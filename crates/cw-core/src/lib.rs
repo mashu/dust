@@ -48,8 +48,8 @@ pub use sampling::{
     CharSamplingState,
 };
 pub use session::{
-    build_session_result, GroupResult, GroupSession, RuntimeStatus, SessionResult, SessionSummary,
-    SessionTiming,
+    answer_length_matches, build_session_result, GroupResult, GroupSession, RuntimeStatus,
+    SessionResult, SessionSummary, SessionTiming,
 };
 pub use settings::{CharSetMode, QrmProfile, TrainingSettings};
 pub use stats::{

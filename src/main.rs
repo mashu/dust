@@ -6,7 +6,7 @@ mod ui;
 
 use std::rc::Rc;
 
-use cw_core::{compute_char_pool, GroupSession, TrainingSettings};
+use cw_core::{answer_length_matches, compute_char_pool, GroupSession, TrainingSettings};
 use dioxus::prelude::*;
 
 use crate::audio::focus_group_input;
@@ -15,7 +15,7 @@ use crate::engine::{
     run_group_session, AppState, Screen, AUTO_CONFIRM_DELAY_MS,
 };
 use crate::persist::{load_sessions, load_settings, save_settings};
-use crate::time::sleep_ms;
+use crate::time::{local_date_string, now_ms, sleep_ms};
 use crate::ui::home::{Home, TrainingView};
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
@@ -73,14 +73,15 @@ fn App() -> Element {
         move |(): ()| {
             let settings_now = settings().clamp();
             settings.set(settings_now.clone());
-            app.stop_audio();
             previewing.set(false);
             listen_playing.set(false);
-            if let Err(err) = app.ensure_player(&settings_now) {
-                toast.set(Some(err));
-                return;
-            }
-            let gen = app.bump_session();
+            let gen = match app.takeover_audio(&settings_now) {
+                Ok(gen) => gen,
+                Err(err) => {
+                    toast.set(Some(err));
+                    return;
+                }
+            };
             let history = sessions();
             let app_loop = (*app).clone();
             spawn(run_group_session(
@@ -103,13 +104,14 @@ fn App() -> Element {
         let app = app.clone();
         move |chars: String| {
             let settings_now = settings().clamp();
-            app.stop_audio();
             previewing.set(false);
-            if let Err(err) = app.ensure_player(&settings_now) {
-                toast.set(Some(err));
-                return;
-            }
-            let gen = app.bump_session();
+            let gen = match app.takeover_audio(&settings_now) {
+                Ok(gen) => gen,
+                Err(err) => {
+                    toast.set(Some(err));
+                    return;
+                }
+            };
             listen_playing.set(true);
             let app_loop = (*app).clone();
             spawn(async move {
@@ -126,12 +128,13 @@ fn App() -> Element {
         let app = app.clone();
         move |_| {
             let settings_now = settings().clamp();
-            app.stop_audio();
-            let gen = app.bump_session();
-            if let Err(err) = app.ensure_player(&settings_now) {
-                toast.set(Some(err));
-                return;
-            }
+            let gen = match app.takeover_audio(&settings_now) {
+                Ok(gen) => gen,
+                Err(err) => {
+                    toast.set(Some(err));
+                    return;
+                }
+            };
             previewing.set(true);
             listen_playing.set(false);
             let app_loop = (*app).clone();
@@ -233,7 +236,7 @@ fn App() -> Element {
                             session_count: sessions().len(),
                             pool,
                             sessions: sessions(),
-                            today: crate::audio::local_date_string(),
+                            today: local_date_string(),
                             auto_progress: current_auto_progress(&settings()),
                             on_start: start_training,
                             on_listen: move |_| go_listen.call(()),
@@ -283,22 +286,40 @@ fn App() -> Element {
                                 locked,
                                 status,
                                 on_change: move |(idx, value): (usize, String)| {
-                                    let sent_len = runtime.read().as_ref().and_then(|s| s.groups.get(idx).map(|g| g.len())).unwrap_or(0);
+                                    let (session_id, sent) = {
+                                        let guard = runtime.read();
+                                        let Some(session) = guard.as_ref() else {
+                                            return;
+                                        };
+                                        (
+                                            session.session_id,
+                                            session.groups.get(idx).cloned().unwrap_or_default(),
+                                        )
+                                    };
                                     if let Some(s) = runtime.write().as_mut() {
-                                        if s.input_locked(idx, &settings()) {
+                                        if s.session_id != session_id
+                                            || idx != s.current_group
+                                            || s.confirmed.get(idx).copied().unwrap_or(false)
+                                            || s.input_locked(idx, &settings())
+                                        {
                                             return;
                                         }
                                         s.set_input(idx, value.clone());
-                                        if !value.is_empty() && value.len() == sent_len {
-                                            s.record_answer_time_if_empty(idx, crate::audio::now_ms());
+                                        if answer_length_matches(&sent, &value) {
+                                            s.record_answer_time_if_empty(idx, now_ms());
                                         }
                                     }
-                                    if !value.is_empty() && value.len() == sent_len {
+                                    if answer_length_matches(&sent, &value) {
                                         let app = app_change.clone();
                                         spawn(async move {
                                             sleep_ms(AUTO_CONFIRM_DELAY_MS).await;
-                                            let still = runtime.read().as_ref().and_then(|s| s.user_input.get(idx).cloned());
-                                            if still.as_deref() == Some(value.as_str()) {
+                                            let still_current = runtime.read().as_ref().is_some_and(|s| {
+                                                s.session_id == session_id
+                                                    && s.user_input.get(idx).map(String::as_str)
+                                                        == Some(value.as_str())
+                                                    && !s.confirmed.get(idx).copied().unwrap_or(false)
+                                            });
+                                            if still_current {
                                                 confirm_group(runtime, idx, Some(value), &app);
                                                 focus_group_input(idx + 1);
                                                 maybe_finish_if_complete(runtime, settings(), app, screen, result, auto_message, sessions, settings, toast);
@@ -307,13 +328,23 @@ fn App() -> Element {
                                     }
                                 },
                                 on_confirm: move |idx| {
+                                    let allowed = runtime.read().as_ref().is_some_and(|s| {
+                                        idx == s.current_group
+                                            && !s.confirmed.get(idx).copied().unwrap_or(false)
+                                            && !s.input_locked(idx, &settings())
+                                    });
+                                    if !allowed {
+                                        return;
+                                    }
                                     confirm_group(runtime, idx, None, &app_confirm);
                                     focus_group_input(idx + 1);
                                     maybe_finish_if_complete(runtime, settings(), app_confirm.clone(), screen, result, auto_message, sessions, settings, toast);
                                 },
                                 on_focus: move |idx| {
                                     if let Some(s) = runtime.write().as_mut() {
-                                        s.focused_group = idx;
+                                        if idx == s.current_group {
+                                            s.focused_group = idx;
+                                        }
                                     }
                                 },
                                 on_submit: {
@@ -408,7 +439,7 @@ fn maybe_finish_if_complete(
     let done = runtime
         .read()
         .as_ref()
-        .map(GroupSession::all_groups_answered)
+        .map(GroupSession::all_groups_confirmed)
         .unwrap_or(false);
     if done {
         finish_session(

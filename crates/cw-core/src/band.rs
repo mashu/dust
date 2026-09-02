@@ -239,6 +239,14 @@ mod tests {
     }
 
     #[test]
+    fn qsb_gain_is_unity_when_disabled() {
+        assert_eq!(qsb_gain_at(0.25, false, 1.0, 1.0), 1.0);
+        assert_eq!(qsb_gain_at(0.25, true, 0.0, 1.0), 1.0);
+        let trough = qsb_gain_at(0.75, true, 1.0, 1.0);
+        assert!(trough > 0.2 && trough < 0.4);
+    }
+
+    #[test]
     fn background_is_finite() {
         let settings = TrainingSettings::default();
         let mut mixer = BandMixer::new(48_000, &settings, 1);

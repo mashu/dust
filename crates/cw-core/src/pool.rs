@@ -190,4 +190,25 @@ mod tests {
         assert!(pool.contains(&'0'));
         assert!(pool.contains(&'1'));
     }
+
+    #[test]
+    fn last3_window_keeps_newest_letters() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Koch;
+        s.koch_level = 10;
+        apply_practice_window(&mut s, PracticeWindow::Last3);
+        let pool = compute_char_pool(&s);
+        assert_eq!(pool.len(), 3);
+        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
+    }
+
+    #[test]
+    fn empty_custom_falls_back_to_koch() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Custom;
+        s.custom_set.clear();
+        let pool = compute_char_pool(&s);
+        assert!(pool.contains(&'K'));
+        assert!(pool.contains(&'M'));
+    }
 }

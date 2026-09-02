@@ -16,12 +16,9 @@ use crate::settings::{CharSetMode, TrainingSettings};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeStatus {
-    Idle,
     Starting,
     PlayingGroup,
     WaitingForAnswer,
-    Completing,
-    Results,
     Failed,
 }
 
@@ -134,17 +131,28 @@ impl GroupSession {
     }
 
     pub fn set_input(&mut self, index: usize, value: String) {
+        if index != self.current_group {
+            return;
+        }
+        if self.confirmed.get(index).copied().unwrap_or(false) {
+            return;
+        }
         if let Some(slot) = self.user_input.get_mut(index) {
             *slot = value;
         }
     }
 
-    pub fn confirm(&mut self, index: usize, value: String, answered_at: u64) {
+    /// Returns true the first time this group is confirmed.
+    pub fn confirm(&mut self, index: usize, value: String, answered_at: u64) -> bool {
+        let Some(flag) = self.confirmed.get_mut(index) else {
+            return false;
+        };
+        if *flag {
+            return false;
+        }
+        *flag = true;
         if let Some(slot) = self.user_input.get_mut(index) {
             *slot = value;
-        }
-        if let Some(slot) = self.confirmed.get_mut(index) {
-            *slot = true;
         }
         if let Some(slot) = self.group_answer_at.get_mut(index) {
             if *slot == 0 {
@@ -153,6 +161,7 @@ impl GroupSession {
         }
         let next = (index + 1).min(self.groups.len().saturating_sub(1));
         self.focused_group = next;
+        true
     }
 
     pub fn record_answer_time_if_empty(&mut self, index: usize, answered_at: u64) {
@@ -169,11 +178,11 @@ impl GroupSession {
             && index == self.current_group
     }
 
-    pub fn all_groups_answered(&self) -> bool {
-        self.groups.iter().enumerate().all(|(i, sent)| {
-            let received = self.user_input.get(i).map(String::as_str).unwrap_or("");
-            !sent.is_empty() && received.len() == sent.len()
-        })
+    pub fn all_groups_confirmed(&self) -> bool {
+        !self.groups.is_empty()
+            && self.groups.iter().enumerate().all(|(index, sent)| {
+                !sent.is_empty() && self.confirmed.get(index).copied().unwrap_or(false)
+            })
     }
 
     pub fn build_timings(&self, fallback_timeout_ms: f64) -> Vec<SessionTiming> {
@@ -213,6 +222,10 @@ fn group_was_scored(session: &GroupSession, index: usize) -> bool {
             .get(index)
             .map(|sent| !sent.is_empty())
             .unwrap_or(false)
+}
+
+pub fn answer_length_matches(sent: &str, received: &str) -> bool {
+    !sent.is_empty() && received.chars().count() == sent.chars().count()
 }
 
 pub fn build_session_result(
@@ -348,5 +361,58 @@ mod tests {
         assert!(result.groups[0].correct);
         assert!((result.accuracy - 1.0).abs() < 1e-9);
         assert!((result.char_wpm - 22.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn confirm_is_idempotent() {
+        let mut session = GroupSession::new(1, 0, 1);
+        session.set_group(0, "KM".into());
+        assert!(session.confirm(0, "KM".into(), 100));
+        assert!(!session.confirm(0, "XX".into(), 200));
+        assert_eq!(session.user_input[0], "KM");
+        session.set_input(0, "ZZ".into());
+        assert_eq!(session.user_input[0], "KM");
+    }
+
+    #[test]
+    fn set_input_ignores_other_groups() {
+        let mut session = GroupSession::new(1, 0, 2);
+        session.set_group(0, "KM".into());
+        session.set_group(1, "UK".into());
+        session.current_group = 0;
+        session.set_input(1, "UK".into());
+        assert_eq!(session.user_input[1], "");
+        session.set_input(0, "KM".into());
+        assert_eq!(session.user_input[0], "KM");
+    }
+
+    #[test]
+    fn all_groups_confirmed_requires_every_sent_group() {
+        let mut session = GroupSession::new(1, 0, 2);
+        session.set_group(0, "KM".into());
+        session.set_group(1, "UK".into());
+        session.confirm(0, "KM".into(), 1);
+        assert!(!session.all_groups_confirmed());
+        session.confirm(1, "".into(), 2);
+        assert!(session.all_groups_confirmed());
+    }
+
+    #[test]
+    fn timeout_empty_answer_is_scored_wrong() {
+        let mut session = GroupSession::new(1, 0, 1);
+        session.set_group(0, "KM".into());
+        session.confirm(0, "".into(), 1000);
+        session.group_end_at[0] = 500;
+        let result = build_session_result(&session, &TrainingSettings::default(), 3000, "2026-09-01".into());
+        assert_eq!(result.groups.len(), 1);
+        assert!(!result.groups[0].correct);
+        assert!(result.accuracy < 0.01);
+    }
+
+    #[test]
+    fn answer_length_uses_characters() {
+        assert!(answer_length_matches("KM", "km"));
+        assert!(!answer_length_matches("KM", "K"));
+        assert!(!answer_length_matches("", "KM"));
     }
 }

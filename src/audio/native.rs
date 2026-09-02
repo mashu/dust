@@ -42,6 +42,7 @@ impl LiveQsb {
 
 pub struct MorsePlayer {
     stop_flag: Arc<AtomicBool>,
+    epoch: Arc<AtomicU64>,
     band_stop: Arc<AtomicBool>,
     band_stream: Option<cpal::Stream>,
     band_signature: String,
@@ -57,6 +58,7 @@ impl MorsePlayer {
             .ok_or_else(|| "No audio output device found".to_string())?;
         Ok(Self {
             stop_flag: Arc::new(AtomicBool::new(false)),
+            epoch: Arc::new(AtomicU64::new(0)),
             band_stop: Arc::new(AtomicBool::new(false)),
             band_stream: None,
             band_signature: String::new(),
@@ -91,7 +93,12 @@ impl MorsePlayer {
         self.band_signature.clear();
     }
 
+    fn bump_epoch(&self) -> u64 {
+        self.epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     pub fn stop(&mut self) {
+        self.bump_epoch();
         self.stop_flag.store(true, Ordering::SeqCst);
         self.tone_stream = None;
         self.tone_finished.store(true, Ordering::SeqCst);
@@ -114,6 +121,7 @@ impl MorsePlayer {
     ) -> Result<crate::audio::PlaybackWait, String> {
         self.apply_band(settings)?;
         let plan = plan_morse_playback(text, settings, rng);
+        let epoch = self.bump_epoch();
         self.reset_stop_flag();
         self.tone_stream = None;
         let (stream, finished) = start_tone_stream(
@@ -127,6 +135,8 @@ impl MorsePlayer {
             plan.duration_sec,
             plan.resolved_char_wpm,
             Arc::clone(&self.stop_flag),
+            epoch,
+            Arc::clone(&self.epoch),
             finished,
         ))
     }

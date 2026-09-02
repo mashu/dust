@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::align_group;
-use crate::morse::is_digit;
 use crate::pool::{compute_char_pool, digits_subset, letters_subset};
 use crate::rng::{weighted_random_pick, Rng};
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -299,7 +298,10 @@ pub fn update_sampling_state_from_answer(
         let Some(character) = pair.sent_char else {
             continue;
         };
-        let belief = belief_for(state, character);
+        let belief = beliefs
+            .get(&character)
+            .copied()
+            .unwrap_or_else(|| belief_for(state, character));
         beliefs.insert(
             character,
             if pair.matched {
@@ -337,10 +339,6 @@ pub fn generate_training_group(
     sample_training_group(&pool, group_size, state, &config, rng)
 }
 
-pub fn is_digit_char(ch: char) -> bool {
-    is_digit(ch)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +374,22 @@ mod tests {
         let mut rng = FastrandRng::default();
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         assert!(weights.values().all(|w| *w > 0.0));
+    }
+
+    #[test]
+    fn repeated_letters_update_belief_once_per_occurrence() {
+        let state = CharSamplingState::default();
+        let next = update_sampling_state_from_answer(&state, "KK", "KK");
+        let k = next.beliefs.get(&'K').copied().unwrap_or_default();
+        assert!((k.alpha - (CHAR_SAMPLING_PRIOR_ALPHA + 2.0)).abs() < 1e-9);
+        assert!((k.beta - CHAR_SAMPLING_PRIOR_BETA).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mismatch_increments_beta() {
+        let state = CharSamplingState::default();
+        let next = update_sampling_state_from_answer(&state, "KM", "KX");
+        let m = next.beliefs.get(&'M').copied().unwrap_or_default();
+        assert!((m.beta - (CHAR_SAMPLING_PRIOR_BETA + 1.0)).abs() < 1e-9);
     }
 }

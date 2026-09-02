@@ -14,6 +14,7 @@ const NOISE_BUFFER_SECONDS: f32 = 2.0;
 pub struct MorsePlayer {
     ctx: AudioContext,
     stop_flag: Rc<Cell<bool>>,
+    epoch: Rc<Cell<u64>>,
     mix_gain: GainNode,
     cw_gain: GainNode,
     group_gain: Option<GainNode>,
@@ -73,6 +74,7 @@ impl MorsePlayer {
         Ok(Self {
             ctx,
             stop_flag: Rc::new(Cell::new(false)),
+            epoch: Rc::new(Cell::new(0)),
             mix_gain,
             cw_gain,
             group_gain: None,
@@ -109,7 +111,14 @@ impl MorsePlayer {
         Ok(())
     }
 
+    fn bump_epoch(&self) -> u64 {
+        let next = self.epoch.get() + 1;
+        self.epoch.set(next);
+        next
+    }
+
     pub fn stop(&mut self) {
+        self.bump_epoch();
         self.stop_flag.set(true);
         if let Some(gain) = &self.group_gain {
             let now = self.ctx.current_time();
@@ -135,6 +144,13 @@ impl MorsePlayer {
         rng: &mut impl Rng,
     ) -> Result<crate::audio::PlaybackWait, String> {
         self.resume_from_gesture();
+        if let Some(gain) = &self.group_gain {
+            let now = self.ctx.current_time();
+            let _ = gain.gain().cancel_scheduled_values(now);
+            let _ = gain.gain().set_target_at_time(0.0, now, 0.01);
+        }
+        self.group_gain = None;
+        let epoch = self.bump_epoch();
         self.apply_band(settings)?;
         let plan = plan_morse_playback(text, settings, rng);
         self.schedule_plan(&plan)?;
@@ -142,11 +158,13 @@ impl MorsePlayer {
             plan.duration_sec,
             plan.resolved_char_wpm,
             self.stop_flag.clone(),
+            epoch,
+            self.epoch.clone(),
         ))
     }
 
     fn schedule_plan(&mut self, plan: &PlaybackPlan) -> Result<(), String> {
-        self.stop_flag.set(false);
+        self.reset_stop_flag();
 
         let group_gain = self.ctx.create_gain().map_err(|e| format!("gain: {e:?}"))?;
         group_gain

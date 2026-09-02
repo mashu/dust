@@ -102,14 +102,14 @@ pub fn TrainingView(
             }
             ProgressHeader { current, total }
             div { class: "card",
-                p { class: "muted", "Enter answers per group (auto-advances when complete)." }
+                p { class: "muted", if playing { "Listening…" } else { "Enter answers per group (auto-advances when complete)." } }
                 div { class: "stack group-list",
                     for (idx, sent) in groups.iter().enumerate() {
                         {
                             let is_focused = focused == idx;
                             let is_active = current == idx;
                             let is_confirmed = confirmed.get(idx).copied().unwrap_or(false);
-                            let disabled = playing && !is_active && !is_confirmed;
+                            let disabled = is_confirmed || !is_active;
                             let input_locked = locked && is_active && !is_confirmed;
                             let value = inputs.get(idx).cloned().unwrap_or_default();
                             let shown = if is_confirmed { sent.clone() } else { "••••".into() };

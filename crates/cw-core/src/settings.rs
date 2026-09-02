@@ -301,3 +301,29 @@ mod defaults {
         0.32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_links_and_bounds() {
+        let mut s = TrainingSettings::default();
+        s.char_wpm_min = 3.0;
+        s.char_wpm_max = 200.0;
+        s.link_char_wpm = true;
+        s.link_char_to_effective = true;
+        s.min_group_size = 8;
+        s.max_group_size = 2;
+        s.link_group_size = true;
+        s.koch_level = 99;
+        let s = s.clamp();
+        assert_eq!(s.char_wpm_min, 5.0);
+        assert_eq!(s.char_wpm_max, 5.0);
+        assert_eq!(s.effective_wpm_min, 5.0);
+        assert_eq!(s.effective_wpm_max, 5.0);
+        assert_eq!(s.min_group_size, 8);
+        assert_eq!(s.max_group_size, 8);
+        assert_eq!(s.koch_level, (s.sequence().len().saturating_sub(1) as u32).max(1));
+    }
+}

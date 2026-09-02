@@ -9,11 +9,11 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::audio::{focus_group_input, local_date_string, now_ms, MorsePlayer};
+use crate::audio::{focus_group_input, MorsePlayer};
 use crate::persist::{
     clear_auto_counters, load_auto_counters, save_auto_counters, save_sessions, save_settings,
 };
-use crate::time::{seed_rng, sleep_ms};
+use crate::time::{local_date_string, now_ms, seed_rng, sleep_ms};
 
 pub const AUTO_CONFIRM_DELAY_MS: u32 = 300;
 
@@ -51,17 +51,24 @@ impl AppState {
         next
     }
 
-    pub fn ensure_player(&self, settings: &TrainingSettings) -> Result<(), String> {
+    fn ensure_player(&self, settings: &TrainingSettings) -> Result<(), String> {
         let mut slot = self.player.borrow_mut();
         if slot.is_none() {
             *slot = Some(MorsePlayer::new()?);
         }
         if let Some(player) = slot.as_mut() {
             player.resume_from_gesture();
-            player.reset_stop_flag();
             player.apply_band(settings)?;
         }
         Ok(())
+    }
+
+    /// Stop current audio, invalidate waiters, then arm the player for a new gen.
+    pub fn takeover_audio(&self, settings: &TrainingSettings) -> Result<u64, String> {
+        self.stop_audio();
+        let gen = self.bump_session();
+        self.ensure_player(settings)?;
+        Ok(gen)
     }
 
     pub fn apply_band_live(&self, settings: &TrainingSettings) {
@@ -243,14 +250,9 @@ pub async fn run_group_session(
             return;
         }
         if !confirmed {
-            auto_confirm(runtime, i, &app);
+            confirm_group(runtime, i, None, &app);
         }
         app.stop_audio();
-        if let Ok(mut slot) = app.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                player.reset_stop_flag();
-            }
-        }
     }
 
     if app.session_gen.get() != gen {
@@ -296,24 +298,6 @@ async fn wait_for_confirm(
     }
 }
 
-fn auto_confirm(mut runtime: Signal<Option<GroupSession>>, index: usize, app: &AppState) {
-    let mut current = runtime.write();
-    let Some(session) = current.as_mut() else {
-        return;
-    };
-    let value = session
-        .user_input
-        .get(index)
-        .cloned()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_uppercase();
-    let sent = session.groups.get(index).cloned().unwrap_or_default();
-    session.confirm(index, value.clone(), now_ms());
-    let next = update_sampling_state_from_answer(&app.sampling.borrow(), &sent, &value);
-    *app.sampling.borrow_mut() = next;
-}
-
 pub fn confirm_group(
     mut runtime: Signal<Option<GroupSession>>,
     index: usize,
@@ -329,7 +313,9 @@ pub fn confirm_group(
         .trim()
         .to_ascii_uppercase();
     let sent = session.groups.get(index).cloned().unwrap_or_default();
-    session.confirm(index, value.clone(), now_ms());
+    if !session.confirm(index, value.clone(), now_ms()) {
+        return;
+    }
     let next = update_sampling_state_from_answer(&app.sampling.borrow(), &sent, &value);
     *app.sampling.borrow_mut() = next;
 }
@@ -445,10 +431,6 @@ pub async fn loop_preview_text(
             return;
         }
         let settings_now = settings().clamp();
-        if let Err(err) = app.ensure_player(&settings_now) {
-            toast.set(Some(err));
-            return;
-        }
         if let Err(err) = play_text_now(&app, text, &settings_now).await {
             toast.set(Some(err));
             return;
