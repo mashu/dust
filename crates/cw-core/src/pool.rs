@@ -2,7 +2,7 @@
 
 use crate::level::{max_level_for_len, unlocked_prefix, LEVEL_MIN};
 use crate::morse::{is_digit, DIGITS};
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{CharSetMode, PracticeWindow, TrainingSettings};
 
 pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
     match settings.char_set_mode {
@@ -14,13 +14,6 @@ pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PracticeWindow {
-    All,
-    Last3,
-    Last5,
-}
-
 pub fn unlocked_practice_count(settings: &TrainingSettings) -> usize {
     match settings.char_set_mode {
         CharSetMode::Digits => unlocked_prefix(DIGITS, settings.digits_level).len(),
@@ -28,7 +21,7 @@ pub fn unlocked_practice_count(settings: &TrainingSettings) -> usize {
     }
 }
 
-pub fn apply_practice_window(settings: &mut TrainingSettings, window: PracticeWindow) {
+fn apply_window_range(settings: &mut TrainingSettings, window: PracticeWindow) {
     let n = unlocked_practice_count(settings).max(1) as u32;
     match window {
         PracticeWindow::All => {
@@ -46,22 +39,13 @@ pub fn apply_practice_window(settings: &mut TrainingSettings, window: PracticeWi
     }
 }
 
-/// Cap levels to the current alphabets and keep All/Last3/Last5, or reset to All.
-pub fn fit_settings_to_alphabet(settings: &mut TrainingSettings) {
-    settings.level = settings
-        .level
-        .clamp(LEVEL_MIN, settings.max_letter_level());
-    settings.digits_level = settings.digits_level.clamp(
-        LEVEL_MIN,
-        max_level_for_len(DIGITS.len()),
-    );
-    match current_practice_window(settings) {
-        Some(window) => apply_practice_window(settings, window),
-        None => apply_practice_window(settings, PracticeWindow::All),
-    }
+/// Remember the named window and retarget start/end to the current alphabet.
+pub fn apply_practice_window(settings: &mut TrainingSettings, window: PracticeWindow) {
+    settings.practice_window = Some(window);
+    apply_window_range(settings, resolved_practice_window(settings));
 }
 
-pub fn current_practice_window(settings: &TrainingSettings) -> Option<PracticeWindow> {
+fn infer_practice_window(settings: &TrainingSettings) -> Option<PracticeWindow> {
     let n = unlocked_practice_count(settings).max(1) as u32;
     let start = settings.sliding_window_start.max(1).min(n);
     let end = settings.sliding_window_end.max(1).min(n);
@@ -76,6 +60,43 @@ pub fn current_practice_window(settings: &TrainingSettings) -> Option<PracticeWi
     } else {
         None
     }
+}
+
+fn named_practice_window(settings: &TrainingSettings) -> PracticeWindow {
+    settings
+        .practice_window
+        .or_else(|| infer_practice_window(settings))
+        .unwrap_or(PracticeWindow::All)
+}
+
+/// Window actually used for the current unlocked count. Last5 stays Last5 in
+/// settings even while fewer than five characters are unlocked.
+pub fn resolved_practice_window(settings: &TrainingSettings) -> PracticeWindow {
+    let n = unlocked_practice_count(settings);
+    match named_practice_window(settings) {
+        PracticeWindow::Last5 if n >= 5 => PracticeWindow::Last5,
+        PracticeWindow::Last3 if n >= 3 => PracticeWindow::Last3,
+        _ => PracticeWindow::All,
+    }
+}
+
+/// Cap levels to the current alphabets and retarget All/Last3/Last5.
+pub fn fit_settings_to_alphabet(settings: &mut TrainingSettings) {
+    settings.level = settings
+        .level
+        .clamp(LEVEL_MIN, settings.max_letter_level());
+    settings.digits_level = settings.digits_level.clamp(
+        LEVEL_MIN,
+        max_level_for_len(DIGITS.len()),
+    );
+    if settings.practice_window.is_none() {
+        settings.practice_window = Some(named_practice_window(settings));
+    }
+    apply_window_range(settings, resolved_practice_window(settings));
+}
+
+pub fn current_practice_window(settings: &TrainingSettings) -> Option<PracticeWindow> {
+    Some(resolved_practice_window(settings))
 }
 
 fn mixed_pool(settings: &TrainingSettings) -> Vec<char> {
@@ -241,5 +262,61 @@ mod tests {
         let pool = compute_char_pool(&s);
         assert_eq!(pool, vec!['0', '1']);
         assert_eq!(current_practice_window(&s), Some(PracticeWindow::All));
+    }
+
+    #[test]
+    fn last5_survives_level_up_from_five_chars() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Koch;
+        s.level = 4;
+        apply_practice_window(&mut s, PracticeWindow::Last5);
+        assert_eq!(unlocked_practice_count(&s), 5);
+        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last5));
+        s.level = 5;
+        fit_settings_to_alphabet(&mut s);
+        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last5));
+        assert_eq!(compute_char_pool(&s).len(), 5);
+        let newest = s.progress_alphabet()[crate::level::unlocked_count_for_level(5) - 1];
+        assert!(compute_char_pool(&s).contains(&newest));
+    }
+
+    #[test]
+    fn last3_retargets_after_level_change() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Koch;
+        s.level = 10;
+        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.level = 11;
+        fit_settings_to_alphabet(&mut s);
+        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
+        let newest = s.progress_alphabet()[crate::level::unlocked_count_for_level(11) - 1];
+        assert!(compute_char_pool(&s).contains(&newest));
+    }
+
+    #[test]
+    fn mixed_letter_pool_excludes_sequence_digits() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Koch;
+        s.level = s.max_letter_level();
+        apply_practice_window(&mut s, PracticeWindow::All);
+        assert!(compute_char_pool(&s).contains(&'5'));
+        s.char_set_mode = CharSetMode::Mixed;
+        s.digits_level = 1;
+        fit_settings_to_alphabet(&mut s);
+        let pool = compute_char_pool(&s);
+        assert!(!pool.contains(&'5'));
+        assert!(pool.contains(&'0'));
+        assert!(pool.contains(&'1'));
+        assert!(pool.iter().filter(|c| c.is_ascii_digit()).all(|c| *c == '0' || *c == '1'));
+    }
+
+    #[test]
+    fn unknown_custom_chars_are_dropped() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Custom;
+        s.custom_set = vec!['A', '*', 'B'];
+        s.level = 1;
+        apply_practice_window(&mut s, PracticeWindow::All);
+        assert_eq!(compute_char_pool(&s), vec!['A', 'B']);
     }
 }

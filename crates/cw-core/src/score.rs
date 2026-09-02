@@ -3,6 +3,7 @@
 use crate::morse::is_scored_char;
 
 pub const MAX_SCORED_CHARS: u32 = 200;
+const MAX_EFFECTIVE_ALPHABET: f64 = 48.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScoreConstants {
@@ -77,7 +78,7 @@ pub fn calculate_effective_alphabet_size(sent_groups: &[impl AsRef<str>]) -> f64
         }
     }
     h += f64::from((k.saturating_sub(1)) as u32) / (2.0 * f64::from(total));
-    h.exp().clamp(1.0, 36.0)
+    h.exp().clamp(1.0, MAX_EFFECTIVE_ALPHABET)
 }
 
 pub fn compute_average_response_ms(samples: &[f64]) -> f64 {

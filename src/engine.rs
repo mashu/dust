@@ -2,9 +2,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::{
-    apply_auto_level, apply_practice_window, auto_level_progress, build_session_result,
-    compute_group_gap_ms, create_initial_sampling_state, current_practice_window,
-    evaluate_auto_level, generate_training_group, update_sampling_state_from_answer,
+    apply_auto_level, auto_level_progress, build_session_result, compute_group_gap_ms,
+    create_initial_sampling_state, evaluate_auto_level, fit_settings_to_alphabet,
+    generate_training_group, update_sampling_state_from_answer,
     AutoAdjustMode, AutoLevelProgress, CharSamplingState, FastrandRng, GroupSession, SessionResult,
     TrainingSettings,
 };
@@ -413,14 +413,11 @@ pub fn finish_session(
     };
     let mut counters = load_auto_counters(mode, settings.char_set_mode, level, digits);
     let mut next_settings = settings.clone();
-    let practice_window = current_practice_window(&settings);
     if let Some(adj) = evaluate_auto_level(built.accuracy, &settings, &mut counters) {
         save_auto_counters(mode, settings.char_set_mode, level, digits, counters);
         clear_auto_counters(&adj.counters_cleared_keys);
         apply_auto_level(&mut next_settings, &adj);
-        if let Some(window) = practice_window {
-            apply_practice_window(&mut next_settings, window);
-        }
+        fit_settings_to_alphabet(&mut next_settings);
         next_settings = next_settings.clamp();
         settings_sig.set(next_settings.clone());
         save_settings(&next_settings);

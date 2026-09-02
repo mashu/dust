@@ -1,6 +1,15 @@
-use cw_core::{AutoAdjustMode, AutoLevelCounters, CharSetMode, SessionResult, TrainingSettings};
+use cw_core::{
+    fit_settings_to_alphabet, AutoAdjustMode, AutoLevelCounters, CharSetMode, SessionResult,
+    TrainingSettings,
+};
 
 const MAX_SESSIONS: usize = 200;
+
+fn finalize_settings(mut settings: TrainingSettings) -> TrainingSettings {
+    settings = settings.clamp();
+    fit_settings_to_alphabet(&mut settings);
+    settings
+}
 
 #[cfg(feature = "web")]
 mod backend {
@@ -21,9 +30,9 @@ mod backend {
         let Ok(Some(raw)) = store.get_item(SETTINGS_KEY) else {
             return TrainingSettings::default();
         };
-        serde_json::from_str::<TrainingSettings>(&raw)
-            .unwrap_or_default()
-            .clamp()
+        finalize_settings(
+            serde_json::from_str::<TrainingSettings>(&raw).unwrap_or_default(),
+        )
     }
 
     pub fn save_settings(settings: &TrainingSettings) {
@@ -131,9 +140,7 @@ mod backend {
     }
 
     pub fn load_settings() -> TrainingSettings {
-        read_json::<TrainingSettings>("settings.json")
-            .unwrap_or_default()
-            .clamp()
+        finalize_settings(read_json::<TrainingSettings>("settings.json").unwrap_or_default())
     }
 
     pub fn save_settings(settings: &TrainingSettings) {

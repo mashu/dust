@@ -99,7 +99,7 @@ pub fn is_digit(ch: char) -> bool {
 }
 
 pub fn is_scored_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric()
+    morse_for(ch).is_some()
 }
 
 /// Digits unlocked at digits level L (level 1 → digits 0–1).

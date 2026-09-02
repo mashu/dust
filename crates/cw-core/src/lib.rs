@@ -45,7 +45,7 @@ pub use sequences::{
 };
 pub use pool::{
     apply_practice_window, compute_char_pool, current_practice_window, fit_settings_to_alphabet,
-    unlocked_practice_count, PracticeWindow,
+    unlocked_practice_count,
 };
 pub use rng::{weighted_random_pick, FastrandRng, Rng};
 pub use sampling::{
@@ -56,7 +56,7 @@ pub use session::{
     answer_length_matches, build_session_result, GroupResult, GroupSession, RuntimeStatus,
     SessionResult, SessionSummary, SessionTiming,
 };
-pub use settings::{CharSetMode, QrmProfile, TrainingSettings};
+pub use settings::{CharSetMode, PracticeWindow, QrmProfile, TrainingSettings};
 pub use stats::{
     accuracy_chart, bigram_heatmap, character_diagnostics, confusion_entries, sampling_rows,
     session_history, unigram_stats, AccuracyPoint, BigramHeatmap, CharacterDiagnostic,

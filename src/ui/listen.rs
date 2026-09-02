@@ -16,23 +16,32 @@ fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
     if pool.is_empty() {
         return 0;
     }
-    let mut prev = settings.clone();
+    let added_from = |previous: Vec<char>| {
+        pool.iter()
+            .rposition(|c| !previous.contains(c))
+    };
     match settings.char_set_mode {
         cw_core::CharSetMode::Digits => {
+            let mut prev = settings.clone();
             prev.digits_level = prev.digits_level.saturating_sub(1).max(1);
+            added_from(compute_char_pool(&prev)).unwrap_or(pool.len() - 1)
         }
         cw_core::CharSetMode::Mixed => {
-            prev.level = prev.level.saturating_sub(1).max(1);
-            prev.digits_level = prev.digits_level.saturating_sub(1).max(1);
+            let mut letter_prev = settings.clone();
+            letter_prev.level = letter_prev.level.saturating_sub(1).max(1);
+            if let Some(idx) = added_from(compute_char_pool(&letter_prev)) {
+                return idx;
+            }
+            let mut digit_prev = settings.clone();
+            digit_prev.digits_level = digit_prev.digits_level.saturating_sub(1).max(1);
+            added_from(compute_char_pool(&digit_prev)).unwrap_or(pool.len() - 1)
         }
         _ => {
+            let mut prev = settings.clone();
             prev.level = prev.level.saturating_sub(1).max(1);
+            added_from(compute_char_pool(&prev)).unwrap_or(pool.len() - 1)
         }
     }
-    let previous = compute_char_pool(&prev);
-    pool.iter()
-        .rposition(|c| !previous.contains(c))
-        .unwrap_or(pool.len() - 1)
 }
 
 #[component]

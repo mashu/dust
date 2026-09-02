@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::level::{max_level_for_len, LEVEL_MIN};
 use crate::morse::{
-    MixedAutoLevelAxis, DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START,
+    is_digit, morse_for, MixedAutoLevelAxis, DEFAULT_SLIDING_WINDOW_END,
+    DEFAULT_SLIDING_WINDOW_START,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +37,14 @@ impl Default for CharSetMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PracticeWindow {
+    All,
+    Last3,
+    Last5,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainingSettings {
@@ -52,6 +61,9 @@ pub struct TrainingSettings {
     /// True when the user chose Sequence → Custom, even if the order still matches a preset.
     #[serde(default)]
     pub sequence_is_custom: bool,
+    /// Named practice window. `None` means infer from the saved start/end (old saves).
+    #[serde(default)]
+    pub practice_window: Option<PracticeWindow>,
     pub sliding_window_start: u32,
     pub sliding_window_end: u32,
     pub side_tone_min: f64,
@@ -127,6 +139,7 @@ impl Default for TrainingSettings {
             custom_set: Vec::new(),
             custom_sequence: Vec::new(),
             sequence_is_custom: false,
+            practice_window: Some(PracticeWindow::All),
             sliding_window_start: DEFAULT_SLIDING_WINDOW_START,
             sliding_window_end: DEFAULT_SLIDING_WINDOW_END,
             side_tone_min: 400.0,
@@ -177,12 +190,12 @@ impl Default for TrainingSettings {
 }
 
 impl TrainingSettings {
-    /// Unique uppercase characters, first-seen order, skipping whitespace.
+    /// Unique Morse characters, first-seen order, skipping whitespace and unknowns.
     pub fn unique_alphabet(chars: &[char]) -> Vec<char> {
         let mut out = Vec::new();
         for ch in chars {
             let up = ch.to_ascii_uppercase();
-            if up.is_whitespace() {
+            if up.is_whitespace() || morse_for(up).is_none() {
                 continue;
             }
             if !out.contains(&up) {
@@ -193,14 +206,23 @@ impl TrainingSettings {
     }
 
     /// Ordered alphabet that `level` unlocks. Custom uses `custom_set` when set.
+    /// Mixed drops digits so the letter axis and digits axis stay separate.
     pub fn progress_alphabet(&self) -> Vec<char> {
-        if self.char_set_mode == CharSetMode::Custom {
+        let base = if self.char_set_mode == CharSetMode::Custom {
             let custom = Self::unique_alphabet(&self.custom_set);
-            if !custom.is_empty() {
-                return custom;
+            if custom.is_empty() {
+                Self::unique_alphabet(self.sequence())
+            } else {
+                custom
             }
+        } else {
+            Self::unique_alphabet(self.sequence())
+        };
+        if self.char_set_mode == CharSetMode::Mixed {
+            base.into_iter().filter(|c| !is_digit(*c)).collect()
+        } else {
+            base
         }
-        self.sequence().to_vec()
     }
 
     pub fn max_letter_level(&self) -> u32 {
@@ -396,7 +418,7 @@ mod tests {
         assert_eq!(s.effective_wpm_max, 5.0);
         assert_eq!(s.min_group_size, 8);
         assert_eq!(s.max_group_size, 8);
-        assert_eq!(s.level, (s.sequence().len().saturating_sub(1) as u32).max(1));
+        assert_eq!(s.level, s.max_letter_level());
     }
 
     #[test]

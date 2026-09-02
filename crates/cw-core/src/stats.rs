@@ -205,13 +205,13 @@ pub fn unigram_stats(sessions: &[SessionResult]) -> Vec<UnigramStat> {
     let mut counts: BTreeMap<char, (u32, u32)> = BTreeMap::new();
     for session in sessions {
         for group in &session.groups {
-            let sent: Vec<char> = group.sent.to_ascii_uppercase().chars().collect();
-            let rec: Vec<char> = group.received.to_ascii_uppercase().chars().collect();
-            for (i, ch) in sent.iter().enumerate() {
-                let typed = rec.get(i).copied();
-                let entry = counts.entry(*ch).or_insert((0, 0));
+            for pair in align_group(&group.sent, &group.received) {
+                let Some(ch) = pair.sent_char else {
+                    continue;
+                };
+                let entry = counts.entry(ch).or_insert((0, 0));
                 entry.1 += 1;
-                if typed != Some(*ch) {
+                if !pair.matched {
                     entry.0 += 1;
                 }
             }
@@ -239,25 +239,24 @@ pub fn bigram_heatmap(sessions: &[SessionResult]) -> BigramHeatmap {
     let mut counts: BTreeMap<(char, char), (u32, u32)> = BTreeMap::new();
     for session in sessions {
         for group in &session.groups {
-            let sent: Vec<char> = group.sent.to_ascii_uppercase().chars().collect();
-            let rec: Vec<char> = group.received.to_ascii_uppercase().chars().collect();
-            for (i, curr) in sent.iter().enumerate() {
-                let prev = if i == 0 {
-                    GROUP_START_BIGRAM_TOKEN
-                } else {
-                    sent[i - 1]
+            let mut sent_prev = None::<char>;
+            for pair in align_group(&group.sent, &group.received) {
+                let Some(curr) = pair.sent_char else {
+                    continue;
                 };
+                let prev = sent_prev.unwrap_or(GROUP_START_BIGRAM_TOKEN);
                 if !letters.contains(&prev) {
                     letters.push(prev);
                 }
-                if !letters.contains(curr) {
-                    letters.push(*curr);
+                if !letters.contains(&curr) {
+                    letters.push(curr);
                 }
-                let entry = counts.entry((prev, *curr)).or_insert((0, 0));
+                let entry = counts.entry((prev, curr)).or_insert((0, 0));
                 entry.1 += 1;
-                if rec.get(i).copied() != Some(*curr) {
+                if !pair.matched {
                     entry.0 += 1;
                 }
+                sent_prev = Some(curr);
             }
         }
     }

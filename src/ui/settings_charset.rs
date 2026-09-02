@@ -99,11 +99,8 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 step: 1.0,
                 onchange: move |v| {
                     let w = &mut *settings.write();
-                    let was_all = current_practice_window(w) == Some(PracticeWindow::All);
                     w.set_active_level(v as u32);
-                    if was_all {
-                        apply_practice_window(w, PracticeWindow::All);
-                    }
+                    fit_settings_to_alphabet(w);
                 }
             }
             if s.char_set_mode == CharSetMode::Mixed {
@@ -114,7 +111,9 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     max: MAX_DIGITS_LEVEL as f64,
                     step: 1.0,
                     onchange: move |v| {
-                        settings.write().digits_level = v as u32;
+                        let w = &mut *settings.write();
+                        w.digits_level = v as u32;
+                        fit_settings_to_alphabet(w);
                     }
                 }
             }
