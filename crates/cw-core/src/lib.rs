@@ -40,11 +40,12 @@ pub use morse::{
     KOCH_LEVEL_MIN, LCWO_SEQUENCE, MAX_DIGITS_LEVEL,
 };
 pub use sequences::{
-    apply_sequence_preset, preset_by_id, preset_id_for, SequencePreset, SEQUENCE_PRESETS,
+    apply_custom_sequence, apply_sequence_preset, preset_by_id, preset_id_for, sequence_preset_id,
+    SequencePreset, SEQUENCE_PRESETS,
 };
 pub use pool::{
-    apply_practice_window, compute_char_pool, current_practice_window, unlocked_practice_count,
-    PracticeWindow,
+    apply_practice_window, compute_char_pool, current_practice_window, fit_settings_to_alphabet,
+    unlocked_practice_count, PracticeWindow,
 };
 pub use rng::{weighted_random_pick, FastrandRng, Rng};
 pub use sampling::{

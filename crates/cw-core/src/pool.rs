@@ -1,6 +1,6 @@
 //! Character pool selection from a leveled alphabet (Koch, digits, mixed, custom).
 
-use crate::level::unlocked_prefix;
+use crate::level::{max_level_for_len, unlocked_prefix, LEVEL_MIN};
 use crate::morse::{is_digit, DIGITS};
 use crate::settings::{CharSetMode, TrainingSettings};
 
@@ -43,6 +43,21 @@ pub fn apply_practice_window(settings: &mut TrainingSettings, window: PracticeWi
             settings.sliding_window_start = n.saturating_sub(4).max(1);
             settings.sliding_window_end = n;
         }
+    }
+}
+
+/// Cap levels to the current alphabets and keep All/Last3/Last5, or reset to All.
+pub fn fit_settings_to_alphabet(settings: &mut TrainingSettings) {
+    settings.level = settings
+        .level
+        .clamp(LEVEL_MIN, settings.max_letter_level());
+    settings.digits_level = settings.digits_level.clamp(
+        LEVEL_MIN,
+        max_level_for_len(DIGITS.len()),
+    );
+    match current_practice_window(settings) {
+        Some(window) => apply_practice_window(settings, window),
+        None => apply_practice_window(settings, PracticeWindow::All),
     }
 }
 
@@ -197,5 +212,34 @@ mod tests {
         assert_eq!(compute_char_pool(&s), vec!['Q', 'R']);
         s.level = 3;
         assert_eq!(compute_char_pool(&s), vec!['Q', 'R', 'S', 'T']);
+    }
+
+    #[test]
+    fn digits_max_level_unlocks_all_ten() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Digits;
+        s.digits_level = max_level_for_len(DIGITS.len());
+        s.sliding_window_start = 1;
+        s.sliding_window_end = 10;
+        let pool = compute_char_pool(&s);
+        assert_eq!(pool.len(), 10);
+        s.digits_level = 10;
+        let clamped = s.clone().clamp();
+        assert_eq!(clamped.digits_level, 9);
+        assert_eq!(compute_char_pool(&clamped).len(), 10);
+    }
+
+    #[test]
+    fn switching_mode_resets_stale_window() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Koch;
+        s.level = 10;
+        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.char_set_mode = CharSetMode::Digits;
+        s.digits_level = 1;
+        fit_settings_to_alphabet(&mut s);
+        let pool = compute_char_pool(&s);
+        assert_eq!(pool, vec!['0', '1']);
+        assert_eq!(current_practice_window(&s), Some(PracticeWindow::All));
     }
 }

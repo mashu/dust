@@ -13,6 +13,10 @@ use crate::score::{
 };
 use crate::settings::{CharSetMode, TrainingSettings};
 
+fn session_level_default() -> u32 {
+    1
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeStatus {
@@ -54,7 +58,7 @@ pub struct SessionResult {
     pub total_chars: u32,
     pub effective_alphabet_size: f64,
     pub score: f64,
-    #[serde(alias = "kochLevel")]
+    #[serde(alias = "kochLevel", default = "session_level_default")]
     pub level: u32,
     pub digits_level: u32,
     pub char_set_mode: CharSetMode,

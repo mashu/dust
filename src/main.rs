@@ -23,7 +23,27 @@ use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 
 fn main() {
-    dioxus::launch(App);
+    #[cfg(feature = "desktop")]
+    {
+        use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
+        dioxus::LaunchBuilder::desktop()
+            .with_cfg(
+                Config::new()
+                    .with_menu(None)
+                    .with_background_color((243, 234, 217, 255))
+                    .with_window(
+                        WindowBuilder::new()
+                            .with_title("Dust")
+                            .with_inner_size(LogicalSize::new(560.0, 860.0))
+                            .with_min_inner_size(LogicalSize::new(420.0, 640.0)),
+                    ),
+            )
+            .launch(App);
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        dioxus::launch(App);
+    }
 }
 
 #[component]
@@ -231,6 +251,7 @@ fn App() -> Element {
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };
 
     rsx! {
+        document::Title { "Dust" }
         document::Link { rel: "stylesheet", href: asset!("/assets/styles.css") }
         document::Meta {
             name: "viewport",
@@ -244,7 +265,15 @@ fn App() -> Element {
             rel: "stylesheet",
             href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=swap",
         }
-        div { class: shell_class,
+        div {
+            class: "app-root",
+            onkeydown: move |e| {
+                if e.key() == Key::F11 {
+                    e.prevent_default();
+                    toggle_fullscreen();
+                }
+            },
+            div { class: shell_class,
             header { class: "header-bar",
                 div {
                     p { class: "brand-kicker", "CW copy trainer" }
@@ -425,8 +454,8 @@ fn App() -> Element {
                     }
                 }
             }
-        }
-        if show_nav {
+            }
+            if show_nav {
             nav { class: "bottom-nav",
                 button {
                     class: if matches!(screen(), Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
@@ -447,15 +476,41 @@ fn App() -> Element {
                     span { "Settings" }
                 }
             }
-        }
-        if let Some(message) = toast() {
-            div { class: "toast", "{message}" }
+            }
+            if let Some(message) = toast() {
+                div { class: "toast", "{message}" }
+            }
         }
     }
 }
 
 fn session_running(screen: Signal<Screen>, runtime: Signal<Option<GroupSession>>) -> bool {
     matches!(screen(), Screen::Training) || runtime.peek().is_some()
+}
+
+fn toggle_fullscreen() {
+    #[cfg(feature = "desktop")]
+    {
+        let desktop = dioxus::desktop::window();
+        let fullscreen = desktop.window.fullscreen().is_some();
+        desktop.set_fullscreen(!fullscreen);
+    }
+    #[cfg(feature = "web")]
+    {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(document) = window.document() else {
+            return;
+        };
+        if document.fullscreen_element().is_some() {
+            document.exit_fullscreen();
+            return;
+        }
+        if let Some(element) = document.document_element() {
+            let _ = element.request_fullscreen();
+        }
+    }
 }
 
 fn maybe_finish_if_complete(

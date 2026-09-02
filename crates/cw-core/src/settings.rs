@@ -40,7 +40,7 @@ impl Default for CharSetMode {
 #[serde(rename_all = "camelCase")]
 pub struct TrainingSettings {
     /// Progress through the current letter/custom alphabet (level 1 unlocks two characters).
-    #[serde(alias = "kochLevel")]
+    #[serde(alias = "kochLevel", default = "defaults::level")]
     pub level: u32,
     pub char_set_mode: CharSetMode,
     pub digits_level: u32,
@@ -49,6 +49,9 @@ pub struct TrainingSettings {
     pub mixed_auto_level_next_axis: MixedAutoLevelAxis,
     pub custom_set: Vec<char>,
     pub custom_sequence: Vec<char>,
+    /// True when the user chose Sequence → Custom, even if the order still matches a preset.
+    #[serde(default)]
+    pub sequence_is_custom: bool,
     pub sliding_window_start: u32,
     pub sliding_window_end: u32,
     pub side_tone_min: f64,
@@ -102,7 +105,7 @@ pub struct TrainingSettings {
     pub receiver_background_offset_mod_depth_hz: f64,
     #[serde(default = "defaults::receiver_background_offset_mod_rate_hz")]
     pub receiver_background_offset_mod_rate_hz: f64,
-    #[serde(alias = "autoAdjustKoch")]
+    #[serde(alias = "autoAdjustKoch", default = "defaults::enabled")]
     pub auto_adjust_level: bool,
     pub auto_adjust_threshold: f64,
     pub auto_adjust_below_threshold_count: u32,
@@ -123,6 +126,7 @@ impl Default for TrainingSettings {
             mixed_auto_level_next_axis: MixedAutoLevelAxis::Letters,
             custom_set: Vec::new(),
             custom_sequence: Vec::new(),
+            sequence_is_custom: false,
             sliding_window_start: DEFAULT_SLIDING_WINDOW_START,
             sliding_window_end: DEFAULT_SLIDING_WINDOW_END,
             side_tone_min: 400.0,
@@ -226,7 +230,7 @@ impl TrainingSettings {
 
     pub fn max_active_level(&self) -> u32 {
         match self.char_set_mode {
-            CharSetMode::Digits => crate::morse::MAX_DIGITS_LEVEL,
+            CharSetMode::Digits => max_level_for_len(crate::morse::DIGITS.len()),
             _ => self.max_letter_level(),
         }
     }
@@ -234,7 +238,10 @@ impl TrainingSettings {
     pub fn clamp(mut self) -> Self {
         let seq_max = self.max_letter_level();
         self.level = self.level.clamp(LEVEL_MIN, seq_max);
-        self.digits_level = self.digits_level.clamp(1, crate::morse::MAX_DIGITS_LEVEL);
+        self.digits_level = self.digits_level.clamp(
+            LEVEL_MIN,
+            max_level_for_len(crate::morse::DIGITS.len()),
+        );
         self.mixed_letters_percent = self.mixed_letters_percent.min(100);
         self.num_groups = self.num_groups.clamp(1, 200);
         self.min_group_size = self.min_group_size.clamp(1, 20);
@@ -328,6 +335,9 @@ impl TrainingSettings {
 mod defaults {
     pub fn enabled() -> bool {
         true
+    }
+    pub fn level() -> u32 {
+        crate::level::LEVEL_MIN
     }
     pub fn qsb_depth() -> f64 {
         0.35

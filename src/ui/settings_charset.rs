@@ -1,7 +1,7 @@
 use cw_core::{
-    apply_practice_window, apply_sequence_preset, current_practice_window, preset_id_for,
-    unlocked_practice_count, CharSetMode, PracticeWindow, TrainingSettings, MAX_DIGITS_LEVEL,
-    SEQUENCE_PRESETS,
+    apply_custom_sequence, apply_practice_window, apply_sequence_preset, current_practice_window,
+    fit_settings_to_alphabet, sequence_preset_id, unlocked_practice_count, CharSetMode,
+    PracticeWindow, TrainingSettings, MAX_DIGITS_LEVEL, SEQUENCE_PRESETS,
 };
 use dioxus::prelude::*;
 
@@ -12,7 +12,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let s = settings();
     let seq = s.sequence();
     let level_max = s.max_active_level();
-    let preset = preset_id_for(seq);
+    let preset = sequence_preset_id(&s);
     let unlocked = unlocked_practice_count(&s);
     let window = current_practice_window(&s);
     let preview: String = cw_core::compute_char_pool(&s).into_iter().collect();
@@ -20,10 +20,26 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
         div { class: "card stack",
             div { class: "tiny", "Character set" }
             div { class: "mode-pills",
-                ModePill { label: "Koch".to_string(), active: s.char_set_mode == CharSetMode::Koch, onclick: move |_| settings.write().char_set_mode = CharSetMode::Koch }
-                ModePill { label: "Digits".to_string(), active: s.char_set_mode == CharSetMode::Digits, onclick: move |_| settings.write().char_set_mode = CharSetMode::Digits }
-                ModePill { label: "Mixed".to_string(), active: s.char_set_mode == CharSetMode::Mixed, onclick: move |_| settings.write().char_set_mode = CharSetMode::Mixed }
-                ModePill { label: "Custom".to_string(), active: s.char_set_mode == CharSetMode::Custom, onclick: move |_| settings.write().char_set_mode = CharSetMode::Custom }
+                ModePill { label: "Koch".to_string(), active: s.char_set_mode == CharSetMode::Koch, onclick: move |_| {
+                    let w = &mut *settings.write();
+                    w.char_set_mode = CharSetMode::Koch;
+                    fit_settings_to_alphabet(w);
+                } }
+                ModePill { label: "Digits".to_string(), active: s.char_set_mode == CharSetMode::Digits, onclick: move |_| {
+                    let w = &mut *settings.write();
+                    w.char_set_mode = CharSetMode::Digits;
+                    fit_settings_to_alphabet(w);
+                } }
+                ModePill { label: "Mixed".to_string(), active: s.char_set_mode == CharSetMode::Mixed, onclick: move |_| {
+                    let w = &mut *settings.write();
+                    w.char_set_mode = CharSetMode::Mixed;
+                    fit_settings_to_alphabet(w);
+                } }
+                ModePill { label: "Custom".to_string(), active: s.char_set_mode == CharSetMode::Custom, onclick: move |_| {
+                    let w = &mut *settings.write();
+                    w.char_set_mode = CharSetMode::Custom;
+                    fit_settings_to_alphabet(w);
+                } }
             }
             if s.char_set_mode != CharSetMode::Digits {
                 div { class: "tiny", "Sequence" }
@@ -39,6 +55,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                                     onclick: move |_| {
                                         let w = &mut *settings.write();
                                         apply_sequence_preset(w, id);
+                                        fit_settings_to_alphabet(w);
                                         *w = w.clone().clamp();
                                     }
                                 }
@@ -50,9 +67,9 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         active: preset == "custom",
                         onclick: move |_| {
                             let w = &mut *settings.write();
-                            if w.custom_sequence.is_empty() {
-                                w.custom_sequence = w.sequence().to_vec();
-                            }
+                            apply_custom_sequence(w);
+                            fit_settings_to_alphabet(w);
+                            *w = w.clone().clamp();
                         }
                     }
                 }
@@ -62,11 +79,14 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     input {
                         value: "{seq.iter().collect::<String>()}",
                         oninput: move |e| {
-                            settings.write().custom_sequence = e.value()
+                            let w = &mut *settings.write();
+                            w.custom_sequence = e.value()
                                 .chars()
                                 .filter(|c| !c.is_whitespace())
                                 .map(|c| c.to_ascii_uppercase())
                                 .collect();
+                            w.sequence_is_custom = !w.custom_sequence.is_empty();
+                            fit_settings_to_alphabet(w);
                         }
                     }
                 }
@@ -115,19 +135,12 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         value: "{s.custom_set.iter().collect::<String>()}",
                         oninput: move |e| {
                             let w = &mut *settings.write();
-                            let was_all = current_practice_window(w) == Some(PracticeWindow::All);
                             w.custom_set = e.value()
                                 .chars()
                                 .filter(|c| !c.is_whitespace())
                                 .map(|c| c.to_ascii_uppercase())
                                 .collect();
-                            let max = w.max_letter_level();
-                            if w.level > max {
-                                w.level = max;
-                            }
-                            if was_all {
-                                apply_practice_window(w, PracticeWindow::All);
-                            }
+                            fit_settings_to_alphabet(w);
                         }
                     }
                 }

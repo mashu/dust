@@ -18,8 +18,9 @@ pub const DEFAULT_SLIDING_WINDOW_END: u32 = LCWO_SEQUENCE.len() as u32;
 pub const SLIDING_WINDOW_INDEX_MAX: u32 = LCWO_SEQUENCE.len() as u32;
 
 pub const DIGITS: &[char] = &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-pub const MAX_DIGITS_LEVEL: u32 = 10;
-pub const MIN_DIGITS_LEVEL: u32 = 1;
+/// Highest digits level: level 1 unlocks two digits, so 10 digits → level 9.
+pub const MAX_DIGITS_LEVEL: u32 = crate::level::max_level_for_len(DIGITS.len());
+pub const MIN_DIGITS_LEVEL: u32 = crate::level::LEVEL_MIN;
 
 const MORSE_PAIRS: &[(char, &str)] = &[
     ('A', ".-"),

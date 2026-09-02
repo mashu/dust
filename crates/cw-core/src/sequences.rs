@@ -67,11 +67,30 @@ pub fn preset_id_for(sequence: &[char]) -> &'static str {
     "custom"
 }
 
+/// UI selection for Sequence pills. Custom stays selected even if the order matches a preset.
+pub fn sequence_preset_id(settings: &crate::settings::TrainingSettings) -> &'static str {
+    if settings.sequence_is_custom {
+        "custom"
+    } else {
+        preset_id_for(settings.sequence())
+    }
+}
+
 pub fn preset_by_id(id: &str) -> Option<&'static SequencePreset> {
     SEQUENCE_PRESETS.iter().find(|p| p.id == id)
 }
 
+pub fn apply_custom_sequence(settings: &mut crate::settings::TrainingSettings) {
+    settings.custom_sequence = settings.sequence().to_vec();
+    settings.sequence_is_custom = true;
+}
+
 pub fn apply_sequence_preset(settings: &mut crate::settings::TrainingSettings, id: &str) {
+    if id == "custom" {
+        apply_custom_sequence(settings);
+        return;
+    }
+    settings.sequence_is_custom = false;
     if id == "lcwo" {
         settings.custom_sequence.clear();
         return;
@@ -84,10 +103,33 @@ pub fn apply_sequence_preset(settings: &mut crate::settings::TrainingSettings, i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::TrainingSettings;
 
     #[test]
     fn empty_is_lcwo() {
         assert_eq!(preset_id_for(&[]), "lcwo");
         assert_eq!(preset_id_for(LCWO_SEQUENCE), "lcwo");
+    }
+
+    #[test]
+    fn custom_stays_selected_when_order_matches_preset() {
+        let mut settings = TrainingSettings::default();
+        apply_custom_sequence(&mut settings);
+        assert_eq!(sequence_preset_id(&settings), "custom");
+        assert_eq!(settings.custom_sequence, LCWO_SEQUENCE);
+        apply_sequence_preset(&mut settings, "lcwo");
+        assert_eq!(sequence_preset_id(&settings), "lcwo");
+        assert!(!settings.sequence_is_custom);
+    }
+
+    #[test]
+    fn preset_click_leaves_custom_mode() {
+        let mut settings = TrainingSettings::default();
+        apply_sequence_preset(&mut settings, "morsemania");
+        apply_custom_sequence(&mut settings);
+        assert_eq!(sequence_preset_id(&settings), "custom");
+        apply_sequence_preset(&mut settings, "alphabetical");
+        assert_eq!(sequence_preset_id(&settings), "alphabetical");
+        assert!(!settings.sequence_is_custom);
     }
 }
