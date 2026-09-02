@@ -188,7 +188,7 @@ mod tests {
             total_chars: chars,
             effective_alphabet_size: 1.0,
             score: 0.0,
-            koch_level: 1,
+            level: 1,
             digits_level: 1,
             char_set_mode: CharSetMode::Koch,
             char_wpm: 18.0,

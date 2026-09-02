@@ -168,7 +168,7 @@ pub fn SettingsView(
             div { class: "card stack",
                 div { class: "tiny", "Auto level" }
                 label { class: "check",
-                    input { r#type: "checkbox", checked: s.auto_adjust_koch, onchange: move |e| settings.write().auto_adjust_koch = e.checked() }
+                    input { r#type: "checkbox", checked: s.auto_adjust_level, onchange: move |e| settings.write().auto_adjust_level = e.checked() }
                     "Automatically adjust level from session accuracy"
                 }
                 NumberField { label: "Accuracy threshold %".to_string(), value: s.auto_adjust_threshold, min: 50.0, max: 100.0, step: 1.0, onchange: move |v| settings.write().auto_adjust_threshold = v }

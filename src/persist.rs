@@ -1,4 +1,4 @@
-use cw_core::{AutoAdjustMode, AutoLevelCounters, SessionResult, TrainingSettings};
+use cw_core::{AutoAdjustMode, AutoLevelCounters, CharSetMode, SessionResult, TrainingSettings};
 
 const MAX_SESSIONS: usize = 200;
 
@@ -58,13 +58,14 @@ mod backend {
 
     pub fn load_auto_counters(
         mode: AutoAdjustMode,
+        char_set: CharSetMode,
         level: u32,
         digits: Option<u32>,
     ) -> AutoLevelCounters {
         let Some(store) = storage() else {
             return AutoLevelCounters::default();
         };
-        let key = format!("{AUTO_PREFIX}{}", mode.storage_key(level, digits));
+        let key = format!("{AUTO_PREFIX}{}", mode.storage_key(char_set, level, digits));
         let Ok(Some(raw)) = store.get_item(&key) else {
             return AutoLevelCounters::default();
         };
@@ -73,6 +74,7 @@ mod backend {
 
     pub fn save_auto_counters(
         mode: AutoAdjustMode,
+        char_set: CharSetMode,
         level: u32,
         digits: Option<u32>,
         counters: AutoLevelCounters,
@@ -80,7 +82,7 @@ mod backend {
         let Some(store) = storage() else {
             return;
         };
-        let key = format!("{AUTO_PREFIX}{}", mode.storage_key(level, digits));
+        let key = format!("{AUTO_PREFIX}{}", mode.storage_key(char_set, level, digits));
         if let Ok(raw) = serde_json::to_string(&counters) {
             let _ = store.set_item(&key, &raw);
         }
@@ -165,23 +167,25 @@ mod backend {
 
     pub fn load_auto_counters(
         mode: AutoAdjustMode,
+        char_set: CharSetMode,
         level: u32,
         digits: Option<u32>,
     ) -> AutoLevelCounters {
         load_all_counters()
-            .get(&mode.storage_key(level, digits))
+            .get(&mode.storage_key(char_set, level, digits))
             .copied()
             .unwrap_or_default()
     }
 
     pub fn save_auto_counters(
         mode: AutoAdjustMode,
+        char_set: CharSetMode,
         level: u32,
         digits: Option<u32>,
         counters: AutoLevelCounters,
     ) {
         let mut map = load_all_counters();
-        map.insert(mode.storage_key(level, digits), counters);
+        map.insert(mode.storage_key(char_set, level, digits), counters);
         save_all_counters(&map);
     }
 

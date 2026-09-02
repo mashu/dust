@@ -11,7 +11,7 @@ use crate::ui::widgets::{ModePill, NumberField};
 pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let s = settings();
     let seq = s.sequence();
-    let seq_max = (seq.len().saturating_sub(1) as u32).max(1);
+    let level_max = s.max_active_level();
     let preset = preset_id_for(seq);
     let unlocked = unlocked_practice_count(&s);
     let window = current_practice_window(&s);
@@ -26,7 +26,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 ModePill { label: "Custom".to_string(), active: s.char_set_mode == CharSetMode::Custom, onclick: move |_| settings.write().char_set_mode = CharSetMode::Custom }
             }
             if s.char_set_mode != CharSetMode::Digits {
-                div { class: "tiny", "Koch sequence" }
+                div { class: "tiny", "Sequence" }
                 div { class: "mode-pills",
                     for preset_def in SEQUENCE_PRESETS.iter() {
                         {
@@ -71,24 +71,22 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     }
                 }
             }
-            if s.char_set_mode != CharSetMode::Digits {
-                NumberField {
-                    label: format!("Koch level (1–{seq_max}) · {unlocked} unlocked"),
-                    value: s.koch_level as f64,
-                    min: 1.0,
-                    max: seq_max as f64,
-                    step: 1.0,
-                    onchange: move |v| {
-                        let w = &mut *settings.write();
-                        let was_all = current_practice_window(w) == Some(PracticeWindow::All);
-                        w.koch_level = v as u32;
-                        if was_all {
-                            apply_practice_window(w, PracticeWindow::All);
-                        }
+            NumberField {
+                label: format!("Level (1–{level_max}) · {unlocked} unlocked"),
+                value: s.active_level() as f64,
+                min: 1.0,
+                max: level_max as f64,
+                step: 1.0,
+                onchange: move |v| {
+                    let w = &mut *settings.write();
+                    let was_all = current_practice_window(w) == Some(PracticeWindow::All);
+                    w.set_active_level(v as u32);
+                    if was_all {
+                        apply_practice_window(w, PracticeWindow::All);
                     }
                 }
             }
-            if s.char_set_mode == CharSetMode::Digits || s.char_set_mode == CharSetMode::Mixed {
+            if s.char_set_mode == CharSetMode::Mixed {
                 NumberField {
                     label: "Digits level (1–{MAX_DIGITS_LEVEL})",
                     value: s.digits_level as f64,
@@ -96,12 +94,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     max: MAX_DIGITS_LEVEL as f64,
                     step: 1.0,
                     onchange: move |v| {
-                        let w = &mut *settings.write();
-                        let was_all = current_practice_window(w) == Some(PracticeWindow::All);
-                        w.digits_level = v as u32;
-                        if was_all && w.char_set_mode == CharSetMode::Digits {
-                            apply_practice_window(w, PracticeWindow::All);
-                        }
+                        settings.write().digits_level = v as u32;
                     }
                 }
             }
@@ -121,32 +114,44 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     input {
                         value: "{s.custom_set.iter().collect::<String>()}",
                         oninput: move |e| {
-                            settings.write().custom_set = e.value().chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_uppercase()).collect();
+                            let w = &mut *settings.write();
+                            let was_all = current_practice_window(w) == Some(PracticeWindow::All);
+                            w.custom_set = e.value()
+                                .chars()
+                                .filter(|c| !c.is_whitespace())
+                                .map(|c| c.to_ascii_uppercase())
+                                .collect();
+                            let max = w.max_letter_level();
+                            if w.level > max {
+                                w.level = max;
+                            }
+                            if was_all {
+                                apply_practice_window(w, PracticeWindow::All);
+                            }
                         }
                     }
                 }
+                p { class: "muted", "Level unlocks this list from the start. Leave empty to use the sequence above." }
             }
-            if s.char_set_mode != CharSetMode::Custom {
-                div { class: "tiny", "Practice window" }
-                div { class: "mode-pills",
+            div { class: "tiny", "Practice window" }
+            div { class: "mode-pills",
+                ModePill {
+                    label: "All".to_string(),
+                    active: window == Some(PracticeWindow::All),
+                    onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::All),
+                }
+                if unlocked >= 3 {
                     ModePill {
-                        label: "All".to_string(),
-                        active: window == Some(PracticeWindow::All),
-                        onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::All),
+                        label: "Last 3".to_string(),
+                        active: window == Some(PracticeWindow::Last3),
+                        onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last3),
                     }
-                    if unlocked >= 3 {
-                        ModePill {
-                            label: "Last 3".to_string(),
-                            active: window == Some(PracticeWindow::Last3),
-                            onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last3),
-                        }
-                    }
-                    if unlocked >= 5 {
-                        ModePill {
-                            label: "Last 5".to_string(),
-                            active: window == Some(PracticeWindow::Last5),
-                            onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last5),
-                        }
+                }
+                if unlocked >= 5 {
+                    ModePill {
+                        label: "Last 5".to_string(),
+                        active: window == Some(PracticeWindow::Last5),
+                        onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last5),
                     }
                 }
             }

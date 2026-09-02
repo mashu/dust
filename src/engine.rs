@@ -409,13 +409,13 @@ pub fn finish_session(
     };
     let level = match mode {
         AutoAdjustMode::Digits => settings.digits_level,
-        _ => settings.koch_level,
+        _ => settings.level,
     };
-    let mut counters = load_auto_counters(mode, level, digits);
+    let mut counters = load_auto_counters(mode, settings.char_set_mode, level, digits);
     let mut next_settings = settings.clone();
     let practice_window = current_practice_window(&settings);
     if let Some(adj) = evaluate_auto_level(built.accuracy, &settings, &mut counters) {
-        save_auto_counters(mode, level, digits, counters);
+        save_auto_counters(mode, settings.char_set_mode, level, digits, counters);
         clear_auto_counters(&adj.counters_cleared_keys);
         apply_auto_level(&mut next_settings, &adj);
         if let Some(window) = practice_window {
@@ -427,7 +427,7 @@ pub fn finish_session(
         auto_message.set(Some(adj.message.clone()));
         toast.set(Some(adj.message));
     } else {
-        save_auto_counters(mode, level, digits, counters);
+        save_auto_counters(mode, settings.char_set_mode, level, digits, counters);
         auto_message.set(None);
     }
 
@@ -445,9 +445,9 @@ pub fn current_auto_progress(settings: &TrainingSettings) -> Option<AutoLevelPro
     let digits = matches!(mode, AutoAdjustMode::Mixed).then_some(settings.digits_level);
     let level = match mode {
         AutoAdjustMode::Digits => settings.digits_level,
-        _ => settings.koch_level,
+        _ => settings.level,
     };
-    auto_level_progress(settings, load_auto_counters(mode, level, digits))
+    auto_level_progress(settings, load_auto_counters(mode, settings.char_set_mode, level, digits))
 }
 
 pub async fn play_chars(

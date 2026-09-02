@@ -10,10 +10,9 @@ pub const LCWO_SEQUENCE: &[char] = &[
     '6', '0', 'X',
 ];
 
-/// Level 1 unlocks the first two characters; each following level adds one.
-pub const KOCH_LEVEL_MIN: u32 = 1;
+pub use crate::level::{unlocked_count_for_level as unlocked_char_count_for_level, LEVEL_MIN as KOCH_LEVEL_MIN};
 /// Final level of the built-in LCWO curriculum (`LCWO_SEQUENCE.len() - 1`).
-pub const KOCH_LEVEL_MAX: u32 = (LCWO_SEQUENCE.len() - 1) as u32;
+pub const KOCH_LEVEL_MAX: u32 = (LCWO_SEQUENCE.len() as u32).saturating_sub(1);
 pub const DEFAULT_SLIDING_WINDOW_START: u32 = 1;
 pub const DEFAULT_SLIDING_WINDOW_END: u32 = LCWO_SEQUENCE.len() as u32;
 pub const SLIDING_WINDOW_INDEX_MAX: u32 = LCWO_SEQUENCE.len() as u32;
@@ -102,15 +101,9 @@ pub fn is_scored_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric()
 }
 
-/// Total characters unlocked at Koch/digits level L (level 1 → 2 characters).
-pub fn unlocked_char_count_for_level(level: u32) -> usize {
-    let safe = level.max(1) as usize;
-    safe + 1
-}
-
 /// Digits unlocked at digits level L (level 1 → digits 0–1).
 pub fn digits_unlocked_count(level: u32) -> usize {
-    unlocked_char_count_for_level(level).min(MAX_DIGITS_LEVEL as usize)
+    crate::level::unlocked_prefix(DIGITS, level).len()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

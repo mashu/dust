@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::level::{max_level_for_len, LEVEL_MIN};
 use crate::morse::{
-    MixedAutoLevelAxis, DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START, KOCH_LEVEL_MIN,
+    MixedAutoLevelAxis, DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +39,9 @@ impl Default for CharSetMode {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainingSettings {
-    pub koch_level: u32,
+    /// Progress through the current letter/custom alphabet (level 1 unlocks two characters).
+    #[serde(alias = "kochLevel")]
+    pub level: u32,
     pub char_set_mode: CharSetMode,
     pub digits_level: u32,
     /// When mixed: 0–100 percent of characters that are letters (rest digits).
@@ -99,7 +102,8 @@ pub struct TrainingSettings {
     pub receiver_background_offset_mod_depth_hz: f64,
     #[serde(default = "defaults::receiver_background_offset_mod_rate_hz")]
     pub receiver_background_offset_mod_rate_hz: f64,
-    pub auto_adjust_koch: bool,
+    #[serde(alias = "autoAdjustKoch")]
+    pub auto_adjust_level: bool,
     pub auto_adjust_threshold: f64,
     pub auto_adjust_below_threshold_count: u32,
     pub auto_adjust_above_threshold_count: u32,
@@ -112,7 +116,7 @@ pub struct TrainingSettings {
 impl Default for TrainingSettings {
     fn default() -> Self {
         Self {
-            koch_level: KOCH_LEVEL_MIN,
+            level: LEVEL_MIN,
             char_set_mode: CharSetMode::Mixed,
             digits_level: 1,
             mixed_letters_percent: 70,
@@ -157,7 +161,7 @@ impl Default for TrainingSettings {
             receiver_background_offset_hz: 140.0,
             receiver_background_offset_mod_depth_hz: 45.0,
             receiver_background_offset_mod_rate_hz: 0.32,
-            auto_adjust_koch: true,
+            auto_adjust_level: true,
             auto_adjust_threshold: 90.0,
             auto_adjust_below_threshold_count: 1,
             auto_adjust_above_threshold_count: 5,
@@ -169,9 +173,67 @@ impl Default for TrainingSettings {
 }
 
 impl TrainingSettings {
+    /// Unique uppercase characters, first-seen order, skipping whitespace.
+    pub fn unique_alphabet(chars: &[char]) -> Vec<char> {
+        let mut out = Vec::new();
+        for ch in chars {
+            let up = ch.to_ascii_uppercase();
+            if up.is_whitespace() {
+                continue;
+            }
+            if !out.contains(&up) {
+                out.push(up);
+            }
+        }
+        out
+    }
+
+    /// Ordered alphabet that `level` unlocks. Custom uses `custom_set` when set.
+    pub fn progress_alphabet(&self) -> Vec<char> {
+        if self.char_set_mode == CharSetMode::Custom {
+            let custom = Self::unique_alphabet(&self.custom_set);
+            if !custom.is_empty() {
+                return custom;
+            }
+        }
+        self.sequence().to_vec()
+    }
+
+    pub fn max_letter_level(&self) -> u32 {
+        max_level_for_len(self.progress_alphabet().len())
+    }
+
+    pub fn active_alphabet(&self) -> Vec<char> {
+        match self.char_set_mode {
+            CharSetMode::Digits => crate::morse::DIGITS.to_vec(),
+            _ => self.progress_alphabet(),
+        }
+    }
+
+    pub fn active_level(&self) -> u32 {
+        match self.char_set_mode {
+            CharSetMode::Digits => self.digits_level,
+            _ => self.level,
+        }
+    }
+
+    pub fn set_active_level(&mut self, value: u32) {
+        match self.char_set_mode {
+            CharSetMode::Digits => self.digits_level = value,
+            _ => self.level = value,
+        }
+    }
+
+    pub fn max_active_level(&self) -> u32 {
+        match self.char_set_mode {
+            CharSetMode::Digits => crate::morse::MAX_DIGITS_LEVEL,
+            _ => self.max_letter_level(),
+        }
+    }
+
     pub fn clamp(mut self) -> Self {
-        let seq_max = (self.sequence().len().saturating_sub(1) as u32).max(1);
-        self.koch_level = self.koch_level.clamp(1, seq_max);
+        let seq_max = self.max_letter_level();
+        self.level = self.level.clamp(LEVEL_MIN, seq_max);
         self.digits_level = self.digits_level.clamp(1, crate::morse::MAX_DIGITS_LEVEL);
         self.mixed_letters_percent = self.mixed_letters_percent.min(100);
         self.num_groups = self.num_groups.clamp(1, 200);
@@ -316,7 +378,7 @@ mod tests {
         s.min_group_size = 8;
         s.max_group_size = 2;
         s.link_group_size = true;
-        s.koch_level = 99;
+        s.level = 99;
         let s = s.clamp();
         assert_eq!(s.char_wpm_min, 5.0);
         assert_eq!(s.char_wpm_max, 5.0);
@@ -324,6 +386,17 @@ mod tests {
         assert_eq!(s.effective_wpm_max, 5.0);
         assert_eq!(s.min_group_size, 8);
         assert_eq!(s.max_group_size, 8);
-        assert_eq!(s.koch_level, (s.sequence().len().saturating_sub(1) as u32).max(1));
+        assert_eq!(s.level, (s.sequence().len().saturating_sub(1) as u32).max(1));
+    }
+
+    #[test]
+    fn custom_level_clamps_to_alphabet_length() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Custom;
+        s.custom_set = vec!['A', 'B', 'C', 'D'];
+        s.level = 99;
+        let s = s.clamp();
+        assert_eq!(s.level, 3);
+        assert_eq!(s.progress_alphabet(), vec!['A', 'B', 'C', 'D']);
     }
 }

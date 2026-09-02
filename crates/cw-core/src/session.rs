@@ -54,7 +54,8 @@ pub struct SessionResult {
     pub total_chars: u32,
     pub effective_alphabet_size: f64,
     pub score: f64,
-    pub koch_level: u32,
+    #[serde(alias = "kochLevel")]
+    pub level: u32,
     pub digits_level: u32,
     pub char_set_mode: CharSetMode,
     pub char_wpm: f64,
@@ -317,7 +318,7 @@ pub fn build_session_result(
         total_chars,
         effective_alphabet_size,
         score,
-        koch_level: settings.koch_level,
+        level: settings.level,
         digits_level: settings.digits_level,
         char_set_mode: settings.char_set_mode,
         char_wpm,

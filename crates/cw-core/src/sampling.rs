@@ -354,7 +354,7 @@ mod tests {
     fn group_length_respects_fixed_size() {
         let mut settings = TrainingSettings::default();
         settings.char_set_mode = CharSetMode::Koch;
-        settings.koch_level = 1;
+        settings.level = 1;
         settings.min_group_size = 3;
         settings.max_group_size = 3;
         let state = CharSamplingState::default();
@@ -386,7 +386,7 @@ mod tests {
     fn generated_group_is_never_empty_for_koch() {
         let mut settings = TrainingSettings::default();
         settings.char_set_mode = CharSetMode::Koch;
-        settings.koch_level = 1;
+        settings.level = 1;
         settings.min_group_size = 1;
         settings.max_group_size = 1;
         let state = CharSamplingState::default();

@@ -21,14 +21,14 @@ pub fn Home(
     let level_label = match settings.char_set_mode {
         cw_core::CharSetMode::Digits => "Digits level",
         cw_core::CharSetMode::Mixed => "Levels",
-        _ => "Koch level",
+        _ => "Level",
     };
     let level_value = match settings.char_set_mode {
         cw_core::CharSetMode::Digits => format!("{}", settings.digits_level),
         cw_core::CharSetMode::Mixed => {
-            format!("{} / {}", settings.koch_level, settings.digits_level)
+            format!("{} / {}", settings.level, settings.digits_level)
         }
-        _ => format!("{}", settings.koch_level),
+        _ => format!("{}", settings.level),
     };
     let acc = last_accuracy
         .map(|a| format!("{}%", (a * 100.0).round()))

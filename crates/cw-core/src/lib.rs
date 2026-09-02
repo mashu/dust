@@ -7,6 +7,7 @@ pub mod alignment;
 pub mod auto_level;
 pub mod band;
 pub mod heatmap;
+pub mod level;
 pub mod morse;
 pub mod pool;
 pub mod rng;
@@ -30,10 +31,13 @@ pub use auto_level::{
 pub use heatmap::{
     build_heatmap, HeatmapCell, HeatmapColorMode, HeatmapGrid, HEATMAP_WEEKS,
 };
+pub use level::{
+    max_level_for_len, unlocked_count_for_level, unlocked_prefix, LEVEL_MIN,
+};
 pub use morse::{
     decode_morse_pattern, digits_unlocked_count, is_morse_code_prefix, morse_for,
-    unlocked_char_count_for_level, MixedAutoLevelAxis, DEFAULT_SLIDING_WINDOW_END,
-    DEFAULT_SLIDING_WINDOW_START, KOCH_LEVEL_MAX, KOCH_LEVEL_MIN, LCWO_SEQUENCE, MAX_DIGITS_LEVEL,
+    MixedAutoLevelAxis, DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START, KOCH_LEVEL_MAX,
+    KOCH_LEVEL_MIN, LCWO_SEQUENCE, MAX_DIGITS_LEVEL,
 };
 pub use sequences::{
     apply_sequence_preset, preset_by_id, preset_id_for, SequencePreset, SEQUENCE_PRESETS,

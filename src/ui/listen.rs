@@ -22,11 +22,11 @@ fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
             prev.digits_level = prev.digits_level.saturating_sub(1).max(1);
         }
         cw_core::CharSetMode::Mixed => {
-            prev.koch_level = prev.koch_level.saturating_sub(1).max(1);
+            prev.level = prev.level.saturating_sub(1).max(1);
             prev.digits_level = prev.digits_level.saturating_sub(1).max(1);
         }
         _ => {
-            prev.koch_level = prev.koch_level.saturating_sub(1).max(1);
+            prev.level = prev.level.saturating_sub(1).max(1);
         }
     }
     let previous = compute_char_pool(&prev);

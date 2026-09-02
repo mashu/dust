@@ -1,38 +1,17 @@
-//! Character pool selection for Koch, digits, mixed, and custom modes.
+//! Character pool selection from a leveled alphabet (Koch, digits, mixed, custom).
 
-use crate::morse::{
-    digits_unlocked_count, is_digit, unlocked_char_count_for_level, DIGITS, LCWO_SEQUENCE,
-};
+use crate::level::unlocked_prefix;
+use crate::morse::{is_digit, DIGITS};
 use crate::settings::{CharSetMode, TrainingSettings};
 
 pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
     match settings.char_set_mode {
         CharSetMode::Mixed => mixed_pool(settings),
-        CharSetMode::Digits => digits_pool(settings),
-        CharSetMode::Custom => {
-            let pool = unique_upper(&settings.custom_set);
-            if pool.is_empty() {
-                koch_pool(settings)
-            } else {
-                pool
-            }
-        }
-        CharSetMode::Koch => koch_pool(settings),
-    }
-}
-
-fn unique_upper(chars: &[char]) -> Vec<char> {
-    let mut out = Vec::new();
-    for ch in chars {
-        let up = ch.to_ascii_uppercase();
-        if up.is_whitespace() {
-            continue;
-        }
-        if !out.contains(&up) {
-            out.push(up);
+        CharSetMode::Digits => leveled_pool(&settings.active_alphabet(), settings.active_level(), settings),
+        CharSetMode::Custom | CharSetMode::Koch => {
+            leveled_pool(&settings.progress_alphabet(), settings.level, settings)
         }
     }
-    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,11 +23,8 @@ pub enum PracticeWindow {
 
 pub fn unlocked_practice_count(settings: &TrainingSettings) -> usize {
     match settings.char_set_mode {
-        CharSetMode::Digits => digits_unlocked_count(settings.digits_level.max(1)),
-        _ => {
-            let sequence = sequence_for(settings);
-            unlocked_char_count_for_level(settings.koch_level.max(1)).min(sequence.len())
-        }
+        CharSetMode::Digits => unlocked_prefix(DIGITS, settings.digits_level).len(),
+        _ => unlocked_prefix(&settings.progress_alphabet(), settings.level).len(),
     }
 }
 
@@ -87,28 +63,19 @@ pub fn current_practice_window(settings: &TrainingSettings) -> Option<PracticeWi
     }
 }
 
-fn sequence_for(settings: &TrainingSettings) -> &[char] {
-    if settings.custom_sequence.is_empty() {
-        LCWO_SEQUENCE
-    } else {
-        &settings.custom_sequence
-    }
-}
-
 fn mixed_pool(settings: &TrainingSettings) -> Vec<char> {
-    let koch_pool = koch_pool(settings);
-    let digit_count = digits_unlocked_count(settings.digits_level.max(1)).min(DIGITS.len());
-    let digits_pool: Vec<char> = DIGITS[..digit_count].to_vec();
-    let mut union = koch_pool.clone();
-    for d in digits_pool {
+    let letters = leveled_pool(&settings.progress_alphabet(), settings.level, settings);
+    let digits = unlocked_prefix(DIGITS, settings.digits_level);
+    let mut union = letters.clone();
+    for d in digits {
         if !union.contains(&d) {
             union.push(d);
         }
     }
     if union.len() >= 2 {
         union
-    } else if koch_pool.len() >= 2 {
-        koch_pool
+    } else if letters.len() >= 2 {
+        letters
     } else {
         union
     }
@@ -131,17 +98,8 @@ fn apply_sliding_window(full_unlocked: &[char], settings: &TrainingSettings) -> 
     }
 }
 
-fn digits_pool(settings: &TrainingSettings) -> Vec<char> {
-    let count = digits_unlocked_count(settings.digits_level.max(1));
-    let full_unlocked = DIGITS[..count].to_vec();
-    apply_sliding_window(&full_unlocked, settings)
-}
-
-fn koch_pool(settings: &TrainingSettings) -> Vec<char> {
-    let sequence = sequence_for(settings);
-    let char_count = unlocked_char_count_for_level(settings.koch_level.max(1)).min(sequence.len());
-    let full_unlocked = sequence[..char_count.max(2.min(sequence.len()))].to_vec();
-    apply_sliding_window(&full_unlocked, settings)
+fn leveled_pool(alphabet: &[char], level: u32, settings: &TrainingSettings) -> Vec<char> {
+    apply_sliding_window(&unlocked_prefix(alphabet, level), settings)
 }
 
 pub fn letters_subset(pool: &[char]) -> Vec<char> {
@@ -160,7 +118,7 @@ mod tests {
     fn koch_level_1_is_k_and_m() {
         let mut s = TrainingSettings::default();
         s.char_set_mode = CharSetMode::Koch;
-        s.koch_level = 1;
+        s.level = 1;
         s.sliding_window_start = 1;
         s.sliding_window_end = 41;
         let pool = compute_char_pool(&s);
@@ -182,7 +140,7 @@ mod tests {
     fn mixed_unions_letters_and_digits() {
         let mut s = TrainingSettings::default();
         s.char_set_mode = CharSetMode::Mixed;
-        s.koch_level = 1;
+        s.level = 1;
         s.digits_level = 1;
         let pool = compute_char_pool(&s);
         assert!(pool.contains(&'K'));
@@ -195,7 +153,7 @@ mod tests {
     fn last3_window_keeps_newest_letters() {
         let mut s = TrainingSettings::default();
         s.char_set_mode = CharSetMode::Koch;
-        s.koch_level = 10;
+        s.level = 10;
         apply_practice_window(&mut s, PracticeWindow::Last3);
         let pool = compute_char_pool(&s);
         assert_eq!(pool.len(), 3);
@@ -206,11 +164,11 @@ mod tests {
     fn last3_reapplied_after_level_up_includes_newest() {
         let mut s = TrainingSettings::default();
         s.char_set_mode = CharSetMode::Koch;
-        s.koch_level = 10;
+        s.level = 10;
         apply_practice_window(&mut s, PracticeWindow::Last3);
-        s.koch_level = 11;
+        s.level = 11;
         let stale = compute_char_pool(&s);
-        let newest = sequence_for(&s)[unlocked_char_count_for_level(11) - 1];
+        let newest = s.progress_alphabet()[crate::level::unlocked_count_for_level(11) - 1];
         assert!(!stale.contains(&newest));
         apply_practice_window(&mut s, PracticeWindow::Last3);
         let pool = compute_char_pool(&s);
@@ -226,5 +184,18 @@ mod tests {
         let pool = compute_char_pool(&s);
         assert!(pool.contains(&'K'));
         assert!(pool.contains(&'M'));
+    }
+
+    #[test]
+    fn custom_level_unlocks_alphabet_prefix() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Custom;
+        s.custom_set = vec!['Q', 'R', 'S', 'T', 'U'];
+        s.level = 1;
+        s.sliding_window_start = 1;
+        s.sliding_window_end = 40;
+        assert_eq!(compute_char_pool(&s), vec!['Q', 'R']);
+        s.level = 3;
+        assert_eq!(compute_char_pool(&s), vec!['Q', 'R', 'S', 'T']);
     }
 }
