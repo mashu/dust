@@ -8,7 +8,10 @@ pub use native::MorsePlayer;
 #[cfg(feature = "web")]
 pub use web::MorsePlayer;
 
-use crate::time::sleep_ms;
+use crate::time::{sleep_ms, POLL_MS};
+
+#[cfg(feature = "web")]
+const PLAYBACK_TAIL_MS: u32 = 24;
 
 #[cfg(feature = "web")]
 use std::cell::Cell;
@@ -79,13 +82,15 @@ impl PlaybackWait {
     pub async fn wait(self) {
         #[cfg(feature = "web")]
         {
-            let wait_ms = ((self.duration_sec * 1000.0).ceil() as u32).saturating_add(60);
-            let steps = wait_ms.div_ceil(50).max(1);
-            for _ in 0..steps {
+            let mut left =
+                ((self.duration_sec * 1000.0).ceil() as u32).saturating_add(PLAYBACK_TAIL_MS);
+            while left > 0 {
                 if self.stop_flag.get() || self.current_epoch.get() != self.epoch {
                     break;
                 }
-                sleep_ms(50).await;
+                let chunk = left.min(POLL_MS);
+                sleep_ms(chunk).await;
+                left = left.saturating_sub(chunk);
             }
         }
         #[cfg(feature = "desktop")]
@@ -94,7 +99,7 @@ impl PlaybackWait {
                 && !self.stop_flag.load(Ordering::SeqCst)
                 && self.current_epoch.load(Ordering::SeqCst) == self.epoch
             {
-                sleep_ms(20).await;
+                sleep_ms(POLL_MS).await;
             }
         }
     }
@@ -104,9 +109,11 @@ pub fn focus_group_input(index: usize) {
     let js = format!(
         r#"(() => {{
             const el = document.getElementById("group-input-{index}");
-            if (el) {{
-                el.focus();
-                el.scrollIntoView({{ block: "center", behavior: "smooth" }});
+            if (!el || el.disabled) {{
+                return;
+            }}
+            if (document.activeElement !== el) {{
+                el.focus({{ preventScroll: true }});
             }}
         }})()"#
     );

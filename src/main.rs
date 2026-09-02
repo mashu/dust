@@ -41,7 +41,11 @@ fn App() -> Element {
     let app = Rc::new(app);
 
     use_effect(move || {
-        save_settings(&settings().clamp());
+        let snapshot = settings();
+        if matches!(screen(), Screen::Training) {
+            return;
+        }
+        save_settings(&snapshot.clamp());
     });
 
     use_effect(move || {
@@ -72,7 +76,12 @@ fn App() -> Element {
         let app = app.clone();
         move |(): ()| {
             let settings_now = settings().clamp();
-            settings.set(settings_now.clone());
+            if session_running(screen, runtime) {
+                return;
+            }
+            if settings.peek().clone() != settings_now {
+                settings.set(settings_now.clone());
+            }
             previewing.set(false);
             listen_playing.set(false);
             let gen = match app.takeover_audio(&settings_now) {
@@ -103,6 +112,9 @@ fn App() -> Element {
     let start_listen = {
         let app = app.clone();
         move |chars: String| {
+            if session_running(screen, runtime) {
+                return;
+            }
             let settings_now = settings().clamp();
             previewing.set(false);
             let gen = match app.takeover_audio(&settings_now) {
@@ -127,6 +139,9 @@ fn App() -> Element {
     let start_band_preview = {
         let app = app.clone();
         move |_| {
+            if session_running(screen, runtime) {
+                return;
+            }
             let settings_now = settings().clamp();
             let gen = match app.takeover_audio(&settings_now) {
                 Ok(gen) => gen,
@@ -150,6 +165,9 @@ fn App() -> Element {
     let stop_preview = use_callback({
         let app = app.clone();
         move |(): ()| {
+            if session_running(screen, runtime) {
+                return;
+            }
             app.bump_session();
             app.stop_audio();
             previewing.set(false);
@@ -171,6 +189,9 @@ fn App() -> Element {
     let go_listen = use_callback({
         let app = app.clone();
         move |(): ()| {
+            if session_running(screen, runtime) {
+                return;
+            }
             app.bump_session();
             app.stop_audio();
             previewing.set(false);
@@ -181,6 +202,9 @@ fn App() -> Element {
     let go_stats = use_callback({
         let app = app.clone();
         move |(): ()| {
+            if session_running(screen, runtime) {
+                return;
+            }
             app.bump_session();
             app.stop_audio();
             previewing.set(false);
@@ -191,6 +215,9 @@ fn App() -> Element {
     let go_settings = use_callback({
         let app = app.clone();
         move |(): ()| {
+            if session_running(screen, runtime) {
+                return;
+            }
             app.bump_session();
             app.stop_audio();
             previewing.set(false);
@@ -423,6 +450,10 @@ fn App() -> Element {
             div { class: "toast", "{message}" }
         }
     }
+}
+
+fn session_running(screen: Signal<Screen>, runtime: Signal<Option<GroupSession>>) -> bool {
+    matches!(screen(), Screen::Training) || runtime.peek().is_some()
 }
 
 fn maybe_finish_if_complete(

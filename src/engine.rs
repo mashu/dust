@@ -13,9 +13,10 @@ use crate::audio::{focus_group_input, MorsePlayer};
 use crate::persist::{
     clear_auto_counters, load_auto_counters, save_auto_counters, save_sessions, save_settings,
 };
-use crate::time::{local_date_string, now_ms, seed_rng, sleep_ms};
+use crate::time::{local_date_string, now_ms, seed_rng, sleep_ms, POLL_MS};
 
 pub const AUTO_CONFIRM_DELAY_MS: u32 = 300;
+const PLAY_ATTEMPTS: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -52,7 +53,10 @@ impl AppState {
     }
 
     fn ensure_player(&self, settings: &TrainingSettings) -> Result<(), String> {
-        let mut slot = self.player.borrow_mut();
+        let mut slot = self
+            .player
+            .try_borrow_mut()
+            .map_err(|_| "Audio is busy.".to_string())?;
         if slot.is_none() {
             *slot = Some(MorsePlayer::new()?);
         }
@@ -61,6 +65,18 @@ impl AppState {
             player.apply_band(settings)?;
         }
         Ok(())
+    }
+
+    fn rebuild_player(&self, settings: &TrainingSettings) -> Result<(), String> {
+        if let Ok(mut slot) = self.player.try_borrow_mut() {
+            if let Some(player) = slot.as_mut() {
+                player.shutdown();
+            }
+            *slot = None;
+        } else {
+            return Err("Audio is busy.".into());
+        }
+        self.ensure_player(settings)
     }
 
     /// Stop current audio, invalidate waiters, then arm the player for a new gen.
@@ -101,38 +117,67 @@ async fn play_text_now(
     text: &str,
     settings: &TrainingSettings,
 ) -> Result<(f64, f64), String> {
+    let mut last_err = None;
+    for attempt in 0..PLAY_ATTEMPTS {
+        if attempt > 0 {
+            let _ = app.rebuild_player(settings);
+            sleep_ms(POLL_MS).await;
+        }
+        match schedule_text(app, text, settings).await {
+            Ok(wait) => {
+                let duration = wait.duration_sec;
+                let char_wpm = wait.char_wpm;
+                wait.wait().await;
+                return Ok((duration, char_wpm));
+            }
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "Audio playback failed.".into()))
+}
+
+async fn schedule_text(
+    app: &AppState,
+    text: &str,
+    settings: &TrainingSettings,
+) -> Result<crate::audio::PlaybackWait, String> {
     #[cfg(feature = "web")]
     {
         let promise = app
             .player
-            .borrow()
-            .as_ref()
-            .and_then(MorsePlayer::take_resume_promise);
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(MorsePlayer::take_resume_promise));
         if let Some(promise) = promise {
             let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
         }
     }
-    let wait = {
-        let mut rng = app.rng.borrow_mut();
-        let mut slot = app.player.borrow_mut();
-        let Some(player) = slot.as_mut() else {
-            return Err("Audio is unavailable.".into());
-        };
-        player.start_text(text, settings, &mut *rng)?
-    };
-    let duration = wait.duration_sec;
-    let char_wpm = wait.char_wpm;
-    wait.wait().await;
-    Ok((duration, char_wpm))
+    for _ in 0..8 {
+        match (
+            app.rng.try_borrow_mut(),
+            app.player.try_borrow_mut(),
+        ) {
+            (Ok(mut rng), Ok(mut slot)) => {
+                let Some(player) = slot.as_mut() else {
+                    return Err("Audio is unavailable.".into());
+                };
+                return player.start_text(text, settings, &mut *rng);
+            }
+            _ => sleep_ms(POLL_MS).await,
+        }
+    }
+    Err("Audio is busy.".into())
 }
 
 pub async fn sleep_cancelable(ms: u32, gen: u64, session_gen: Rc<Cell<u64>>) -> bool {
-    let steps = ms.div_ceil(50).max(1);
-    for _ in 0..steps {
+    let mut left = ms.max(1);
+    while left > 0 {
         if session_gen.get() != gen {
             return false;
         }
-        sleep_ms(50.min(ms.max(1))).await;
+        let chunk = left.min(POLL_MS);
+        sleep_ms(chunk).await;
+        left = left.saturating_sub(chunk);
     }
     session_gen.get() == gen
 }
@@ -185,12 +230,14 @@ pub async fn run_group_session(
             }
         }
         focus_group_input(i);
-        let gap = compute_group_gap_ms(&settings);
-        if gap > 0 && !sleep_cancelable(gap, gen, app.session_gen.clone()).await {
-            return;
-        }
-        if app.session_gen.get() != gen {
-            return;
+        if i > 0 {
+            let gap = compute_group_gap_ms(&settings);
+            if gap > 0 && !sleep_cancelable(gap, gen, app.session_gen.clone()).await {
+                return;
+            }
+            if app.session_gen.get() != gen {
+                return;
+            }
         }
 
         let group = {
@@ -210,35 +257,34 @@ pub async fn run_group_session(
             s.groups.get(i).cloned().unwrap_or_default()
         };
         if group.is_empty() {
-            continue;
-        }
-
-        let play = play_text_now(&app, &group, &settings).await;
-        if app.session_gen.get() != gen {
-            return;
-        }
-        match play {
-            Ok((duration, char_wpm)) => {
-                let ended = now_ms().max(
-                    runtime
-                        .read()
-                        .as_ref()
-                        .and_then(|s| s.group_start_at.get(i).copied())
-                        .unwrap_or(now_ms())
-                        + (duration * 1000.0).round() as u64,
-                );
-                if let Some(s) = runtime.write().as_mut() {
-                    s.end_playback(i, ended, char_wpm);
-                }
+            if let Some(s) = runtime.write().as_mut() {
+                s.end_playback(i, now_ms(), 0.0);
             }
-            Err(message) => {
-                toast.set(Some(message));
-                if let Some(s) = runtime.write().as_mut() {
-                    s.status = RuntimeStatus::Failed;
-                    s.error_message = Some("Audio playback failed.".into());
-                }
-                app.shutdown_audio();
+        } else {
+            let play = play_text_now(&app, &group, &settings).await;
+            if app.session_gen.get() != gen {
                 return;
+            }
+            match play {
+                Ok((duration, char_wpm)) => {
+                    let ended = now_ms().max(
+                        runtime
+                            .read()
+                            .as_ref()
+                            .and_then(|s| s.group_start_at.get(i).copied())
+                            .unwrap_or(now_ms())
+                            + (duration * 1000.0).round() as u64,
+                    );
+                    if let Some(s) = runtime.write().as_mut() {
+                        s.end_playback(i, ended, char_wpm);
+                    }
+                }
+                Err(message) => {
+                    toast.set(Some(message));
+                    if let Some(s) = runtime.write().as_mut() {
+                        s.end_playback(i, now_ms(), 0.0);
+                    }
+                }
             }
         }
         focus_group_input(i);
@@ -252,7 +298,6 @@ pub async fn run_group_session(
         if !confirmed {
             confirm_group(runtime, i, None, &app);
         }
-        app.stop_audio();
     }
 
     if app.session_gen.get() != gen {
@@ -294,7 +339,7 @@ async fn wait_for_confirm(
         if timeout_ms > 0 && now_ms().saturating_sub(start) >= u64::from(timeout_ms) {
             return false;
         }
-        sleep_ms(50).await;
+        sleep_ms(POLL_MS).await;
     }
 }
 

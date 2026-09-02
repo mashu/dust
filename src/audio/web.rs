@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use cw_core::band::{QRM_OUTPUT_GAIN, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, RINGING_OUTPUT_GAIN};
 use cw_core::{plan_morse_playback, PlaybackPlan, QrmProfile, Rng, TrainingSettings};
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{
     AudioBufferSourceNode, AudioContext, AudioContextState, AudioNode, AudioScheduledSourceNode,
@@ -71,6 +72,7 @@ impl MorsePlayer {
         mix_gain
             .connect_with_audio_node(&ctx.destination())
             .map_err(|e| format!("mix connect: {e:?}"))?;
+        install_resume_on_foreground(&ctx);
         Ok(Self {
             ctx,
             stop_flag: Rc::new(Cell::new(false)),
@@ -221,6 +223,27 @@ impl MorsePlayer {
         }
         Ok(())
     }
+}
+
+fn install_resume_on_foreground(ctx: &AudioContext) {
+    let ctx = ctx.clone();
+    let closure = Closure::wrap(Box::new(move || {
+        let hidden = web_sys::window()
+            .and_then(|window| window.document())
+            .map(|doc| doc.hidden())
+            .unwrap_or(true);
+        if hidden || ctx.state() != AudioContextState::Suspended {
+            return;
+        }
+        let _ = ctx.resume();
+    }) as Box<dyn FnMut()>);
+    if let Some(doc) = web_sys::window().and_then(|window| window.document()) {
+        let _ = doc.add_event_listener_with_callback(
+            "visibilitychange",
+            closure.as_ref().unchecked_ref(),
+        );
+    }
+    closure.forget();
 }
 
 fn push_source(graph: &mut BandGraph, source: impl JsCast) {

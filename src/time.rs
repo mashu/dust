@@ -1,3 +1,7 @@
+/// Fine-grained poll for playback/confirm waits. Keeps Morse→input latency low
+/// without spinning.
+pub const POLL_MS: u32 = 16;
+
 pub async fn sleep_ms(ms: u32) {
     let ms = ms.max(1);
     #[cfg(target_arch = "wasm32")]

@@ -274,6 +274,11 @@ pub fn sample_training_group(
             group.push(ch);
         }
     }
+    if group.is_empty() {
+        for ch in pool.iter().copied().take(group_size.max(1)) {
+            group.push(ch);
+        }
+    }
 
     let mut session_sample_counts = state.session_sample_counts.clone();
     for character in group.chars() {
@@ -374,6 +379,19 @@ mod tests {
         let mut rng = FastrandRng::default();
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
         assert!(weights.values().all(|w| *w > 0.0));
+    }
+
+    #[test]
+    fn generated_group_is_never_empty_for_koch() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Koch;
+        settings.koch_level = 1;
+        settings.min_group_size = 1;
+        settings.max_group_size = 1;
+        let state = CharSamplingState::default();
+        let mut rng = FastrandRng::default();
+        let (group, _) = generate_training_group(&settings, &state, &mut rng);
+        assert!(!group.is_empty());
     }
 
     #[test]
