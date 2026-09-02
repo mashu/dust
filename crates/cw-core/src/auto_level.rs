@@ -22,13 +22,36 @@ impl AutoAdjustMode {
         }
     }
 
-    pub fn storage_key(self, char_set: CharSetMode, level: u32, digits_level: Option<u32>) -> String {
+    pub fn level_for(self, settings: &TrainingSettings) -> u32 {
         match self {
-            Self::Mixed => format!("mixed_{level}_{}", digits_level.unwrap_or(0)),
-            Self::Digits => format!("digits_{level}"),
-            Self::Alphabet => match char_set {
-                CharSetMode::Custom => format!("custom_{level}"),
-                _ => format!("koch_{level}"),
+            Self::Digits => settings.digits_level,
+            _ => settings.level,
+        }
+    }
+
+    pub fn digits_for(self, settings: &TrainingSettings) -> Option<u32> {
+        matches!(self, Self::Mixed).then_some(settings.digits_level)
+    }
+
+    pub fn storage_key_for(self, settings: &TrainingSettings) -> String {
+        self.storage_key_at(settings, self.level_for(settings), self.digits_for(settings))
+    }
+
+    pub fn storage_key_at(
+        self,
+        settings: &TrainingSettings,
+        level: u32,
+        digits_level: Option<u32>,
+    ) -> String {
+        let fingerprint = settings.alphabet_fingerprint();
+        match self {
+            Self::Mixed => {
+                format!("mixed_{level}_{}_{fingerprint}", digits_level.unwrap_or(0))
+            }
+            Self::Digits => format!("digits_{level}_{fingerprint}"),
+            Self::Alphabet => match settings.char_set_mode {
+                CharSetMode::Custom => format!("custom_{level}_{fingerprint}"),
+                _ => format!("koch_{level}_{fingerprint}"),
             },
         }
     }
@@ -84,6 +107,41 @@ fn apply_mixed_axis_delta(
 
 fn max_letter_level(settings: &TrainingSettings) -> u32 {
     settings.max_letter_level()
+}
+
+fn mixed_letters_active(settings: &TrainingSettings) -> bool {
+    settings.mixed_letters_percent.min(100) > 0
+}
+
+fn mixed_digits_active(settings: &TrainingSettings) -> bool {
+    settings.mixed_letters_percent.min(100) < 100
+}
+
+fn mixed_axis_active(settings: &TrainingSettings, axis: MixedAutoLevelAxis) -> bool {
+    match axis {
+        MixedAutoLevelAxis::Letters => mixed_letters_active(settings),
+        MixedAutoLevelAxis::Digits => mixed_digits_active(settings),
+    }
+}
+
+fn mixed_try_axis(
+    settings: &TrainingSettings,
+    axis: MixedAutoLevelAxis,
+    delta: i32,
+    current_level: u32,
+    current_digits: u32,
+) -> Option<(u32, u32, MixedAutoLevelAxis)> {
+    if !mixed_axis_active(settings, axis) {
+        return None;
+    }
+    apply_mixed_axis_delta(
+        axis,
+        delta,
+        current_level,
+        current_digits,
+        max_letter_level(settings),
+        MAX_DIGITS_LEVEL,
+    )
 }
 
 /// Evaluate whether the training level should change. Mutates `counters` for the current level.
@@ -168,8 +226,8 @@ pub fn evaluate_auto_level(
                 accuracy_pct.round()
             ),
             counters_cleared_keys: vec![
-                mode.storage_key(settings.char_set_mode, current_level, None),
-                mode.storage_key(settings.char_set_mode, next_level, None),
+                mode.storage_key_at(settings, current_level, None),
+                mode.storage_key_at(settings, next_level, None),
             ],
         });
     }
@@ -177,24 +235,8 @@ pub fn evaluate_auto_level(
     let current_digits = settings.digits_level.max(MIN_DIGITS_LEVEL);
     let primary = settings.mixed_auto_level_next_axis;
     let secondary = primary.flip();
-    let mixed = apply_mixed_axis_delta(
-        primary,
-        delta,
-        current_level,
-        current_digits,
-        max_letter_level(settings),
-        MAX_DIGITS_LEVEL,
-    )
-    .or_else(|| {
-        apply_mixed_axis_delta(
-            secondary,
-            delta,
-            current_level,
-            current_digits,
-            max_letter_level(settings),
-            MAX_DIGITS_LEVEL,
-        )
-    });
+    let mixed = mixed_try_axis(settings, primary, delta, current_level, current_digits)
+        .or_else(|| mixed_try_axis(settings, secondary, delta, current_level, current_digits));
     let Some((next_level, next_digits_level, adjusted_axis)) = mixed else {
         if delta > 0 {
             counters.above = 0;
@@ -233,8 +275,8 @@ pub fn evaluate_auto_level(
             accuracy_pct.round()
         ),
         counters_cleared_keys: vec![
-            mode.storage_key(settings.char_set_mode, current_level, Some(current_digits)),
-            mode.storage_key(settings.char_set_mode, next_level, Some(next_digits_level)),
+            mode.storage_key_at(settings, current_level, Some(current_digits)),
+            mode.storage_key_at(settings, next_level, Some(next_digits_level)),
         ],
     })
 }
@@ -372,5 +414,64 @@ mod tests {
         assert_eq!(result.next_level, 2);
         apply_auto_level(&mut settings, &result);
         assert_eq!(settings.digits_level, 2);
+    }
+
+    #[test]
+    fn storage_keys_differ_for_different_sequences() {
+        let mut lcwo = TrainingSettings::default();
+        lcwo.char_set_mode = CharSetMode::Koch;
+        lcwo.custom_sequence.clear();
+        let mut mania = lcwo.clone();
+        mania.custom_sequence = crate::sequences::TRADITIONAL_KOCH_SEQUENCE.to_vec();
+        let mode = AutoAdjustMode::Alphabet;
+        assert_ne!(
+            mode.storage_key_for(&lcwo),
+            mode.storage_key_for(&mania)
+        );
+        let mut custom_a = TrainingSettings::default();
+        custom_a.char_set_mode = CharSetMode::Custom;
+        custom_a.custom_set = vec!['Q', 'R', 'S'];
+        let mut custom_b = custom_a.clone();
+        custom_b.custom_set = vec!['X', 'Y', 'Z'];
+        assert_ne!(
+            mode.storage_key_for(&custom_a),
+            mode.storage_key_for(&custom_b)
+        );
+        assert_eq!(
+            mode.storage_key_at(&lcwo, 5, None),
+            format!("koch_5_{}", lcwo.alphabet_fingerprint())
+        );
+    }
+
+    #[test]
+    fn mixed_100_percent_does_not_adjust_digits() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Mixed;
+        settings.mixed_letters_percent = 100;
+        settings.custom_sequence = vec!['K', 'M'];
+        settings.level = 1;
+        settings.digits_level = 1;
+        settings.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        settings.auto_adjust_above_threshold_count = 1;
+        let mut counters = AutoLevelCounters::default();
+        assert!(evaluate_auto_level(1.0, &settings, &mut counters).is_none());
+        assert_eq!(counters.above, 0);
+        assert_eq!(settings.digits_level, 1);
+    }
+
+    #[test]
+    fn mixed_0_percent_skips_letter_axis() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Mixed;
+        settings.mixed_letters_percent = 0;
+        settings.level = 1;
+        settings.digits_level = 1;
+        settings.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        settings.auto_adjust_above_threshold_count = 1;
+        let mut counters = AutoLevelCounters::default();
+        let result = evaluate_auto_level(1.0, &settings, &mut counters).expect("digit up");
+        assert_eq!(result.next_level, 1);
+        assert_eq!(result.next_digits_level, Some(2));
+        assert_eq!(result.adjusted_mixed_axis, Some(MixedAutoLevelAxis::Digits));
     }
 }

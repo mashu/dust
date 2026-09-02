@@ -89,7 +89,7 @@ impl MorsePlayer {
     fn stop_band(&mut self) {
         self.band_stop.store(true, Ordering::SeqCst);
         self.band_stream = None;
-        self.band_stop.store(false, Ordering::SeqCst);
+        self.band_stop = Arc::new(AtomicBool::new(false));
         self.band_signature.clear();
     }
 
@@ -134,6 +134,7 @@ impl MorsePlayer {
         Ok(crate::audio::PlaybackWait::desktop(
             plan.duration_sec,
             plan.resolved_char_wpm,
+            plan.resolved_effective_wpm,
             Arc::clone(&self.stop_flag),
             epoch,
             Arc::clone(&self.epoch),

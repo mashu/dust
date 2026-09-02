@@ -18,12 +18,19 @@ pub fn dot_seconds(wpm: f64) -> f64 {
 }
 
 pub fn compute_group_gap_ms(settings: &TrainingSettings) -> u32 {
-    let char_wpm = settings.char_wpm_min.max(1.0);
-    // Match intra-group Farnsworth: effective WPM never exceeds character WPM.
-    let effective_wpm = settings.effective_wpm_min.max(1.0).min(char_wpm);
+    compute_group_gap_for_wpm(
+        settings.char_wpm_min,
+        settings.effective_wpm_min,
+        settings.extra_word_space_multiplier,
+    )
+}
+
+/// Word-space gap for the WPM that was actually sent, not the settings minimum.
+pub fn compute_group_gap_for_wpm(char_wpm: f64, effective_wpm: f64, extra_word_space: f64) -> u32 {
+    let char_wpm = char_wpm.max(1.0);
+    let effective_wpm = effective_wpm.max(1.0).min(char_wpm);
     let dot_effective_sec = 1.2 / effective_wpm;
-    let word_space_sec =
-        7.0 * dot_effective_sec * clamp_extra_spacing(settings.extra_word_space_multiplier);
+    let word_space_sec = 7.0 * dot_effective_sec * clamp_extra_spacing(extra_word_space);
     (word_space_sec * 1000.0).round() as u32
 }
 
@@ -243,5 +250,8 @@ mod tests {
         let mut farnsworth = even.clone();
         farnsworth.effective_wpm_min = 10.0;
         assert!(compute_group_gap_ms(&farnsworth) > compute_group_gap_ms(&even));
+        assert!(
+            compute_group_gap_for_wpm(40.0, 40.0, 1.0) < compute_group_gap_for_wpm(18.0, 18.0, 1.0)
+        );
     }
 }

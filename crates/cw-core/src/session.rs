@@ -64,6 +64,9 @@ pub struct SessionResult {
     pub char_set_mode: CharSetMode,
     pub char_wpm: f64,
     pub effective_wpm: f64,
+    /// Full progress alphabet at the time of the session. Empty on legacy saves.
+    #[serde(default)]
+    pub alphabet_fingerprint: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,11 +91,15 @@ pub struct GroupSession {
     pub group_end_at: Vec<u64>,
     pub group_answer_at: Vec<u64>,
     pub group_char_wpm: Vec<f64>,
+    pub group_effective_wpm: Vec<f64>,
     pub error_message: Option<String>,
+    /// Settings the session was started with. Scoring and auto-level must use this
+    /// snapshot, not whatever the live settings signal happens to hold.
+    pub settings: TrainingSettings,
 }
 
 impl GroupSession {
-    pub fn new(session_id: u64, started_at: u64, num_groups: usize) -> Self {
+    pub fn new(session_id: u64, started_at: u64, num_groups: usize, settings: TrainingSettings) -> Self {
         Self {
             status: RuntimeStatus::Starting,
             session_id,
@@ -106,7 +113,9 @@ impl GroupSession {
             group_end_at: vec![0; num_groups],
             group_answer_at: vec![0; num_groups],
             group_char_wpm: vec![0.0; num_groups],
+            group_effective_wpm: vec![0.0; num_groups],
             error_message: None,
+            settings,
         }
     }
 
@@ -130,12 +139,15 @@ impl GroupSession {
         }
     }
 
-    pub fn end_playback(&mut self, index: usize, now_ms: u64, char_wpm: f64) {
+    pub fn end_playback(&mut self, index: usize, now_ms: u64, char_wpm: f64, effective_wpm: f64) {
         if let Some(slot) = self.group_end_at.get_mut(index) {
             *slot = now_ms;
         }
         if let Some(slot) = self.group_char_wpm.get_mut(index) {
             *slot = char_wpm;
+        }
+        if let Some(slot) = self.group_effective_wpm.get_mut(index) {
+            *slot = effective_wpm;
         }
         self.status = RuntimeStatus::WaitingForAnswer;
     }
@@ -182,8 +194,8 @@ impl GroupSession {
         }
     }
 
-    pub fn input_locked(&self, index: usize, settings: &TrainingSettings) -> bool {
-        settings.lock_input_during_group_playback
+    pub fn input_locked(&self, index: usize) -> bool {
+        self.settings.lock_input_during_group_playback
             && self.status == RuntimeStatus::PlayingGroup
             && index == self.current_group
     }
@@ -307,6 +319,18 @@ pub fn build_session_result(
     } else {
         played_wpm.iter().sum::<f64>() / played_wpm.len() as f64
     };
+    let played_effective: Vec<f64> = session
+        .group_effective_wpm
+        .iter()
+        .enumerate()
+        .filter(|(index, wpm)| group_was_scored(session, *index) && **wpm > 0.0)
+        .map(|(_, wpm)| *wpm)
+        .collect();
+    let effective_wpm = if played_effective.is_empty() {
+        settings.effective_wpm_min.min(char_wpm)
+    } else {
+        played_effective.iter().sum::<f64>() / played_effective.len() as f64
+    };
 
     SessionResult {
         date,
@@ -322,11 +346,15 @@ pub fn build_session_result(
         total_chars,
         effective_alphabet_size,
         score,
-        level: settings.level,
+        level: match settings.char_set_mode {
+            CharSetMode::Digits => settings.digits_level,
+            _ => settings.level,
+        },
         digits_level: settings.digits_level,
         char_set_mode: settings.char_set_mode,
         char_wpm,
-        effective_wpm: settings.effective_wpm_min,
+        effective_wpm,
+        alphabet_fingerprint: settings.alphabet_fingerprint(),
     }
 }
 
@@ -339,6 +367,15 @@ impl SessionResult {
             score: self.score,
         }
     }
+
+    /// Whether this session's letter stats should seed sampling for `settings`.
+    pub fn usable_for_sampling(&self, settings: &TrainingSettings) -> bool {
+        if self.char_set_mode != settings.char_set_mode {
+            return false;
+        }
+        self.alphabet_fingerprint.is_empty()
+            || self.alphabet_fingerprint == settings.alphabet_fingerprint()
+    }
 }
 
 #[cfg(test)]
@@ -347,7 +384,7 @@ mod tests {
 
     #[test]
     fn perfect_copy_is_full_accuracy() {
-        let mut session = GroupSession::new(1, 0, 2);
+        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
         session.set_group(0, "KM".into());
         session.set_group(1, "UK".into());
         session.confirm(0, "KM".into(), 1000);
@@ -363,7 +400,7 @@ mod tests {
 
     #[test]
     fn unconfirmed_generated_groups_are_not_scored() {
-        let mut session = GroupSession::new(1, 0, 3);
+        let mut session = GroupSession::new(1, 0, 3, TrainingSettings::default());
         session.set_group(0, "KM".into());
         session.set_group(1, "UK".into());
         session.set_group(2, "RS".into());
@@ -381,7 +418,7 @@ mod tests {
 
     #[test]
     fn confirm_is_idempotent() {
-        let mut session = GroupSession::new(1, 0, 1);
+        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
         session.set_group(0, "KM".into());
         assert!(session.confirm(0, "KM".into(), 100));
         assert!(!session.confirm(0, "XX".into(), 200));
@@ -392,7 +429,7 @@ mod tests {
 
     #[test]
     fn set_input_ignores_other_groups() {
-        let mut session = GroupSession::new(1, 0, 2);
+        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
         session.set_group(0, "KM".into());
         session.set_group(1, "UK".into());
         session.current_group = 0;
@@ -404,7 +441,7 @@ mod tests {
 
     #[test]
     fn all_groups_confirmed_requires_every_sent_group() {
-        let mut session = GroupSession::new(1, 0, 2);
+        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
         session.set_group(0, "KM".into());
         session.set_group(1, "UK".into());
         session.confirm(0, "KM".into(), 1);
@@ -415,7 +452,7 @@ mod tests {
 
     #[test]
     fn timeout_empty_answer_is_scored_wrong() {
-        let mut session = GroupSession::new(1, 0, 1);
+        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
         session.set_group(0, "KM".into());
         session.confirm(0, "".into(), 1000);
         session.group_end_at[0] = 500;
@@ -435,7 +472,7 @@ mod tests {
 
     #[test]
     fn set_group_clears_unconfirmed_input() {
-        let mut session = GroupSession::new(1, 0, 1);
+        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
         session.set_input(0, "XX".into());
         session.set_group(0, "KM".into());
         assert_eq!(session.user_input[0], "");
@@ -447,7 +484,7 @@ mod tests {
 
     #[test]
     fn answer_during_playback_counts_as_immediate() {
-        let mut session = GroupSession::new(1, 0, 1);
+        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
         session.set_group(0, "KM".into());
         session.group_end_at[0] = 2000;
         session.confirm(0, "KM".into(), 1500);
@@ -455,5 +492,81 @@ mod tests {
         assert_eq!(timings.len(), 1);
         assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
         assert!((timings[0].per_char_ms - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn result_uses_played_effective_wpm() {
+        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
+        session.set_group(0, "KM".into());
+        session.confirm(0, "KM".into(), 1000);
+        session.group_end_at[0] = 500;
+        session.group_char_wpm[0] = 25.0;
+        session.group_effective_wpm[0] = 12.0;
+        let mut settings = TrainingSettings::default();
+        settings.effective_wpm_min = 18.0;
+        settings.effective_wpm_max = 25.0;
+        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
+        assert!((result.char_wpm - 25.0).abs() < 1e-9);
+        assert!((result.effective_wpm - 12.0).abs() < 1e-9);
+        assert_eq!(result.alphabet_fingerprint, settings.alphabet_fingerprint());
+    }
+
+    #[test]
+    fn sampling_history_requires_matching_mode_and_alphabet() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Koch;
+        let mut koch = build_session_result(
+            &GroupSession::new(1, 0, 1, settings.clone()),
+            &settings,
+            1,
+            "2026-09-01".into(),
+        );
+        koch.char_set_mode = CharSetMode::Koch;
+        koch.alphabet_fingerprint = settings.alphabet_fingerprint();
+        assert!(koch.usable_for_sampling(&settings));
+
+        let mut digits = koch.clone();
+        digits.char_set_mode = CharSetMode::Digits;
+        assert!(!digits.usable_for_sampling(&settings));
+
+        let mut other_seq = settings.clone();
+        other_seq.custom_sequence = crate::sequences::TRADITIONAL_KOCH_SEQUENCE.to_vec();
+        koch.alphabet_fingerprint = settings.alphabet_fingerprint();
+        assert!(!koch.usable_for_sampling(&other_seq));
+
+        let mut legacy = koch.clone();
+        legacy.char_set_mode = CharSetMode::Koch;
+        legacy.alphabet_fingerprint.clear();
+        assert!(legacy.usable_for_sampling(&settings));
+    }
+
+    #[test]
+    fn input_locked_uses_session_settings() {
+        let mut settings = TrainingSettings::default();
+        settings.lock_input_during_group_playback = true;
+        let mut session = GroupSession::new(1, 0, 1, settings);
+        session.begin_group(0, 0);
+        assert!(session.input_locked(0));
+        session.settings.lock_input_during_group_playback = false;
+        assert!(!session.input_locked(0));
+        session.end_playback(0, 1, 20.0, 18.0);
+        session.settings.lock_input_during_group_playback = true;
+        assert!(!session.input_locked(0));
+    }
+
+    #[test]
+    fn digits_session_records_digits_level() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Digits;
+        settings.digits_level = 4;
+        settings.level = 1;
+        let mut session = GroupSession::new(1, 0, 1, settings.clone());
+        session.set_group(0, "01".into());
+        session.confirm(0, "01".into(), 1000);
+        session.group_end_at[0] = 500;
+        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
+        assert_eq!(result.level, 4);
+        assert_eq!(result.digits_level, 4);
+        assert_eq!(result.char_set_mode, CharSetMode::Digits);
     }
 }

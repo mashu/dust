@@ -2,10 +2,10 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::{
-    apply_auto_level, auto_level_progress, build_session_result, compute_group_gap_ms,
-    create_initial_sampling_state, evaluate_auto_level, fit_settings_to_alphabet,
-    generate_training_group, update_sampling_state_from_answer,
-    AutoAdjustMode, AutoLevelProgress, CharSamplingState, FastrandRng, GroupSession, SessionResult,
+    apply_auto_level, auto_level_progress, build_session_result, compute_group_gap_for_wpm,
+    compute_group_gap_ms, create_initial_sampling_state, evaluate_auto_level,
+    fit_settings_to_alphabet, generate_training_group, update_sampling_state_from_answer,
+    AutoLevelProgress, CharSamplingState, FastrandRng, GroupSession, SessionResult,
     TrainingSettings,
 };
 use dioxus::prelude::*;
@@ -117,7 +117,7 @@ async fn play_text_now(
     app: &AppState,
     text: &str,
     settings: &TrainingSettings,
-) -> Result<(f64, f64), String> {
+) -> Result<(f64, f64, f64), String> {
     let mut last_err = None;
     for attempt in 0..PLAY_ATTEMPTS {
         if attempt > 0 {
@@ -128,8 +128,9 @@ async fn play_text_now(
             Ok(wait) => {
                 let duration = wait.duration_sec;
                 let char_wpm = wait.char_wpm;
+                let effective_wpm = wait.effective_wpm;
                 wait.wait().await;
-                return Ok((duration, char_wpm));
+                return Ok((duration, char_wpm, effective_wpm));
             }
             Err(err) => last_err = Some(err),
         }
@@ -183,10 +184,15 @@ pub async fn sleep_cancelable(ms: u32, gen: u64, session_gen: Rc<Cell<u64>>) -> 
     session_gen.get() == gen
 }
 
-fn letter_history(
-    sessions: &[SessionResult],
-) -> Vec<&std::collections::BTreeMap<char, cw_core::LetterAccuracy>> {
-    sessions.iter().map(|s| &s.letter_accuracy).collect()
+fn letter_history<'a>(
+    sessions: &'a [SessionResult],
+    settings: &TrainingSettings,
+) -> Vec<&'a std::collections::BTreeMap<char, cw_core::LetterAccuracy>> {
+    sessions
+        .iter()
+        .filter(|session| session.usable_for_sampling(settings))
+        .map(|s| &s.letter_accuracy)
+        .collect()
 }
 
 pub async fn run_group_session(
@@ -204,8 +210,8 @@ pub async fn run_group_session(
 ) {
     let n = settings.num_groups as usize;
     let started = now_ms();
-    let mut session = GroupSession::new(gen, started, n);
-    let history_refs = letter_history(&history);
+    let mut session = GroupSession::new(gen, started, n, settings.clone());
+    let history_refs = letter_history(&history, &settings);
     *app.sampling.borrow_mut() = create_initial_sampling_state(&history_refs);
 
     {
@@ -239,7 +245,7 @@ pub async fn run_group_session(
         // Keep the previous group current through the Farnsworth gap so a lock-off
         // user cannot type/confirm the next group before its Morse starts.
         if i > 0 {
-            let gap = compute_group_gap_ms(&settings);
+            let gap = previous_group_gap_ms(&runtime, i, &settings);
             if gap > 0 && !sleep_cancelable(gap, gen, app.session_gen.clone()).await {
                 return;
             }
@@ -259,7 +265,7 @@ pub async fn run_group_session(
         focus_group_input(i);
         if group.is_empty() {
             if let Some(s) = runtime.write().as_mut() {
-                s.end_playback(i, now_ms(), 0.0);
+                s.end_playback(i, now_ms(), 0.0, 0.0);
             }
         } else {
             let play = play_text_now(&app, &group, &settings).await;
@@ -267,7 +273,7 @@ pub async fn run_group_session(
                 return;
             }
             match play {
-                Ok((duration, char_wpm)) => {
+                Ok((duration, char_wpm, effective_wpm)) => {
                     let ended = now_ms().max(
                         runtime
                             .read()
@@ -277,13 +283,13 @@ pub async fn run_group_session(
                             + (duration * 1000.0).round() as u64,
                     );
                     if let Some(s) = runtime.write().as_mut() {
-                        s.end_playback(i, ended, char_wpm);
+                        s.end_playback(i, ended, char_wpm, effective_wpm);
                     }
                 }
                 Err(message) => {
                     toast.set(Some(message));
                     if let Some(s) = runtime.write().as_mut() {
-                        s.end_playback(i, now_ms(), 0.0);
+                        s.end_playback(i, now_ms(), 0.0, 0.0);
                     }
                 }
             }
@@ -305,7 +311,6 @@ pub async fn run_group_session(
         return;
     }
     finish_session(
-        settings,
         app,
         runtime,
         screen,
@@ -315,6 +320,35 @@ pub async fn run_group_session(
         settings_sig,
         toast,
     );
+}
+
+fn previous_group_gap_ms(
+    runtime: &Signal<Option<GroupSession>>,
+    index: usize,
+    settings: &TrainingSettings,
+) -> u32 {
+    let prev = index.saturating_sub(1);
+    let played = runtime.read().as_ref().and_then(|session| {
+        let char_wpm = session
+            .group_char_wpm
+            .get(prev)
+            .copied()
+            .filter(|wpm| *wpm > 0.0)?;
+        let effective_wpm = session
+            .group_effective_wpm
+            .get(prev)
+            .copied()
+            .filter(|wpm| *wpm > 0.0)?;
+        Some((char_wpm, effective_wpm))
+    });
+    match played {
+        Some((char_wpm, effective_wpm)) => compute_group_gap_for_wpm(
+            char_wpm,
+            effective_wpm,
+            settings.extra_word_space_multiplier,
+        ),
+        None => compute_group_gap_ms(settings),
+    }
 }
 
 async fn wait_for_confirm(
@@ -370,7 +404,6 @@ pub fn confirm_group(
 }
 
 pub fn finish_session(
-    settings: TrainingSettings,
     app: AppState,
     mut runtime: Signal<Option<GroupSession>>,
     mut screen: Signal<Screen>,
@@ -394,6 +427,7 @@ pub fn finish_session(
         screen.set(Screen::Home);
         return;
     }
+    let settings = session.settings.clone();
     let built = build_session_result(&session, &settings, now_ms(), local_date_string());
     if built.groups.is_empty() {
         runtime.set(None);
@@ -401,20 +435,9 @@ pub fn finish_session(
         return;
     }
 
-    let mode = AutoAdjustMode::from_char_set(settings.char_set_mode);
-    let digits = if matches!(mode, AutoAdjustMode::Mixed) {
-        Some(settings.digits_level)
-    } else {
-        None
-    };
-    let level = match mode {
-        AutoAdjustMode::Digits => settings.digits_level,
-        _ => settings.level,
-    };
-    let mut counters = load_auto_counters(mode, settings.char_set_mode, level, digits);
+    let mut counters = load_auto_counters(&settings);
     let mut next_settings = settings.clone();
     if let Some(adj) = evaluate_auto_level(built.accuracy, &settings, &mut counters) {
-        save_auto_counters(mode, settings.char_set_mode, level, digits, counters);
         clear_auto_counters(&adj.counters_cleared_keys);
         apply_auto_level(&mut next_settings, &adj);
         fit_settings_to_alphabet(&mut next_settings);
@@ -424,7 +447,7 @@ pub fn finish_session(
         auto_message.set(Some(adj.message.clone()));
         toast.set(Some(adj.message));
     } else {
-        save_auto_counters(mode, settings.char_set_mode, level, digits, counters);
+        save_auto_counters(&settings, counters);
         auto_message.set(None);
     }
 
@@ -438,13 +461,7 @@ pub fn finish_session(
 }
 
 pub fn current_auto_progress(settings: &TrainingSettings) -> Option<AutoLevelProgress> {
-    let mode = AutoAdjustMode::from_char_set(settings.char_set_mode);
-    let digits = matches!(mode, AutoAdjustMode::Mixed).then_some(settings.digits_level);
-    let level = match mode {
-        AutoAdjustMode::Digits => settings.digits_level,
-        _ => settings.level,
-    };
-    auto_level_progress(settings, load_auto_counters(mode, settings.char_set_mode, level, digits))
+    auto_level_progress(settings, load_auto_counters(settings))
 }
 
 pub async fn play_chars(
@@ -461,6 +478,9 @@ pub async fn play_chars(
             return;
         }
         let play = play_text_now(&app, &ch.to_string(), &settings).await;
+        if app.session_gen.get() != gen {
+            return;
+        }
         match play {
             Ok(_) => {}
             Err(message) => {

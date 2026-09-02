@@ -64,4 +64,6 @@ pub use stats::{
     GROUP_START_BIGRAM_TOKEN,
 };
 pub use streak::{compute_streak_status, StreakState, StreakStatus};
-pub use timing::{compute_group_gap_ms, plan_morse_playback, PlaybackPlan, ToneEvent};
+pub use timing::{
+    compute_group_gap_for_wpm, compute_group_gap_ms, plan_morse_playback, PlaybackPlan, ToneEvent,
+};

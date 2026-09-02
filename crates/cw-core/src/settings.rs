@@ -324,6 +324,15 @@ impl TrainingSettings {
         }
     }
 
+    /// Identity of the alphabet this mode is training, used to isolate auto-level
+    /// counters and sampling history when the user switches sequence or custom set.
+    pub fn alphabet_fingerprint(&self) -> String {
+        match self.char_set_mode {
+            CharSetMode::Digits => crate::morse::DIGITS.iter().copied().collect(),
+            _ => self.progress_alphabet().into_iter().collect(),
+        }
+    }
+
     pub fn side_tone_center(&self) -> f64 {
         let min = self.side_tone_min.max(100.0);
         let max = self.side_tone_max.max(min);
@@ -430,5 +439,18 @@ mod tests {
         let s = s.clamp();
         assert_eq!(s.level, 3);
         assert_eq!(s.progress_alphabet(), vec!['A', 'B', 'C', 'D']);
+    }
+
+    #[test]
+    fn alphabet_fingerprint_tracks_sequence() {
+        let mut lcwo = TrainingSettings::default();
+        lcwo.char_set_mode = CharSetMode::Koch;
+        lcwo.custom_sequence.clear();
+        let mut mania = lcwo.clone();
+        mania.custom_sequence = crate::sequences::TRADITIONAL_KOCH_SEQUENCE.to_vec();
+        assert_ne!(lcwo.alphabet_fingerprint(), mania.alphabet_fingerprint());
+        let mut digits = TrainingSettings::default();
+        digits.char_set_mode = CharSetMode::Digits;
+        assert_eq!(digits.alphabet_fingerprint(), "0123456789");
     }
 }

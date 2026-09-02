@@ -84,11 +84,8 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         value: "{seq.iter().collect::<String>()}",
                         oninput: move |e| {
                             let w = &mut *settings.write();
-                            w.custom_sequence = e.value()
-                                .chars()
-                                .filter(|c| !c.is_whitespace())
-                                .map(|c| c.to_ascii_uppercase())
-                                .collect();
+                            let typed: Vec<char> = e.value().chars().collect();
+                            w.custom_sequence = TrainingSettings::unique_alphabet(&typed);
                             w.sequence_is_custom = !w.custom_sequence.is_empty();
                             fit_settings_to_alphabet(w);
                         }
@@ -128,7 +125,11 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     min: 0.0,
                     max: 100.0,
                     step: 5.0,
-                    onchange: move |v| settings.write().mixed_letters_percent = v as u32,
+                    onchange: move |v| {
+                        let w = &mut *settings.write();
+                        w.mixed_letters_percent = v as u32;
+                        fit_settings_to_alphabet(w);
+                    },
                 }
             }
             if s.char_set_mode == CharSetMode::Custom {
@@ -138,11 +139,9 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         value: "{s.custom_set.iter().collect::<String>()}",
                         oninput: move |e| {
                             let w = &mut *settings.write();
-                            w.custom_set = e.value()
-                                .chars()
-                                .filter(|c| !c.is_whitespace())
-                                .map(|c| c.to_ascii_uppercase())
-                                .collect();
+                            w.custom_set = TrainingSettings::unique_alphabet(
+                                &e.value().chars().collect::<Vec<_>>(),
+                            );
                             fit_settings_to_alphabet(w);
                         }
                     }

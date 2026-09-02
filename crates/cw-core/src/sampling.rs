@@ -447,4 +447,23 @@ mod tests {
         }
         assert!(m_sum > k_sum);
     }
+
+    #[test]
+    fn mixed_100_percent_never_samples_digits() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Mixed;
+        settings.mixed_letters_percent = 100;
+        settings.level = 5;
+        settings.digits_level = 9;
+        settings.min_group_size = 4;
+        settings.max_group_size = 4;
+        let mut state = CharSamplingState::default();
+        let mut rng = FastrandRng::default();
+        for _ in 0..40 {
+            let (group, next) = generate_training_group(&settings, &state, &mut rng);
+            assert!(!group.is_empty());
+            assert!(group.chars().all(|c| !c.is_ascii_digit()), "{group}");
+            state = next;
+        }
+    }
 }

@@ -193,6 +193,7 @@ mod tests {
             char_set_mode: CharSetMode::Koch,
             char_wpm: 18.0,
             effective_wpm: 18.0,
+            alphabet_fingerprint: String::new(),
         }
     }
 

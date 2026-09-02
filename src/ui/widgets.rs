@@ -106,7 +106,12 @@ pub fn NumberField(
                     if let Ok(v) = e.value().parse::<f64>() {
                         onchange.call(v);
                     }
-                }
+                },
+                onchange: move |e| {
+                    if let Ok(v) = e.value().parse::<f64>() {
+                        onchange.call(v.clamp(min, max));
+                    }
+                },
             }
         }
     }

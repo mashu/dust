@@ -64,10 +64,11 @@ fn App() -> Element {
     let app = Rc::new(app);
 
     use_effect(move || {
-        let snapshot = settings();
+        let mut snapshot = settings();
         if matches!(screen(), Screen::Training) {
             return;
         }
+        fit_settings_to_alphabet(&mut snapshot);
         save_settings(&snapshot.clamp());
     });
 
@@ -329,7 +330,7 @@ fn App() -> Element {
                     let session = runtime();
                     if let Some(session) = session {
                         let playing = session.status == cw_core::RuntimeStatus::PlayingGroup;
-                        let locked = session.input_locked(session.current_group, &settings());
+                        let locked = session.input_locked(session.current_group);
                         let status = session.error_message.clone().unwrap_or_default();
                         let groups = session.groups.clone();
                         let inputs = session.user_input.clone();
@@ -362,7 +363,7 @@ fn App() -> Element {
                                         if s.session_id != session_id
                                             || idx != s.current_group
                                             || s.confirmed.get(idx).copied().unwrap_or(false)
-                                            || s.input_locked(idx, &settings())
+                                            || s.input_locked(idx)
                                         {
                                             return;
                                         }
@@ -377,6 +378,7 @@ fn App() -> Element {
                                             sleep_ms(AUTO_CONFIRM_DELAY_MS).await;
                                             let still_current = runtime.read().as_ref().is_some_and(|s| {
                                                 s.session_id == session_id
+                                                    && s.current_group == idx
                                                     && s.user_input.get(idx).map(String::as_str)
                                                         == Some(value.as_str())
                                                     && !s.confirmed.get(idx).copied().unwrap_or(false)
@@ -384,7 +386,7 @@ fn App() -> Element {
                                             if still_current {
                                                 confirm_group(runtime, idx, Some(value), &app);
                                                 focus_group_input(idx + 1);
-                                                maybe_finish_if_complete(runtime, settings(), app, screen, result, auto_message, sessions, settings, toast);
+                                                maybe_finish_if_complete(runtime, app, screen, result, auto_message, sessions, settings, toast);
                                             }
                                         });
                                     }
@@ -393,14 +395,14 @@ fn App() -> Element {
                                     let allowed = runtime.read().as_ref().is_some_and(|s| {
                                         idx == s.current_group
                                             && !s.confirmed.get(idx).copied().unwrap_or(false)
-                                            && !s.input_locked(idx, &settings())
+                                            && !s.input_locked(idx)
                                     });
                                     if !allowed {
                                         return;
                                     }
                                     confirm_group(runtime, idx, None, &app_confirm);
                                     focus_group_input(idx + 1);
-                                    maybe_finish_if_complete(runtime, settings(), app_confirm.clone(), screen, result, auto_message, sessions, settings, toast);
+                                    maybe_finish_if_complete(runtime, app_confirm.clone(), screen, result, auto_message, sessions, settings, toast);
                                 },
                                 on_focus: move |idx| {
                                     if let Some(s) = runtime.write().as_mut() {
@@ -414,17 +416,17 @@ fn App() -> Element {
                                     move |_| {
                                         if let Some(session) = runtime.read().as_ref() {
                                             let idx = session.current_group;
+                                            let locked = session.input_locked(idx);
                                             let typed = session
                                                 .user_input
                                                 .get(idx)
                                                 .map(|value| !value.trim().is_empty())
                                                 .unwrap_or(false);
-                                            if typed {
+                                            if typed && !locked {
                                                 confirm_group(runtime, idx, None, &app);
                                             }
                                         }
                                         finish_session(
-                                            settings(),
                                             (*app).clone(),
                                             runtime,
                                             screen,
@@ -519,7 +521,6 @@ fn toggle_fullscreen() {
 
 fn maybe_finish_if_complete(
     runtime: Signal<Option<GroupSession>>,
-    settings_now: TrainingSettings,
     app: Rc<AppState>,
     screen: Signal<Screen>,
     result: Signal<Option<cw_core::SessionResult>>,
@@ -535,7 +536,6 @@ fn maybe_finish_if_complete(
         .unwrap_or(false);
     if done {
         finish_session(
-            settings_now,
             (*app).clone(),
             runtime,
             screen,

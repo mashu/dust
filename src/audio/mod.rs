@@ -26,6 +26,7 @@ use std::sync::Arc;
 pub struct PlaybackWait {
     pub duration_sec: f64,
     pub char_wpm: f64,
+    pub effective_wpm: f64,
     #[cfg(feature = "web")]
     stop_flag: Rc<Cell<bool>>,
     #[cfg(feature = "web")]
@@ -47,6 +48,7 @@ impl PlaybackWait {
     pub(crate) fn web(
         duration_sec: f64,
         char_wpm: f64,
+        effective_wpm: f64,
         stop_flag: Rc<Cell<bool>>,
         epoch: u64,
         current_epoch: Rc<Cell<u64>>,
@@ -54,6 +56,7 @@ impl PlaybackWait {
         Self {
             duration_sec,
             char_wpm,
+            effective_wpm,
             stop_flag,
             epoch,
             current_epoch,
@@ -64,6 +67,7 @@ impl PlaybackWait {
     pub(crate) fn desktop(
         duration_sec: f64,
         char_wpm: f64,
+        effective_wpm: f64,
         stop_flag: Arc<AtomicBool>,
         epoch: u64,
         current_epoch: Arc<AtomicU64>,
@@ -72,6 +76,7 @@ impl PlaybackWait {
         Self {
             duration_sec,
             char_wpm,
+            effective_wpm,
             stop_flag,
             epoch,
             current_epoch,

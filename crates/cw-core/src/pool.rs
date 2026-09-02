@@ -17,6 +17,20 @@ pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
 pub fn unlocked_practice_count(settings: &TrainingSettings) -> usize {
     match settings.char_set_mode {
         CharSetMode::Digits => unlocked_prefix(DIGITS, settings.digits_level).len(),
+        CharSetMode::Mixed => {
+            let pct = settings.mixed_letters_percent.min(100);
+            let letters = if pct == 0 {
+                0
+            } else {
+                unlocked_prefix(&settings.progress_alphabet(), settings.level).len()
+            };
+            let digits = if pct == 100 {
+                0
+            } else {
+                unlocked_prefix(DIGITS, settings.digits_level).len()
+            };
+            letters.max(digits)
+        }
         _ => unlocked_prefix(&settings.progress_alphabet(), settings.level).len(),
     }
 }
@@ -82,6 +96,8 @@ pub fn resolved_practice_window(settings: &TrainingSettings) -> PracticeWindow {
 
 /// Cap levels to the current alphabets and retarget All/Last3/Last5.
 pub fn fit_settings_to_alphabet(settings: &mut TrainingSettings) {
+    settings.custom_sequence = TrainingSettings::unique_alphabet(&settings.custom_sequence);
+    settings.custom_set = TrainingSettings::unique_alphabet(&settings.custom_set);
     settings.level = settings
         .level
         .clamp(LEVEL_MIN, settings.max_letter_level());
@@ -128,11 +144,20 @@ fn window_unlocked(unlocked: &[char], named: PracticeWindow) -> Vec<char> {
 
 fn mixed_pool(settings: &TrainingSettings) -> Vec<char> {
     let named = named_practice_window(settings);
-    let letters = window_unlocked(
-        &unlocked_prefix(&settings.progress_alphabet(), settings.level),
-        named,
-    );
-    let digits = window_unlocked(&unlocked_prefix(DIGITS, settings.digits_level), named);
+    let pct = settings.mixed_letters_percent.min(100);
+    let letters = if pct == 0 {
+        Vec::new()
+    } else {
+        window_unlocked(
+            &unlocked_prefix(&settings.progress_alphabet(), settings.level),
+            named,
+        )
+    };
+    let digits = if pct == 100 {
+        Vec::new()
+    } else {
+        window_unlocked(&unlocked_prefix(DIGITS, settings.digits_level), named)
+    };
     let mut union = letters.clone();
     for d in digits {
         if !union.contains(&d) {
@@ -347,5 +372,45 @@ mod tests {
         let digits: Vec<char> = pool.iter().copied().filter(|c| c.is_ascii_digit()).collect();
         assert_eq!(letters.len(), 3);
         assert_eq!(digits, vec!['7', '8', '9']);
+    }
+
+    #[test]
+    fn mixed_100_percent_omits_digits_from_pool() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Mixed;
+        s.level = 5;
+        s.digits_level = max_level_for_len(DIGITS.len());
+        s.mixed_letters_percent = 100;
+        apply_practice_window(&mut s, PracticeWindow::All);
+        let pool = compute_char_pool(&s);
+        assert!(!pool.is_empty());
+        assert!(pool.iter().all(|c| !c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn mixed_0_percent_omits_letters_from_pool() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Mixed;
+        s.level = 10;
+        s.digits_level = 3;
+        s.mixed_letters_percent = 0;
+        apply_practice_window(&mut s, PracticeWindow::All);
+        let pool = compute_char_pool(&s);
+        assert!(!pool.is_empty());
+        assert!(pool.iter().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn mixed_0_percent_last3_follows_digit_count() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Mixed;
+        s.level = 1;
+        s.digits_level = max_level_for_len(DIGITS.len());
+        s.mixed_letters_percent = 0;
+        apply_practice_window(&mut s, PracticeWindow::Last3);
+        assert!(unlocked_practice_count(&s) >= 3);
+        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
+        let pool = compute_char_pool(&s);
+        assert_eq!(pool, vec!['7', '8', '9']);
     }
 }

@@ -152,12 +152,14 @@ impl MorsePlayer {
         self.resume_from_gesture();
         self.release_group_gain();
         let epoch = self.bump_epoch();
+        self.reset_stop_flag();
         self.apply_band(settings)?;
         let plan = plan_morse_playback(text, settings, rng);
         self.schedule_plan(&plan)?;
         Ok(crate::audio::PlaybackWait::web(
             plan.duration_sec,
             plan.resolved_char_wpm,
+            plan.resolved_effective_wpm,
             self.stop_flag.clone(),
             epoch,
             self.epoch.clone(),
