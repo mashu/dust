@@ -1,0 +1,5 @@
+/target
+/.dioxus
+**/*.rs.bk
+.DS_Store
+*.log

@@ -1,0 +1,20 @@
+[application]
+name = "dust"
+
+[web.app]
+title = "Dust"
+
+[web.watcher]
+watch_path = ["src", "assets", "crates"]
+
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+script = []
+style = []
+
+[bundle]
+identifier = "dev.dust.morse"
+publisher = "Dust"
