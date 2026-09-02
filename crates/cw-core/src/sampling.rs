@@ -195,7 +195,8 @@ pub fn compute_raw_sampling_weights(
     for character in pool {
         let belief = belief_for(state, *character);
         let p_error = if config.thompson_sampling {
-            sample_beta(belief.alpha, belief.beta, rng)
+            // Beta(α, β) is P(correct); difficulty weighting needs P(error).
+            (1.0 - sample_beta(belief.alpha, belief.beta, rng)).clamp(0.0, 1.0)
         } else {
             beta_posterior_mean_error(belief)
         };
@@ -409,5 +410,41 @@ mod tests {
         let next = update_sampling_state_from_answer(&state, "KM", "KX");
         let m = next.beliefs.get(&'M').copied().unwrap_or_default();
         assert!((m.beta - (CHAR_SAMPLING_PRIOR_BETA + 1.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn thompson_weights_hard_letters_above_easy() {
+        let pool = ['K', 'M'];
+        let mut state = CharSamplingState::default();
+        state.beliefs.insert(
+            'K',
+            CharBetaBelief {
+                alpha: 40.0,
+                beta: 1.0,
+            },
+        );
+        state.beliefs.insert(
+            'M',
+            CharBetaBelief {
+                alpha: 1.0,
+                beta: 40.0,
+            },
+        );
+        let config = CharSamplingConfig {
+            error_weight_strength: 3.0,
+            coverage_strength: 0.0,
+            thompson_sampling: true,
+            mixed_letters_percent: 70,
+            char_set_mode: CharSetMode::Koch,
+        };
+        let mut rng = FastrandRng::default();
+        let mut k_sum = 0.0;
+        let mut m_sum = 0.0;
+        for _ in 0..400 {
+            let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
+            k_sum += weights.get(&'K').copied().unwrap_or(0.0);
+            m_sum += weights.get(&'M').copied().unwrap_or(0.0);
+        }
+        assert!(m_sum > k_sum);
     }
 }

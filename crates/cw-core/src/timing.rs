@@ -18,10 +18,9 @@ pub fn dot_seconds(wpm: f64) -> f64 {
 }
 
 pub fn compute_group_gap_ms(settings: &TrainingSettings) -> u32 {
-    let effective_wpm = settings
-        .effective_wpm_min
-        .max(settings.char_wpm_min)
-        .max(1.0);
+    let char_wpm = settings.char_wpm_min.max(1.0);
+    // Match intra-group Farnsworth: effective WPM never exceeds character WPM.
+    let effective_wpm = settings.effective_wpm_min.max(1.0).min(char_wpm);
     let dot_effective_sec = 1.2 / effective_wpm;
     let word_space_sec =
         7.0 * dot_effective_sec * clamp_extra_spacing(settings.extra_word_space_multiplier);
@@ -232,5 +231,17 @@ mod tests {
         let a = plan_morse_playback("KM", &fast, &mut rng_a);
         let b = plan_morse_playback("KM", &slow, &mut rng_b);
         assert!(b.duration_sec > a.duration_sec);
+    }
+
+    #[test]
+    fn inter_group_gap_follows_farnsworth_effective_wpm() {
+        let mut even = TrainingSettings::default();
+        even.char_wpm_min = 20.0;
+        even.effective_wpm_min = 20.0;
+        even.link_char_to_effective = false;
+        even.extra_word_space_multiplier = 1.0;
+        let mut farnsworth = even.clone();
+        farnsworth.effective_wpm_min = 10.0;
+        assert!(compute_group_gap_ms(&farnsworth) > compute_group_gap_ms(&even));
     }
 }

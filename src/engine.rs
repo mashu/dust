@@ -2,10 +2,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::{
-    apply_auto_level, auto_level_progress, build_session_result, compute_group_gap_ms,
-    create_initial_sampling_state, evaluate_auto_level, generate_training_group,
-    update_sampling_state_from_answer, AutoAdjustMode, AutoLevelProgress, CharSamplingState,
-    FastrandRng, GroupSession, RuntimeStatus, SessionResult, TrainingSettings,
+    apply_auto_level, apply_practice_window, auto_level_progress, build_session_result,
+    compute_group_gap_ms, create_initial_sampling_state, current_practice_window,
+    evaluate_auto_level, generate_training_group, update_sampling_state_from_answer,
+    AutoAdjustMode, AutoLevelProgress, CharSamplingState, FastrandRng, GroupSession, SessionResult,
+    TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -234,11 +235,9 @@ pub async fn run_group_session(
                 *app.sampling.borrow_mut() = next_state;
                 s.set_group(i, g);
             }
-            s.status = RuntimeStatus::PlayingGroup;
-            s.current_group = i;
-            s.focused_group = i;
         }
-        focus_group_input(i);
+        // Keep the previous group current through the Farnsworth gap so a lock-off
+        // user cannot type/confirm the next group before its Morse starts.
         if i > 0 {
             let gap = compute_group_gap_ms(&settings);
             if gap > 0 && !sleep_cancelable(gap, gen, app.session_gen.clone()).await {
@@ -257,6 +256,7 @@ pub async fn run_group_session(
             s.begin_group(i, now_ms());
             s.groups.get(i).cloned().unwrap_or_default()
         };
+        focus_group_input(i);
         if group.is_empty() {
             if let Some(s) = runtime.write().as_mut() {
                 s.end_playback(i, now_ms(), 0.0);
@@ -413,10 +413,14 @@ pub fn finish_session(
     };
     let mut counters = load_auto_counters(mode, level, digits);
     let mut next_settings = settings.clone();
+    let practice_window = current_practice_window(&settings);
     if let Some(adj) = evaluate_auto_level(built.accuracy, &settings, &mut counters) {
         save_auto_counters(mode, level, digits, counters);
         clear_auto_counters(&adj.counters_cleared_keys);
         apply_auto_level(&mut next_settings, &adj);
+        if let Some(window) = practice_window {
+            apply_practice_window(&mut next_settings, window);
+        }
         next_settings = next_settings.clamp();
         settings_sig.set(next_settings.clone());
         save_settings(&next_settings);
@@ -454,7 +458,8 @@ pub async fn play_chars(
     gap_ms: u32,
     mut toast: Signal<Option<String>>,
 ) {
-    for ch in chars.chars() {
+    let chars: Vec<char> = chars.chars().collect();
+    for (i, ch) in chars.iter().enumerate() {
         if app.session_gen.get() != gen {
             return;
         }
@@ -466,7 +471,9 @@ pub async fn play_chars(
                 return;
             }
         }
-        if !sleep_cancelable(gap_ms, gen, app.session_gen.clone()).await {
+        if i + 1 < chars.len()
+            && !sleep_cancelable(gap_ms, gen, app.session_gen.clone()).await
+        {
             return;
         }
     }

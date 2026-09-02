@@ -203,7 +203,13 @@ impl GroupSession {
                     0
                 };
                 let answer_at = if raw_answer > 0 { raw_answer } else { fallback };
-                let delta = answer_at.saturating_sub(end_at) as f64;
+                // Copy-during-play can stamp answer_at before Morse ends. Treat that
+                // as an immediate response so it is not dropped as a 0 ms sample.
+                let delta = if answer_at > 0 && end_at > 0 && answer_at < end_at {
+                    1.0
+                } else {
+                    answer_at.saturating_sub(end_at) as f64
+                };
                 let per_char = if sent.is_empty() {
                     0.0
                 } else {
@@ -432,5 +438,17 @@ mod tests {
         session.confirm(0, "KM".into(), 1);
         session.set_group(0, "UK".into());
         assert_eq!(session.user_input[0], "KM");
+    }
+
+    #[test]
+    fn answer_during_playback_counts_as_immediate() {
+        let mut session = GroupSession::new(1, 0, 1);
+        session.set_group(0, "KM".into());
+        session.group_end_at[0] = 2000;
+        session.confirm(0, "KM".into(), 1500);
+        let timings = session.build_timings(10_000.0);
+        assert_eq!(timings.len(), 1);
+        assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
+        assert!((timings[0].per_char_ms - 1.0).abs() < 1e-9);
     }
 }

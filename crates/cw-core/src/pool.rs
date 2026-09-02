@@ -203,6 +203,22 @@ mod tests {
     }
 
     #[test]
+    fn last3_reapplied_after_level_up_includes_newest() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Koch;
+        s.koch_level = 10;
+        apply_practice_window(&mut s, PracticeWindow::Last3);
+        s.koch_level = 11;
+        let stale = compute_char_pool(&s);
+        let newest = sequence_for(&s)[unlocked_char_count_for_level(11) - 1];
+        assert!(!stale.contains(&newest));
+        apply_practice_window(&mut s, PracticeWindow::Last3);
+        let pool = compute_char_pool(&s);
+        assert!(pool.contains(&newest));
+        assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
+    }
+
+    #[test]
     fn empty_custom_falls_back_to_koch() {
         let mut s = TrainingSettings::default();
         s.char_set_mode = CharSetMode::Custom;
