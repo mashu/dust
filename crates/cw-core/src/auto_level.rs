@@ -144,6 +144,30 @@ fn mixed_try_axis(
     )
 }
 
+/// After a mixed adjustment, flip only onto an axis that is actually practiced.
+fn mixed_active_next_axis(
+    settings: &TrainingSettings,
+    adjusted_axis: MixedAutoLevelAxis,
+) -> MixedAutoLevelAxis {
+    let flipped = adjusted_axis.flip();
+    if mixed_axis_active(settings, flipped) {
+        flipped
+    } else {
+        adjusted_axis
+    }
+}
+
+fn mixed_display_next_axis(settings: &TrainingSettings) -> MixedAutoLevelAxis {
+    let stored = settings.mixed_auto_level_next_axis;
+    if mixed_axis_active(settings, stored) {
+        stored
+    } else if mixed_axis_active(settings, stored.flip()) {
+        stored.flip()
+    } else {
+        stored
+    }
+}
+
 /// Evaluate whether the training level should change. Mutates `counters` for the current level.
 /// Returns `None` when no level change is warranted.
 pub fn evaluate_auto_level(
@@ -245,7 +269,7 @@ pub fn evaluate_auto_level(
         }
         return None;
     };
-    let next_axis = adjusted_axis.flip();
+    let next_axis = mixed_active_next_axis(settings, adjusted_axis);
     let count_text = if delta > 0 {
         format!("{} sessions above", counters.above)
     } else {
@@ -327,7 +351,7 @@ pub fn auto_level_progress(
         below_disabled: settings.auto_adjust_below_threshold_count == 0,
         alternating_mixed: settings.char_set_mode == CharSetMode::Mixed,
         next_mixed_axis: (settings.char_set_mode == CharSetMode::Mixed)
-            .then_some(settings.mixed_auto_level_next_axis),
+            .then_some(mixed_display_next_axis(settings)),
     })
 }
 
@@ -473,5 +497,28 @@ mod tests {
         assert_eq!(result.next_level, 1);
         assert_eq!(result.next_digits_level, Some(2));
         assert_eq!(result.adjusted_mixed_axis, Some(MixedAutoLevelAxis::Digits));
+        assert_eq!(
+            result.next_mixed_auto_level_axis,
+            Some(MixedAutoLevelAxis::Digits)
+        );
+    }
+
+    #[test]
+    fn mixed_100_percent_keeps_letter_next_axis() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Mixed;
+        settings.mixed_letters_percent = 100;
+        settings.level = 1;
+        settings.digits_level = 1;
+        settings.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        settings.auto_adjust_above_threshold_count = 1;
+        let mut counters = AutoLevelCounters::default();
+        let result = evaluate_auto_level(1.0, &settings, &mut counters).expect("letter up");
+        assert_eq!(result.next_level, 2);
+        assert_eq!(result.adjusted_mixed_axis, Some(MixedAutoLevelAxis::Letters));
+        assert_eq!(
+            result.next_mixed_auto_level_axis,
+            Some(MixedAutoLevelAxis::Letters)
+        );
     }
 }

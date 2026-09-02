@@ -17,6 +17,14 @@ fn session_level_default() -> u32 {
     1
 }
 
+fn session_mode_legacy() -> CharSetMode {
+    CharSetMode::Koch
+}
+
+fn session_wpm_default() -> f64 {
+    18.0
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RuntimeStatus {
@@ -39,6 +47,7 @@ pub struct GroupResult {
 pub struct SessionTiming {
     pub time_to_complete_ms: f64,
     pub per_char_ms: f64,
+    #[serde(default)]
     pub char_wpm: Option<f64>,
 }
 
@@ -60,9 +69,13 @@ pub struct SessionResult {
     pub score: f64,
     #[serde(alias = "kochLevel", default = "session_level_default")]
     pub level: u32,
+    #[serde(default = "session_level_default")]
     pub digits_level: u32,
+    #[serde(default = "session_mode_legacy")]
     pub char_set_mode: CharSetMode,
+    #[serde(default = "session_wpm_default")]
     pub char_wpm: f64,
+    #[serde(default = "session_wpm_default")]
     pub effective_wpm: f64,
     /// Full progress alphabet at the time of the session. Empty on legacy saves.
     #[serde(default)]
@@ -191,6 +204,16 @@ impl GroupSession {
             if *slot == 0 {
                 *slot = answered_at;
             }
+        }
+    }
+
+    /// Drop a length-match stamp if the user backspaces before confirm.
+    pub fn clear_answer_time(&mut self, index: usize) {
+        if self.confirmed.get(index).copied().unwrap_or(false) {
+            return;
+        }
+        if let Some(slot) = self.group_answer_at.get_mut(index) {
+            *slot = 0;
         }
     }
 
@@ -568,5 +591,36 @@ mod tests {
         assert_eq!(result.level, 4);
         assert_eq!(result.digits_level, 4);
         assert_eq!(result.char_set_mode, CharSetMode::Digits);
+    }
+
+    #[test]
+    fn shortening_answer_clears_completion_stamp() {
+        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
+        session.set_group(0, "KM".into());
+        session.group_end_at[0] = 1000;
+        session.record_answer_time_if_empty(0, 1100);
+        session.clear_answer_time(0);
+        session.confirm(0, "KM".into(), 1400);
+        let timings = session.build_timings(10_000.0);
+        assert!((timings[0].time_to_complete_ms - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn legacy_session_json_fills_new_fields() {
+        let timing: SessionTiming =
+            serde_json::from_str(r#"{"timeToCompleteMs":1,"perCharMs":1}"#).unwrap();
+        assert_eq!(timing.char_wpm, None);
+        let raw = r#"{
+            "date":"2026-01-01","timestamp":1,"startedAt":0,"finishedAt":1,
+            "groups":[],"groupTimings":[],"accuracy":1,"letterAccuracy":{},
+            "alphabetSize":0,"avgResponseMs":0,"totalChars":0,
+            "effectiveAlphabetSize":0,"score":0,"level":1
+        }"#;
+        let result: SessionResult = serde_json::from_str(raw).unwrap();
+        assert_eq!(result.digits_level, 1);
+        assert_eq!(result.char_set_mode, CharSetMode::Koch);
+        assert_eq!(result.char_wpm, 18.0);
+        assert_eq!(result.effective_wpm, 18.0);
+        assert!(result.alphabet_fingerprint.is_empty());
     }
 }

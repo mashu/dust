@@ -123,6 +123,12 @@ impl MixedAutoLevelAxis {
     }
 }
 
+impl Default for MixedAutoLevelAxis {
+    fn default() -> Self {
+        Self::Letters
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

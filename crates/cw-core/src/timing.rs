@@ -156,6 +156,10 @@ pub fn plan_morse_playback(
     let smoothing = settings.envelope_smoothing.clamp(0.0, 1.0);
 
     let chars: Vec<char> = text.chars().collect();
+    let last_morse_idx = chars.iter().enumerate().rev().find_map(|(i, raw)| {
+        let ch = raw.to_ascii_uppercase();
+        (*raw != ' ' && morse_for(ch).is_some()).then_some(i)
+    });
     let mut current_time = 0.0;
     let mut events = Vec::new();
 
@@ -186,8 +190,7 @@ pub fn plan_morse_playback(
             });
             current_time += duration + symbol_space;
         }
-        let is_last = i + 1 == chars.len();
-        if !is_last {
+        if last_morse_idx != Some(i) {
             current_time += char_space - symbol_space;
         }
     }
@@ -253,5 +256,20 @@ mod tests {
         assert!(
             compute_group_gap_for_wpm(40.0, 40.0, 1.0) < compute_group_gap_for_wpm(18.0, 18.0, 1.0)
         );
+    }
+
+    #[test]
+    fn unknown_trailing_char_does_not_add_char_space() {
+        let mut settings = TrainingSettings::default();
+        settings.char_wpm_min = 20.0;
+        settings.char_wpm_max = 20.0;
+        settings.effective_wpm_min = 20.0;
+        settings.effective_wpm_max = 20.0;
+        settings.link_char_to_effective = true;
+        let a = plan_morse_playback("KM", &settings, &mut FastrandRng(1));
+        let b = plan_morse_playback("KM#", &settings, &mut FastrandRng(1));
+        assert!(morse_for('#').is_none());
+        assert!((a.duration_sec - b.duration_sec).abs() < 1e-12);
+        assert_eq!(a.events.len(), b.events.len());
     }
 }

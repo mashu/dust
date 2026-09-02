@@ -332,8 +332,11 @@ pub fn confusion_entries(sessions: &[SessionResult], limit: usize) -> Vec<Confus
 }
 
 pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SamplingRow> {
-    let owned: Vec<BTreeMap<char, LetterAccuracy>> =
-        sessions.iter().map(session_letter_accuracy).collect();
+    let owned: Vec<BTreeMap<char, LetterAccuracy>> = sessions
+        .iter()
+        .filter(|session| session.usable_for_sampling(settings))
+        .map(session_letter_accuracy)
+        .collect();
     let history: Vec<&BTreeMap<char, LetterAccuracy>> = owned.iter().collect();
     let state = crate::sampling::create_initial_sampling_state(&history);
     let pool = compute_char_pool(settings);
@@ -437,5 +440,39 @@ mod tests {
         let conf = confusion_entries(&sessions, 8);
         assert!(!conf.is_empty());
         assert_eq!(unigram_stats(&sessions).len(), 2);
+    }
+
+    #[test]
+    fn sampling_rows_ignore_other_char_set_modes() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Koch;
+        let mut koch = session();
+        koch.char_set_mode = CharSetMode::Koch;
+        koch.letter_accuracy.clear();
+        koch.letter_accuracy.insert(
+            'K',
+            crate::alignment::LetterAccuracy {
+                correct: 10,
+                total: 10,
+            },
+        );
+        let mut digits = koch.clone();
+        digits.char_set_mode = CharSetMode::Digits;
+        digits.letter_accuracy.insert(
+            'K',
+            crate::alignment::LetterAccuracy {
+                correct: 0,
+                total: 10,
+            },
+        );
+        let k_belief = |rows: &[SamplingRow]| {
+            rows.iter()
+                .find(|row| row.character == 'K')
+                .map(|row| (row.alpha, row.beta))
+                .expect("K in pool")
+        };
+        let only_koch = k_belief(&sampling_rows(&settings, &[koch.clone()]));
+        let mixed_history = k_belief(&sampling_rows(&settings, &[koch, digits]));
+        assert_eq!(only_koch, mixed_history);
     }
 }

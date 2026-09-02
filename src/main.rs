@@ -291,7 +291,11 @@ fn App() -> Element {
             match screen() {
                 Screen::Home => {
                     let pool: String = compute_char_pool(&settings()).into_iter().collect();
-                    let last = sessions().last().map(|s| s.accuracy);
+                    let last = sessions()
+                        .iter()
+                        .rev()
+                        .find(|s| s.usable_for_sampling(&settings()))
+                        .map(|s| s.accuracy);
                     rsx! {
                         Home {
                             settings: settings(),
@@ -370,6 +374,8 @@ fn App() -> Element {
                                         s.set_input(idx, value.clone());
                                         if answer_length_matches(&sent, &value) {
                                             s.record_answer_time_if_empty(idx, now_ms());
+                                        } else {
+                                            s.clear_answer_time(idx);
                                         }
                                     }
                                     if answer_length_matches(&sent, &value) {
@@ -378,6 +384,7 @@ fn App() -> Element {
                                             sleep_ms(AUTO_CONFIRM_DELAY_MS).await;
                                             let still_current = runtime.read().as_ref().is_some_and(|s| {
                                                 s.session_id == session_id
+                                                    && app.session_gen.get() == session_id
                                                     && s.current_group == idx
                                                     && s.user_input.get(idx).map(String::as_str)
                                                         == Some(value.as_str())

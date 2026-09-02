@@ -38,8 +38,13 @@ fn sparkline_points(points: &[AccuracyPoint]) -> String {
 #[component]
 pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     let mut tab = use_signal(|| StatsTab::Overview);
+    let matching: Vec<SessionResult> = sessions
+        .iter()
+        .filter(|s| s.usable_for_sampling(&settings))
+        .cloned()
+        .collect();
     let chart = accuracy_chart(&sessions);
-    let letters = character_diagnostics(&sessions);
+    let letters = character_diagnostics(&matching);
     let avg = if sessions.is_empty() {
         0.0
     } else {
@@ -76,7 +81,7 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
                     }
                 },
                 StatsTab::Letters => rsx! { LettersTab { letters } },
-                StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
+                StatsTab::Mistakes => rsx! { MistakesTab { sessions: matching } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
                 StatsTab::History => rsx! { HistoryTab { sessions } },
             }

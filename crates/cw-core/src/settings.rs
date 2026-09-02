@@ -46,7 +46,7 @@ pub enum PracticeWindow {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default = "TrainingSettings::default")]
 pub struct TrainingSettings {
     /// Progress through the current letter/custom alphabet (level 1 unlocks two characters).
     #[serde(alias = "kochLevel", default = "defaults::level")]
@@ -452,5 +452,23 @@ mod tests {
         let mut digits = TrainingSettings::default();
         digits.char_set_mode = CharSetMode::Digits;
         assert_eq!(digits.alphabet_fingerprint(), "0123456789");
+    }
+
+    #[test]
+    fn missing_json_fields_use_training_defaults() {
+        let s: TrainingSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.mixed_letters_percent, 70);
+        assert!(s.lock_input_during_group_playback);
+        assert!(s.link_char_to_effective);
+        assert_eq!(s.group_timeout, 10.0);
+        assert_eq!(s.auto_adjust_threshold, 90.0);
+        assert_eq!(s.num_groups, 20);
+        assert_eq!(s.digits_level, 1);
+        assert_eq!(s.char_wpm_min, 18.0);
+        let koch: TrainingSettings =
+            serde_json::from_str(r#"{"charSetMode":"koch"}"#).unwrap();
+        assert_eq!(koch.char_set_mode, CharSetMode::Koch);
+        assert_eq!(koch.mixed_letters_percent, 70);
+        assert!(koch.lock_input_during_group_playback);
     }
 }

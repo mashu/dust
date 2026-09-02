@@ -388,6 +388,11 @@ pub fn confirm_group(
     let Some(session) = current.as_mut() else {
         return;
     };
+    // finish_session bumps gen then clones runtime. A pending auto-confirm must
+    // not mutate the live session after that clone (or after the user left).
+    if session.session_id != app.session_gen.get() {
+        return;
+    }
     let value = override_value
         .unwrap_or_else(|| session.user_input.get(index).cloned().unwrap_or_default())
         .trim()
