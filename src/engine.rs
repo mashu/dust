@@ -223,11 +223,20 @@ pub async fn run_group_session(
         }
         {
             let mut current = runtime.write();
-            if let Some(s) = current.as_mut() {
-                s.status = RuntimeStatus::PlayingGroup;
-                s.current_group = i;
-                s.focused_group = i;
+            let Some(s) = current.as_mut() else {
+                return;
+            };
+            if s.groups.get(i).map(|g| g.is_empty()).unwrap_or(true) {
+                let sampling = app.sampling.borrow();
+                let mut rng = app.rng.borrow_mut();
+                let (g, next_state) = generate_training_group(&settings, &sampling, &mut *rng);
+                drop(sampling);
+                *app.sampling.borrow_mut() = next_state;
+                s.set_group(i, g);
             }
+            s.status = RuntimeStatus::PlayingGroup;
+            s.current_group = i;
+            s.focused_group = i;
         }
         focus_group_input(i);
         if i > 0 {
@@ -245,14 +254,6 @@ pub async fn run_group_session(
             let Some(s) = current.as_mut() else {
                 return;
             };
-            if s.groups.get(i).map(|g| g.is_empty()).unwrap_or(true) {
-                let sampling = app.sampling.borrow();
-                let mut rng = app.rng.borrow_mut();
-                let (g, next_state) = generate_training_group(&settings, &sampling, &mut *rng);
-                drop(sampling);
-                *app.sampling.borrow_mut() = next_state;
-                s.set_group(i, g);
-            }
             s.begin_group(i, now_ms());
             s.groups.get(i).cloned().unwrap_or_default()
         };
@@ -358,6 +359,9 @@ pub fn confirm_group(
         .trim()
         .to_ascii_uppercase();
     let sent = session.groups.get(index).cloned().unwrap_or_default();
+    if index != session.current_group {
+        return;
+    }
     if !session.confirm(index, value.clone(), now_ms()) {
         return;
     }
@@ -391,6 +395,11 @@ pub fn finish_session(
         return;
     }
     let built = build_session_result(&session, &settings, now_ms(), local_date_string());
+    if built.groups.is_empty() {
+        runtime.set(None);
+        screen.set(Screen::Home);
+        return;
+    }
 
     let mode = AutoAdjustMode::from_char_set(settings.char_set_mode);
     let digits = if matches!(mode, AutoAdjustMode::Mixed) {

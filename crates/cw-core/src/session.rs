@@ -109,6 +109,11 @@ impl GroupSession {
         if let Some(slot) = self.groups.get_mut(index) {
             *slot = text;
         }
+        if !self.confirmed.get(index).copied().unwrap_or(false) {
+            if let Some(slot) = self.user_input.get_mut(index) {
+                slot.clear();
+            }
+        }
     }
 
     pub fn begin_group(&mut self, index: usize, now_ms: u64) {
@@ -225,7 +230,7 @@ fn group_was_scored(session: &GroupSession, index: usize) -> bool {
 }
 
 pub fn answer_length_matches(sent: &str, received: &str) -> bool {
-    !sent.is_empty() && received.chars().count() == sent.chars().count()
+    !sent.is_empty() && received.trim().chars().count() == sent.chars().count()
 }
 
 pub fn build_session_result(
@@ -412,7 +417,20 @@ mod tests {
     #[test]
     fn answer_length_uses_characters() {
         assert!(answer_length_matches("KM", "km"));
+        assert!(answer_length_matches("KM", " km "));
         assert!(!answer_length_matches("KM", "K"));
         assert!(!answer_length_matches("", "KM"));
+    }
+
+    #[test]
+    fn set_group_clears_unconfirmed_input() {
+        let mut session = GroupSession::new(1, 0, 1);
+        session.set_input(0, "XX".into());
+        session.set_group(0, "KM".into());
+        assert_eq!(session.user_input[0], "");
+        session.set_input(0, "KM".into());
+        session.confirm(0, "KM".into(), 1);
+        session.set_group(0, "UK".into());
+        assert_eq!(session.user_input[0], "KM");
     }
 }

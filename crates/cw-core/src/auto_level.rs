@@ -1,7 +1,7 @@
 //! Automatic Koch / digits level adjustment after a session.
 
 use crate::morse::{
-    MixedAutoLevelAxis, KOCH_LEVEL_MAX, KOCH_LEVEL_MIN, MAX_DIGITS_LEVEL, MIN_DIGITS_LEVEL,
+    MixedAutoLevelAxis, KOCH_LEVEL_MIN, MAX_DIGITS_LEVEL, MIN_DIGITS_LEVEL,
 };
 use crate::settings::{CharSetMode, TrainingSettings};
 
@@ -78,6 +78,10 @@ fn apply_mixed_axis_delta(
     }
 }
 
+fn max_letter_level(settings: &TrainingSettings) -> u32 {
+    (settings.sequence().len().saturating_sub(1) as u32).max(KOCH_LEVEL_MIN)
+}
+
 /// Evaluate whether the training level should change. Mutates `counters` for the current level.
 /// Returns `None` when no level change is warranted.
 pub fn evaluate_auto_level(
@@ -130,11 +134,16 @@ pub fn evaluate_auto_level(
         let max_level = if mode == AutoAdjustMode::Digits {
             MAX_DIGITS_LEVEL
         } else {
-            KOCH_LEVEL_MAX
+            max_letter_level(settings)
         };
         let next_level =
             (current_level as i32 + delta).clamp(KOCH_LEVEL_MIN as i32, max_level as i32) as u32;
         if next_level == current_level {
+            if delta > 0 {
+                counters.above = 0;
+            } else {
+                counters.below = 0;
+            }
             return None;
         }
         let count_text = if delta > 0 {
@@ -172,7 +181,7 @@ pub fn evaluate_auto_level(
         delta,
         current_level,
         current_digits,
-        KOCH_LEVEL_MAX,
+        max_letter_level(settings),
         MAX_DIGITS_LEVEL,
     )
     .or_else(|| {
@@ -181,11 +190,18 @@ pub fn evaluate_auto_level(
             delta,
             current_level,
             current_digits,
-            KOCH_LEVEL_MAX,
+            max_letter_level(settings),
             MAX_DIGITS_LEVEL,
         )
-    })?;
-    let (next_level, next_digits_level, adjusted_axis) = mixed;
+    });
+    let Some((next_level, next_digits_level, adjusted_axis)) = mixed else {
+        if delta > 0 {
+            counters.above = 0;
+        } else {
+            counters.below = 0;
+        }
+        return None;
+    };
     let next_axis = adjusted_axis.flip();
     let count_text = if delta > 0 {
         format!("{} sessions above", counters.above)
@@ -315,5 +331,18 @@ mod tests {
         assert_eq!(progress.above_count, 2);
         assert_eq!(progress.below_count, 1);
         assert!(progress.alternating_mixed);
+    }
+
+    #[test]
+    fn blocked_increase_at_max_resets_above_counter() {
+        let mut settings = TrainingSettings::default();
+        settings.char_set_mode = CharSetMode::Koch;
+        settings.custom_sequence = vec!['K', 'M'];
+        settings.koch_level = 1;
+        settings.auto_adjust_above_threshold_count = 1;
+        let mut counters = AutoLevelCounters::default();
+        assert!(evaluate_auto_level(1.0, &settings, &mut counters).is_none());
+        assert_eq!(counters.above, 0);
+        assert_eq!(counters.below, 0);
     }
 }

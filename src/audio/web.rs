@@ -119,15 +119,19 @@ impl MorsePlayer {
         next
     }
 
-    pub fn stop(&mut self) {
-        self.bump_epoch();
-        self.stop_flag.set(true);
-        if let Some(gain) = &self.group_gain {
+    fn release_group_gain(&mut self) {
+        if let Some(gain) = self.group_gain.take() {
             let now = self.ctx.current_time();
             let _ = gain.gain().cancel_scheduled_values(now);
             let _ = gain.gain().set_target_at_time(0.0, now, 0.01);
+            let _ = gain.disconnect();
         }
-        self.group_gain = None;
+    }
+
+    pub fn stop(&mut self) {
+        self.bump_epoch();
+        self.stop_flag.set(true);
+        self.release_group_gain();
     }
 
     pub fn shutdown(&mut self) {
@@ -146,12 +150,7 @@ impl MorsePlayer {
         rng: &mut impl Rng,
     ) -> Result<crate::audio::PlaybackWait, String> {
         self.resume_from_gesture();
-        if let Some(gain) = &self.group_gain {
-            let now = self.ctx.current_time();
-            let _ = gain.gain().cancel_scheduled_values(now);
-            let _ = gain.gain().set_target_at_time(0.0, now, 0.01);
-        }
-        self.group_gain = None;
+        self.release_group_gain();
         let epoch = self.bump_epoch();
         self.apply_band(settings)?;
         let plan = plan_morse_playback(text, settings, rng);

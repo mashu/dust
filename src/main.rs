@@ -84,9 +84,11 @@ fn App() -> Element {
             }
             previewing.set(false);
             listen_playing.set(false);
+            screen.set(Screen::Training);
             let gen = match app.takeover_audio(&settings_now) {
                 Ok(gen) => gen,
                 Err(err) => {
+                    screen.set(Screen::Home);
                     toast.set(Some(err));
                     return;
                 }
