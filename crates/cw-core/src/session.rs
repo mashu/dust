@@ -206,6 +206,15 @@ impl GroupSession {
     }
 }
 
+fn group_was_scored(session: &GroupSession, index: usize) -> bool {
+    session.confirmed.get(index).copied().unwrap_or(false)
+        && session
+            .groups
+            .get(index)
+            .map(|sent| !sent.is_empty())
+            .unwrap_or(false)
+}
+
 pub fn build_session_result(
     session: &GroupSession,
     settings: &TrainingSettings,
@@ -221,8 +230,9 @@ pub fn build_session_result(
         .groups
         .iter()
         .zip(answers.iter())
-        .filter(|(sent, _)| !sent.is_empty())
-        .map(|(sent, recv)| (sent.clone(), recv.clone()))
+        .enumerate()
+        .filter(|(index, _)| group_was_scored(session, *index))
+        .map(|(_, (sent, recv))| (sent.clone(), recv.clone()))
         .collect();
 
     let groups: Vec<GroupResult> = pairs
@@ -239,7 +249,13 @@ pub fn build_session_result(
     let sent_only: Vec<&str> = pairs.iter().map(|(s, _)| s.as_str()).collect();
     let alphabet_size = calculate_alphabet_size(&sent_only);
     let effective_alphabet_size = calculate_effective_alphabet_size(&sent_only);
-    let timings = session.build_timings(settings.group_timeout * 1000.0);
+    let all_timings = session.build_timings(settings.group_timeout * 1000.0);
+    let timings: Vec<SessionTiming> = all_timings
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| group_was_scored(session, *index))
+        .map(|(_, timing)| timing)
+        .collect();
     let avg_response_ms =
         compute_average_response_ms(&timings.iter().map(|t| t.per_char_ms).collect::<Vec<_>>());
     let total_chars = calculate_total_chars(&sent_only);
@@ -250,6 +266,18 @@ pub fn build_session_result(
         total_chars,
         ScoreConstants::default(),
     );
+    let played_wpm: Vec<f64> = session
+        .group_char_wpm
+        .iter()
+        .enumerate()
+        .filter(|(index, wpm)| group_was_scored(session, *index) && **wpm > 0.0)
+        .map(|(_, wpm)| *wpm)
+        .collect();
+    let char_wpm = if played_wpm.is_empty() {
+        settings.char_wpm_min
+    } else {
+        played_wpm.iter().sum::<f64>() / played_wpm.len() as f64
+    };
 
     SessionResult {
         date,
@@ -268,7 +296,7 @@ pub fn build_session_result(
         koch_level: settings.koch_level,
         digits_level: settings.digits_level,
         char_set_mode: settings.char_set_mode,
-        char_wpm: settings.char_wpm_min,
+        char_wpm,
         effective_wpm: settings.effective_wpm_min,
     }
 }
@@ -301,5 +329,24 @@ mod tests {
         let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
         assert!((result.accuracy - 1.0).abs() < 1e-9);
         assert!(result.groups.iter().all(|g| g.correct));
+        assert!((result.char_wpm - 18.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unconfirmed_generated_groups_are_not_scored() {
+        let mut session = GroupSession::new(1, 0, 3);
+        session.set_group(0, "KM".into());
+        session.set_group(1, "UK".into());
+        session.set_group(2, "RS".into());
+        session.confirm(0, "KM".into(), 1000);
+        session.group_end_at[0] = 500;
+        session.group_char_wpm[0] = 22.0;
+        let settings = TrainingSettings::default();
+        let result = build_session_result(&session, &settings, 3000, "2026-09-01".into());
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.group_timings.len(), 1);
+        assert!(result.groups[0].correct);
+        assert!((result.accuracy - 1.0).abs() < 1e-9);
+        assert!((result.char_wpm - 22.0).abs() < 1e-9);
     }
 }

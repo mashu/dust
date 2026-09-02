@@ -73,13 +73,13 @@ fn App() -> Element {
         move |(): ()| {
             let settings_now = settings().clamp();
             settings.set(settings_now.clone());
+            app.stop_audio();
+            previewing.set(false);
+            listen_playing.set(false);
             if let Err(err) = app.ensure_player(&settings_now) {
                 toast.set(Some(err));
                 return;
             }
-            app.stop_audio();
-            previewing.set(false);
-            listen_playing.set(false);
             let gen = app.bump_session();
             let history = sessions();
             let app_loop = (*app).clone();
@@ -103,13 +103,14 @@ fn App() -> Element {
         let app = app.clone();
         move |chars: String| {
             let settings_now = settings().clamp();
+            app.stop_audio();
+            previewing.set(false);
             if let Err(err) = app.ensure_player(&settings_now) {
                 toast.set(Some(err));
                 return;
             }
             let gen = app.bump_session();
             listen_playing.set(true);
-            previewing.set(false);
             let app_loop = (*app).clone();
             spawn(async move {
                 play_chars(app_loop.clone(), gen, settings_now, chars, 420, toast).await;
@@ -318,8 +319,28 @@ fn App() -> Element {
                                 on_submit: {
                                     let app = app.clone();
                                     move |_| {
-                                        app.bump_session();
-                                        finish_session(settings(), (*app).clone(), runtime, screen, result, auto_message, sessions, settings, toast);
+                                        if let Some(session) = runtime.read().as_ref() {
+                                            let idx = session.current_group;
+                                            let typed = session
+                                                .user_input
+                                                .get(idx)
+                                                .map(|value| !value.trim().is_empty())
+                                                .unwrap_or(false);
+                                            if typed {
+                                                confirm_group(runtime, idx, None, &app);
+                                            }
+                                        }
+                                        finish_session(
+                                            settings(),
+                                            (*app).clone(),
+                                            runtime,
+                                            screen,
+                                            result,
+                                            auto_message,
+                                            sessions,
+                                            settings,
+                                            toast,
+                                        );
                                     }
                                 },
                                 on_stop: go_home,

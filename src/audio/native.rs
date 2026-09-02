@@ -1,10 +1,44 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
-use cw_core::band::{apply_qsb, BandMixer};
+use cw_core::band::{qsb_gain_at, BandMixer};
 use cw_core::{plan_morse_playback, PlaybackPlan, Rng, ToneEvent, TrainingSettings};
+
+struct LiveQsb {
+    enabled: AtomicBool,
+    depth_bits: AtomicU64,
+    rate_bits: AtomicU64,
+}
+
+impl LiveQsb {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            enabled: AtomicBool::new(false),
+            depth_bits: AtomicU64::new(0.0f64.to_bits()),
+            rate_bits: AtomicU64::new(0.12f64.to_bits()),
+        })
+    }
+
+    fn store(&self, settings: &TrainingSettings) {
+        self.enabled
+            .store(settings.qsb_enabled, Ordering::Relaxed);
+        self.depth_bits
+            .store(settings.qsb_depth.to_bits(), Ordering::Relaxed);
+        self.rate_bits
+            .store(settings.qsb_rate_hz.to_bits(), Ordering::Relaxed);
+    }
+
+    fn gain_at(&self, t_sec: f64) -> f32 {
+        qsb_gain_at(
+            t_sec,
+            self.enabled.load(Ordering::Relaxed),
+            f64::from_bits(self.depth_bits.load(Ordering::Relaxed)),
+            f64::from_bits(self.rate_bits.load(Ordering::Relaxed)),
+        )
+    }
+}
 
 pub struct MorsePlayer {
     stop_flag: Arc<AtomicBool>,
@@ -13,6 +47,7 @@ pub struct MorsePlayer {
     band_signature: String,
     tone_stream: Option<cpal::Stream>,
     tone_finished: Arc<AtomicBool>,
+    qsb: Arc<LiveQsb>,
 }
 
 impl MorsePlayer {
@@ -27,12 +62,14 @@ impl MorsePlayer {
             band_signature: String::new(),
             tone_stream: None,
             tone_finished: Arc::new(AtomicBool::new(true)),
+            qsb: LiveQsb::new(),
         })
     }
 
     pub fn resume_from_gesture(&self) {}
 
     pub fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        self.qsb.store(settings);
         let signature = settings.band_signature();
         if signature == self.band_signature {
             return Ok(());
@@ -79,8 +116,11 @@ impl MorsePlayer {
         let plan = plan_morse_playback(text, settings, rng);
         self.reset_stop_flag();
         self.tone_stream = None;
-        let (stream, finished) =
-            start_tone_stream(&plan, Some(settings), Arc::clone(&self.stop_flag))?;
+        let (stream, finished) = start_tone_stream(
+            &plan,
+            Arc::clone(&self.qsb),
+            Arc::clone(&self.stop_flag),
+        )?;
         self.tone_finished = Arc::clone(&finished);
         self.tone_stream = Some(stream);
         Ok(crate::audio::PlaybackWait::desktop(
@@ -129,7 +169,7 @@ fn render_plan(plan: &PlaybackPlan, sample_rate: u32) -> Vec<f32> {
 
 fn start_tone_stream(
     plan: &PlaybackPlan,
-    settings: Option<&TrainingSettings>,
+    qsb: Arc<LiveQsb>,
     stop: Arc<AtomicBool>,
 ) -> Result<(cpal::Stream, Arc<AtomicBool>), String> {
     let host = cpal::default_host();
@@ -141,10 +181,7 @@ fn start_tone_stream(
         .map_err(|e| format!("Audio config: {e}"))?;
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
-    let mut samples = render_plan(plan, sample_rate);
-    if let Some(settings) = settings {
-        apply_qsb(&mut samples, sample_rate, settings);
-    }
+    let samples = render_plan(plan, sample_rate);
     let pos = Arc::new(AtomicUsize::new(0));
     let finished = Arc::new(AtomicBool::new(false));
 
@@ -154,7 +191,9 @@ fn start_tone_stream(
             &device,
             &config.into(),
             samples,
+            sample_rate,
             channels,
+            qsb,
             Arc::clone(&pos),
             Arc::clone(&stop),
             Arc::clone(&finished),
@@ -164,7 +203,9 @@ fn start_tone_stream(
             &device,
             &config.into(),
             samples,
+            sample_rate,
             channels,
+            qsb,
             Arc::clone(&pos),
             Arc::clone(&stop),
             Arc::clone(&finished),
@@ -174,7 +215,9 @@ fn start_tone_stream(
             &device,
             &config.into(),
             samples,
+            sample_rate,
             channels,
+            qsb,
             Arc::clone(&pos),
             Arc::clone(&stop),
             Arc::clone(&finished),
@@ -190,7 +233,9 @@ fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     samples: Vec<f32>,
+    sample_rate: u32,
     channels: usize,
+    qsb: Arc<LiveQsb>,
     pos: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
@@ -200,6 +245,7 @@ where
     T: Sample + SizedSample + FromSample<f32>,
 {
     let channels = channels.max(1);
+    let sr = f64::from(sample_rate.max(1));
     device
         .build_output_stream(
             config,
@@ -214,7 +260,8 @@ where
                 let mut i = pos.load(Ordering::SeqCst);
                 let mut out_i = 0;
                 while out_i < output.len() {
-                    let value = samples.get(i).copied().unwrap_or(0.0);
+                    let dry = samples.get(i).copied().unwrap_or(0.0);
+                    let value = dry * qsb.gain_at(i as f64 / sr);
                     for _ in 0..channels {
                         if out_i >= output.len() {
                             break;

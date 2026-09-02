@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::band::{QRM_OUTPUT_GAIN, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, RINGING_OUTPUT_GAIN};
@@ -18,6 +18,7 @@ pub struct MorsePlayer {
     cw_gain: GainNode,
     group_gain: Option<GainNode>,
     band: BandGraph,
+    pending_resume: RefCell<Option<js_sys::Promise>>,
 }
 
 struct BandGraph {
@@ -76,13 +77,20 @@ impl MorsePlayer {
             cw_gain,
             group_gain: None,
             band: BandGraph::new(),
+            pending_resume: RefCell::new(None),
         })
     }
 
     pub fn resume_from_gesture(&self) {
         if self.ctx.state() == AudioContextState::Suspended {
-            let _ = self.ctx.resume();
+            if let Ok(promise) = self.ctx.resume() {
+                *self.pending_resume.borrow_mut() = Some(promise);
+            }
         }
+    }
+
+    pub fn take_resume_promise(&self) -> Option<js_sys::Promise> {
+        self.pending_resume.borrow_mut().take()
     }
 
     pub fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
@@ -126,8 +134,8 @@ impl MorsePlayer {
         settings: &TrainingSettings,
         rng: &mut impl Rng,
     ) -> Result<crate::audio::PlaybackWait, String> {
-        self.apply_band(settings)?;
         self.resume_from_gesture();
+        self.apply_band(settings)?;
         let plan = plan_morse_playback(text, settings, rng);
         self.schedule_plan(&plan)?;
         Ok(crate::audio::PlaybackWait::web(

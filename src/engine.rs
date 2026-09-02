@@ -94,6 +94,17 @@ async fn play_text_now(
     text: &str,
     settings: &TrainingSettings,
 ) -> Result<(f64, f64), String> {
+    #[cfg(feature = "web")]
+    {
+        let promise = app
+            .player
+            .borrow()
+            .as_ref()
+            .and_then(MorsePlayer::take_resume_promise);
+        if let Some(promise) = promise {
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        }
+    }
     let wait = {
         let mut rng = app.rng.borrow_mut();
         let mut slot = app.player.borrow_mut();
@@ -343,6 +354,11 @@ pub fn finish_session(
         screen.set(Screen::Home);
         return;
     };
+    if !session.confirmed.iter().any(|confirmed| *confirmed) {
+        runtime.set(None);
+        screen.set(Screen::Home);
+        return;
+    }
     let built = build_session_result(&session, &settings, now_ms(), local_date_string());
 
     let mode = AutoAdjustMode::from_char_set(settings.char_set_mode);
@@ -433,9 +449,11 @@ pub async fn loop_preview_text(
             toast.set(Some(err));
             return;
         }
-        if play_text_now(&app, text, &settings_now).await.is_err()
-            || !sleep_cancelable(gap_ms, gen, app.session_gen.clone()).await
-        {
+        if let Err(err) = play_text_now(&app, text, &settings_now).await {
+            toast.set(Some(err));
+            return;
+        }
+        if !sleep_cancelable(gap_ms, gen, app.session_gen.clone()).await {
             return;
         }
     }

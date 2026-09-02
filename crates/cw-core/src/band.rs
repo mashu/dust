@@ -193,20 +193,30 @@ impl BandMixer {
     }
 }
 
-pub fn apply_qsb(samples: &mut [f32], sample_rate: u32, settings: &TrainingSettings) {
-    if !settings.qsb_enabled || settings.qsb_depth <= 0.0 || samples.is_empty() {
-        return;
+pub fn qsb_gain_at(t_sec: f64, enabled: bool, depth: f64, rate_hz: f64) -> f32 {
+    if !enabled || depth <= 0.0 {
+        return 1.0;
     }
-    let sr = f64::from(sample_rate.max(1));
-    let depth = settings.qsb_depth.clamp(0.0, 1.0);
-    let rate = settings.qsb_rate_hz.clamp(0.03, 1.5);
+    let depth = depth.clamp(0.0, 1.0);
+    let rate = rate_hz.clamp(0.03, 1.5);
     let gain_range = depth.min(1.0 - QSB_MIN_GAIN);
     let base = 1.0 - gain_range / 2.0;
     let half = gain_range / 2.0;
+    (base + half * (2.0 * std::f64::consts::PI * rate * t_sec).sin()) as f32
+}
+
+pub fn apply_qsb(samples: &mut [f32], sample_rate: u32, settings: &TrainingSettings) {
+    if samples.is_empty() {
+        return;
+    }
+    let sr = f64::from(sample_rate.max(1));
     for (i, sample) in samples.iter_mut().enumerate() {
-        let t = i as f64 / sr;
-        let gain = base + half * (2.0 * std::f64::consts::PI * rate * t).sin();
-        *sample *= gain as f32;
+        *sample *= qsb_gain_at(
+            i as f64 / sr,
+            settings.qsb_enabled,
+            settings.qsb_depth,
+            settings.qsb_rate_hz,
+        );
     }
 }
 

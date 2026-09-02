@@ -156,10 +156,12 @@ pub fn TrainingView(
                                         readonly: input_locked,
                                         placeholder: "{placeholder}",
                                         autocomplete: "off",
+                                        autocorrect: "off",
                                         autocapitalize: "characters",
                                         spellcheck: false,
                                         enterkeyhint: "done",
                                         inputmode: "text",
+                                        lang: "zxx",
                                         onfocus: move |_| on_focus.call(idx),
                                         oninput: move |e| on_change.call((idx, e.value())),
                                         onkeydown: move |e| {
