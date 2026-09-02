@@ -58,13 +58,15 @@ pub fn aggregate_heatmap(sessions: &[SessionResult]) -> BTreeMap<String, Heatmap
         if date_to_day_index(&session.date).is_none() {
             continue;
         }
-        let entry = days.entry(session.date.clone()).or_insert_with(|| HeatmapDay {
-            date: session.date.clone(),
-            chars: 0,
-            sessions: 0,
-            group_count: 0,
-            accuracy_sum: 0.0,
-        });
+        let entry = days
+            .entry(session.date.clone())
+            .or_insert_with(|| HeatmapDay {
+                date: session.date.clone(),
+                chars: 0,
+                sessions: 0,
+                group_count: 0,
+                accuracy_sum: 0.0,
+            });
         entry.chars += session.total_chars;
         entry.sessions += 1;
         entry.group_count += session.groups.len() as u32;
@@ -215,7 +217,13 @@ mod tests {
         // 2026-07-17 is a Friday.
         let grid = build_heatmap(&[], "2026-07-17", 1, HeatmapColorMode::Volume).expect("grid");
         assert_eq!(grid.cells.len(), 7);
-        assert_eq!(grid.cells.first().map(|c| c.date.as_str()), Some("2026-07-13"));
-        assert_eq!(grid.cells.get(4).map(|c| c.date.as_str()), Some("2026-07-17"));
+        assert_eq!(
+            grid.cells.first().map(|c| c.date.as_str()),
+            Some("2026-07-13")
+        );
+        assert_eq!(
+            grid.cells.get(4).map(|c| c.date.as_str()),
+            Some("2026-07-17")
+        );
     }
 }

@@ -69,7 +69,7 @@ pub fn preset_id_for(sequence: &[char]) -> &'static str {
 
 /// UI selection for Sequence pills. Custom stays selected even if the order matches a preset.
 pub fn sequence_preset_id(settings: &crate::settings::TrainingSettings) -> &'static str {
-    if settings.sequence_is_custom {
+    if settings.curriculum.sequence_is_custom {
         "custom"
     } else {
         preset_id_for(settings.sequence())
@@ -81,8 +81,8 @@ pub fn preset_by_id(id: &str) -> Option<&'static SequencePreset> {
 }
 
 pub fn apply_custom_sequence(settings: &mut crate::settings::TrainingSettings) {
-    settings.custom_sequence = settings.sequence().to_vec();
-    settings.sequence_is_custom = true;
+    settings.curriculum.custom_sequence = settings.sequence().to_vec();
+    settings.curriculum.sequence_is_custom = true;
 }
 
 pub fn apply_sequence_preset(settings: &mut crate::settings::TrainingSettings, id: &str) {
@@ -90,13 +90,13 @@ pub fn apply_sequence_preset(settings: &mut crate::settings::TrainingSettings, i
         apply_custom_sequence(settings);
         return;
     }
-    settings.sequence_is_custom = false;
+    settings.curriculum.sequence_is_custom = false;
     if id == "lcwo" {
-        settings.custom_sequence.clear();
+        settings.curriculum.custom_sequence.clear();
         return;
     }
     if let Some(preset) = preset_by_id(id) {
-        settings.custom_sequence = preset.sequence.to_vec();
+        settings.curriculum.custom_sequence = preset.sequence.to_vec();
     }
 }
 
@@ -116,10 +116,10 @@ mod tests {
         let mut settings = TrainingSettings::default();
         apply_custom_sequence(&mut settings);
         assert_eq!(sequence_preset_id(&settings), "custom");
-        assert_eq!(settings.custom_sequence, LCWO_SEQUENCE);
+        assert_eq!(settings.curriculum.custom_sequence, LCWO_SEQUENCE);
         apply_sequence_preset(&mut settings, "lcwo");
         assert_eq!(sequence_preset_id(&settings), "lcwo");
-        assert!(!settings.sequence_is_custom);
+        assert!(!settings.curriculum.sequence_is_custom);
     }
 
     #[test]
@@ -130,6 +130,6 @@ mod tests {
         assert_eq!(sequence_preset_id(&settings), "custom");
         apply_sequence_preset(&mut settings, "alphabetical");
         assert_eq!(sequence_preset_id(&settings), "alphabetical");
-        assert!(!settings.sequence_is_custom);
+        assert!(!settings.curriculum.sequence_is_custom);
     }
 }

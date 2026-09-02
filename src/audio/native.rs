@@ -23,11 +23,11 @@ impl LiveQsb {
 
     fn store(&self, settings: &TrainingSettings) {
         self.enabled
-            .store(settings.qsb_enabled, Ordering::Relaxed);
+            .store(settings.band.qsb_enabled, Ordering::Relaxed);
         self.depth_bits
-            .store(settings.qsb_depth.to_bits(), Ordering::Relaxed);
+            .store(settings.band.qsb_depth.to_bits(), Ordering::Relaxed);
         self.rate_bits
-            .store(settings.qsb_rate_hz.to_bits(), Ordering::Relaxed);
+            .store(settings.band.qsb_rate_hz.to_bits(), Ordering::Relaxed);
     }
 
     fn gain_at(&self, t_sec: f64) -> f32 {
@@ -124,11 +124,8 @@ impl MorsePlayer {
         let epoch = self.bump_epoch();
         self.reset_stop_flag();
         self.tone_stream = None;
-        let (stream, finished) = start_tone_stream(
-            &plan,
-            Arc::clone(&self.qsb),
-            Arc::clone(&self.stop_flag),
-        )?;
+        let (stream, finished) =
+            start_tone_stream(&plan, Arc::clone(&self.qsb), Arc::clone(&self.stop_flag))?;
         self.tone_finished = Arc::clone(&finished);
         self.tone_stream = Some(stream);
         Ok(crate::audio::PlaybackWait::desktop(

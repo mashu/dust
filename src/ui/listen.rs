@@ -16,31 +16,29 @@ fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
     if pool.is_empty() {
         return 0;
     }
-    let added_from = |previous: Vec<char>| {
-        pool.iter()
-            .rposition(|c| !previous.contains(c))
-    };
-    match settings.char_set_mode {
+    let added_from = |previous: Vec<char>| pool.iter().rposition(|c| !previous.contains(c));
+    match settings.curriculum.char_set_mode {
         cw_core::CharSetMode::Digits => {
             let mut prev = settings.clone();
-            prev.digits_level = prev.digits_level.saturating_sub(1).max(1);
+            prev.curriculum.digits_level = prev.curriculum.digits_level.saturating_sub(1).max(1);
             added_from(compute_char_pool(&prev)).unwrap_or(pool.len() - 1)
         }
         cw_core::CharSetMode::Mixed => {
-            let pct = settings.mixed_letters_percent.min(100);
+            let pct = settings.curriculum.mixed_letters_percent.min(100);
             let try_letters = || {
                 let mut prev = settings.clone();
-                prev.level = prev.level.saturating_sub(1).max(1);
+                prev.curriculum.level = prev.curriculum.level.saturating_sub(1).max(1);
                 added_from(compute_char_pool(&prev))
             };
             let try_digits = || {
                 let mut prev = settings.clone();
-                prev.digits_level = prev.digits_level.saturating_sub(1).max(1);
+                prev.curriculum.digits_level =
+                    prev.curriculum.digits_level.saturating_sub(1).max(1);
                 added_from(compute_char_pool(&prev))
             };
             let letter_hit = (pct > 0).then(try_letters).flatten();
             let digit_hit = (pct < 100).then(try_digits).flatten();
-            match settings.mixed_auto_level_next_axis.flip() {
+            match settings.auto_level.mixed_auto_level_next_axis.flip() {
                 MixedAutoLevelAxis::Letters => letter_hit.or(digit_hit),
                 MixedAutoLevelAxis::Digits => digit_hit.or(letter_hit),
             }
@@ -48,7 +46,7 @@ fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
         }
         _ => {
             let mut prev = settings.clone();
-            prev.level = prev.level.saturating_sub(1).max(1);
+            prev.curriculum.level = prev.curriculum.level.saturating_sub(1).max(1);
             added_from(compute_char_pool(&prev)).unwrap_or(pool.len() - 1)
         }
     }

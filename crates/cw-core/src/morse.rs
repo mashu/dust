@@ -10,7 +10,9 @@ pub const LCWO_SEQUENCE: &[char] = &[
     '6', '0', 'X',
 ];
 
-pub use crate::level::{unlocked_count_for_level as unlocked_char_count_for_level, LEVEL_MIN as KOCH_LEVEL_MIN};
+pub use crate::level::{
+    unlocked_count_for_level as unlocked_char_count_for_level, LEVEL_MIN as KOCH_LEVEL_MIN,
+};
 /// Final level of the built-in LCWO curriculum (`LCWO_SEQUENCE.len() - 1`).
 pub const KOCH_LEVEL_MAX: u32 = (LCWO_SEQUENCE.len() as u32).saturating_sub(1);
 pub const DEFAULT_SLIDING_WINDOW_START: u32 = 1;
@@ -105,28 +107,6 @@ pub fn is_scored_char(ch: char) -> bool {
 /// Digits unlocked at digits level L (level 1 → digits 0–1).
 pub fn digits_unlocked_count(level: u32) -> usize {
     crate::level::unlocked_prefix(DIGITS, level).len()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MixedAutoLevelAxis {
-    Letters,
-    Digits,
-}
-
-impl MixedAutoLevelAxis {
-    pub fn flip(self) -> Self {
-        match self {
-            Self::Letters => Self::Digits,
-            Self::Digits => Self::Letters,
-        }
-    }
-}
-
-impl Default for MixedAutoLevelAxis {
-    fn default() -> Self {
-        Self::Letters
-    }
 }
 
 #[cfg(test)]

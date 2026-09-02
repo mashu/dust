@@ -239,10 +239,8 @@ fn install_resume_on_foreground(ctx: &AudioContext) {
         let _ = ctx.resume();
     }) as Box<dyn FnMut()>);
     if let Some(doc) = web_sys::window().and_then(|window| window.document()) {
-        let _ = doc.add_event_listener_with_callback(
-            "visibilitychange",
-            closure.as_ref().unchecked_ref(),
-        );
+        let _ = doc
+            .add_event_listener_with_callback("visibilitychange", closure.as_ref().unchecked_ref());
     }
     closure.forget();
 }
@@ -290,7 +288,10 @@ fn add_frequency_modulation(
     Ok(())
 }
 
-fn fill_noise_buffer(ctx: &AudioContext, fill: impl FnMut(usize) -> f32) -> Result<web_sys::AudioBuffer, String> {
+fn fill_noise_buffer(
+    ctx: &AudioContext,
+    fill: impl FnMut(usize) -> f32,
+) -> Result<web_sys::AudioBuffer, String> {
     fill_noise_buffer_with(ctx, fill)
 }
 
@@ -312,7 +313,10 @@ fn fill_noise_buffer_with(
     Ok(buffer)
 }
 
-fn looping_source(ctx: &AudioContext, buffer: &web_sys::AudioBuffer) -> Result<AudioBufferSourceNode, String> {
+fn looping_source(
+    ctx: &AudioContext,
+    buffer: &web_sys::AudioBuffer,
+) -> Result<AudioBufferSourceNode, String> {
     let source = ctx
         .create_buffer_source()
         .map_err(|e| format!("buffer source: {e:?}"))?;
@@ -366,14 +370,16 @@ fn add_qsb(
     settings: &TrainingSettings,
     graph: &mut BandGraph,
 ) -> Result<(), String> {
-    if !settings.qsb_enabled || settings.qsb_depth <= 0.0 {
+    if !settings.band.qsb_enabled || settings.band.qsb_depth <= 0.0 {
         return Ok(());
     }
-    let depth = settings.qsb_depth.clamp(0.0, 1.0);
-    let rate = settings.qsb_rate_hz.clamp(0.03, 1.5);
+    let depth = settings.band.qsb_depth.clamp(0.0, 1.0);
+    let rate = settings.band.qsb_rate_hz.clamp(0.03, 1.5);
     let gain_range = depth.min(1.0 - QSB_MIN_GAIN);
     let base_gain = 1.0 - gain_range / 2.0;
-    let lfo = ctx.create_oscillator().map_err(|e| format!("qsb osc: {e:?}"))?;
+    let lfo = ctx
+        .create_oscillator()
+        .map_err(|e| format!("qsb osc: {e:?}"))?;
     let lfo_gain = ctx.create_gain().map_err(|e| format!("qsb gain: {e:?}"))?;
     cw_gain
         .gain()
@@ -404,10 +410,10 @@ fn add_qrn(
     settings: &TrainingSettings,
     graph: &mut BandGraph,
 ) -> Result<(), String> {
-    if !settings.qrn_enabled || settings.qrn_level <= 0.0 {
+    if !settings.band.qrn_enabled || settings.band.qrn_level <= 0.0 {
         return Ok(());
     }
-    let level = settings.qrn_level.clamp(0.0, 1.0);
+    let level = settings.band.qrn_level.clamp(0.0, 1.0);
     let source = create_white_noise(ctx)?;
     let bandpass = ctx
         .create_biquad_filter()
@@ -446,15 +452,21 @@ fn add_passband_qrm(
     settings: &TrainingSettings,
     graph: &mut BandGraph,
 ) -> Result<(), String> {
-    let level = settings.qrm_level.clamp(0.0, 1.0);
-    let model_gain = settings.receiver_background_gain.clamp(0.0, 20.0);
-    let resonance = settings.receiver_background_resonance.clamp(0.5, 240.0);
-    let offset_hz = settings.receiver_background_offset_hz.clamp(-1000.0, 1000.0);
+    let level = settings.band.qrm_level.clamp(0.0, 1.0);
+    let model_gain = settings.band.receiver_background_gain.clamp(0.0, 20.0);
+    let resonance = settings
+        .band
+        .receiver_background_resonance
+        .clamp(0.5, 240.0);
+    let offset_hz = settings
+        .band
+        .receiver_background_offset_hz
+        .clamp(-1000.0, 1000.0);
     let center = settings.side_tone_center();
     let source = create_resonator_source(
         ctx,
-        settings.receiver_background_excitation_rate,
-        settings.receiver_background_decay,
+        settings.band.receiver_background_excitation_rate,
+        settings.band.receiver_background_decay,
     )?;
     let primary = ctx
         .create_biquad_filter()
@@ -462,7 +474,9 @@ fn add_passband_qrm(
     let secondary = ctx
         .create_biquad_filter()
         .map_err(|e| format!("qrm s: {e:?}"))?;
-    let amplitude_lfo = ctx.create_oscillator().map_err(|e| format!("qrm lfo: {e:?}"))?;
+    let amplitude_lfo = ctx
+        .create_oscillator()
+        .map_err(|e| format!("qrm lfo: {e:?}"))?;
     let amplitude_gain = ctx.create_gain().map_err(|e| format!("qrm ag: {e:?}"))?;
     let gain = ctx.create_gain().map_err(|e| format!("qrm g: {e:?}"))?;
     let base_gain = QRM_OUTPUT_GAIN * level * model_gain;
@@ -491,15 +505,15 @@ fn add_passband_qrm(
     add_frequency_modulation(
         ctx,
         &primary.frequency(),
-        settings.receiver_background_offset_mod_depth_hz,
-        settings.receiver_background_offset_mod_rate_hz,
+        settings.band.receiver_background_offset_mod_depth_hz,
+        settings.band.receiver_background_offset_mod_rate_hz,
         graph,
     )?;
     add_frequency_modulation(
         ctx,
         &secondary.frequency(),
-        settings.receiver_background_offset_mod_depth_hz * 0.65,
-        settings.receiver_background_offset_mod_rate_hz * 0.73,
+        settings.band.receiver_background_offset_mod_depth_hz * 0.65,
+        settings.band.receiver_background_offset_mod_rate_hz * 0.73,
         graph,
     )?;
     amplitude_lfo.set_type(OscillatorType::Sine);
@@ -553,15 +567,21 @@ fn add_ringing_qrm(
     settings: &TrainingSettings,
     graph: &mut BandGraph,
 ) -> Result<(), String> {
-    let level = settings.qrm_level.clamp(0.0, 1.0);
-    let model_gain = settings.receiver_background_gain.clamp(0.0, 20.0);
-    let resonance = settings.receiver_background_resonance.clamp(0.5, 240.0);
-    let offset_hz = settings.receiver_background_offset_hz.clamp(-1000.0, 1000.0);
+    let level = settings.band.qrm_level.clamp(0.0, 1.0);
+    let model_gain = settings.band.receiver_background_gain.clamp(0.0, 20.0);
+    let resonance = settings
+        .band
+        .receiver_background_resonance
+        .clamp(0.5, 240.0);
+    let offset_hz = settings
+        .band
+        .receiver_background_offset_hz
+        .clamp(-1000.0, 1000.0);
     let center = settings.side_tone_center();
     let source = create_resonator_source(
         ctx,
-        settings.receiver_background_excitation_rate,
-        settings.receiver_background_decay,
+        settings.band.receiver_background_excitation_rate,
+        settings.band.receiver_background_decay,
     )?;
     let filter = ctx
         .create_biquad_filter()
@@ -579,12 +599,15 @@ fn add_ringing_qrm(
     add_frequency_modulation(
         ctx,
         &filter.frequency(),
-        settings.receiver_background_offset_mod_depth_hz,
-        settings.receiver_background_offset_mod_rate_hz,
+        settings.band.receiver_background_offset_mod_depth_hz,
+        settings.band.receiver_background_offset_mod_rate_hz,
         graph,
     )?;
     gain.gain()
-        .set_value_at_time((RINGING_OUTPUT_GAIN * level * model_gain) as f32, ctx.current_time())
+        .set_value_at_time(
+            (RINGING_OUTPUT_GAIN * level * model_gain) as f32,
+            ctx.current_time(),
+        )
         .map_err(|e| format!("ring level: {e:?}"))?;
     source
         .connect_with_audio_node(&filter)
@@ -607,13 +630,19 @@ fn add_qrm(
     settings: &TrainingSettings,
     graph: &mut BandGraph,
 ) -> Result<(), String> {
-    if !settings.qrm_enabled || settings.qrm_level <= 0.0 {
+    if !settings.band.qrm_enabled || settings.band.qrm_level <= 0.0 {
         return Ok(());
     }
-    if matches!(settings.qrm_profile, QrmProfile::Whistle | QrmProfile::Mixed) {
+    if matches!(
+        settings.band.qrm_profile,
+        QrmProfile::Whistle | QrmProfile::Mixed
+    ) {
         add_passband_qrm(ctx, mix_gain, settings, graph)?;
     }
-    if matches!(settings.qrm_profile, QrmProfile::Ringing | QrmProfile::Mixed) {
+    if matches!(
+        settings.band.qrm_profile,
+        QrmProfile::Ringing | QrmProfile::Mixed
+    ) {
         add_ringing_qrm(ctx, mix_gain, settings, graph)?;
     }
     Ok(())

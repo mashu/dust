@@ -62,7 +62,8 @@ pub fn StreakCard(status: StreakStatus) -> Element {
 pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
     let mut mode = use_signal(|| HeatmapColorMode::Volume);
     let mut selected = use_signal(|| None::<String>);
-    let Some(grid) = cw_core::build_heatmap(&sessions, &today, cw_core::HEATMAP_WEEKS, mode()) else {
+    let Some(grid) = cw_core::build_heatmap(&sessions, &today, cw_core::HEATMAP_WEEKS, mode())
+    else {
         return rsx! {};
     };
     let legend = if mode() == HeatmapColorMode::Volume {
@@ -70,14 +71,17 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
     } else {
         "Better copy"
     };
-    let selected_cell = selected().and_then(|date| {
-        grid.cells.iter().find(|c| c.date == date).cloned()
-    });
+    let selected_cell =
+        selected().and_then(|date| grid.cells.iter().find(|c| c.date == date).cloned());
     let selected_summary = selected_cell.as_ref().map(|cell| {
         if cell.sessions == 0 {
             format!("{} · no practice", cell.date)
         } else {
-            let noun = if cell.sessions == 1 { "session" } else { "sessions" };
+            let noun = if cell.sessions == 1 {
+                "session"
+            } else {
+                "sessions"
+            };
             let mut text = format!(
                 "{} · {} {noun} · {} chars",
                 cell.date, cell.sessions, cell.chars

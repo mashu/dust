@@ -82,8 +82,14 @@ impl BandMixer {
         let sr = f64::from(sample_rate.max(1));
         let settings = settings.clone().clamp();
         let center = settings.side_tone_center();
-        let resonance = settings.receiver_background_resonance.clamp(0.5, 240.0);
-        let offset = settings.receiver_background_offset_hz.clamp(-1000.0, 1000.0);
+        let resonance = settings
+            .band
+            .receiver_background_resonance
+            .clamp(0.5, 240.0);
+        let offset = settings
+            .band
+            .receiver_background_offset_hz
+            .clamp(-1000.0, 1000.0);
         Self {
             sample_rate: sr,
             rng: FastrandRng(seed | 1),
@@ -106,16 +112,23 @@ impl BandMixer {
     }
 
     pub fn needs_background(settings: &TrainingSettings) -> bool {
-        (settings.qrn_enabled && settings.qrn_level > 0.0)
-            || (settings.qrm_enabled && settings.qrm_level > 0.0)
+        (settings.band.qrn_enabled && settings.band.qrn_level > 0.0)
+            || (settings.band.qrm_enabled && settings.band.qrm_level > 0.0)
     }
 
     fn excitation_sample(&mut self) -> f64 {
-        let rate = self.settings.receiver_background_excitation_rate.clamp(0.1, 500.0);
-        let decay = self.settings.receiver_background_decay.clamp(0.5, 0.9999);
+        let rate = self
+            .settings
+            .band
+            .receiver_background_excitation_rate
+            .clamp(0.1, 500.0);
+        let decay = self
+            .settings
+            .band
+            .receiver_background_decay
+            .clamp(0.5, 0.9999);
         if self.rng.f64() < rate / self.sample_rate {
-            self.ringing_energy +=
-                (self.rng.f64() * 2.0 - 1.0) * (0.6 + self.rng.f64() * 0.4);
+            self.ringing_energy += (self.rng.f64() * 2.0 - 1.0) * (0.6 + self.rng.f64() * 0.4);
         }
         self.ringing_energy *= decay;
         self.ringing_energy + (self.rng.f64() * 2.0 - 1.0) * 0.015
@@ -130,24 +143,39 @@ impl BandMixer {
     }
 
     fn qrm_sample(&mut self) -> f64 {
-        if !self.settings.qrm_enabled || self.settings.qrm_level <= 0.0 {
+        if !self.settings.band.qrm_enabled || self.settings.band.qrm_level <= 0.0 {
             return 0.0;
         }
-        let level = self.settings.qrm_level.clamp(0.0, 1.0);
-        let model_gain = self.settings.receiver_background_gain.clamp(0.0, 20.0);
+        let level = self.settings.band.qrm_level.clamp(0.0, 1.0);
+        let model_gain = self.settings.band.receiver_background_gain.clamp(0.0, 20.0);
         let center = self.settings.side_tone_center();
-        let offset = self.settings.receiver_background_offset_hz.clamp(-1000.0, 1000.0);
-        let depth = self.settings.receiver_background_offset_mod_depth_hz.clamp(0.0, 1000.0);
-        let rate = self.settings.receiver_background_offset_mod_rate_hz.clamp(0.0, 20.0);
-        let resonance = self.settings.receiver_background_resonance.clamp(0.5, 240.0);
+        let offset = self
+            .settings
+            .band
+            .receiver_background_offset_hz
+            .clamp(-1000.0, 1000.0);
+        let depth = self
+            .settings
+            .band
+            .receiver_background_offset_mod_depth_hz
+            .clamp(0.0, 1000.0);
+        let rate = self
+            .settings
+            .band
+            .receiver_background_offset_mod_rate_hz
+            .clamp(0.0, 20.0);
+        let resonance = self
+            .settings
+            .band
+            .receiver_background_resonance
+            .clamp(0.5, 240.0);
         let grain = self.excitation_sample();
         let mut out = 0.0;
-        let profile = self.settings.qrm_profile;
+        let profile = self.settings.band.qrm_profile;
 
         if matches!(profile, QrmProfile::Whistle | QrmProfile::Mixed) {
             let primary_f = center + offset + Self::wobble(self.t, depth, rate);
-            let secondary_f = center
-                - (offset.abs() + 35.0).max(20.0)
+            let secondary_f = center - (offset.abs() + 35.0).max(20.0)
                 + Self::wobble(self.t, depth * 0.65, rate * 0.73);
             self.qrm_primary
                 .set_bandpass(self.sample_rate, primary_f, resonance);
@@ -164,20 +192,17 @@ impl BandMixer {
             let ring_f = center + offset - 35.0 + Self::wobble(self.t, depth, rate);
             self.qrm_ring
                 .set_bandpass(self.sample_rate, ring_f, (resonance * 1.45).min(320.0));
-            out += self.qrm_ring.process(grain)
-                * RINGING_OUTPUT_GAIN
-                * level
-                * model_gain;
+            out += self.qrm_ring.process(grain) * RINGING_OUTPUT_GAIN * level * model_gain;
         }
         out
     }
 
     fn qrn_sample(&mut self) -> f64 {
-        if !self.settings.qrn_enabled || self.settings.qrn_level <= 0.0 {
+        if !self.settings.band.qrn_enabled || self.settings.band.qrn_level <= 0.0 {
             return 0.0;
         }
         let noise = self.rng.f64() * 2.0 - 1.0;
-        self.qrn.process(noise) * QRN_OUTPUT_GAIN * self.settings.qrn_level.clamp(0.0, 1.0)
+        self.qrn.process(noise) * QRN_OUTPUT_GAIN * self.settings.band.qrn_level.clamp(0.0, 1.0)
     }
 
     pub fn next_background(&mut self) -> f32 {
@@ -213,9 +238,9 @@ pub fn apply_qsb(samples: &mut [f32], sample_rate: u32, settings: &TrainingSetti
     for (i, sample) in samples.iter_mut().enumerate() {
         *sample *= qsb_gain_at(
             i as f64 / sr,
-            settings.qsb_enabled,
-            settings.qsb_depth,
-            settings.qsb_rate_hz,
+            settings.band.qsb_enabled,
+            settings.band.qsb_depth,
+            settings.band.qsb_rate_hz,
         );
     }
 }
@@ -227,9 +252,9 @@ mod tests {
     #[test]
     fn qsb_modulates_amplitude() {
         let mut settings = TrainingSettings::default();
-        settings.qsb_enabled = true;
-        settings.qsb_depth = 1.0;
-        settings.qsb_rate_hz = 1.0;
+        settings.band.qsb_enabled = true;
+        settings.band.qsb_depth = 1.0;
+        settings.band.qsb_rate_hz = 1.0;
         let mut samples = vec![1.0f32; 48_000];
         apply_qsb(&mut samples, 48_000, &settings);
         let min = samples.iter().copied().fold(f32::MAX, f32::min);

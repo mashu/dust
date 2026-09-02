@@ -20,32 +20,32 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
         div { class: "card stack",
             div { class: "tiny", "Character set" }
             div { class: "mode-pills",
-                ModePill { label: "Koch".to_string(), active: s.char_set_mode == CharSetMode::Koch, onclick: move |_| {
+                ModePill { label: "Koch".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Koch, onclick: move |_| {
                     let w = &mut *settings.write();
-                    w.char_set_mode = CharSetMode::Koch;
-                    w.practice_window = Some(PracticeWindow::All);
+                    w.curriculum.char_set_mode = CharSetMode::Koch;
+                    w.curriculum.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
-                ModePill { label: "Digits".to_string(), active: s.char_set_mode == CharSetMode::Digits, onclick: move |_| {
+                ModePill { label: "Digits".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Digits, onclick: move |_| {
                     let w = &mut *settings.write();
-                    w.char_set_mode = CharSetMode::Digits;
-                    w.practice_window = Some(PracticeWindow::All);
+                    w.curriculum.char_set_mode = CharSetMode::Digits;
+                    w.curriculum.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
-                ModePill { label: "Mixed".to_string(), active: s.char_set_mode == CharSetMode::Mixed, onclick: move |_| {
+                ModePill { label: "Mixed".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Mixed, onclick: move |_| {
                     let w = &mut *settings.write();
-                    w.char_set_mode = CharSetMode::Mixed;
-                    w.practice_window = Some(PracticeWindow::All);
+                    w.curriculum.char_set_mode = CharSetMode::Mixed;
+                    w.curriculum.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
-                ModePill { label: "Custom".to_string(), active: s.char_set_mode == CharSetMode::Custom, onclick: move |_| {
+                ModePill { label: "Custom".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Custom, onclick: move |_| {
                     let w = &mut *settings.write();
-                    w.char_set_mode = CharSetMode::Custom;
-                    w.practice_window = Some(PracticeWindow::All);
+                    w.curriculum.char_set_mode = CharSetMode::Custom;
+                    w.curriculum.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
             }
-            if s.char_set_mode != CharSetMode::Digits {
+            if s.curriculum.char_set_mode != CharSetMode::Digits {
                 div { class: "tiny", "Sequence" }
                 div { class: "mode-pills",
                     for preset_def in SEQUENCE_PRESETS.iter() {
@@ -85,8 +85,8 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         oninput: move |e| {
                             let w = &mut *settings.write();
                             let typed: Vec<char> = e.value().chars().collect();
-                            w.custom_sequence = TrainingSettings::unique_alphabet(&typed);
-                            w.sequence_is_custom = !w.custom_sequence.is_empty();
+                            w.curriculum.custom_sequence = TrainingSettings::unique_alphabet(&typed);
+                            w.curriculum.sequence_is_custom = !w.curriculum.custom_sequence.is_empty();
                             fit_settings_to_alphabet(w);
                         }
                     }
@@ -104,42 +104,42 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     fit_settings_to_alphabet(w);
                 }
             }
-            if s.char_set_mode == CharSetMode::Mixed {
+            if s.curriculum.char_set_mode == CharSetMode::Mixed {
                 NumberField {
                     label: "Digits level (1–{MAX_DIGITS_LEVEL})",
-                    value: s.digits_level as f64,
+                    value: s.curriculum.digits_level as f64,
                     min: 1.0,
                     max: MAX_DIGITS_LEVEL as f64,
                     step: 1.0,
                     onchange: move |v| {
                         let w = &mut *settings.write();
-                        w.digits_level = v as u32;
+                        w.curriculum.digits_level = v as u32;
                         fit_settings_to_alphabet(w);
                     }
                 }
             }
-            if s.char_set_mode == CharSetMode::Mixed {
+            if s.curriculum.char_set_mode == CharSetMode::Mixed {
                 NumberField {
                     label: "Mixed letters %".to_string(),
-                    value: s.mixed_letters_percent as f64,
+                    value: s.curriculum.mixed_letters_percent as f64,
                     min: 0.0,
                     max: 100.0,
                     step: 5.0,
                     onchange: move |v| {
                         let w = &mut *settings.write();
-                        w.mixed_letters_percent = v as u32;
+                        w.curriculum.mixed_letters_percent = v as u32;
                         fit_settings_to_alphabet(w);
                     },
                 }
             }
-            if s.char_set_mode == CharSetMode::Custom {
+            if s.curriculum.char_set_mode == CharSetMode::Custom {
                 div { class: "field",
                     label { "Custom alphabet" }
                     input {
-                        value: "{s.custom_set.iter().collect::<String>()}",
+                        value: "{s.curriculum.custom_set.iter().collect::<String>()}",
                         oninput: move |e| {
                             let w = &mut *settings.write();
-                            w.custom_set = TrainingSettings::unique_alphabet(
+                            w.curriculum.custom_set = TrainingSettings::unique_alphabet(
                                 &e.value().chars().collect::<Vec<_>>(),
                             );
                             fit_settings_to_alphabet(w);

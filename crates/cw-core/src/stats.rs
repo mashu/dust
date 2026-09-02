@@ -194,9 +194,11 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
             MasteryStatus::Building => 1,
             MasteryStatus::Mastered => 2,
         };
-        rank(a.status)
-            .cmp(&rank(b.status))
-            .then(a.accuracy_pct.partial_cmp(&b.accuracy_pct).unwrap_or(std::cmp::Ordering::Equal))
+        rank(a.status).cmp(&rank(b.status)).then(
+            a.accuracy_pct
+                .partial_cmp(&b.accuracy_pct)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     out
 }
@@ -323,9 +325,11 @@ pub fn confusion_entries(sessions: &[SessionResult], limit: usize) -> Vec<Confus
         })
         .collect();
     rows.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then(b.percentage.partial_cmp(&a.percentage).unwrap_or(std::cmp::Ordering::Equal))
+        b.count.cmp(&a.count).then(
+            b.percentage
+                .partial_cmp(&a.percentage)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     rows.truncate(limit);
     rows
@@ -445,7 +449,7 @@ mod tests {
     #[test]
     fn sampling_rows_ignore_other_char_set_modes() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
         let mut koch = session();
         koch.char_set_mode = CharSetMode::Koch;
         koch.letter_accuracy.clear();

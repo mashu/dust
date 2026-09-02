@@ -52,66 +52,66 @@ pub fn BandConditionsCard(
             ToggleRow {
                 label: "QSB fading",
                 description: "Slow gain changes on the Morse signal only.",
-                enabled: s.qsb_enabled,
-                onchange: move |on| settings.write().qsb_enabled = on,
+                enabled: s.band.qsb_enabled,
+                onchange: move |on| settings.write().band.qsb_enabled = on,
             }
             div { class: "field-grid",
                 RangeField {
-                    label: format!("Depth ({:.0}%)", s.qsb_depth * 100.0),
-                    value: s.qsb_depth,
+                    label: format!("Depth ({:.0}%)", s.band.qsb_depth * 100.0),
+                    value: s.band.qsb_depth,
                     min: 0.0,
                     max: 1.0,
                     step: 0.05,
-                    disabled: !s.qsb_enabled,
-                    onchange: move |v| settings.write().qsb_depth = v,
+                    disabled: !s.band.qsb_enabled,
+                    onchange: move |v| settings.write().band.qsb_depth = v,
                 }
                 RangeField {
-                    label: format!("Rate ({:.2} Hz)", s.qsb_rate_hz),
-                    value: s.qsb_rate_hz,
+                    label: format!("Rate ({:.2} Hz)", s.band.qsb_rate_hz),
+                    value: s.band.qsb_rate_hz,
                     min: 0.03,
                     max: 1.5,
                     step: 0.01,
-                    disabled: !s.qsb_enabled,
-                    onchange: move |v| settings.write().qsb_rate_hz = v,
+                    disabled: !s.band.qsb_enabled,
+                    onchange: move |v| settings.write().band.qsb_rate_hz = v,
                 }
             }
             ToggleRow {
                 label: "QRN static",
                 description: "Atmospheric noise inside the CW passband.",
-                enabled: s.qrn_enabled,
-                onchange: move |on| settings.write().qrn_enabled = on,
+                enabled: s.band.qrn_enabled,
+                onchange: move |on| settings.write().band.qrn_enabled = on,
             }
             RangeField {
-                label: format!("Intensity ({:.0}%)", s.qrn_level * 100.0),
-                value: s.qrn_level,
+                label: format!("Intensity ({:.0}%)", s.band.qrn_level * 100.0),
+                value: s.band.qrn_level,
                 min: 0.0,
                 max: 1.0,
                 step: 0.05,
-                disabled: !s.qrn_enabled,
-                onchange: move |v| settings.write().qrn_level = v,
+                disabled: !s.band.qrn_enabled,
+                onchange: move |v| settings.write().band.qrn_level = v,
             }
             ToggleRow {
                 label: "Receiver background",
                 description: "Narrow-filter hiss, ringing, and passband breathing.",
-                enabled: s.qrm_enabled,
-                onchange: move |on| settings.write().qrm_enabled = on,
+                enabled: s.band.qrm_enabled,
+                onchange: move |on| settings.write().band.qrm_enabled = on,
             }
             div { class: "field-grid",
                 RangeField {
-                    label: format!("Intensity ({:.0}%)", s.qrm_level * 100.0),
-                    value: s.qrm_level,
+                    label: format!("Intensity ({:.0}%)", s.band.qrm_level * 100.0),
+                    value: s.band.qrm_level,
                     min: 0.0,
                     max: 1.0,
                     step: 0.05,
-                    disabled: !s.qrm_enabled,
-                    onchange: move |v| settings.write().qrm_level = v,
+                    disabled: !s.band.qrm_enabled,
+                    onchange: move |v| settings.write().band.qrm_level = v,
                 }
                 div { class: "field",
                     label { "Profile" }
                     div { class: "mode-pills",
-                        ModePill { label: "Whistle", active: s.qrm_profile == QrmProfile::Whistle, disabled: !s.qrm_enabled, onclick: move |_| settings.write().qrm_profile = QrmProfile::Whistle }
-                        ModePill { label: "Ringing", active: s.qrm_profile == QrmProfile::Ringing, disabled: !s.qrm_enabled, onclick: move |_| settings.write().qrm_profile = QrmProfile::Ringing }
-                        ModePill { label: "Mixed", active: s.qrm_profile == QrmProfile::Mixed, disabled: !s.qrm_enabled, onclick: move |_| settings.write().qrm_profile = QrmProfile::Mixed }
+                        ModePill { label: "Whistle", active: s.band.qrm_profile == QrmProfile::Whistle, disabled: !s.band.qrm_enabled, onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Whistle }
+                        ModePill { label: "Ringing", active: s.band.qrm_profile == QrmProfile::Ringing, disabled: !s.band.qrm_enabled, onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Ringing }
+                        ModePill { label: "Mixed", active: s.band.qrm_profile == QrmProfile::Mixed, disabled: !s.band.qrm_enabled, onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Mixed }
                     }
                 }
             }
@@ -121,7 +121,7 @@ pub fn BandConditionsCard(
                 span {
                     div { class: "tiny", "Advanced receiver tuning" }
                     div { class: "muted",
-                        "Gain {s.receiver_background_gain:.0}× · Q {s.receiver_background_resonance:.0} · offset {s.receiver_background_offset_hz:.0} Hz"
+                        "Gain {s.band.receiver_background_gain:.0}× · Q {s.band.receiver_background_resonance:.0} · offset {s.band.receiver_background_offset_hz:.0} Hz"
                     }
                 }
                 span { class: "muted", if show_advanced() { "▼" } else { "▶" } }
@@ -129,67 +129,67 @@ pub fn BandConditionsCard(
             if show_advanced() {
                 div { class: "field-grid",
                     RangeField {
-                        label: format!("Model gain ({:.1}×)", s.receiver_background_gain),
-                        value: s.receiver_background_gain,
+                        label: format!("Model gain ({:.1}×)", s.band.receiver_background_gain),
+                        value: s.band.receiver_background_gain,
                         min: 0.0,
                         max: 20.0,
                         step: 0.1,
-                        disabled: !s.qrm_enabled,
-                        onchange: move |v| settings.write().receiver_background_gain = v,
+                        disabled: !s.band.qrm_enabled,
+                        onchange: move |v| settings.write().band.receiver_background_gain = v,
                     }
                     RangeField {
-                        label: format!("Excitation ({:.0}/s)", s.receiver_background_excitation_rate),
-                        value: s.receiver_background_excitation_rate,
+                        label: format!("Excitation ({:.0}/s)", s.band.receiver_background_excitation_rate),
+                        value: s.band.receiver_background_excitation_rate,
                         min: 0.1,
                         max: 500.0,
                         step: 1.0,
-                        disabled: !s.qrm_enabled,
-                        onchange: move |v| settings.write().receiver_background_excitation_rate = v,
+                        disabled: !s.band.qrm_enabled,
+                        onchange: move |v| settings.write().band.receiver_background_excitation_rate = v,
                     }
                     RangeField {
-                        label: format!("Resonance Q ({:.0})", s.receiver_background_resonance),
-                        value: s.receiver_background_resonance,
+                        label: format!("Resonance Q ({:.0})", s.band.receiver_background_resonance),
+                        value: s.band.receiver_background_resonance,
                         min: 0.5,
                         max: 240.0,
                         step: 0.5,
-                        disabled: !s.qrm_enabled,
-                        onchange: move |v| settings.write().receiver_background_resonance = v,
+                        disabled: !s.band.qrm_enabled,
+                        onchange: move |v| settings.write().band.receiver_background_resonance = v,
                     }
                     RangeField {
-                        label: format!("Decay ({:.3})", s.receiver_background_decay),
-                        value: s.receiver_background_decay,
+                        label: format!("Decay ({:.3})", s.band.receiver_background_decay),
+                        value: s.band.receiver_background_decay,
                         min: 0.5,
                         max: 0.9999,
                         step: 0.0001,
-                        disabled: !s.qrm_enabled,
-                        onchange: move |v| settings.write().receiver_background_decay = v,
+                        disabled: !s.band.qrm_enabled,
+                        onchange: move |v| settings.write().band.receiver_background_decay = v,
                     }
                     RangeField {
-                        label: format!("Filter offset ({:.0} Hz)", s.receiver_background_offset_hz),
-                        value: s.receiver_background_offset_hz,
+                        label: format!("Filter offset ({:.0} Hz)", s.band.receiver_background_offset_hz),
+                        value: s.band.receiver_background_offset_hz,
                         min: -1000.0,
                         max: 1000.0,
                         step: 5.0,
-                        disabled: !s.qrm_enabled,
-                        onchange: move |v| settings.write().receiver_background_offset_hz = v,
+                        disabled: !s.band.qrm_enabled,
+                        onchange: move |v| settings.write().band.receiver_background_offset_hz = v,
                     }
                     RangeField {
-                        label: format!("Wobble depth ({:.0} Hz)", s.receiver_background_offset_mod_depth_hz),
-                        value: s.receiver_background_offset_mod_depth_hz,
+                        label: format!("Wobble depth ({:.0} Hz)", s.band.receiver_background_offset_mod_depth_hz),
+                        value: s.band.receiver_background_offset_mod_depth_hz,
                         min: 0.0,
                         max: 1000.0,
                         step: 5.0,
-                        disabled: !s.qrm_enabled,
-                        onchange: move |v| settings.write().receiver_background_offset_mod_depth_hz = v,
+                        disabled: !s.band.qrm_enabled,
+                        onchange: move |v| settings.write().band.receiver_background_offset_mod_depth_hz = v,
                     }
                     RangeField {
-                        label: format!("Wobble rate ({:.2} Hz)", s.receiver_background_offset_mod_rate_hz),
-                        value: s.receiver_background_offset_mod_rate_hz,
+                        label: format!("Wobble rate ({:.2} Hz)", s.band.receiver_background_offset_mod_rate_hz),
+                        value: s.band.receiver_background_offset_mod_rate_hz,
                         min: 0.0,
                         max: 20.0,
                         step: 0.01,
-                        disabled: !s.qrm_enabled,
-                        onchange: move |v| settings.write().receiver_background_offset_mod_rate_hz = v,
+                        disabled: !s.band.qrm_enabled,
+                        onchange: move |v| settings.write().band.receiver_background_offset_mod_rate_hz = v,
                     }
                 }
             }

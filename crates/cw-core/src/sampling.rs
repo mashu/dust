@@ -42,11 +42,11 @@ pub struct CharSamplingConfig {
 
 pub fn config_from_settings(settings: &TrainingSettings) -> CharSamplingConfig {
     CharSamplingConfig {
-        error_weight_strength: settings.error_weight_strength,
-        coverage_strength: settings.char_sampling_coverage_strength,
-        thompson_sampling: settings.char_sampling_thompson,
-        mixed_letters_percent: settings.mixed_letters_percent,
-        char_set_mode: settings.char_set_mode,
+        error_weight_strength: settings.auto_level.error_weight_strength,
+        coverage_strength: settings.auto_level.char_sampling_coverage_strength,
+        thompson_sampling: settings.auto_level.char_sampling_thompson,
+        mixed_letters_percent: settings.curriculum.mixed_letters_percent,
+        char_set_mode: settings.curriculum.char_set_mode,
     }
 }
 
@@ -210,7 +210,10 @@ pub fn compute_raw_sampling_weights(
 }
 
 pub fn normalize_weights(pool: &[char], weights: &BTreeMap<char, f64>) -> BTreeMap<char, f64> {
-    let total: f64 = pool.iter().map(|c| weights.get(c).copied().unwrap_or(0.0)).sum();
+    let total: f64 = pool
+        .iter()
+        .map(|c| weights.get(c).copied().unwrap_or(0.0))
+        .sum();
     let mut out = BTreeMap::new();
     if total <= 0.0 {
         let uniform = if pool.is_empty() {
@@ -336,11 +339,12 @@ pub fn generate_training_group(
 ) -> (String, CharSamplingState) {
     let pool = compute_char_pool(settings);
     let span = settings
+        .curriculum
         .max_group_size
-        .saturating_sub(settings.min_group_size)
+        .saturating_sub(settings.curriculum.min_group_size)
         + 1;
-    let group_size =
-        settings.min_group_size as usize + rng.usize_in(0, span.saturating_sub(1) as usize);
+    let group_size = settings.curriculum.min_group_size as usize
+        + rng.usize_in(0, span.saturating_sub(1) as usize);
     let config = config_from_settings(settings);
     sample_training_group(&pool, group_size, state, &config, rng)
 }
@@ -353,10 +357,10 @@ mod tests {
     #[test]
     fn group_length_respects_fixed_size() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Koch;
-        settings.level = 1;
-        settings.min_group_size = 3;
-        settings.max_group_size = 3;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 1;
+        settings.curriculum.min_group_size = 3;
+        settings.curriculum.max_group_size = 3;
         let state = CharSamplingState::default();
         let mut rng = FastrandRng::default();
         let (group, _) = generate_training_group(&settings, &state, &mut rng);
@@ -385,10 +389,10 @@ mod tests {
     #[test]
     fn generated_group_is_never_empty_for_koch() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Koch;
-        settings.level = 1;
-        settings.min_group_size = 1;
-        settings.max_group_size = 1;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 1;
+        settings.curriculum.min_group_size = 1;
+        settings.curriculum.max_group_size = 1;
         let state = CharSamplingState::default();
         let mut rng = FastrandRng::default();
         let (group, _) = generate_training_group(&settings, &state, &mut rng);
@@ -451,12 +455,12 @@ mod tests {
     #[test]
     fn mixed_100_percent_never_samples_digits() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Mixed;
-        settings.mixed_letters_percent = 100;
-        settings.level = 5;
-        settings.digits_level = 9;
-        settings.min_group_size = 4;
-        settings.max_group_size = 4;
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        settings.curriculum.mixed_letters_percent = 100;
+        settings.curriculum.level = 5;
+        settings.curriculum.digits_level = 9;
+        settings.curriculum.min_group_size = 4;
+        settings.curriculum.max_group_size = 4;
         let mut state = CharSamplingState::default();
         let mut rng = FastrandRng::default();
         for _ in 0..40 {

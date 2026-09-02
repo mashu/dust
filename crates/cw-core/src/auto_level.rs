@@ -1,10 +1,8 @@
 //! Automatic level adjustment after a session.
 
 use crate::level::LEVEL_MIN;
-use crate::morse::{
-    MixedAutoLevelAxis, MAX_DIGITS_LEVEL, MIN_DIGITS_LEVEL,
-};
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::morse::{MAX_DIGITS_LEVEL, MIN_DIGITS_LEVEL};
+use crate::settings::{CharSetMode, MixedAutoLevelAxis, TrainingSettings};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutoAdjustMode {
@@ -24,17 +22,21 @@ impl AutoAdjustMode {
 
     pub fn level_for(self, settings: &TrainingSettings) -> u32 {
         match self {
-            Self::Digits => settings.digits_level,
-            _ => settings.level,
+            Self::Digits => settings.curriculum.digits_level,
+            _ => settings.curriculum.level,
         }
     }
 
     pub fn digits_for(self, settings: &TrainingSettings) -> Option<u32> {
-        matches!(self, Self::Mixed).then_some(settings.digits_level)
+        matches!(self, Self::Mixed).then_some(settings.curriculum.digits_level)
     }
 
     pub fn storage_key_for(self, settings: &TrainingSettings) -> String {
-        self.storage_key_at(settings, self.level_for(settings), self.digits_for(settings))
+        self.storage_key_at(
+            settings,
+            self.level_for(settings),
+            self.digits_for(settings),
+        )
     }
 
     pub fn storage_key_at(
@@ -49,7 +51,7 @@ impl AutoAdjustMode {
                 format!("mixed_{level}_{}_{fingerprint}", digits_level.unwrap_or(0))
             }
             Self::Digits => format!("digits_{level}_{fingerprint}"),
-            Self::Alphabet => match settings.char_set_mode {
+            Self::Alphabet => match settings.curriculum.char_set_mode {
                 CharSetMode::Custom => format!("custom_{level}_{fingerprint}"),
                 _ => format!("koch_{level}_{fingerprint}"),
             },
@@ -110,11 +112,11 @@ fn max_letter_level(settings: &TrainingSettings) -> u32 {
 }
 
 fn mixed_letters_active(settings: &TrainingSettings) -> bool {
-    settings.mixed_letters_percent.min(100) > 0
+    settings.curriculum.mixed_letters_percent.min(100) > 0
 }
 
 fn mixed_digits_active(settings: &TrainingSettings) -> bool {
-    settings.mixed_letters_percent.min(100) < 100
+    settings.curriculum.mixed_letters_percent.min(100) < 100
 }
 
 fn mixed_axis_active(settings: &TrainingSettings, axis: MixedAutoLevelAxis) -> bool {
@@ -158,7 +160,7 @@ fn mixed_active_next_axis(
 }
 
 fn mixed_display_next_axis(settings: &TrainingSettings) -> MixedAutoLevelAxis {
-    let stored = settings.mixed_auto_level_next_axis;
+    let stored = settings.auto_level.mixed_auto_level_next_axis;
     if mixed_axis_active(settings, stored) {
         stored
     } else if mixed_axis_active(settings, stored.flip()) {
@@ -175,11 +177,11 @@ pub fn evaluate_auto_level(
     settings: &TrainingSettings,
     counters: &mut AutoLevelCounters,
 ) -> Option<AutoLevelResult> {
-    if !settings.auto_adjust_level {
+    if !settings.auto_level.auto_adjust_level {
         return None;
     }
-    let mode = AutoAdjustMode::from_char_set(settings.char_set_mode);
-    let threshold = settings.auto_adjust_threshold.clamp(0.0, 100.0);
+    let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
+    let threshold = settings.auto_level.auto_adjust_threshold.clamp(0.0, 100.0);
     let accuracy_pct = accuracy_fraction * 100.0;
     if accuracy_pct >= threshold {
         counters.above += 1;
@@ -187,12 +189,12 @@ pub fn evaluate_auto_level(
         counters.below += 1;
     }
 
-    let increase_enabled = settings.auto_adjust_above_threshold_count > 0;
-    let decrease_enabled = settings.auto_adjust_below_threshold_count > 0;
+    let increase_enabled = settings.auto_level.auto_adjust_above_threshold_count > 0;
+    let decrease_enabled = settings.auto_level.auto_adjust_below_threshold_count > 0;
     let should_increase =
-        increase_enabled && counters.above >= settings.auto_adjust_above_threshold_count;
+        increase_enabled && counters.above >= settings.auto_level.auto_adjust_above_threshold_count;
     let should_decrease =
-        decrease_enabled && counters.below >= settings.auto_adjust_below_threshold_count;
+        decrease_enabled && counters.below >= settings.auto_level.auto_adjust_below_threshold_count;
 
     let delta = if should_increase && should_decrease {
         if counters.above >= counters.below {
@@ -212,8 +214,8 @@ pub fn evaluate_auto_level(
     }
 
     let current_level = match mode {
-        AutoAdjustMode::Digits => settings.digits_level,
-        _ => settings.level,
+        AutoAdjustMode::Digits => settings.curriculum.digits_level,
+        _ => settings.curriculum.level,
     };
 
     if mode != AutoAdjustMode::Mixed {
@@ -256,8 +258,8 @@ pub fn evaluate_auto_level(
         });
     }
 
-    let current_digits = settings.digits_level.max(MIN_DIGITS_LEVEL);
-    let primary = settings.mixed_auto_level_next_axis;
+    let current_digits = settings.curriculum.digits_level.max(MIN_DIGITS_LEVEL);
+    let primary = settings.auto_level.mixed_auto_level_next_axis;
     let secondary = primary.flip();
     let mixed = mixed_try_axis(settings, primary, delta, current_level, current_digits)
         .or_else(|| mixed_try_axis(settings, secondary, delta, current_level, current_digits));
@@ -306,16 +308,16 @@ pub fn evaluate_auto_level(
 }
 
 pub fn apply_auto_level(settings: &mut TrainingSettings, result: &AutoLevelResult) {
-    match AutoAdjustMode::from_char_set(settings.char_set_mode) {
-        AutoAdjustMode::Digits => settings.digits_level = result.next_level,
-        AutoAdjustMode::Alphabet => settings.level = result.next_level,
+    match AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode) {
+        AutoAdjustMode::Digits => settings.curriculum.digits_level = result.next_level,
+        AutoAdjustMode::Alphabet => settings.curriculum.level = result.next_level,
         AutoAdjustMode::Mixed => {
-            settings.level = result.next_level;
+            settings.curriculum.level = result.next_level;
             if let Some(d) = result.next_digits_level {
-                settings.digits_level = d;
+                settings.curriculum.digits_level = d;
             }
             if let Some(axis) = result.next_mixed_auto_level_axis {
-                settings.mixed_auto_level_next_axis = axis;
+                settings.auto_level.mixed_auto_level_next_axis = axis;
             }
         }
     }
@@ -338,19 +340,19 @@ pub fn auto_level_progress(
     settings: &TrainingSettings,
     counters: AutoLevelCounters,
 ) -> Option<AutoLevelProgress> {
-    if !settings.auto_adjust_level {
+    if !settings.auto_level.auto_adjust_level {
         return None;
     }
     Some(AutoLevelProgress {
-        threshold: settings.auto_adjust_threshold.clamp(0.0, 100.0),
+        threshold: settings.auto_level.auto_adjust_threshold.clamp(0.0, 100.0),
         above_count: counters.above,
         below_count: counters.below,
-        above_target: settings.auto_adjust_above_threshold_count,
-        below_target: settings.auto_adjust_below_threshold_count,
-        above_disabled: settings.auto_adjust_above_threshold_count == 0,
-        below_disabled: settings.auto_adjust_below_threshold_count == 0,
-        alternating_mixed: settings.char_set_mode == CharSetMode::Mixed,
-        next_mixed_axis: (settings.char_set_mode == CharSetMode::Mixed)
+        above_target: settings.auto_level.auto_adjust_above_threshold_count,
+        below_target: settings.auto_level.auto_adjust_below_threshold_count,
+        above_disabled: settings.auto_level.auto_adjust_above_threshold_count == 0,
+        below_disabled: settings.auto_level.auto_adjust_below_threshold_count == 0,
+        alternating_mixed: settings.curriculum.char_set_mode == CharSetMode::Mixed,
+        next_mixed_axis: (settings.curriculum.char_set_mode == CharSetMode::Mixed)
             .then_some(mixed_display_next_axis(settings)),
     })
 }
@@ -362,9 +364,9 @@ mod tests {
     #[test]
     fn five_above_increases_koch() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Koch;
-        settings.level = 1;
-        settings.auto_adjust_above_threshold_count = 5;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 1;
+        settings.auto_level.auto_adjust_above_threshold_count = 5;
         let mut counters = AutoLevelCounters { above: 4, below: 0 };
         let result = evaluate_auto_level(1.0, &settings, &mut counters).expect("level up");
         assert_eq!(result.next_level, 2);
@@ -374,9 +376,9 @@ mod tests {
     #[test]
     fn below_threshold_decreases() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Koch;
-        settings.level = 3;
-        settings.auto_adjust_below_threshold_count = 1;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 3;
+        settings.auto_level.auto_adjust_below_threshold_count = 1;
         let mut counters = AutoLevelCounters::default();
         let result = evaluate_auto_level(0.5, &settings, &mut counters).expect("level down");
         assert_eq!(result.next_level, 2);
@@ -386,7 +388,7 @@ mod tests {
     #[test]
     fn progress_none_when_disabled() {
         let mut settings = TrainingSettings::default();
-        settings.auto_adjust_level = false;
+        settings.auto_level.auto_adjust_level = false;
         assert!(auto_level_progress(&settings, AutoLevelCounters::default()).is_none());
     }
 
@@ -403,10 +405,10 @@ mod tests {
     #[test]
     fn blocked_increase_at_max_resets_above_counter() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Koch;
-        settings.custom_sequence = vec!['K', 'M'];
-        settings.level = 1;
-        settings.auto_adjust_above_threshold_count = 1;
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.custom_sequence = vec!['K', 'M'];
+        settings.curriculum.level = 1;
+        settings.auto_level.auto_adjust_above_threshold_count = 1;
         let mut counters = AutoLevelCounters::default();
         assert!(evaluate_auto_level(1.0, &settings, &mut counters).is_none());
         assert_eq!(counters.above, 0);
@@ -416,47 +418,44 @@ mod tests {
     #[test]
     fn custom_mode_increases_level_within_alphabet() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Custom;
-        settings.custom_set = vec!['Q', 'R', 'S', 'T'];
-        settings.level = 1;
-        settings.auto_adjust_above_threshold_count = 1;
+        settings.curriculum.char_set_mode = CharSetMode::Custom;
+        settings.curriculum.custom_set = vec!['Q', 'R', 'S', 'T'];
+        settings.curriculum.level = 1;
+        settings.auto_level.auto_adjust_above_threshold_count = 1;
         let mut counters = AutoLevelCounters::default();
         let result = evaluate_auto_level(1.0, &settings, &mut counters).expect("level up");
         assert_eq!(result.next_level, 2);
         apply_auto_level(&mut settings, &result);
-        assert_eq!(settings.level, 2);
+        assert_eq!(settings.curriculum.level, 2);
     }
 
     #[test]
     fn digits_mode_increases_level_within_alphabet() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Digits;
-        settings.digits_level = 1;
-        settings.auto_adjust_above_threshold_count = 1;
+        settings.curriculum.char_set_mode = CharSetMode::Digits;
+        settings.curriculum.digits_level = 1;
+        settings.auto_level.auto_adjust_above_threshold_count = 1;
         let mut counters = AutoLevelCounters::default();
         let result = evaluate_auto_level(1.0, &settings, &mut counters).expect("level up");
         assert_eq!(result.next_level, 2);
         apply_auto_level(&mut settings, &result);
-        assert_eq!(settings.digits_level, 2);
+        assert_eq!(settings.curriculum.digits_level, 2);
     }
 
     #[test]
     fn storage_keys_differ_for_different_sequences() {
         let mut lcwo = TrainingSettings::default();
-        lcwo.char_set_mode = CharSetMode::Koch;
-        lcwo.custom_sequence.clear();
+        lcwo.curriculum.char_set_mode = CharSetMode::Koch;
+        lcwo.curriculum.custom_sequence.clear();
         let mut mania = lcwo.clone();
-        mania.custom_sequence = crate::sequences::TRADITIONAL_KOCH_SEQUENCE.to_vec();
+        mania.curriculum.custom_sequence = crate::sequences::TRADITIONAL_KOCH_SEQUENCE.to_vec();
         let mode = AutoAdjustMode::Alphabet;
-        assert_ne!(
-            mode.storage_key_for(&lcwo),
-            mode.storage_key_for(&mania)
-        );
+        assert_ne!(mode.storage_key_for(&lcwo), mode.storage_key_for(&mania));
         let mut custom_a = TrainingSettings::default();
-        custom_a.char_set_mode = CharSetMode::Custom;
-        custom_a.custom_set = vec!['Q', 'R', 'S'];
+        custom_a.curriculum.char_set_mode = CharSetMode::Custom;
+        custom_a.curriculum.custom_set = vec!['Q', 'R', 'S'];
         let mut custom_b = custom_a.clone();
-        custom_b.custom_set = vec!['X', 'Y', 'Z'];
+        custom_b.curriculum.custom_set = vec!['X', 'Y', 'Z'];
         assert_ne!(
             mode.storage_key_for(&custom_a),
             mode.storage_key_for(&custom_b)
@@ -470,28 +469,28 @@ mod tests {
     #[test]
     fn mixed_100_percent_does_not_adjust_digits() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Mixed;
-        settings.mixed_letters_percent = 100;
-        settings.custom_sequence = vec!['K', 'M'];
-        settings.level = 1;
-        settings.digits_level = 1;
-        settings.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
-        settings.auto_adjust_above_threshold_count = 1;
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        settings.curriculum.mixed_letters_percent = 100;
+        settings.curriculum.custom_sequence = vec!['K', 'M'];
+        settings.curriculum.level = 1;
+        settings.curriculum.digits_level = 1;
+        settings.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        settings.auto_level.auto_adjust_above_threshold_count = 1;
         let mut counters = AutoLevelCounters::default();
         assert!(evaluate_auto_level(1.0, &settings, &mut counters).is_none());
         assert_eq!(counters.above, 0);
-        assert_eq!(settings.digits_level, 1);
+        assert_eq!(settings.curriculum.digits_level, 1);
     }
 
     #[test]
     fn mixed_0_percent_skips_letter_axis() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Mixed;
-        settings.mixed_letters_percent = 0;
-        settings.level = 1;
-        settings.digits_level = 1;
-        settings.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
-        settings.auto_adjust_above_threshold_count = 1;
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        settings.curriculum.mixed_letters_percent = 0;
+        settings.curriculum.level = 1;
+        settings.curriculum.digits_level = 1;
+        settings.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        settings.auto_level.auto_adjust_above_threshold_count = 1;
         let mut counters = AutoLevelCounters::default();
         let result = evaluate_auto_level(1.0, &settings, &mut counters).expect("digit up");
         assert_eq!(result.next_level, 1);
@@ -506,16 +505,19 @@ mod tests {
     #[test]
     fn mixed_100_percent_keeps_letter_next_axis() {
         let mut settings = TrainingSettings::default();
-        settings.char_set_mode = CharSetMode::Mixed;
-        settings.mixed_letters_percent = 100;
-        settings.level = 1;
-        settings.digits_level = 1;
-        settings.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
-        settings.auto_adjust_above_threshold_count = 1;
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        settings.curriculum.mixed_letters_percent = 100;
+        settings.curriculum.level = 1;
+        settings.curriculum.digits_level = 1;
+        settings.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        settings.auto_level.auto_adjust_above_threshold_count = 1;
         let mut counters = AutoLevelCounters::default();
         let result = evaluate_auto_level(1.0, &settings, &mut counters).expect("letter up");
         assert_eq!(result.next_level, 2);
-        assert_eq!(result.adjusted_mixed_axis, Some(MixedAutoLevelAxis::Letters));
+        assert_eq!(
+            result.adjusted_mixed_axis,
+            Some(MixedAutoLevelAxis::Letters)
+        );
         assert_eq!(
             result.next_mixed_auto_level_axis,
             Some(MixedAutoLevelAxis::Letters)

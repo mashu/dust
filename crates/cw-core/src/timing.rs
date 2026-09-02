@@ -19,9 +19,9 @@ pub fn dot_seconds(wpm: f64) -> f64 {
 
 pub fn compute_group_gap_ms(settings: &TrainingSettings) -> u32 {
     compute_group_gap_for_wpm(
-        settings.char_wpm_min,
-        settings.effective_wpm_min,
-        settings.extra_word_space_multiplier,
+        settings.playback.char_wpm_min,
+        settings.playback.effective_wpm_min,
+        settings.playback.extra_word_space_multiplier,
     )
 }
 
@@ -55,8 +55,8 @@ pub struct PlaybackPlan {
 
 fn resolve_char_wpm(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
     rng.pick_in_range(
-        settings.char_wpm_min.max(1.0),
-        settings.char_wpm_max.max(1.0),
+        settings.playback.char_wpm_min.max(1.0),
+        settings.playback.char_wpm_max.max(1.0),
     )
     .max(1.0)
 }
@@ -64,17 +64,17 @@ fn resolve_char_wpm(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
 fn resolve_effective_wpm(settings: &TrainingSettings, char_wpm: f64, rng: &mut impl Rng) -> f64 {
     let sampled = rng
         .pick_in_range(
-            settings.effective_wpm_min.max(1.0),
-            settings.effective_wpm_max.max(1.0),
+            settings.playback.effective_wpm_min.max(1.0),
+            settings.playback.effective_wpm_max.max(1.0),
         )
         .max(1.0);
     sampled.min(char_wpm)
 }
 
 fn resolve_volume(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
-    let min = settings.volume_min.clamp(0.1, 1.0);
-    let max = settings.volume_max.clamp(0.1, 1.0);
-    if settings.link_volume || (min - max).abs() < f64::EPSILON {
+    let min = settings.band.volume_min.clamp(0.1, 1.0);
+    let max = settings.band.volume_max.clamp(0.1, 1.0);
+    if settings.band.link_volume || (min - max).abs() < f64::EPSILON {
         min
     } else {
         rng.pick_in_range(min, max)
@@ -82,8 +82,8 @@ fn resolve_volume(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
 }
 
 fn resolve_tone_hz(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
-    let min = settings.side_tone_min.max(100.0);
-    let max = settings.side_tone_max.max(min);
+    let min = settings.band.side_tone_min.max(100.0);
+    let max = settings.band.side_tone_max.max(min);
     if (min - max).abs() < f64::EPSILON {
         min
     } else {
@@ -142,7 +142,7 @@ pub fn plan_morse_playback(
 ) -> PlaybackPlan {
     let resolved_char_wpm = resolve_char_wpm(settings, rng);
     let resolved_effective_wpm = resolve_effective_wpm(settings, resolved_char_wpm, rng);
-    let extra = clamp_extra_spacing(settings.extra_word_space_multiplier);
+    let extra = clamp_extra_spacing(settings.playback.extra_word_space_multiplier);
     let side_tone = resolve_tone_hz(settings, rng);
 
     let dot_char = dot_seconds(resolved_char_wpm);
@@ -152,8 +152,8 @@ pub fn plan_morse_playback(
     let symbol_space = dot_char;
     let char_space = dot_eff * 3.0;
     let word_space = dot_eff * 7.0 * extra;
-    let rise_time = settings.steepness / 1000.0;
-    let smoothing = settings.envelope_smoothing.clamp(0.0, 1.0);
+    let rise_time = settings.band.steepness / 1000.0;
+    let smoothing = settings.band.envelope_smoothing.clamp(0.0, 1.0);
 
     let chars: Vec<char> = text.chars().collect();
     let last_morse_idx = chars.iter().enumerate().rev().find_map(|(i, raw)| {
@@ -214,11 +214,11 @@ mod tests {
     #[test]
     fn k_at_20_wpm_has_positive_duration() {
         let mut settings = TrainingSettings::default();
-        settings.char_wpm_min = 20.0;
-        settings.char_wpm_max = 20.0;
-        settings.effective_wpm_min = 20.0;
-        settings.effective_wpm_max = 20.0;
-        settings.link_char_to_effective = true;
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.char_wpm_max = 20.0;
+        settings.playback.effective_wpm_min = 20.0;
+        settings.playback.effective_wpm_max = 20.0;
+        settings.playback.link_char_to_effective = true;
         let mut rng = FastrandRng::default();
         let plan = plan_morse_playback("K", &settings, &mut rng);
         assert!(plan.duration_sec > 0.0);
@@ -228,14 +228,14 @@ mod tests {
     #[test]
     fn farnsworth_slower_effective_lengthens_gaps() {
         let mut fast = TrainingSettings::default();
-        fast.char_wpm_min = 20.0;
-        fast.char_wpm_max = 20.0;
-        fast.effective_wpm_min = 20.0;
-        fast.effective_wpm_max = 20.0;
+        fast.playback.char_wpm_min = 20.0;
+        fast.playback.char_wpm_max = 20.0;
+        fast.playback.effective_wpm_min = 20.0;
+        fast.playback.effective_wpm_max = 20.0;
         let mut slow = fast.clone();
-        slow.effective_wpm_min = 10.0;
-        slow.effective_wpm_max = 10.0;
-        slow.link_char_to_effective = false;
+        slow.playback.effective_wpm_min = 10.0;
+        slow.playback.effective_wpm_max = 10.0;
+        slow.playback.link_char_to_effective = false;
         let mut rng_a = FastrandRng(1);
         let mut rng_b = FastrandRng(1);
         let a = plan_morse_playback("KM", &fast, &mut rng_a);
@@ -246,12 +246,12 @@ mod tests {
     #[test]
     fn inter_group_gap_follows_farnsworth_effective_wpm() {
         let mut even = TrainingSettings::default();
-        even.char_wpm_min = 20.0;
-        even.effective_wpm_min = 20.0;
-        even.link_char_to_effective = false;
-        even.extra_word_space_multiplier = 1.0;
+        even.playback.char_wpm_min = 20.0;
+        even.playback.effective_wpm_min = 20.0;
+        even.playback.link_char_to_effective = false;
+        even.playback.extra_word_space_multiplier = 1.0;
         let mut farnsworth = even.clone();
-        farnsworth.effective_wpm_min = 10.0;
+        farnsworth.playback.effective_wpm_min = 10.0;
         assert!(compute_group_gap_ms(&farnsworth) > compute_group_gap_ms(&even));
         assert!(
             compute_group_gap_for_wpm(40.0, 40.0, 1.0) < compute_group_gap_for_wpm(18.0, 18.0, 1.0)
@@ -261,11 +261,11 @@ mod tests {
     #[test]
     fn unknown_trailing_char_does_not_add_char_space() {
         let mut settings = TrainingSettings::default();
-        settings.char_wpm_min = 20.0;
-        settings.char_wpm_max = 20.0;
-        settings.effective_wpm_min = 20.0;
-        settings.effective_wpm_max = 20.0;
-        settings.link_char_to_effective = true;
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.char_wpm_max = 20.0;
+        settings.playback.effective_wpm_min = 20.0;
+        settings.playback.effective_wpm_max = 20.0;
+        settings.playback.link_char_to_effective = true;
         let a = plan_morse_playback("KM", &settings, &mut FastrandRng(1));
         let b = plan_morse_playback("KM#", &settings, &mut FastrandRng(1));
         assert!(morse_for('#').is_none());

@@ -15,8 +15,12 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
     };
     let mixed = if progress.alternating_mixed {
         match progress.next_mixed_axis {
-            Some(cw_core::MixedAutoLevelAxis::Letters) => "Alternating letters/digits — next: Letters",
-            Some(cw_core::MixedAutoLevelAxis::Digits) => "Alternating letters/digits — next: Digits",
+            Some(cw_core::MixedAutoLevelAxis::Letters) => {
+                "Alternating letters/digits — next: Letters"
+            }
+            Some(cw_core::MixedAutoLevelAxis::Digits) => {
+                "Alternating letters/digits — next: Digits"
+            }
             None => "Alternates letter/digit level",
         }
     } else {

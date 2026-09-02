@@ -210,13 +210,19 @@ mod tests {
     fn roundtrips_unix_epoch() {
         assert_eq!(date_to_day_index("1970-01-01"), Some(0));
         assert_eq!(day_index_to_date(0), "1970-01-01");
-        assert_eq!(date_to_day_index("2026-07-17"), date_to_day_index(&date_at(0)));
+        assert_eq!(
+            date_to_day_index("2026-07-17"),
+            date_to_day_index(&date_at(0))
+        );
     }
 
     #[test]
     fn none_with_no_history() {
         let empty: [&str; 0] = [];
-        assert_eq!(compute_streak_status(&empty, TODAY).state, StreakState::None);
+        assert_eq!(
+            compute_streak_status(&empty, TODAY).state,
+            StreakState::None
+        );
     }
 
     #[test]
@@ -274,7 +280,10 @@ mod tests {
     #[test]
     fn hides_old_lapse() {
         let dates = [date_at(-40), date_at(-39)];
-        assert_eq!(compute_streak_status(&dates, TODAY).state, StreakState::None);
+        assert_eq!(
+            compute_streak_status(&dates, TODAY).state,
+            StreakState::None
+        );
     }
 
     #[test]

@@ -43,8 +43,34 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
         .filter(|s| s.usable_for_sampling(&settings))
         .cloned()
         .collect();
-    let chart = accuracy_chart(&sessions);
     let letters = character_diagnostics(&matching);
+    rsx! {
+        div { class: "stack stats-page",
+            h2 { class: "page-title", "Stats" }
+            div { class: "mode-pills tab-bar",
+                ModePill { label: "Overview".to_string(), active: tab() == StatsTab::Overview, onclick: move |_| tab.set(StatsTab::Overview) }
+                ModePill { label: "Letters".to_string(), active: tab() == StatsTab::Letters, onclick: move |_| tab.set(StatsTab::Letters) }
+                ModePill { label: "Mistakes".to_string(), active: tab() == StatsTab::Mistakes, onclick: move |_| tab.set(StatsTab::Mistakes) }
+                ModePill { label: "Sampling".to_string(), active: tab() == StatsTab::Sampling, onclick: move |_| tab.set(StatsTab::Sampling) }
+                ModePill { label: "History".to_string(), active: tab() == StatsTab::History, onclick: move |_| tab.set(StatsTab::History) }
+            }
+            match tab() {
+                StatsTab::Overview => rsx! {
+                    OverviewTab { sessions: matching }
+                },
+                StatsTab::Letters => rsx! { LettersTab { letters } },
+                StatsTab::Mistakes => rsx! { MistakesTab { sessions: matching } },
+                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions: matching } },
+                StatsTab::History => rsx! { HistoryTab { sessions } },
+            }
+        }
+    }
+}
+
+#[component]
+fn OverviewTab(sessions: Vec<SessionResult>) -> Element {
+    let chart = accuracy_chart(&sessions);
+    let letters = character_diagnostics(&sessions);
     let avg = if sessions.is_empty() {
         0.0
     } else {
@@ -58,46 +84,9 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
         .iter()
         .filter(|d| d.status == MasteryStatus::Mastered)
         .count();
-    let pts = sparkline_points(&chart);
-    rsx! {
-        div { class: "stack stats-page",
-            h2 { class: "page-title", "Stats" }
-            div { class: "mode-pills tab-bar",
-                ModePill { label: "Overview".to_string(), active: tab() == StatsTab::Overview, onclick: move |_| tab.set(StatsTab::Overview) }
-                ModePill { label: "Letters".to_string(), active: tab() == StatsTab::Letters, onclick: move |_| tab.set(StatsTab::Letters) }
-                ModePill { label: "Mistakes".to_string(), active: tab() == StatsTab::Mistakes, onclick: move |_| tab.set(StatsTab::Mistakes) }
-                ModePill { label: "Sampling".to_string(), active: tab() == StatsTab::Sampling, onclick: move |_| tab.set(StatsTab::Sampling) }
-                ModePill { label: "History".to_string(), active: tab() == StatsTab::History, onclick: move |_| tab.set(StatsTab::History) }
-            }
-            match tab() {
-                StatsTab::Overview => rsx! {
-                    OverviewTab {
-                        sessions: sessions.len(),
-                        avg,
-                        best,
-                        mastered,
-                        points: pts,
-                        empty: sessions.is_empty(),
-                    }
-                },
-                StatsTab::Letters => rsx! { LettersTab { letters } },
-                StatsTab::Mistakes => rsx! { MistakesTab { sessions: matching } },
-                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
-                StatsTab::History => rsx! { HistoryTab { sessions } },
-            }
-        }
-    }
-}
-
-#[component]
-fn OverviewTab(
-    sessions: usize,
-    avg: f64,
-    best: f64,
-    mastered: usize,
-    points: String,
-    empty: bool,
-) -> Element {
+    let points = sparkline_points(&chart);
+    let empty = sessions.is_empty();
+    let session_count = sessions.len();
     rsx! {
         div { class: "stack",
             if empty {
@@ -134,7 +123,7 @@ fn OverviewTab(
                             stroke_linejoin: "round",
                         }
                     }
-                    p { class: "muted", "{sessions} sessions on this device" }
+                    p { class: "muted", "{session_count} sessions on this device" }
                 }
             }
         }

@@ -22,6 +22,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(feature = "desktop")]
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackOutcome {
+    Completed,
+    Cancelled,
+}
+
 /// Morse already scheduled; wait without holding the player `RefCell`.
 pub struct PlaybackWait {
     pub duration_sec: f64,
@@ -84,18 +90,23 @@ impl PlaybackWait {
         }
     }
 
-    pub async fn wait(self) {
+    pub async fn wait(self) -> PlaybackOutcome {
         #[cfg(feature = "web")]
         {
             let mut left =
                 ((self.duration_sec * 1000.0).ceil() as u32).saturating_add(PLAYBACK_TAIL_MS);
             while left > 0 {
                 if self.stop_flag.get() || self.current_epoch.get() != self.epoch {
-                    break;
+                    return PlaybackOutcome::Cancelled;
                 }
                 let chunk = left.min(POLL_MS);
                 sleep_ms(chunk).await;
                 left = left.saturating_sub(chunk);
+            }
+            if self.stop_flag.get() || self.current_epoch.get() != self.epoch {
+                PlaybackOutcome::Cancelled
+            } else {
+                PlaybackOutcome::Completed
             }
         }
         #[cfg(feature = "desktop")]
@@ -105,6 +116,14 @@ impl PlaybackWait {
                 && self.current_epoch.load(Ordering::SeqCst) == self.epoch
             {
                 sleep_ms(POLL_MS).await;
+            }
+            if self.finished.load(Ordering::SeqCst)
+                && !self.stop_flag.load(Ordering::SeqCst)
+                && self.current_epoch.load(Ordering::SeqCst) == self.epoch
+            {
+                PlaybackOutcome::Completed
+            } else {
+                PlaybackOutcome::Cancelled
             }
         }
     }
