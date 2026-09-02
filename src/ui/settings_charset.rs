@@ -23,21 +23,25 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 ModePill { label: "Koch".to_string(), active: s.char_set_mode == CharSetMode::Koch, onclick: move |_| {
                     let w = &mut *settings.write();
                     w.char_set_mode = CharSetMode::Koch;
+                    w.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
                 ModePill { label: "Digits".to_string(), active: s.char_set_mode == CharSetMode::Digits, onclick: move |_| {
                     let w = &mut *settings.write();
                     w.char_set_mode = CharSetMode::Digits;
+                    w.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
                 ModePill { label: "Mixed".to_string(), active: s.char_set_mode == CharSetMode::Mixed, onclick: move |_| {
                     let w = &mut *settings.write();
                     w.char_set_mode = CharSetMode::Mixed;
+                    w.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
                 ModePill { label: "Custom".to_string(), active: s.char_set_mode == CharSetMode::Custom, onclick: move |_| {
                     let w = &mut *settings.write();
                     w.char_set_mode = CharSetMode::Custom;
+                    w.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
             }

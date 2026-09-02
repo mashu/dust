@@ -99,9 +99,40 @@ pub fn current_practice_window(settings: &TrainingSettings) -> Option<PracticeWi
     Some(resolved_practice_window(settings))
 }
 
+fn window_for_len(n: usize, named: PracticeWindow) -> PracticeWindow {
+    match named {
+        PracticeWindow::Last5 if n >= 5 => PracticeWindow::Last5,
+        PracticeWindow::Last3 if n >= 3 => PracticeWindow::Last3,
+        _ => PracticeWindow::All,
+    }
+}
+
+/// Slice an unlocked prefix by All/Last3/Last5 using that slice's own length.
+fn window_unlocked(unlocked: &[char], named: PracticeWindow) -> Vec<char> {
+    let n = unlocked.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let (start, end) = match window_for_len(n, named) {
+        PracticeWindow::All => (1, n),
+        PracticeWindow::Last3 => (n.saturating_sub(2).max(1), n),
+        PracticeWindow::Last5 => (n.saturating_sub(4).max(1), n),
+    };
+    let pool = unlocked[start.saturating_sub(1)..end].to_vec();
+    if pool.len() >= 2 {
+        pool
+    } else {
+        unlocked[n.saturating_sub(2)..].to_vec()
+    }
+}
+
 fn mixed_pool(settings: &TrainingSettings) -> Vec<char> {
-    let letters = leveled_pool(&settings.progress_alphabet(), settings.level, settings);
-    let digits = unlocked_prefix(DIGITS, settings.digits_level);
+    let named = named_practice_window(settings);
+    let letters = window_unlocked(
+        &unlocked_prefix(&settings.progress_alphabet(), settings.level),
+        named,
+    );
+    let digits = window_unlocked(&unlocked_prefix(DIGITS, settings.digits_level), named);
     let mut union = letters.clone();
     for d in digits {
         if !union.contains(&d) {
@@ -117,25 +148,11 @@ fn mixed_pool(settings: &TrainingSettings) -> Vec<char> {
     }
 }
 
-fn apply_sliding_window(full_unlocked: &[char], settings: &TrainingSettings) -> Vec<char> {
-    let n = full_unlocked.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    let start1 = settings.sliding_window_start.max(1).min(n as u32);
-    let end1 = settings.sliding_window_end.max(1).min(n as u32);
-    let start_idx = start1.min(end1) as usize;
-    let end_idx = start1.max(end1) as usize;
-    let pool = full_unlocked[start_idx.saturating_sub(1)..end_idx].to_vec();
-    if pool.len() >= 2 {
-        pool
-    } else {
-        full_unlocked[n.saturating_sub(2)..].to_vec()
-    }
-}
-
 fn leveled_pool(alphabet: &[char], level: u32, settings: &TrainingSettings) -> Vec<char> {
-    apply_sliding_window(&unlocked_prefix(alphabet, level), settings)
+    window_unlocked(
+        &unlocked_prefix(alphabet, level),
+        named_practice_window(settings),
+    )
 }
 
 pub fn letters_subset(pool: &[char]) -> Vec<char> {
@@ -197,18 +214,16 @@ mod tests {
     }
 
     #[test]
-    fn last3_reapplied_after_level_up_includes_newest() {
+    fn last3_follows_level_from_named_window() {
         let mut s = TrainingSettings::default();
         s.char_set_mode = CharSetMode::Koch;
         s.level = 10;
         apply_practice_window(&mut s, PracticeWindow::Last3);
         s.level = 11;
-        let stale = compute_char_pool(&s);
         let newest = s.progress_alphabet()[crate::level::unlocked_count_for_level(11) - 1];
-        assert!(!stale.contains(&newest));
-        apply_practice_window(&mut s, PracticeWindow::Last3);
         let pool = compute_char_pool(&s);
         assert!(pool.contains(&newest));
+        assert_eq!(pool.len(), 3);
         assert_eq!(current_practice_window(&s), Some(PracticeWindow::Last3));
     }
 
@@ -318,5 +333,19 @@ mod tests {
         s.level = 1;
         apply_practice_window(&mut s, PracticeWindow::All);
         assert_eq!(compute_char_pool(&s), vec!['A', 'B']);
+    }
+
+    #[test]
+    fn mixed_last3_windows_letters_and_digits_separately() {
+        let mut s = TrainingSettings::default();
+        s.char_set_mode = CharSetMode::Mixed;
+        s.level = 10;
+        s.digits_level = max_level_for_len(DIGITS.len());
+        apply_practice_window(&mut s, PracticeWindow::Last3);
+        let pool = compute_char_pool(&s);
+        let letters: Vec<char> = pool.iter().copied().filter(|c| !c.is_ascii_digit()).collect();
+        let digits: Vec<char> = pool.iter().copied().filter(|c| c.is_ascii_digit()).collect();
+        assert_eq!(letters.len(), 3);
+        assert_eq!(digits, vec!['7', '8', '9']);
     }
 }

@@ -6,7 +6,10 @@ mod ui;
 
 use std::rc::Rc;
 
-use cw_core::{answer_length_matches, compute_char_pool, GroupSession, TrainingSettings};
+use cw_core::{
+    answer_length_matches, compute_char_pool, fit_settings_to_alphabet, GroupSession,
+    TrainingSettings,
+};
 use dioxus::prelude::*;
 
 use crate::audio::focus_group_input;
@@ -95,7 +98,8 @@ fn App() -> Element {
     let start_training = use_callback({
         let app = app.clone();
         move |(): ()| {
-            let settings_now = settings().clamp();
+            let mut settings_now = settings().clamp();
+            fit_settings_to_alphabet(&mut settings_now);
             if session_running(screen, runtime) {
                 return;
             }
