@@ -22,6 +22,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@v2
@@ -40,8 +42,20 @@ jobs:
             libasound2-dev \
             libxdo-dev
 
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
       - name: Test cw-core
-        run: cargo test -p cw-core --locked
+        run: cargo llvm-cov -p cw-core --locked --lcov --output-path lcov-cw-core.info
 
       - name: Test desktop app
-        run: cargo test -p dust --features desktop --locked
+        run: cargo llvm-cov -p dust --features desktop --locked --lcov --output-path lcov-dust.info
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov-cw-core.info,lcov-dust.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
