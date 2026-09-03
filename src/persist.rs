@@ -195,9 +195,16 @@ fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
 
 #[cfg(feature = "desktop")]
 fn write_json(name: &str, value: &impl serde::Serialize) {
-    let path = ensure_dir().join(name);
-    if let Ok(raw) = serde_json::to_string_pretty(value) {
-        let _ = std::fs::write(path, raw);
+    let dir = ensure_dir();
+    let path = dir.join(name);
+    let tmp = dir.join(format!(".{name}.tmp"));
+    let Ok(raw) = serde_json::to_string_pretty(value) else {
+        return;
+    };
+    if std::fs::write(&tmp, raw).is_ok() {
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(tmp);
+        }
     }
 }
 

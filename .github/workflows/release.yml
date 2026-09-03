@@ -1,0 +1,239 @@
+# Build installers on a version tag (v*) and publish a GitHub Release.
+#
+# GitHub-hosted runners produce Linux, Windows, and macOS desktop bundles
+# (each on its native OS). The web app is deployed separately to GitHub Pages.
+# Native Android/iOS packages are not built: this app has no mobile target, and
+# store-ready IPA/AAB files need signing certificates the runners do not provide.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  DIOXUS_CLI_VERSION: "0.7.10"
+
+jobs:
+  version:
+    name: Check version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve and verify version
+        id: version
+        run: |
+          set -euo pipefail
+          cargo_version="$(awk '
+            /^\[workspace.package\]/ { in_pkg = 1; next }
+            in_pkg && /^\[/ { in_pkg = 0 }
+            in_pkg && /^version *=/ {
+              gsub(/[" ]/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)"
+          if [[ -z "$cargo_version" ]]; then
+            echo "Could not read workspace.package.version from Cargo.toml"
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [[ "$tag" != "$cargo_version" ]]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${cargo_version}"
+              exit 1
+            fi
+          fi
+          echo "version=${cargo_version}" >> "$GITHUB_OUTPUT"
+          echo "Releasing version ${cargo_version}"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+            platform: linux
+            package_types: deb
+          - name: Windows
+            os: windows-latest
+            platform: windows
+            package_types: nsis
+          - name: macOS
+            os: macos-latest
+            platform: macos
+            package_types: dmg
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.platform }}
+          cache-directories: target/dx
+
+      - name: Install Linux desktop dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            libxdo-dev \
+            patchelf
+
+      - name: Install NSIS
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install Dioxus CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo binstall "dioxus-cli@${DIOXUS_CLI_VERSION}" --no-confirm --locked \
+            || cargo install dioxus-cli --version "${DIOXUS_CLI_VERSION}" --locked
+          dx --version
+
+      - name: Bundle
+        run: |
+          dx bundle --release --locked \
+            --platform "${{ matrix.platform }}" \
+            --package-types "${{ matrix.package_types }}" \
+            --out-dir dist
+
+      - name: Collect artifacts
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+
+          arch_raw="$(uname -m)"
+          case "$arch_raw" in
+            arm64|aarch64) arch=aarch64 ;;
+            x86_64|amd64) arch=x86_64 ;;
+            *) arch="$arch_raw" ;;
+          esac
+
+          search_roots=""
+          if [[ -d dist ]]; then
+            search_roots="$search_roots dist"
+          fi
+          if [[ -d target/dx ]]; then
+            search_roots="$search_roots target/dx"
+          fi
+          if [[ -z "$search_roots" ]]; then
+            echo "No bundle output directories were produced"
+            exit 1
+          fi
+
+          list="${RUNNER_TEMP}/dust-artifacts.txt"
+          find $search_roots -type f \( \
+            -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
+            -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
+          \) | sort > "$list"
+
+          copied=0
+          while IFS= read -r src; do
+            [[ -z "$src" ]] && continue
+            base="$(basename "$src")"
+            # Skip inner payload copies; keep packaged installers.
+            if [[ "$base" == "dust.exe" || "$base" == "dust" ]]; then
+              continue
+            fi
+            ext="${base##*.}"
+            case "$PLATFORM" in
+              linux) dest="dust-${VERSION}-${arch}-unknown-linux-gnu.${ext}" ;;
+              windows) dest="dust-${VERSION}-${arch}-pc-windows-msvc-setup.${ext}" ;;
+              macos) dest="dust-${VERSION}-${arch}-apple-darwin.${ext}" ;;
+              *) dest="dust-${VERSION}-${PLATFORM}.${ext}" ;;
+            esac
+            if [[ -e "artifacts/${dest}" ]]; then
+              dest="dust-${VERSION}-${base}"
+            fi
+            cp "$src" "artifacts/${dest}"
+            copied=$((copied + 1))
+          done < "$list"
+
+          if [[ "$copied" -eq 0 ]]; then
+            echo "No installer artifacts were produced"
+            find $search_roots -type f | head -100
+            exit 1
+          fi
+
+          ls -lh artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dust-${{ matrix.platform }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [version, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: artifacts
+        run: |
+          sha256sum * | tee SHA256SUMS.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Dust v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: artifacts/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

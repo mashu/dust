@@ -1,0 +1,112 @@
+# Deploy the WASM web app to GitHub Pages on pushes to main.
+#
+# One-time: Settings → Pages → Build and deployment → Source: GitHub Actions.
+# Project sites are served at https://<owner>.github.io/<repo>/ ; base_path is
+# injected here so local `dx serve --platform web` still runs at /.
+
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  DIOXUS_CLI_VERSION: "0.7.10"
+
+jobs:
+  build:
+    name: Build web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pages-web
+          cache-directories: target/dx
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install Dioxus CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo binstall "dioxus-cli@${DIOXUS_CLI_VERSION}" --no-confirm --locked \
+            || cargo install dioxus-cli --version "${DIOXUS_CLI_VERSION}" --locked
+          dx --version
+
+      - name: Set GitHub Pages base path
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY##*/}"
+          if [[ "$repo" == *.github.io ]]; then
+            echo "User or org site; leaving base_path unset"
+            exit 0
+          fi
+          sed -i "/^\[web.app\]/a base_path = \"${repo}\"" Dioxus.toml
+          echo "Set web.app.base_path = ${repo}"
+          cat Dioxus.toml
+
+      - name: Bundle web
+        run: dx bundle --release --locked --platform web --out-dir dist
+
+      - name: Prepare Pages site
+        run: |
+          set -euo pipefail
+          src=""
+          for candidate in dist/public dist target/dx/dust/release/web/public; do
+            if [[ -f "${candidate}/index.html" ]]; then
+              src="$candidate"
+              break
+            fi
+          done
+          if [[ -z "$src" ]]; then
+            echo "Web build output not found"
+            find . -name index.html | head -50
+            exit 1
+          fi
+          mkdir -p site
+          cp -a "$src"/. site/
+          cp site/index.html site/404.html
+          touch site/.nojekyll
+          ls -lh site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

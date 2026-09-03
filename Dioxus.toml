@@ -18,3 +18,4 @@ style = []
 [bundle]
 identifier = "dev.dust.morse"
 publisher = "Dust"
+short_description = "CW Morse group trainer"
