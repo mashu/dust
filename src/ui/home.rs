@@ -54,9 +54,11 @@ pub fn Home(
                     button { class: "btn btn-secondary", onclick: move |_| on_listen.call(()), "Listen to letters" }
                 }
             }
-            if session_count > 0 {
+            if !sessions.is_empty() {
                 ActivityHeatmap { sessions, today }
-                StreakCard { status: streak }
+            }
+            StreakCard { status: streak }
+            if session_count > 0 {
                 div { class: "grid-3",
                     div { class: "kpi emerald",
                         div { class: "tiny", "Last accuracy" }
@@ -71,8 +73,6 @@ pub fn Home(
                         div { class: "value", "{level_value}" }
                     }
                 }
-            } else {
-                StreakCard { status: streak }
             }
             if let Some(progress) = auto_progress {
                 AutoLevelCard { progress }

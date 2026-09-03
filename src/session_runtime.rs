@@ -280,7 +280,7 @@ async fn handle_effect(
             let outcome = if text.is_empty() {
                 Ok((0.0, 0.0, 0.0))
             } else {
-                play_text_now(app, &text, &snapshot).await
+                play_text_now(app, gen, &text, &snapshot).await
             };
             if app.session_gen.get() != gen {
                 return Vec::new();

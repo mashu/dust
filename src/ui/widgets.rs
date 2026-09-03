@@ -104,7 +104,11 @@ pub fn NumberField(
                 value: "{value}",
                 oninput: move |e| {
                     if let Ok(v) = e.value().parse::<f64>() {
-                        onchange.call(v);
+                        if v > max {
+                            onchange.call(max);
+                        } else {
+                            onchange.call(v);
+                        }
                     }
                 },
                 onchange: move |e| {

@@ -264,10 +264,16 @@ impl GroupSession {
         if group.confirmed {
             return false;
         }
+        if group.end_at == 0 {
+            group.end_at = answered_at;
+        }
         group.confirmed = true;
         group.input = value;
         if group.answer_at == 0 {
             group.answer_at = answered_at;
+        }
+        if self.status == RuntimeStatus::PlayingGroup {
+            self.status = RuntimeStatus::WaitingForAnswer;
         }
         let next = (index + 1).min(self.groups.len().saturating_sub(1));
         self.focused_group = next;
@@ -319,7 +325,7 @@ impl GroupSession {
                     0
                 };
                 let answer_at = if raw_answer > 0 { raw_answer } else { fallback };
-                let delta = if answer_at > 0 && end_at > 0 && answer_at < end_at {
+                let delta = if answer_at > 0 && end_at > 0 && answer_at <= end_at {
                     1.0
                 } else {
                     answer_at.saturating_sub(end_at) as f64
@@ -658,6 +664,18 @@ mod tests {
         assert_eq!(timings.len(), 1);
         assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
         assert!((timings[0].per_char_ms - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn confirm_before_end_playback_is_immediate() {
+        let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
+        session.set_group(0, "KM".into());
+        session.begin_group(0, 0);
+        session.confirm(0, "KM".into(), 400);
+        assert_eq!(session.view().status, RuntimeStatus::WaitingForAnswer);
+        let timings = session.build_timings(10_000.0);
+        assert_eq!(timings.len(), 1);
+        assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
     }
 
     #[test]

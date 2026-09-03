@@ -19,13 +19,13 @@ pub fn TrainingView(
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
 ) -> Element {
-    use_effect(use_reactive!(|focused, current, playing, locked| {
-        let _ = (current, playing, locked);
+    use_effect(use_reactive!(|focused, current| {
+        let _ = current;
         focus_group_input(focused);
     }));
     rsx! {
         div { class: "stack",
-            ProgressHeader { current, total }
+            ProgressHeader { current: focused, total }
             div { class: "card",
                 p { class: "muted", if playing { "Listening…" } else { "Enter answers per group (auto-advances when complete)." } }
                 div { class: "stack group-list",
@@ -34,8 +34,10 @@ pub fn TrainingView(
                             let is_focused = focused == idx;
                             let is_active = current == idx;
                             let is_confirmed = confirmed.get(idx).copied().unwrap_or(false);
-                            let disabled = is_confirmed || !is_active;
-                            let input_locked = locked && is_active && !is_confirmed;
+                            let awaiting_play = is_focused && !is_active && !is_confirmed;
+                            let disabled = is_confirmed || (!is_active && !awaiting_play);
+                            let input_locked =
+                                (locked && is_active && !is_confirmed) || awaiting_play;
                             let value = inputs.get(idx).cloned().unwrap_or_default();
                             let shown = if is_confirmed { sent.clone() } else { "••••".into() };
                             let cls = if is_focused { "group focused" } else { "group" };
@@ -46,7 +48,9 @@ pub fn TrainingView(
                             } else {
                                 "answer"
                             };
-                            let placeholder = if input_locked {
+                            let placeholder = if awaiting_play {
+                                "Waiting..."
+                            } else if input_locked {
                                 "Listening..."
                             } else if disabled {
                                 "Waiting..."

@@ -689,6 +689,9 @@ mod tests {
         let late = m.apply(SessionEvent::PlaybackCancelled { index: 0 }, 80);
         assert!(late.is_empty());
         assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        assert_eq!(m.session().view().status, crate::RuntimeStatus::WaitingForAnswer);
+        let timings = m.session().build_timings(10_000.0);
+        assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
     }
 
     #[test]

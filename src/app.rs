@@ -225,7 +225,6 @@ pub fn App() -> Element {
     rsx! {
         document::Title { "Dust" }
         document::Style { { include_str!("../assets/styles.css") } }
-        document::Link { rel: "stylesheet", href: asset!("/assets/styles.css") }
         document::Meta {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover",

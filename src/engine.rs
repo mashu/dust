@@ -121,28 +121,43 @@ pub(crate) enum PlayError {
 
 pub(crate) async fn play_text_now(
     app: &AppState,
+    gen: u64,
     text: &str,
     settings: &TrainingSettings,
 ) -> Result<(f64, f64, f64), PlayError> {
     let mut last_err = None;
     for attempt in 0..PLAY_ATTEMPTS {
+        if app.session_gen.get() != gen {
+            return Err(PlayError::Cancelled);
+        }
         if attempt > 0 {
             let _ = app.rebuild_player(settings);
             sleep_ms(POLL_MS).await;
+            if app.session_gen.get() != gen {
+                return Err(PlayError::Cancelled);
+            }
         }
-        match schedule_text(app, text, settings).await {
+        match schedule_text(app, gen, text, settings).await {
             Ok(wait) => {
                 let duration = wait.duration_sec;
                 let char_wpm = wait.char_wpm;
                 let effective_wpm = wait.effective_wpm;
                 match wait.wait().await {
                     PlaybackOutcome::Completed => {
+                        if app.session_gen.get() != gen {
+                            return Err(PlayError::Cancelled);
+                        }
                         return Ok((duration, char_wpm, effective_wpm));
                     }
                     PlaybackOutcome::Cancelled => return Err(PlayError::Cancelled),
                 }
             }
-            Err(err) => last_err = Some(err),
+            Err(err) => {
+                if app.session_gen.get() != gen {
+                    return Err(PlayError::Cancelled);
+                }
+                last_err = Some(err);
+            }
         }
     }
     Err(PlayError::Failed(
@@ -152,9 +167,13 @@ pub(crate) async fn play_text_now(
 
 async fn schedule_text(
     app: &AppState,
+    gen: u64,
     text: &str,
     settings: &TrainingSettings,
 ) -> Result<crate::audio::PlaybackWait, String> {
+    if app.session_gen.get() != gen {
+        return Err("Cancelled.".into());
+    }
     #[cfg(feature = "web")]
     {
         let promise = app
@@ -165,8 +184,14 @@ async fn schedule_text(
         if let Some(promise) = promise {
             let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
         }
+        if app.session_gen.get() != gen {
+            return Err("Cancelled.".into());
+        }
     }
     for _ in 0..8 {
+        if app.session_gen.get() != gen {
+            return Err("Cancelled.".into());
+        }
         match (app.rng.try_borrow_mut(), app.player.try_borrow_mut()) {
             (Ok(mut rng), Ok(mut slot)) => {
                 let Some(player) = slot.as_mut() else {
@@ -296,7 +321,7 @@ pub async fn play_chars(
         if app.session_gen.get() != gen {
             return;
         }
-        let play = play_text_now(&app, &ch.to_string(), &settings).await;
+        let play = play_text_now(&app, gen, &ch.to_string(), &settings).await;
         if app.session_gen.get() != gen {
             return;
         }
@@ -327,7 +352,7 @@ pub async fn loop_preview_text(
             return;
         }
         let settings_now = settings().clamp();
-        if let Err(err) = play_text_now(&app, text, &settings_now).await {
+        if let Err(err) = play_text_now(&app, gen, text, &settings_now).await {
             match err {
                 PlayError::Cancelled => return,
                 PlayError::Failed(message) => {
