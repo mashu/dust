@@ -1,9 +1,12 @@
 # Build installers on a version tag (v*) and publish a GitHub Release.
 #
+# Triggers:
+# - git push of v*.*.* tags (`push`)
+# - creating a tag in the GitHub UI (`create`)
+# - Actions → Release → Run workflow (optional tag input)
+#
 # GitHub-hosted runners produce Linux, Windows, and macOS desktop bundles
 # (each on its native OS). The web app is deployed separately to GitHub Pages.
-# Native Android/iOS packages are not built: this app has no mobile target, and
-# store-ready IPA/AAB files need signing certificates the runners do not provide.
 
 name: Release
 
@@ -11,11 +14,17 @@ on:
   push:
     tags:
       - "v*.*.*"
+  create:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v0.1.0). Required when running from a branch."
+        required: false
+        type: string
 
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: release-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -27,15 +36,45 @@ env:
 jobs:
   version:
     name: Check version
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
+      - name: Resolve tag
+        id: meta
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            tag="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            echo "Run this workflow from a version tag, or pass the tag input."
+            exit 1
+          fi
+          case "$tag" in
+            v*.*.*) ;;
+            *)
+              echo "Tag '$tag' does not match v*.*.*"
+              exit 1
+              ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Using tag $tag"
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
 
       - name: Resolve and verify version
         id: version
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
           cargo_version="$(awk '
@@ -51,12 +90,10 @@ jobs:
             echo "Could not read workspace.package.version from Cargo.toml"
             exit 1
           fi
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            tag="${GITHUB_REF_NAME#v}"
-            if [[ "$tag" != "$cargo_version" ]]; then
-              echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${cargo_version}"
-              exit 1
-            fi
+          tag="${TAG#v}"
+          if [[ "$tag" != "$cargo_version" ]]; then
+            echo "Tag ${TAG} does not match Cargo.toml version ${cargo_version}"
+            exit 1
           fi
           echo "version=${cargo_version}" >> "$GITHUB_OUTPUT"
           echo "Releasing version ${cargo_version}"
@@ -87,10 +124,41 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Fix rust-objcopy LLVM dylib path
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          sysroot="$(rustc --print sysroot)"
+          host="$(rustc -vV | awk '/^host:/{print $2}')"
+          dest="${sysroot}/lib/rustlib/${host}/lib"
+          mkdir -p "$dest"
+          if ! find "${sysroot}/lib" -maxdepth 1 -name 'libLLVM*.dylib' | grep -q .; then
+            echo "libLLVM.dylib not found under ${sysroot}/lib"
+            find "$sysroot" -name 'libLLVM*' | head -50
+            exit 1
+          fi
+          find "${sysroot}/lib" -maxdepth 1 -name 'libLLVM*.dylib' -exec ln -sf {} "$dest/" \;
+          echo "Linked LLVM dylibs into ${dest}:"
+          ls -l "$dest"/libLLVM*
+          objcopy="${sysroot}/lib/rustlib/${host}/bin/rust-objcopy"
+          if [[ ! -x "$objcopy" ]]; then
+            echo "rust-objcopy not found at ${objcopy}"
+            ls -l "${sysroot}/lib/rustlib/${host}/bin" || true
+            exit 1
+          fi
+          echo "PATH=${sysroot}/lib/rustlib/${host}/bin:${PATH}" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=${sysroot}/lib:${dest}${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=${sysroot}/lib:${dest}" >> "$GITHUB_ENV"
+          "$objcopy" --version
 
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@v2
@@ -163,8 +231,12 @@ jobs:
           fi
           if [[ -z "$search_roots" ]]; then
             echo "No bundle output directories were produced"
+            ls -la
             exit 1
           fi
+
+          echo "Bundle outputs:"
+          find $search_roots -type f | sort | head -200
 
           list="${RUNNER_TEMP}/dust-artifacts.txt"
           find $search_roots -type f \( \
@@ -195,15 +267,40 @@ jobs:
           done < "$list"
 
           if [[ "$copied" -eq 0 ]]; then
-            echo "No installer artifacts were produced"
-            find $search_roots -type f | head -100
-            exit 1
+            echo "No installer packages found; collecting the raw binary"
+            bin=""
+            while IFS= read -r src; do
+              [[ -z "$src" ]] && continue
+              base="$(basename "$src")"
+              if [[ "$base" == "dust" || "$base" == "dust.exe" ]]; then
+                bin="$src"
+              fi
+            done < <(find $search_roots -type f \( -name dust -o -name dust.exe \) | sort)
+            if [[ -z "$bin" ]]; then
+              echo "No installer artifacts or binaries were produced"
+              exit 1
+            fi
+            case "$PLATFORM" in
+              windows)
+                dest="dust-${VERSION}-${arch}-pc-windows-msvc.exe"
+                cp "$bin" "artifacts/${dest}"
+                ;;
+              linux)
+                dest="dust-${VERSION}-${arch}-unknown-linux-gnu.tar.gz"
+                tar -czf "artifacts/${dest}" -C "$(dirname "$bin")" "$(basename "$bin")"
+                ;;
+              macos)
+                dest="dust-${VERSION}-${arch}-apple-darwin.tar.gz"
+                tar -czf "artifacts/${dest}" -C "$(dirname "$bin")" "$(basename "$bin")"
+                ;;
+            esac
+            copied=1
           fi
 
           ls -lh artifacts
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: dust-${{ matrix.platform }}
           path: artifacts/*
@@ -212,13 +309,12 @@ jobs:
   release:
     name: Publish GitHub release
     needs: [version, build]
-    if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
@@ -231,6 +327,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.version.outputs.tag }}
           name: Dust v${{ needs.version.outputs.version }}
           generate_release_notes: true
           files: artifacts/*

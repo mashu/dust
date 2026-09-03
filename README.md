@@ -58,6 +58,8 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
+Creating the tag only in the GitHub UI also works. To rebuild an existing tag, use **Actions → Release → Run workflow** and pass `v0.1.0`.
+
 GitHub Actions then builds and attaches:
 
 - Linux `.deb`
