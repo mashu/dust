@@ -19,12 +19,17 @@ pub enum SessionPhase {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionEvent {
     PlaybackEnded {
+        index: usize,
         duration_sec: f64,
         char_wpm: f64,
         effective_wpm: f64,
     },
-    PlaybackCancelled,
-    PlaybackFailed,
+    PlaybackCancelled {
+        index: usize,
+    },
+    PlaybackFailed {
+        index: usize,
+    },
     Input {
         index: usize,
         text: String,
@@ -47,6 +52,7 @@ pub enum SessionEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionEffect {
     Play {
+        index: usize,
         text: String,
     },
     NeedGroup {
@@ -101,13 +107,13 @@ impl SessionMachine {
             pending_sleep: None,
             pending_auto_confirm: None,
         };
-        let mut effects = vec![SessionEffect::Focus { index: 0 }];
-        if text.is_empty() {
-            // Runtime should immediately send PlaybackEnded.
-        } else {
-            effects.push(SessionEffect::Play { text });
-        }
-        (machine, effects)
+        (
+            machine,
+            vec![
+                SessionEffect::Focus { index: 0 },
+                SessionEffect::Play { index: 0, text },
+            ],
+        )
     }
 
     pub fn session(&self) -> &GroupSession {
@@ -146,13 +152,15 @@ impl SessionMachine {
             return Vec::new();
         }
         match event {
-            SessionEvent::PlaybackCancelled | SessionEvent::Abort => self.abort(),
-            SessionEvent::PlaybackFailed => self.fail_audio(),
+            SessionEvent::Abort => self.abort(),
+            SessionEvent::PlaybackCancelled { index } => self.playback_cancelled(index),
+            SessionEvent::PlaybackFailed { index } => self.playback_failed(index),
             SessionEvent::PlaybackEnded {
+                index,
                 duration_sec,
                 char_wpm,
                 effective_wpm,
-            } => self.playback_ended(now_ms, duration_sec, char_wpm, effective_wpm),
+            } => self.playback_ended(index, now_ms, duration_sec, char_wpm, effective_wpm),
             SessionEvent::Input { index, text } => self.input(index, text, now_ms),
             SessionEvent::Confirm => self.confirm_current(now_ms, None),
             SessionEvent::Timeout => self.timeout(now_ms),
@@ -174,6 +182,27 @@ impl SessionMachine {
         vec![SessionEffect::StopAudio, SessionEffect::AbortToHome]
     }
 
+    fn playing_index(&self) -> Option<usize> {
+        match self.phase {
+            SessionPhase::Playing { index } => Some(index),
+            _ => None,
+        }
+    }
+
+    fn playback_cancelled(&mut self, index: usize) -> Vec<SessionEffect> {
+        if self.playing_index() != Some(index) {
+            return Vec::new();
+        }
+        self.abort()
+    }
+
+    fn playback_failed(&mut self, index: usize) -> Vec<SessionEffect> {
+        if self.playing_index() != Some(index) {
+            return Vec::new();
+        }
+        self.fail_audio()
+    }
+
     fn fail_audio(&mut self) -> Vec<SessionEffect> {
         self.cancel_timers();
         if self.session.any_confirmed() {
@@ -190,14 +219,15 @@ impl SessionMachine {
 
     fn playback_ended(
         &mut self,
+        index: usize,
         now_ms: u64,
         duration_sec: f64,
         char_wpm: f64,
         effective_wpm: f64,
     ) -> Vec<SessionEffect> {
-        let SessionPhase::Playing { index } = self.phase else {
+        if self.playing_index() != Some(index) {
             return Vec::new();
-        };
+        }
         let ended = now_ms.max(
             self.session.group_start_ms(index).unwrap_or(now_ms)
                 + (duration_sec * 1000.0).round() as u64,
@@ -339,6 +369,7 @@ impl SessionMachine {
         let id = self.alloc_id();
         self.pending_sleep = Some(id);
         vec![
+            SessionEffect::StopAudio,
             SessionEffect::NeedGroup { index: next },
             SessionEffect::Focus {
                 index: self.session.focused_group(),
@@ -375,11 +406,10 @@ impl SessionMachine {
             .group(index)
             .map(|g| g.sent().to_string())
             .unwrap_or_default();
-        let mut effects = vec![SessionEffect::Focus { index }];
-        if !text.is_empty() {
-            effects.push(SessionEffect::Play { text });
-        }
-        effects
+        vec![
+            SessionEffect::Focus { index },
+            SessionEffect::Play { index, text },
+        ]
     }
 
     pub fn set_group_text(&mut self, index: usize, text: String) {
@@ -417,7 +447,7 @@ mod tests {
     #[test]
     fn audio_fail_with_no_answers_aborts() {
         let mut m = machine();
-        let effects = m.apply(SessionEvent::PlaybackFailed, 10);
+        let effects = m.apply(SessionEvent::PlaybackFailed { index: 0 }, 10);
         assert_eq!(m.phase(), SessionPhase::Aborted);
         assert!(effects.contains(&SessionEffect::AbortToHome));
     }
@@ -427,6 +457,7 @@ mod tests {
         let mut m = machine();
         let effects = m.apply(
             SessionEvent::PlaybackEnded {
+                index: 0,
                 duration_sec: 0.5,
                 char_wpm: 20.0,
                 effective_wpm: 18.0,
@@ -459,6 +490,7 @@ mod tests {
         let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into());
         let _ = m.apply(
             SessionEvent::PlaybackEnded {
+                index: 0,
                 duration_sec: 0.2,
                 char_wpm: 18.0,
                 effective_wpm: 18.0,
@@ -498,6 +530,7 @@ mod tests {
         let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into());
         let _ = m.apply(
             SessionEvent::PlaybackEnded {
+                index: 0,
                 duration_sec: 0.2,
                 char_wpm: 18.0,
                 effective_wpm: 18.0,
@@ -542,6 +575,7 @@ mod tests {
         let mut m = machine();
         let _ = m.apply(
             SessionEvent::PlaybackEnded {
+                index: 0,
                 duration_sec: 0.5,
                 char_wpm: 20.0,
                 effective_wpm: 18.0,
@@ -566,6 +600,7 @@ mod tests {
         let mut m = machine();
         let _ = m.apply(
             SessionEvent::PlaybackEnded {
+                index: 0,
                 duration_sec: 0.2,
                 char_wpm: 18.0,
                 effective_wpm: 18.0,
@@ -581,8 +616,92 @@ mod tests {
             .position(|e| matches!(e, SessionEffect::Play { .. }));
         assert!(need.is_some());
         assert!(play.is_none(), "play must wait until NeedGroup is applied");
+        assert!(effects.contains(&SessionEffect::StopAudio));
         assert!(effects
             .iter()
             .any(|e| matches!(e, SessionEffect::Sleep { .. })));
+    }
+
+    #[test]
+    fn cancelled_play_for_another_group_does_not_abort() {
+        let mut m = machine();
+        let _ = m.apply(
+            SessionEvent::PlaybackEnded {
+                index: 0,
+                duration_sec: 0.2,
+                char_wpm: 18.0,
+                effective_wpm: 18.0,
+            },
+            200,
+        );
+        let _ = m.apply(SessionEvent::Confirm, 300);
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        let effects = m.apply(SessionEvent::PlaybackCancelled { index: 0 }, 310);
+        assert!(effects.is_empty());
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+    }
+
+    #[test]
+    fn cancelled_play_for_current_group_aborts() {
+        let mut m = machine();
+        let effects = m.apply(SessionEvent::PlaybackCancelled { index: 0 }, 10);
+        assert_eq!(m.phase(), SessionPhase::Aborted);
+        assert!(effects.contains(&SessionEffect::AbortToHome));
+    }
+
+    #[test]
+    fn playback_ended_for_stale_index_is_ignored() {
+        let mut m = machine();
+        let _ = m.apply(
+            SessionEvent::PlaybackEnded {
+                index: 0,
+                duration_sec: 0.2,
+                char_wpm: 18.0,
+                effective_wpm: 18.0,
+            },
+            200,
+        );
+        let effects = m.apply(
+            SessionEvent::PlaybackEnded {
+                index: 0,
+                duration_sec: 0.2,
+                char_wpm: 18.0,
+                effective_wpm: 18.0,
+            },
+            400,
+        );
+        assert!(effects.is_empty());
+        assert!(matches!(
+            m.phase(),
+            SessionPhase::AwaitingAnswer { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn confirm_during_play_stops_audio() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.num_groups = 2;
+        settings.playback.lock_input_during_group_playback = false;
+        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into());
+        let effects = m.apply(SessionEvent::Confirm, 50);
+        assert!(effects.contains(&SessionEffect::StopAudio));
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        let late = m.apply(SessionEvent::PlaybackCancelled { index: 0 }, 80);
+        assert!(late.is_empty());
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+    }
+
+    #[test]
+    fn start_emits_play_even_for_empty_text() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.num_groups = 1;
+        let (_, effects) = SessionMachine::start(SessionId::new(1), 0, settings, String::new());
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            SessionEffect::Play {
+                index: 0,
+                text
+            } if text.is_empty()
+        )));
     }
 }

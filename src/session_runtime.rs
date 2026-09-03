@@ -14,12 +14,16 @@ pub fn dispatch_event(
     app: &AppState,
     mut runtime: Signal<Option<cw_core::GroupSession>>,
     event: SessionEvent,
+    expected_gen: u64,
 ) -> Vec<SessionEffect> {
+    if app.session_gen.get() != expected_gen {
+        return Vec::new();
+    }
     let mut slot = app.machine.borrow_mut();
     let Some(machine) = slot.as_mut() else {
         return Vec::new();
     };
-    if machine.session().session_id().raw() != app.session_gen.get() {
+    if machine.session().session_id().raw() != expected_gen {
         return Vec::new();
     }
     let before = machine.session().confirmed_flags();
@@ -58,7 +62,7 @@ pub fn send_command(
         .as_ref()
         .map(|s| s.settings().clone())
         .unwrap_or_else(|| settings_sig());
-    let effects = dispatch_event(&app, runtime, event);
+    let effects = dispatch_event(&app, runtime, event, gen);
     spawn_effects(
         effects,
         settings,
@@ -227,6 +231,14 @@ async fn handle_effect(
             Vec::new()
         }
         SessionEffect::NeedGroup { index } => {
+            let terminal = app
+                .machine
+                .borrow()
+                .as_ref()
+                .is_some_and(|m| m.is_terminal());
+            if terminal || app.session_gen.get() != gen {
+                return Vec::new();
+            }
             let snapshot = app
                 .machine
                 .borrow()
@@ -247,46 +259,50 @@ async fn handle_effect(
                 drop(sampling);
                 drop(rng);
                 if let Some(machine) = app.machine.borrow_mut().as_mut() {
-                    machine.set_group_text(index, group);
-                    runtime.set(Some(machine.session().clone()));
+                    if !machine.is_terminal() && machine.session().session_id().raw() == gen {
+                        machine.set_group_text(index, group);
+                        runtime.set(Some(machine.session().clone()));
+                    }
                 }
             }
             Vec::new()
         }
-        SessionEffect::Play { text } => {
+        SessionEffect::Play { index, text } => {
+            if app.session_gen.get() != gen {
+                return Vec::new();
+            }
             let snapshot = app
                 .machine
                 .borrow()
                 .as_ref()
                 .map(|m| m.session().settings().clone())
                 .unwrap_or_else(|| settings.clone());
-            if text.is_empty() {
-                return dispatch_event(
-                    app,
-                    runtime,
-                    SessionEvent::PlaybackEnded {
-                        duration_sec: 0.0,
-                        char_wpm: 0.0,
-                        effective_wpm: 0.0,
-                    },
-                );
+            let outcome = if text.is_empty() {
+                Ok((0.0, 0.0, 0.0))
+            } else {
+                play_text_now(app, &text, &snapshot).await
+            };
+            if app.session_gen.get() != gen {
+                return Vec::new();
             }
-            match play_text_now(app, &text, &snapshot).await {
+            match outcome {
                 Ok((duration, char_wpm, effective_wpm)) => dispatch_event(
                     app,
                     runtime,
                     SessionEvent::PlaybackEnded {
+                        index,
                         duration_sec: duration,
                         char_wpm,
                         effective_wpm,
                     },
+                    gen,
                 ),
                 Err(PlayError::Cancelled) => {
-                    dispatch_event(app, runtime, SessionEvent::PlaybackCancelled)
+                    dispatch_event(app, runtime, SessionEvent::PlaybackCancelled { index }, gen)
                 }
                 Err(PlayError::Failed(message)) => {
                     toast.set(Some(message));
-                    dispatch_event(app, runtime, SessionEvent::PlaybackFailed)
+                    dispatch_event(app, runtime, SessionEvent::PlaybackFailed { index }, gen)
                 }
             }
         }
@@ -305,10 +321,10 @@ async fn handle_effect(
             let phase = app.machine.borrow().as_ref().map(|m| m.phase());
             match phase {
                 Some(SessionPhase::InterGroupGap { .. }) => {
-                    dispatch_event(app, runtime, SessionEvent::GapElapsed)
+                    dispatch_event(app, runtime, SessionEvent::GapElapsed, gen)
                 }
                 Some(SessionPhase::AwaitingAnswer { .. }) => {
-                    dispatch_event(app, runtime, SessionEvent::Timeout)
+                    dispatch_event(app, runtime, SessionEvent::Timeout, gen)
                 }
                 _ => Vec::new(),
             }
@@ -326,6 +342,7 @@ async fn handle_effect(
                 app,
                 runtime,
                 SessionEvent::AutoConfirmDue { id, index, value },
+                gen,
             )
         }
         SessionEffect::PersistAndShowResults => {
