@@ -224,6 +224,7 @@ pub fn App() -> Element {
 
     rsx! {
         document::Title { "Dust" }
+        document::Style { { include_str!("../assets/styles.css") } }
         document::Link { rel: "stylesheet", href: asset!("/assets/styles.css") }
         document::Meta {
             name: "viewport",
@@ -235,7 +236,7 @@ pub fn App() -> Element {
         document::Meta { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" }
         document::Link {
             rel: "stylesheet",
-            href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=swap",
+            href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional",
         }
         div {
             class: "app-root",

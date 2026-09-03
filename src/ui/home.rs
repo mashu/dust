@@ -43,12 +43,20 @@ pub fn Home(
                 h2 { class: "page-title", style: "margin: 0 0 0.25rem;", "Practice" }
                 p { class: "muted", "Hear the group first, then answer from memory." }
             }
-            TipsCarousel {}
-            if let Some(progress) = auto_progress {
-                AutoLevelCard { progress }
+            div { class: "card home-start",
+                div { class: "tiny", "Current alphabet" }
+                p { class: "pool", "{pool}" }
+                p { class: "muted", style: "margin: 0.4rem 0 0.85rem;",
+                    "{settings.playback.char_wpm_min as u32}–{settings.playback.char_wpm_max as u32} WPM · {settings.curriculum.min_group_size}–{settings.curriculum.max_group_size} chars · {settings.curriculum.num_groups} groups"
+                }
+                div { class: "home-actions",
+                    button { class: "btn btn-primary", onclick: move |_| on_start.call(()), "Start training" }
+                    button { class: "btn btn-secondary", onclick: move |_| on_listen.call(()), "Listen to letters" }
+                }
             }
-            StreakCard { status: streak }
             if session_count > 0 {
+                ActivityHeatmap { sessions, today }
+                StreakCard { status: streak }
                 div { class: "grid-3",
                     div { class: "kpi emerald",
                         div { class: "tiny", "Last accuracy" }
@@ -63,19 +71,13 @@ pub fn Home(
                         div { class: "value", "{level_value}" }
                     }
                 }
-                ActivityHeatmap { sessions, today }
+            } else {
+                StreakCard { status: streak }
             }
-            div { class: "card",
-                div { class: "tiny", "Current alphabet" }
-                p { class: "pool", "{pool}" }
-                p { class: "muted", style: "margin: 0.4rem 0 0.8rem;",
-                    "{settings.playback.char_wpm_min as u32}–{settings.playback.char_wpm_max as u32} WPM · {settings.curriculum.min_group_size}–{settings.curriculum.max_group_size} chars · {settings.curriculum.num_groups} groups"
-                }
-                div { class: "home-actions",
-                    button { class: "btn btn-primary", onclick: move |_| on_start.call(()), "Start training" }
-                    button { class: "btn btn-secondary", onclick: move |_| on_listen.call(()), "Listen to letters" }
-                }
+            if let Some(progress) = auto_progress {
+                AutoLevelCard { progress }
             }
+            TipsCarousel {}
         }
     }
 }

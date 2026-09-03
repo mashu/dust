@@ -8,7 +8,7 @@ title = "Dust"
 watch_path = ["src", "assets", "crates"]
 
 [web.resource]
-style = []
+style = ["assets/styles.css"]
 script = []
 
 [web.resource.dev]

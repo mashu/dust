@@ -9,6 +9,17 @@ mod ui;
 
 use crate::app::App;
 
+#[cfg(feature = "desktop")]
+fn themed_document_head() -> String {
+    let mut head = String::from("<style>");
+    head.push_str(include_str!("../assets/styles.css"));
+    head.push_str("</style>");
+    head.push_str(
+        r#"<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional" media="print" onload="this.media='all'">"#,
+    );
+    head
+}
+
 fn main() {
     #[cfg(feature = "desktop")]
     {
@@ -28,6 +39,7 @@ fn main() {
                 Config::new()
                     .with_menu(None)
                     .with_background_color((243, 234, 217, 255))
+                    .with_custom_head(themed_document_head())
                     .with_window(
                         WindowBuilder::new()
                             .with_title("Dust")
