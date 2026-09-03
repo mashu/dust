@@ -112,19 +112,19 @@ pub fn spawn_effects(
     });
 }
 
-pub async fn run_machine_session(
+/// Build the session machine on the UI thread so Training has groups before the
+/// first paint, and so a cancelled start cannot resurrect a dead session.
+pub fn boot_machine_session(
     settings: TrainingSettings,
-    history: Vec<cw_core::SessionResult>,
-    app: AppState,
+    history: &[cw_core::SessionResult],
+    app: &AppState,
     gen: u64,
     mut runtime: Signal<Option<cw_core::GroupSession>>,
     mut screen: Signal<Screen>,
-    result: Signal<Option<cw_core::SessionResult>>,
-    auto_message: Signal<Option<String>>,
-    sessions: Signal<Vec<cw_core::SessionResult>>,
-    settings_sig: Signal<TrainingSettings>,
-    toast: Signal<Option<String>>,
-) {
+) -> Option<Vec<SessionEffect>> {
+    if app.session_gen.get() != gen {
+        return None;
+    }
     let history_refs: Vec<_> = history
         .iter()
         .filter(|session| session.usable_for_sampling(&settings))
@@ -140,30 +140,19 @@ pub async fn run_machine_session(
         group
     };
 
-    let (machine, effects) = SessionMachine::start(
-        cw_core::SessionId::new(gen),
-        now_ms(),
-        settings.clone(),
-        first,
-    );
+    if app.session_gen.get() != gen {
+        return None;
+    }
+
+    let (machine, effects) =
+        SessionMachine::start(cw_core::SessionId::new(gen), now_ms(), settings, first);
+    if app.session_gen.get() != gen {
+        return None;
+    }
     runtime.set(Some(machine.session().clone()));
     screen.set(Screen::Training);
     *app.machine.borrow_mut() = Some(machine);
-
-    drive_effects(
-        effects,
-        settings,
-        app,
-        gen,
-        runtime,
-        screen,
-        result,
-        auto_message,
-        sessions,
-        settings_sig,
-        toast,
-    )
-    .await;
+    Some(effects)
 }
 
 async fn drive_effects(

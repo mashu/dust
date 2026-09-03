@@ -1,6 +1,23 @@
 use cw_core::{align_group, GroupResult};
 use dioxus::prelude::*;
 
+fn parse_number_input(raw: &str, min: f64, max: f64, commit: bool) -> Option<f64> {
+    let value: f64 = raw.parse().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
+    if commit {
+        return Some(value.clamp(min, max));
+    }
+    if value > max {
+        Some(max)
+    } else if value < 0.0 && min >= 0.0 {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 #[component]
 pub fn CharacterComparison(sent: String, received: String) -> Element {
     let sent_up = sent.to_ascii_uppercase();
@@ -103,17 +120,13 @@ pub fn NumberField(
                 step: "{step}",
                 value: "{value}",
                 oninput: move |e| {
-                    if let Ok(v) = e.value().parse::<f64>() {
-                        if v > max {
-                            onchange.call(max);
-                        } else {
-                            onchange.call(v);
-                        }
+                    if let Some(v) = parse_number_input(&e.value(), min, max, false) {
+                        onchange.call(v);
                     }
                 },
                 onchange: move |e| {
-                    if let Ok(v) = e.value().parse::<f64>() {
-                        onchange.call(v.clamp(min, max));
+                    if let Some(v) = parse_number_input(&e.value(), min, max, true) {
+                        onchange.call(v);
                     }
                 },
             }
@@ -152,7 +165,7 @@ pub fn LinkedRange(
                     min: min_bound,
                     max: max_bound,
                     step,
-                    onchange: move |v: f64| on_min.call(v.clamp(min_bound, max_bound)),
+                    onchange: move |v: f64| on_min.call(v),
                 }
             } else {
                 div { class: "field-grid",
@@ -163,10 +176,9 @@ pub fn LinkedRange(
                         max: max_bound,
                         step,
                         onchange: move |v: f64| {
-                            let min = v.clamp(min_bound, max_bound);
-                            on_min.call(min);
-                            if min > max_value {
-                                on_max.call(min);
+                            on_min.call(v);
+                            if v > max_value {
+                                on_max.call(v);
                             }
                         },
                     }
@@ -177,15 +189,37 @@ pub fn LinkedRange(
                         max: max_bound,
                         step,
                         onchange: move |v: f64| {
-                            let max = v.clamp(min_bound, max_bound);
-                            on_max.call(max);
-                            if max < min_value {
-                                on_min.call(max);
+                            on_max.call(v);
+                            if v < min_value {
+                                on_min.call(v);
                             }
                         },
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_number_input;
+
+    #[test]
+    fn typing_below_min_is_kept_until_commit() {
+        assert_eq!(parse_number_input("1", 5.0, 60.0, false), Some(1.0));
+        assert_eq!(parse_number_input("18", 5.0, 60.0, false), Some(18.0));
+        assert_eq!(parse_number_input("1", 5.0, 60.0, true), Some(5.0));
+    }
+
+    #[test]
+    fn input_above_max_is_capped() {
+        assert_eq!(parse_number_input("99", 5.0, 60.0, false), Some(60.0));
+    }
+
+    #[test]
+    fn negative_values_are_ignored_when_min_is_non_negative() {
+        assert_eq!(parse_number_input("-1", 1.0, 100.0, false), None);
+        assert_eq!(parse_number_input("1e500", 1.0, 100.0, false), None);
     }
 }

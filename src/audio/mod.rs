@@ -111,19 +111,24 @@ impl PlaybackWait {
         }
         #[cfg(feature = "desktop")]
         {
+            let hang_ms = ((self.duration_sec * 1000.0).ceil() as u32).saturating_add(2_000);
+            let mut waited = 0u32;
             while !self.finished.load(Ordering::SeqCst)
                 && !self.stop_flag.load(Ordering::SeqCst)
                 && self.current_epoch.load(Ordering::SeqCst) == self.epoch
             {
+                if waited >= hang_ms {
+                    break;
+                }
                 sleep_ms(POLL_MS).await;
+                waited = waited.saturating_add(POLL_MS);
             }
-            if self.finished.load(Ordering::SeqCst)
-                && !self.stop_flag.load(Ordering::SeqCst)
-                && self.current_epoch.load(Ordering::SeqCst) == self.epoch
-            {
-                PlaybackOutcome::Completed
-            } else {
+            let stopped = self.stop_flag.load(Ordering::SeqCst)
+                || self.current_epoch.load(Ordering::SeqCst) != self.epoch;
+            if stopped {
                 PlaybackOutcome::Cancelled
+            } else {
+                PlaybackOutcome::Completed
             }
         }
     }

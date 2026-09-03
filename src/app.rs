@@ -1,11 +1,12 @@
 use std::rc::Rc;
 
-use cw_core::{fit_settings_to_alphabet, GroupSession};
+use cw_core::{fit_settings_to_alphabet, GroupSession, SessionEvent};
 use dioxus::prelude::*;
 
-use crate::engine::{loop_preview_text, play_chars, run_group_session, AppState, Screen};
+use crate::engine::{loop_preview_text, play_chars, AppState, Screen};
 use crate::persist::{load_sessions, load_settings, save_settings};
 use crate::routes::app_routes;
+use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
 use crate::time::sleep_ms;
 
 #[component]
@@ -76,21 +77,23 @@ pub fn App() -> Element {
             }
             previewing.set(false);
             listen_playing.set(false);
-            screen.set(Screen::Training);
             let gen = match app.takeover_audio(&settings_now) {
                 Ok(gen) => gen,
                 Err(err) => {
-                    screen.set(Screen::Home);
                     toast.set(Some(err));
                     return;
                 }
             };
             let history = sessions();
-            let app_loop = (*app).clone();
-            spawn(run_group_session(
+            let Some(effects) =
+                boot_machine_session(settings_now.clone(), &history, &app, gen, runtime, screen)
+            else {
+                return;
+            };
+            spawn_effects(
+                effects,
                 settings_now,
-                history,
-                app_loop,
+                (*app).clone(),
                 gen,
                 runtime,
                 screen,
@@ -99,7 +102,7 @@ pub fn App() -> Element {
                 sessions,
                 settings,
                 toast,
-            ));
+            );
         }
     });
 
@@ -219,6 +222,30 @@ pub fn App() -> Element {
             screen.set(Screen::Settings);
         }
     });
+    let exit_training = use_callback({
+        let app = app.clone();
+        move |(): ()| {
+            let event = match runtime.peek().as_ref() {
+                Some(session) if session.any_confirmed() => SessionEvent::FinishNow,
+                Some(_) => SessionEvent::Abort,
+                None => {
+                    go_home.call(());
+                    return;
+                }
+            };
+            send_command(
+                (*app).clone(),
+                runtime,
+                screen,
+                result,
+                auto_message,
+                sessions,
+                settings,
+                toast,
+                event,
+            );
+        }
+    });
     let show_nav = !matches!(screen(), Screen::Training);
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };
 
@@ -249,7 +276,7 @@ pub fn App() -> Element {
             header { class: "header-bar",
                 p { class: "brand-name", "Dust" }
                 if screen() == Screen::Training {
-                    button { class: "btn btn-ghost header-ghost", onclick: move |_| go_home.call(()), "Exit" }
+                    button { class: "btn btn-ghost header-ghost", onclick: move |_| exit_training.call(()), "Exit" }
                 }
             }
             { app_routes(

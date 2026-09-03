@@ -218,35 +218,6 @@ pub async fn sleep_cancelable(ms: u32, gen: u64, session_gen: Rc<Cell<u64>>) -> 
     session_gen.get() == gen
 }
 
-pub async fn run_group_session(
-    settings: TrainingSettings,
-    history: Vec<SessionResult>,
-    app: AppState,
-    gen: u64,
-    runtime: Signal<Option<GroupSession>>,
-    screen: Signal<Screen>,
-    result: Signal<Option<SessionResult>>,
-    auto_message: Signal<Option<String>>,
-    sessions: Signal<Vec<SessionResult>>,
-    settings_sig: Signal<TrainingSettings>,
-    toast: Signal<Option<String>>,
-) {
-    crate::session_runtime::run_machine_session(
-        settings,
-        history,
-        app,
-        gen,
-        runtime,
-        screen,
-        result,
-        auto_message,
-        sessions,
-        settings_sig,
-        toast,
-    )
-    .await;
-}
-
 pub fn finish_session(
     app: AppState,
     mut runtime: Signal<Option<GroupSession>>,

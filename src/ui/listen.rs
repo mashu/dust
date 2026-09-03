@@ -120,6 +120,7 @@ pub fn ListenView(
                     }
                     button {
                         class: "btn btn-secondary",
+                        disabled: all_chars.is_empty(),
                         onclick: move |_| on_play.call(all_chars.clone()),
                         "Play all"
                     }

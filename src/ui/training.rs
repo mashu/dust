@@ -99,7 +99,7 @@ pub fn TrainingView(
                                                 e.prevent_default();
                                                 return;
                                             }
-                                            if e.key().to_string() == "Enter" && !disabled {
+                                            if e.key() == Key::Enter && !disabled {
                                                 on_confirm.call(idx);
                                             }
                                         }

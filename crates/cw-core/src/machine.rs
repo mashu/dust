@@ -193,7 +193,8 @@ impl SessionMachine {
         if self.playing_index() != Some(index) {
             return Vec::new();
         }
-        self.abort()
+        // Same as a hard audio failure: keep scored groups instead of dropping them.
+        self.fail_audio()
     }
 
     fn playback_failed(&mut self, index: usize) -> Vec<SessionEffect> {
@@ -650,6 +651,28 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_play_after_confirmed_group_persists() {
+        let mut m = machine();
+        let _ = m.apply(
+            SessionEvent::PlaybackEnded {
+                index: 0,
+                duration_sec: 0.2,
+                char_wpm: 18.0,
+                effective_wpm: 18.0,
+            },
+            200,
+        );
+        let _ = m.apply(SessionEvent::Confirm, 300);
+        m.set_group_text(1, "UK".into());
+        let _ = m.apply(SessionEvent::GapElapsed, 800);
+        assert!(matches!(m.phase(), SessionPhase::Playing { index: 1 }));
+        let effects = m.apply(SessionEvent::PlaybackCancelled { index: 1 }, 900);
+        assert_eq!(m.phase(), SessionPhase::Finished);
+        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        assert!(m.session().group(0).unwrap().confirmed());
+    }
+
+    #[test]
     fn playback_ended_for_stale_index_is_ignored() {
         let mut m = machine();
         let _ = m.apply(
@@ -689,7 +712,10 @@ mod tests {
         let late = m.apply(SessionEvent::PlaybackCancelled { index: 0 }, 80);
         assert!(late.is_empty());
         assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
-        assert_eq!(m.session().view().status, crate::RuntimeStatus::WaitingForAnswer);
+        assert_eq!(
+            m.session().view().status,
+            crate::RuntimeStatus::WaitingForAnswer
+        );
         let timings = m.session().build_timings(10_000.0);
         assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
     }

@@ -207,6 +207,18 @@ fn start_tone_stream(
             Arc::clone(&finished),
             err_fn,
         )?,
+        SampleFormat::F64 => build_stream::<f64>(
+            &device,
+            &config.into(),
+            samples,
+            sample_rate,
+            channels,
+            qsb,
+            Arc::clone(&pos),
+            Arc::clone(&stop),
+            Arc::clone(&finished),
+            err_fn,
+        )?,
         SampleFormat::I16 => build_stream::<i16>(
             &device,
             &config.into(),
@@ -219,7 +231,55 @@ fn start_tone_stream(
             Arc::clone(&finished),
             err_fn,
         )?,
+        SampleFormat::I32 => build_stream::<i32>(
+            &device,
+            &config.into(),
+            samples,
+            sample_rate,
+            channels,
+            qsb,
+            Arc::clone(&pos),
+            Arc::clone(&stop),
+            Arc::clone(&finished),
+            err_fn,
+        )?,
         SampleFormat::U16 => build_stream::<u16>(
+            &device,
+            &config.into(),
+            samples,
+            sample_rate,
+            channels,
+            qsb,
+            Arc::clone(&pos),
+            Arc::clone(&stop),
+            Arc::clone(&finished),
+            err_fn,
+        )?,
+        SampleFormat::U32 => build_stream::<u32>(
+            &device,
+            &config.into(),
+            samples,
+            sample_rate,
+            channels,
+            qsb,
+            Arc::clone(&pos),
+            Arc::clone(&stop),
+            Arc::clone(&finished),
+            err_fn,
+        )?,
+        SampleFormat::I8 => build_stream::<i8>(
+            &device,
+            &config.into(),
+            samples,
+            sample_rate,
+            channels,
+            qsb,
+            Arc::clone(&pos),
+            Arc::clone(&stop),
+            Arc::clone(&finished),
+            err_fn,
+        )?,
+        SampleFormat::U8 => build_stream::<u8>(
             &device,
             &config.into(),
             samples,
@@ -323,6 +383,14 @@ fn start_band_stream(
                 None,
             )
             .map_err(|e| format!("Band stream: {e}"))?,
+        SampleFormat::F64 => device
+            .build_output_stream(
+                &stream_config,
+                move |output: &mut [f64], _| fill_band(output, channels, &mut mixer, &stop),
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("Band stream: {e}"))?,
         SampleFormat::I16 => device
             .build_output_stream(
                 &stream_config,
@@ -331,10 +399,42 @@ fn start_band_stream(
                 None,
             )
             .map_err(|e| format!("Band stream: {e}"))?,
+        SampleFormat::I32 => device
+            .build_output_stream(
+                &stream_config,
+                move |output: &mut [i32], _| fill_band(output, channels, &mut mixer, &stop),
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("Band stream: {e}"))?,
         SampleFormat::U16 => device
             .build_output_stream(
                 &stream_config,
                 move |output: &mut [u16], _| fill_band(output, channels, &mut mixer, &stop),
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("Band stream: {e}"))?,
+        SampleFormat::U32 => device
+            .build_output_stream(
+                &stream_config,
+                move |output: &mut [u32], _| fill_band(output, channels, &mut mixer, &stop),
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("Band stream: {e}"))?,
+        SampleFormat::I8 => device
+            .build_output_stream(
+                &stream_config,
+                move |output: &mut [i8], _| fill_band(output, channels, &mut mixer, &stop),
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("Band stream: {e}"))?,
+        SampleFormat::U8 => device
+            .build_output_stream(
+                &stream_config,
+                move |output: &mut [u8], _| fill_band(output, channels, &mut mixer, &stop),
                 err_fn,
                 None,
             )
