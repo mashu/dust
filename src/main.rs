@@ -12,6 +12,16 @@ use crate::app::App;
 fn main() {
     #[cfg(feature = "desktop")]
     {
+        #[cfg(target_os = "linux")]
+        {
+            // GTK client-side decorations draw a thick header with the window title.
+            // Prefer the window manager's normal title bar instead.
+            #[allow(unused_unsafe)]
+            // Safety: process start, before other threads exist.
+            unsafe {
+                std::env::set_var("GTK_CSD", "0");
+            }
+        }
         use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
         dioxus::LaunchBuilder::desktop()
             .with_cfg(

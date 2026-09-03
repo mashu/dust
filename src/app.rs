@@ -247,10 +247,7 @@ pub fn App() -> Element {
             },
             div { class: shell_class,
             header { class: "header-bar",
-                div {
-                    p { class: "brand-kicker", "CW copy trainer" }
-                    h1 { "Dust" }
-                }
+                p { class: "brand-name", "Dust" }
                 if screen() == Screen::Training {
                     button { class: "btn btn-ghost header-ghost", onclick: move |_| go_home.call(()), "Exit" }
                 }

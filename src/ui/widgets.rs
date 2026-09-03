@@ -148,7 +148,7 @@ pub fn LinkedRange(
                     min: min_bound,
                     max: max_bound,
                     step,
-                    onchange: move |v| on_min.call(v),
+                    onchange: move |v: f64| on_min.call(v.clamp(min_bound, max_bound)),
                 }
             } else {
                 div { class: "field-grid",
@@ -158,7 +158,13 @@ pub fn LinkedRange(
                         min: min_bound,
                         max: max_bound,
                         step,
-                        onchange: move |v| on_min.call(v),
+                        onchange: move |v: f64| {
+                            let min = v.clamp(min_bound, max_bound);
+                            on_min.call(min);
+                            if min > max_value {
+                                on_max.call(min);
+                            }
+                        },
                     }
                     NumberField {
                         label: format!("Max ({unit})"),
@@ -166,7 +172,13 @@ pub fn LinkedRange(
                         min: min_bound,
                         max: max_bound,
                         step,
-                        onchange: move |v| on_max.call(v),
+                        onchange: move |v: f64| {
+                            let max = v.clamp(min_bound, max_bound);
+                            on_max.call(max);
+                            if max < min_value {
+                                on_min.call(max);
+                            }
+                        },
                     }
                 }
             }

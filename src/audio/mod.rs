@@ -132,13 +132,29 @@ impl PlaybackWait {
 pub fn focus_group_input(index: usize) {
     let js = format!(
         r#"(() => {{
-            const el = document.getElementById("group-input-{index}");
-            if (!el || el.disabled) {{
-                return;
-            }}
-            if (document.activeElement !== el) {{
-                el.focus({{ preventScroll: true }});
-            }}
+            const cardId = "group-card-{index}";
+            const inputId = "group-input-{index}";
+            let scrolled = false;
+            const apply = () => {{
+                const card = document.getElementById(cardId);
+                if (card && !scrolled) {{
+                    card.scrollIntoView({{ behavior: "smooth", block: "center", inline: "nearest" }});
+                    scrolled = true;
+                }}
+                const el = document.getElementById(inputId);
+                if (!el || el.disabled) {{
+                    return;
+                }}
+                if (document.activeElement !== el) {{
+                    el.focus({{ preventScroll: true }});
+                }}
+            }};
+            apply();
+            requestAnimationFrame(() => {{
+                apply();
+                setTimeout(apply, 50);
+                setTimeout(apply, 180);
+            }});
         }})()"#
     );
     let _ = dioxus::document::eval(&js);

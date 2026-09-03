@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::audio::focus_group_input;
 use crate::ui::widgets::ProgressHeader;
 
 #[component]
@@ -18,6 +19,10 @@ pub fn TrainingView(
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
 ) -> Element {
+    use_effect(use_reactive!(|focused, current, playing, locked| {
+        let _ = (current, playing, locked);
+        focus_group_input(focused);
+    }));
     rsx! {
         div { class: "stack",
             ProgressHeader { current, total }
@@ -49,7 +54,7 @@ pub fn TrainingView(
                                 "Type group answer..."
                             };
                             rsx! {
-                                div { class: cls,
+                                div { id: "group-card-{idx}", class: cls,
                                     div { class: "row", style: "justify-content: space-between;",
                                         div { class: "row",
                                             span { class: if is_focused { "badge current" } else { "badge" }, "Group {idx + 1}" }
@@ -74,6 +79,7 @@ pub fn TrainingView(
                                         value: "{value}",
                                         disabled: disabled,
                                         readonly: input_locked,
+                                        autofocus: is_active && !is_confirmed,
                                         placeholder: "{placeholder}",
                                         autocomplete: "off",
                                         autocorrect: "off",

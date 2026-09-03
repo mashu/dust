@@ -31,11 +31,19 @@ pub fn SettingsView(
                     on_min: move |v| {
                         let w = &mut *settings.write();
                         w.curriculum.min_group_size = v as u32;
-                        if w.curriculum.link_group_size {
+                        if w.curriculum.link_group_size
+                            || w.curriculum.min_group_size > w.curriculum.max_group_size
+                        {
                             w.curriculum.max_group_size = w.curriculum.min_group_size;
                         }
                     },
-                    on_max: move |v| settings.write().curriculum.max_group_size = v as u32,
+                    on_max: move |v| {
+                        let w = &mut *settings.write();
+                        w.curriculum.max_group_size = v as u32;
+                        if w.curriculum.max_group_size < w.curriculum.min_group_size {
+                            w.curriculum.min_group_size = w.curriculum.max_group_size;
+                        }
+                    },
                     on_link: move |on| {
                         let w = &mut *settings.write();
                         w.curriculum.link_group_size = on;
@@ -64,8 +72,10 @@ pub fn SettingsView(
                     on_min: move |v| {
                         let w = &mut *settings.write();
                         w.playback.char_wpm_min = v;
-                        if w.playback.link_char_wpm {
-                            w.playback.char_wpm_max = v;
+                        if w.playback.link_char_wpm
+                            || w.playback.char_wpm_min > w.playback.char_wpm_max
+                        {
+                            w.playback.char_wpm_max = w.playback.char_wpm_min;
                         }
                         if w.playback.link_char_to_effective {
                             w.playback.effective_wpm_min = w.playback.char_wpm_min;
@@ -75,8 +85,12 @@ pub fn SettingsView(
                     on_max: move |v| {
                         let w = &mut *settings.write();
                         w.playback.char_wpm_max = v;
+                        if w.playback.char_wpm_max < w.playback.char_wpm_min {
+                            w.playback.char_wpm_min = w.playback.char_wpm_max;
+                        }
                         if w.playback.link_char_to_effective {
-                            w.playback.effective_wpm_max = v;
+                            w.playback.effective_wpm_min = w.playback.char_wpm_min;
+                            w.playback.effective_wpm_max = w.playback.char_wpm_max;
                         }
                     },
                     on_link: move |on| {
@@ -103,11 +117,19 @@ pub fn SettingsView(
                         on_min: move |v| {
                             let w = &mut *settings.write();
                             w.playback.effective_wpm_min = v;
-                            if w.playback.link_effective_wpm {
+                            if w.playback.link_effective_wpm
+                                || w.playback.effective_wpm_min > w.playback.effective_wpm_max
+                            {
                                 w.playback.effective_wpm_max = v;
                             }
                         },
-                        on_max: move |v| settings.write().playback.effective_wpm_max = v,
+                        on_max: move |v| {
+                            let w = &mut *settings.write();
+                            w.playback.effective_wpm_max = v;
+                            if w.playback.effective_wpm_max < w.playback.effective_wpm_min {
+                                w.playback.effective_wpm_min = v;
+                            }
+                        },
                         on_link: move |on| {
                             let w = &mut *settings.write();
                             w.playback.link_effective_wpm = on;
@@ -134,8 +156,34 @@ pub fn SettingsView(
             div { class: "card stack",
                 div { class: "tiny", "Tone & volume" }
                 div { class: "field-grid",
-                    NumberField { label: "Side tone min (Hz)".to_string(), value: s.band.side_tone_min, min: 200.0, max: 1200.0, step: 10.0, onchange: move |v| settings.write().band.side_tone_min = v }
-                    NumberField { label: "Side tone max (Hz)".to_string(), value: s.band.side_tone_max, min: 200.0, max: 1200.0, step: 10.0, onchange: move |v| settings.write().band.side_tone_max = v }
+                    NumberField {
+                        label: "Side tone min (Hz)".to_string(),
+                        value: s.band.side_tone_min,
+                        min: 200.0,
+                        max: 1200.0,
+                        step: 10.0,
+                        onchange: move |v| {
+                            let w = &mut *settings.write();
+                            w.band.side_tone_min = v;
+                            if w.band.side_tone_min > w.band.side_tone_max {
+                                w.band.side_tone_max = w.band.side_tone_min;
+                            }
+                        }
+                    }
+                    NumberField {
+                        label: "Side tone max (Hz)".to_string(),
+                        value: s.band.side_tone_max,
+                        min: 200.0,
+                        max: 1200.0,
+                        step: 10.0,
+                        onchange: move |v| {
+                            let w = &mut *settings.write();
+                            w.band.side_tone_max = v;
+                            if w.band.side_tone_max < w.band.side_tone_min {
+                                w.band.side_tone_min = w.band.side_tone_max;
+                            }
+                        }
+                    }
                 }
                 LinkedRange {
                     label: "Volume".to_string(),
@@ -149,11 +197,17 @@ pub fn SettingsView(
                     on_min: move |v| {
                         let w = &mut *settings.write();
                         w.band.volume_min = v;
-                        if w.band.link_volume {
+                        if w.band.link_volume || w.band.volume_min > w.band.volume_max {
                             w.band.volume_max = v;
                         }
                     },
-                    on_max: move |v| settings.write().band.volume_max = v,
+                    on_max: move |v| {
+                        let w = &mut *settings.write();
+                        w.band.volume_max = v;
+                        if w.band.volume_max < w.band.volume_min {
+                            w.band.volume_min = v;
+                        }
+                    },
                     on_link: move |on| {
                         let w = &mut *settings.write();
                         w.band.link_volume = on;
