@@ -7,7 +7,10 @@ use dioxus::prelude::*;
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
 use crate::ui::widgets::{Icon, Seg};
 
-const CHART_W: f64 = 300.0;
+// 420×96 keeps the drawing box at the same aspect the card gives it, so the
+// SVG can scale uniformly: stretched coordinates would turn the dots into
+// ellipses and thin the stroke unevenly.
+const CHART_W: f64 = 420.0;
 const CHART_H: f64 = 96.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,20 +22,50 @@ enum StatsTab {
     History,
 }
 
-fn chart_geometry(points: &[AccuracyPoint]) -> (String, String) {
-    if points.is_empty() {
-        return (String::new(), String::new());
-    }
-    let last = (points.len() - 1).max(1) as f64;
-    let coords: Vec<(f64, f64)> = points
+/// Chart shape for the accuracy series. `None` when there is nothing to draw.
+struct ChartGeometry {
+    line: String,
+    area: String,
+    dots: Vec<(f64, f64)>,
+    floor_pct: f64,
+    threshold_y: Option<f64>,
+}
+
+/// Accuracy clusters near the top, so the axis starts below the worst session
+/// instead of at zero — otherwise every series is a flat line in the top tenth.
+fn chart_floor(points: &[AccuracyPoint]) -> f64 {
+    let min = points
         .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let x = i as f64 / last * CHART_W;
-            let y = CHART_H - (p.accuracy_pct.clamp(0.0, 100.0) / 100.0) * CHART_H;
-            (x, y)
-        })
-        .collect();
+        .map(|p| p.accuracy_pct.clamp(0.0, 100.0))
+        .fold(100.0_f64, f64::min);
+    (((min - 6.0) / 10.0).floor() * 10.0).clamp(0.0, 80.0)
+}
+
+fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartGeometry> {
+    if points.is_empty() {
+        return None;
+    }
+    let floor_pct = chart_floor(points);
+    let span = (100.0 - floor_pct).max(1.0);
+    let y_at = |pct: f64| {
+        let pct = pct.clamp(0.0, 100.0);
+        (CHART_H - ((pct - floor_pct) / span) * CHART_H).clamp(0.0, CHART_H)
+    };
+
+    let coords: Vec<(f64, f64)> = if points.len() == 1 {
+        // One session: a flat line across the card with a dot on it beats an
+        // empty chart, which is what a single-point polyline renders as.
+        let y = y_at(points[0].accuracy_pct);
+        vec![(0.0, y), (CHART_W, y)]
+    } else {
+        let last = (points.len() - 1) as f64;
+        points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as f64 / last * CHART_W, y_at(p.accuracy_pct)))
+            .collect()
+    };
+
     let line = coords
         .iter()
         .map(|(x, y)| format!("{x:.1},{y:.1}"))
@@ -46,7 +79,23 @@ fn chart_geometry(points: &[AccuracyPoint]) -> (String, String) {
         " L{:.1},{CHART_H:.1} Z",
         coords.last().map(|(x, _)| *x).unwrap_or(0.0)
     ));
-    (line, area)
+
+    let dots = if points.len() == 1 {
+        vec![(CHART_W / 2.0, coords[0].1)]
+    } else if points.len() <= 30 {
+        coords.clone()
+    } else {
+        coords.last().copied().into_iter().collect()
+    };
+
+    Some(ChartGeometry {
+        line,
+        area,
+        dots,
+        floor_pct,
+        threshold_y: (threshold_pct > floor_pct && threshold_pct < 100.0)
+            .then(|| y_at(threshold_pct)),
+    })
 }
 
 #[component]
@@ -73,7 +122,10 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             }
             match tab() {
                 StatsTab::Overview => rsx! {
-                    OverviewTab { sessions: matching }
+                    OverviewTab {
+                        sessions: matching,
+                        threshold: settings.auto_level.auto_adjust_threshold,
+                    }
                 },
                 StatsTab::Letters => rsx! { LettersTab { letters } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions: matching } },
@@ -85,7 +137,7 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
 }
 
 #[component]
-fn OverviewTab(sessions: Vec<SessionResult>) -> Element {
+fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
     let chart = accuracy_chart(&sessions);
     let letters = character_diagnostics(&sessions);
     let avg = if sessions.is_empty() {
@@ -101,13 +153,17 @@ fn OverviewTab(sessions: Vec<SessionResult>) -> Element {
         .iter()
         .filter(|d| d.status == MasteryStatus::Mastered)
         .count();
-    let (line, area) = chart_geometry(&chart);
-    let empty = sessions.is_empty();
+    let geometry = chart_geometry(&chart, threshold);
     let session_count = sessions.len();
+    let session_noun = if session_count == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
     let latest = chart.last().map(|p| p.accuracy_pct).unwrap_or(0.0);
     rsx! {
         div { class: "stack",
-            if empty {
+            if sessions.is_empty() {
                 div { class: "card",
                     div { class: "card-head",
                         div { class: "card-head-main",
@@ -134,41 +190,64 @@ fn OverviewTab(sessions: Vec<SessionResult>) -> Element {
                         div { class: "value", "{mastered}" }
                     }
                 }
-                div { class: "card chart-card",
-                    div { class: "card-head",
-                        div { class: "card-head-main",
-                            span { class: "card-icon", Icon { name: "chart" } }
-                            div {
-                                h3 { class: "card-title", "Accuracy over time" }
-                                p { class: "card-note", "{session_count} sessions · latest {latest.round()}%" }
+                if let Some(geometry) = geometry {
+                    div { class: "card chart-card",
+                        div { class: "card-head",
+                            div { class: "card-head-main",
+                                span { class: "card-icon", Icon { name: "chart" } }
+                                div {
+                                    h3 { class: "card-title", "Accuracy over time" }
+                                    p { class: "card-note", "{session_count} {session_noun} · latest {latest.round()}%" }
+                                }
                             }
                         }
-                    }
-                    svg {
-                        class: "sparkline",
-                        view_box: "0 0 300 96",
-                        preserve_aspect_ratio: "none",
-                        defs {
-                            linearGradient { id: "dust-acc-fill", x1: "0", y1: "0", x2: "0", y2: "1",
-                                stop { offset: "0%", style: "stop-color: var(--copper); stop-opacity: 0.42;" }
-                                stop { offset: "100%", style: "stop-color: var(--copper); stop-opacity: 0.02;" }
+                        svg {
+                            class: "sparkline",
+                            view_box: "0 0 420 96",
+                            defs {
+                                linearGradient { id: "dust-acc-fill", x1: "0", y1: "0", x2: "0", y2: "1",
+                                    stop { offset: "0%", style: "stop-color: var(--copper); stop-opacity: 0.42;" }
+                                    stop { offset: "100%", style: "stop-color: var(--copper); stop-opacity: 0.02;" }
+                                }
+                            }
+                            if let Some(y) = geometry.threshold_y {
+                                line {
+                                    x1: "0",
+                                    y1: "{y:.1}",
+                                    x2: "420",
+                                    y2: "{y:.1}",
+                                    stroke: "var(--good)",
+                                    stroke_width: "1",
+                                    stroke_dasharray: "4 4",
+                                    opacity: "0.65",
+                                }
+                            }
+                            path { d: "{geometry.area}", fill: "url(#dust-acc-fill)", stroke: "none" }
+                            polyline {
+                                points: "{geometry.line}",
+                                fill: "none",
+                                stroke: "var(--copper)",
+                                stroke_width: "2.2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                            }
+                            for (x, y) in geometry.dots.iter() {
+                                circle {
+                                    cx: "{x:.1}",
+                                    cy: "{y:.1}",
+                                    r: "3",
+                                    fill: "var(--copper)",
+                                    stroke: "var(--surface)",
+                                    stroke_width: "1.5",
+                                }
                             }
                         }
-                        line { x1: "0", y1: "9.6", x2: "300", y2: "9.6", stroke: "var(--line-soft)", stroke_width: "1", stroke_dasharray: "3 5" }
-                        line { x1: "0", y1: "48", x2: "300", y2: "48", stroke: "var(--line-soft)", stroke_width: "1", stroke_dasharray: "3 5" }
-                        path { d: "{area}", fill: "url(#dust-acc-fill)", stroke: "none" }
-                        polyline {
-                            points: "{line}",
-                            fill: "none",
-                            stroke: "var(--copper)",
-                            stroke_width: "2.2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
+                        div { class: "row-between",
+                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
+                                "Scale {geometry.floor_pct}–100%"
+                            }
+                            span { class: "chip good", "Level up at {threshold.round()}%" }
                         }
-                    }
-                    div { class: "row-between",
-                        span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;", "90% line is the level-up threshold" }
-                        span { class: "chip neutral", "100% top" }
                     }
                 }
             }

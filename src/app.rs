@@ -11,6 +11,30 @@ use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::widgets::Icon;
 
+/// Head tags are injected once, on mount. They live in their own component so
+/// that App re-renders do not re-run them — `dioxus-document` warns on every
+/// prop update of a head element ("Changing the props of `Style {}` is not
+/// supported"), and a component with no props is memoized.
+#[component]
+fn AppHead() -> Element {
+    rsx! {
+        document::Title { "Dust" }
+        document::Style { { include_str!("../assets/styles.css") } }
+        document::Meta {
+            name: "viewport",
+            content: "width=device-width, initial-scale=1, viewport-fit=cover",
+        }
+        document::Meta { name: "theme-color", content: "#1b2436" }
+        document::Meta { name: "mobile-web-app-capable", content: "yes" }
+        document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
+        document::Meta { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" }
+        document::Link {
+            rel: "stylesheet",
+            href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional",
+        }
+    }
+}
+
 #[component]
 pub fn App() -> Element {
     let mut settings = use_signal(load_settings);
@@ -307,20 +331,7 @@ pub fn App() -> Element {
     let screen_key = screen_key(screen());
 
     rsx! {
-        document::Title { "Dust" }
-        document::Style { { include_str!("../assets/styles.css") } }
-        document::Meta {
-            name: "viewport",
-            content: "width=device-width, initial-scale=1, viewport-fit=cover",
-        }
-        document::Meta { name: "theme-color", content: "#1b2436" }
-        document::Meta { name: "mobile-web-app-capable", content: "yes" }
-        document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
-        document::Meta { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" }
-        document::Link {
-            rel: "stylesheet",
-            href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional",
-        }
+        AppHead {}
         div {
             class: "app-root",
             onkeydown: move |e| {
