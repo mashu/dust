@@ -133,8 +133,7 @@ pub fn Home(
                         "Start training"
                     }
                     button {
-                        class: "btn btn-secondary",
-                        style: "background: rgb(255 255 255 / 10%); color: var(--cream); border-color: rgb(255 255 255 / 16%);",
+                        class: "btn btn-hero",
                         onclick: move |_| on_listen.call(()),
                         Icon { name: "headphones" }
                         "Listen to letters"

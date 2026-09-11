@@ -44,6 +44,24 @@
   --info: #3d5a80;
   --info-soft: rgb(61 90 128 / 12%);
 
+  /* Switch: the off state needs its own contrast, not just a surface tint */
+  --switch-track: #e3d2b4;
+  --switch-edge: #cdb894;
+  --switch-knob: #fffdf7;
+
+  /* Hero panel — an elevated sheet in whichever theme is on */
+  --hero-bg:
+    radial-gradient(115% 130% at 0% 0%, rgb(196 92 38 / 16%) 0%, transparent 58%),
+    linear-gradient(155deg, #fffdf7 0%, #f6ecda 62%, #f0e3cd 100%);
+  --hero-ink: var(--ink);
+  --hero-ink-soft: var(--ink-dim);
+  --hero-border: var(--line-strong);
+  --hero-line: rgb(27 36 54 / 10%);
+  --hero-chip: rgb(27 36 54 / 5%);
+  --hero-chip-line: rgb(27 36 54 / 9%);
+  --hero-chip-ink: var(--ink);
+  --hero-shadow: var(--shadow-md);
+
   /* Shadows */
   --shadow-sm: 0 1px 2px rgb(27 36 54 / 6%);
   --shadow-md: 0 2px 6px rgb(27 36 54 / 5%), 0 12px 28px rgb(27 36 54 / 7%);
@@ -146,6 +164,22 @@
     --info: #7aa5dd;
     --info-soft: rgb(122 165 221 / 16%);
 
+    --switch-track: #2b3446;
+    --switch-edge: #414c62;
+    --switch-knob: #98a4b8;
+
+    --hero-bg:
+      radial-gradient(120% 120% at 0% 0%, rgb(245 132 63 / 26%) 0%, transparent 55%),
+      linear-gradient(155deg, #1d2534 0%, #141a25 65%);
+    --hero-ink: var(--cream);
+    --hero-ink-soft: rgb(244 247 252 / 58%);
+    --hero-border: rgb(255 255 255 / 8%);
+    --hero-line: rgb(255 255 255 / 10%);
+    --hero-chip: rgb(255 255 255 / 8%);
+    --hero-chip-line: rgb(255 255 255 / 10%);
+    --hero-chip-ink: var(--cream);
+    --hero-shadow: var(--shadow-lg);
+
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
     --shadow-md: 0 2px 6px rgb(0 0 0 / 30%), 0 14px 30px rgb(0 0 0 / 45%);
     --shadow-lg: 0 28px 70px rgb(0 0 0 / 60%);
@@ -191,6 +225,22 @@
   --bad-soft: rgb(244 114 106 / 16%);
   --info: #7aa5dd;
   --info-soft: rgb(122 165 221 / 16%);
+
+  --switch-track: #2b3446;
+  --switch-edge: #414c62;
+  --switch-knob: #98a4b8;
+
+  --hero-bg:
+    radial-gradient(120% 120% at 0% 0%, rgb(245 132 63 / 26%) 0%, transparent 55%),
+    linear-gradient(155deg, #1d2534 0%, #141a25 65%);
+  --hero-ink: var(--cream);
+  --hero-ink-soft: rgb(244 247 252 / 58%);
+  --hero-border: rgb(255 255 255 / 8%);
+  --hero-line: rgb(255 255 255 / 10%);
+  --hero-chip: rgb(255 255 255 / 8%);
+  --hero-chip-line: rgb(255 255 255 / 10%);
+  --hero-chip-ink: var(--cream);
+  --hero-shadow: var(--shadow-lg);
 
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
   --shadow-md: 0 2px 6px rgb(0 0 0 / 30%), 0 14px 30px rgb(0 0 0 / 45%);
@@ -503,15 +553,13 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   overflow: hidden;
   border-radius: var(--r-xl);
   padding: 1.2rem 1.25rem 1.35rem;
-  color: var(--cream);
-  border: 1px solid rgb(255 255 255 / 8%);
-  background:
-    radial-gradient(120% 120% at 0% 0%, rgb(196 92 38 / 35%) 0%, transparent 55%),
-    linear-gradient(155deg, var(--navy-2) 0%, var(--navy) 65%);
-  box-shadow: var(--shadow-lg);
+  color: var(--hero-ink);
+  border: 1px solid var(--hero-border);
+  background: var(--hero-bg);
+  box-shadow: var(--hero-shadow);
 }
-.hero .eyebrow { color: rgb(248 241 227 / 65%); }
-.hero .eyebrow::before { background: var(--copper-lift); }
+.hero .eyebrow { color: var(--hero-ink-soft); }
+.hero .eyebrow::before { background: var(--copper); }
 .hero-top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
 .hero-level {
   display: inline-flex;
@@ -519,8 +567,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   gap: 0.35rem;
   padding: 0.25rem 0.6rem;
   border-radius: var(--pill);
-  background: rgb(255 255 255 / 10%);
-  border: 1px solid rgb(255 255 255 / 14%);
+  background: var(--hero-chip);
+  border: 1px solid var(--hero-chip-line);
+  color: var(--hero-ink);
   font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -538,12 +587,12 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   height: 1.85rem;
   padding: 0 0.35rem;
   border-radius: 8px;
-  background: rgb(255 255 255 / 9%);
-  border: 1px solid rgb(255 255 255 / 10%);
+  background: var(--hero-chip);
+  border: 1px solid var(--hero-chip-line);
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.9rem;
   font-weight: 700;
-  color: var(--cream);
+  color: var(--hero-chip-ink);
 }
 .pool-chip.fresh {
   background: linear-gradient(180deg, var(--copper-lift), var(--copper));
@@ -557,8 +606,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   gap: 0.5rem;
   padding: 0.7rem 0;
   margin-bottom: 0.95rem;
-  border-top: 1px solid rgb(255 255 255 / 10%);
-  border-bottom: 1px solid rgb(255 255 255 / 10%);
+  border-top: 1px solid var(--hero-line);
+  border-bottom: 1px solid var(--hero-line);
 }
 .spec-value {
   display: block;
@@ -573,7 +622,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   font-size: 0.62rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgb(248 241 227 / 55%);
+  color: var(--hero-ink-soft);
   font-weight: 700;
 }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; }
@@ -583,7 +632,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   gap: 5px;
   height: 18px;
   margin-top: 1.05rem;
-  opacity: 0.55;
+  opacity: 0.7;
 }
 .hero-wave i {
   display: block;
@@ -592,7 +641,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   background: var(--copper-lift);
   animation: trace 2.6s var(--ease) infinite;
 }
-.hero-wave i:nth-child(3n) { background: rgb(248 241 227 / 70%); }
+.hero-wave i:nth-child(3n) { background: var(--hero-ink-soft); }
 @keyframes trace {
   0%, 100% { opacity: 0.25; transform: scaleY(1); }
   45% { opacity: 1; transform: scaleY(2.1); }
@@ -634,6 +683,12 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   box-shadow: var(--shadow-sm);
 }
 .btn-secondary:hover { border-color: var(--copper); color: var(--copper-deep); }
+.btn-hero {
+  background: var(--hero-chip);
+  color: var(--hero-ink);
+  border-color: var(--hero-chip-line);
+}
+.btn-hero:hover { border-color: var(--copper); color: var(--copper-deep); }
 .btn-danger { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
 .btn-ghost { background: transparent; color: var(--copper-deep); }
 .btn-ghost:hover { background: var(--copper-soft); }
@@ -905,11 +960,12 @@ input[type="range"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .switch {
   position: relative;
   flex: 0 0 auto;
-  width: 42px;
-  height: 24px;
+  width: 44px;
+  height: 26px;
   border-radius: var(--pill);
-  background: var(--surface-sunken);
-  border: 1px solid var(--line);
+  background: var(--switch-track);
+  border: 1px solid var(--switch-edge);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 10%);
   transition: background 0.18s var(--ease), border-color 0.18s var(--ease);
 }
 .switch input {
@@ -923,16 +979,20 @@ input[type="range"]:disabled { opacity: 0.5; cursor: not-allowed; }
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   border-radius: 50%;
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
-  transition: transform 0.2s var(--ease);
+  background: var(--switch-knob);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 25%);
+  transition: transform 0.2s var(--ease), background 0.18s var(--ease);
   pointer-events: none;
 }
-.switch.on { background: linear-gradient(180deg, var(--copper-lift), var(--copper)); border-color: transparent; }
-.switch.on i { transform: translateX(18px); }
+.switch.on {
+  background: linear-gradient(180deg, var(--copper-lift), var(--copper));
+  border-color: var(--copper-deep);
+}
+.switch.on i { transform: translateX(18px); background: #fff; }
+.switch input:focus-visible + i { outline: 2px solid var(--copper); outline-offset: 2px; }
 .check { display: flex; gap: 0.5rem; align-items: center; font-size: 0.9rem; color: var(--ink-soft); }
 
 /* ==========================================================================
