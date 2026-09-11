@@ -68,15 +68,55 @@ GitHub Actions then builds and attaches:
 - Linux `.deb`
 - Windows NSIS installer (`.exe`)
 - macOS `.dmg` (Apple Silicon on `macos-latest`)
+- Android `.apk` (arm64)
 
 macOS builds are unsigned (right-click → Open the first time). Windows needs WebView2, which is already present on typical Windows 10/11 systems.
 
-Native Android/iOS packages are not produced. The app has no mobile target, and store-ready IPA/AAB files need signing certificates that GitHub-hosted runners do not provide. Use the GitHub Pages build in a mobile browser instead.
+The Android APK is signed with Gradle's debug key: fine for sideloading, not for the Play
+Store, which wants an AAB signed with an upload key. No iOS package is produced — a
+store-ready IPA needs signing certificates that GitHub-hosted runners do not provide.
+
+## Android
+
+Dioxus's `mobile` feature is the same wry/tao webview stack as the desktop build, so the whole
+UI, curriculum and scoring come across unchanged. `dx` enables that feature itself for
+`--platform android`.
+
+Audio is cpal's Android backend — AAudio through [oboe](https://github.com/google/oboe) — so
+the player, band simulation and QSB are the desktop ones. Building it compiles oboe's C++ with
+the NDK toolchain, which is why an NDK is required and not just the SDK. If a toolchain
+bring-up ever blocks on that, `--features mobile-silent` builds the same app with a player
+that keeps a session's timing but makes no sound, and the practice screen says so.
+
+Settings and history persist: `dirs` has no `HOME` to work from on Android, so the store
+resolves `/data/data/<package>/files` from the package name in `/proc/self/cmdline`.
+
+### Building one yourself
+
+```bash
+rustup target add aarch64-linux-android
+export ANDROID_HOME=~/Android/Sdk          # or /usr/lib/android-sdk
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+dx bundle --platform android --target aarch64-linux-android --package-types apk --release
+```
+
+Pass `--target` explicitly: without it `dx` builds for the host architecture, which on an
+x86_64 machine means an emulator APK that a phone will not run.
+
+On Debian the `google-android-*-installer` packages in contrib fetch Google's SDK bits
+(`apt-cache search google-android` shows which versions your release carries); the official
+`commandlinetools` zip plus `sdkmanager` gives tighter control over NDK versions. Either way
+you need JDK 17 and `ANDROID_HOME`/`ANDROID_NDK_HOME` exported.
+
+### Getting an APK without cutting a release
+
+**Actions → Android APK → Run workflow**, on any branch. The APK is attached to that run as an
+artifact.
 
 ## Layout
 
 ```
 crates/cw-core   Morse, Koch pools, Farnsworth timing, sampling, score, session
-src/             Dioxus app (Web Audio on WASM, cpal on desktop)
+src/             Dioxus app (Web Audio on WASM, cpal on desktop and Android)
 assets/          CSS
 ```

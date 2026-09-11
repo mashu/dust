@@ -4,9 +4,9 @@
 # artifacts, signed with Gradle's debug key, so a phone installs it once you allow
 # installs from unknown sources.
 #
-# This build has no audio: the `mobile` feature swaps cpal for a silent player, so
-# sessions run and score at the right pace but play nothing. Android output needs
-# the oboe/NDK path (or a WebView Web Audio shim) and is tracked separately.
+# Audio goes through cpal's AAudio/oboe backend, the same player the desktop build
+# uses. If that ever blocks a toolchain bring-up, `--features mobile-silent` builds
+# the same app with a player that keeps session timing but makes no sound.
 
 name: Android APK
 

@@ -70,10 +70,13 @@ web = [
 desktop = ["dioxus/desktop", "native-runtime", "native-audio"]
 # Android/iOS run the same webview stack as the desktop build. `dx` enables this
 # feature automatically for `--platform android`.
-mobile = ["dioxus/mobile", "native-runtime", "silent-audio"]
+mobile = ["dioxus/mobile", "native-runtime", "native-audio"]
+# Same, minus the audio backend: a fallback for bringing up a new mobile
+# toolchain, since cpal on Android pulls the NDK C++ build for oboe.
+mobile-silent = ["dioxus/mobile", "native-runtime", "silent-audio"]
 # Storage and timers shared by every non-wasm build.
 native-runtime = ["dep:dirs", "dep:tokio"]
-# cpal output. Not on Android yet: that needs the oboe/NDK toolchain.
+# cpal output: ALSA/CoreAudio/WASAPI on desktop, AAudio through oboe on Android.
 native-audio = ["dep:cpal"]
 # Plays nothing, but keeps a session's timing so the rest of the app is usable.
 silent-audio = []

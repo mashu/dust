@@ -81,8 +81,22 @@ impl MorsePlayer {
             self.band_signature = signature;
             return Ok(());
         }
-        self.band_stream = Some(start_band_stream(settings, Arc::clone(&self.band_stop))?);
-        self.band_signature = signature;
+        // The receiver background is decoration. If its stream will not open —
+        // some Android devices refuse a second concurrent output stream — the
+        // Morse must still play, so this failure is swallowed rather than
+        // failing the whole player.
+        match start_band_stream(settings, Arc::clone(&self.band_stop)) {
+            Ok(stream) => {
+                self.band_stream = Some(stream);
+                self.band_signature = signature;
+            }
+            Err(_) => {
+                // Remember the signature anyway so a failing configuration is
+                // not retried on every settings change.
+                self.band_stream = None;
+                self.band_signature = signature;
+            }
+        }
         Ok(())
     }
 
