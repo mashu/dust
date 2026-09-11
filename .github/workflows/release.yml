@@ -306,9 +306,114 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
 
+  android:
+    name: Android APK
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # New pipeline: an Android failure must never hold back the desktop release.
+    continue-on-error: true
+    env:
+      ANDROID_TRIPLE: aarch64-linux-android
+      NDK_FALLBACK_VERSION: "27.2.12479018"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Resolve the Android SDK and NDK
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$sdk" || ! -d "$sdk" ]]; then
+            echo "No Android SDK on this runner."
+            exit 1
+          fi
+
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK:-}}}"
+          if [[ -z "$ndk" || ! -d "$ndk" ]]; then
+            ndk="$(find "$sdk/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -1 || true)"
+          fi
+          if [[ -z "$ndk" || ! -d "$ndk" ]]; then
+            yes | "$sdk/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+            "$sdk/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_FALLBACK_VERSION}"
+            ndk="$sdk/ndk/${NDK_FALLBACK_VERSION}"
+          fi
+
+          {
+            echo "ANDROID_HOME=$sdk"
+            echo "ANDROID_SDK_ROOT=$sdk"
+            echo "ANDROID_NDK_HOME=$ndk"
+            echo "NDK_HOME=$ndk"
+          } >> "$GITHUB_ENV"
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-android
+          cache-directories: target/dx
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install Dioxus CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo binstall "dioxus-cli@${DIOXUS_CLI_VERSION}" --no-confirm --locked \
+            || cargo install dioxus-cli --version "${DIOXUS_CLI_VERSION}" --locked
+          dx --version
+
+      - name: Bundle APK
+        run: |
+          dx bundle --release --locked \
+            --platform android \
+            --target "${ANDROID_TRIPLE}" \
+            --package-types apk
+
+      - name: Collect APK
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "Bundle outputs:"
+          find target/dx -name '*.apk' -type f | sort
+
+          apk="$(find target/dx -name '*.apk' -type f -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
+          if [[ -z "$apk" ]]; then
+            echo "No APK was produced"
+            exit 1
+          fi
+          mkdir -p artifacts
+          cp "$apk" "artifacts/dust-${VERSION}-android-arm64.apk"
+          ls -lh artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: dust-android
+          path: artifacts/*
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: [version, build]
+    needs: [version, build, android]
+    # Publish as long as the desktop bundles are good; Android is best-effort.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

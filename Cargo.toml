@@ -67,7 +67,16 @@ web = [
     "dep:wasm-bindgen-futures",
     "dep:web-sys",
 ]
-desktop = ["dioxus/desktop", "dep:cpal", "dep:dirs", "dep:tokio"]
+desktop = ["dioxus/desktop", "native-runtime", "native-audio"]
+# Android/iOS run the same webview stack as the desktop build. `dx` enables this
+# feature automatically for `--platform android`.
+mobile = ["dioxus/mobile", "native-runtime", "silent-audio"]
+# Storage and timers shared by every non-wasm build.
+native-runtime = ["dep:dirs", "dep:tokio"]
+# cpal output. Not on Android yet: that needs the oboe/NDK toolchain.
+native-audio = ["dep:cpal"]
+# Plays nothing, but keeps a session's timing so the rest of the app is usable.
+silent-audio = []
 
 [profile.release]
 lto = true

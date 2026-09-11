@@ -3,6 +3,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::audio::AUDIO_IS_SILENT;
 use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::listen::newest_index;
@@ -91,6 +92,17 @@ pub fn Home(
             header { class: "page-head",
                 h2 { class: "page-title", "Practice" }
                 p { class: "page-sub", "Hear the group first, then answer from memory." }
+            }
+            if AUDIO_IS_SILENT {
+                div { class: "notice",
+                    Icon { name: "volume" }
+                    div {
+                        div { style: "font-weight: 700;", "This build has no audio yet" }
+                        p { class: "muted", style: "margin: 0.15rem 0 0;",
+                            "Sessions still run and score at the right pace, they just play nothing. Android audio is the next piece of work."
+                        }
+                    }
+                }
             }
             section { class: "hero",
                 div { class: "hero-top",

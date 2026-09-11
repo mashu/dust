@@ -156,7 +156,7 @@ impl MorsePlayer {
         self.apply_band(settings)?;
         let plan = plan_morse_playback(text, settings, rng);
         self.schedule_plan(&plan)?;
-        Ok(crate::audio::PlaybackWait::web(
+        Ok(crate::audio::PlaybackWait::polled(
             plan.duration_sec,
             plan.resolved_char_wpm,
             plan.resolved_effective_wpm,

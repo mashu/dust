@@ -19,6 +19,9 @@ dx serve --platform desktop
 
 # Browser / WASM
 dx serve --platform web --port 8080
+
+# Android (needs JDK 17 + Android SDK/NDK, see below)
+dx serve --platform android
 ```
 
 ```bash

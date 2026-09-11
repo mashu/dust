@@ -139,10 +139,10 @@ fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 pub struct DesktopStore;
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 impl Store for DesktopStore {
     fn load_theme(&self) -> String {
         std::fs::read_to_string(data_dir().join("theme.txt"))
@@ -199,28 +199,58 @@ impl Store for DesktopStore {
     }
 }
 
-#[cfg(feature = "desktop")]
+/// Android hands an app no `HOME`, so `dirs` has nothing to work from. The
+/// first entry of `/proc/self/cmdline` is the package name, and
+/// `/data/data/<package>/files` is the private directory the app owns.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn package_from_cmdline(raw: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(raw);
+    let name = text.split('\0').next()?.trim();
+    // Some processes are named `<package>:<process>`; the data dir is the package.
+    let name = name.split(':').next()?;
+    let valid = !name.is_empty()
+        && name.contains('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
+    valid.then(|| name.to_string())
+}
+
+#[cfg(all(feature = "native-runtime", target_os = "android"))]
+fn android_data_dir() -> Option<std::path::PathBuf> {
+    let raw = std::fs::read("/proc/self/cmdline").ok()?;
+    let package = package_from_cmdline(&raw)?;
+    let dir = std::path::PathBuf::from(format!("/data/data/{package}/files/dust"));
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+#[cfg(feature = "native-runtime")]
 fn data_dir() -> std::path::PathBuf {
+    #[cfg(target_os = "android")]
+    if let Some(dir) = android_data_dir() {
+        return dir;
+    }
     dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("dust")
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 fn ensure_dir() -> std::path::PathBuf {
     let dir = data_dir();
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
     let path = data_dir().join(name);
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 fn write_json(name: &str, value: &impl serde::Serialize) {
     let dir = ensure_dir();
     let path = dir.join(name);
@@ -235,12 +265,12 @@ fn write_json(name: &str, value: &impl serde::Serialize) {
     }
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 fn auto_path() -> std::path::PathBuf {
     data_dir().join("auto_adjust.json")
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 fn load_all_counters() -> std::collections::BTreeMap<String, AutoLevelCounters> {
     std::fs::read_to_string(auto_path())
         .ok()
@@ -248,7 +278,7 @@ fn load_all_counters() -> std::collections::BTreeMap<String, AutoLevelCounters> 
         .unwrap_or_default()
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 fn save_all_counters(map: &std::collections::BTreeMap<String, AutoLevelCounters>) {
     write_json("auto_adjust.json", map);
 }
@@ -258,7 +288,7 @@ pub fn default_store() -> WebStore {
     WebStore
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-runtime")]
 pub fn default_store() -> DesktopStore {
     DesktopStore
 }
@@ -297,4 +327,34 @@ pub fn save_auto_counters(settings: &TrainingSettings, counters: AutoLevelCounte
 
 pub fn clear_auto_counters(keys: &[String]) {
     default_store().clear_auto_counters(keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::package_from_cmdline;
+
+    #[test]
+    fn reads_the_package_name_from_cmdline() {
+        assert_eq!(
+            package_from_cmdline(b"dev.dust.morse\0").as_deref(),
+            Some("dev.dust.morse")
+        );
+        assert_eq!(
+            package_from_cmdline(b"dev.dust.morse\0/system/bin/app_process\0").as_deref(),
+            Some("dev.dust.morse")
+        );
+        assert_eq!(
+            package_from_cmdline(b"dev.dust.morse:remote\0").as_deref(),
+            Some("dev.dust.morse")
+        );
+    }
+
+    #[test]
+    fn rejects_anything_that_is_not_a_package() {
+        assert_eq!(package_from_cmdline(b""), None);
+        assert_eq!(package_from_cmdline(b"\0"), None);
+        // A desktop process name has no dots and must not become a /data/data path.
+        assert_eq!(package_from_cmdline(b"dust\0"), None);
+        assert_eq!(package_from_cmdline(b"/usr/bin/dust\0"), None);
+    }
 }

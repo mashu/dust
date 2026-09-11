@@ -55,6 +55,8 @@ fn main() {
             )
             .launch(App);
     }
+    // Android and iOS run the same webview stack, but the OS owns the window,
+    // so there is nothing to configure — and the web build launches the same way.
     #[cfg(not(feature = "desktop"))]
     {
         dioxus::launch(App);

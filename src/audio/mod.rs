@@ -1,25 +1,33 @@
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-audio")]
 mod native;
+#[cfg(feature = "silent-audio")]
+mod silent;
 #[cfg(feature = "web")]
 mod web;
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-audio")]
 pub use native::MorsePlayer;
+#[cfg(feature = "silent-audio")]
+pub use silent::MorsePlayer;
 #[cfg(feature = "web")]
 pub use web::MorsePlayer;
 
+/// True when the build has no audio output and only simulates the timing of a
+/// session — the Android build, for now.
+pub const AUDIO_IS_SILENT: bool = cfg!(feature = "silent-audio");
+
 use crate::time::{sleep_ms, POLL_MS};
 
-#[cfg(feature = "web")]
+#[cfg(any(feature = "web", feature = "silent-audio"))]
 const PLAYBACK_TAIL_MS: u32 = 24;
 
-#[cfg(feature = "web")]
+#[cfg(any(feature = "web", feature = "silent-audio"))]
 use std::cell::Cell;
-#[cfg(feature = "web")]
+#[cfg(any(feature = "web", feature = "silent-audio"))]
 use std::rc::Rc;
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-audio")]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(feature = "desktop")]
+#[cfg(feature = "native-audio")]
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,25 +41,25 @@ pub struct PlaybackWait {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
-    #[cfg(feature = "web")]
+    #[cfg(any(feature = "web", feature = "silent-audio"))]
     stop_flag: Rc<Cell<bool>>,
-    #[cfg(feature = "web")]
+    #[cfg(any(feature = "web", feature = "silent-audio"))]
     epoch: u64,
-    #[cfg(feature = "web")]
+    #[cfg(any(feature = "web", feature = "silent-audio"))]
     current_epoch: Rc<Cell<u64>>,
-    #[cfg(feature = "desktop")]
+    #[cfg(feature = "native-audio")]
     stop_flag: Arc<AtomicBool>,
-    #[cfg(feature = "desktop")]
+    #[cfg(feature = "native-audio")]
     epoch: u64,
-    #[cfg(feature = "desktop")]
+    #[cfg(feature = "native-audio")]
     current_epoch: Arc<AtomicU64>,
-    #[cfg(feature = "desktop")]
+    #[cfg(feature = "native-audio")]
     finished: Arc<AtomicBool>,
 }
 
 impl PlaybackWait {
-    #[cfg(feature = "web")]
-    pub(crate) fn web(
+    #[cfg(any(feature = "web", feature = "silent-audio"))]
+    pub(crate) fn polled(
         duration_sec: f64,
         char_wpm: f64,
         effective_wpm: f64,
@@ -69,7 +77,7 @@ impl PlaybackWait {
         }
     }
 
-    #[cfg(feature = "desktop")]
+    #[cfg(feature = "native-audio")]
     pub(crate) fn desktop(
         duration_sec: f64,
         char_wpm: f64,
@@ -91,7 +99,7 @@ impl PlaybackWait {
     }
 
     pub async fn wait(self) -> PlaybackOutcome {
-        #[cfg(feature = "web")]
+        #[cfg(any(feature = "web", feature = "silent-audio"))]
         {
             let mut left =
                 ((self.duration_sec * 1000.0).ceil() as u32).saturating_add(PLAYBACK_TAIL_MS);
@@ -109,7 +117,7 @@ impl PlaybackWait {
                 PlaybackOutcome::Completed
             }
         }
-        #[cfg(feature = "desktop")]
+        #[cfg(feature = "native-audio")]
         {
             let hang_ms = ((self.duration_sec * 1000.0).ceil() as u32).saturating_add(2_000);
             let mut waited = 0u32;

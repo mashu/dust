@@ -1402,6 +1402,18 @@ input[type="range"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .heat-cell:disabled { opacity: 0.3; cursor: default; }
 .heatmap-legend { display: flex; align-items: center; gap: 0.35rem; }
 
+.notice {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  border-radius: var(--r-md);
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--ink);
+  padding: 0.8rem 0.95rem;
+}
+.notice .icon { color: var(--warn); width: 1.15rem; height: 1.15rem; margin-top: 0.1rem; }
+
 /* Tips */
 .tips {
   display: flex;

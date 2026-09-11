@@ -59,3 +59,25 @@ jobs:
           files: lcov-cw-core.info,lcov-dust.info
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  android-check:
+    name: Android type-check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android-check
+
+      # `cargo check` never links, so this catches mobile cfg regressions without
+      # needing the NDK. The APK itself is built by the Android APK workflow.
+      - name: Check the mobile build
+        run: cargo check -p dust --no-default-features --features mobile --target aarch64-linux-android --locked
