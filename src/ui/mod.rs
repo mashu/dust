@@ -1,5 +1,6 @@
 pub mod auto_level;
 pub mod band;
+pub mod envelope;
 pub mod heatmap;
 pub mod home;
 pub mod listen;

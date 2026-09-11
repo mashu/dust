@@ -5,7 +5,10 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
-use crate::ui::widgets::ModePill;
+use crate::ui::widgets::{Icon, Seg};
+
+const CHART_W: f64 = 300.0;
+const CHART_H: f64 = 96.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatsTab {
@@ -16,23 +19,34 @@ enum StatsTab {
     History,
 }
 
-fn sparkline_points(points: &[AccuracyPoint]) -> String {
+fn chart_geometry(points: &[AccuracyPoint]) -> (String, String) {
     if points.is_empty() {
-        return String::new();
+        return (String::new(), String::new());
     }
-    let w = 280.0;
-    let h = 72.0;
     let last = (points.len() - 1).max(1) as f64;
-    points
+    let coords: Vec<(f64, f64)> = points
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let x = i as f64 / last * w;
-            let y = h - (p.accuracy_pct.clamp(0.0, 100.0) / 100.0) * h;
-            format!("{x:.1},{y:.1}")
+            let x = i as f64 / last * CHART_W;
+            let y = CHART_H - (p.accuracy_pct.clamp(0.0, 100.0) / 100.0) * CHART_H;
+            (x, y)
         })
+        .collect();
+    let line = coords
+        .iter()
+        .map(|(x, y)| format!("{x:.1},{y:.1}"))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    let mut area = format!("M{:.1},{CHART_H:.1}", coords[0].0);
+    for (x, y) in &coords {
+        area.push_str(&format!(" L{x:.1},{y:.1}"));
+    }
+    area.push_str(&format!(
+        " L{:.1},{CHART_H:.1} Z",
+        coords.last().map(|(x, _)| *x).unwrap_or(0.0)
+    ));
+    (line, area)
 }
 
 #[component]
@@ -46,13 +60,16 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
     let letters = character_diagnostics(&matching);
     rsx! {
         div { class: "stack stats-page",
-            h2 { class: "page-title", "Stats" }
-            div { class: "mode-pills tab-bar",
-                ModePill { label: "Overview".to_string(), active: tab() == StatsTab::Overview, onclick: move |_| tab.set(StatsTab::Overview) }
-                ModePill { label: "Letters".to_string(), active: tab() == StatsTab::Letters, onclick: move |_| tab.set(StatsTab::Letters) }
-                ModePill { label: "Mistakes".to_string(), active: tab() == StatsTab::Mistakes, onclick: move |_| tab.set(StatsTab::Mistakes) }
-                ModePill { label: "Sampling".to_string(), active: tab() == StatsTab::Sampling, onclick: move |_| tab.set(StatsTab::Sampling) }
-                ModePill { label: "History".to_string(), active: tab() == StatsTab::History, onclick: move |_| tab.set(StatsTab::History) }
+            header { class: "page-head",
+                h2 { class: "page-title", "Stats" }
+                p { class: "page-sub", "Everything scored on this device for the current alphabet." }
+            }
+            div { class: "segmented",
+                Seg { label: "Overview".to_string(), active: tab() == StatsTab::Overview, onclick: move |_| tab.set(StatsTab::Overview) }
+                Seg { label: "Letters".to_string(), active: tab() == StatsTab::Letters, onclick: move |_| tab.set(StatsTab::Letters) }
+                Seg { label: "Mistakes".to_string(), active: tab() == StatsTab::Mistakes, onclick: move |_| tab.set(StatsTab::Mistakes) }
+                Seg { label: "Sampling".to_string(), active: tab() == StatsTab::Sampling, onclick: move |_| tab.set(StatsTab::Sampling) }
+                Seg { label: "History".to_string(), active: tab() == StatsTab::History, onclick: move |_| tab.set(StatsTab::History) }
             }
             match tab() {
                 StatsTab::Overview => rsx! {
@@ -84,14 +101,23 @@ fn OverviewTab(sessions: Vec<SessionResult>) -> Element {
         .iter()
         .filter(|d| d.status == MasteryStatus::Mastered)
         .count();
-    let points = sparkline_points(&chart);
+    let (line, area) = chart_geometry(&chart);
     let empty = sessions.is_empty();
     let session_count = sessions.len();
+    let latest = chart.last().map(|p| p.accuracy_pct).unwrap_or(0.0);
     rsx! {
         div { class: "stack",
             if empty {
                 div { class: "card",
-                    p { class: "muted", "Complete a session to see accuracy over time, letter mastery, and sampling weights." }
+                    div { class: "card-head",
+                        div { class: "card-head-main",
+                            span { class: "card-icon", Icon { name: "chart" } }
+                            div { h3 { class: "card-title", "Nothing scored yet" } }
+                        }
+                    }
+                    p { class: "muted", style: "margin: 0;",
+                        "Finish a session to unlock accuracy over time, letter mastery and sampling weights."
+                    }
                 }
             } else {
                 div { class: "grid-3",
@@ -108,22 +134,42 @@ fn OverviewTab(sessions: Vec<SessionResult>) -> Element {
                         div { class: "value", "{mastered}" }
                     }
                 }
-                div { class: "card stack",
-                    div { class: "tiny", "Accuracy" }
+                div { class: "card chart-card",
+                    div { class: "card-head",
+                        div { class: "card-head-main",
+                            span { class: "card-icon", Icon { name: "chart" } }
+                            div {
+                                h3 { class: "card-title", "Accuracy over time" }
+                                p { class: "card-note", "{session_count} sessions · latest {latest.round()}%" }
+                            }
+                        }
+                    }
                     svg {
                         class: "sparkline",
-                        view_box: "0 0 280 72",
+                        view_box: "0 0 300 96",
                         preserve_aspect_ratio: "none",
+                        defs {
+                            linearGradient { id: "dust-acc-fill", x1: "0", y1: "0", x2: "0", y2: "1",
+                                stop { offset: "0%", style: "stop-color: var(--copper); stop-opacity: 0.42;" }
+                                stop { offset: "100%", style: "stop-color: var(--copper); stop-opacity: 0.02;" }
+                            }
+                        }
+                        line { x1: "0", y1: "9.6", x2: "300", y2: "9.6", stroke: "var(--line-soft)", stroke_width: "1", stroke_dasharray: "3 5" }
+                        line { x1: "0", y1: "48", x2: "300", y2: "48", stroke: "var(--line-soft)", stroke_width: "1", stroke_dasharray: "3 5" }
+                        path { d: "{area}", fill: "url(#dust-acc-fill)", stroke: "none" }
                         polyline {
-                            points: "{points}",
+                            points: "{line}",
                             fill: "none",
                             stroke: "var(--copper)",
-                            stroke_width: "2.5",
+                            stroke_width: "2.2",
                             stroke_linecap: "round",
                             stroke_linejoin: "round",
                         }
                     }
-                    p { class: "muted", "{session_count} sessions on this device" }
+                    div { class: "row-between",
+                        span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;", "90% line is the level-up threshold" }
+                        span { class: "chip neutral", "100% top" }
+                    }
                 }
             }
         }

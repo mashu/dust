@@ -5,7 +5,9 @@ use crate::rng::Rng;
 use crate::settings::TrainingSettings;
 
 pub const DEFAULT_TARGET_GAIN: f64 = 0.3;
-pub const ENVELOPE_SAMPLE_RATE: u32 = 256;
+/// Envelope curve resolution. High enough that a 10 ms rise is a real curve and
+/// not a two-point straight line at the speeds the trainer sends.
+pub const ENVELOPE_SAMPLE_RATE: u32 = 1200;
 pub const EXTRA_SPACING_MULTIPLIER_MIN: f64 = 0.1;
 
 pub fn clamp_extra_spacing(value: f64) -> f64 {
@@ -71,6 +73,22 @@ fn resolve_effective_wpm(settings: &TrainingSettings, char_wpm: f64, rng: &mut i
     sampled.min(char_wpm)
 }
 
+/// How many times one group is sent before the answer window opens.
+pub fn resolve_group_repeats(settings: &TrainingSettings, rng: &mut impl Rng) -> u32 {
+    let min = settings.playback.group_repeat_min.clamp(
+        crate::settings::GROUP_REPEAT_MIN,
+        crate::settings::GROUP_REPEAT_MAX,
+    );
+    let max = settings
+        .playback
+        .group_repeat_max
+        .clamp(min, crate::settings::GROUP_REPEAT_MAX);
+    if settings.playback.link_group_repeat || min == max {
+        return min;
+    }
+    rng.usize_in(min as usize, max as usize) as u32
+}
+
 fn resolve_volume(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
     let min = settings.band.volume_min.clamp(0.1, 1.0);
     let max = settings.band.volume_max.clamp(0.1, 1.0);
@@ -99,9 +117,6 @@ pub fn build_envelope_curve(
 ) -> Vec<f32> {
     let smoothing = smoothing.clamp(0.0, 1.0);
     let rise = rise_time_sec.min(duration_sec / 2.0).max(0.0);
-    if smoothing == 0.0 {
-        return vec![0.0, target_gain as f32, target_gain as f32, 0.0];
-    }
     let attack_steps = ((ENVELOPE_SAMPLE_RATE as f64) * rise).floor().max(2.0) as usize;
     let sustain_steps = ((ENVELOPE_SAMPLE_RATE as f64) * (duration_sec - 2.0 * rise).max(0.0))
         .floor()
@@ -205,6 +220,77 @@ pub fn plan_morse_playback(
     }
 }
 
+/// One sampled point of the keying envelope: seconds from the start of the
+/// preview, gain normalised to 0..=1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnvelopePoint {
+    pub t_sec: f64,
+    pub gain: f64,
+}
+
+/// A dit, one symbol space, then a dah — exactly the shape the audio backends
+/// apply, so the settings screen can draw what the ear is about to hear.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnvelopeShape {
+    pub wpm: f64,
+    pub dot_sec: f64,
+    pub rise_sec: f64,
+    pub smoothing: f64,
+    pub total_sec: f64,
+    /// Attack length as a share of one dit. Above ~0.5 the dit never reaches full gain.
+    pub rise_share_of_dit: f64,
+    pub points: Vec<EnvelopePoint>,
+}
+
+const ENVELOPE_PREVIEW_POINTS: usize = 96;
+
+fn sample_curve(curve: &[f32], start_sec: f64, duration_sec: f64, out: &mut Vec<EnvelopePoint>) {
+    if curve.len() < 2 || duration_sec <= 0.0 {
+        return;
+    }
+    let last = curve.len() - 1;
+    let step = (curve.len() / ENVELOPE_PREVIEW_POINTS).max(1);
+    let mut i = 0;
+    while i <= last {
+        out.push(EnvelopePoint {
+            t_sec: start_sec + (i as f64 / last as f64) * duration_sec,
+            gain: f64::from(curve[i]).clamp(0.0, 1.0),
+        });
+        if i == last {
+            break;
+        }
+        i = (i + step).min(last);
+    }
+}
+
+/// Keying envelope preview for the current rise time and smoothing, drawn at
+/// the fastest character speed in the settings — the worst case for clicks.
+pub fn envelope_shape(settings: &TrainingSettings) -> EnvelopeShape {
+    let wpm = settings
+        .playback
+        .char_wpm_max
+        .max(settings.playback.char_wpm_min)
+        .max(1.0);
+    let dot_sec = dot_seconds(wpm);
+    let dash_sec = dot_sec * 3.0;
+    let rise_sec = (settings.band.steepness / 1000.0).max(0.0);
+    let smoothing = settings.band.envelope_smoothing.clamp(0.0, 1.0);
+    let mut points = Vec::new();
+    let dit = build_envelope_curve(dot_sec, rise_sec, 1.0, smoothing);
+    sample_curve(&dit, 0.0, dot_sec, &mut points);
+    let dah = build_envelope_curve(dash_sec, rise_sec, 1.0, smoothing);
+    sample_curve(&dah, dot_sec * 2.0, dash_sec, &mut points);
+    EnvelopeShape {
+        wpm,
+        dot_sec,
+        rise_sec,
+        smoothing,
+        total_sec: dot_sec * 5.0,
+        rise_share_of_dit: (rise_sec / dot_sec.max(f64::EPSILON)).min(1.0),
+        points,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +342,63 @@ mod tests {
         assert!(
             compute_group_gap_for_wpm(40.0, 40.0, 1.0) < compute_group_gap_for_wpm(18.0, 18.0, 1.0)
         );
+    }
+
+    #[test]
+    fn envelope_starts_and_ends_silent() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.char_wpm_max = 20.0;
+        settings.band.steepness = 8.0;
+        for smoothing in [0.0, 0.5, 1.0] {
+            settings.band.envelope_smoothing = smoothing;
+            let shape = envelope_shape(&settings);
+            assert!(shape.points.len() > 8);
+            assert!(shape.points.first().unwrap().gain.abs() < 1e-6);
+            assert!(shape.points.last().unwrap().gain.abs() < 1e-6);
+            assert!(shape.points.iter().any(|p| p.gain > 0.99));
+            assert!(shape
+                .points
+                .windows(2)
+                .all(|w| w[1].t_sec >= w[0].t_sec - 1e-12));
+            assert!(shape.points.last().unwrap().t_sec <= shape.total_sec + 1e-9);
+        }
+    }
+
+    #[test]
+    fn rise_time_shortens_the_full_gain_plateau() {
+        let mut fast = TrainingSettings::default();
+        fast.playback.char_wpm_max = 20.0;
+        fast.band.steepness = 2.0;
+        let mut slow = fast.clone();
+        slow.band.steepness = 20.0;
+        let plateau = |s: &TrainingSettings| {
+            envelope_shape(s)
+                .points
+                .iter()
+                .filter(|p| p.t_sec <= envelope_shape(s).dot_sec && p.gain > 0.98)
+                .count()
+        };
+        assert!(plateau(&fast) > plateau(&slow));
+        assert!(envelope_shape(&slow).rise_share_of_dit > envelope_shape(&fast).rise_share_of_dit);
+    }
+
+    #[test]
+    fn group_repeats_stay_inside_the_range() {
+        let mut settings = TrainingSettings::default();
+        let mut rng = FastrandRng::default();
+        assert_eq!(resolve_group_repeats(&settings, &mut rng), 1);
+        settings.playback.link_group_repeat = false;
+        settings.playback.group_repeat_min = 2;
+        settings.playback.group_repeat_max = 4;
+        let mut seen_low = false;
+        let mut seen_high = false;
+        for _ in 0..400 {
+            let n = resolve_group_repeats(&settings, &mut rng);
+            assert!((2..=4).contains(&n));
+            seen_low |= n == 2;
+            seen_high |= n == 4;
+        }
+        assert!(seen_low && seen_high);
     }
 
     #[test]

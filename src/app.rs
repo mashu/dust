@@ -3,11 +3,13 @@ use std::rc::Rc;
 use cw_core::{fit_settings_to_alphabet, GroupSession, SessionEvent};
 use dioxus::prelude::*;
 
-use crate::engine::{loop_preview_text, play_chars, AppState, Screen};
-use crate::persist::{load_sessions, load_settings, save_settings};
+use crate::engine::{loop_preview_text, play_chars, play_sample_text, AppState, Screen};
+use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
 use crate::routes::app_routes;
 use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
+use crate::theme::Theme;
 use crate::time::sleep_ms;
+use crate::ui::widgets::Icon;
 
 #[component]
 pub fn App() -> Element {
@@ -20,8 +22,25 @@ pub fn App() -> Element {
     let mut toast = use_signal(|| None::<String>);
     let mut previewing = use_signal(|| false);
     let mut listen_playing = use_signal(|| false);
+    let mut sample_playing = use_signal(|| None::<String>);
+    let mut theme = use_signal(|| Theme::from_key(&load_theme()));
     let app = use_hook(AppState::new);
     let app = Rc::new(app);
+
+    use_effect(move || {
+        let key = theme().key();
+        save_theme(key);
+        let _ = dioxus::document::eval(&format!(
+            r#"(() => {{
+                const root = document.documentElement;
+                if ("{key}" === "auto") {{
+                    root.removeAttribute("data-theme");
+                }} else {{
+                    root.setAttribute("data-theme", "{key}");
+                }}
+            }})()"#
+        ));
+    });
 
     use_effect(move || {
         if matches!(screen(), Screen::Training) {
@@ -59,6 +78,7 @@ pub fn App() -> Element {
             app.shutdown_audio();
             previewing.set(false);
             listen_playing.set(false);
+            sample_playing.set(None);
             runtime.set(None);
             screen.set(Screen::Home);
         }
@@ -77,6 +97,7 @@ pub fn App() -> Element {
             }
             previewing.set(false);
             listen_playing.set(false);
+            sample_playing.set(None);
             let gen = match app.takeover_audio(&settings_now) {
                 Ok(gen) => gen,
                 Err(err) => {
@@ -114,6 +135,7 @@ pub fn App() -> Element {
             }
             let settings_now = settings().clamp();
             previewing.set(false);
+            sample_playing.set(None);
             let gen = match app.takeover_audio(&settings_now) {
                 Ok(gen) => gen,
                 Err(err) => {
@@ -127,6 +149,35 @@ pub fn App() -> Element {
                 play_chars(app_loop.clone(), gen, settings_now, chars, 420, toast).await;
                 if app_loop.session_gen.get() == gen {
                     listen_playing.set(false);
+                    app_loop.stop_audio();
+                }
+            });
+        }
+    });
+
+    // Envelope test chips: send one short sample with the current keying settings.
+    let play_sample = use_callback({
+        let app = app.clone();
+        move |text: String| {
+            if session_running(screen, runtime) {
+                return;
+            }
+            let settings_now = settings().clamp();
+            let gen = match app.takeover_audio(&settings_now) {
+                Ok(gen) => gen,
+                Err(err) => {
+                    toast.set(Some(err));
+                    return;
+                }
+            };
+            previewing.set(false);
+            listen_playing.set(false);
+            sample_playing.set(Some(text.clone()));
+            let app_loop = (*app).clone();
+            spawn(async move {
+                play_sample_text(app_loop.clone(), gen, settings_now, text, toast).await;
+                if app_loop.session_gen.get() == gen {
+                    sample_playing.set(None);
                     app_loop.stop_audio();
                 }
             });
@@ -149,6 +200,7 @@ pub fn App() -> Element {
             };
             previewing.set(true);
             listen_playing.set(false);
+            sample_playing.set(None);
             let app_loop = (*app).clone();
             spawn(async move {
                 loop_preview_text(app_loop.clone(), gen, settings, "CQ", 280, toast).await;
@@ -169,6 +221,7 @@ pub fn App() -> Element {
             app.stop_audio();
             previewing.set(false);
             listen_playing.set(false);
+            sample_playing.set(None);
         }
     });
 
@@ -193,6 +246,7 @@ pub fn App() -> Element {
             app.stop_audio();
             previewing.set(false);
             listen_playing.set(false);
+            sample_playing.set(None);
             screen.set(Screen::Listen);
         }
     });
@@ -206,6 +260,7 @@ pub fn App() -> Element {
             app.stop_audio();
             previewing.set(false);
             listen_playing.set(false);
+            sample_playing.set(None);
             screen.set(Screen::Stats);
         }
     });
@@ -219,6 +274,7 @@ pub fn App() -> Element {
             app.stop_audio();
             previewing.set(false);
             listen_playing.set(false);
+            sample_playing.set(None);
             screen.set(Screen::Settings);
         }
     });
@@ -248,6 +304,7 @@ pub fn App() -> Element {
     });
     let show_nav = !matches!(screen(), Screen::Training);
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };
+    let screen_key = screen_key(screen());
 
     rsx! {
         document::Title { "Dust" }
@@ -256,7 +313,7 @@ pub fn App() -> Element {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover",
         }
-        document::Meta { name: "theme-color", content: "#1c2740" }
+        document::Meta { name: "theme-color", content: "#1b2436" }
         document::Meta { name: "mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" }
@@ -273,57 +330,94 @@ pub fn App() -> Element {
                 }
             },
             div { class: shell_class,
-            header { class: "header-bar",
-                p { class: "brand-name", "Dust" }
-                if screen() == Screen::Training {
-                    button { class: "btn btn-ghost header-ghost", onclick: move |_| exit_training.call(()), "Exit" }
+                header { class: "header-bar",
+                    div { class: "brand",
+                        span { class: "brand-mark", aria_hidden: "true", "·−" }
+                        div {
+                            p { class: "brand-name", "Dust" }
+                            p { class: "brand-sub", "CW group trainer" }
+                        }
+                    }
+                    div { class: "header-actions",
+                        button {
+                            class: "icon-btn",
+                            title: "{theme().label()}",
+                            aria_label: "{theme().label()}",
+                            onclick: move |_| {
+                                let next = theme().next();
+                                theme.set(next);
+                            },
+                            Icon { name: theme().icon() }
+                        }
+                        if screen() == Screen::Training {
+                            button {
+                                class: "btn btn-secondary btn-sm",
+                                onclick: move |_| exit_training.call(()),
+                                "Exit"
+                            }
+                        }
+                    }
                 }
-            }
-            { app_routes(
-                screen,
-                settings,
-                sessions,
-                runtime,
-                result,
-                auto_message,
-                toast,
-                previewing(),
-                listen_playing(),
-                app.clone(),
-                start_training,
-                go_home,
-                go_listen,
-                start_band_preview,
-                stop_preview,
-                start_listen,
-            ) }
+                div { class: "screen", key: "{screen_key}",
+                    { app_routes(
+                        screen,
+                        settings,
+                        sessions,
+                        runtime,
+                        result,
+                        auto_message,
+                        toast,
+                        previewing(),
+                        listen_playing(),
+                        sample_playing(),
+                        app.clone(),
+                        start_training,
+                        go_home,
+                        go_listen,
+                        start_band_preview,
+                        stop_preview,
+                        start_listen,
+                        play_sample,
+                    ) }
+                }
             }
             if show_nav {
-            nav { class: "bottom-nav",
-                button {
-                    class: if matches!(screen(), Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
-                    onclick: move |_| go_home.call(()),
-                    span { class: "nav-icon", "⌁" }
-                    span { "Practice" }
+                nav { class: "bottom-nav",
+                    button {
+                        class: if matches!(screen(), Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
+                        onclick: move |_| go_home.call(()),
+                        Icon { name: "signal" }
+                        span { "Practice" }
+                    }
+                    button {
+                        class: if screen() == Screen::Stats { "nav-item active" } else { "nav-item" },
+                        onclick: move |_| go_stats.call(()),
+                        Icon { name: "chart" }
+                        span { "Stats" }
+                    }
+                    button {
+                        class: if screen() == Screen::Settings { "nav-item active" } else { "nav-item" },
+                        onclick: move |_| go_settings.call(()),
+                        Icon { name: "sliders" }
+                        span { "Settings" }
+                    }
                 }
-                button {
-                    class: if screen() == Screen::Stats { "nav-item active" } else { "nav-item" },
-                    onclick: move |_| go_stats.call(()),
-                    span { class: "nav-icon", "▣" }
-                    span { "Stats" }
-                }
-                button {
-                    class: if screen() == Screen::Settings { "nav-item active" } else { "nav-item" },
-                    onclick: move |_| go_settings.call(()),
-                    span { class: "nav-icon", "⚙" }
-                    span { "Settings" }
-                }
-            }
             }
             if let Some(message) = toast() {
                 div { class: "toast", "{message}" }
             }
         }
+    }
+}
+
+fn screen_key(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Home => "home",
+        Screen::Settings => "settings",
+        Screen::Training => "training",
+        Screen::Results => "results",
+        Screen::Stats => "stats",
+        Screen::Listen => "listen",
     }
 }
 

@@ -1,6 +1,8 @@
 use cw_core::{HeatmapColorMode, HeatmapGrid, SessionResult, StreakState, StreakStatus};
 use dioxus::prelude::*;
 
+use crate::ui::widgets::{Icon, Seg};
+
 #[component]
 pub fn StreakCard(status: StreakStatus) -> Element {
     if status.state == StreakState::None {
@@ -93,26 +95,32 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
         }
     });
     rsx! {
-        div { class: "card stack heatmap-card",
-            div { class: "row", style: "justify-content: space-between;",
-                div { class: "tiny", "Practice calendar" }
-                div { class: "mode-pills",
-                    button {
-                        class: if mode() == HeatmapColorMode::Volume { "pill active" } else { "pill" },
-                        onclick: move |_| mode.set(HeatmapColorMode::Volume),
-                        "Volume"
+        div { class: "card stack-sm heatmap-card",
+            div { class: "card-head",
+                div { class: "card-head-main",
+                    span { class: "card-icon", Icon { name: "timer" } }
+                    div {
+                        h3 { class: "card-title", "Practice calendar" }
+                        p { class: "card-note", "One square per day" }
                     }
-                    button {
-                        class: if mode() == HeatmapColorMode::Accuracy { "pill active" } else { "pill" },
+                }
+                div { class: "segmented",
+                    Seg {
+                        label: "Volume".to_string(),
+                        active: mode() == HeatmapColorMode::Volume,
+                        onclick: move |_| mode.set(HeatmapColorMode::Volume),
+                    }
+                    Seg {
+                        label: "Accuracy".to_string(),
+                        active: mode() == HeatmapColorMode::Accuracy,
                         onclick: move |_| mode.set(HeatmapColorMode::Accuracy),
-                        "Accuracy"
                     }
                 }
             }
             HeatmapGridView { grid: grid.clone(), selected: selected(), on_select: move |date| selected.set(Some(date)) }
             div { class: "heatmap-legend",
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "Less" }
-                span { class: "heat-cell", style: "background: #e5e7eb;" }
+                span { class: "heat-cell" }
                 span { class: "heat-cell", style: "background: hsl(0, 75%, 45%);" }
                 span { class: "heat-cell", style: "background: hsl(60, 75%, 45%);" }
                 span { class: "heat-cell", style: "background: hsl(120, 75%, 45%);" }
@@ -147,6 +155,7 @@ fn HeatmapGridView(
                         let date = cell.date.clone();
                         let is_selected = selected.as_deref() == Some(date.as_str());
                         let cls = if is_selected { "heat-cell selected" } else { "heat-cell" };
+                        let paint = (cell.sessions > 0).then(|| format!("background: {};", cell.color));
                         let title = if cell.sessions == 0 {
                             format!("{} — no practice", cell.date)
                         } else {
@@ -155,7 +164,7 @@ fn HeatmapGridView(
                         rsx! {
                             button {
                                 class: cls,
-                                style: "background: {cell.color};",
+                                style: paint,
                                 title: "{title}",
                                 disabled: cell.in_future,
                                 onclick: move |_| on_select.call(date.clone()),

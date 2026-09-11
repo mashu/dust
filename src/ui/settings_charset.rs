@@ -5,7 +5,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{ModePill, NumberField};
+use crate::ui::widgets::{Icon, ModePill, NumberField, Seg};
 
 #[component]
 pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
@@ -15,30 +15,44 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let preset = sequence_preset_id(&s);
     let unlocked = unlocked_practice_count(&s);
     let window = current_practice_window(&s);
-    let preview: String = cw_core::compute_char_pool(&s).into_iter().collect();
+    let pool = cw_core::compute_char_pool(&s);
+    let mode_note = match s.curriculum.char_set_mode {
+        CharSetMode::Koch => "Letters unlocked in Koch order",
+        CharSetMode::Digits => "Digits only",
+        CharSetMode::Mixed => "Letters and digits together",
+        CharSetMode::Custom => "Your own character list",
+    };
     rsx! {
-        div { class: "card stack",
-            div { class: "tiny", "Character set" }
-            div { class: "mode-pills",
-                ModePill { label: "Koch".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Koch, onclick: move |_| {
+        div { class: "card stack-sm",
+            div { class: "card-head",
+                div { class: "card-head-main",
+                    span { class: "card-icon", Icon { name: "letters" } }
+                    div {
+                        h3 { class: "card-title", "Character set" }
+                        p { class: "card-note", "{mode_note} · {unlocked} in play" }
+                    }
+                }
+            }
+            div { class: "segmented",
+                Seg { label: "Koch".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Koch, onclick: move |_| {
                     let w = &mut *settings.write();
                     w.curriculum.char_set_mode = CharSetMode::Koch;
                     w.curriculum.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
-                ModePill { label: "Digits".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Digits, onclick: move |_| {
+                Seg { label: "Digits".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Digits, onclick: move |_| {
                     let w = &mut *settings.write();
                     w.curriculum.char_set_mode = CharSetMode::Digits;
                     w.curriculum.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
-                ModePill { label: "Mixed".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Mixed, onclick: move |_| {
+                Seg { label: "Mixed".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Mixed, onclick: move |_| {
                     let w = &mut *settings.write();
                     w.curriculum.char_set_mode = CharSetMode::Mixed;
                     w.curriculum.practice_window = Some(PracticeWindow::All);
                     fit_settings_to_alphabet(w);
                 } }
-                ModePill { label: "Custom".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Custom, onclick: move |_| {
+                Seg { label: "Custom".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Custom, onclick: move |_| {
                     let w = &mut *settings.write();
                     w.curriculum.char_set_mode = CharSetMode::Custom;
                     w.curriculum.practice_window = Some(PracticeWindow::All);
@@ -46,7 +60,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 } }
             }
             if s.curriculum.char_set_mode != CharSetMode::Digits {
-                div { class: "tiny", "Sequence" }
+                div { class: "eyebrow", "Unlock order" }
                 div { class: "mode-pills",
                     for preset_def in SEQUENCE_PRESETS.iter() {
                         {
@@ -77,10 +91,10 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         }
                     }
                 }
-                p { class: "muted sequence-preview", "{seq.iter().collect::<String>()}" }
                 div { class: "field",
                     label { "Sequence order" }
                     input {
+                        class: "mono",
                         value: "{seq.iter().collect::<String>()}",
                         oninput: move |e| {
                             let w = &mut *settings.write();
@@ -92,39 +106,42 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     }
                 }
             }
-            NumberField {
-                label: format!("Level (1–{level_max}) · {unlocked} unlocked"),
-                value: s.active_level() as f64,
-                min: 1.0,
-                max: level_max as f64,
-                step: 1.0,
-                onchange: move |v| {
-                    let w = &mut *settings.write();
-                    w.set_active_level(v as u32);
-                    fit_settings_to_alphabet(w);
-                }
-            }
-            if s.curriculum.char_set_mode == CharSetMode::Mixed {
+            div { class: "field-grid",
                 NumberField {
-                    label: "Digits level (1–{MAX_DIGITS_LEVEL})",
-                    value: s.curriculum.digits_level as f64,
+                    label: format!("Level (1–{level_max})"),
+                    value: s.active_level() as f64,
                     min: 1.0,
-                    max: MAX_DIGITS_LEVEL as f64,
+                    max: level_max as f64,
                     step: 1.0,
                     onchange: move |v| {
                         let w = &mut *settings.write();
-                        w.curriculum.digits_level = v as u32;
+                        w.set_active_level(v as u32);
                         fit_settings_to_alphabet(w);
+                    }
+                }
+                if s.curriculum.char_set_mode == CharSetMode::Mixed {
+                    NumberField {
+                        label: format!("Digits level (1–{MAX_DIGITS_LEVEL})"),
+                        value: s.curriculum.digits_level as f64,
+                        min: 1.0,
+                        max: MAX_DIGITS_LEVEL as f64,
+                        step: 1.0,
+                        onchange: move |v| {
+                            let w = &mut *settings.write();
+                            w.curriculum.digits_level = v as u32;
+                            fit_settings_to_alphabet(w);
+                        }
                     }
                 }
             }
             if s.curriculum.char_set_mode == CharSetMode::Mixed {
                 NumberField {
-                    label: "Mixed letters %".to_string(),
+                    label: "Share of letters".to_string(),
                     value: s.curriculum.mixed_letters_percent as f64,
                     min: 0.0,
                     max: 100.0,
                     step: 5.0,
+                    unit: "%".to_string(),
                     onchange: move |v| {
                         let w = &mut *settings.write();
                         w.curriculum.mixed_letters_percent = v as u32;
@@ -136,6 +153,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 div { class: "field",
                     label { "Custom alphabet" }
                     input {
+                        class: "mono",
                         value: "{s.curriculum.custom_set.iter().collect::<String>()}",
                         oninput: move |e| {
                             let w = &mut *settings.write();
@@ -146,31 +164,35 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         }
                     }
                 }
-                p { class: "muted", "Level unlocks this list from the start. Leave empty to use the sequence above." }
+                p { class: "muted", style: "margin: 0;", "Level unlocks this list from the start. Leave it empty to use the sequence above." }
             }
-            div { class: "tiny", "Practice window" }
+            div { class: "eyebrow", "Practice window" }
             div { class: "mode-pills",
                 ModePill {
-                    label: "All".to_string(),
+                    label: "Everything".to_string(),
                     active: window == Some(PracticeWindow::All),
                     onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::All),
                 }
                 if unlocked >= 3 {
                     ModePill {
-                        label: "Last 3".to_string(),
+                        label: "Newest 3".to_string(),
                         active: window == Some(PracticeWindow::Last3),
                         onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last3),
                     }
                 }
                 if unlocked >= 5 {
                     ModePill {
-                        label: "Last 5".to_string(),
+                        label: "Newest 5".to_string(),
                         active: window == Some(PracticeWindow::Last5),
                         onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last5),
                     }
                 }
             }
-            p { class: "pool", "{preview}" }
+            div { class: "chars", style: "gap: 4px;",
+                for ch in pool.iter() {
+                    span { class: "ch sent-row", "{ch}" }
+                }
+            }
         }
     }
 }

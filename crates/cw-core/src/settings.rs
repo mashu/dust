@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 use crate::level::{max_level_for_len, LEVEL_MIN};
 use crate::morse::{is_digit, morse_for, DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START};
 
+/// A group is always sent at least once.
+pub const GROUP_REPEAT_MIN: u32 = 1;
+/// Upper bound for "send the group N times before the answer window opens".
+pub const GROUP_REPEAT_MAX: u32 = 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MixedAutoLevelAxis {
@@ -124,6 +129,13 @@ pub struct PlaybackSettings {
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
     pub lock_input_during_group_playback: bool,
+    /// Lowest number of times a group is sent before the answer window opens.
+    #[serde(default = "defaults::group_repeat")]
+    pub group_repeat_min: u32,
+    #[serde(default = "defaults::group_repeat")]
+    pub group_repeat_max: u32,
+    #[serde(default = "defaults::enabled")]
+    pub link_group_repeat: bool,
 }
 
 impl Default for PlaybackSettings {
@@ -139,6 +151,9 @@ impl Default for PlaybackSettings {
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
             lock_input_during_group_playback: true,
+            group_repeat_min: 1,
+            group_repeat_max: 1,
+            link_group_repeat: true,
         }
     }
 }
@@ -410,6 +425,17 @@ impl TrainingSettings {
             .band
             .receiver_background_offset_mod_rate_hz
             .clamp(0.0, 20.0);
+        self.playback.group_repeat_min = self
+            .playback
+            .group_repeat_min
+            .clamp(GROUP_REPEAT_MIN, GROUP_REPEAT_MAX);
+        self.playback.group_repeat_max = self
+            .playback
+            .group_repeat_max
+            .clamp(self.playback.group_repeat_min, GROUP_REPEAT_MAX);
+        if self.playback.link_group_repeat {
+            self.playback.group_repeat_max = self.playback.group_repeat_min;
+        }
         self.playback.extra_word_space_multiplier =
             self.playback.extra_word_space_multiplier.max(0.1);
         self.playback.group_timeout = self.playback.group_timeout.clamp(0.0, 120.0);
@@ -471,6 +497,9 @@ impl TrainingSettings {
 mod defaults {
     pub fn enabled() -> bool {
         true
+    }
+    pub fn group_repeat() -> u32 {
+        1
     }
     pub fn level() -> u32 {
         crate::level::LEVEL_MIN
@@ -536,6 +565,33 @@ mod tests {
     }
 
     #[test]
+    fn group_repeats_clamp_and_link() {
+        let mut s = TrainingSettings::default();
+        assert_eq!(s.playback.group_repeat_min, 1);
+        assert_eq!(s.playback.group_repeat_max, 1);
+        s.playback.link_group_repeat = false;
+        s.playback.group_repeat_min = 0;
+        s.playback.group_repeat_max = 99;
+        let s = s.clamp();
+        assert_eq!(s.playback.group_repeat_min, GROUP_REPEAT_MIN);
+        assert_eq!(s.playback.group_repeat_max, GROUP_REPEAT_MAX);
+
+        let mut linked = TrainingSettings::default();
+        linked.playback.link_group_repeat = true;
+        linked.playback.group_repeat_min = 3;
+        linked.playback.group_repeat_max = 7;
+        let linked = linked.clamp();
+        assert_eq!(linked.playback.group_repeat_max, 3);
+
+        let mut inverted = TrainingSettings::default();
+        inverted.playback.link_group_repeat = false;
+        inverted.playback.group_repeat_min = 4;
+        inverted.playback.group_repeat_max = 2;
+        let inverted = inverted.clamp();
+        assert_eq!(inverted.playback.group_repeat_max, 4);
+    }
+
+    #[test]
     fn custom_level_clamps_to_alphabet_length() {
         let mut s = TrainingSettings::default();
         s.curriculum.char_set_mode = CharSetMode::Custom;
@@ -570,6 +626,9 @@ mod tests {
         assert_eq!(s.curriculum.num_groups, 20);
         assert_eq!(s.curriculum.digits_level, 1);
         assert_eq!(s.playback.char_wpm_min, 18.0);
+        assert_eq!(s.playback.group_repeat_min, 1);
+        assert_eq!(s.playback.group_repeat_max, 1);
+        assert!(s.playback.link_group_repeat);
         let koch: TrainingSettings = serde_json::from_str(r#"{"charSetMode":"koch"}"#).unwrap();
         assert_eq!(koch.curriculum.char_set_mode, CharSetMode::Koch);
         assert_eq!(koch.curriculum.mixed_letters_percent, 70);

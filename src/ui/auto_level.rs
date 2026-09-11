@@ -1,6 +1,8 @@
 use cw_core::AutoLevelProgress;
 use dioxus::prelude::*;
 
+use crate::ui::widgets::Icon;
+
 #[component]
 pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
     let up_pct = if progress.above_disabled || progress.above_target == 0 {
@@ -38,9 +40,15 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
     };
     rsx! {
         section { class: "card auto-level",
-            div { class: "row", style: "justify-content: space-between;",
-                span { class: "tiny", "Auto level" }
-                span { class: "chip", "{progress.threshold as u32}% accuracy" }
+            div { class: "card-head",
+                div { class: "card-head-main",
+                    span { class: "card-icon", Icon { name: "target" } }
+                    div {
+                        h3 { class: "card-title", "Auto level" }
+                        p { class: "card-note", "{mixed}" }
+                    }
+                }
+                span { class: "chip", "{progress.threshold as u32}% to pass" }
             }
             div { class: "auto-bars",
                 div { class: if progress.above_disabled { "auto-meter disabled" } else { "auto-meter" },
@@ -62,7 +70,6 @@ pub fn AutoLevelCard(progress: AutoLevelProgress) -> Element {
                     }
                 }
             }
-            p { class: "tiny", style: "text-transform: none; letter-spacing: 0; margin: 0.5rem 0 0;", "{mixed}" }
         }
     }
 }

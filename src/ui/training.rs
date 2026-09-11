@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::audio::focus_group_input;
-use crate::ui::widgets::ProgressHeader;
+use crate::ui::widgets::{Icon, ProgressHeader};
 
 #[component]
 pub fn TrainingView(
@@ -13,6 +13,8 @@ pub fn TrainingView(
     focused: usize,
     playing: bool,
     locked: bool,
+    repeat_total: u32,
+    repeat_done: u32,
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
     on_focus: EventHandler<usize>,
@@ -23,12 +25,33 @@ pub fn TrainingView(
         let _ = current;
         focus_group_input(focused);
     }));
+    let send_index = (repeat_done + 1).min(repeat_total.max(1));
+    let status = if playing && repeat_total > 1 {
+        format!("Sending {send_index} of {repeat_total}")
+    } else if playing {
+        "Sending".to_string()
+    } else {
+        "Your turn".to_string()
+    };
+    let hint = if playing {
+        "Listen — the answer box unlocks when the group finishes."
+    } else {
+        "Type what you heard. It advances on its own when the length matches."
+    };
     rsx! {
         div { class: "stack",
-            ProgressHeader { current: focused, total }
+            ProgressHeader { current: focused, total, status, live: playing }
             div { class: "card",
-                p { class: "muted", if playing { "Listening…" } else { "Enter answers per group (auto-advances when complete)." } }
-                div { class: "stack group-list",
+                div { class: "row-between",
+                    p { class: "muted", style: "margin: 0;", "{hint}" }
+                    if repeat_total > 1 {
+                        span { class: "chip",
+                            Icon { name: "repeat" }
+                            "{repeat_total}× per group"
+                        }
+                    }
+                }
+                div { class: "group-list", style: "margin-top: 0.85rem;",
                     for (idx, sent) in groups.iter().enumerate() {
                         {
                             let is_focused = focused == idx;
@@ -39,40 +62,39 @@ pub fn TrainingView(
                             let input_locked =
                                 (locked && is_active && !is_confirmed) || awaiting_play;
                             let value = inputs.get(idx).cloned().unwrap_or_default();
-                            let shown = if is_confirmed { sent.clone() } else { "••••".into() };
-                            let cls = if is_focused { "group focused" } else { "group" };
-                            let input_cls = if disabled {
-                                "answer"
-                            } else if input_locked {
-                                "answer locked"
+                            let shown = if is_confirmed { sent.clone() } else { "•••".into() };
+                            let cls = if is_focused {
+                                "group focused"
+                            } else if is_confirmed {
+                                "group done"
                             } else {
-                                "answer"
+                                "group"
                             };
+                            let input_cls = if input_locked { "answer locked" } else { "answer" };
+                            let correct = value.trim().eq_ignore_ascii_case(sent);
                             let placeholder = if awaiting_play {
-                                "Waiting..."
+                                "Waiting…"
                             } else if input_locked {
-                                "Listening..."
+                                "Listening…"
                             } else if disabled {
-                                "Waiting..."
+                                "Waiting…"
                             } else {
-                                "Type group answer..."
+                                "Type the group"
                             };
                             rsx! {
                                 div { id: "group-card-{idx}", class: cls,
-                                    div { class: "row", style: "justify-content: space-between;",
-                                        div { class: "row",
-                                            span { class: if is_focused { "badge current" } else { "badge" }, "Group {idx + 1}" }
-                                            if is_focused {
-                                                span { class: "badge current", "Current" }
+                                    div { class: "row-between",
+                                        div { class: "row", style: "gap: 0.35rem;",
+                                            span { class: if is_focused { "badge current" } else { "badge" }, "{idx + 1}" }
+                                            if is_focused && playing && repeat_total > 1 {
+                                                span { class: "badge current", "Send {send_index}/{repeat_total}" }
                                             }
                                         }
-                                        div { class: "row",
+                                        div { class: "row", style: "gap: 0.4rem;",
                                             span { class: "sent", "{shown}" }
                                             if is_confirmed {
-                                                if value.trim().eq_ignore_ascii_case(sent) {
-                                                    span { style: "color: var(--emerald-600);", "✓" }
-                                                } else {
-                                                    span { style: "color: var(--rose-600);", "✗" }
+                                                span { class: if correct { "badge good" } else { "badge bad" },
+                                                    Icon { name: if correct { "check" } else { "x" } }
                                                 }
                                             }
                                         }
@@ -81,7 +103,7 @@ pub fn TrainingView(
                                         id: "group-input-{idx}",
                                         class: input_cls,
                                         value: "{value}",
-                                        disabled: disabled,
+                                        disabled,
                                         readonly: input_locked,
                                         autofocus: is_active && !is_confirmed,
                                         placeholder: "{placeholder}",
@@ -105,9 +127,11 @@ pub fn TrainingView(
                                         }
                                     }
                                     if is_confirmed {
-                                        crate::ui::widgets::CharacterComparison {
-                                            sent: sent.clone(),
-                                            received: value.trim().to_ascii_uppercase(),
+                                        div { style: "margin-top: 0.5rem;",
+                                            crate::ui::widgets::CharacterComparison {
+                                                sent: sent.clone(),
+                                                received: value.trim().to_ascii_uppercase(),
+                                            }
                                         }
                                     }
                                 }
@@ -115,13 +139,16 @@ pub fn TrainingView(
                         }
                     }
                 }
-                p { class: "tiny", style: "margin-top: 0.6rem; text-transform: none; letter-spacing: 0;",
-                    "Auto-advances when the group is complete · Enter to confirm"
-                }
             }
             div { class: "train-actions",
-                button { class: "btn btn-primary", onclick: move |_| on_submit.call(()), "End session" }
-                button { class: "btn btn-danger", onclick: move |_| on_stop.call(()), "Stop" }
+                button { class: "btn btn-primary", onclick: move |_| on_submit.call(()),
+                    Icon { name: "flag" }
+                    "End session"
+                }
+                button { class: "btn btn-danger", onclick: move |_| on_stop.call(()),
+                    Icon { name: "x" }
+                    "Discard"
+                }
             }
         }
     }

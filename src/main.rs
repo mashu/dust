@@ -9,6 +9,7 @@ mod engine;
 mod persist;
 mod routes;
 mod session_runtime;
+mod theme;
 mod time;
 mod ui;
 

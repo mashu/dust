@@ -9,9 +9,19 @@ pub const AUTO_CONFIRM_DELAY_MS: u32 = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
-    Playing { index: usize },
-    InterGroupGap { next: usize },
-    AwaitingAnswer { index: usize },
+    Playing {
+        index: usize,
+    },
+    /// Word-space pause between two sends of the same group.
+    RepeatGap {
+        index: usize,
+    },
+    InterGroupGap {
+        next: usize,
+    },
+    AwaitingAnswer {
+        index: usize,
+    },
     Finished,
     Aborted,
 }
@@ -83,6 +93,10 @@ pub struct SessionMachine {
     next_effect_id: u64,
     pending_sleep: Option<u64>,
     pending_auto_confirm: Option<u64>,
+    /// Sends still owed for the group being played, including the one in flight.
+    repeats_left: u32,
+    /// Audio time already spent on this group: every send plus the gaps between them.
+    group_elapsed_ms: u64,
 }
 
 impl SessionMachine {
@@ -91,21 +105,26 @@ impl SessionMachine {
         started_at: u64,
         settings: TrainingSettings,
         first_group: String,
+        first_repeats: u32,
     ) -> (Self, Vec<SessionEffect>) {
         let n = settings.curriculum.num_groups.max(1) as usize;
         let mut session = GroupSession::new(session_id, started_at, n, settings);
         session.set_group(0, first_group);
+        session.set_group_repeats(0, first_repeats);
         session.begin_group(0, started_at);
         let text = session
             .group(0)
             .map(|g| g.sent().to_string())
             .unwrap_or_default();
+        let repeats_left = session.group_repeats(0);
         let machine = Self {
             session,
             phase: SessionPhase::Playing { index: 0 },
             next_effect_id: 1,
             pending_sleep: None,
             pending_auto_confirm: None,
+            repeats_left,
+            group_elapsed_ms: 0,
         };
         (
             machine,
@@ -229,10 +248,25 @@ impl SessionMachine {
         if self.playing_index() != Some(index) {
             return Vec::new();
         }
-        let ended = now_ms.max(
-            self.session.group_start_ms(index).unwrap_or(now_ms)
-                + (duration_sec * 1000.0).round() as u64,
-        );
+        self.session.note_play_finished(index);
+        self.group_elapsed_ms = self
+            .group_elapsed_ms
+            .saturating_add((duration_sec * 1000.0).round() as u64);
+        if self.repeats_left > 1 {
+            self.repeats_left -= 1;
+            let gap = compute_group_gap_for_wpm(
+                char_wpm,
+                effective_wpm,
+                self.session.settings().playback.extra_word_space_multiplier,
+            );
+            self.group_elapsed_ms = self.group_elapsed_ms.saturating_add(u64::from(gap));
+            self.phase = SessionPhase::RepeatGap { index };
+            let id = self.alloc_id();
+            self.pending_sleep = Some(id);
+            return vec![SessionEffect::Sleep { id, ms: gap }];
+        }
+        let ended = now_ms
+            .max(self.session.group_start_ms(index).unwrap_or(now_ms) + self.group_elapsed_ms);
         self.session
             .end_playback(index, ended, char_wpm, effective_wpm);
         self.phase = SessionPhase::AwaitingAnswer { index };
@@ -248,7 +282,9 @@ impl SessionMachine {
 
     fn input(&mut self, index: usize, text: String, now_ms: u64) -> Vec<SessionEffect> {
         let current = match self.phase {
-            SessionPhase::Playing { index } | SessionPhase::AwaitingAnswer { index } => index,
+            SessionPhase::Playing { index }
+            | SessionPhase::RepeatGap { index }
+            | SessionPhase::AwaitingAnswer { index } => index,
             _ => return Vec::new(),
         };
         if index != current || self.session.input_locked(index) {
@@ -392,16 +428,30 @@ impl SessionMachine {
     }
 
     fn gap_elapsed(&mut self, now_ms: u64) -> Vec<SessionEffect> {
-        let SessionPhase::InterGroupGap { next } = self.phase else {
-            return Vec::new();
-        };
-        self.pending_sleep = None;
-        self.begin_next(next, now_ms)
+        match self.phase {
+            SessionPhase::InterGroupGap { next } => {
+                self.pending_sleep = None;
+                self.begin_next(next, now_ms)
+            }
+            SessionPhase::RepeatGap { index } => {
+                self.pending_sleep = None;
+                self.phase = SessionPhase::Playing { index };
+                let text = self
+                    .session
+                    .group(index)
+                    .map(|g| g.sent().to_string())
+                    .unwrap_or_default();
+                vec![SessionEffect::Play { index, text }]
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn begin_next(&mut self, index: usize, now_ms: u64) -> Vec<SessionEffect> {
         self.session.begin_group(index, now_ms);
         self.phase = SessionPhase::Playing { index };
+        self.repeats_left = self.session.group_repeats(index);
+        self.group_elapsed_ms = 0;
         let text = self
             .session
             .group(index)
@@ -413,8 +463,9 @@ impl SessionMachine {
         ]
     }
 
-    pub fn set_group_text(&mut self, index: usize, text: String) {
+    pub fn set_group_text(&mut self, index: usize, text: String, repeats: u32) {
         self.session.set_group(index, text);
+        self.session.set_group_repeats(index, repeats);
     }
 
     pub fn sleep_is_current(&self, id: u64) -> bool {
@@ -432,8 +483,86 @@ mod tests {
         settings.curriculum.num_groups = 2;
         settings.playback.group_timeout = 10.0;
         settings.playback.lock_input_during_group_playback = true;
-        let (m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into());
+        let (m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), 1);
         m
+    }
+
+    fn machine_with_repeats(repeats: u32) -> SessionMachine {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.num_groups = 2;
+        settings.playback.group_timeout = 10.0;
+        settings.playback.lock_input_during_group_playback = true;
+        settings.playback.link_group_repeat = false;
+        settings.playback.group_repeat_min = repeats;
+        settings.playback.group_repeat_max = repeats;
+        let (m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), repeats);
+        m
+    }
+
+    fn ended(index: usize) -> SessionEvent {
+        SessionEvent::PlaybackEnded {
+            index,
+            duration_sec: 0.5,
+            char_wpm: 20.0,
+            effective_wpm: 18.0,
+        }
+    }
+
+    #[test]
+    fn a_repeated_group_is_sent_again_after_a_word_space() {
+        let mut m = machine_with_repeats(3);
+        let effects = m.apply(ended(0), 500);
+        assert!(matches!(m.phase(), SessionPhase::RepeatGap { index: 0 }));
+        assert_eq!(m.view().repeat_total, 3);
+        assert_eq!(m.view().repeat_done, 1);
+        // Still "playing" for the UI, so typing stays locked between sends.
+        assert!(m.session().input_locked(0));
+        let Some(SessionEffect::Sleep { id, ms }) = effects.first().cloned() else {
+            panic!("expected a repeat gap sleep, got {effects:?}");
+        };
+        assert!(ms > 0);
+        assert!(m.sleep_is_current(id));
+
+        let effects = m.apply(SessionEvent::GapElapsed, 900);
+        assert!(matches!(m.phase(), SessionPhase::Playing { index: 0 }));
+        assert_eq!(
+            effects,
+            vec![SessionEffect::Play {
+                index: 0,
+                text: "KM".into()
+            }]
+        );
+
+        m.apply(ended(0), 1400);
+        assert!(matches!(m.phase(), SessionPhase::RepeatGap { index: 0 }));
+        m.apply(SessionEvent::GapElapsed, 1800);
+        let effects = m.apply(ended(0), 2300);
+        assert!(matches!(
+            m.phase(),
+            SessionPhase::AwaitingAnswer { index: 0 }
+        ));
+        assert_eq!(m.view().repeat_done, 3);
+        assert!(!m.session().input_locked(0));
+        assert!(effects.contains(&SessionEffect::Focus { index: 0 }));
+    }
+
+    #[test]
+    fn repeat_count_resets_for_each_group() {
+        let mut m = machine_with_repeats(2);
+        m.apply(ended(0), 500);
+        m.apply(SessionEvent::GapElapsed, 900);
+        m.apply(ended(0), 1400);
+        m.set_group_text(1, "UK".into(), 1);
+        m.apply(SessionEvent::Confirm, 1500);
+        assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
+        m.apply(SessionEvent::GapElapsed, 2000);
+        assert!(matches!(m.phase(), SessionPhase::Playing { index: 1 }));
+        assert_eq!(m.view().repeat_total, 1);
+        m.apply(ended(1), 2500);
+        assert!(matches!(
+            m.phase(),
+            SessionPhase::AwaitingAnswer { index: 1 }
+        ));
     }
 
     #[test]
@@ -488,7 +617,7 @@ mod tests {
         settings.curriculum.num_groups = 1;
         settings.playback.group_timeout = 0.0;
         settings.playback.lock_input_during_group_playback = false;
-        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into());
+        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), 1);
         let _ = m.apply(
             SessionEvent::PlaybackEnded {
                 index: 0,
@@ -528,7 +657,7 @@ mod tests {
         let mut settings = TrainingSettings::default();
         settings.curriculum.num_groups = 1;
         settings.playback.lock_input_during_group_playback = false;
-        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into());
+        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), 1);
         let _ = m.apply(
             SessionEvent::PlaybackEnded {
                 index: 0,
@@ -663,7 +792,7 @@ mod tests {
             200,
         );
         let _ = m.apply(SessionEvent::Confirm, 300);
-        m.set_group_text(1, "UK".into());
+        m.set_group_text(1, "UK".into(), 1);
         let _ = m.apply(SessionEvent::GapElapsed, 800);
         assert!(matches!(m.phase(), SessionPhase::Playing { index: 1 }));
         let effects = m.apply(SessionEvent::PlaybackCancelled { index: 1 }, 900);
@@ -705,7 +834,7 @@ mod tests {
         let mut settings = TrainingSettings::default();
         settings.curriculum.num_groups = 2;
         settings.playback.lock_input_during_group_playback = false;
-        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into());
+        let (mut m, _) = SessionMachine::start(SessionId::new(1), 0, settings, "KM".into(), 1);
         let effects = m.apply(SessionEvent::Confirm, 50);
         assert!(effects.contains(&SessionEffect::StopAudio));
         assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
@@ -724,7 +853,7 @@ mod tests {
     fn start_emits_play_even_for_empty_text() {
         let mut settings = TrainingSettings::default();
         settings.curriculum.num_groups = 1;
-        let (_, effects) = SessionMachine::start(SessionId::new(1), 0, settings, String::new());
+        let (_, effects) = SessionMachine::start(SessionId::new(1), 0, settings, String::new(), 1);
         assert!(effects.iter().any(|e| matches!(
             e,
             SessionEffect::Play {

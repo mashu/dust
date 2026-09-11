@@ -5,6 +5,8 @@ use cw_core::{
 const MAX_SESSIONS: usize = 200;
 
 pub trait Store {
+    fn load_theme(&self) -> String;
+    fn save_theme(&self, theme: &str);
     fn load_settings(&self) -> TrainingSettings;
     fn save_settings(&self, settings: &TrainingSettings);
     fn load_sessions(&self) -> Vec<SessionResult>;
@@ -40,6 +42,18 @@ pub struct WebStore;
 
 #[cfg(feature = "web")]
 impl Store for WebStore {
+    fn load_theme(&self) -> String {
+        storage()
+            .and_then(|store| store.get_item(THEME_KEY).ok().flatten())
+            .unwrap_or_default()
+    }
+
+    fn save_theme(&self, theme: &str) {
+        if let Some(store) = storage() {
+            let _ = store.set_item(THEME_KEY, theme);
+        }
+    }
+
     fn load_settings(&self) -> TrainingSettings {
         let Some(store) = storage() else {
             return TrainingSettings::default();
@@ -112,6 +126,8 @@ impl Store for WebStore {
 }
 
 #[cfg(feature = "web")]
+const THEME_KEY: &str = "dust_theme";
+#[cfg(feature = "web")]
 const SETTINGS_KEY: &str = "dust_settings";
 #[cfg(feature = "web")]
 const SESSIONS_KEY: &str = "dust_sessions";
@@ -128,6 +144,17 @@ pub struct DesktopStore;
 
 #[cfg(feature = "desktop")]
 impl Store for DesktopStore {
+    fn load_theme(&self) -> String {
+        std::fs::read_to_string(data_dir().join("theme.txt"))
+            .map(|raw| raw.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    fn save_theme(&self, theme: &str) {
+        let dir = ensure_dir();
+        let _ = std::fs::write(dir.join("theme.txt"), theme);
+    }
+
     fn load_settings(&self) -> TrainingSettings {
         finalize_settings(read_json::<TrainingSettings>("settings.json").unwrap_or_default())
     }
@@ -234,6 +261,14 @@ pub fn default_store() -> WebStore {
 #[cfg(feature = "desktop")]
 pub fn default_store() -> DesktopStore {
     DesktopStore
+}
+
+pub fn load_theme() -> String {
+    default_store().load_theme()
+}
+
+pub fn save_theme(theme: &str) {
+    default_store().save_theme(theme)
 }
 
 pub fn load_settings() -> TrainingSettings {
