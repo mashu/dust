@@ -101,13 +101,11 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartG
 #[component]
 pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     let mut tab = use_signal(|| StatsTab::Overview);
-    let matching: Vec<SessionResult> = sessions
-        .iter()
-        .filter(|s| s.usable_for_sampling(&settings))
-        .cloned()
-        .collect();
-    let letters = character_diagnostics(&matching);
-    let hidden = sessions.len().saturating_sub(matching.len());
+    // Accuracy, letters and mistakes are counted over the whole history: a
+    // letter is the same letter whichever character set it was sent under.
+    // Only the sampling snapshot narrows to the current set, and it does that
+    // itself so it keeps matching what the trainer will actually draw.
+    let letters = character_diagnostics(&sessions);
     rsx! {
         div { class: "stack stats-page",
             header { class: "page-head",
@@ -124,14 +122,13 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             match tab() {
                 StatsTab::Overview => rsx! {
                     OverviewTab {
-                        sessions: matching,
-                        hidden,
+                        sessions: sessions.clone(),
                         threshold: settings.auto_level.auto_adjust_threshold,
                     }
                 },
                 StatsTab::Letters => rsx! { LettersTab { letters } },
-                StatsTab::Mistakes => rsx! { MistakesTab { sessions: matching } },
-                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions: matching } },
+                StatsTab::Mistakes => rsx! { MistakesTab { sessions: sessions.clone() } },
+                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions: sessions.clone() } },
                 StatsTab::History => rsx! { HistoryTab { sessions } },
             }
         }
@@ -139,7 +136,7 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
 }
 
 #[component]
-fn OverviewTab(sessions: Vec<SessionResult>, hidden: usize, threshold: f64) -> Element {
+fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
     let chart = accuracy_chart(&sessions);
     let letters = character_diagnostics(&sessions);
     let avg = if sessions.is_empty() {
@@ -170,21 +167,11 @@ fn OverviewTab(sessions: Vec<SessionResult>, hidden: usize, threshold: f64) -> E
                     div { class: "card-head",
                         div { class: "card-head-main",
                             span { class: "card-icon", Icon { name: "chart" } }
-                            div {
-                                h3 { class: "card-title",
-                                    if hidden > 0 { "Nothing scored for this set" } else { "Nothing scored yet" }
-                                }
-                            }
+                            div { h3 { class: "card-title", "Nothing scored yet" } }
                         }
                     }
-                    if hidden > 0 {
-                        p { class: "muted", style: "margin: 0;",
-                            "{hidden} earlier sessions used a different character set or sequence, so they are not comparable with this one. They are listed in full under History, and switching the set back brings them into these tabs."
-                        }
-                    } else {
-                        p { class: "muted", style: "margin: 0;",
-                            "Finish a session to unlock accuracy over time, letter mastery and sampling weights."
-                        }
+                    p { class: "muted", style: "margin: 0;",
+                        "Finish a session to unlock accuracy over time, letter mastery and sampling weights."
                     }
                 }
             } else {

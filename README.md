@@ -54,14 +54,14 @@ One-time: in the GitHub repo go to **Settings → Pages → Build and deployment
 
 ## GitHub Releases
 
-Push a git tag that matches the workspace version in `Cargo.toml` (currently `0.1.0`):
+Push a git tag that matches the workspace version in `Cargo.toml` (currently `0.2.0`):
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-Creating the tag only in the GitHub UI also works. To rebuild an existing tag, use **Actions → Release → Run workflow** and pass `v0.1.0`.
+Creating the tag only in the GitHub UI also works. To rebuild an existing tag, use **Actions → Release → Run workflow** and pass `v0.2.0`.
 
 GitHub Actions then builds and attaches:
 
@@ -136,11 +136,13 @@ Updating the app does not clear any of it. The storage keys (`dust_settings`, `d
 `dust_auto_adjust_*`) and file names are not versioned, and settings files from older builds
 still load — new fields fall back to their defaults.
 
-History can still look empty after a change of course: stats, the accuracy chart and the
-"Sessions" tile only count sessions recorded with the **same character set and alphabet**, so
-switching between Koch, Digits, Mixed and Custom, or editing the sequence, parks the old ones.
-They are not gone — the practice calendar and the **History** tab in Stats always show
-everything, and switching back brings them into the rest.
+Stats are computed across your whole history. Changing course — Koch to Mixed, a new sequence,
+a custom alphabet — does not hide what you already did: accuracy over time, letter mastery,
+mistakes, the calendar and the streak all count every session, because a letter is the same
+letter whichever set it was sent under.
+
+The one exception is the **Sampling** tab, which shows what the trainer will draw next and so
+narrows to the current character set, the same way the sampler itself does.
 
 ## Layout
 

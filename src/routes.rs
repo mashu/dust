@@ -36,21 +36,14 @@ pub fn app_routes(
     match screen() {
         Screen::Home => {
             let pool: String = compute_char_pool(&settings()).into_iter().collect();
-            let matching: Vec<_> = sessions()
-                .iter()
-                .filter(|s| s.usable_for_sampling(&settings()))
-                .cloned()
-                .collect();
-            let last = matching.last().map(|s| s.accuracy);
-            // Sessions recorded under another character set still exist; they are
-            // just not comparable with the current one.
-            let hidden = sessions().len().saturating_sub(matching.len());
+            // Every session counts, whatever character set it was recorded with.
+            let history = sessions();
+            let last = history.last().map(|s| s.accuracy);
             rsx! {
                 Home {
                     settings: settings(),
                     last_accuracy: last,
-                    session_count: matching.len(),
-                    hidden_sessions: hidden,
+                    session_count: history.len(),
                     pool,
                     sessions: sessions(),
                     today: local_date_string(),
