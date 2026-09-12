@@ -310,6 +310,20 @@ pub async fn play_chars(
     }
 }
 
+/// Send one short sample once — used by the keying-envelope test chips.
+pub async fn play_sample_text(
+    app: AppState,
+    gen: u64,
+    settings: TrainingSettings,
+    text: String,
+    mut toast: Signal<Option<String>>,
+) {
+    match play_text_now(&app, gen, &text, &settings).await {
+        Ok(_) | Err(PlayError::Cancelled) => {}
+        Err(PlayError::Failed(message)) => toast.set(Some(message)),
+    }
+}
+
 pub async fn loop_preview_text(
     app: AppState,
     gen: u64,

@@ -57,6 +57,10 @@ cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt"] }
 
+[dev-dependencies]
+# Renders components to HTML so the screens can be smoke-tested without a window.
+dioxus-ssr = "0.7.10"
+
 [features]
 default = []
 web = [
@@ -67,7 +71,19 @@ web = [
     "dep:wasm-bindgen-futures",
     "dep:web-sys",
 ]
-desktop = ["dioxus/desktop", "dep:cpal", "dep:dirs", "dep:tokio"]
+desktop = ["dioxus/desktop", "native-runtime", "native-audio"]
+# Android/iOS run the same webview stack as the desktop build. `dx` enables this
+# feature automatically for `--platform android`.
+mobile = ["dioxus/mobile", "native-runtime", "native-audio"]
+# Same, minus the audio backend: a fallback for bringing up a new mobile
+# toolchain, since cpal on Android pulls the NDK C++ build for oboe.
+mobile-silent = ["dioxus/mobile", "native-runtime", "silent-audio"]
+# Storage and timers shared by every non-wasm build.
+native-runtime = ["dep:dirs", "dep:tokio"]
+# cpal output: ALSA/CoreAudio/WASAPI on desktop, AAudio through oboe on Android.
+native-audio = ["dep:cpal"]
+# Plays nothing, but keeps a session's timing so the rest of the app is usable.
+silent-audio = []
 
 [profile.release]
 lto = true

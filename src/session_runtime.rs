@@ -1,8 +1,8 @@
 //! Owns the session machine, audio, and effect execution. UI sends events only.
 
 use cw_core::{
-    generate_training_group, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
-    TrainingSettings,
+    generate_training_group, resolve_group_repeats, SessionEffect, SessionEvent, SessionMachine,
+    SessionPhase, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -132,20 +132,26 @@ pub fn boot_machine_session(
         .collect();
     *app.sampling.borrow_mut() = cw_core::create_initial_sampling_state(&history_refs);
 
-    let first = {
+    let (first, first_repeats) = {
         let mut sampling = app.sampling.borrow_mut();
         let mut rng = app.rng.borrow_mut();
         let (group, next_state) = generate_training_group(&settings, &sampling, &mut *rng);
         *sampling = next_state;
-        group
+        let repeats = resolve_group_repeats(&settings, &mut *rng);
+        (group, repeats)
     };
 
     if app.session_gen.get() != gen {
         return None;
     }
 
-    let (machine, effects) =
-        SessionMachine::start(cw_core::SessionId::new(gen), now_ms(), settings, first);
+    let (machine, effects) = SessionMachine::start(
+        cw_core::SessionId::new(gen),
+        now_ms(),
+        settings,
+        first,
+        first_repeats,
+    );
     if app.session_gen.get() != gen {
         return None;
     }
@@ -245,11 +251,12 @@ async fn handle_effect(
                 let mut rng = app.rng.borrow_mut();
                 let (group, next_state) = generate_training_group(&snapshot, &sampling, &mut *rng);
                 *sampling = next_state;
+                let repeats = resolve_group_repeats(&snapshot, &mut *rng);
                 drop(sampling);
                 drop(rng);
                 if let Some(machine) = app.machine.borrow_mut().as_mut() {
                     if !machine.is_terminal() && machine.session().session_id().raw() == gen {
-                        machine.set_group_text(index, group);
+                        machine.set_group_text(index, group, repeats);
                         runtime.set(Some(machine.session().clone()));
                     }
                 }
@@ -309,7 +316,7 @@ async fn handle_effect(
             }
             let phase = app.machine.borrow().as_ref().map(|m| m.phase());
             match phase {
-                Some(SessionPhase::InterGroupGap { .. }) => {
+                Some(SessionPhase::InterGroupGap { .. }) | Some(SessionPhase::RepeatGap { .. }) => {
                     dispatch_event(app, runtime, SessionEvent::GapElapsed, gen)
                 }
                 Some(SessionPhase::AwaitingAnswer { .. }) => {

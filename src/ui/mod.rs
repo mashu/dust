@@ -1,5 +1,6 @@
 pub mod auto_level;
 pub mod band;
+pub mod envelope;
 pub mod heatmap;
 pub mod home;
 pub mod listen;
@@ -11,3 +12,6 @@ pub mod stats_detail;
 pub mod tips;
 pub mod training;
 pub mod widgets;
+
+#[cfg(test)]
+mod render_tests;

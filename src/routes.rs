@@ -23,6 +23,7 @@ pub fn app_routes(
     toast: Signal<Option<String>>,
     previewing: bool,
     listen_playing: bool,
+    sample_playing: Option<String>,
     app: Rc<AppState>,
     start_training: EventHandler<()>,
     go_home: EventHandler<()>,
@@ -30,6 +31,7 @@ pub fn app_routes(
     start_band_preview: EventHandler<()>,
     stop_preview: EventHandler<()>,
     start_listen: EventHandler<String>,
+    play_sample: EventHandler<String>,
 ) -> Element {
     match screen() {
         Screen::Home => {
@@ -58,8 +60,10 @@ pub fn app_routes(
             SettingsView {
                 settings,
                 previewing,
+                sample_playing,
                 on_preview_band: start_band_preview,
                 on_stop_band: stop_preview,
+                on_play_sample: play_sample,
             }
         },
         Screen::Stats => rsx! {
@@ -94,6 +98,8 @@ pub fn app_routes(
                         focused: view.focused,
                         playing,
                         locked: view.locked,
+                        repeat_total: view.repeat_total,
+                        repeat_done: view.repeat_done,
                         on_change: move |(idx, value): (usize, String)| {
                             send_command(
                                 (*app_change).clone(),

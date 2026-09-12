@@ -1,18 +1,9 @@
 use cw_core::{compute_char_pool, morse_for, MixedAutoLevelAxis, TrainingSettings};
 use dioxus::prelude::*;
 
-fn pretty_morse(pattern: &str) -> String {
-    pattern
-        .chars()
-        .map(|c| match c {
-            '.' => '·',
-            '-' => '−',
-            _ => c,
-        })
-        .collect()
-}
+use crate::ui::widgets::Icon;
 
-fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
+pub fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
     if pool.is_empty() {
         return 0;
     }
@@ -52,6 +43,18 @@ fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
     }
 }
 
+/// Dots and dashes drawn as keyed elements rather than punctuation.
+#[component]
+fn MorseBars(pattern: String) -> Element {
+    rsx! {
+        div { class: "listen-morse", "aria-hidden": "true",
+            for symbol in pattern.chars() {
+                i { class: if symbol == '.' { "dit" } else { "dah" } }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn ListenView(
     settings: TrainingSettings,
@@ -68,14 +71,25 @@ pub fn ListenView(
         .min(pool.len().saturating_sub(1));
     let current = pool.get(idx).copied();
     let pattern = current.and_then(morse_for).unwrap_or("");
+    let spoken: String = pattern
+        .chars()
+        .map(|c| if c == '.' { "di " } else { "dah " })
+        .collect::<String>()
+        .trim_end()
+        .to_string();
     let all_chars: String = pool.iter().collect();
     rsx! {
         div { class: "stack listen-page",
-            div { class: "row", style: "justify-content: space-between;",
-                h2 { class: "page-title", style: "margin: 0;", "Listen to letters" }
-                button { class: "btn btn-ghost", onclick: move |_| on_back.call(()), "Back" }
+            header { class: "row-between",
+                div {
+                    h2 { class: "page-title", "Listen" }
+                    p { class: "page-sub", "Play one character, or the whole unlocked pool." }
+                }
+                button { class: "btn btn-secondary btn-sm", onclick: move |_| on_back.call(()),
+                    Icon { name: "back" }
+                    "Back"
+                }
             }
-            p { class: "muted", "Newest unlocked character is selected. Play one, or the whole alphabet." }
             div { class: "chip-strip",
                 for (i, ch) in pool.iter().copied().enumerate() {
                     {
@@ -101,20 +115,29 @@ pub fn ListenView(
             div { class: "card listen-stage",
                 if let Some(ch) = current {
                     div { class: "listen-glyph", "{ch}" }
-                    div { class: "listen-morse mono", "{pretty_morse(pattern)}" }
-                    p { class: "muted", if default_idx == idx { "Newly unlocked" } else { "From your current pool" } }
+                    MorseBars { pattern: pattern.to_string() }
+                    p { class: "mono", style: "margin: 0; letter-spacing: 0.16em; color: var(--copper-deep); font-size: 0.9rem;",
+                        "{spoken}"
+                    }
+                    p { class: "muted", style: "margin: 0.5rem 0 0;",
+                        if default_idx == idx { "Newest unlocked character" } else { "From your current pool" }
+                    }
                 } else {
                     p { class: "muted", "No characters in the pool." }
                 }
             }
-            div { class: "home-actions",
+            div { class: "hero-actions",
                 if playing {
-                    button { class: "btn btn-secondary", onclick: move |_| on_stop.call(()), "Stop" }
+                    button { class: "btn btn-secondary", onclick: move |_| on_stop.call(()),
+                        Icon { name: "stop" }
+                        "Stop"
+                    }
                 } else {
                     if let Some(ch) = current {
                         button {
                             class: "btn btn-primary",
                             onclick: move |_| on_play.call(ch.to_string()),
+                            Icon { name: "play" }
                             "Play {ch}"
                         }
                     }
@@ -122,6 +145,7 @@ pub fn ListenView(
                         class: "btn btn-secondary",
                         disabled: all_chars.is_empty(),
                         onclick: move |_| on_play.call(all_chars.clone()),
+                        Icon { name: "headphones" }
                         "Play all"
                     }
                 }

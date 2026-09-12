@@ -62,6 +62,10 @@ pub struct Group {
     answer_at: u64,
     char_wpm: f64,
     effective_wpm: f64,
+    /// How many times this group is sent before the answer window opens.
+    repeats: u32,
+    /// Sends already finished for this group.
+    plays_done: u32,
 }
 
 impl Group {
@@ -75,6 +79,8 @@ impl Group {
             answer_at: 0,
             char_wpm: 0.0,
             effective_wpm: 0.0,
+            repeats: 1,
+            plays_done: 0,
         }
     }
 
@@ -89,6 +95,14 @@ impl Group {
     pub fn confirmed(&self) -> bool {
         self.confirmed
     }
+
+    pub fn repeats(&self) -> u32 {
+        self.repeats
+    }
+
+    pub fn plays_done(&self) -> u32 {
+        self.plays_done
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,6 +115,9 @@ pub struct SessionView {
     pub inputs: Vec<String>,
     pub confirmed: Vec<bool>,
     pub locked: bool,
+    /// Planned sends for the group being played, and how many are done.
+    pub repeat_total: u32,
+    pub repeat_done: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +204,7 @@ impl GroupSession {
     }
 
     pub fn view(&self) -> SessionView {
+        let current = self.groups.get(self.current_group);
         SessionView {
             session_id: self.session_id,
             status: self.status,
@@ -196,6 +214,29 @@ impl GroupSession {
             inputs: self.inputs(),
             confirmed: self.confirmed_flags(),
             locked: self.input_locked(self.current_group),
+            repeat_total: current.map(|g| g.repeats.max(1)).unwrap_or(1),
+            repeat_done: current.map(|g| g.plays_done).unwrap_or(0),
+        }
+    }
+
+    pub fn group_repeats(&self, index: usize) -> u32 {
+        self.groups
+            .get(index)
+            .map(|g| g.repeats.max(1))
+            .unwrap_or(1)
+    }
+
+    /// Plan how many times `index` is sent. Clamped to at least one send.
+    pub fn set_group_repeats(&mut self, index: usize, repeats: u32) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.repeats = repeats.max(1);
+        }
+    }
+
+    /// Count one finished send of `index`.
+    pub fn note_play_finished(&mut self, index: usize) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.plays_done = group.plays_done.saturating_add(1);
         }
     }
 
@@ -228,6 +269,7 @@ impl GroupSession {
         self.status = RuntimeStatus::PlayingGroup;
         if let Some(group) = self.groups.get_mut(index) {
             group.start_at = now_ms;
+            group.plays_done = 0;
         }
     }
 
@@ -581,6 +623,23 @@ mod tests {
         assert!(result.groups[0].correct);
         assert!((result.accuracy - 1.0).abs() < 1e-9);
         assert!((result.char_wpm - 22.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn repeats_default_to_one_and_count_plays() {
+        let mut session = GroupSession::new(1, 0, 2, TrainingSettings::default());
+        assert_eq!(session.group_repeats(0), 1);
+        session.set_group_repeats(0, 0);
+        assert_eq!(session.group_repeats(0), 1);
+        session.set_group_repeats(0, 3);
+        session.set_group(0, "KM".into());
+        session.begin_group(0, 0);
+        session.note_play_finished(0);
+        let view = session.view();
+        assert_eq!(view.repeat_total, 3);
+        assert_eq!(view.repeat_done, 1);
+        session.begin_group(0, 10);
+        assert_eq!(session.view().repeat_done, 0);
     }
 
     #[test]

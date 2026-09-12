@@ -58,7 +58,8 @@ pub use session::{
 };
 pub use settings::{
     AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, MixedAutoLevelAxis,
-    PlaybackSettings, PracticeWindow, QrmProfile, TrainingSettings,
+    PlaybackSettings, PracticeWindow, QrmProfile, RangeSetting, RangeValues, TrainingSettings,
+    GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
 };
 pub use stats::{
     accuracy_chart, bigram_heatmap, character_diagnostics, confusion_entries, sampling_rows,
@@ -68,5 +69,7 @@ pub use stats::{
 };
 pub use streak::{compute_streak_status, StreakState, StreakStatus};
 pub use timing::{
-    compute_group_gap_for_wpm, compute_group_gap_ms, plan_morse_playback, PlaybackPlan, ToneEvent,
+    build_envelope_curve, compute_group_gap_for_wpm, compute_group_gap_ms, dot_seconds,
+    envelope_shape, plan_morse_playback, resolve_group_repeats, EnvelopePoint, EnvelopeShape,
+    PlaybackPlan, ToneEvent,
 };

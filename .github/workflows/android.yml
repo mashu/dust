@@ -1,0 +1,141 @@
+# Build a sideloadable Android APK on demand.
+#
+# Actions → Android APK → Run workflow, on any branch. The APK lands in the run's
+# artifacts, signed with Gradle's debug key, so a phone installs it once you allow
+# installs from unknown sources.
+#
+# Audio goes through cpal's AAudio/oboe backend, the same player the desktop build
+# uses. If that ever blocks a toolchain bring-up, `--features mobile-silent` builds
+# the same app with a player that keeps session timing but makes no sound.
+
+name: Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Rust profile for the native library"
+        type: choice
+        options: [release, debug]
+        default: release
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DIOXUS_CLI_VERSION: "0.7.10"
+  ANDROID_TRIPLE: aarch64-linux-android
+  # Fallback only; the runner image normally ships an NDK already.
+  NDK_FALLBACK_VERSION: "27.2.12479018"
+
+jobs:
+  apk:
+    name: Build APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Resolve the Android SDK and NDK
+        run: |
+          set -euo pipefail
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$sdk" || ! -d "$sdk" ]]; then
+            echo "No Android SDK on this runner."
+            exit 1
+          fi
+
+          ndk="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK:-}}}"
+          if [[ -z "$ndk" || ! -d "$ndk" ]]; then
+            ndk="$(find "$sdk/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -1 || true)"
+          fi
+          if [[ -z "$ndk" || ! -d "$ndk" ]]; then
+            echo "No NDK found; installing ${NDK_FALLBACK_VERSION}"
+            yes | "$sdk/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+            "$sdk/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_FALLBACK_VERSION}"
+            ndk="$sdk/ndk/${NDK_FALLBACK_VERSION}"
+          fi
+
+          echo "SDK: $sdk"
+          echo "NDK: $ndk"
+          {
+            echo "ANDROID_HOME=$sdk"
+            echo "ANDROID_SDK_ROOT=$sdk"
+            echo "ANDROID_NDK_HOME=$ndk"
+            echo "NDK_HOME=$ndk"
+          } >> "$GITHUB_ENV"
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android
+          cache-directories: target/dx
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install Dioxus CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo binstall "dioxus-cli@${DIOXUS_CLI_VERSION}" --no-confirm --locked \
+            || cargo install dioxus-cli --version "${DIOXUS_CLI_VERSION}" --locked
+          dx --version
+
+      - name: Bundle APK
+        run: |
+          set -euo pipefail
+          args=(bundle --platform android --target "${ANDROID_TRIPLE}" --package-types apk --locked)
+          if [[ "${{ inputs.profile }}" != "debug" ]]; then
+            args+=(--release)
+          fi
+          echo "dx ${args[*]}"
+          dx "${args[@]}"
+
+      - name: Collect APK
+        id: collect
+        run: |
+          set -euo pipefail
+          version="$(awk '
+            /^\[workspace.package\]/ { in_pkg = 1; next }
+            in_pkg && /^\[/ { in_pkg = 0 }
+            in_pkg && /^version *=/ { gsub(/[" ]/, "", $3); print $3; exit }
+          ' Cargo.toml)"
+
+          echo "Bundle outputs:"
+          find target/dx -name '*.apk' -type f | sort
+
+          apk="$(find target/dx -name '*.apk' -type f -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"
+          if [[ -z "$apk" ]]; then
+            echo "No APK was produced"
+            exit 1
+          fi
+
+          mkdir -p artifacts
+          name="dust-${version}-android-arm64.apk"
+          cp "$apk" "artifacts/${name}"
+          ls -lh artifacts
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: dust-android
+          path: artifacts/*
+          if-no-files-found: error
