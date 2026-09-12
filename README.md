@@ -57,14 +57,14 @@ One-time: in the GitHub repo go to **Settings → Pages → Build and deployment
 
 ## GitHub Releases
 
-Push a git tag that matches the workspace version in `Cargo.toml` (currently `0.2.0`):
+Push a git tag that matches the workspace version in `Cargo.toml` (currently `0.3.0`):
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
-Creating the tag only in the GitHub UI also works. To rebuild an existing tag, use **Actions → Release → Run workflow** and pass `v0.2.0`.
+Creating the tag only in the GitHub UI also works. To rebuild an existing tag, use **Actions → Release → Run workflow** and pass `v0.3.0`.
 
 GitHub Actions then builds and attaches:
 
@@ -72,12 +72,14 @@ GitHub Actions then builds and attaches:
 - Windows NSIS installer (`.exe`)
 - macOS `.dmg` (Apple Silicon on `macos-latest`)
 - Android `.apk` (arm64)
+- iOS `.ipa` (arm64, unsigned — see below)
 
 macOS builds are unsigned (right-click → Open the first time). Windows needs WebView2, which is already present on typical Windows 10/11 systems.
 
 The Android APK is signed with Gradle's debug key: fine for sideloading, not for the Play
-Store. For Play, build a signed AAB locally (see **Play Store** below). iOS is not attached
-to releases: see below for the unsigned IPA, which is built on demand.
+Store. For Play, build a signed AAB locally (see **Play Store** below). The iOS IPA carries no
+signature at all — a sideloader adds one, see **iOS** below. Neither mobile job can hold back
+the desktop bundles: if one fails, the release still publishes without it.
 
 ## Android
 
@@ -180,7 +182,8 @@ What you can build, and what Apple lets you install, are different questions:
 | **Unsigned IPA** (this repo) | none | your iPhone, after a sideloader re-signs it |
 | Signed IPA / TestFlight | Apple Developer Program, $99/yr | any device, no re-signing |
 
-**Actions → iOS IPA → Run workflow** produces the unsigned `.ipa`. Install it with
+Releases carry the unsigned `.ipa`, and **Actions → iOS IPA → Run workflow** builds one from
+any branch between releases. Install it with
 [AltStore](https://altstore.io), [SideStore](https://sidestore.io) or
 [Sideloadly](https://sideloadly.io): they re-sign the app with your own Apple ID. A free Apple
 ID gives a signature that lasts **7 days** and allows **three** sideloaded apps at a time —

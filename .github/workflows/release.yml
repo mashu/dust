@@ -215,11 +215,14 @@ jobs:
           echo "Bundle outputs:"
           find $search_roots -type f | sort | head -200
 
+          # `dx` writes each installer into both dist/ and target/dx, so the same
+          # file turns up twice and the second copy used to be attached to the
+          # release under its raw name. Keep the first path per basename.
           list="${RUNNER_TEMP}/dust-artifacts.txt"
           find $search_roots -type f \( \
             -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
             -o -name '*.dmg' -o -name '*.msi' -o -name '*.exe' \
-          \) | sort > "$list"
+          \) | sort | awk -F/ '!seen[$NF]++' > "$list"
 
           copied=0
           while IFS= read -r src; do
@@ -386,9 +389,88 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
 
+  ios:
+    name: iOS IPA
+    needs: version
+    runs-on: macos-latest
+    timeout-minutes: 90
+    # Unsigned and sideload-only; never let it hold back the other bundles.
+    continue-on-error: true
+    env:
+      IOS_TRIPLE: aarch64-apple-ios
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+          components: llvm-tools-preview
+
+      - name: Fix rust-objcopy LLVM dylib path
+        run: bash scripts/fix-macos-rust-objcopy.sh
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-ios
+          cache-directories: target/dx
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install Dioxus CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo binstall "dioxus-cli@${DIOXUS_CLI_VERSION}" --no-confirm --locked \
+            || cargo install dioxus-cli --version "${DIOXUS_CLI_VERSION}" --locked
+          dx --version
+
+      # `dx` codesigns only when asked, so this is an unsigned .app. Its own .ipa
+      # packaging verifies a signature, hence `--package-types ios` plus the
+      # Payload zip below.
+      - name: Bundle the app
+        run: |
+          dx bundle --release --locked \
+            --platform ios \
+            --target "${IOS_TRIPLE}" \
+            --package-types ios
+
+      - name: Package an unsigned IPA
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "Bundle outputs:"
+          find target/dx -maxdepth 6 -name '*.app' -type d | sort
+
+          app="$(find target/dx -name '*.app' -type d | head -1)"
+          if [[ -z "$app" ]]; then
+            echo "No .app bundle was produced"
+            exit 1
+          fi
+          rm -rf Payload
+          mkdir -p Payload artifacts
+          cp -R "$app" Payload/
+          zip -qry "artifacts/dust-${VERSION}-ios-unsigned.ipa" Payload
+          ls -lh artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: dust-ios
+          path: artifacts/*
+          if-no-files-found: error
+
   release:
     name: Publish GitHub release
-    needs: [version, build, android]
+    needs: [version, build, android, ios]
     # Publish as long as the desktop bundles are good; Android is best-effort.
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
