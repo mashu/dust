@@ -42,11 +42,15 @@ pub fn app_routes(
                 .cloned()
                 .collect();
             let last = matching.last().map(|s| s.accuracy);
+            // Sessions recorded under another character set still exist; they are
+            // just not comparable with the current one.
+            let hidden = sessions().len().saturating_sub(matching.len());
             rsx! {
                 Home {
                     settings: settings(),
                     last_accuracy: last,
                     session_count: matching.len(),
+                    hidden_sessions: hidden,
                     pool,
                     sessions: sessions(),
                     today: local_date_string(),

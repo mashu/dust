@@ -36,6 +36,8 @@ pub fn Home(
     settings: TrainingSettings,
     last_accuracy: Option<f64>,
     session_count: usize,
+    /// Sessions in the history that belong to a different character set.
+    hidden_sessions: usize,
     pool: String,
     sessions: Vec<SessionResult>,
     today: String,
@@ -170,6 +172,21 @@ pub fn Home(
                     div { class: "kpi blue",
                         div { class: "tiny", "{level_label}" }
                         div { class: "value", "{level_value}" }
+                    }
+                }
+            } else if hidden_sessions > 0 {
+                div { class: "card",
+                    div { class: "card-head",
+                        div { class: "card-head-main",
+                            span { class: "card-icon", Icon { name: "shuffle" } }
+                            div {
+                                h3 { class: "card-title", "Nothing scored for this set yet" }
+                                p { class: "card-note", "{hidden_sessions} earlier sessions used a different character set." }
+                            }
+                        }
+                    }
+                    p { class: "muted", style: "margin: 0;",
+                        "They are still here — the calendar below and Stats → History show every session. Scores only average within one character set, so switching back brings them into your stats."
                     }
                 }
             } else {

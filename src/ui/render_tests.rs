@@ -18,7 +18,7 @@ use super::home::Home;
 use super::listen::ListenView;
 use super::results::ResultsView;
 use super::settings::SettingsView;
-use super::stats::StatsView;
+use super::stats::{StatsView, StatsViewProps};
 use super::training::TrainingView;
 
 fn render(app: fn() -> Element) -> String {
@@ -92,6 +92,7 @@ fn home_renders_the_hero_and_stats() {
                 settings: TrainingSettings::default(),
                 last_accuracy: Some(0.94),
                 session_count: 3,
+                hidden_sessions: 0,
                 pool: "KM01".to_string(),
                 sessions: history(),
                 today: "2026-09-03".to_string(),
@@ -120,6 +121,7 @@ fn home_without_history_invites_a_first_session() {
                 settings: TrainingSettings::default(),
                 last_accuracy: None,
                 session_count: 0,
+                hidden_sessions: 0,
                 pool: "KM".to_string(),
                 sessions: Vec::new(),
                 today: "2026-09-03".to_string(),
@@ -131,6 +133,48 @@ fn home_without_history_invites_a_first_session() {
     });
     assert!(html.contains("First session"));
     assert!(!html.contains("Last accuracy"));
+}
+
+#[test]
+fn home_says_where_the_history_went_after_a_set_change() {
+    let html = render(|| {
+        rsx! {
+            Home {
+                settings: TrainingSettings::default(),
+                last_accuracy: None,
+                session_count: 0,
+                hidden_sessions: 12,
+                pool: "KM".to_string(),
+                sessions: history(),
+                today: "2026-09-03".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    });
+    // Not "First session": the history is parked, not missing.
+    assert!(!html.contains("First session"));
+    assert!(html.contains("Nothing scored for this set yet"));
+    assert!(html.contains("12 earlier sessions"));
+    assert!(html.contains("History"));
+}
+
+#[test]
+fn stats_explains_a_history_recorded_under_another_set() {
+    let mut other = session("2026-09-01", 0.9);
+    other.char_set_mode = CharSetMode::Digits;
+    other.alphabet_fingerprint = "0123456789".to_string();
+    let html = render_props(
+        StatsView,
+        StatsViewProps {
+            settings: TrainingSettings::default(),
+            sessions: vec![other],
+        },
+    );
+    assert!(html.contains("Nothing scored for this set"));
+    assert!(html.contains("1 earlier sessions") || html.contains("1 earlier session"));
+    assert!(!html.contains("Finish a session to unlock"));
 }
 
 #[test]

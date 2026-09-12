@@ -107,6 +107,7 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
         .cloned()
         .collect();
     let letters = character_diagnostics(&matching);
+    let hidden = sessions.len().saturating_sub(matching.len());
     rsx! {
         div { class: "stack stats-page",
             header { class: "page-head",
@@ -124,6 +125,7 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
                 StatsTab::Overview => rsx! {
                     OverviewTab {
                         sessions: matching,
+                        hidden,
                         threshold: settings.auto_level.auto_adjust_threshold,
                     }
                 },
@@ -137,7 +139,7 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
 }
 
 #[component]
-fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
+fn OverviewTab(sessions: Vec<SessionResult>, hidden: usize, threshold: f64) -> Element {
     let chart = accuracy_chart(&sessions);
     let letters = character_diagnostics(&sessions);
     let avg = if sessions.is_empty() {
@@ -168,11 +170,21 @@ fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
                     div { class: "card-head",
                         div { class: "card-head-main",
                             span { class: "card-icon", Icon { name: "chart" } }
-                            div { h3 { class: "card-title", "Nothing scored yet" } }
+                            div {
+                                h3 { class: "card-title",
+                                    if hidden > 0 { "Nothing scored for this set" } else { "Nothing scored yet" }
+                                }
+                            }
                         }
                     }
-                    p { class: "muted", style: "margin: 0;",
-                        "Finish a session to unlock accuracy over time, letter mastery and sampling weights."
+                    if hidden > 0 {
+                        p { class: "muted", style: "margin: 0;",
+                            "{hidden} earlier sessions used a different character set or sequence, so they are not comparable with this one. They are listed in full under History, and switching the set back brings them into these tabs."
+                        }
+                    } else {
+                        p { class: "muted", style: "margin: 0;",
+                            "Finish a session to unlock accuracy over time, letter mastery and sampling weights."
+                        }
                     }
                 }
             } else {
