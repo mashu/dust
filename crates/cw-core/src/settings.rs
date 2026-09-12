@@ -259,6 +259,34 @@ impl Default for AutoLevelSettings {
     }
 }
 
+/// The min/max pairs the settings screen edits. Keeping the invariants here —
+/// max never below min, "linked" collapsing the pair, character speed dragging
+/// effective speed along — keeps them testable and out of the UI's callbacks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeSetting {
+    CharWpm,
+    EffectiveWpm,
+    GroupSize,
+    GroupRepeat,
+    SideTone,
+    Volume,
+}
+
+/// Current state of one range: the pair, and whether it is collapsed to a
+/// single value rather than sampled per group.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RangeValues {
+    pub min: f64,
+    pub max: f64,
+    pub linked: bool,
+}
+
+/// How far apart the side tone bounds are pushed when a fixed pitch is opened
+/// back up into a range.
+const SIDE_TONE_SPREAD_HZ: f64 = 200.0;
+const SIDE_TONE_MIN_HZ: f64 = 200.0;
+const SIDE_TONE_MAX_HZ: f64 = 1200.0;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default = "TrainingSettings::default")]
 pub struct TrainingSettings {
@@ -464,6 +492,133 @@ impl TrainingSettings {
         }
     }
 
+    pub fn range(&self, which: RangeSetting) -> RangeValues {
+        let (min, max, linked) = match which {
+            RangeSetting::CharWpm => (
+                self.playback.char_wpm_min,
+                self.playback.char_wpm_max,
+                self.playback.link_char_wpm,
+            ),
+            RangeSetting::EffectiveWpm => (
+                self.playback.effective_wpm_min,
+                self.playback.effective_wpm_max,
+                self.playback.link_effective_wpm,
+            ),
+            RangeSetting::GroupSize => (
+                f64::from(self.curriculum.min_group_size),
+                f64::from(self.curriculum.max_group_size),
+                self.curriculum.link_group_size,
+            ),
+            RangeSetting::GroupRepeat => (
+                f64::from(self.playback.group_repeat_min),
+                f64::from(self.playback.group_repeat_max),
+                self.playback.link_group_repeat,
+            ),
+            // The side tone has no stored link flag: a single pitch is simply
+            // a range with both ends together.
+            RangeSetting::SideTone => (
+                self.band.side_tone_min,
+                self.band.side_tone_max,
+                (self.band.side_tone_min - self.band.side_tone_max).abs() < f64::EPSILON,
+            ),
+            RangeSetting::Volume => (
+                self.band.volume_min,
+                self.band.volume_max,
+                self.band.link_volume,
+            ),
+        };
+        RangeValues { min, max, linked }
+    }
+
+    /// Move the lower bound. The upper bound follows when it would end up below
+    /// it, or when the pair is linked.
+    pub fn set_range_min(&mut self, which: RangeSetting, value: f64) {
+        let current = self.range(which);
+        let max = if current.linked || value > current.max {
+            value
+        } else {
+            current.max
+        };
+        self.write_range(which, value, max);
+    }
+
+    /// Move the upper bound, dragging the lower one down if it would overtake it.
+    pub fn set_range_max(&mut self, which: RangeSetting, value: f64) {
+        let current = self.range(which);
+        let min = if current.linked || value < current.min {
+            value
+        } else {
+            current.min
+        };
+        self.write_range(which, min, value);
+    }
+
+    /// Collapse a range to its lower bound, or open a fixed value back up.
+    pub fn set_range_linked(&mut self, which: RangeSetting, linked: bool) {
+        let current = self.range(which);
+        match which {
+            RangeSetting::CharWpm => self.playback.link_char_wpm = linked,
+            RangeSetting::EffectiveWpm => self.playback.link_effective_wpm = linked,
+            RangeSetting::GroupSize => self.curriculum.link_group_size = linked,
+            RangeSetting::GroupRepeat => self.playback.link_group_repeat = linked,
+            // Nothing to store: the bounds themselves say whether it is fixed.
+            RangeSetting::SideTone => {}
+            RangeSetting::Volume => self.band.link_volume = linked,
+        }
+        if linked {
+            self.write_range(which, current.min, current.min);
+        } else if which == RangeSetting::SideTone {
+            let max = (current.min + SIDE_TONE_SPREAD_HZ).min(SIDE_TONE_MAX_HZ);
+            let min = (max - SIDE_TONE_SPREAD_HZ).max(SIDE_TONE_MIN_HZ);
+            self.write_range(which, min, max);
+        }
+    }
+
+    fn write_range(&mut self, which: RangeSetting, min: f64, max: f64) {
+        let as_u32 = |value: f64| value.max(0.0).round() as u32;
+        match which {
+            RangeSetting::CharWpm => {
+                self.playback.char_wpm_min = min;
+                self.playback.char_wpm_max = max;
+                self.sync_effective_to_char();
+            }
+            RangeSetting::EffectiveWpm => {
+                self.playback.effective_wpm_min = min;
+                self.playback.effective_wpm_max = max;
+            }
+            RangeSetting::GroupSize => {
+                self.curriculum.min_group_size = as_u32(min);
+                self.curriculum.max_group_size = as_u32(max);
+            }
+            RangeSetting::GroupRepeat => {
+                self.playback.group_repeat_min = as_u32(min);
+                self.playback.group_repeat_max = as_u32(max);
+            }
+            RangeSetting::SideTone => {
+                self.band.side_tone_min = min;
+                self.band.side_tone_max = max;
+            }
+            RangeSetting::Volume => {
+                self.band.volume_min = min;
+                self.band.volume_max = max;
+            }
+        }
+    }
+
+    /// Farnsworth off: effective speed simply mirrors character speed.
+    pub fn sync_effective_to_char(&mut self) {
+        if self.playback.link_char_to_effective {
+            self.playback.effective_wpm_min = self.playback.char_wpm_min;
+            self.playback.effective_wpm_max = self.playback.char_wpm_max;
+        }
+    }
+
+    /// Switch character set, resetting the practice window with it.
+    pub fn set_char_set_mode(&mut self, mode: CharSetMode) {
+        self.curriculum.char_set_mode = mode;
+        self.curriculum.practice_window = Some(PracticeWindow::All);
+    }
+
     pub fn side_tone_center(&self) -> f64 {
         let min = self.band.side_tone_min.max(100.0);
         let max = self.band.side_tone_max.max(min);
@@ -589,6 +744,120 @@ mod tests {
         inverted.playback.group_repeat_max = 2;
         let inverted = inverted.clamp();
         assert_eq!(inverted.playback.group_repeat_max, 4);
+    }
+
+    #[test]
+    fn moving_a_bound_keeps_the_pair_ordered() {
+        let mut s = TrainingSettings::default();
+        s.playback.link_char_wpm = false;
+        s.playback.link_char_to_effective = false;
+
+        s.set_range_min(RangeSetting::CharWpm, 30.0);
+        let range = s.range(RangeSetting::CharWpm);
+        assert_eq!((range.min, range.max), (30.0, 30.0), "max follows min up");
+
+        s.set_range_max(RangeSetting::CharWpm, 40.0);
+        assert_eq!(s.range(RangeSetting::CharWpm).max, 40.0);
+
+        s.set_range_max(RangeSetting::CharWpm, 12.0);
+        let range = s.range(RangeSetting::CharWpm);
+        assert_eq!((range.min, range.max), (12.0, 12.0), "min follows max down");
+    }
+
+    #[test]
+    fn a_linked_range_moves_as_one() {
+        let mut s = TrainingSettings::default();
+        s.set_range_linked(RangeSetting::GroupRepeat, true);
+        s.set_range_min(RangeSetting::GroupRepeat, 3.0);
+        let range = s.range(RangeSetting::GroupRepeat);
+        assert_eq!((range.min, range.max, range.linked), (3.0, 3.0, true));
+
+        // Unlinking leaves the value where it was; the range opens by editing.
+        s.set_range_linked(RangeSetting::GroupRepeat, false);
+        s.set_range_max(RangeSetting::GroupRepeat, 5.0);
+        let range = s.range(RangeSetting::GroupRepeat);
+        assert_eq!((range.min, range.max, range.linked), (3.0, 5.0, false));
+        assert_eq!(s.playback.group_repeat_min, 3);
+        assert_eq!(s.playback.group_repeat_max, 5);
+    }
+
+    #[test]
+    fn character_speed_drags_effective_speed_when_tied() {
+        let mut s = TrainingSettings::default();
+        s.playback.link_char_to_effective = true;
+        s.playback.link_char_wpm = false;
+        s.set_range_min(RangeSetting::CharWpm, 15.0);
+        s.set_range_max(RangeSetting::CharWpm, 28.0);
+        assert_eq!(s.range(RangeSetting::EffectiveWpm).min, 15.0);
+        assert_eq!(s.range(RangeSetting::EffectiveWpm).max, 28.0);
+
+        // Untied, effective speed is independent again.
+        s.playback.link_char_to_effective = false;
+        s.set_range_min(RangeSetting::EffectiveWpm, 9.0);
+        s.set_range_max(RangeSetting::CharWpm, 30.0);
+        assert_eq!(s.range(RangeSetting::EffectiveWpm).min, 9.0);
+    }
+
+    #[test]
+    fn the_side_tone_is_fixed_when_both_ends_match() {
+        let mut s = TrainingSettings::default();
+        assert!(!s.range(RangeSetting::SideTone).linked);
+
+        s.set_range_linked(RangeSetting::SideTone, true);
+        let range = s.range(RangeSetting::SideTone);
+        assert!(range.linked);
+        assert_eq!(range.min, range.max);
+
+        // Opening it back up spreads the bounds without leaving the band.
+        s.set_range_linked(RangeSetting::SideTone, false);
+        let range = s.range(RangeSetting::SideTone);
+        assert!(!range.linked);
+        assert_eq!(range.max - range.min, 200.0);
+        assert!(range.min >= 200.0 && range.max <= 1200.0);
+
+        // Even at the top of the band the spread stays inside it.
+        s.band.side_tone_min = 1200.0;
+        s.band.side_tone_max = 1200.0;
+        s.set_range_linked(RangeSetting::SideTone, false);
+        let range = s.range(RangeSetting::SideTone);
+        assert_eq!((range.min, range.max), (1000.0, 1200.0));
+    }
+
+    #[test]
+    fn group_sizes_round_to_whole_characters() {
+        let mut s = TrainingSettings::default();
+        s.set_range_min(RangeSetting::GroupSize, 4.0);
+        s.set_range_max(RangeSetting::GroupSize, 6.0);
+        assert_eq!(s.curriculum.min_group_size, 4);
+        assert_eq!(s.curriculum.max_group_size, 6);
+        // Negative input from a text field cannot underflow the unsigned field.
+        s.set_range_min(RangeSetting::GroupSize, -3.0);
+        assert_eq!(s.curriculum.min_group_size, 0);
+    }
+
+    #[test]
+    fn volume_keeps_its_own_link_flag() {
+        let mut s = TrainingSettings::default();
+        s.set_range_linked(RangeSetting::Volume, true);
+        assert!(s.band.link_volume);
+        s.set_range_min(RangeSetting::Volume, 0.5);
+        assert_eq!(
+            s.range(RangeSetting::Volume),
+            RangeValues {
+                min: 0.5,
+                max: 0.5,
+                linked: true
+            }
+        );
+    }
+
+    #[test]
+    fn switching_mode_resets_the_practice_window() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.practice_window = Some(PracticeWindow::Last3);
+        s.set_char_set_mode(CharSetMode::Digits);
+        assert_eq!(s.curriculum.char_set_mode, CharSetMode::Digits);
+        assert_eq!(s.curriculum.practice_window, Some(PracticeWindow::All));
     }
 
     #[test]

@@ -34,30 +34,22 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
             div { class: "segmented",
-                Seg { label: "Koch".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Koch, onclick: move |_| {
-                    let w = &mut *settings.write();
-                    w.curriculum.char_set_mode = CharSetMode::Koch;
-                    w.curriculum.practice_window = Some(PracticeWindow::All);
-                    fit_settings_to_alphabet(w);
-                } }
-                Seg { label: "Digits".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Digits, onclick: move |_| {
-                    let w = &mut *settings.write();
-                    w.curriculum.char_set_mode = CharSetMode::Digits;
-                    w.curriculum.practice_window = Some(PracticeWindow::All);
-                    fit_settings_to_alphabet(w);
-                } }
-                Seg { label: "Mixed".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Mixed, onclick: move |_| {
-                    let w = &mut *settings.write();
-                    w.curriculum.char_set_mode = CharSetMode::Mixed;
-                    w.curriculum.practice_window = Some(PracticeWindow::All);
-                    fit_settings_to_alphabet(w);
-                } }
-                Seg { label: "Custom".to_string(), active: s.curriculum.char_set_mode == CharSetMode::Custom, onclick: move |_| {
-                    let w = &mut *settings.write();
-                    w.curriculum.char_set_mode = CharSetMode::Custom;
-                    w.curriculum.practice_window = Some(PracticeWindow::All);
-                    fit_settings_to_alphabet(w);
-                } }
+                for (label, mode) in [
+                    ("Koch", CharSetMode::Koch),
+                    ("Digits", CharSetMode::Digits),
+                    ("Mixed", CharSetMode::Mixed),
+                    ("Custom", CharSetMode::Custom),
+                ] {
+                    Seg {
+                        label: label.to_string(),
+                        active: s.curriculum.char_set_mode == mode,
+                        onclick: move |_| {
+                            let w = &mut *settings.write();
+                            w.set_char_set_mode(mode);
+                            fit_settings_to_alphabet(w);
+                        },
+                    }
+                }
             }
             if s.curriculum.char_set_mode != CharSetMode::Digits {
                 div { class: "eyebrow", "Unlock order" }

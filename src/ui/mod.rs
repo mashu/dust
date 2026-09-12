@@ -12,3 +12,6 @@ pub mod stats_detail;
 pub mod tips;
 pub mod training;
 pub mod widgets;
+
+#[cfg(test)]
+mod render_tests;

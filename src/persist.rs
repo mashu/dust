@@ -331,7 +331,69 @@ pub fn clear_auto_counters(keys: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::package_from_cmdline;
+    use super::{
+        finalize_settings, package_from_cmdline, recover_sessions, trim_sessions, MAX_SESSIONS,
+    };
+    use cw_core::{CharSetMode, SessionResult, TrainingSettings};
+
+    fn session(date: &str) -> SessionResult {
+        SessionResult {
+            date: date.to_string(),
+            timestamp: 1,
+            started_at: 0,
+            finished_at: 1,
+            groups: Vec::new(),
+            group_timings: Vec::new(),
+            accuracy: 1.0,
+            letter_accuracy: Default::default(),
+            alphabet_size: 1,
+            avg_response_ms: 1.0,
+            total_chars: 1,
+            effective_alphabet_size: 1.0,
+            score: 1.0,
+            level: 1,
+            digits_level: 1,
+            char_set_mode: CharSetMode::Mixed,
+            char_wpm: 20.0,
+            effective_wpm: 18.0,
+            alphabet_fingerprint: String::new(),
+        }
+    }
+
+    #[test]
+    fn history_keeps_the_newest_sessions() {
+        let all: Vec<SessionResult> = (0..MAX_SESSIONS + 20)
+            .map(|i| session(&format!("2026-01-{i:03}")))
+            .collect();
+        let trimmed = trim_sessions(&all);
+        assert_eq!(trimmed.len(), MAX_SESSIONS);
+        // The oldest go, the order stays chronological.
+        assert_eq!(trimmed.first().unwrap().date, all[20].date);
+        assert_eq!(trimmed.last().unwrap().date, all.last().unwrap().date);
+        assert_eq!(trim_sessions(&[]).len(), 0);
+    }
+
+    #[test]
+    fn a_corrupt_session_is_dropped_instead_of_losing_the_file() {
+        let good = serde_json::to_string(&session("2026-09-01")).unwrap();
+        let raw = format!("[{good}, {{\"date\": \"nonsense\"}}]");
+        let recovered = recover_sessions(&raw);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].date, "2026-09-01");
+        // A file that is not even a list gives an empty history, not a panic.
+        assert!(recover_sessions("{}").is_empty());
+        assert!(recover_sessions("").is_empty());
+    }
+
+    #[test]
+    fn loaded_settings_are_clamped_and_fitted() {
+        let mut stored = TrainingSettings::default();
+        stored.playback.char_wpm_min = 500.0;
+        stored.curriculum.num_groups = 0;
+        let settings = finalize_settings(stored);
+        assert_eq!(settings.playback.char_wpm_min, 80.0);
+        assert_eq!(settings.curriculum.num_groups, 1);
+    }
 
     #[test]
     fn reads_the_package_name_from_cmdline() {

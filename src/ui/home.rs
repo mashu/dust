@@ -199,3 +199,30 @@ pub fn Home(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{level_summary, range_label};
+    use cw_core::{CharSetMode, TrainingSettings};
+
+    #[test]
+    fn the_level_summary_follows_the_mode() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.level = 7;
+        settings.curriculum.digits_level = 3;
+
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        assert_eq!(level_summary(&settings), "Level 7");
+        settings.curriculum.char_set_mode = CharSetMode::Digits;
+        assert_eq!(level_summary(&settings), "Digits level 3");
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        assert_eq!(level_summary(&settings), "Level 7 · digits 3");
+    }
+
+    #[test]
+    fn a_fixed_value_reads_as_one_number() {
+        assert_eq!(range_label(18.0, 18.0), "18");
+        assert_eq!(range_label(18.0, 25.0), "18–25");
+        assert_eq!(range_label(0.7, 1.0), "0.7–1");
+    }
+}

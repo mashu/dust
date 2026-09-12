@@ -225,3 +225,50 @@ pub fn EnvelopeCard(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{envelope_path, x_at, PAD_X, VIEW_W};
+    use cw_core::{envelope_shape, EnvelopePoint, EnvelopeShape, TrainingSettings};
+
+    fn shape() -> EnvelopeShape {
+        let mut settings = TrainingSettings::default();
+        settings.playback.char_wpm_max = 25.0;
+        settings.band.steepness = 10.0;
+        settings.band.envelope_smoothing = 0.75;
+        envelope_shape(&settings)
+    }
+
+    #[test]
+    fn time_maps_across_the_padded_width() {
+        let total = 0.24;
+        assert_eq!(x_at(0.0, total), PAD_X);
+        assert_eq!(x_at(total, total), VIEW_W - PAD_X);
+        assert!(x_at(total / 2.0, total) > PAD_X);
+        // A degenerate span must not divide by zero.
+        assert!(x_at(0.0, 0.0).is_finite());
+    }
+
+    #[test]
+    fn the_trace_is_a_closed_mirrored_shape() {
+        let shape = shape();
+        let path = envelope_path(&shape);
+        assert!(path.starts_with('M'));
+        assert!(path.ends_with(" Z"));
+        // Every sample appears twice: once above the centre line, once below.
+        let commands = path.matches(" L").count() + 1;
+        assert_eq!(commands, shape.points.len() * 2);
+    }
+
+    #[test]
+    fn too_few_points_draw_nothing() {
+        let mut empty = shape();
+        empty.points.clear();
+        assert!(envelope_path(&empty).is_empty());
+        empty.points.push(EnvelopePoint {
+            t_sec: 0.0,
+            gain: 1.0,
+        });
+        assert!(envelope_path(&empty).is_empty());
+    }
+}

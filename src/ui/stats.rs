@@ -254,3 +254,89 @@ fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{chart_floor, chart_geometry, CHART_H, CHART_W};
+    use cw_core::AccuracyPoint;
+
+    fn points(pcts: &[f64]) -> Vec<AccuracyPoint> {
+        pcts.iter()
+            .enumerate()
+            .map(|(i, pct)| AccuracyPoint {
+                date: format!("2026-09-{:02}", i + 1),
+                accuracy_pct: *pct,
+                timestamp: 1_757_000_000_000 + i as u64,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn no_sessions_means_no_chart() {
+        assert!(chart_geometry(&[], 90.0).is_none());
+    }
+
+    #[test]
+    fn one_session_draws_a_flat_line_with_a_point() {
+        let geometry = chart_geometry(&points(&[89.0]), 90.0).unwrap();
+        // Two coordinates, so the polyline actually has a segment to draw.
+        assert_eq!(geometry.line.split(' ').count(), 2);
+        assert!(geometry.line.starts_with("0.0,"));
+        assert!(geometry.area.ends_with(" Z"));
+        assert_eq!(geometry.dots.len(), 1);
+        assert!((geometry.dots[0].0 - CHART_W / 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_axis_starts_below_the_worst_session() {
+        assert_eq!(chart_floor(&points(&[88.0, 94.0])), 80.0);
+        assert_eq!(chart_floor(&points(&[71.0, 94.0])), 60.0);
+        // Never below zero, and never so high that the span disappears.
+        assert_eq!(chart_floor(&points(&[3.0])), 0.0);
+        assert_eq!(chart_floor(&points(&[100.0])), 80.0);
+    }
+
+    #[test]
+    fn the_series_spans_the_full_width_and_height() {
+        let geometry = chart_geometry(&points(&[60.0, 100.0, 80.0]), 90.0).unwrap();
+        let coords: Vec<(f64, f64)> = geometry
+            .line
+            .split(' ')
+            .map(|pair| {
+                let (x, y) = pair.split_once(',').unwrap();
+                (x.parse().unwrap(), y.parse().unwrap())
+            })
+            .collect();
+        assert_eq!(coords.len(), 3);
+        assert_eq!(coords[0].0, 0.0);
+        assert_eq!(coords[2].0, CHART_W);
+        // 100% sits on the top edge; the worst session sits above the bottom,
+        // because the axis floor is the round ten below it.
+        assert_eq!(coords[1].1, 0.0);
+        assert_eq!(geometry.floor_pct, 50.0);
+        assert!(coords[0].1 > coords[2].1, "60% must sit below 80%");
+        assert!(coords.iter().all(|(_, y)| (0.0..=CHART_H).contains(y)));
+        assert_eq!(geometry.dots.len(), 3);
+    }
+
+    #[test]
+    fn only_the_last_point_is_marked_on_a_long_history() {
+        let long: Vec<f64> = (0..40).map(|i| 60.0 + f64::from(i % 20)).collect();
+        let geometry = chart_geometry(&points(&long), 90.0).unwrap();
+        assert_eq!(geometry.dots.len(), 1);
+    }
+
+    #[test]
+    fn the_threshold_line_hides_when_it_is_off_the_scale() {
+        // Sessions in the 90s: the 90% guide sits inside the visible range.
+        let inside = chart_geometry(&points(&[92.0, 97.0]), 90.0).unwrap();
+        assert!(inside.threshold_y.is_some());
+        // A threshold under the floor has nowhere to sit.
+        let below = chart_geometry(&points(&[96.0, 99.0]), 50.0).unwrap();
+        assert_eq!(below.floor_pct, 80.0);
+        assert!(below.threshold_y.is_none());
+        // Neither does one at the very top.
+        let top = chart_geometry(&points(&[80.0]), 100.0).unwrap();
+        assert!(top.threshold_y.is_none());
+    }
+}

@@ -460,3 +460,29 @@ fn toggle_fullscreen() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::screen_key;
+    use crate::engine::Screen;
+
+    #[test]
+    fn every_screen_has_its_own_key() {
+        let keys: Vec<&str> = [
+            Screen::Home,
+            Screen::Settings,
+            Screen::Training,
+            Screen::Results,
+            Screen::Stats,
+            Screen::Listen,
+        ]
+        .into_iter()
+        .map(screen_key)
+        .collect();
+        // The key remounts the screen wrapper, so it has to differ per screen.
+        let mut unique = keys.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len());
+    }
+}

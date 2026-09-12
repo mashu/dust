@@ -57,6 +57,10 @@ cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt"] }
 
+[dev-dependencies]
+# Renders components to HTML so the screens can be smoke-tested without a window.
+dioxus-ssr = "0.7.10"
+
 [features]
 default = []
 web = [
