@@ -18,7 +18,7 @@ use super::home::Home;
 use super::listen::ListenView;
 use super::results::ResultsView;
 use super::settings::SettingsView;
-use super::stats::StatsView;
+use super::stats::{StatsView, StatsViewProps};
 use super::training::TrainingView;
 
 fn render(app: fn() -> Element) -> String {
@@ -131,6 +131,32 @@ fn home_without_history_invites_a_first_session() {
     });
     assert!(html.contains("First session"));
     assert!(!html.contains("Last accuracy"));
+}
+
+#[test]
+fn stats_count_sessions_from_every_character_set() {
+    // A history recorded in Digits mode, read while the app is set to Mixed.
+    let mut digits = session("2026-09-01", 0.9);
+    digits.char_set_mode = CharSetMode::Digits;
+    digits.alphabet_fingerprint = "0123456789".to_string();
+    let mut koch = session("2026-09-02", 0.7);
+    koch.char_set_mode = CharSetMode::Koch;
+    koch.alphabet_fingerprint = "KMURESNAPTLWI".to_string();
+
+    let html = render_props(
+        StatsView,
+        StatsViewProps {
+            settings: TrainingSettings::default(),
+            sessions: vec![digits, koch],
+        },
+    );
+    assert!(
+        !html.contains("Nothing scored yet"),
+        "history must not be hidden"
+    );
+    assert!(html.contains("2 sessions ·"));
+    // Average of 90% and 70%.
+    assert!(html.contains("80%"));
 }
 
 #[test]

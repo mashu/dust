@@ -101,12 +101,11 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartG
 #[component]
 pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     let mut tab = use_signal(|| StatsTab::Overview);
-    let matching: Vec<SessionResult> = sessions
-        .iter()
-        .filter(|s| s.usable_for_sampling(&settings))
-        .cloned()
-        .collect();
-    let letters = character_diagnostics(&matching);
+    // Accuracy, letters and mistakes are counted over the whole history: a
+    // letter is the same letter whichever character set it was sent under.
+    // Only the sampling snapshot narrows to the current set, and it does that
+    // itself so it keeps matching what the trainer will actually draw.
+    let letters = character_diagnostics(&sessions);
     rsx! {
         div { class: "stack stats-page",
             header { class: "page-head",
@@ -123,13 +122,13 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             match tab() {
                 StatsTab::Overview => rsx! {
                     OverviewTab {
-                        sessions: matching,
+                        sessions: sessions.clone(),
                         threshold: settings.auto_level.auto_adjust_threshold,
                     }
                 },
                 StatsTab::Letters => rsx! { LettersTab { letters } },
-                StatsTab::Mistakes => rsx! { MistakesTab { sessions: matching } },
-                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions: matching } },
+                StatsTab::Mistakes => rsx! { MistakesTab { sessions: sessions.clone() } },
+                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions: sessions.clone() } },
                 StatsTab::History => rsx! { HistoryTab { sessions } },
             }
         }

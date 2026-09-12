@@ -2,7 +2,9 @@ use cw_core::{
     fit_settings_to_alphabet, AutoAdjustMode, AutoLevelCounters, SessionResult, TrainingSettings,
 };
 
-const MAX_SESSIONS: usize = 200;
+/// How much history is kept. Sessions are a few KB each, so this stays well
+/// inside a browser's localStorage budget while covering years of daily practice.
+const MAX_SESSIONS: usize = 500;
 
 pub trait Store {
     fn load_theme(&self) -> String;
@@ -24,6 +26,33 @@ fn recover_sessions(raw: &str) -> Vec<SessionResult> {
         .into_iter()
         .filter_map(|value| serde_json::from_value(value).ok())
         .collect()
+}
+
+/// Load settings without throwing away everything for one bad field.
+///
+/// A strict parse fails on a single unreadable value — a hand-edited file, or a
+/// field whose type changed between versions — and the user would silently get
+/// factory settings back. So fall back to applying the stored keys one at a
+/// time and keeping the ones that still deserialize.
+fn recover_settings(raw: &str) -> TrainingSettings {
+    if let Ok(settings) = serde_json::from_str::<TrainingSettings>(raw) {
+        return settings;
+    }
+    let Ok(serde_json::Value::Object(stored)) = serde_json::from_str::<serde_json::Value>(raw)
+    else {
+        return TrainingSettings::default();
+    };
+    let mut kept = serde_json::Map::new();
+    for (key, value) in stored {
+        let mut candidate = kept.clone();
+        candidate.insert(key, value);
+        if serde_json::from_value::<TrainingSettings>(serde_json::Value::Object(candidate.clone()))
+            .is_ok()
+        {
+            kept = candidate;
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default()
 }
 
 fn finalize_settings(mut settings: TrainingSettings) -> TrainingSettings {
@@ -61,7 +90,7 @@ impl Store for WebStore {
         let Ok(Some(raw)) = store.get_item(SETTINGS_KEY) else {
             return TrainingSettings::default();
         };
-        finalize_settings(serde_json::from_str::<TrainingSettings>(&raw).unwrap_or_default())
+        finalize_settings(recover_settings(&raw))
     }
 
     fn save_settings(&self, settings: &TrainingSettings) {
@@ -87,8 +116,18 @@ impl Store for WebStore {
         let Some(store) = storage() else {
             return;
         };
-        if let Ok(raw) = serde_json::to_string(&trim_sessions(sessions)) {
-            let _ = store.set_item(SESSIONS_KEY, &raw);
+        // localStorage refuses the write once the origin is near its quota. Give
+        // up the oldest sessions rather than the whole history, which is what a
+        // single failed write would otherwise cost.
+        let mut kept = trim_sessions(sessions);
+        loop {
+            let Ok(raw) = serde_json::to_string(&kept) else {
+                return;
+            };
+            if store.set_item(SESSIONS_KEY, &raw).is_ok() || kept.len() <= 1 {
+                return;
+            }
+            kept.drain(..kept.len().div_ceil(2));
         }
     }
 
@@ -156,7 +195,8 @@ impl Store for DesktopStore {
     }
 
     fn load_settings(&self) -> TrainingSettings {
-        finalize_settings(read_json::<TrainingSettings>("settings.json").unwrap_or_default())
+        let raw = std::fs::read_to_string(data_dir().join("settings.json")).unwrap_or_default();
+        finalize_settings(recover_settings(&raw))
     }
 
     fn save_settings(&self, settings: &TrainingSettings) {
@@ -244,13 +284,6 @@ fn ensure_dir() -> std::path::PathBuf {
 }
 
 #[cfg(feature = "native-runtime")]
-fn read_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
-    let path = data_dir().join(name);
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
-}
-
-#[cfg(feature = "native-runtime")]
 fn write_json(name: &str, value: &impl serde::Serialize) {
     let dir = ensure_dir();
     let path = dir.join(name);
@@ -332,7 +365,8 @@ pub fn clear_auto_counters(keys: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        finalize_settings, package_from_cmdline, recover_sessions, trim_sessions, MAX_SESSIONS,
+        finalize_settings, package_from_cmdline, recover_sessions, recover_settings, trim_sessions,
+        MAX_SESSIONS,
     };
     use cw_core::{CharSetMode, SessionResult, TrainingSettings};
 
@@ -383,6 +417,51 @@ mod tests {
         // A file that is not even a list gives an empty history, not a panic.
         assert!(recover_sessions("{}").is_empty());
         assert!(recover_sessions("").is_empty());
+    }
+
+    #[test]
+    fn one_unreadable_field_does_not_reset_every_setting() {
+        let mut stored = TrainingSettings::default();
+        stored.playback.char_wpm_min = 12.0;
+        stored.playback.char_wpm_max = 33.0;
+        stored.curriculum.num_groups = 7;
+        stored.band.qrn_enabled = false;
+        let mut json = serde_json::to_value(&stored).unwrap();
+        // Something wrote a string where a number belongs.
+        json["groupTimeout"] = serde_json::json!("nonsense");
+        let raw = serde_json::to_string(&json).unwrap();
+        assert!(serde_json::from_str::<TrainingSettings>(&raw).is_err());
+
+        let recovered = recover_settings(&raw);
+        assert_eq!(recovered.playback.char_wpm_min, 12.0);
+        assert_eq!(recovered.playback.char_wpm_max, 33.0);
+        assert_eq!(recovered.curriculum.num_groups, 7);
+        assert!(!recovered.band.qrn_enabled);
+        // Only the unreadable field falls back to its default.
+        assert_eq!(
+            recovered.playback.group_timeout,
+            TrainingSettings::default().playback.group_timeout
+        );
+    }
+
+    #[test]
+    fn settings_from_an_older_build_still_load() {
+        // No repeat, envelope or theme fields existed then.
+        let raw =
+            r#"{"level":9,"charSetMode":"koch","charWpmMin":22,"charWpmMax":22,"numGroups":15}"#;
+        let settings = recover_settings(raw);
+        assert_eq!(settings.curriculum.level, 9);
+        assert_eq!(settings.curriculum.char_set_mode, CharSetMode::Koch);
+        assert_eq!(settings.playback.char_wpm_min, 22.0);
+        assert_eq!(settings.curriculum.num_groups, 15);
+        assert_eq!(settings.playback.group_repeat_min, 1);
+    }
+
+    #[test]
+    fn unreadable_settings_fall_back_to_defaults() {
+        assert_eq!(recover_settings("not json"), TrainingSettings::default());
+        assert_eq!(recover_settings("[]"), TrainingSettings::default());
+        assert_eq!(recover_settings(""), TrainingSettings::default());
     }
 
     #[test]

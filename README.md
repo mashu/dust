@@ -54,14 +54,14 @@ One-time: in the GitHub repo go to **Settings → Pages → Build and deployment
 
 ## GitHub Releases
 
-Push a git tag that matches the workspace version in `Cargo.toml` (currently `0.1.0`):
+Push a git tag that matches the workspace version in `Cargo.toml` (currently `0.2.0`):
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-Creating the tag only in the GitHub UI also works. To rebuild an existing tag, use **Actions → Release → Run workflow** and pass `v0.1.0`.
+Creating the tag only in the GitHub UI also works. To rebuild an existing tag, use **Actions → Release → Run workflow** and pass `v0.2.0`.
 
 GitHub Actions then builds and attaches:
 
@@ -82,11 +82,19 @@ Dioxus's `mobile` feature is the same wry/tao webview stack as the desktop build
 UI, curriculum and scoring come across unchanged. `dx` enables that feature itself for
 `--platform android`.
 
-Audio is cpal's Android backend — AAudio through [oboe](https://github.com/google/oboe) — so
-the player, band simulation and QSB are the desktop ones. Building it compiles oboe's C++ with
-the NDK toolchain, which is why an NDK is required and not just the SDK. If a toolchain
-bring-up ever blocks on that, `--features mobile-silent` builds the same app with a player
-that keeps a session's timing but makes no sound, and the practice screen says so.
+Audio has full parity with the desktop app. It is not a reduced mobile build: `src/audio/native.rs`
+is compiled as-is for Android, with cpal routing it to AAudio through
+[oboe](https://github.com/google/oboe) instead of ALSA. Same keying envelope, same random tone
+and speed per group, same QSB fading, QRN static and receiver background. Building it compiles
+oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just the SDK.
+
+One Android-specific fallback: the receiver background runs as a second, continuously open
+output stream, and some devices refuse to open two at once. If that happens the Morse, its
+envelope and QSB still play — only the background hiss drops out — rather than the session
+refusing to start. Mixing the background into a single stream would remove even that caveat.
+
+If a toolchain bring-up ever blocks on oboe, `--features mobile-silent` builds the same app
+with a player that keeps a session's timing but makes no sound, and the practice screen says so.
 
 Settings and history persist: `dirs` has no `HOME` to work from on Android, so the store
 resolves `/data/data/<package>/files` from the package name in `/proc/self/cmdline`.
@@ -112,6 +120,29 @@ you need JDK 17 and `ANDROID_HOME`/`ANDROID_NDK_HOME` exported.
 
 **Actions → Android APK → Run workflow**, on any branch. The APK is attached to that run as an
 artifact.
+
+## Where your progress lives
+
+Nothing syncs. Each install keeps its own history, in the place that platform gives it:
+
+| Build | Location |
+| --- | --- |
+| Web | `localStorage` for that exact origin (`https://mashu.github.io`, or `localhost:8080` while developing — the two are separate stores) |
+| Linux desktop | `~/.local/share/dust/` (`$XDG_DATA_HOME`) |
+| Windows / macOS | the platform data dir `dirs` reports |
+| Android | `/data/data/<package>/files/dust/` |
+
+Updating the app does not clear any of it. The storage keys (`dust_settings`, `dust_sessions`,
+`dust_auto_adjust_*`) and file names are not versioned, and settings files from older builds
+still load — new fields fall back to their defaults.
+
+Stats are computed across your whole history. Changing course — Koch to Mixed, a new sequence,
+a custom alphabet — does not hide what you already did: accuracy over time, letter mastery,
+mistakes, the calendar and the streak all count every session, because a letter is the same
+letter whichever set it was sent under.
+
+The one exception is the **Sampling** tab, which shows what the trainer will draw next and so
+narrows to the current character set, the same way the sampler itself does.
 
 ## Layout
 
