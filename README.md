@@ -22,6 +22,9 @@ dx serve --platform web --port 8080
 
 # Android (needs JDK 17 + Android SDK/NDK, see below)
 dx serve --platform android
+
+# iOS simulator (needs a Mac with Xcode)
+dx serve --platform ios
 ```
 
 ```bash
@@ -73,8 +76,8 @@ GitHub Actions then builds and attaches:
 macOS builds are unsigned (right-click → Open the first time). Windows needs WebView2, which is already present on typical Windows 10/11 systems.
 
 The Android APK is signed with Gradle's debug key: fine for sideloading, not for the Play
-Store, which wants an AAB signed with an upload key. No iOS package is produced — a
-store-ready IPA needs signing certificates that GitHub-hosted runners do not provide.
+Store, which wants an AAB signed with an upload key. iOS is not attached to releases: see
+below for the unsigned IPA, which is built on demand.
 
 ## Android
 
@@ -121,6 +124,32 @@ you need JDK 17 and `ANDROID_HOME`/`ANDROID_NDK_HOME` exported.
 **Actions → Android APK → Run workflow**, on any branch. The APK is attached to that run as an
 artifact.
 
+## iOS
+
+Same story as Android — `mobile` is the wry/tao webview stack, cpal reaches CoreAudio, and
+`dirs` needs no special case because iOS sets `$HOME` to the app container. One thing is
+iOS-only: an app that has not claimed an `AVAudioSession` is silent, follows the ringer switch
+and gets interrupted by anything else on the device, and cpal does not claim one. The player
+takes the `playback` category before opening its first stream.
+
+What you can build, and what Apple lets you install, are different questions:
+
+| | Signing | Runs on |
+| --- | --- | --- |
+| Simulator build | none | a Mac |
+| **Unsigned IPA** (this repo) | none | your iPhone, after a sideloader re-signs it |
+| Signed IPA / TestFlight | Apple Developer Program, $99/yr | any device, no re-signing |
+
+**Actions → iOS IPA → Run workflow** produces the unsigned `.ipa`. Install it with
+[AltStore](https://altstore.io), [SideStore](https://sidestore.io) or
+[Sideloadly](https://sideloadly.io): they re-sign the app with your own Apple ID. A free Apple
+ID gives a signature that lasts **7 days** and allows **three** sideloaded apps at a time —
+the tools re-sign in place before it expires. A paid membership removes both limits and is the
+only route to TestFlight or the App Store.
+
+CI type-checks the simulator target on every PR, which needs no Apple account and covers the
+audio-session code and cpal's CoreAudio backend.
+
 ## Where your progress lives
 
 Nothing syncs. Each install keeps its own history, in the place that platform gives it:
@@ -131,6 +160,7 @@ Nothing syncs. Each install keeps its own history, in the place that platform gi
 | Linux desktop | `~/.local/share/dust/` (`$XDG_DATA_HOME`) |
 | Windows / macOS | the platform data dir `dirs` reports |
 | Android | `/data/data/<package>/files/dust/` |
+| iOS | `Library/Application Support/dust/` inside the app container |
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`, `dust_sessions`,
 `dust_auto_adjust_*`) and file names are not versioned, and settings files from older builds

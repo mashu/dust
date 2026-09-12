@@ -51,8 +51,32 @@ pub struct MorsePlayer {
     qsb: Arc<LiveQsb>,
 }
 
+/// iOS starts an app with no audio session, which leaves output silent, tied to
+/// the ringer switch and interrupted by anything else on the device. Claiming
+/// the playback category before the first stream opens is what makes the Morse
+/// audible — cpal does not do it, and there is no equivalent on other platforms.
+#[cfg(target_os = "ios")]
+fn claim_audio_session() {
+    use objc2_avf_audio::{AVAudioSession, AVAudioSessionCategoryPlayback};
+
+    // Safety: both calls are plain messages to the process-wide shared session,
+    // and every failure is reported through the returned NSError rather than a
+    // trap. Nothing here can leave the session half-configured.
+    unsafe {
+        let session = AVAudioSession::sharedInstance();
+        if let Some(playback) = AVAudioSessionCategoryPlayback {
+            let _ = session.setCategory_error(playback);
+        }
+        let _ = session.setActive_error(true);
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+fn claim_audio_session() {}
+
 impl MorsePlayer {
     pub fn new() -> Result<Self, String> {
+        claim_audio_session();
         let _ = cpal::default_host()
             .default_output_device()
             .ok_or_else(|| "No audio output device found".to_string())?;

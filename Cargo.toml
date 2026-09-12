@@ -57,6 +57,15 @@ cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt"] }
 
+# iOS: claiming an audio session is what makes the app audible at all, and cpal
+# does not do it for us.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-avf-audio = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVAudioSession",
+    "AVAudioSessionTypes",
+] }
+
 [dev-dependencies]
 # Renders components to HTML so the screens can be smoke-tested without a window.
 dioxus-ssr = "0.7.10"

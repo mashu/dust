@@ -1,0 +1,119 @@
+# Build an unsigned iOS app you can sideload.
+#
+# Actions → iOS IPA → Run workflow, on any branch. The run's artifact is an
+# unsigned .ipa: install it with AltStore, SideStore or Sideloadly, which re-sign
+# it with your own Apple ID. A free Apple ID gives you a 7-day signature and at
+# most three sideloaded apps; the Apple Developer Program removes both limits.
+#
+# The .ipa cannot be installed by double-clicking or through TestFlight — those
+# need a signature from a paid account, which is why nothing here touches
+# certificates or secrets.
+
+name: iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Rust profile for the app binary"
+        type: choice
+        options: [release, debug]
+        default: release
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DIOXUS_CLI_VERSION: "0.7.10"
+  IOS_TRIPLE: aarch64-apple-ios
+
+jobs:
+  ipa:
+    name: Build IPA
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Show the toolchain
+        run: |
+          xcode-select -p
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ios
+          cache-directories: target/dx
+
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+
+      - name: Install Dioxus CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo binstall "dioxus-cli@${DIOXUS_CLI_VERSION}" --no-confirm --locked \
+            || cargo install dioxus-cli --version "${DIOXUS_CLI_VERSION}" --locked
+          dx --version
+
+      # `dx` only codesigns when asked (--codesign, --device or entitlements), so
+      # this produces an unsigned .app. Its own .ipa packaging verifies a
+      # signature, hence `--package-types ios` and the Payload zip below.
+      - name: Bundle the app
+        run: |
+          set -euo pipefail
+          args=(bundle --platform ios --target "${IOS_TRIPLE}" --package-types ios --locked)
+          if [[ "${{ inputs.profile }}" != "debug" ]]; then
+            args+=(--release)
+          fi
+          echo "dx ${args[*]}"
+          dx "${args[@]}"
+
+      - name: Package an unsigned IPA
+        run: |
+          set -euo pipefail
+          version="$(awk '
+            /^\[workspace.package\]/ { in_pkg = 1; next }
+            in_pkg && /^\[/ { in_pkg = 0 }
+            in_pkg && /^version *=/ { gsub(/[" ]/, "", $3); print $3; exit }
+          ' Cargo.toml)"
+
+          echo "Bundle outputs:"
+          find target/dx -maxdepth 6 -name '*.app' -type d | sort
+
+          app="$(find target/dx -name '*.app' -type d | head -1)"
+          if [[ -z "$app" ]]; then
+            echo "No .app bundle was produced"
+            exit 1
+          fi
+          echo "Using $app"
+          ls -la "$app"
+
+          # An .ipa is a zip with the bundle under Payload/ — the layout the
+          # sideloading tools expect before they re-sign it.
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$app" Payload/
+          mkdir -p artifacts
+          name="dust-${version}-ios-unsigned.ipa"
+          zip -qry "artifacts/${name}" Payload
+          ls -lh artifacts
+          unzip -l "artifacts/${name}" | head -20
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v6
+        with:
+          name: dust-ios-unsigned
+          path: artifacts/*
+          if-no-files-found: error
