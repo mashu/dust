@@ -120,3 +120,27 @@ jobs:
       # building an APK — including the cpal/oboe C++ that Android audio needs.
       - name: Check the mobile build
         run: cargo check -p dust --no-default-features --features mobile --target aarch64-linux-android --locked
+
+  ios-check:
+    name: iOS type-check
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ios-check
+
+      # The simulator target needs no signing and no Apple account, so this
+      # catches iOS regressions — including the AVAudioSession code and cpal's
+      # CoreAudio backend — on every PR. The IPA itself is built on demand by
+      # the iOS IPA workflow.
+      - name: Check the iOS build
+        run: cargo check -p dust --no-default-features --features mobile --target aarch64-apple-ios-sim --locked
