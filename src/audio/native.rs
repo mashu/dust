@@ -71,11 +71,9 @@ fn claim_audio_session() {
     }
 }
 
-#[cfg(not(target_os = "ios"))]
-fn claim_audio_session() {}
-
 impl MorsePlayer {
     pub fn new() -> Result<Self, String> {
+        #[cfg(target_os = "ios")]
         claim_audio_session();
         let _ = cpal::default_host()
             .default_output_device()

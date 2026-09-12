@@ -76,8 +76,8 @@ GitHub Actions then builds and attaches:
 macOS builds are unsigned (right-click → Open the first time). Windows needs WebView2, which is already present on typical Windows 10/11 systems.
 
 The Android APK is signed with Gradle's debug key: fine for sideloading, not for the Play
-Store, which wants an AAB signed with an upload key. iOS is not attached to releases: see
-below for the unsigned IPA, which is built on demand.
+Store. For Play, build a signed AAB locally (see **Play Store** below). iOS is not attached
+to releases: see below for the unsigned IPA, which is built on demand.
 
 ## Android
 
@@ -123,6 +123,46 @@ you need JDK 17 and `ANDROID_HOME`/`ANDROID_NDK_HOME` exported.
 
 **Actions → Android APK → Run workflow**, on any branch. The APK is attached to that run as an
 artifact.
+
+### Play Store
+
+Play wants an **Android App Bundle** (`.aab`) signed with an upload key, targeting API 36.
+The keystore lives outside the repo (`~/.android/dust-play-upload.jks`) so it is never
+committed.
+
+One-time, create the upload key (keep the env file private; losing the key means a Play
+Console upload-key reset):
+
+```bash
+install -m 700 -d ~/.android
+pw="$(openssl rand -base64 32)"
+printf 'KEYSTORE_PASSWORD=%s\nKEY_PASSWORD=%s\n' "$pw" "$pw" > ~/.android/dust-play-upload.env
+chmod 600 ~/.android/dust-play-upload.env
+# shellcheck disable=SC1090
+source ~/.android/dust-play-upload.env
+keytool -genkeypair -v \
+  -keystore ~/.android/dust-play-upload.jks \
+  -storetype JKS \
+  -alias upload \
+  -keyalg RSA -keysize 4096 -validity 10000 \
+  -dname "CN=Dust Morse Trainer, O=Dust, C=US" \
+  -storepass "$KEYSTORE_PASSWORD" \
+  -keypass "$KEY_PASSWORD"
+chmod 600 ~/.android/dust-play-upload.jks
+unset pw KEYSTORE_PASSWORD KEY_PASSWORD
+```
+
+Then, with a JDK that includes `javac` (17 or 21) and a writable SDK (this machine uses
+`~/Android/Sdk`, NDK `27.2.12479018`):
+
+```bash
+scripts/android-play-bundle.sh
+```
+
+That writes `dist/dust-<version>-android-arm64.aab` (`dev.dust.morse`, versionCode 1). In
+Play Console create the app, let Google generate the app signing key, and upload that AAB.
+Back up `~/.android/dust-play-upload.jks` and `~/.android/dust-play-upload.env`. The public
+upload certificate is `dist/dust-upload-certificate.pem`.
 
 ## iOS
 

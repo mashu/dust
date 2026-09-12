@@ -216,6 +216,7 @@ fn the_app_shell_renders_the_practice_screen() {
     assert!(html.contains("Start training"));
     // Head tags live in their own component so they mount once.
     assert!(html.contains("class=\"screen\""));
+    assert!(html.contains("id=\"screen-home\""));
 }
 
 #[test]

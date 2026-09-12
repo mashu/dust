@@ -369,7 +369,7 @@ pub fn App() -> Element {
                         }
                     }
                 }
-                div { class: "screen", key: "{screen_key}",
+                div { class: "screen", id: "screen-{screen_key}", key: "{screen_key}",
                     { app_routes(
                         screen,
                         settings,

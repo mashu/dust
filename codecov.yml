@@ -1,0 +1,12 @@
+# Coverage is collected on Linux desktop. iOS-only code (AVAudioSession) is
+# compiled out of that job, so patch coverage of those lines cannot pass a
+# strict target. Project still tracks overall coverage with a small leeway.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        informational: true
