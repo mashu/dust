@@ -141,6 +141,9 @@ pub mod fake {
         pub behaviour: Cell<Option<Behaviour>>,
         pub players_built: Cell<u32>,
         pub build_error: Cell<bool>,
+        /// The page is out of sight, the way a hidden browser tab is: the
+        /// audio clock parks, and nothing charges the stall budget.
+        pub page_hidden: Cell<bool>,
         /// Sends that break before the good ones start, whatever `behaviour`
         /// says. One per send, so a recovery can be tested exactly.
         pub failures_left: Cell<u32>,
@@ -165,6 +168,11 @@ pub mod fake {
         /// Break the next `count` sends, then play normally.
         pub fn fail_next(&self, count: u32) {
             self.failures_left.set(count);
+        }
+
+        /// Send the page to the background, or bring it back.
+        pub fn set_page_hidden(&self, hidden: bool) {
+            self.page_hidden.set(hidden);
         }
 
         pub fn calls(&self) -> Vec<Call> {
@@ -229,6 +237,15 @@ pub mod fake {
                     .set(self.recorder.failures_left.get() - 1);
                 return WaitFlags {
                     failed: true,
+                    ..Default::default()
+                };
+            }
+            if self.recorder.page_hidden.get() {
+                // A backgrounded page: the clock stops where it is, and the
+                // scheduled tone is still waiting to be heard.
+                return WaitFlags {
+                    suspended: true,
+                    played_ms: Some(self.played.get()),
                     ..Default::default()
                 };
             }

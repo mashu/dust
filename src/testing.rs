@@ -209,6 +209,12 @@ impl Harness {
         self.recorder.set(behaviour);
     }
 
+    /// Send the page to the background, or bring it back — a tab switch, a
+    /// locked phone. The audio clock parks while it is away.
+    pub fn set_page_hidden(&self, hidden: bool) {
+        self.recorder.set_page_hidden(hidden);
+    }
+
     /// Run until `done` or the budget runs out. Returns whether it finished.
     pub async fn run_until(&mut self, budget_ms: u64, mut done: impl FnMut(&Self) -> bool) -> bool {
         let mut waited = 0;

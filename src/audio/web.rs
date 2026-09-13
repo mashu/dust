@@ -36,9 +36,22 @@ impl PlaybackSignal for WebSignal {
             cancelled: self.stop_flag.get() || self.epoch.get() != self.mine,
             finished: false,
             failed: self.ctx.state() == AudioContextState::Closed,
+            // A hidden page is the one case where a frozen clock is not a
+            // fault. The tones stay scheduled at their own context times, so
+            // coming back resumes the group where it stopped.
+            suspended: page_is_hidden(),
             played_ms: Some(played.min(f64::from(u32::MAX / 4)) as u32),
         }
     }
+}
+
+/// Whether the page is out of sight. A context this app suspended itself, on a
+/// page the listener is looking at, is still a fault worth recovering from —
+/// only the tab being away excuses a clock that is not moving.
+fn page_is_hidden() -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .is_some_and(|doc| doc.hidden())
 }
 
 pub struct MorsePlayer {
@@ -282,11 +295,7 @@ impl MorseBackend for MorsePlayer {
 fn install_resume_on_foreground(ctx: &AudioContext) {
     let ctx = ctx.clone();
     let closure = Closure::wrap(Box::new(move || {
-        let hidden = web_sys::window()
-            .and_then(|window| window.document())
-            .map(|doc| doc.hidden())
-            .unwrap_or(true);
-        if hidden || ctx.state() != AudioContextState::Suspended {
+        if page_is_hidden() || ctx.state() != AudioContextState::Suspended {
             return;
         }
         let _ = ctx.resume();

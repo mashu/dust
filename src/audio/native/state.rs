@@ -100,6 +100,9 @@ impl PlaybackSignal for ToneSignal {
             cancelled: self.armed.superseded(),
             finished: self.finished.load(Ordering::SeqCst),
             failed: false,
+            // The stream either calls back or it does not; there is nothing
+            // here that parks it the way a browser parks a hidden tab.
+            suspended: false,
             // cpal gives no clock of its own: the callback running out of
             // samples is the only word on when a send is over.
             played_ms: None,
@@ -183,6 +186,7 @@ mod tests {
                 cancelled: false,
                 finished: false,
                 failed: false,
+                suspended: false,
                 played_ms: None,
             }
         );

@@ -17,6 +17,8 @@ pub mod score;
 pub mod sequences;
 pub mod session;
 pub mod settings;
+#[cfg(test)]
+mod soak;
 pub mod stats;
 pub mod streak;
 pub mod timing;

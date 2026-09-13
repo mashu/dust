@@ -38,6 +38,10 @@ pub struct WaitFlags {
     pub finished: bool,
     /// The backend says the stream is broken.
     pub failed: bool,
+    /// The audio clock is parked on purpose rather than broken: a hidden tab,
+    /// a context the browser suspended, a phone that locked. Nothing is being
+    /// missed, so none of this time counts against the stall budget.
+    pub suspended: bool,
     /// Audio-clock progress, for backends that have one. `None` means the
     /// backend can only report `finished`.
     pub played_ms: Option<u32>,
@@ -75,14 +79,34 @@ pub fn next_wait_step(
             return WaitStep::Done(PlaybackOutcome::Completed);
         }
     }
+    // A send whose clock is parked is not stalling, it is waiting for the
+    // listener to come back, and the scheduled tone is still there to play
+    // when they do. Failing here would end a session because someone looked
+    // at another tab.
+    if flags.suspended {
+        return WaitStep::KeepWaiting;
+    }
     // The send has outlived its own length by the grace period without the
-    // audio reporting it got there. The tone is not playing: a suspended
-    // AudioContext, a device that went away, a stream that stopped calling
-    // back. Waiting longer only makes the silence longer.
+    // audio reporting it got there. The tone is not playing: a device that
+    // went away, a stream that stopped calling back. Waiting longer only makes
+    // the silence longer.
     if waited_ms >= target.saturating_add(grace_ms) {
         return WaitStep::Done(PlaybackOutcome::Failed);
     }
     WaitStep::KeepWaiting
+}
+
+/// What one poll interval costs the stall budget.
+///
+/// Time spent suspended is free. Charging it would only defer the same bug:
+/// the budget would run out while the page was hidden and the send would fail
+/// the instant it came back, with the audio running again.
+pub fn stall_charge(flags: WaitFlags, poll_ms: u32) -> u32 {
+    if flags.suspended {
+        0
+    } else {
+        poll_ms
+    }
 }
 
 /// A send in flight, as the backend sees it.
@@ -126,12 +150,13 @@ impl PlaybackWait {
         let duration_ms = self.duration_ms();
         let mut waited = 0u32;
         loop {
-            match next_wait_step(self.signal.poll(), waited, duration_ms, STALL_GRACE_MS) {
+            let flags = self.signal.poll();
+            match next_wait_step(flags, waited, duration_ms, STALL_GRACE_MS) {
                 WaitStep::Done(outcome) => return outcome,
                 WaitStep::KeepWaiting => {}
             }
             sleep_ms(POLL_MS).await;
-            waited = waited.saturating_add(POLL_MS);
+            waited = waited.saturating_add(stall_charge(flags, POLL_MS));
         }
     }
 }
@@ -272,6 +297,51 @@ mod tests {
         done.finished = true;
         let outcome = run(scripted(0.1, vec![playing, playing, done]).wait());
         assert_eq!(outcome, PlaybackOutcome::Completed);
+    }
+
+    #[test]
+    fn a_parked_clock_is_not_a_stalled_one() {
+        let mut hidden = flags();
+        hidden.suspended = true;
+        hidden.played_ms = Some(0);
+        // However long the page stays away, the send keeps its place.
+        assert_eq!(
+            next_wait_step(hidden, 10 * 60 * 1_000, 1_000, 2_000),
+            WaitStep::KeepWaiting
+        );
+        assert_eq!(stall_charge(hidden, POLL_MS), 0);
+        // And a visible page is charged for every tick, as before.
+        assert_eq!(stall_charge(flags(), POLL_MS), POLL_MS);
+        // Being away excuses a frozen clock, not a dead stream or a stop.
+        let mut broken = hidden;
+        broken.failed = true;
+        assert_eq!(
+            next_wait_step(broken, 0, 1_000, 2_000),
+            WaitStep::Done(PlaybackOutcome::Failed)
+        );
+        let mut stopped = hidden;
+        stopped.cancelled = true;
+        assert_eq!(
+            next_wait_step(stopped, 0, 1_000, 2_000),
+            WaitStep::Done(PlaybackOutcome::Cancelled)
+        );
+    }
+
+    #[test]
+    fn a_send_survives_the_page_going_away_and_coming_back() {
+        let mut hidden = flags();
+        hidden.suspended = true;
+        hidden.played_ms = Some(20);
+        let mut done = flags();
+        done.played_ms = Some(1_000 + PLAYBACK_TAIL_MS);
+        // Hidden for far longer than the grace period, then back and finishing.
+        let mut steps = vec![hidden; 500];
+        steps.push(done);
+        assert_eq!(
+            run(scripted(1.0, steps).wait()),
+            PlaybackOutcome::Completed,
+            "a backgrounded tab must not cost the listener the group"
+        );
     }
 
     #[test]

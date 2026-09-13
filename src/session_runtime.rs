@@ -567,6 +567,42 @@ mod tests {
         });
     }
 
+    /// Leaving the tab must not cost the listener their session. The audio
+    /// clock parks while the page is away, and a send that is counted down
+    /// against it would run out the stall budget in silence and end the
+    /// session — on the browser build, on the first group, for a tab switch.
+    #[test]
+    fn a_session_survives_the_page_going_to_the_background() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            h.advance(200).await;
+            h.set_page_hidden(true);
+
+            // Far longer than the stall grace, in a phase that would have
+            // failed on the wall clock.
+            h.advance(60_000).await;
+            assert_eq!(
+                h.phase(),
+                Some(SessionPhase::Playing { index: 0 }),
+                "the group is still waiting to be heard"
+            );
+            assert_eq!(h.toast(), None, "nothing has gone wrong");
+            assert_eq!(h.screen(), Screen::Training);
+            assert_eq!(h.texts().len(), 1, "and it was not sent again");
+
+            // Back to the tab: the same send finishes and the session goes on.
+            h.set_page_hidden(false);
+            assert!(
+                h.run_until(30_000, |h| h.awaiting_answer().is_some()).await,
+                "the answer window should open once the page is back"
+            );
+            assert_eq!(h.screen(), Screen::Training);
+            h.play_through(120_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+        });
+    }
+
     #[test]
     fn a_broken_stream_is_retried_before_the_session_is_given_up() {
         run(|| async {

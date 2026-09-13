@@ -29,6 +29,8 @@ impl PlaybackSignal for SilentSignal {
             cancelled: self.epoch.get() != self.mine,
             finished: false,
             failed: false,
+            // There is no audio to park, so a send always runs to its length.
+            suspended: false,
             // Nothing is playing, so the wall clock is the only clock there is.
             played_ms: Some(elapsed.min(u128::from(u32::MAX)) as u32),
         }
