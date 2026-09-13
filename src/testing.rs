@@ -15,13 +15,17 @@ use dioxus::core::{ElementId, NoOpMutations};
 use dioxus::prelude::*;
 
 use crate::audio::fake::{Behaviour, Call, Recorder};
-use crate::engine::{AppState, Screen};
+use crate::engine::{AppState, Screen, SessionSignals};
 use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
 use crate::time::POLL_MS;
+use crate::ui::widgets::DISCLOSURE;
 
 /// Clock step per pump. Smaller than one poll interval, so nothing is skipped
 /// over.
 const STEP_MS: u64 = 4;
+
+/// How deep a disclosure may nest before the harness calls it a mistake.
+const NESTED_DISCLOSURES: usize = 8;
 
 pub struct Harness {
     dom: VirtualDom,
@@ -108,6 +112,19 @@ impl Harness {
         }
     }
 
+    /// The signals a session writes into, as the app assembles them.
+    pub fn signals(&self) -> SessionSignals {
+        SessionSignals {
+            screen: self.screen,
+            runtime: self.runtime,
+            result: self.result,
+            auto_message: self.auto_message,
+            sessions: self.sessions,
+            settings: self.settings,
+            toast: self.toast,
+        }
+    }
+
     /// Run `f` with a Dioxus runtime and scope in place, the way a component
     /// callback runs.
     pub fn in_app<T>(&self, f: impl FnOnce() -> T) -> T {
@@ -134,49 +151,21 @@ impl Harness {
     pub fn start_training(&mut self) {
         let settings_now = self.settings.peek().clone().clamp();
         let history = self.sessions.peek().clone();
-        let (app, runtime, screen) = (self.app.clone(), self.runtime, self.screen);
+        let (app, signals) = (self.app.clone(), self.signals());
         let gen = self
             .in_app(|| app.takeover_audio(&settings_now))
             .expect("the fake player always opens");
         let effects = self
-            .in_app(|| {
-                boot_machine_session(settings_now.clone(), &history, &app, gen, runtime, screen)
-            })
+            .in_app(|| boot_machine_session(settings_now.clone(), &history, &app, gen, signals))
             .expect("a fresh session always boots");
-        self.in_app(|| {
-            spawn_effects(
-                effects,
-                settings_now,
-                app.clone(),
-                gen,
-                runtime,
-                screen,
-                self.result,
-                self.auto_message,
-                self.sessions,
-                self.settings,
-                self.toast,
-            )
-        });
+        self.in_app(|| spawn_effects(effects, settings_now, app.clone(), gen, signals));
         self.pump();
     }
 
     /// Send one event the way a component callback does.
     pub fn send(&mut self, event: SessionEvent) {
-        let app = self.app.clone();
-        self.in_app(|| {
-            send_command(
-                app,
-                self.runtime,
-                self.screen,
-                self.result,
-                self.auto_message,
-                self.sessions,
-                self.settings,
-                self.toast,
-                event,
-            )
-        });
+        let (app, signals) = (self.app.clone(), self.signals());
+        self.in_app(|| send_command(app, signals, event));
         self.pump();
     }
 
@@ -277,25 +266,29 @@ pub fn run<F: std::future::Future<Output = ()>>(body: impl FnOnce() -> F) {
         .block_on(body());
 }
 
-/// A component under test, with its event listeners addressable.
+/// A rendered page, addressed the way its markup names things.
 ///
-/// Rendering alone proves a screen draws; this also presses its buttons, so the
-/// callbacks behind them are exercised rather than merely constructed.
+/// Dioxus mounts elements in an order of its own, so counting listeners is no
+/// way to find a button. Every interactive control in the app carries an `id`
+/// instead, built by [`crate::ui::widgets::control_id`], and the renderer
+/// reports those ids against the live elements — so a test presses
+/// `btn-start-training`, not "click number four". An id written as a plain
+/// literal is part of the template and never reported, which is why they are
+/// all built at runtime.
 pub struct Ui {
     dom: VirtualDom,
-    listeners: Vec<(String, ElementId)>,
+    /// Live elements by the `id` their markup gives them.
+    ids: Vec<(String, ElementId)>,
 }
 
+/// Ids and removals, as the renderer reports them.
 #[derive(Default)]
-struct ListenerLog {
-    added: Vec<(String, ElementId)>,
-    removed: Vec<(String, ElementId)>,
-    /// Elements that went away. Dioxus does not report the listeners on a
-    /// removed subtree one by one, so the ids have to be forgotten wholesale.
+struct IdLog {
+    named: Vec<(String, ElementId)>,
     gone: Vec<ElementId>,
 }
 
-impl dioxus::core::WriteMutations for ListenerLog {
+impl dioxus::core::WriteMutations for IdLog {
     fn append_children(&mut self, _: ElementId, _: usize) {}
     fn assign_node_id(&mut self, _: &'static [u8], _: ElementId) {}
     fn create_placeholder(&mut self, _: ElementId) {}
@@ -314,15 +307,16 @@ impl dioxus::core::WriteMutations for ListenerLog {
         value: &dioxus::core::AttributeValue,
         id: ElementId,
     ) {
-        let _ = (name, value, id);
+        if name != "id" {
+            return;
+        }
+        if let dioxus::core::AttributeValue::Text(text) = value {
+            self.named.push((text.clone(), id));
+        }
     }
     fn set_node_text(&mut self, _: &str, _: ElementId) {}
-    fn create_event_listener(&mut self, name: &'static str, id: ElementId) {
-        self.added.push((name.to_string(), id));
-    }
-    fn remove_event_listener(&mut self, name: &'static str, id: ElementId) {
-        self.removed.push((name.to_string(), id));
-    }
+    fn create_event_listener(&mut self, _: &'static str, _: ElementId) {}
+    fn remove_event_listener(&mut self, _: &'static str, _: ElementId) {}
     fn remove_node(&mut self, id: ElementId) {
         self.gone.push(id);
     }
@@ -356,11 +350,49 @@ impl Ui {
         crate::persist::save_sessions(sessions);
         let recorder = Recorder::new();
         let state = AppState::with_backend(recorder.factory());
-        let dom = VirtualDom::new(crate::app::App).with_root_context(state);
-        (Self::from_dom(dom), recorder)
+        (
+            Self::from_dom(VirtualDom::new(crate::app::App).with_root_context(state)),
+            recorder,
+        )
     }
 
-    /// Move the clock forward, settling the app as it goes.
+    fn from_dom(dom: VirtualDom) -> Self {
+        let mut ui = Self {
+            dom,
+            ids: Vec::new(),
+        };
+        let mut log = IdLog::default();
+        ui.dom.rebuild(&mut log);
+        ui.apply(log);
+        ui.settle();
+        ui
+    }
+
+    fn apply(&mut self, log: IdLog) {
+        for id in log.gone {
+            self.ids.retain(|(_, held)| *held != id);
+        }
+        // An element id is live only once, so a new name for one retires
+        // whatever was recorded against it before, and the other way round.
+        for (name, id) in log.named {
+            self.ids
+                .retain(|(held_name, held_id)| *held_id != id && *held_name != name);
+            self.ids.push((name, id));
+        }
+    }
+
+    /// Settle everything the last event set off: the render it dirtied, the
+    /// effects that render queues, and whatever those effects dirty in turn.
+    pub fn settle(&mut self) {
+        for _ in 0..6 {
+            self.dom.process_events();
+            let mut log = IdLog::default();
+            self.dom.render_immediate(&mut log);
+            self.apply(log);
+        }
+    }
+
+    /// Move the clock forward, settling the page as it goes.
     pub async fn advance(&mut self, ms: u64) {
         let steps = ms.div_ceil(STEP_MS).max(1);
         for _ in 0..steps {
@@ -370,7 +402,7 @@ impl Ui {
         }
     }
 
-    /// Run until the page says what we are waiting for, or give up.
+    /// Run until the page shows what we are waiting for, or give up.
     pub async fn run_until(&mut self, budget_ms: u64, mut done: impl FnMut(&Self) -> bool) -> bool {
         let mut waited = 0;
         while waited < budget_ms {
@@ -383,133 +415,157 @@ impl Ui {
         done(self)
     }
 
-    pub fn has(&self, needle: &str) -> bool {
-        self.html().contains(needle)
-    }
-
-    fn from_dom(dom: VirtualDom) -> Self {
-        let mut ui = Self {
-            dom,
-            listeners: Vec::new(),
-        };
-        let mut log = ListenerLog::default();
-        ui.dom.rebuild(&mut log);
-        ui.apply(log);
-        ui
-    }
-
-    fn apply(&mut self, log: ListenerLog) {
-        for entry in log.removed {
-            self.listeners.retain(|held| *held != entry);
-        }
-        for id in log.gone {
-            self.listeners.retain(|(_, held)| *held != id);
-        }
-        // An element id is only ever live once, so a new listener on an id
-        // retires whatever was recorded for it before.
-        for entry in log.added {
-            self.listeners
-                .retain(|(name, id)| !(*id == entry.1 && *name == entry.0));
-            self.listeners.push(entry);
-        }
-    }
-
-    /// Settle everything the last event set off: the render it dirtied, the
-    /// effects that render queues, and whatever those effects dirty in turn.
-    pub fn settle(&mut self) {
-        for _ in 0..6 {
-            self.dom.process_events();
-            let mut log = ListenerLog::default();
-            self.dom.render_immediate(&mut log);
-            self.apply(log);
-        }
-    }
-
     pub fn html(&self) -> String {
         dioxus_ssr::render(&self.dom)
     }
 
-    pub fn count(&self, name: &str) -> usize {
-        self.listeners
-            .iter()
-            .filter(|(held, _)| held == name)
-            .count()
+    pub fn has(&self, needle: &str) -> bool {
+        self.html().contains(needle)
     }
 
-    fn nth(&self, name: &str, index: usize) -> ElementId {
-        self.listeners
+    /// The ids of everything on the page, and a check that each is unique: two
+    /// elements answering to one name would make both the page and this
+    /// harness ambiguous.
+    pub fn page_ids(&self) -> Vec<String> {
+        let html = self.html();
+        let mut seen: Vec<String> = Vec::new();
+        for part in html.split("id=\"").skip(1) {
+            let Some(name) = part.split('"').next() else {
+                continue;
+            };
+            assert!(
+                !seen.iter().any(|held| held == name),
+                "two elements are called {name:?}"
+            );
+            seen.push(name.to_string());
+        }
+        seen
+    }
+
+    /// Which screen the shell is showing.
+    pub fn screen(&self) -> String {
+        self.html()
+            .split("id=\"screen-")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap_or("none")
+            .to_string()
+    }
+
+    /// Whether the page is showing a control with this id.
+    pub fn shows(&self, id: &str) -> bool {
+        self.has(&format!("id=\"{id}\""))
+    }
+
+    /// Every control on the page whose id starts with `prefix`, in the order
+    /// the markup names them.
+    pub fn controls(&self, prefix: &str) -> Vec<String> {
+        let live = self.page_ids();
+        let mut out: Vec<String> = self
+            .ids
             .iter()
-            .filter(|(held, _)| held == name)
-            .map(|(_, id)| *id)
-            .nth(index)
+            .map(|(name, _)| name.clone())
+            .filter(|name| name.starts_with(prefix) && live.contains(name))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn element(&self, id: &str) -> ElementId {
+        self.ids
+            .iter()
+            .find(|(name, _)| name == id)
+            .map(|(_, element)| *element)
             .unwrap_or_else(|| {
-                panic!(
-                    "no {name} listener number {index}; there are {}",
-                    self.count(name)
-                )
+                let mut seen: Vec<&str> = self.ids.iter().map(|(name, _)| name.as_str()).collect();
+                seen.sort_unstable();
+                panic!("the page has no control called {id:?}; it has {seen:?}")
             })
     }
 
     /// Deliver an event the way a renderer does: a platform payload that the
-    /// html crate converts into the typed data the listener expects.
-    fn fire(&mut self, name: &str, index: usize, data: Box<dyn std::any::Any>) {
-        let id = self.nth(name, index);
-        self.fire_at(name, id, data);
-    }
-
-    fn fire_at(&mut self, name: &str, id: ElementId, data: Box<dyn std::any::Any>) {
+    /// html crate turns into the typed data the listener expects.
+    fn fire(&mut self, event: &str, id: &str, data: Box<dyn std::any::Any>) {
         install_event_converter();
+        let element = self.element(id);
         let payload = std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
         self.dom
             .runtime()
-            .handle_event(name, dioxus::core::Event::new(payload, true), id);
+            .handle_event(event, dioxus::core::Event::new(payload, true), element);
         self.settle();
     }
 
-    pub fn click(&mut self, index: usize) {
+    /// Open every panel the page keeps behind a toggle, and keep going until
+    /// nothing new appears — one disclosure may hold another.
+    ///
+    /// A sweep that skips this only ever sees the controls a screen happens to
+    /// start with, which is how a whole card of sliders can go untested.
+    pub fn open_disclosures(&mut self) {
+        for _ in 0..NESTED_DISCLOSURES {
+            let closed: Vec<String> = self
+                .controls(DISCLOSURE)
+                .into_iter()
+                .filter(|id| !self.is_open(id))
+                .collect();
+            if closed.is_empty() {
+                return;
+            }
+            for id in &closed {
+                self.click(id);
+                assert!(
+                    self.is_open(id),
+                    "{id:?} did not open; a disclosure has to show an `open` class \
+                     while its panel is up, or nothing can tell that it is"
+                );
+            }
+        }
+        panic!("disclosures kept opening onto more disclosures");
+    }
+
+    /// Whether a disclosure is showing what it hides. The markup says so with
+    /// an `open` class, the same one the stylesheet turns the chevron on.
+    fn is_open(&self, id: &str) -> bool {
+        self.html()
+            .split(&format!("id=\"{id}\""))
+            .nth(1)
+            .and_then(|rest| rest.split('>').next())
+            .is_some_and(|tag| tag.contains("open"))
+    }
+
+    /// Press the control with this id.
+    pub fn click(&mut self, id: &str) {
         self.fire(
             "click",
-            index,
+            id,
             Box::new(dioxus::html::SerializedMouseData::default()),
         );
     }
 
-    pub fn input(&mut self, index: usize, value: &str) {
-        self.fire(
-            "input",
-            index,
-            Box::new(dioxus::html::SerializedFormData::new(
-                value.to_string(),
-                Vec::new(),
-            )),
-        );
+    /// Type into the field with this id.
+    pub fn type_into(&mut self, id: &str, value: &str) {
+        self.fire("input", id, Self::form(value));
     }
 
-    pub fn change(&mut self, index: usize, value: &str) {
-        self.fire(
-            "change",
-            index,
-            Box::new(dioxus::html::SerializedFormData::new(
-                value.to_string(),
-                Vec::new(),
-            )),
-        );
+    /// Commit a field, the way leaving it does.
+    pub fn commit(&mut self, id: &str, value: &str) {
+        self.fire("change", id, Self::form(value));
     }
 
-    pub fn focus(&mut self, index: usize) {
+    pub fn focus(&mut self, id: &str) {
         self.fire(
             "focus",
-            index,
+            id,
             Box::new(dioxus::html::SerializedFocusData::default()),
         );
     }
 
-    pub fn keydown(&mut self, index: usize, key: Key) {
+    pub fn press_enter(&mut self, id: &str) {
         self.fire(
             "keydown",
-            index,
+            id,
             Box::new(dioxus::html::SerializedKeyboardData::new(
-                key,
+                Key::Enter,
                 dioxus::prelude::Code::Enter,
                 dioxus::prelude::Location::Standard,
                 false,
@@ -517,6 +573,13 @@ impl Ui {
                 false,
             )),
         );
+    }
+
+    fn form(value: &str) -> Box<dyn std::any::Any> {
+        Box::new(dioxus::html::SerializedFormData::new(
+            value.to_string(),
+            Vec::new(),
+        ))
     }
 }
 
@@ -526,4 +589,77 @@ fn install_event_converter() {
     ONCE.call_once(|| {
         dioxus::html::set_event_converter(Box::new(dioxus::html::SerializedHtmlEventConverter));
     });
+}
+
+#[cfg(test)]
+mod harness_tests {
+    use super::*;
+
+    use crate::ui::widgets::control_id;
+
+    #[component]
+    fn Counter() -> Element {
+        let mut count = use_signal(|| 0);
+        let mut text = use_signal(String::new);
+        rsx! {
+            button {
+                id: control_id("btn", "bump"),
+                onclick: move |_| count += 1,
+                "count {count}"
+            }
+            if count() < 2 {
+                button {
+                    id: control_id("btn", "only at first"),
+                    onclick: move |_| count.set(9),
+                    "gone later"
+                }
+            }
+            input {
+                id: control_id("field", "text"),
+                value: "{text}",
+                oninput: move |e| text.set(e.value()),
+                onchange: move |e| text.set(format!("committed {}", e.value())),
+            }
+            p { "text is {text}" }
+        }
+    }
+
+    #[test]
+    fn a_control_is_pressed_by_the_id_its_markup_gives_it() {
+        let mut ui = Ui::new(Counter, ());
+        assert!(ui.has("count 0"));
+        ui.click("btn-bump");
+        assert!(ui.has("count 1"));
+        ui.type_into("field-text", "KM");
+        assert!(ui.has("text is KM"));
+        ui.commit("field-text", "KM");
+        assert!(ui.has("text is committed KM"));
+    }
+
+    #[test]
+    fn a_control_that_has_gone_is_no_longer_on_the_page() {
+        let mut ui = Ui::new(Counter, ());
+        assert!(ui.shows("btn-only-at-first"));
+        assert_eq!(
+            ui.controls("btn-only"),
+            vec!["btn-only-at-first".to_string()]
+        );
+        ui.click("btn-only-at-first");
+        assert!(!ui.shows("btn-only-at-first"));
+        assert!(ui.controls("btn-only").is_empty());
+        // The ones that stayed still answer.
+        assert_eq!(
+            ui.controls(""),
+            vec!["btn-bump".to_string(), "field-text".to_string()]
+        );
+        ui.click("btn-bump");
+        assert!(ui.has("count 10"));
+    }
+
+    #[test]
+    #[should_panic(expected = "no control called")]
+    fn pressing_something_that_is_not_there_says_so() {
+        let mut ui = Ui::new(Counter, ());
+        ui.click("nonsense");
+    }
 }

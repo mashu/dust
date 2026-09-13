@@ -5,7 +5,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{Icon, ModePill, NumberField, Seg};
+use crate::ui::widgets::{control_id, Icon, ModePill, NumberField, Seg};
 
 #[component]
 pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
@@ -86,6 +86,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 div { class: "field",
                     label { "Sequence order" }
                     input {
+                        id: control_id("field", "sequence order"),
                         class: "mono",
                         value: "{seq.iter().collect::<String>()}",
                         oninput: move |e| {
@@ -101,6 +102,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
             div { class: "field-grid",
                 NumberField {
                     label: format!("Level (1–{level_max})"),
+                    id: "field-level".to_string(),
                     value: s.active_level() as f64,
                     min: 1.0,
                     max: level_max as f64,
@@ -114,6 +116,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 if s.curriculum.char_set_mode == CharSetMode::Mixed {
                     NumberField {
                         label: format!("Digits level (1–{MAX_DIGITS_LEVEL})"),
+                        id: "field-digits-level".to_string(),
                         value: s.curriculum.digits_level as f64,
                         min: 1.0,
                         max: MAX_DIGITS_LEVEL as f64,
@@ -145,6 +148,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 div { class: "field",
                     label { "Custom alphabet" }
                     input {
+                        id: control_id("field", "custom alphabet"),
                         class: "mono",
                         value: "{s.curriculum.custom_set.iter().collect::<String>()}",
                         oninput: move |e| {

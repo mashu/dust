@@ -4,7 +4,7 @@
 use cw_core::{envelope_shape, EnvelopeShape, TrainingSettings};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{pretty_number, Icon, SliderField};
+use crate::ui::widgets::{control_id, pretty_number, Icon, SliderField};
 
 const VIEW_W: f64 = 320.0;
 const VIEW_H: f64 = 120.0;
@@ -196,7 +196,10 @@ pub fn EnvelopeCard(
             div { class: "row-between",
                 span { class: "eyebrow", "Test it" }
                 if playing.is_some() {
-                    button { class: "btn btn-secondary btn-sm", onclick: move |_| on_stop.call(()),
+                    button {
+                        id: control_id("btn", "sample stop"),
+                        class: "btn btn-secondary btn-sm",
+                        onclick: move |_| on_stop.call(()),
                         Icon { name: "stop" }
                         "Stop"
                     }
@@ -209,6 +212,7 @@ pub fn EnvelopeCard(
                         let is_playing = playing.as_deref() == Some(chip.text);
                         rsx! {
                             button {
+                                id: control_id("chip", chip.label),
                                 class: if is_playing { "test-chip playing" } else { "test-chip" },
                                 onclick: move |_| on_play.call(text.clone()),
                                 Icon { name: if is_playing { "stop" } else { "play" } }

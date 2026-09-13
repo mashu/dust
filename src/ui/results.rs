@@ -1,7 +1,7 @@
 use cw_core::SessionResult;
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{GroupResultRow, Icon, ScoreRing};
+use crate::ui::widgets::{control_id, GroupResultRow, Icon, ScoreRing};
 
 #[component]
 pub fn ResultsView(
@@ -74,11 +74,17 @@ pub fn ResultsView(
                 }
             }
             div { class: "hero-actions", style: "justify-content: center;",
-                button { class: "btn btn-primary", onclick: move |_| on_again.call(()),
+                button {
+                    id: control_id("btn", "train again"),
+                    class: "btn btn-primary",
+                    onclick: move |_| on_again.call(()),
                     Icon { name: "repeat" }
                     "Train again"
                 }
-                button { class: "btn btn-secondary", onclick: move |_| on_home.call(()),
+                button {
+                    id: control_id("btn", "back"),
+                    class: "btn btn-secondary",
+                    onclick: move |_| on_home.call(()),
                     Icon { name: "back" }
                     "Back"
                 }

@@ -7,6 +7,10 @@ pub struct AlignmentPair {
     pub matched: bool,
 }
 
+/// Edit distance, filled row by row, then walked back to pair the characters
+/// up. Every cell reads the row above it and the cell to its left, so the
+/// indices are the point rather than something an iterator would tidy away.
+#[allow(clippy::needless_range_loop)]
 pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
     let s: Vec<char> = sent.to_ascii_uppercase().chars().collect();
     let r: Vec<char> = received.to_ascii_uppercase().chars().collect();

@@ -23,10 +23,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: llvm-tools-preview
+          components: llvm-tools-preview, clippy, rustfmt
 
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
 
       - name: Install Linux desktop dependencies
         run: |
@@ -48,6 +51,9 @@ jobs:
       - name: Give ALSA a null output device
         run: |
           printf 'pcm.!default { type null }\nctl.!default { type null }\n' > "$HOME/.asoundrc"
+
+      - name: Lint
+        run: cargo clippy --workspace --features desktop --all-targets --locked -- -D warnings
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2

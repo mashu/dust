@@ -1,4 +1,9 @@
 //! Training settings for the group trainer.
+//!
+//! The `Default` impls are written out rather than derived: every default is a
+//! decision about how the trainer behaves out of the box, and they read better
+//! spelled out next to the type than as an attribute on one variant.
+#![allow(clippy::derivable_impls)]
 
 use serde::{Deserialize, Serialize};
 
@@ -17,18 +22,18 @@ pub enum MixedAutoLevelAxis {
     Digits,
 }
 
+impl Default for MixedAutoLevelAxis {
+    fn default() -> Self {
+        Self::Letters
+    }
+}
+
 impl MixedAutoLevelAxis {
     pub fn flip(self) -> Self {
         match self {
             Self::Letters => Self::Digits,
             Self::Digits => Self::Letters,
         }
-    }
-}
-
-impl Default for MixedAutoLevelAxis {
-    fn default() -> Self {
-        Self::Letters
     }
 }
 

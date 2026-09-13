@@ -7,7 +7,9 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::audio::focus_group_input;
-use crate::engine::{finish_session, play_text_now, sleep_cancelable, AppState, PlayError, Screen};
+use crate::engine::{
+    finish_session, play_text_now, sleep_cancelable, AppState, PlayError, Screen, SessionSignals,
+};
 use crate::time::now_ms;
 
 pub fn dispatch_event(
@@ -45,37 +47,16 @@ pub fn dispatch_event(
     effects
 }
 
-pub fn send_command(
-    app: AppState,
-    runtime: Signal<Option<cw_core::GroupSession>>,
-    screen: Signal<crate::engine::Screen>,
-    result: Signal<Option<cw_core::SessionResult>>,
-    auto_message: Signal<Option<String>>,
-    sessions: Signal<Vec<cw_core::SessionResult>>,
-    settings_sig: Signal<TrainingSettings>,
-    toast: Signal<Option<String>>,
-    event: SessionEvent,
-) {
+pub fn send_command(app: AppState, signals: SessionSignals, event: SessionEvent) {
     let gen = app.session_gen.get();
-    let settings = runtime
+    let settings = signals
+        .runtime
         .read()
         .as_ref()
         .map(|s| s.settings().clone())
-        .unwrap_or_else(|| settings_sig());
-    let effects = dispatch_event(&app, runtime, event, gen);
-    spawn_effects(
-        effects,
-        settings,
-        app,
-        gen,
-        runtime,
-        screen,
-        result,
-        auto_message,
-        sessions,
-        settings_sig,
-        toast,
-    );
+        .unwrap_or_else(|| (signals.settings)());
+    let effects = dispatch_event(&app, signals.runtime, event, gen);
+    spawn_effects(effects, settings, app, gen, signals);
 }
 
 pub fn spawn_effects(
@@ -83,32 +64,13 @@ pub fn spawn_effects(
     settings: TrainingSettings,
     app: AppState,
     gen: u64,
-    runtime: Signal<Option<cw_core::GroupSession>>,
-    screen: Signal<Screen>,
-    result: Signal<Option<cw_core::SessionResult>>,
-    auto_message: Signal<Option<String>>,
-    sessions: Signal<Vec<cw_core::SessionResult>>,
-    settings_sig: Signal<TrainingSettings>,
-    toast: Signal<Option<String>>,
+    signals: SessionSignals,
 ) {
     if effects.is_empty() {
         return;
     }
     spawn(async move {
-        drive_effects(
-            effects,
-            settings,
-            app,
-            gen,
-            runtime,
-            screen,
-            result,
-            auto_message,
-            sessions,
-            settings_sig,
-            toast,
-        )
-        .await;
+        drive_effects(effects, settings, app, gen, signals).await;
     });
 }
 
@@ -119,9 +81,13 @@ pub fn boot_machine_session(
     history: &[cw_core::SessionResult],
     app: &AppState,
     gen: u64,
-    mut runtime: Signal<Option<cw_core::GroupSession>>,
-    mut screen: Signal<Screen>,
+    signals: SessionSignals,
 ) -> Option<Vec<SessionEffect>> {
+    let SessionSignals {
+        mut runtime,
+        mut screen,
+        ..
+    } = signals;
     if app.session_gen.get() != gen {
         return None;
     }
@@ -166,13 +132,7 @@ async fn drive_effects(
     settings: TrainingSettings,
     app: AppState,
     gen: u64,
-    runtime: Signal<Option<cw_core::GroupSession>>,
-    screen: Signal<Screen>,
-    result: Signal<Option<cw_core::SessionResult>>,
-    auto_message: Signal<Option<String>>,
-    sessions: Signal<Vec<cw_core::SessionResult>>,
-    settings_sig: Signal<TrainingSettings>,
-    toast: Signal<Option<String>>,
+    signals: SessionSignals,
 ) {
     while !pending.is_empty() {
         if app.session_gen.get() != gen {
@@ -183,22 +143,7 @@ async fn drive_effects(
             if app.session_gen.get() != gen {
                 return;
             }
-            pending.extend(
-                handle_effect(
-                    effect,
-                    &settings,
-                    &app,
-                    gen,
-                    runtime,
-                    screen,
-                    result,
-                    auto_message,
-                    sessions,
-                    settings_sig,
-                    toast,
-                )
-                .await,
-            );
+            pending.extend(handle_effect(effect, &settings, &app, gen, signals).await);
         }
     }
 }
@@ -208,14 +153,14 @@ async fn handle_effect(
     settings: &TrainingSettings,
     app: &AppState,
     gen: u64,
-    mut runtime: Signal<Option<cw_core::GroupSession>>,
-    mut screen: Signal<Screen>,
-    result: Signal<Option<cw_core::SessionResult>>,
-    auto_message: Signal<Option<String>>,
-    sessions: Signal<Vec<cw_core::SessionResult>>,
-    settings_sig: Signal<TrainingSettings>,
-    mut toast: Signal<Option<String>>,
+    signals: SessionSignals,
 ) -> Vec<SessionEffect> {
+    let SessionSignals {
+        mut runtime,
+        mut screen,
+        mut toast,
+        ..
+    } = signals;
     match effect {
         SessionEffect::Focus { index } => {
             focus_group_input(index);
@@ -343,16 +288,7 @@ async fn handle_effect(
         }
         SessionEffect::PersistAndShowResults => {
             *app.machine.borrow_mut() = None;
-            finish_session(
-                app.clone(),
-                runtime,
-                screen,
-                result,
-                auto_message,
-                sessions,
-                settings_sig,
-                toast,
-            );
+            finish_session(app.clone(), signals);
             Vec::new()
         }
         SessionEffect::AbortToHome => {
@@ -770,9 +706,9 @@ mod tests {
             let gen = app.session_gen.get();
             // Something else claimed the audio between the two calls.
             app.bump_session();
-            let effects = h.in_app(|| {
-                boot_machine_session(test_settings(), &[], &app, gen, h.runtime, h.screen)
-            });
+            let signals = h.signals();
+            let effects =
+                h.in_app(|| boot_machine_session(test_settings(), &[], &app, gen, signals));
             assert!(effects.is_none());
             assert!(app.machine.borrow().is_none());
             assert_eq!(h.screen(), Screen::Home);
@@ -854,9 +790,7 @@ mod tests {
                     machine.set_group_text(0, String::new(), 1);
                 }
             });
-            let (runtime, screen) = (h.runtime, h.screen);
-            let (result, auto_message, sessions, settings, toast) =
-                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
+            let signals = h.signals();
             let settings_now = h.settings.peek().clone();
             h.in_app(|| {
                 spawn_effects(
@@ -867,13 +801,7 @@ mod tests {
                     settings_now,
                     app.clone(),
                     gen,
-                    runtime,
-                    screen,
-                    result,
-                    auto_message,
-                    sessions,
-                    settings,
-                    toast,
+                    signals,
                 )
             });
             h.pump();
@@ -890,9 +818,7 @@ mod tests {
             let app = h.app.clone();
             let gen = app.session_gen.get();
             let settings_now = h.settings.peek().clone();
-            let (runtime, screen) = (h.runtime, h.screen);
-            let (result, auto_message, sessions, settings, toast) =
-                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
+            let signals = h.signals();
             // A sleep the machine has already forgotten about.
             h.in_app(|| {
                 spawn_effects(
@@ -900,13 +826,7 @@ mod tests {
                     settings_now,
                     app.clone(),
                     gen,
-                    runtime,
-                    screen,
-                    result,
-                    auto_message,
-                    sessions,
-                    settings,
-                    toast,
+                    signals,
                 )
             });
             h.pump();
@@ -923,9 +843,7 @@ mod tests {
             let app = h.app.clone();
             let gen = app.session_gen.get();
             let settings_now = h.settings.peek().clone();
-            let (runtime, screen) = (h.runtime, h.screen);
-            let (result, auto_message, sessions, settings, toast) =
-                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
+            let signals = h.signals();
             h.send(SessionEvent::Abort);
             h.recorder.clear();
             h.in_app(|| {
@@ -940,13 +858,7 @@ mod tests {
                     settings_now,
                     app.clone(),
                     gen,
-                    runtime,
-                    screen,
-                    result,
-                    auto_message,
-                    sessions,
-                    settings,
-                    toast,
+                    signals,
                 )
             });
             h.pump();
@@ -969,22 +881,14 @@ mod tests {
             let app = h.app.clone();
             let gen = app.session_gen.get();
             let settings_now = h.settings.peek().clone();
-            let (runtime, screen) = (h.runtime, h.screen);
-            let (result, auto_message, sessions, settings_sig, toast) =
-                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
+            let signals = h.signals();
             h.in_app(|| {
                 spawn_effects(
                     vec![SessionEffect::NeedGroup { index: 0 }],
                     settings_now,
                     app.clone(),
                     gen,
-                    runtime,
-                    screen,
-                    result,
-                    auto_message,
-                    sessions,
-                    settings_sig,
-                    toast,
+                    signals,
                 )
             });
             h.pump();

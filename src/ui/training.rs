@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::audio::focus_group_input;
-use crate::ui::widgets::{Icon, ProgressHeader};
+use crate::ui::widgets::{control_id, Icon, ProgressHeader};
 
 #[component]
 pub fn TrainingView(
@@ -141,11 +141,17 @@ pub fn TrainingView(
                 }
             }
             div { class: "train-actions",
-                button { class: "btn btn-primary", onclick: move |_| on_submit.call(()),
+                button {
+                    id: control_id("btn", "end session"),
+                    class: "btn btn-primary",
+                    onclick: move |_| on_submit.call(()),
                     Icon { name: "flag" }
                     "End session"
                 }
-                button { class: "btn btn-danger", onclick: move |_| on_stop.call(()),
+                button {
+                    id: control_id("btn", "discard"),
+                    class: "btn btn-danger",
+                    onclick: move |_| on_stop.call(()),
                     Icon { name: "x" }
                     "Discard"
                 }

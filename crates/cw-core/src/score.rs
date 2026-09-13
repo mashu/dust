@@ -104,7 +104,7 @@ pub fn compute_session_score(
     let n = effective_alphabet_size.max(1.0);
     let a = accuracy.clamp(0.0, 1.0);
     let t_avg = avg_response_ms.max(1.0).round();
-    let c = total_chars.max(1).min(MAX_SCORED_CHARS) as f64;
+    let c = total_chars.clamp(1, MAX_SCORED_CHARS) as f64;
 
     let term_alphabet = n.powf(constants.alpha);
     let term_accuracy = a.powf(constants.beta);

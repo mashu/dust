@@ -1,7 +1,7 @@
 use cw_core::{compute_char_pool, morse_for, MixedAutoLevelAxis, TrainingSettings};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::Icon;
+use crate::ui::widgets::{control_id, Icon};
 
 pub fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
     if pool.is_empty() {
@@ -85,7 +85,10 @@ pub fn ListenView(
                     h2 { class: "page-title", "Listen" }
                     p { class: "page-sub", "Play one character, or the whole unlocked pool." }
                 }
-                button { class: "btn btn-secondary btn-sm", onclick: move |_| on_back.call(()),
+                button {
+                    id: control_id("btn", "listen back"),
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| on_back.call(()),
                     Icon { name: "back" }
                     "Back"
                 }
@@ -104,6 +107,7 @@ pub fn ListenView(
                         };
                         rsx! {
                             button {
+                                id: control_id("chip", &ch.to_string()),
                                 class: class,
                                 onclick: move |_| selected.set(Some(i)),
                                 "{ch}"
@@ -128,13 +132,17 @@ pub fn ListenView(
             }
             div { class: "hero-actions",
                 if playing {
-                    button { class: "btn btn-secondary", onclick: move |_| on_stop.call(()),
+                    button {
+                        id: control_id("btn", "stop"),
+                        class: "btn btn-secondary",
+                        onclick: move |_| on_stop.call(()),
                         Icon { name: "stop" }
                         "Stop"
                     }
                 } else {
                     if let Some(ch) = current {
                         button {
+                            id: control_id("btn", "play"),
                             class: "btn btn-primary",
                             onclick: move |_| on_play.call(ch.to_string()),
                             Icon { name: "play" }
@@ -142,6 +150,7 @@ pub fn ListenView(
                         }
                     }
                     button {
+                        id: control_id("btn", "play all"),
                         class: "btn btn-secondary",
                         disabled: all_chars.is_empty(),
                         onclick: move |_| on_play.call(all_chars.clone()),

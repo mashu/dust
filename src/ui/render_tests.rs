@@ -492,7 +492,6 @@ mod interactions {
     use crate::ui::band::BandConditionsCard;
     use crate::ui::heatmap::ActivityHeatmap;
     use crate::ui::settings::SettingsView;
-    use dioxus::prelude::Key;
 
     #[component]
     fn HeatmapHarness() -> Element {
@@ -512,62 +511,31 @@ mod interactions {
         let mut ui = Ui::new(HeatmapHarness, ());
         assert!(ui.has("Tap a day for details."));
         assert!(ui.has("Practice calendar"));
-        // Two segments and one button per day.
-        assert_eq!(ui.count("click"), 16 * 7 + 2);
+        // One button per day, sixteen weeks of them.
+        assert_eq!(ui.controls("day-").len(), 16 * 7);
 
-        // A day with practice on it reports what was done.
-        let mut opened = false;
-        for index in 0..ui.count("click") {
-            ui.click(index);
-            if ui.has("2026-09-08 · 1 session") {
-                opened = true;
-                break;
-            }
-        }
-        assert!(opened, "a practised day should show its summary");
-        assert!(ui.has("chars"));
+        // Each day answers to its own date.
+        ui.click("day-2026-09-08");
+        assert!(ui.has("2026-09-08 · 1 session · 2 chars"));
         assert!(ui.has("accuracy"));
     }
 
     #[test]
     fn a_quiet_day_says_so() {
         let mut ui = Ui::new(HeatmapHarness, ());
-        let mut opened = false;
-        for index in 0..ui.count("click") {
-            ui.click(index);
-            if ui.has("no practice") {
-                opened = true;
-                break;
-            }
-        }
-        assert!(opened, "an empty day should say nothing happened");
+        ui.click("day-2026-09-09");
+        assert!(ui.has("2026-09-09 · no practice"));
     }
 
     #[test]
     fn the_calendar_can_be_coloured_by_accuracy() {
         let mut ui = Ui::new(HeatmapHarness, ());
         assert!(ui.has("More chars"));
-        let mut switched = None;
-        for index in 0..ui.count("click") {
-            ui.click(index);
-            if ui.has("Better copy") {
-                switched = Some(index);
-                break;
-            }
-        }
-        let accuracy = switched.expect("one of the segments colours by accuracy");
-        // Every day is coloured by how well it was copied, not how much.
+        ui.click("seg-accuracy");
+        assert!(ui.has("Better copy"));
         assert!(ui.has("hsl("));
-        for index in 0..ui.count("click") {
-            if index == accuracy {
-                continue;
-            }
-            ui.click(index);
-            if ui.has("More chars") {
-                return;
-            }
-        }
-        panic!("nothing switched the calendar back to volume");
+        ui.click("seg-volume");
+        assert!(ui.has("More chars"));
     }
 
     #[test]
@@ -614,41 +582,51 @@ mod interactions {
         assert!(!ui.has("Model gain"));
         assert!(!ui.has("QSB slowly fades"));
 
-        // Press everything on the card: the help note and the advanced tuning
-        // both open, and no control leaves the card in a state it cannot draw.
-        let mut seen_help = false;
-        let mut seen_advanced = false;
-        let mut index = 0;
-        while index < ui.count("click") {
-            ui.click(index);
-            seen_help |= ui.has("QSB slowly fades");
-            seen_advanced |= ui.has("Model gain");
-            index += 1;
-        }
-        assert!(seen_help, "the help note should open");
-        assert!(seen_advanced, "the advanced tuning should open");
+        ui.open_disclosures();
+        assert!(ui.has("QSB slowly fades"), "the help should have opened");
+        assert!(ui.has("Model gain"), "the tuning should have opened");
 
-        // Every slider on the opened card can be moved without breaking it.
-        let mut index = 0;
-        while index < ui.count("input") {
-            ui.input(index, "0.5");
-            index += 1;
+        // Every advanced slider is moved, and the readout beside it has to
+        // follow: a tuning control that never reaches the settings is a dead
+        // one, and it would look exactly like this if it were.
+        for (slider, moved_to, reads) in [
+            ("slider-model-gain", "3.5", "3.5×"),
+            ("slider-excitation", "40", "40/s"),
+            ("slider-resonance-q", "120", "120"),
+            ("slider-decay", "0.75", "0.750"),
+            ("slider-filter-offset", "-250", "-250 Hz"),
+            ("slider-wobble-depth", "400", "400 Hz"),
+            ("slider-wobble-rate", "2.5", "2.50 Hz"),
+        ] {
+            ui.type_into(slider, moved_to);
+            assert!(
+                ui.has(&format!("class=\"slider-value\">{reads}<")),
+                "{slider} should read {reads}"
+            );
         }
-        let mut index = 0;
-        while index < ui.count("change") {
-            ui.change(index, "true");
-            ui.change(index, "false");
-            index += 1;
+
+        // And nothing on the card breaks it, whichever panel is open.
+        for control in ui.controls("") {
+            ui.open_disclosures();
+            if ui.shows(&control) {
+                ui.click(&control);
+            }
+            if ui.shows(&control) {
+                ui.type_into(&control, "0.5");
+            }
+            if ui.shows(&control) {
+                ui.commit(&control, "true");
+            }
         }
-        assert!(!ui.html().is_empty());
+        assert!(ui.has("Band conditions"));
     }
 
     #[test]
     fn a_running_preview_offers_a_stop_button() {
         let mut ui = Ui::new(BandHarness, BandHarnessProps { previewing: true });
-        assert!(ui.has("Stop"));
-        ui.click(0);
-        assert!(!ui.html().is_empty());
+        assert!(ui.has("Looping “CQ”"));
+        ui.click("btn-band-stop");
+        assert!(ui.has("Band conditions"));
     }
 
     #[component]
@@ -670,18 +648,8 @@ mod interactions {
     fn a_sample_that_is_playing_offers_a_stop_button() {
         let mut ui = Ui::new(SettingsHarness, ());
         assert!(ui.has("test-chip playing"));
-        // Every control on the page, pressed in turn.
-        let mut index = 0;
-        while index < ui.count("click") {
-            ui.click(index);
-            index += 1;
-        }
-        let mut index = 0;
-        while index < ui.count("input") {
-            ui.input(index, "2");
-            index += 1;
-        }
-        assert!(!ui.html().is_empty());
+        ui.click("btn-sample-stop");
+        assert!(ui.has("Keying envelope"));
     }
 
     #[component]
@@ -715,10 +683,10 @@ mod interactions {
         assert!(ui.has("answer locked"));
         assert!(ui.has("Listening…"));
         // The keypress is swallowed rather than confirming the group.
-        ui.keydown(0, Key::Enter);
+        ui.press_enter("group-input-0");
         assert!(!ui.has("confirmed"));
         // Focusing a group reports it upwards.
-        ui.focus(0);
+        ui.focus("group-input-0");
         assert!(ui.has("group focused"));
     }
 }

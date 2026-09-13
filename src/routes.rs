@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
-use cw_core::{compute_char_pool, GroupSession, SessionEvent, SessionResult, TrainingSettings};
+use cw_core::{compute_char_pool, SessionEvent};
 use dioxus::prelude::*;
 
-use crate::engine::{current_auto_progress, AppState, Screen};
+use crate::engine::{current_auto_progress, AppState, Screen, SessionSignals};
 use crate::session_runtime::send_command;
 use crate::time::local_date_string;
 use crate::ui::home::Home;
@@ -13,26 +13,56 @@ use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::training::TrainingView;
 
+/// What the screens show beyond the session itself: whichever preview is
+/// running, and the sample chip that is lit.
+#[derive(Clone, PartialEq)]
+pub struct ViewState {
+    pub previewing: bool,
+    pub listen_playing: bool,
+    pub sample_playing: Option<String>,
+}
+
+/// What a screen can ask the app to do for it.
+#[derive(Clone, Copy)]
+pub struct AppCallbacks {
+    pub start_training: EventHandler<()>,
+    pub go_home: EventHandler<()>,
+    pub go_listen: EventHandler<()>,
+    pub start_band_preview: EventHandler<()>,
+    pub stop_preview: EventHandler<()>,
+    pub start_listen: EventHandler<String>,
+    pub play_sample: EventHandler<String>,
+}
+
 pub fn app_routes(
-    screen: Signal<Screen>,
-    settings: Signal<TrainingSettings>,
-    sessions: Signal<Vec<SessionResult>>,
-    runtime: Signal<Option<GroupSession>>,
-    result: Signal<Option<SessionResult>>,
-    auto_message: Signal<Option<String>>,
-    toast: Signal<Option<String>>,
-    previewing: bool,
-    listen_playing: bool,
-    sample_playing: Option<String>,
+    signals: SessionSignals,
+    view: ViewState,
     app: Rc<AppState>,
-    start_training: EventHandler<()>,
-    go_home: EventHandler<()>,
-    go_listen: EventHandler<()>,
-    start_band_preview: EventHandler<()>,
-    stop_preview: EventHandler<()>,
-    start_listen: EventHandler<String>,
-    play_sample: EventHandler<String>,
+    callbacks: AppCallbacks,
 ) -> Element {
+    let SessionSignals {
+        screen,
+        runtime,
+        result,
+        auto_message,
+        sessions,
+        settings,
+        toast: _,
+    } = signals;
+    let ViewState {
+        previewing,
+        listen_playing,
+        sample_playing,
+    } = view;
+    let AppCallbacks {
+        start_training,
+        go_home,
+        go_listen,
+        start_band_preview,
+        stop_preview,
+        start_listen,
+        play_sample,
+    } = callbacks;
     match screen() {
         Screen::Home => {
             let pool: String = compute_char_pool(&settings()).into_iter().collect();
@@ -98,69 +128,19 @@ pub fn app_routes(
                         repeat_total: view.repeat_total,
                         repeat_done: view.repeat_done,
                         on_change: move |(idx, value): (usize, String)| {
-                            send_command(
-                                (*app_change).clone(),
-                                runtime,
-                                screen,
-                                result,
-                                auto_message,
-                                sessions,
-                                settings,
-                                toast,
-                                SessionEvent::Input { index: idx, text: value },
-                            );
+                            send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
                         },
                         on_confirm: move |_idx| {
-                            send_command(
-                                (*app_confirm).clone(),
-                                runtime,
-                                screen,
-                                result,
-                                auto_message,
-                                sessions,
-                                settings,
-                                toast,
-                                SessionEvent::Confirm,
-                            );
+                            send_command((*app_confirm).clone(), signals, SessionEvent::Confirm);
                         },
                         on_focus: move |idx| {
-                            send_command(
-                                (*app_focus).clone(),
-                                runtime,
-                                screen,
-                                result,
-                                auto_message,
-                                sessions,
-                                settings,
-                                toast,
-                                SessionEvent::Focus { index: idx },
-                            );
+                            send_command((*app_focus).clone(), signals, SessionEvent::Focus { index: idx });
                         },
                         on_submit: move |_| {
-                            send_command(
-                                (*app_submit).clone(),
-                                runtime,
-                                screen,
-                                result,
-                                auto_message,
-                                sessions,
-                                settings,
-                                toast,
-                                SessionEvent::FinishNow,
-                            );
+                            send_command((*app_submit).clone(), signals, SessionEvent::FinishNow);
                         },
                         on_stop: move |_| {
-                            send_command(
-                                (*app_stop).clone(),
-                                runtime,
-                                screen,
-                                result,
-                                auto_message,
-                                sessions,
-                                settings,
-                                toast,
-                                SessionEvent::Abort,
-                            );
+                            send_command((*app_stop).clone(), signals, SessionEvent::Abort);
                         },
                     }
                 }
@@ -195,35 +175,35 @@ mod tests {
     /// results screen with nothing to show.
     #[component]
     fn EmptyRoute(screen: Screen) -> Element {
-        let screen = use_signal(|| screen);
-        let settings = use_signal(test_settings);
-        let sessions = use_signal(Vec::new);
-        let runtime = use_signal(|| None);
-        let result = use_signal(|| None);
-        let auto_message = use_signal(|| None);
-        let toast = use_signal(|| None);
+        let signals = SessionSignals {
+            screen: use_signal(|| screen),
+            runtime: use_signal(|| None),
+            result: use_signal(|| None),
+            auto_message: use_signal(|| None),
+            sessions: use_signal(Vec::new),
+            settings: use_signal(test_settings),
+            toast: use_signal(|| None),
+        };
         let app = use_hook(|| Rc::new(AppState::new()));
         let noop = EventHandler::new(move |_| {});
         let noop_text = EventHandler::new(move |_: String| {});
         app_routes(
-            screen,
-            settings,
-            sessions,
-            runtime,
-            result,
-            auto_message,
-            toast,
-            false,
-            false,
-            None,
+            signals,
+            ViewState {
+                previewing: false,
+                listen_playing: false,
+                sample_playing: None,
+            },
             app.clone(),
-            noop,
-            noop,
-            noop,
-            noop,
-            noop,
-            noop_text,
-            noop_text,
+            AppCallbacks {
+                start_training: noop,
+                go_home: noop,
+                go_listen: noop,
+                start_band_preview: noop,
+                stop_preview: noop,
+                start_listen: noop_text,
+                play_sample: noop_text,
+            },
         )
     }
 
@@ -251,9 +231,8 @@ mod tests {
             );
             assert!(ui.has("Start training"));
             // Both hero buttons report upwards without anything behind them.
-            for index in 0..ui.count("click") {
-                ui.click(index);
-            }
+            ui.click("btn-start-training");
+            ui.click("btn-listen-to-letters");
             assert!(ui.has("Start training"));
         });
     }

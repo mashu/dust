@@ -1,7 +1,7 @@
 use cw_core::{QrmProfile, TrainingSettings};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{Icon, Seg, SliderField, Switch};
+use crate::ui::widgets::{control_id, Icon, Seg, SliderField, Switch, DISCLOSURE};
 
 #[component]
 pub fn BandConditionsCard(
@@ -26,6 +26,7 @@ pub fn BandConditionsCard(
                 div { class: "card-tools",
                     if previewing {
                         button {
+                            id: control_id("btn", "band stop"),
                             class: "btn btn-secondary btn-sm",
                             onclick: move |_| on_stop.call(()),
                             Icon { name: "stop" }
@@ -33,6 +34,7 @@ pub fn BandConditionsCard(
                         }
                     } else {
                         button {
+                            id: control_id("btn", "band preview"),
                             class: "btn btn-primary btn-sm",
                             onclick: move |_| on_preview.call(()),
                             Icon { name: "play" }
@@ -40,7 +42,8 @@ pub fn BandConditionsCard(
                         }
                     }
                     button {
-                        class: "icon-btn",
+                        id: control_id(DISCLOSURE, "band help"),
+                        class: if show_help() { "icon-btn open" } else { "icon-btn" },
                         title: "What is this?",
                         aria_label: "What is this?",
                         onclick: move |_| show_help.set(!show_help()),
@@ -97,6 +100,7 @@ pub fn BandConditionsCard(
             }
             SliderField {
                 label: "Intensity".to_string(),
+                id: "slider-qrn-intensity".to_string(),
                 value_label: format!("{:.0}%", s.band.qrn_level * 100.0),
                 value: s.band.qrn_level,
                 min: 0.0,
@@ -113,6 +117,7 @@ pub fn BandConditionsCard(
             }
             SliderField {
                 label: "Intensity".to_string(),
+                id: "slider-qrm-intensity".to_string(),
                 value_label: format!("{:.0}%", s.band.qrm_level * 100.0),
                 value: s.band.qrm_level,
                 min: 0.0,
@@ -126,22 +131,26 @@ pub fn BandConditionsCard(
                 div { class: "segmented",
                     Seg {
                         label: "Whistle".to_string(),
+                        id: "seg-qrm-whistle".to_string(),
                         active: s.band.qrm_profile == QrmProfile::Whistle,
                         onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Whistle,
                     }
                     Seg {
                         label: "Ringing".to_string(),
+                        id: "seg-qrm-ringing".to_string(),
                         active: s.band.qrm_profile == QrmProfile::Ringing,
                         onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Ringing,
                     }
                     Seg {
                         label: "Mixed".to_string(),
+                        id: "seg-qrm-mixed".to_string(),
                         active: s.band.qrm_profile == QrmProfile::Mixed,
                         onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Mixed,
                     }
                 }
             }
             button {
+                id: control_id(DISCLOSURE, "band advanced"),
                 class: if show_advanced() { "advanced-toggle open" } else { "advanced-toggle" },
                 onclick: move |_| show_advanced.set(!show_advanced()),
                 span {

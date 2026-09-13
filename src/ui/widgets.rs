@@ -32,6 +32,44 @@ fn pct_between(value: f64, min: f64, max: f64) -> f64 {
     (((value - min) / (max - min)) * 100.0).clamp(0.0, 100.0)
 }
 
+/// The id prefix for a button whose only job is to reveal more of the page.
+///
+/// It is a convention with teeth: screen-wide sweeps open every control named
+/// this way before they look for anything else, and a disclosure has to carry
+/// an `open` class while its panel is up so they can tell it worked.
+pub const DISCLOSURE: &str = "disclosure";
+
+/// A stable element id for a control, built from the label it shows.
+///
+/// Every interactive control carries one: it is what a stylesheet, an anchor or
+/// a test reaches for, and deriving it from the label keeps the two in step.
+///
+/// The prefix names the kind of control — `btn`, `slider`, `switch`, `seg` and
+/// so on. One of them is load-bearing: `disclosure` marks a button whose only
+/// job is to reveal more of the page. Screen-wide sweeps open every one of
+/// those before they look for controls, so a panel that hides behind a toggle
+/// is still tested.
+pub fn control_id(prefix: &str, label: &str) -> String {
+    let mut slug = String::new();
+    let mut gap = false;
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if gap && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.extend(ch.to_lowercase());
+            gap = false;
+        } else {
+            gap = true;
+        }
+    }
+    if slug.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}-{slug}")
+    }
+}
+
 /// Trim trailing zeros so 18.0 reads as "18" and 0.75 stays "0.75".
 pub fn pretty_number(value: f64) -> String {
     let rounded = (value * 1000.0).round() / 1000.0;
@@ -227,6 +265,7 @@ pub fn ProgressHeader(current: usize, total: usize, status: String, live: bool) 
 pub fn ModePill(label: String, active: bool, onclick: EventHandler<()>) -> Element {
     rsx! {
         button {
+            id: control_id("pill", &label),
             class: if active { "pill active" } else { "pill" },
             onclick: move |_| onclick.call(()),
             "{label}"
@@ -236,9 +275,17 @@ pub fn ModePill(label: String, active: bool, onclick: EventHandler<()>) -> Eleme
 
 /// One segment of a `.segmented` control.
 #[component]
-pub fn Seg(label: String, active: bool, onclick: EventHandler<()>) -> Element {
+pub fn Seg(
+    label: String,
+    active: bool,
+    /// Overrides the id derived from the label, where one label appears twice
+    /// on the same screen.
+    id: Option<String>,
+    onclick: EventHandler<()>,
+) -> Element {
     rsx! {
         button {
+            id: id.unwrap_or_else(|| control_id("seg", &label)),
             class: if active { "seg active" } else { "seg" },
             onclick: move |_| onclick.call(()),
             "{label}"
@@ -263,6 +310,7 @@ pub fn Switch(
             }
             span { class: if checked { "switch on" } else { "switch" },
                 input {
+                    id: control_id("switch", &title),
                     r#type: "checkbox",
                     checked,
                     onchange: move |e| onchange.call(e.checked()),
@@ -282,6 +330,8 @@ pub fn SliderField(
     max: f64,
     step: f64,
     disabled: bool,
+    /// Overrides the id derived from the label, where one label appears twice.
+    id: Option<String>,
     onchange: EventHandler<f64>,
 ) -> Element {
     let pct = pct_between(value, min, max);
@@ -292,6 +342,7 @@ pub fn SliderField(
                 span { class: "slider-value", "{value_label}" }
             }
             input {
+                id: id.unwrap_or_else(|| control_id("slider", &label)),
                 r#type: "range",
                 min: "{min}",
                 max: "{max}",
@@ -317,13 +368,18 @@ pub fn NumberField(
     max: f64,
     step: f64,
     unit: Option<String>,
+    /// Overrides the id derived from the label, for fields whose label is not
+    /// unique or not stable.
+    id: Option<String>,
     onchange: EventHandler<f64>,
 ) -> Element {
+    let name = id.unwrap_or_else(|| control_id("number", &label));
     rsx! {
         div { class: "field",
             label { "{label}" }
             div { class: "stepper",
                 button {
+                    id: control_id("less", &name),
                     class: "step",
                     r#type: "button",
                     aria_label: "Decrease",
@@ -332,6 +388,7 @@ pub fn NumberField(
                     "−"
                 }
                 input {
+                    id: name.clone(),
                     r#type: "number",
                     inputmode: "decimal",
                     min: "{min}",
@@ -353,6 +410,7 @@ pub fn NumberField(
                     span { class: "unit", "{unit}" }
                 }
                 button {
+                    id: control_id("more", &name),
                     class: "step",
                     r#type: "button",
                     aria_label: "Increase",
@@ -400,6 +458,7 @@ pub fn LinkedRange(
                 div { class: "row", style: "gap: 0.45rem;",
                     span { class: "range-value", "{summary}" }
                     button {
+                        id: control_id("link", &label),
                         class: if linked { "link-toggle on" } else { "link-toggle" },
                         r#type: "button",
                         onclick: move |_| on_link.call(!linked),
@@ -414,6 +473,7 @@ pub fn LinkedRange(
             if linked {
                 NumberField {
                     label: format!("Value ({unit})"),
+                    id: control_id("fixed", &label),
                     value: min_value,
                     min: min_bound,
                     max: max_bound,
@@ -424,6 +484,7 @@ pub fn LinkedRange(
                 div { class: "field-grid",
                     NumberField {
                         label: format!("Min ({unit})"),
+                        id: control_id("from", &label),
                         value: min_value,
                         min: min_bound,
                         max: max_bound,
@@ -437,6 +498,7 @@ pub fn LinkedRange(
                     }
                     NumberField {
                         label: format!("Max ({unit})"),
+                        id: control_id("to", &label),
                         value: max_value,
                         min: min_bound,
                         max: max_bound,
@@ -518,7 +580,7 @@ pub fn ScoreRing(pct: f64, value: String, caption: String) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{nudge, parse_number_input, pct_between, pretty_number};
+    use super::{control_id, nudge, parse_number_input, pct_between, pretty_number};
 
     #[test]
     fn typing_below_min_is_kept_until_commit() {
@@ -558,5 +620,18 @@ mod tests {
         assert_eq!(pretty_number(18.0), "18");
         assert_eq!(pretty_number(0.75), "0.75");
         assert_eq!(pretty_number(0.1 + 0.2), "0.3");
+    }
+
+    #[test]
+    fn a_control_id_is_the_label_slugged_under_its_prefix() {
+        assert_eq!(control_id("btn", "Start training"), "btn-start-training");
+        assert_eq!(control_id("seg", "CW Academy"), "seg-cw-academy");
+        assert_eq!(control_id("day", "2026-09-08"), "day-2026-09-08");
+        assert_eq!(control_id("number", "Level (1–40)"), "number-level-1-40");
+        // Punctuation and accents never reach the id.
+        assert_eq!(control_id("field", "Min (°)"), "field-min");
+        // A label with nothing usable in it leaves the prefix on its own.
+        assert_eq!(control_id("btn", "—"), "btn");
+        assert_eq!(control_id("btn", ""), "btn");
     }
 }

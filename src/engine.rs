@@ -23,6 +23,20 @@ const PLAY_ATTEMPTS: u32 = 3;
 /// driven without a sound card.
 pub type BackendFactory = Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>>;
 
+/// Everything a session writes back into the app: the screen it is on, the
+/// session in flight, the history it joins, and the messages it raises.
+/// Signals are cheap to copy, so this travels by value.
+#[derive(Clone, Copy)]
+pub struct SessionSignals {
+    pub screen: Signal<Screen>,
+    pub runtime: Signal<Option<GroupSession>>,
+    pub result: Signal<Option<SessionResult>>,
+    pub auto_message: Signal<Option<String>>,
+    pub sessions: Signal<Vec<SessionResult>>,
+    pub settings: Signal<TrainingSettings>,
+    pub toast: Signal<Option<String>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Home,
@@ -215,7 +229,7 @@ async fn schedule_text(
                 let Some(player) = slot.as_mut() else {
                     return Err("Audio is unavailable.".into());
                 };
-                return player.start_text(text, settings, &mut *rng);
+                return player.start_text(text, settings, &mut rng);
             }
             _ => sleep_ms(POLL_MS).await,
         }
@@ -236,16 +250,16 @@ pub async fn sleep_cancelable(ms: u32, gen: u64, session_gen: Rc<Cell<u64>>) -> 
     session_gen.get() == gen
 }
 
-pub fn finish_session(
-    app: AppState,
-    mut runtime: Signal<Option<GroupSession>>,
-    mut screen: Signal<Screen>,
-    mut result: Signal<Option<SessionResult>>,
-    mut auto_message: Signal<Option<String>>,
-    mut sessions: Signal<Vec<SessionResult>>,
-    mut settings_sig: Signal<TrainingSettings>,
-    mut toast: Signal<Option<String>>,
-) {
+pub fn finish_session(app: AppState, signals: SessionSignals) {
+    let SessionSignals {
+        mut screen,
+        mut runtime,
+        mut result,
+        mut auto_message,
+        mut sessions,
+        settings: mut settings_sig,
+        mut toast,
+    } = signals;
     if matches!(screen(), Screen::Results) || runtime.read().is_none() {
         return;
     }
@@ -584,21 +598,8 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             h.start_training();
-            let (app, runtime, screen) = (h.app.clone(), h.runtime, h.screen);
-            let (result, auto_message, sessions, settings, toast) =
-                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
-            h.in_app(|| {
-                finish_session(
-                    app,
-                    runtime,
-                    screen,
-                    result,
-                    auto_message,
-                    sessions,
-                    settings,
-                    toast,
-                )
-            });
+            let (app, signals) = (h.app.clone(), h.signals());
+            h.in_app(|| finish_session(app, signals));
             h.pump();
             assert_eq!(h.screen(), Screen::Home);
             assert!(h.sessions.peek().is_empty());
@@ -610,21 +611,8 @@ mod tests {
     fn finishing_without_a_session_at_all_is_a_no_op() {
         run(|| async {
             let mut h = Harness::new();
-            let (app, runtime, screen) = (h.app.clone(), h.runtime, h.screen);
-            let (result, auto_message, sessions, settings, toast) =
-                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
-            h.in_app(|| {
-                finish_session(
-                    app,
-                    runtime,
-                    screen,
-                    result,
-                    auto_message,
-                    sessions,
-                    settings,
-                    toast,
-                )
-            });
+            let (app, signals) = (h.app.clone(), h.signals());
+            h.in_app(|| finish_session(app, signals));
             h.pump();
             assert_eq!(h.screen(), Screen::Home);
         });
@@ -646,21 +634,8 @@ mod tests {
             let session = h.app.machine.borrow().as_ref().map(|m| m.session().clone());
             h.runtime.set(session);
             h.pump();
-            let (app, runtime, screen) = (h.app.clone(), h.runtime, h.screen);
-            let (result, auto_message, sessions, settings, toast) =
-                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
-            h.in_app(|| {
-                finish_session(
-                    app,
-                    runtime,
-                    screen,
-                    result,
-                    auto_message,
-                    sessions,
-                    settings,
-                    toast,
-                )
-            });
+            let (app, signals) = (h.app.clone(), h.signals());
+            h.in_app(|| finish_session(app, signals));
             h.pump();
             assert_eq!(h.screen(), Screen::Home);
             assert!(h.sessions.peek().is_empty());
@@ -803,36 +778,28 @@ mod tests {
     #[test]
     fn a_send_asked_for_after_the_session_moved_on_never_starts() {
         run(|| async {
-            let h = Harness::new();
+            let mut h = Harness::new();
             let settings = test_settings();
             let gen = h.app.takeover_audio(&settings).expect("player");
+            // The audio was claimed by something else before the send began.
             h.app.bump_session();
             h.recorder.clear();
             let app = h.app.clone();
-            let result =
-                h.in_app(|| futures_lite_block_on(play_text_now(&app, gen, "CQ", &settings)));
-            assert!(matches!(result, Err(PlayError::Cancelled)));
+            let outcome = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let sink = std::rc::Rc::clone(&outcome);
+            h.in_app(|| {
+                spawn(async move {
+                    *sink.borrow_mut() = Some(play_text_now(&app, gen, "CQ", &settings).await);
+                });
+            });
+            h.pump();
+            assert!(h.run_until(1_000, |_| outcome.borrow().is_some()).await);
+            assert!(matches!(
+                outcome.borrow().as_ref(),
+                Some(Err(PlayError::Cancelled))
+            ));
             assert!(h.texts().is_empty(), "nothing should have been sent");
         });
-    }
-
-    /// A tiny executor for a future that is already finished: the cancellation
-    /// checks return before the first await point.
-    fn futures_lite_block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-        fn noop(_: *const ()) {}
-        fn clone(ptr: *const ()) -> RawWaker {
-            RawWaker::new(ptr, &VTABLE)
-        }
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-        // Safety: the waker does nothing and holds no state.
-        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-        let mut context = Context::from_waker(&waker);
-        let mut future = Box::pin(future);
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(value) => value,
-            Poll::Pending => panic!("the future was expected to finish at once"),
-        }
     }
 
     #[test]

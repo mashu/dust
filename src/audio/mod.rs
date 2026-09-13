@@ -15,7 +15,6 @@ mod wait;
 mod web;
 
 #[cfg_attr(not(test), allow(unused_imports))]
-pub use wait::PLAYBACK_TAIL_MS;
 pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
 
 use cw_core::{FastrandRng, TrainingSettings};
@@ -249,7 +248,7 @@ pub mod fake {
                         .played
                         .get()
                         .saturating_add(crate::time::POLL_MS)
-                        .min(self.duration_ms.saturating_add(PLAYBACK_TAIL_MS));
+                        .min(self.duration_ms.saturating_add(wait::PLAYBACK_TAIL_MS));
                     self.played.set(played);
                     WaitFlags {
                         played_ms: Some(played),

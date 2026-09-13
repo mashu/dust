@@ -8,7 +8,7 @@ use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::listen::newest_index;
 use crate::ui::tips::TipsCarousel;
-use crate::ui::widgets::{pretty_number, Icon};
+use crate::ui::widgets::{control_id, pretty_number, Icon};
 
 fn level_summary(settings: &TrainingSettings) -> String {
     match settings.curriculum.char_set_mode {
@@ -140,11 +140,15 @@ pub fn Home(
                     }
                 }
                 div { class: "hero-actions",
-                    button { class: "btn btn-primary", onclick: move |_| on_start.call(()),
+                    button {
+                        id: control_id("btn", "start training"),
+                        class: "btn btn-primary",
+                        onclick: move |_| on_start.call(()),
                         Icon { name: "play" }
                         "Start training"
                     }
                     button {
+                        id: control_id("btn", "listen to letters"),
                         class: "btn btn-hero",
                         onclick: move |_| on_listen.call(()),
                         Icon { name: "headphones" }
