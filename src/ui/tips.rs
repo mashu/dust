@@ -29,3 +29,24 @@ pub fn TipsCarousel() -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{run, Ui};
+
+    #[test]
+    fn the_carousel_moves_on_by_itself_and_comes_back_round() {
+        run(|| async {
+            let mut ui = Ui::new(TipsCarousel, ());
+            assert!(ui.has(TIPS[0]));
+            for tip in TIPS.iter().skip(1) {
+                ui.advance(5_100).await;
+                assert!(ui.has(tip), "expected the next tip");
+            }
+            // Past the last one it starts again.
+            ui.advance(5_100).await;
+            assert!(ui.has(TIPS[0]));
+        });
+    }
+}

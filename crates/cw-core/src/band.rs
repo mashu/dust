@@ -40,7 +40,9 @@ impl Biquad {
 
     fn set_bandpass(&mut self, sample_rate: f64, f0: f64, q: f64) {
         let sr = sample_rate.max(1.0);
-        let freq = f0.clamp(20.0, sr * 0.45);
+        // Nyquist wins over the 20 Hz floor: at an absurdly low sample rate the
+        // upper bound would otherwise fall below the lower one and clamp panics.
+        let freq = f0.clamp(20.0, (sr * 0.45).max(20.0));
         let q = q.max(0.5);
         let omega = 2.0 * std::f64::consts::PI * freq / sr;
         let sin = omega.sin();
@@ -134,7 +136,7 @@ impl BandMixer {
         self.ringing_energy + (self.rng.f64() * 2.0 - 1.0) * 0.015
     }
 
-    fn wobble(t: f64, depth: f64, rate: f64) -> f64 {
+    pub(crate) fn wobble(t: f64, depth: f64, rate: f64) -> f64 {
         if depth <= 0.0 || rate <= 0.0 {
             0.0
         } else {
@@ -278,5 +280,127 @@ mod tests {
         let mut buf = vec![0.0f32; 2048];
         mixer.fill_background(&mut buf);
         assert!(buf.iter().all(|s| s.is_finite()));
+    }
+}
+
+#[cfg(test)]
+mod mixer_tests {
+    use super::*;
+
+    fn quiet() -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.band.qrn_enabled = false;
+        s.band.qrm_enabled = false;
+        s
+    }
+
+    #[test]
+    fn a_silent_band_needs_no_background_stream() {
+        assert!(!BandMixer::needs_background(&quiet()));
+
+        let mut static_only = quiet();
+        static_only.band.qrn_enabled = true;
+        static_only.band.qrn_level = 0.3;
+        assert!(BandMixer::needs_background(&static_only));
+
+        // Enabled at zero level is still silence.
+        static_only.band.qrn_level = 0.0;
+        assert!(!BandMixer::needs_background(&static_only));
+
+        let mut interference = quiet();
+        interference.band.qrm_enabled = true;
+        interference.band.qrm_level = 0.2;
+        assert!(BandMixer::needs_background(&interference));
+    }
+
+    #[test]
+    fn a_silent_band_mixes_to_silence() {
+        let mut mixer = BandMixer::new(8_000, &quiet(), 1);
+        let mut out = [1.0f32; 64];
+        mixer.fill_background(&mut out);
+        assert!(out.iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn every_qrm_profile_produces_sound_and_stays_in_range() {
+        for profile in [QrmProfile::Whistle, QrmProfile::Ringing, QrmProfile::Mixed] {
+            let mut settings = quiet();
+            settings.band.qrm_enabled = true;
+            settings.band.qrm_level = 1.0;
+            settings.band.qrm_profile = profile;
+            settings.band.qrn_enabled = true;
+            settings.band.qrn_level = 1.0;
+            let mut mixer = BandMixer::new(8_000, &settings, 7);
+            let mut out = [0.0f32; 4_000];
+            mixer.fill_background(&mut out);
+            assert!(
+                out.iter().all(|s| (-1.0..=1.0).contains(s)),
+                "{profile:?} left the unit range"
+            );
+            assert!(
+                out.iter().any(|s| *s != 0.0),
+                "{profile:?} produced nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_still_band_does_not_wobble() {
+        assert_eq!(BandMixer::wobble(1.0, 0.0, 2.0), 0.0);
+        assert_eq!(BandMixer::wobble(1.0, 30.0, 0.0), 0.0);
+        assert!(BandMixer::wobble(0.25, 30.0, 1.0) > 0.0);
+    }
+
+    #[test]
+    fn a_zero_sample_rate_is_treated_as_one() {
+        let mut settings = quiet();
+        settings.band.qrn_enabled = true;
+        settings.band.qrn_level = 0.5;
+        let mut mixer = BandMixer::new(0, &settings, 1);
+        let mut out = [0.0f32; 8];
+        mixer.fill_background(&mut out);
+        assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn fading_is_off_unless_it_is_switched_on() {
+        assert_eq!(qsb_gain_at(1.0, false, 0.5, 0.2), 1.0);
+        assert_eq!(qsb_gain_at(1.0, true, 0.0, 0.2), 1.0);
+    }
+
+    #[test]
+    fn fading_stays_inside_its_depth() {
+        let depth: f64 = 0.5;
+        let range = depth.min(1.0 - QSB_MIN_GAIN);
+        let base = 1.0 - range / 2.0;
+        for step in 0..200 {
+            let t = f64::from(step) * 0.05;
+            let gain = f64::from(qsb_gain_at(t, true, depth, 0.5));
+            assert!(gain >= base - range / 2.0 - 1e-6, "{gain} too quiet");
+            assert!(gain <= base + range / 2.0 + 1e-6, "{gain} too loud");
+            assert!(gain >= QSB_MIN_GAIN - 1e-6);
+        }
+    }
+
+    #[test]
+    fn applying_fading_to_samples_leaves_an_empty_buffer_alone() {
+        let mut settings = TrainingSettings::default();
+        settings.band.qsb_enabled = true;
+        settings.band.qsb_depth = 0.6;
+        settings.band.qsb_rate_hz = 1.0;
+        apply_qsb(&mut [], 8_000, &settings);
+
+        let mut samples = vec![1.0f32; 8_000];
+        apply_qsb(&mut samples, 8_000, &settings);
+        assert!(samples.iter().all(|s| *s <= 1.0 && *s >= 0.0));
+        // A second of fading at 1 Hz has to move the level somewhere.
+        let min = samples.iter().copied().fold(f32::MAX, f32::min);
+        let max = samples.iter().copied().fold(f32::MIN, f32::max);
+        assert!(max - min > 0.1);
+
+        // A zero sample rate must not divide by zero.
+        let mut samples = vec![1.0f32; 4];
+        apply_qsb(&mut samples, 0, &settings);
+        assert!(samples.iter().all(|s| s.is_finite()));
     }
 }

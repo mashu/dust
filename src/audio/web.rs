@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::band::{QRM_OUTPUT_GAIN, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, RINGING_OUTPUT_GAIN};
-use cw_core::{plan_morse_playback, PlaybackPlan, QrmProfile, Rng, TrainingSettings};
+use cw_core::{plan_morse_playback, FastrandRng, PlaybackPlan, QrmProfile, TrainingSettings};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -10,7 +10,36 @@ use web_sys::{
     BiquadFilterType, GainNode, OscillatorType,
 };
 
+use super::{MorseBackend, PlaybackSignal, PlaybackWait, WaitFlags};
+
 const NOISE_BUFFER_SECONDS: f32 = 2.0;
+
+/// What a scheduled send looks like to a waiter.
+///
+/// Progress is read off the AudioContext's own clock, never the wall clock: a
+/// suspended context (autoplay policy, a backgrounded tab, iOS taking the
+/// audio away) freezes `current_time` while `setTimeout` keeps firing, and a
+/// send that is counted down on the wall clock would then be declared finished
+/// while the Morse has not been heard at all.
+struct WebSignal {
+    ctx: AudioContext,
+    stop_flag: Rc<Cell<bool>>,
+    epoch: Rc<Cell<u64>>,
+    mine: u64,
+    started_at: f64,
+}
+
+impl PlaybackSignal for WebSignal {
+    fn poll(&self) -> WaitFlags {
+        let played = ((self.ctx.current_time() - self.started_at) * 1000.0).max(0.0);
+        WaitFlags {
+            cancelled: self.stop_flag.get() || self.epoch.get() != self.mine,
+            finished: false,
+            failed: self.ctx.state() == AudioContextState::Closed,
+            played_ms: Some(played.min(f64::from(u32::MAX / 4)) as u32),
+        }
+    }
+}
 
 pub struct MorsePlayer {
     ctx: AudioContext,
@@ -93,11 +122,7 @@ impl MorsePlayer {
         }
     }
 
-    pub fn take_resume_promise(&self) -> Option<js_sys::Promise> {
-        self.pending_resume.borrow_mut().take()
-    }
-
-    pub fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+    fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
         let signature = settings.band_signature();
         if signature == self.band.signature {
             return Ok(());
@@ -128,41 +153,35 @@ impl MorsePlayer {
         }
     }
 
-    pub fn stop(&mut self) {
-        self.bump_epoch();
-        self.stop_flag.set(true);
-        self.release_group_gain();
-    }
-
-    pub fn shutdown(&mut self) {
-        self.stop();
-        self.band.stop_layers(&self.ctx, &self.cw_gain);
-    }
-
     pub fn reset_stop_flag(&self) {
         self.stop_flag.set(false);
     }
 
-    pub fn start_text(
+    fn start_send(
         &mut self,
         text: &str,
         settings: &TrainingSettings,
-        rng: &mut impl Rng,
-    ) -> Result<crate::audio::PlaybackWait, String> {
+        rng: &mut FastrandRng,
+    ) -> Result<PlaybackWait, String> {
         self.resume_from_gesture();
         self.release_group_gain();
         let epoch = self.bump_epoch();
         self.reset_stop_flag();
-        self.apply_band(settings)?;
+        self.apply_band_now(settings)?;
         let plan = plan_morse_playback(text, settings, rng);
+        let started_at = self.ctx.current_time();
         self.schedule_plan(&plan)?;
-        Ok(crate::audio::PlaybackWait::polled(
+        Ok(PlaybackWait::new(
             plan.duration_sec,
             plan.resolved_char_wpm,
             plan.resolved_effective_wpm,
-            self.stop_flag.clone(),
-            epoch,
-            self.epoch.clone(),
+            Rc::new(WebSignal {
+                ctx: self.ctx.clone(),
+                stop_flag: self.stop_flag.clone(),
+                epoch: self.epoch.clone(),
+                mine: epoch,
+                started_at,
+            }),
         ))
     }
 
@@ -223,6 +242,40 @@ impl MorsePlayer {
                 .map_err(|e| format!("stop: {e:?}"))?;
         }
         Ok(())
+    }
+}
+
+impl MorseBackend for MorsePlayer {
+    fn resume_from_gesture(&mut self) {
+        MorsePlayer::resume_from_gesture(self);
+    }
+
+    fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        self.apply_band_now(settings)
+    }
+
+    fn start_text(
+        &mut self,
+        text: &str,
+        settings: &TrainingSettings,
+        rng: &mut FastrandRng,
+    ) -> Result<PlaybackWait, String> {
+        self.start_send(text, settings, rng)
+    }
+
+    fn stop(&mut self) {
+        self.bump_epoch();
+        self.stop_flag.set(true);
+        self.release_group_gain();
+    }
+
+    fn shutdown(&mut self) {
+        MorseBackend::stop(self);
+        self.band.stop_layers(&self.ctx, &self.cw_gain);
+    }
+
+    fn take_resume_promise(&self) -> Option<js_sys::Promise> {
+        self.pending_resume.borrow_mut().take()
     }
 }
 

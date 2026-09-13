@@ -213,6 +213,87 @@ mod tests {
     }
 
     #[test]
+    fn a_session_with_an_unreadable_date_is_skipped() {
+        let days = aggregate_heatmap(&[session("not-a-date", 10, 1.0)]);
+        assert!(days.is_empty());
+    }
+
+    #[test]
+    fn an_out_of_range_accuracy_is_not_summed() {
+        let days = aggregate_heatmap(&[session("2026-07-17", 4, f64::NAN)]);
+        let day = days.get("2026-07-17").expect("day");
+        assert_eq!(day.sessions, 1);
+        assert_eq!(day.accuracy_sum, 0.0);
+    }
+
+    #[test]
+    fn a_day_without_sessions_has_no_average() {
+        let day = HeatmapDay {
+            date: "2026-07-17".into(),
+            chars: 0,
+            sessions: 0,
+            group_count: 0,
+            accuracy_sum: 0.0,
+        };
+        assert_eq!(day.avg_accuracy(), None);
+    }
+
+    #[test]
+    fn colours_run_from_empty_through_red_to_green() {
+        assert_eq!(color_for_count(0, 10), EMPTY_COLOR);
+        assert_eq!(color_for_count(10, 10), hsl_from_normalized(1.0));
+        assert_eq!(color_for_count(5, 0), hsl_from_normalized(1.0));
+        assert_eq!(hsl_from_normalized(0.0), "hsl(0, 75%, 45%)");
+        assert_eq!(hsl_from_normalized(1.0), "hsl(120, 75%, 45%)");
+        // Out-of-range input is clamped rather than producing a broken colour.
+        assert_eq!(hsl_from_normalized(-1.0), hsl_from_normalized(0.0));
+        assert_eq!(hsl_from_normalized(9.0), hsl_from_normalized(1.0));
+    }
+
+    #[test]
+    fn accuracy_colour_falls_back_when_a_day_has_no_accuracy() {
+        assert_eq!(color_for_accuracy(0, Some(1.0)), EMPTY_COLOR);
+        assert_eq!(color_for_accuracy(2, None), NO_ACCURACY_COLOR);
+        assert_eq!(color_for_accuracy(2, Some(1.0)), hsl_from_normalized(1.0));
+    }
+
+    #[test]
+    fn an_unreadable_today_draws_no_grid() {
+        assert!(build_heatmap(&[], "nonsense", 4, HeatmapColorMode::Volume).is_none());
+    }
+
+    #[test]
+    fn the_grid_paints_practice_and_leaves_the_future_empty() {
+        // 2026-07-17 is a Friday, so Saturday and Sunday are still ahead.
+        let grid = build_heatmap(
+            &[session("2026-07-17", 10, 0.5)],
+            "2026-07-17",
+            1,
+            HeatmapColorMode::Accuracy,
+        )
+        .expect("grid");
+        assert_eq!(grid.weeks, 1);
+        assert_eq!(grid.max_chars, 10);
+        let friday = grid.cells.iter().find(|c| c.date == "2026-07-17").unwrap();
+        assert_eq!(friday.sessions, 1);
+        assert_eq!(friday.group_count, 1);
+        assert_eq!(friday.avg_accuracy, Some(0.5));
+        assert_eq!(friday.color, hsl_from_normalized(0.5));
+        assert!(!friday.in_future);
+        let sunday = grid.cells.last().expect("sunday");
+        assert!(sunday.in_future);
+        assert_eq!(sunday.color, EMPTY_COLOR);
+        // Zero weeks still draws one.
+        assert_eq!(
+            build_heatmap(&[], "2026-07-17", 0, HeatmapColorMode::Volume)
+                .expect("grid")
+                .cells
+                .len(),
+            7
+        );
+    }
+
+    #[test]
     fn grid_starts_on_monday() {
         // 2026-07-17 is a Friday.
         let grid = build_heatmap(&[], "2026-07-17", 1, HeatmapColorMode::Volume).expect("grid");

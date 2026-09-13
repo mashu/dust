@@ -1,11 +1,14 @@
-# Coverage is collected on Linux desktop. iOS-only code (AVAudioSession) is
-# compiled out of that job, so patch coverage of those lines cannot pass a
-# strict target. Project still tracks overall coverage with a small leeway.
+# Coverage is collected on Linux desktop: `cargo llvm-cov` over cw-core and the
+# app, both uploaded here. iOS-only code (AVAudioSession) and the web backend
+# are compiled out of that job, so patch coverage of those lines cannot pass a
+# strict target.
 coverage:
   status:
     project:
       default:
-        target: auto
+        # The suite sits a little over 98%; anything that drops it below 97%
+        # has left something untested.
+        target: 97%
         threshold: 1%
     patch:
       default:

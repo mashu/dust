@@ -178,64 +178,112 @@ fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
 }
 
+/// Files under one directory. The directory is a field rather than a global so
+/// a test can point one at a scratch folder.
 #[cfg(feature = "native-runtime")]
-pub struct DesktopStore;
+pub struct DesktopStore {
+    root: std::path::PathBuf,
+}
+
+#[cfg(feature = "native-runtime")]
+impl DesktopStore {
+    pub fn new() -> Self {
+        Self { root: data_dir() }
+    }
+
+    #[cfg(test)]
+    pub fn at(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    fn ensure_dir(&self) -> &std::path::Path {
+        let _ = std::fs::create_dir_all(&self.root);
+        &self.root
+    }
+
+    fn write_json(&self, name: &str, value: &impl serde::Serialize) {
+        let dir = self.ensure_dir();
+        let path = dir.join(name);
+        let tmp = dir.join(format!(".{name}.tmp"));
+        let Ok(raw) = serde_json::to_string_pretty(value) else {
+            return;
+        };
+        // Write beside the file and rename, so a crash or a full disk cannot
+        // leave a half-written history behind.
+        if std::fs::write(&tmp, raw).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(tmp);
+        }
+    }
+
+    fn load_all_counters(&self) -> std::collections::BTreeMap<String, AutoLevelCounters> {
+        std::fs::read_to_string(self.root.join("auto_adjust.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(feature = "native-runtime")]
+impl Default for DesktopStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[cfg(feature = "native-runtime")]
 impl Store for DesktopStore {
     fn load_theme(&self) -> String {
-        std::fs::read_to_string(data_dir().join("theme.txt"))
+        std::fs::read_to_string(self.root.join("theme.txt"))
             .map(|raw| raw.trim().to_string())
             .unwrap_or_default()
     }
 
     fn save_theme(&self, theme: &str) {
-        let dir = ensure_dir();
+        let dir = self.ensure_dir();
         let _ = std::fs::write(dir.join("theme.txt"), theme);
     }
 
     fn load_settings(&self) -> TrainingSettings {
-        let raw = std::fs::read_to_string(data_dir().join("settings.json")).unwrap_or_default();
+        let raw = std::fs::read_to_string(self.root.join("settings.json")).unwrap_or_default();
         finalize_settings(recover_settings(&raw))
     }
 
     fn save_settings(&self, settings: &TrainingSettings) {
-        write_json("settings.json", settings);
+        self.write_json("settings.json", settings);
     }
 
     fn load_sessions(&self) -> Vec<SessionResult> {
-        let path = data_dir().join("sessions.json");
-        let Ok(raw) = std::fs::read_to_string(path) else {
+        let Ok(raw) = std::fs::read_to_string(self.root.join("sessions.json")) else {
             return Vec::new();
         };
         recover_sessions(&raw)
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) {
-        write_json("sessions.json", &trim_sessions(sessions));
+        self.write_json("sessions.json", &trim_sessions(sessions));
     }
 
     fn load_auto_counters(&self, settings: &TrainingSettings) -> AutoLevelCounters {
         let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
-        load_all_counters()
+        self.load_all_counters()
             .get(&mode.storage_key_for(settings))
             .copied()
             .unwrap_or_default()
     }
 
     fn save_auto_counters(&self, settings: &TrainingSettings, counters: AutoLevelCounters) {
-        let mut map = load_all_counters();
+        let mut map = self.load_all_counters();
         let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
         map.insert(mode.storage_key_for(settings), counters);
-        save_all_counters(&map);
+        self.write_json("auto_adjust.json", &map);
     }
 
     fn clear_auto_counters(&self, keys: &[String]) {
-        let mut map = load_all_counters();
+        let mut map = self.load_all_counters();
         for key in keys {
             map.remove(key);
         }
-        save_all_counters(&map);
+        self.write_json("auto_adjust.json", &map);
     }
 }
 
@@ -265,8 +313,15 @@ fn android_data_dir() -> Option<std::path::PathBuf> {
     Some(dir)
 }
 
+/// Where a desktop build keeps its files. `DUST_DATA_DIR` overrides it, which
+/// is what a portable install or a test run uses.
 #[cfg(feature = "native-runtime")]
 fn data_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("DUST_DATA_DIR") {
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
     #[cfg(target_os = "android")]
     if let Some(dir) = android_data_dir() {
         return dir;
@@ -276,54 +331,21 @@ fn data_dir() -> std::path::PathBuf {
         .join("dust")
 }
 
-#[cfg(feature = "native-runtime")]
-fn ensure_dir() -> std::path::PathBuf {
-    let dir = data_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
-
-#[cfg(feature = "native-runtime")]
-fn write_json(name: &str, value: &impl serde::Serialize) {
-    let dir = ensure_dir();
-    let path = dir.join(name);
-    let tmp = dir.join(format!(".{name}.tmp"));
-    let Ok(raw) = serde_json::to_string_pretty(value) else {
-        return;
-    };
-    if std::fs::write(&tmp, raw).is_ok() {
-        if std::fs::rename(&tmp, &path).is_err() {
-            let _ = std::fs::remove_file(tmp);
-        }
-    }
-}
-
-#[cfg(feature = "native-runtime")]
-fn auto_path() -> std::path::PathBuf {
-    data_dir().join("auto_adjust.json")
-}
-
-#[cfg(feature = "native-runtime")]
-fn load_all_counters() -> std::collections::BTreeMap<String, AutoLevelCounters> {
-    std::fs::read_to_string(auto_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
-}
-
-#[cfg(feature = "native-runtime")]
-fn save_all_counters(map: &std::collections::BTreeMap<String, AutoLevelCounters>) {
-    write_json("auto_adjust.json", map);
-}
-
-#[cfg(feature = "web")]
-pub fn default_store() -> WebStore {
+#[cfg(all(feature = "web", not(test)))]
+fn default_store() -> WebStore {
     WebStore
 }
 
-#[cfg(feature = "native-runtime")]
-pub fn default_store() -> DesktopStore {
-    DesktopStore
+#[cfg(all(feature = "native-runtime", not(test)))]
+fn default_store() -> DesktopStore {
+    DesktopStore::new()
+}
+
+/// Tests get their own store per thread, so nothing they save reaches the
+/// user's real history and parallel tests cannot see each other's writes.
+#[cfg(test)]
+fn default_store() -> memory::MemoryStore {
+    memory::MemoryStore
 }
 
 pub fn load_theme() -> String {
@@ -362,12 +384,84 @@ pub fn clear_auto_counters(keys: &[String]) {
     default_store().clear_auto_counters(keys)
 }
 
+/// An in-memory stand-in for the real store, one per test thread.
+#[cfg(test)]
+pub mod memory {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct Contents {
+        theme: String,
+        settings: Option<TrainingSettings>,
+        sessions: Vec<SessionResult>,
+        counters: BTreeMap<String, AutoLevelCounters>,
+    }
+
+    thread_local! {
+        static CONTENTS: RefCell<Contents> = RefCell::new(Contents::default());
+    }
+
+    pub struct MemoryStore;
+
+    /// Forget everything this thread saved.
+    pub fn reset() {
+        CONTENTS.with(|c| *c.borrow_mut() = Contents::default());
+    }
+
+    impl Store for MemoryStore {
+        fn load_theme(&self) -> String {
+            CONTENTS.with(|c| c.borrow().theme.clone())
+        }
+
+        fn save_theme(&self, theme: &str) {
+            CONTENTS.with(|c| c.borrow_mut().theme = theme.to_string());
+        }
+
+        fn load_settings(&self) -> TrainingSettings {
+            let stored = CONTENTS.with(|c| c.borrow().settings.clone());
+            finalize_settings(stored.unwrap_or_default())
+        }
+
+        fn save_settings(&self, settings: &TrainingSettings) {
+            CONTENTS.with(|c| c.borrow_mut().settings = Some(settings.clone()));
+        }
+
+        fn load_sessions(&self) -> Vec<SessionResult> {
+            CONTENTS.with(|c| c.borrow().sessions.clone())
+        }
+
+        fn save_sessions(&self, sessions: &[SessionResult]) {
+            CONTENTS.with(|c| c.borrow_mut().sessions = trim_sessions(sessions));
+        }
+
+        fn load_auto_counters(&self, settings: &TrainingSettings) -> AutoLevelCounters {
+            let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
+            let key = mode.storage_key_for(settings);
+            CONTENTS.with(|c| c.borrow().counters.get(&key).copied().unwrap_or_default())
+        }
+
+        fn save_auto_counters(&self, settings: &TrainingSettings, counters: AutoLevelCounters) {
+            let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
+            let key = mode.storage_key_for(settings);
+            CONTENTS.with(|c| c.borrow_mut().counters.insert(key, counters));
+        }
+
+        fn clear_auto_counters(&self, keys: &[String]) {
+            CONTENTS.with(|c| {
+                let mut contents = c.borrow_mut();
+                for key in keys {
+                    contents.counters.remove(key);
+                }
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        finalize_settings, package_from_cmdline, recover_sessions, recover_settings, trim_sessions,
-        MAX_SESSIONS,
-    };
+    use super::*;
     use cw_core::{CharSetMode, SessionResult, TrainingSettings};
 
     fn session(date: &str) -> SessionResult {
@@ -472,6 +566,199 @@ mod tests {
         let settings = finalize_settings(stored);
         assert_eq!(settings.playback.char_wpm_min, 80.0);
         assert_eq!(settings.curriculum.num_groups, 1);
+    }
+
+    /// A scratch directory that cleans up after itself.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("dust-test-{}-{name}-{unique}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn store(name: &str) -> (TempDir, DesktopStore) {
+        let dir = TempDir::new(name);
+        let store = DesktopStore::at(dir.0.clone());
+        (dir, store)
+    }
+
+    #[test]
+    fn a_fresh_install_reads_back_defaults() {
+        let (_dir, store) = store("fresh");
+        assert_eq!(store.load_theme(), "");
+        assert_eq!(
+            store.load_settings(),
+            finalize_settings(TrainingSettings::default())
+        );
+        assert!(store.load_sessions().is_empty());
+        assert_eq!(
+            store.load_auto_counters(&TrainingSettings::default()),
+            AutoLevelCounters::default()
+        );
+    }
+
+    #[test]
+    fn everything_written_comes_back() {
+        let (_dir, store) = store("roundtrip");
+        store.save_theme("dark");
+        assert_eq!(store.load_theme(), "dark");
+
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.num_groups = 7;
+        settings.playback.char_wpm_min = 24.0;
+        settings.playback.char_wpm_max = 24.0;
+        store.save_settings(&settings);
+        assert_eq!(store.load_settings().curriculum.num_groups, 7);
+        assert_eq!(store.load_settings().playback.char_wpm_min, 24.0);
+
+        store.save_sessions(&[session("2026-09-01"), session("2026-09-02")]);
+        let read = store.load_sessions();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[1].date, "2026-09-02");
+
+        let counters = AutoLevelCounters { above: 3, below: 1 };
+        store.save_auto_counters(&settings, counters);
+        assert_eq!(store.load_auto_counters(&settings), counters);
+
+        // Counters are kept per level, not shared.
+        let mut other = settings.clone();
+        other.curriculum.level = settings.curriculum.level + 1;
+        assert_eq!(
+            store.load_auto_counters(&other),
+            AutoLevelCounters::default()
+        );
+
+        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
+        store.clear_auto_counters(&[mode.storage_key_for(&settings)]);
+        assert_eq!(
+            store.load_auto_counters(&settings),
+            AutoLevelCounters::default()
+        );
+        // Clearing a key that was never written is harmless.
+        store.clear_auto_counters(&["nothing".to_string()]);
+    }
+
+    #[test]
+    fn history_is_trimmed_on_the_way_to_disk() {
+        let (_dir, store) = store("trim");
+        let all: Vec<SessionResult> = (0..MAX_SESSIONS + 5)
+            .map(|i| session(&format!("2026-01-{i:03}")))
+            .collect();
+        store.save_sessions(&all);
+        assert_eq!(store.load_sessions().len(), MAX_SESSIONS);
+    }
+
+    #[test]
+    fn a_damaged_file_does_not_take_the_rest_with_it() {
+        let (dir, store) = store("damaged");
+        store.save_theme("light");
+        std::fs::write(dir.0.join("sessions.json"), "{ not json").unwrap();
+        std::fs::write(dir.0.join("settings.json"), "{ not json").unwrap();
+        std::fs::write(dir.0.join("auto_adjust.json"), "{ not json").unwrap();
+        assert!(store.load_sessions().is_empty());
+        assert_eq!(
+            store.load_settings(),
+            finalize_settings(TrainingSettings::default())
+        );
+        assert_eq!(
+            store.load_auto_counters(&TrainingSettings::default()),
+            AutoLevelCounters::default()
+        );
+        assert_eq!(store.load_theme(), "light");
+    }
+
+    #[test]
+    fn a_theme_file_with_stray_whitespace_still_reads() {
+        let (dir, store) = store("theme");
+        std::fs::create_dir_all(&dir.0).unwrap();
+        std::fs::write(dir.0.join("theme.txt"), "  dark\n").unwrap();
+        assert_eq!(store.load_theme(), "dark");
+    }
+
+    #[test]
+    fn the_data_directory_can_be_pointed_somewhere_else() {
+        let dir = TempDir::new("datadir");
+        let previous = std::env::var_os("DUST_DATA_DIR");
+        // Safety: single-threaded within this test, and the variable is put
+        // back before anything else reads it.
+        unsafe { std::env::set_var("DUST_DATA_DIR", &dir.0) };
+        assert_eq!(data_dir(), dir.0);
+        assert_eq!(DesktopStore::new().root, dir.0);
+        assert_eq!(DesktopStore::default().root, dir.0);
+
+        // An empty value is ignored rather than writing to the current folder.
+        unsafe { std::env::set_var("DUST_DATA_DIR", "") };
+        assert_ne!(data_dir(), std::path::PathBuf::new());
+        assert!(data_dir().ends_with("dust"));
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("DUST_DATA_DIR", value),
+                None => std::env::remove_var("DUST_DATA_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_history_that_cannot_be_written_leaves_the_old_one_alone() {
+        let (dir, store) = store("unwritable");
+        store.save_sessions(&[session("2026-09-01")]);
+        assert_eq!(store.load_sessions().len(), 1);
+
+        // JSON has no way to write a NaN, so such a session is written as null
+        // and dropped on the way back in rather than breaking the whole file.
+        let mut broken = session("2026-09-02");
+        broken.accuracy = f64::NAN;
+        store.save_sessions(&[broken, session("2026-09-03")]);
+        let read = store.load_sessions();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].date, "2026-09-03");
+
+        // A destination that cannot be replaced leaves no scratch file behind.
+        std::fs::remove_file(dir.0.join("sessions.json")).unwrap();
+        std::fs::create_dir(dir.0.join("sessions.json")).unwrap();
+        store.save_sessions(&[session("2026-09-04")]);
+        assert!(!dir.0.join(".sessions.json.tmp").exists());
+    }
+
+    #[test]
+    fn the_in_memory_store_behaves_like_the_real_one() {
+        memory::reset();
+        assert_eq!(load_theme(), "");
+        save_theme("dark");
+        assert_eq!(load_theme(), "dark");
+
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.num_groups = 9;
+        save_settings(&settings);
+        assert_eq!(load_settings().curriculum.num_groups, 9);
+
+        save_sessions(&[session("2026-09-01")]);
+        assert_eq!(load_sessions().len(), 1);
+
+        let counters = AutoLevelCounters { above: 2, below: 0 };
+        save_auto_counters(&settings, counters);
+        assert_eq!(load_auto_counters(&settings), counters);
+        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
+        clear_auto_counters(&[mode.storage_key_for(&settings)]);
+        assert_eq!(load_auto_counters(&settings), AutoLevelCounters::default());
+
+        memory::reset();
+        assert_eq!(load_theme(), "");
+        assert!(load_sessions().is_empty());
     }
 
     #[test]

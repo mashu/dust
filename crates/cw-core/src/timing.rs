@@ -159,6 +159,9 @@ pub fn plan_morse_playback(
     let resolved_effective_wpm = resolve_effective_wpm(settings, resolved_char_wpm, rng);
     let extra = clamp_extra_spacing(settings.playback.extra_word_space_multiplier);
     let side_tone = resolve_tone_hz(settings, rng);
+    // Tone, speed and level are the station's, not the individual dit's: they
+    // are drawn once for the whole send, the way one operator sounds.
+    let target_gain = DEFAULT_TARGET_GAIN * resolve_volume(settings, rng);
 
     let dot_char = dot_seconds(resolved_char_wpm);
     let dot_eff = dot_seconds(resolved_effective_wpm);
@@ -193,8 +196,6 @@ pub fn plan_morse_playback(
             } else {
                 dash_duration
             };
-            let volume = resolve_volume(settings, rng);
-            let target_gain = DEFAULT_TARGET_GAIN * volume;
             let envelope = build_envelope_curve(duration, rise_time, target_gain, smoothing);
             events.push(ToneEvent {
                 start_sec: current_time,
@@ -414,5 +415,213 @@ mod tests {
         assert!(morse_for('#').is_none());
         assert!((a.duration_sec - b.duration_sec).abs() < 1e-12);
         assert_eq!(a.events.len(), b.events.len());
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use crate::rng::Rng;
+    use crate::settings::TrainingSettings;
+
+    struct Fixed(f64);
+
+    impl Rng for Fixed {
+        fn f64(&mut self) -> f64 {
+            self.0
+        }
+    }
+
+    fn fixed_speed(wpm: f64) -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.playback.char_wpm_min = wpm;
+        s.playback.char_wpm_max = wpm;
+        s.playback.effective_wpm_min = wpm;
+        s.playback.effective_wpm_max = wpm;
+        s.band.side_tone_min = 600.0;
+        s.band.side_tone_max = 600.0;
+        s
+    }
+
+    #[test]
+    fn one_send_keeps_one_tone_and_one_level_throughout() {
+        // Tone, speed and volume belong to the whole send, not to each symbol.
+        let mut settings = fixed_speed(20.0);
+        settings.band.side_tone_min = 400.0;
+        settings.band.side_tone_max = 900.0;
+        settings.band.volume_min = 0.2;
+        settings.band.volume_max = 1.0;
+        settings.band.link_volume = false;
+        let mut rng = crate::rng::FastrandRng(7);
+        let plan = plan_morse_playback("HELLO", &settings, &mut rng);
+        let first = &plan.events[0];
+        assert!(plan.events.len() > 4);
+        for event in &plan.events {
+            assert_eq!(event.frequency_hz, first.frequency_hz);
+            assert_eq!(event.target_gain, first.target_gain);
+        }
+        assert!((400.0..=900.0).contains(&first.frequency_hz));
+        assert!(first.target_gain <= DEFAULT_TARGET_GAIN);
+    }
+
+    #[test]
+    fn a_linked_volume_is_used_as_is() {
+        let mut settings = fixed_speed(20.0);
+        settings.band.link_volume = true;
+        settings.band.volume_min = 0.5;
+        settings.band.volume_max = 1.0;
+        let mut rng = Fixed(0.99);
+        let plan = plan_morse_playback("E", &settings, &mut rng);
+        assert_eq!(plan.events[0].target_gain, DEFAULT_TARGET_GAIN * 0.5);
+    }
+
+    #[test]
+    fn a_space_stretches_the_gap_to_a_word_space() {
+        let settings = fixed_speed(20.0);
+        let mut rng = Fixed(0.5);
+        let tight = plan_morse_playback("EE", &settings, &mut rng);
+        let mut rng = Fixed(0.5);
+        let spaced = plan_morse_playback("E E", &settings, &mut rng);
+        assert_eq!(tight.events.len(), spaced.events.len());
+        let gap = spaced.events[1].start_sec - tight.events[1].start_sec;
+        let dot = dot_seconds(20.0);
+        // A word space is seven dots where a character space is three.
+        assert!((gap - 4.0 * dot).abs() < 1e-9, "gap was {gap}");
+    }
+
+    #[test]
+    fn characters_with_no_morse_code_are_skipped() {
+        let settings = fixed_speed(20.0);
+        let mut rng = Fixed(0.5);
+        let plain = plan_morse_playback("EE", &settings, &mut rng);
+        let mut rng = Fixed(0.5);
+        let noisy = plan_morse_playback("E#E", &settings, &mut rng);
+        assert_eq!(plain.events.len(), noisy.events.len());
+        assert_eq!(plain.duration_sec, noisy.duration_sec);
+        // Text with nothing sendable in it plays nothing at all.
+        let mut rng = Fixed(0.5);
+        let empty = plan_morse_playback("###", &settings, &mut rng);
+        assert!(empty.events.is_empty());
+        assert_eq!(empty.duration_sec, 0.0);
+    }
+
+    #[test]
+    fn lower_case_is_sent_the_same_as_upper_case() {
+        let settings = fixed_speed(20.0);
+        let mut rng = Fixed(0.5);
+        let upper = plan_morse_playback("KM", &settings, &mut rng);
+        let mut rng = Fixed(0.5);
+        let lower = plan_morse_playback("km", &settings, &mut rng);
+        assert_eq!(upper.events.len(), lower.events.len());
+        assert_eq!(upper.duration_sec, lower.duration_sec);
+    }
+
+    #[test]
+    fn effective_speed_never_outruns_character_speed() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.link_char_to_effective = false;
+        settings.playback.char_wpm_min = 15.0;
+        settings.playback.char_wpm_max = 15.0;
+        settings.playback.effective_wpm_min = 40.0;
+        settings.playback.effective_wpm_max = 40.0;
+        let mut rng = Fixed(0.5);
+        let plan = plan_morse_playback("K", &settings, &mut rng);
+        assert_eq!(plan.resolved_char_wpm, 15.0);
+        assert_eq!(plan.resolved_effective_wpm, 15.0);
+    }
+
+    #[test]
+    fn a_nonsense_speed_is_treated_as_one_word_a_minute() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.char_wpm_min = 0.0;
+        settings.playback.char_wpm_max = 0.0;
+        settings.playback.effective_wpm_min = 0.0;
+        settings.playback.effective_wpm_max = 0.0;
+        let mut rng = Fixed(0.5);
+        let plan = plan_morse_playback("E", &settings, &mut rng);
+        assert_eq!(plan.resolved_char_wpm, 1.0);
+        assert_eq!(dot_seconds(0.0), 1.2);
+    }
+
+    #[test]
+    fn repeats_are_drawn_from_the_range_when_it_is_not_linked() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.link_group_repeat = false;
+        settings.playback.group_repeat_min = 2;
+        settings.playback.group_repeat_max = 4;
+        let mut low = Fixed(0.0);
+        assert_eq!(resolve_group_repeats(&settings, &mut low), 2);
+        let mut high = Fixed(0.999_999);
+        assert_eq!(resolve_group_repeats(&settings, &mut high), 4);
+
+        // Linked, the lower bound is used whatever the draw.
+        settings.playback.link_group_repeat = true;
+        let mut high = Fixed(0.999_999);
+        assert_eq!(resolve_group_repeats(&settings, &mut high), 2);
+
+        // Out-of-range settings are pulled back into the allowed span.
+        settings.playback.link_group_repeat = false;
+        settings.playback.group_repeat_min = 0;
+        settings.playback.group_repeat_max = 99;
+        let mut high = Fixed(0.999_999);
+        assert_eq!(
+            resolve_group_repeats(&settings, &mut high),
+            crate::settings::GROUP_REPEAT_MAX
+        );
+    }
+
+    #[test]
+    fn the_word_space_between_groups_follows_the_slower_speed() {
+        let fast = compute_group_gap_for_wpm(20.0, 20.0, 1.0);
+        let slow = compute_group_gap_for_wpm(20.0, 10.0, 1.0);
+        assert!(slow > fast);
+        // Extra spacing multiplies it.
+        assert_eq!(compute_group_gap_for_wpm(20.0, 20.0, 2.0), fast * 2);
+        // An effective speed above the character speed is ignored.
+        assert_eq!(compute_group_gap_for_wpm(20.0, 40.0, 1.0), fast);
+        // Nonsense speeds do not divide by zero.
+        assert!(compute_group_gap_for_wpm(0.0, 0.0, 0.0) > 0);
+        assert_eq!(clamp_extra_spacing(-1.0), EXTRA_SPACING_MULTIPLIER_MIN);
+    }
+
+    #[test]
+    fn the_envelope_preview_is_a_dit_then_a_dah() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.char_wpm_max = 20.0;
+        settings.band.steepness = 10.0;
+        let shape = envelope_shape(&settings);
+        assert_eq!(shape.wpm, 20.0);
+        assert!((shape.dot_sec - 0.06).abs() < 1e-9);
+        assert_eq!(shape.total_sec, shape.dot_sec * 5.0);
+        assert!(shape.rise_share_of_dit > 0.0 && shape.rise_share_of_dit <= 1.0);
+        assert!(shape.points.len() > 10);
+        // The trace starts and ends silent, and never leaves the unit range.
+        assert_eq!(shape.points.first().map(|p| p.gain), Some(0.0));
+        assert_eq!(shape.points.last().map(|p| p.gain), Some(0.0));
+        assert!(shape.points.iter().all(|p| (0.0..=1.0).contains(&p.gain)));
+        // The dah starts two dits in.
+        assert!(shape
+            .points
+            .iter()
+            .any(|p| (p.t_sec - shape.dot_sec * 2.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn a_rise_longer_than_the_dit_still_draws_a_shape() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.char_wpm_min = 60.0;
+        settings.playback.char_wpm_max = 60.0;
+        settings.band.steepness = 50.0;
+        let shape = envelope_shape(&settings);
+        assert_eq!(shape.rise_share_of_dit, 1.0);
+        assert!(shape.points.iter().all(|p| p.gain.is_finite()));
+    }
+
+    #[test]
+    fn an_envelope_with_no_room_for_a_ramp_is_still_two_points() {
+        let curve = build_envelope_curve(0.0, 0.0, 1.0, 0.5);
+        assert!(curve.len() >= 2);
+        assert!(curve.iter().all(|g| g.is_finite()));
     }
 }

@@ -9,6 +9,8 @@ mod engine;
 mod persist;
 mod routes;
 mod session_runtime;
+#[cfg(test)]
+mod testing;
 mod theme;
 mod time;
 mod ui;
@@ -24,6 +26,19 @@ fn themed_document_head() -> String {
         r#"<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional" media="print" onload="this.media='all'">"#,
     );
     head
+}
+
+#[cfg(all(test, feature = "desktop"))]
+mod tests {
+    #[test]
+    fn the_desktop_head_carries_the_stylesheet_and_the_fonts() {
+        let head = super::themed_document_head();
+        assert!(head.starts_with("<style>"));
+        assert!(head.contains(".app-root"), "the app stylesheet is inlined");
+        assert!(head.contains("fonts.googleapis.com"));
+        // The font sheet must not block the first paint.
+        assert!(head.contains("media=\"print\""));
+    }
 }
 
 fn main() {

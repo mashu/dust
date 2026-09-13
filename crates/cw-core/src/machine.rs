@@ -863,3 +863,343 @@ mod tests {
         )));
     }
 }
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use crate::settings::TrainingSettings;
+
+    fn settings(lock: bool, timeout: f64) -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.curriculum.num_groups = 2;
+        s.playback.group_timeout = timeout;
+        s.playback.lock_input_during_group_playback = lock;
+        s
+    }
+
+    fn started(lock: bool, timeout: f64) -> SessionMachine {
+        let (machine, _) = SessionMachine::start(
+            SessionId::new(7),
+            0,
+            settings(lock, timeout),
+            "KM".into(),
+            1,
+        );
+        machine
+    }
+
+    fn finished_play(machine: &mut SessionMachine, index: usize) -> Vec<SessionEffect> {
+        machine.apply(
+            SessionEvent::PlaybackEnded {
+                index,
+                duration_sec: 1.0,
+                char_wpm: 20.0,
+                effective_wpm: 20.0,
+            },
+            1_000,
+        )
+    }
+
+    #[test]
+    fn a_failure_reported_for_another_group_is_ignored() {
+        let mut machine = started(true, 10.0);
+        assert!(machine
+            .apply(SessionEvent::PlaybackFailed { index: 1 }, 0)
+            .is_empty());
+        assert_eq!(machine.phase(), SessionPhase::Playing { index: 0 });
+    }
+
+    #[test]
+    fn typing_is_ignored_while_the_group_is_being_sent() {
+        let mut machine = started(true, 10.0);
+        assert!(machine
+            .apply(
+                SessionEvent::Input {
+                    index: 0,
+                    text: "KM".into()
+                },
+                5
+            )
+            .is_empty());
+        assert_eq!(machine.session().group(0).map(|g| g.input()), Some(""));
+    }
+
+    #[test]
+    fn typing_into_another_group_is_ignored() {
+        let mut machine = started(false, 10.0);
+        assert!(machine
+            .apply(
+                SessionEvent::Input {
+                    index: 1,
+                    text: "XX".into()
+                },
+                5
+            )
+            .is_empty());
+        assert_eq!(machine.session().group(1).map(|g| g.input()), Some(""));
+    }
+
+    #[test]
+    fn typing_during_the_gap_between_groups_is_ignored() {
+        let mut machine = started(false, 10.0);
+        finished_play(&mut machine, 0);
+        machine.apply(SessionEvent::Confirm, 1_100);
+        assert!(matches!(
+            machine.phase(),
+            SessionPhase::InterGroupGap { .. }
+        ));
+        assert!(machine
+            .apply(
+                SessionEvent::Input {
+                    index: 1,
+                    text: "X".into()
+                },
+                1_200
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn typing_and_then_correcting_cancels_the_pending_auto_confirm() {
+        let mut machine = started(true, 10.0);
+        finished_play(&mut machine, 0);
+        let effects = machine.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+            },
+            1_100,
+        );
+        let SessionEffect::AutoConfirm { id, .. } = effects[0].clone() else {
+            panic!("expected an auto-confirm, got {effects:?}");
+        };
+        // A backspace makes the length wrong again and withdraws the confirm.
+        assert!(machine
+            .apply(
+                SessionEvent::Input {
+                    index: 0,
+                    text: "K".into()
+                },
+                1_200
+            )
+            .is_empty());
+        assert!(machine
+            .apply(
+                SessionEvent::AutoConfirmDue {
+                    id,
+                    index: 0,
+                    value: "KM".into()
+                },
+                1_300
+            )
+            .is_empty());
+        assert!(!machine.session().confirmed_flags()[0]);
+    }
+
+    #[test]
+    fn an_auto_confirm_whose_text_changed_does_not_fire() {
+        let mut machine = started(true, 10.0);
+        finished_play(&mut machine, 0);
+        let effects = machine.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+            },
+            1_100,
+        );
+        let SessionEffect::AutoConfirm { id, .. } = effects[0].clone() else {
+            panic!("expected an auto-confirm");
+        };
+        // Same length, different text: the stamped value is stale.
+        machine.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "MK".into(),
+            },
+            1_150,
+        );
+        assert!(machine
+            .apply(
+                SessionEvent::AutoConfirmDue {
+                    id,
+                    index: 0,
+                    value: "KM".into()
+                },
+                1_200
+            )
+            .is_empty());
+        assert!(!machine.session().confirmed_flags()[0]);
+    }
+
+    #[test]
+    fn an_auto_confirm_for_a_group_that_has_moved_on_does_not_fire() {
+        let mut machine = started(true, 10.0);
+        finished_play(&mut machine, 0);
+        let effects = machine.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+            },
+            1_100,
+        );
+        let SessionEffect::AutoConfirm { id, .. } = effects[0].clone() else {
+            panic!("expected an auto-confirm");
+        };
+        // The answer is confirmed by hand first, so group 0 is no longer current.
+        machine.apply(SessionEvent::Confirm, 1_150);
+        machine.apply(SessionEvent::GapElapsed, 1_200);
+        assert_eq!(machine.session().current_group(), 1);
+        assert!(machine
+            .apply(
+                SessionEvent::AutoConfirmDue {
+                    id,
+                    index: 0,
+                    value: "KM".into()
+                },
+                1_300
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn a_timeout_outside_the_answer_window_is_ignored() {
+        let mut machine = started(true, 10.0);
+        assert!(machine.apply(SessionEvent::Timeout, 500).is_empty());
+        assert_eq!(machine.phase(), SessionPhase::Playing { index: 0 });
+    }
+
+    #[test]
+    fn a_gap_that_elapses_outside_a_gap_is_ignored() {
+        let mut machine = started(true, 10.0);
+        assert!(machine.apply(SessionEvent::GapElapsed, 500).is_empty());
+        assert_eq!(machine.phase(), SessionPhase::Playing { index: 0 });
+    }
+
+    #[test]
+    fn confirming_while_the_group_is_still_sending_is_ignored() {
+        let mut machine = started(true, 10.0);
+        assert!(machine.apply(SessionEvent::Confirm, 100).is_empty());
+        assert!(!machine.session().confirmed_flags()[0]);
+    }
+
+    #[test]
+    fn a_second_confirm_for_the_same_group_does_nothing() {
+        let mut machine = started(true, 10.0);
+        finished_play(&mut machine, 0);
+        assert!(!machine.apply(SessionEvent::Confirm, 1_100).is_empty());
+        assert!(machine.apply(SessionEvent::Confirm, 1_200).is_empty());
+    }
+
+    #[test]
+    fn nothing_at_all_happens_once_the_session_is_over() {
+        let mut machine = started(true, 10.0);
+        machine.apply(SessionEvent::Abort, 10);
+        assert_eq!(machine.phase(), SessionPhase::Aborted);
+        assert!(machine.is_terminal());
+        for event in [
+            SessionEvent::Confirm,
+            SessionEvent::Timeout,
+            SessionEvent::GapElapsed,
+            SessionEvent::FinishNow,
+            SessionEvent::Abort,
+            SessionEvent::Focus { index: 0 },
+            SessionEvent::PlaybackFailed { index: 0 },
+        ] {
+            assert!(machine.apply(event.clone(), 20).is_empty(), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn ending_a_session_with_something_typed_but_unconfirmed_keeps_it() {
+        let mut machine = started(true, 10.0);
+        finished_play(&mut machine, 0);
+        machine.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: " km ".into(),
+            },
+            1_100,
+        );
+        let effects = machine.apply(SessionEvent::FinishNow, 1_200);
+        assert_eq!(machine.phase(), SessionPhase::Finished);
+        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        assert!(machine.session().confirmed_flags()[0]);
+        // Trimmed and upper-cased on the way in.
+        assert_eq!(machine.session().group(0).map(|g| g.input()), Some("KM"));
+    }
+
+    #[test]
+    fn ending_a_session_with_nothing_typed_goes_home() {
+        let mut machine = started(true, 10.0);
+        finished_play(&mut machine, 0);
+        machine.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "   ".into(),
+            },
+            1_100,
+        );
+        let effects = machine.apply(SessionEvent::FinishNow, 1_200);
+        assert_eq!(machine.phase(), SessionPhase::Aborted);
+        assert!(effects.contains(&SessionEffect::AbortToHome));
+    }
+
+    #[test]
+    fn the_focus_event_only_moves_onto_the_current_group() {
+        let mut machine = started(true, 10.0);
+        assert!(machine
+            .apply(SessionEvent::Focus { index: 1 }, 10)
+            .is_empty());
+        assert_eq!(machine.session().focused_group(), 0);
+        machine.apply(SessionEvent::Focus { index: 0 }, 10);
+        assert_eq!(machine.session().focused_group(), 0);
+    }
+
+    #[test]
+    fn the_gap_after_a_silent_group_falls_back_to_the_settings_speed() {
+        // A group whose playback never reported a speed leaves no measured WPM,
+        // so the gap is computed from the settings instead.
+        let mut machine = started(true, 10.0);
+        let effects = machine.apply(
+            SessionEvent::PlaybackEnded {
+                index: 0,
+                duration_sec: 0.0,
+                char_wpm: 0.0,
+                effective_wpm: 0.0,
+            },
+            10,
+        );
+        assert!(effects.contains(&SessionEffect::Focus { index: 0 }));
+        let effects = machine.apply(SessionEvent::Confirm, 20);
+        let Some(SessionEffect::Sleep { ms, .. }) = effects
+            .iter()
+            .find(|e| matches!(e, SessionEffect::Sleep { .. }))
+            .cloned()
+        else {
+            panic!("expected a gap sleep");
+        };
+        assert_eq!(
+            ms,
+            crate::timing::compute_group_gap_ms(machine.session().settings())
+        );
+    }
+
+    #[test]
+    fn a_zero_timeout_leaves_the_answer_window_open() {
+        let mut machine = started(true, 0.0);
+        let effects = finished_play(&mut machine, 0);
+        assert_eq!(effects, vec![SessionEffect::Focus { index: 0 }]);
+        assert!(!machine.sleep_is_current(1));
+    }
+
+    #[test]
+    fn the_session_can_be_edited_through_the_machine() {
+        let mut machine = started(true, 10.0);
+        machine.session_mut().set_group(1, "UR".into());
+        assert_eq!(machine.session().group(1).map(|g| g.sent()), Some("UR"));
+        assert_eq!(
+            machine.view().sent,
+            vec!["KM".to_string(), "UR".to_string()]
+        );
+    }
+}

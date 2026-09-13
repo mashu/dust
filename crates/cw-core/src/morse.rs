@@ -134,3 +134,54 @@ mod tests {
         assert!(!is_morse_code_prefix("......-"));
     }
 }
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    #[test]
+    fn digits_unlock_two_at_a_time() {
+        assert_eq!(digits_unlocked_count(0), 2);
+        assert_eq!(digits_unlocked_count(1), 2);
+        assert_eq!(digits_unlocked_count(5), 6);
+        assert_eq!(digits_unlocked_count(MAX_DIGITS_LEVEL), DIGITS.len());
+        assert_eq!(digits_unlocked_count(99), DIGITS.len());
+        assert_eq!(MAX_DIGITS_LEVEL, 9);
+        assert_eq!(MIN_DIGITS_LEVEL, 1);
+    }
+
+    #[test]
+    fn a_prefix_of_a_real_code_is_a_prefix() {
+        assert!(is_morse_code_prefix(""));
+        assert!(is_morse_code_prefix("-"));
+        assert!(is_morse_code_prefix("-.-"));
+        assert!(!is_morse_code_prefix("......."));
+    }
+
+    #[test]
+    fn characters_round_trip_through_their_code() {
+        for (ch, code) in MORSE_PAIRS {
+            assert_eq!(morse_for(*ch), Some(*code));
+            assert_eq!(decode_morse_pattern(code), Some(*ch));
+            assert!(is_scored_char(*ch));
+            assert_eq!(is_digit(*ch), ch.is_ascii_digit());
+        }
+        assert_eq!(morse_for('k'), morse_for('K'));
+        assert_eq!(morse_for('#'), None);
+        assert_eq!(decode_morse_pattern("........"), None);
+        assert!(!is_scored_char(' '));
+    }
+
+    #[test]
+    fn the_lcwo_curriculum_is_consistent() {
+        assert_eq!(KOCH_LEVEL_MIN, 1);
+        assert_eq!(KOCH_LEVEL_MAX as usize, LCWO_SEQUENCE.len() - 1);
+        assert_eq!(DEFAULT_SLIDING_WINDOW_START, 1);
+        assert_eq!(DEFAULT_SLIDING_WINDOW_END as usize, LCWO_SEQUENCE.len());
+        assert_eq!(SLIDING_WINDOW_INDEX_MAX, DEFAULT_SLIDING_WINDOW_END);
+        assert_eq!(unlocked_char_count_for_level(1), 2);
+        for ch in LCWO_SEQUENCE {
+            assert!(morse_for(*ch).is_some(), "{ch:?} has no code");
+        }
+    }
+}

@@ -296,3 +296,84 @@ mod tests {
         assert_eq!(status.freezes_used, 2);
     }
 }
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::*;
+
+    #[test]
+    fn a_date_that_is_not_a_date_is_refused() {
+        assert_eq!(parse_ymd("2026-13-01"), None);
+        assert_eq!(parse_ymd("2026-00-01"), None);
+        assert_eq!(parse_ymd("2026-01-00"), None);
+        assert_eq!(parse_ymd("2026-01-32"), None);
+        assert_eq!(parse_ymd("2026-01-01-01"), None);
+        assert_eq!(parse_ymd("2026-01"), None);
+        assert_eq!(parse_ymd("nonsense"), None);
+        assert_eq!(parse_ymd("2026-0a-01"), None);
+        assert_eq!(date_to_day_index("nope"), None);
+        assert_eq!(parse_ymd("2026-01-01"), Some((2026, 1, 1)));
+    }
+
+    #[test]
+    fn dates_round_trip_through_their_day_index() {
+        for date in [
+            "1970-01-01",
+            "1969-12-31",
+            "2000-02-29",
+            "2026-09-13",
+            "2100-03-01",
+        ] {
+            let index = date_to_day_index(date).expect(date);
+            assert_eq!(day_index_to_date(index), date);
+        }
+        assert_eq!(date_to_day_index("1970-01-01"), Some(0));
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+    }
+
+    #[test]
+    fn the_week_starts_on_monday() {
+        // 2026-09-14 is a Monday.
+        let monday = date_to_day_index("2026-09-14").unwrap();
+        assert_eq!(weekday_monday0(monday), 0);
+        assert_eq!(weekday_monday0(monday + 6), 6);
+        assert_eq!(weekday_monday0(monday - 1), 6);
+    }
+
+    #[test]
+    fn a_streak_needs_a_readable_today() {
+        let status = compute_streak_status(&["2026-09-13"], "nonsense");
+        assert_eq!(status.state, StreakState::None);
+        assert_eq!(status.days, 0);
+    }
+
+    #[test]
+    fn dates_in_the_future_are_not_counted_yet() {
+        let status =
+            compute_streak_status(&["2026-09-12", "2026-09-13", "2026-09-20"], "2026-09-13");
+        assert_eq!(status.state, StreakState::Safe);
+        assert_eq!(status.days, 2);
+    }
+
+    #[test]
+    fn only_unreadable_dates_is_the_same_as_no_history() {
+        let status = compute_streak_status(&["nope", "also-nope"], "2026-09-13");
+        assert_eq!(status.state, StreakState::None);
+    }
+
+    #[test]
+    fn a_long_absence_drops_the_streak_out_of_sight() {
+        let dates = ["2026-08-01", "2026-08-02", "2026-08-03"];
+        let status = compute_streak_status(&dates, "2026-09-13");
+        assert_eq!(status.state, StreakState::None);
+        assert_eq!(status.lost_streak_days, None);
+    }
+
+    #[test]
+    fn the_same_day_twice_counts_once() {
+        let dates = ["2026-09-13", "2026-09-13", "2026-09-12"];
+        let status = compute_streak_status(&dates, "2026-09-13");
+        assert_eq!(status.days, 2);
+    }
+}

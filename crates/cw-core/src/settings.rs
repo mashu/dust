@@ -915,3 +915,319 @@ mod tests {
         assert_eq!(back, TrainingSettings::default());
     }
 }
+
+#[cfg(test)]
+mod invariant_tests {
+    use super::*;
+    use crate::pool::fit_settings_to_alphabet;
+
+    /// Every field pushed past both ends of its range, so one pass of `clamp`
+    /// has something to do everywhere.
+    fn wild() -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.curriculum.level = 999;
+        s.curriculum.digits_level = 999;
+        s.curriculum.mixed_letters_percent = 900;
+        s.curriculum.num_groups = 9_000;
+        s.curriculum.min_group_size = 99;
+        s.curriculum.max_group_size = 0;
+        s.curriculum.custom_sequence = vec!['k', 'k', ' ', 'm'];
+        s.curriculum.custom_set = vec!['#'];
+        s.curriculum.sliding_window_start = 900;
+        s.curriculum.sliding_window_end = 0;
+        s.playback.char_wpm_min = 900.0;
+        s.playback.char_wpm_max = -5.0;
+        s.playback.effective_wpm_min = -1.0;
+        s.playback.effective_wpm_max = 900.0;
+        s.playback.extra_word_space_multiplier = -3.0;
+        s.playback.group_timeout = 9_000.0;
+        s.playback.group_repeat_min = 99;
+        s.playback.group_repeat_max = 0;
+        s.band.side_tone_min = 9_000.0;
+        s.band.side_tone_max = 1.0;
+        s.band.volume_min = 9.0;
+        s.band.volume_max = -9.0;
+        s.band.steepness = 900.0;
+        s.band.envelope_smoothing = 9.0;
+        s.band.qsb_depth = 9.0;
+        s.band.qsb_rate_hz = 9.0;
+        s.band.qrn_level = 9.0;
+        s.band.qrm_level = 9.0;
+        s.band.receiver_background_gain = 900.0;
+        s.band.receiver_background_excitation_rate = 9_000.0;
+        s.band.receiver_background_resonance = 9_000.0;
+        s.band.receiver_background_decay = 9.0;
+        s.band.receiver_background_offset_hz = -9_000.0;
+        s.band.receiver_background_offset_mod_depth_hz = 9_000.0;
+        s.band.receiver_background_offset_mod_rate_hz = 900.0;
+        s.auto_level.auto_adjust_threshold = 900.0;
+        s.auto_level.error_weight_strength = -1.0;
+        s.auto_level.char_sampling_coverage_strength = -1.0;
+        s
+    }
+
+    /// The app re-runs clamp + fit on every settings change and writes the
+    /// result back into the same signal. A second pass that moved anything
+    /// would make that effect loop forever.
+    #[test]
+    fn clamping_and_fitting_reach_a_fixed_point_in_one_pass() {
+        for mode in [
+            CharSetMode::Koch,
+            CharSetMode::Digits,
+            CharSetMode::Mixed,
+            CharSetMode::Custom,
+        ] {
+            for linked in [false, true] {
+                let mut first = wild();
+                first.curriculum.char_set_mode = mode;
+                first.curriculum.link_group_size = linked;
+                first.playback.link_char_wpm = linked;
+                first.playback.link_effective_wpm = linked;
+                first.playback.link_char_to_effective = linked;
+                first.playback.link_group_repeat = linked;
+                first.band.link_volume = linked;
+                let mut first = first.clamp();
+                fit_settings_to_alphabet(&mut first);
+                let mut second = first.clone().clamp();
+                fit_settings_to_alphabet(&mut second);
+                assert_eq!(first, second, "mode {mode:?}, linked {linked}");
+            }
+        }
+    }
+
+    #[test]
+    fn clamping_puts_every_range_the_right_way_round() {
+        let s = wild().clamp();
+        assert!(s.playback.char_wpm_min <= s.playback.char_wpm_max);
+        assert!(s.playback.effective_wpm_min <= s.playback.effective_wpm_max);
+        assert!(s.band.side_tone_min <= s.band.side_tone_max);
+        assert!(s.band.volume_min <= s.band.volume_max);
+        assert!(s.curriculum.min_group_size <= s.curriculum.max_group_size);
+        assert!(s.playback.group_repeat_min <= s.playback.group_repeat_max);
+        assert_eq!(s.curriculum.mixed_letters_percent, 100);
+        assert_eq!(s.curriculum.num_groups, 200);
+        assert_eq!(s.playback.group_timeout, 120.0);
+        assert_eq!(s.playback.group_repeat_max, GROUP_REPEAT_MAX);
+        assert_eq!(s.band.steepness, 50.0);
+        assert_eq!(s.band.envelope_smoothing, 1.0);
+        assert_eq!(s.band.receiver_background_decay, 0.9999);
+        assert_eq!(s.band.receiver_background_offset_hz, -1000.0);
+        assert_eq!(s.band.receiver_background_offset_mod_rate_hz, 20.0);
+        assert_eq!(s.band.receiver_background_excitation_rate, 500.0);
+        assert_eq!(s.playback.extra_word_space_multiplier, 0.1);
+        assert_eq!(s.auto_level.auto_adjust_threshold, 100.0);
+        assert_eq!(s.auto_level.error_weight_strength, 0.0);
+        assert_eq!(s.auto_level.char_sampling_coverage_strength, 0.0);
+    }
+
+    #[test]
+    fn linked_ranges_collapse_onto_their_lower_bound() {
+        let mut s = TrainingSettings::default();
+        s.playback.link_char_wpm = true;
+        s.playback.link_effective_wpm = true;
+        s.playback.link_char_to_effective = false;
+        s.curriculum.link_group_size = true;
+        s.playback.link_group_repeat = true;
+        s.band.link_volume = true;
+        s.playback.char_wpm_min = 22.0;
+        s.playback.char_wpm_max = 30.0;
+        s.playback.effective_wpm_min = 12.0;
+        s.playback.effective_wpm_max = 19.0;
+        s.curriculum.min_group_size = 4;
+        s.curriculum.max_group_size = 9;
+        s.playback.group_repeat_min = 2;
+        s.playback.group_repeat_max = 5;
+        s.band.volume_min = 0.4;
+        s.band.volume_max = 0.9;
+        let s = s.clamp();
+        assert_eq!(s.playback.char_wpm_max, 22.0);
+        assert_eq!(s.playback.effective_wpm_max, 12.0);
+        assert_eq!(s.curriculum.max_group_size, 4);
+        assert_eq!(s.playback.group_repeat_max, 2);
+        assert_eq!(s.band.volume_max, 0.4);
+    }
+
+    #[test]
+    fn defaults_are_the_documented_ones() {
+        assert_eq!(CharSetMode::default(), CharSetMode::Mixed);
+        assert_eq!(QrmProfile::default(), QrmProfile::Mixed);
+        assert_eq!(MixedAutoLevelAxis::default(), MixedAutoLevelAxis::Letters);
+        assert_eq!(
+            MixedAutoLevelAxis::Letters.flip(),
+            MixedAutoLevelAxis::Digits
+        );
+        assert_eq!(
+            MixedAutoLevelAxis::Digits.flip(),
+            MixedAutoLevelAxis::Letters
+        );
+    }
+
+    #[test]
+    fn the_active_level_follows_the_character_set() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.level = 4;
+        s.curriculum.digits_level = 6;
+
+        s.curriculum.char_set_mode = CharSetMode::Digits;
+        assert_eq!(s.active_level(), 6);
+        assert_eq!(s.active_alphabet(), crate::morse::DIGITS.to_vec());
+        assert_eq!(s.max_active_level(), 9);
+        s.set_active_level(3);
+        assert_eq!(s.curriculum.digits_level, 3);
+        assert_eq!(s.curriculum.level, 4);
+
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        assert_eq!(s.active_level(), 4);
+        assert_eq!(s.max_active_level(), s.max_letter_level());
+        assert_eq!(s.active_alphabet(), s.progress_alphabet());
+        s.set_active_level(7);
+        assert_eq!(s.curriculum.level, 7);
+    }
+
+    #[test]
+    fn the_fingerprint_identifies_the_alphabet_being_trained() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Digits;
+        assert_eq!(s.alphabet_fingerprint(), "0123456789");
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        assert!(s.alphabet_fingerprint().starts_with("KMURE"));
+        // Mixed trains letters on the letter axis, so digits are not in it.
+        s.curriculum.char_set_mode = CharSetMode::Mixed;
+        assert!(!s.alphabet_fingerprint().contains('5'));
+        // A different sequence is a different alphabet.
+        s.curriculum.custom_sequence = vec!['A', 'B'];
+        assert_eq!(s.alphabet_fingerprint(), "AB");
+    }
+
+    #[test]
+    fn the_band_signature_changes_with_every_band_setting() {
+        let base = TrainingSettings::default();
+        let mut seen = vec![base.band_signature()];
+        let edits: Vec<fn(&mut TrainingSettings)> = vec![
+            |s| s.band.side_tone_min = 333.0,
+            |s| s.band.side_tone_max = 999.0,
+            |s| s.band.qsb_enabled = false,
+            |s| s.band.qsb_depth = 0.9,
+            |s| s.band.qsb_rate_hz = 0.9,
+            |s| s.band.qrn_enabled = false,
+            |s| s.band.qrn_level = 0.9,
+            |s| s.band.qrm_enabled = false,
+            |s| s.band.qrm_level = 0.9,
+            |s| s.band.qrm_profile = QrmProfile::Ringing,
+            |s| s.band.receiver_background_gain = 3.0,
+            |s| s.band.receiver_background_excitation_rate = 3.0,
+            |s| s.band.receiver_background_resonance = 3.0,
+            |s| s.band.receiver_background_decay = 0.7,
+            |s| s.band.receiver_background_offset_hz = 3.0,
+            |s| s.band.receiver_background_offset_mod_depth_hz = 3.0,
+            |s| s.band.receiver_background_offset_mod_rate_hz = 3.0,
+        ];
+        for edit in edits {
+            let mut changed = base.clone();
+            edit(&mut changed);
+            let signature = changed.band_signature();
+            assert!(
+                !seen.contains(&signature),
+                "signature repeated: {signature}"
+            );
+            seen.push(signature);
+        }
+        // Speed is not a band setting, so it leaves the signature alone.
+        let mut faster = base.clone();
+        faster.playback.char_wpm_min = 40.0;
+        assert_eq!(faster.band_signature(), base.band_signature());
+    }
+
+    #[test]
+    fn the_side_tone_centre_is_the_middle_of_the_range() {
+        let mut s = TrainingSettings::default();
+        s.band.side_tone_min = 400.0;
+        s.band.side_tone_max = 600.0;
+        assert_eq!(s.side_tone_center(), 500.0);
+        // A reversed pair still reports its lower bound rather than a negative span.
+        s.band.side_tone_max = 100.0;
+        assert_eq!(s.side_tone_center(), 400.0);
+    }
+
+    #[test]
+    fn opening_a_fixed_side_tone_spreads_it_without_leaving_the_dial() {
+        let mut s = TrainingSettings::default();
+        s.band.side_tone_min = 600.0;
+        s.band.side_tone_max = 600.0;
+        assert!(s.range(RangeSetting::SideTone).linked);
+        s.set_range_linked(RangeSetting::SideTone, false);
+        assert_eq!(s.band.side_tone_min, 600.0);
+        assert_eq!(s.band.side_tone_max, 800.0);
+
+        // At the top of the dial the pair spreads downwards instead.
+        s.band.side_tone_min = 1200.0;
+        s.band.side_tone_max = 1200.0;
+        s.set_range_linked(RangeSetting::SideTone, false);
+        assert_eq!(s.band.side_tone_max, 1200.0);
+        assert_eq!(s.band.side_tone_min, 1000.0);
+
+        // Collapsing sends both ends to the lower bound.
+        s.set_range_linked(RangeSetting::SideTone, true);
+        assert_eq!(s.band.side_tone_max, 1000.0);
+    }
+
+    #[test]
+    fn every_range_can_be_read_moved_and_linked() {
+        let cases = [
+            (RangeSetting::CharWpm, 20.0, 30.0),
+            (RangeSetting::EffectiveWpm, 10.0, 15.0),
+            (RangeSetting::GroupSize, 3.0, 6.0),
+            (RangeSetting::GroupRepeat, 2.0, 4.0),
+            (RangeSetting::SideTone, 400.0, 700.0),
+            (RangeSetting::Volume, 0.3, 0.8),
+        ];
+        for (which, low, high) in cases {
+            let mut s = TrainingSettings::default();
+            s.playback.link_char_to_effective = false;
+            s.set_range_linked(which, false);
+            s.set_range_min(which, low);
+            s.set_range_max(which, high);
+            let range = s.range(which);
+            assert_eq!((range.min, range.max), (low, high), "{which:?}");
+
+            // Pushing the lower bound past the upper one drags it along.
+            s.set_range_min(which, high + 1.0);
+            assert_eq!(s.range(which).max, high + 1.0, "{which:?}");
+            // And the other way round.
+            s.set_range_max(which, low);
+            assert_eq!(s.range(which).min, low, "{which:?}");
+
+            // Linked, both ends move together.
+            s.set_range_linked(which, true);
+            let range = s.range(which);
+            assert_eq!(range.min, range.max, "{which:?}");
+            s.set_range_min(which, high);
+            assert_eq!(s.range(which).max, high, "{which:?}");
+        }
+    }
+
+    #[test]
+    fn character_speed_drags_effective_speed_when_they_are_tied() {
+        let mut s = TrainingSettings::default();
+        s.playback.link_char_to_effective = true;
+        s.set_range_min(RangeSetting::CharWpm, 25.0);
+        assert_eq!(s.playback.effective_wpm_min, 25.0);
+        s.set_range_max(RangeSetting::CharWpm, 33.0);
+        assert_eq!(s.playback.effective_wpm_max, 33.0);
+
+        // Untied, effective speed keeps its own value.
+        s.playback.link_char_to_effective = false;
+        s.set_range_min(RangeSetting::EffectiveWpm, 9.0);
+        s.set_range_min(RangeSetting::CharWpm, 28.0);
+        assert_eq!(s.playback.effective_wpm_min, 9.0);
+    }
+
+    #[test]
+    fn switching_the_character_set_resets_the_practice_window() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.practice_window = Some(PracticeWindow::Last3);
+        s.set_char_set_mode(CharSetMode::Digits);
+        assert_eq!(s.curriculum.char_set_mode, CharSetMode::Digits);
+        assert_eq!(s.curriculum.practice_window, Some(PracticeWindow::All));
+    }
+}

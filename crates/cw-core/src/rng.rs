@@ -107,3 +107,82 @@ mod tests {
         assert!(a > 900);
     }
 }
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    struct Fixed(f64);
+
+    impl Rng for Fixed {
+        fn f64(&mut self) -> f64 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn a_collapsed_range_returns_its_only_value() {
+        let mut rng = Fixed(0.99);
+        assert_eq!(rng.pick_in_range(18.0, 18.0), 18.0);
+        assert_eq!(rng.pick_in_range_inclusive_int(600.0, 600.0), 600.0);
+        assert_eq!(rng.usize_in(4, 4), 4);
+        assert_eq!(rng.usize_in(4, 2), 4);
+    }
+
+    #[test]
+    fn a_reversed_range_is_read_in_the_right_order() {
+        let mut rng = Fixed(0.0);
+        assert_eq!(rng.pick_in_range(30.0, 10.0), 10.0);
+        assert_eq!(rng.pick_in_range_inclusive_int(600.0, 400.0), 400.0);
+    }
+
+    #[test]
+    fn integer_picks_cover_both_ends_and_never_overshoot() {
+        for (draw, expected) in [(0.0, 400.0), (0.5, 500.0), (0.999_999, 600.0)] {
+            let mut rng = Fixed(draw);
+            assert_eq!(rng.pick_in_range_inclusive_int(400.0, 600.0), expected);
+        }
+        for (draw, expected) in [(0.0, 1), (0.999_999, 5)] {
+            let mut rng = Fixed(draw);
+            assert_eq!(rng.usize_in(1, 5), expected);
+        }
+    }
+
+    #[test]
+    fn weights_that_add_up_to_nothing_fall_back_to_an_even_pick() {
+        let mut rng = Fixed(0.75);
+        assert_eq!(
+            weighted_random_pick(&['A', 'B', 'C', 'D'], &[0.0; 4], &mut rng),
+            'D'
+        );
+        // Fewer weights than characters: the missing ones count as one each,
+        // so the total is positive and the walk starts at the first character.
+        let mut rng = Fixed(0.0);
+        assert_eq!(weighted_random_pick(&['A', 'B'], &[0.0], &mut rng), 'A');
+        let mut rng = Fixed(0.99);
+        assert_eq!(weighted_random_pick(&['A', 'B'], &[0.0], &mut rng), 'B');
+    }
+
+    #[test]
+    fn a_draw_at_the_very_top_still_lands_on_a_character() {
+        let mut rng = Fixed(1.0);
+        assert_eq!(
+            weighted_random_pick(&['A', 'B'], &[1.0, 1.0], &mut rng),
+            'B'
+        );
+    }
+
+    #[test]
+    fn the_default_generator_is_deterministic_and_in_range() {
+        let mut a = FastrandRng::default();
+        let mut b = FastrandRng::default();
+        for _ in 0..100 {
+            let x = a.f64();
+            assert_eq!(x, b.f64());
+            assert!((0.0..1.0).contains(&x));
+        }
+        // A different seed gives a different stream.
+        let mut other = FastrandRng(1);
+        assert_ne!(FastrandRng::default().f64(), other.f64());
+    }
+}

@@ -133,3 +133,81 @@ mod tests {
         assert!(!settings.curriculum.sequence_is_custom);
     }
 }
+
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    use crate::settings::TrainingSettings;
+
+    #[test]
+    fn an_unknown_order_is_reported_as_custom() {
+        assert_eq!(preset_id_for(&[]), "lcwo");
+        assert_eq!(preset_id_for(LCWO_SEQUENCE), "lcwo");
+        assert_eq!(preset_id_for(ALPHABETICAL_SEQUENCE), "alphabetical");
+        assert_eq!(preset_id_for(&['K', 'M']), "custom");
+        assert!(preset_by_id("nope").is_none());
+        assert_eq!(
+            preset_by_id("cw-academy").map(|p| p.name),
+            Some("CW Academy")
+        );
+    }
+
+    #[test]
+    fn choosing_custom_keeps_the_order_that_was_showing() {
+        let mut settings = TrainingSettings::default();
+        apply_sequence_preset(&mut settings, "morsemania");
+        assert_eq!(sequence_preset_id(&settings), "morsemania");
+
+        apply_sequence_preset(&mut settings, "custom");
+        assert!(settings.curriculum.sequence_is_custom);
+        assert_eq!(
+            settings.curriculum.custom_sequence,
+            TRADITIONAL_KOCH_SEQUENCE
+        );
+        // The order still matches a preset, but the user asked for custom.
+        assert_eq!(sequence_preset_id(&settings), "custom");
+    }
+
+    #[test]
+    fn going_back_to_lcwo_clears_the_stored_order() {
+        let mut settings = TrainingSettings::default();
+        apply_sequence_preset(&mut settings, "alphabetical");
+        assert!(!settings.curriculum.custom_sequence.is_empty());
+        apply_sequence_preset(&mut settings, "lcwo");
+        assert!(settings.curriculum.custom_sequence.is_empty());
+        assert!(!settings.curriculum.sequence_is_custom);
+        assert_eq!(settings.sequence(), LCWO_SEQUENCE);
+    }
+
+    #[test]
+    fn an_unknown_preset_id_leaves_the_order_alone() {
+        let mut settings = TrainingSettings::default();
+        apply_sequence_preset(&mut settings, "alphabetical");
+        apply_sequence_preset(&mut settings, "nonsense");
+        assert_eq!(settings.curriculum.custom_sequence, ALPHABETICAL_SEQUENCE);
+    }
+
+    #[test]
+    fn every_preset_teaches_only_sendable_characters() {
+        for preset in SEQUENCE_PRESETS {
+            assert!(!preset.sequence.is_empty(), "{} is empty", preset.id);
+            assert!(!preset.description.is_empty());
+            for ch in preset.sequence {
+                assert!(
+                    crate::morse::morse_for(*ch).is_some(),
+                    "{} teaches {ch:?}, which has no Morse code",
+                    preset.id
+                );
+            }
+            let mut unique = preset.sequence.to_vec();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                preset.sequence.len(),
+                "{} repeats a character",
+                preset.id
+            );
+        }
+    }
+}

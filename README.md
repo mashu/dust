@@ -27,9 +27,29 @@ dx serve --platform android
 dx serve --platform ios
 ```
 
+## Tests
+
 ```bash
-cargo test -p cw-core
+cargo test -p cw-core                      # domain logic
+cargo test -p dust --features desktop      # app, audio and UI
 ```
+
+The app tests run the real thing rather than a mock of it. A session is driven
+through the actual Dioxus runtime with a paused clock, so sends, gaps, timeouts
+and auto-confirms happen on their true schedule in milliseconds of wall time,
+and screens are tested by pressing their buttons and reading the HTML that comes
+back. Audio goes through a recording player, so what the trainer asked to be
+sent — and when it was cancelled, stalled or retried — is checked without a
+sound card. `src/testing.rs` holds that harness.
+
+The cpal backend is exercised against the machine's real default output. On a
+machine with no sound card, an ALSA null device stands in:
+
+```bash
+printf 'pcm.!default { type null }\nctl.!default { type null }\n' > ~/.asoundrc
+```
+
+Without one those few tests report that they are skipping and pass.
 
 ## Linux desktop bundle
 

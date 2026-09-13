@@ -524,3 +524,250 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    use crate::settings::CharSetMode;
+
+    fn mixed(letters_pct: u32) -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Mixed;
+        s.curriculum.mixed_letters_percent = letters_pct;
+        s.curriculum.level = 5;
+        s.curriculum.digits_level = 5;
+        s.auto_level.auto_adjust_above_threshold_count = 1;
+        s.auto_level.auto_adjust_below_threshold_count = 1;
+        s
+    }
+
+    #[test]
+    fn nothing_moves_while_auto_level_is_off() {
+        let mut s = TrainingSettings::default();
+        s.auto_level.auto_adjust_level = false;
+        let mut counters = AutoLevelCounters::default();
+        assert!(evaluate_auto_level(1.0, &s, &mut counters).is_none());
+        assert_eq!(counters, AutoLevelCounters::default());
+        assert!(auto_level_progress(&s, counters).is_none());
+    }
+
+    #[test]
+    fn a_session_only_counts_until_the_run_is_long_enough() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.auto_level.auto_adjust_above_threshold_count = 3;
+        s.auto_level.auto_adjust_below_threshold_count = 3;
+        let mut counters = AutoLevelCounters::default();
+        assert!(evaluate_auto_level(1.0, &s, &mut counters).is_none());
+        assert_eq!(counters.above, 1);
+        assert!(evaluate_auto_level(1.0, &s, &mut counters).is_none());
+        let result = evaluate_auto_level(1.0, &s, &mut counters).expect("level up");
+        assert_eq!(result.delta, 1);
+        assert_eq!(result.next_level, 2);
+        assert!(result.message.contains("3 sessions above"));
+        assert_eq!(result.counters_cleared_keys.len(), 2);
+    }
+
+    #[test]
+    fn a_zero_target_switches_that_direction_off() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.level = 5;
+        s.auto_level.auto_adjust_above_threshold_count = 0;
+        s.auto_level.auto_adjust_below_threshold_count = 0;
+        let mut counters = AutoLevelCounters::default();
+        assert!(evaluate_auto_level(1.0, &s, &mut counters).is_none());
+        assert!(evaluate_auto_level(0.0, &s, &mut counters).is_none());
+        assert_eq!((counters.above, counters.below), (1, 1));
+        let progress = auto_level_progress(&s, counters).expect("progress");
+        assert!(progress.above_disabled && progress.below_disabled);
+    }
+
+    #[test]
+    fn when_both_runs_are_due_the_longer_one_wins() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.level = 5;
+        s.auto_level.auto_adjust_above_threshold_count = 1;
+        s.auto_level.auto_adjust_below_threshold_count = 1;
+
+        let mut up = AutoLevelCounters { above: 4, below: 2 };
+        assert_eq!(
+            evaluate_auto_level(1.0, &s, &mut up).map(|r| r.delta),
+            Some(1)
+        );
+
+        let mut down = AutoLevelCounters { above: 1, below: 9 };
+        assert_eq!(
+            evaluate_auto_level(1.0, &s, &mut down).map(|r| r.delta),
+            Some(-1)
+        );
+    }
+
+    #[test]
+    fn a_level_already_at_the_end_of_the_alphabet_clears_its_run() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.level = s.max_letter_level();
+        s.auto_level.auto_adjust_above_threshold_count = 1;
+        let mut counters = AutoLevelCounters { above: 5, below: 0 };
+        assert!(evaluate_auto_level(1.0, &s, &mut counters).is_none());
+        assert_eq!(counters.above, 0);
+
+        // Same at the bottom.
+        s.curriculum.level = 1;
+        s.auto_level.auto_adjust_below_threshold_count = 1;
+        let mut counters = AutoLevelCounters { above: 0, below: 5 };
+        assert!(evaluate_auto_level(0.0, &s, &mut counters).is_none());
+        assert_eq!(counters.below, 0);
+    }
+
+    #[test]
+    fn digits_move_their_own_level() {
+        let mut s = TrainingSettings::default();
+        s.curriculum.char_set_mode = CharSetMode::Digits;
+        s.curriculum.digits_level = 3;
+        s.auto_level.auto_adjust_above_threshold_count = 1;
+        let mut counters = AutoLevelCounters::default();
+        let result = evaluate_auto_level(1.0, &s, &mut counters).expect("level up");
+        assert_eq!(result.next_level, 4);
+        assert!(result.counters_cleared_keys[0].starts_with("digits_3_"));
+        apply_auto_level(&mut s, &result);
+        assert_eq!(s.curriculum.digits_level, 4);
+        assert_eq!(s.curriculum.level, 1);
+    }
+
+    #[test]
+    fn mixed_alternates_between_the_two_axes() {
+        let mut s = mixed(50);
+        let mut counters = AutoLevelCounters::default();
+        let first = evaluate_auto_level(1.0, &s, &mut counters).expect("letters first");
+        assert_eq!(first.adjusted_mixed_axis, Some(MixedAutoLevelAxis::Letters));
+        assert_eq!(first.next_level, 6);
+        assert_eq!(first.next_digits_level, Some(5));
+        assert_eq!(
+            first.next_mixed_auto_level_axis,
+            Some(MixedAutoLevelAxis::Digits)
+        );
+        assert!(first.message.contains("alphabet 6"));
+        apply_auto_level(&mut s, &first);
+        assert_eq!(s.curriculum.level, 6);
+        assert_eq!(
+            s.auto_level.mixed_auto_level_next_axis,
+            MixedAutoLevelAxis::Digits
+        );
+
+        let mut counters = AutoLevelCounters::default();
+        let second = evaluate_auto_level(1.0, &s, &mut counters).expect("digits next");
+        assert_eq!(second.adjusted_mixed_axis, Some(MixedAutoLevelAxis::Digits));
+        assert_eq!(second.next_digits_level, Some(6));
+        assert!(second.message.contains("digits 6"));
+        apply_auto_level(&mut s, &second);
+        assert_eq!(s.curriculum.digits_level, 6);
+    }
+
+    #[test]
+    fn mixed_skips_an_axis_that_is_not_being_practiced() {
+        // Letters only: the digit axis never moves, and the next axis stays letters.
+        let mut s = mixed(100);
+        s.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Digits;
+        let mut counters = AutoLevelCounters::default();
+        let result = evaluate_auto_level(1.0, &s, &mut counters).expect("letters");
+        assert_eq!(
+            result.adjusted_mixed_axis,
+            Some(MixedAutoLevelAxis::Letters)
+        );
+        assert_eq!(
+            result.next_mixed_auto_level_axis,
+            Some(MixedAutoLevelAxis::Letters)
+        );
+        assert_eq!(result.next_digits_level, Some(5));
+
+        // Digits only: the letter axis never moves.
+        let mut s = mixed(0);
+        let mut counters = AutoLevelCounters::default();
+        let result = evaluate_auto_level(0.0, &s, &mut counters).expect("digits");
+        assert_eq!(result.adjusted_mixed_axis, Some(MixedAutoLevelAxis::Digits));
+        assert_eq!(result.next_digits_level, Some(4));
+        assert_eq!(result.next_level, 5);
+        apply_auto_level(&mut s, &result);
+        assert_eq!(s.curriculum.digits_level, 4);
+    }
+
+    #[test]
+    fn mixed_at_both_ceilings_clears_its_run_instead_of_moving() {
+        let mut s = mixed(50);
+        s.curriculum.level = s.max_letter_level();
+        s.curriculum.digits_level = crate::morse::MAX_DIGITS_LEVEL;
+        let mut counters = AutoLevelCounters { above: 3, below: 0 };
+        assert!(evaluate_auto_level(1.0, &s, &mut counters).is_none());
+        assert_eq!(counters.above, 0);
+
+        s.curriculum.level = 1;
+        s.curriculum.digits_level = 1;
+        let mut counters = AutoLevelCounters { above: 0, below: 3 };
+        assert!(evaluate_auto_level(0.0, &s, &mut counters).is_none());
+        assert_eq!(counters.below, 0);
+    }
+
+    #[test]
+    fn progress_reports_the_axis_that_is_actually_practiced() {
+        let mut s = mixed(100);
+        s.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Digits;
+        let progress =
+            auto_level_progress(&s, AutoLevelCounters { above: 2, below: 1 }).expect("progress");
+        assert!(progress.alternating_mixed);
+        assert_eq!(progress.next_mixed_axis, Some(MixedAutoLevelAxis::Letters));
+        assert_eq!(progress.above_count, 2);
+        assert_eq!(progress.below_count, 1);
+
+        // With neither axis in play the stored axis is reported unchanged.
+        let mut neither = mixed(100);
+        neither.curriculum.mixed_letters_percent = 100;
+        neither.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        let progress = auto_level_progress(&neither, AutoLevelCounters::default()).expect("p");
+        assert_eq!(progress.next_mixed_axis, Some(MixedAutoLevelAxis::Letters));
+
+        // Outside mixed there is no axis at all.
+        let mut koch = TrainingSettings::default();
+        koch.curriculum.char_set_mode = CharSetMode::Koch;
+        let progress = auto_level_progress(&koch, AutoLevelCounters::default()).expect("p");
+        assert!(!progress.alternating_mixed);
+        assert_eq!(progress.next_mixed_axis, None);
+    }
+
+    #[test]
+    fn counter_keys_separate_modes_levels_and_alphabets() {
+        let mut koch = TrainingSettings::default();
+        koch.curriculum.char_set_mode = CharSetMode::Koch;
+        let mut custom = koch.clone();
+        custom.curriculum.char_set_mode = CharSetMode::Custom;
+        custom.curriculum.custom_set = vec!['K', 'M'];
+        let mut mixed_settings = koch.clone();
+        mixed_settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        let mut digits = koch.clone();
+        digits.curriculum.char_set_mode = CharSetMode::Digits;
+
+        let key = |s: &TrainingSettings| {
+            AutoAdjustMode::from_char_set(s.curriculum.char_set_mode).storage_key_for(s)
+        };
+        let keys = [key(&koch), key(&custom), key(&mixed_settings), key(&digits)];
+        assert!(keys[0].starts_with("koch_1_"));
+        assert!(keys[1].starts_with("custom_1_"));
+        assert!(keys[2].starts_with("mixed_1_1_"));
+        assert!(keys[3].starts_with("digits_1_"));
+        let mut unique = keys.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len());
+
+        // A different sequence is a different key at the same level.
+        let mut other = koch.clone();
+        other.curriculum.custom_sequence = vec!['A', 'B', 'C'];
+        assert_ne!(key(&koch), key(&other));
+
+        assert_eq!(AutoAdjustMode::Digits.level_for(&digits), 1);
+        assert_eq!(AutoAdjustMode::Alphabet.digits_for(&koch), None);
+        assert_eq!(AutoAdjustMode::Mixed.digits_for(&mixed_settings), Some(1));
+    }
+}

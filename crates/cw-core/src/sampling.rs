@@ -471,3 +471,245 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    use crate::rng::FastrandRng;
+
+    /// Returns a fixed sequence of "random" numbers, so every branch that
+    /// depends on a draw can be aimed at deliberately.
+    struct ScriptedRng {
+        values: Vec<f64>,
+        next: usize,
+    }
+
+    impl ScriptedRng {
+        fn new(values: &[f64]) -> Self {
+            Self {
+                values: values.to_vec(),
+                next: 0,
+            }
+        }
+    }
+
+    impl Rng for ScriptedRng {
+        fn f64(&mut self) -> f64 {
+            let value = self.values[self.next % self.values.len()];
+            self.next += 1;
+            value
+        }
+    }
+
+    fn config(mode: CharSetMode, pct: u32) -> CharSamplingConfig {
+        CharSamplingConfig {
+            error_weight_strength: 3.0,
+            coverage_strength: 1.0,
+            thompson_sampling: false,
+            mixed_letters_percent: pct,
+            char_set_mode: mode,
+        }
+    }
+
+    #[test]
+    fn a_belief_with_no_mass_is_a_coin_flip() {
+        assert_eq!(
+            beta_posterior_mean_error(CharBetaBelief {
+                alpha: 0.0,
+                beta: 0.0
+            }),
+            0.5
+        );
+    }
+
+    #[test]
+    fn an_untouched_character_starts_on_the_flat_prior() {
+        let state = CharSamplingState::default();
+        let belief = belief_for(&state, 'K');
+        assert_eq!(belief.alpha, CHAR_SAMPLING_PRIOR_ALPHA);
+        assert_eq!(belief.beta, CHAR_SAMPLING_PRIOR_BETA);
+        assert_eq!(beta_posterior_mean_error(belief), 0.5);
+    }
+
+    #[test]
+    fn coverage_lifts_the_characters_that_have_been_seen_least() {
+        let pool = ['K', 'M'];
+        let mut state = CharSamplingState::default();
+        state.session_sample_counts.insert('K', 10);
+        let config = config(CharSetMode::Koch, 70);
+        let mut rng = FastrandRng::default();
+        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
+        assert!(weights[&'M'] > weights[&'K']);
+
+        // With coverage off both characters weigh the same.
+        let mut flat = config.clone();
+        flat.coverage_strength = 0.0;
+        let weights = compute_raw_sampling_weights(&pool, &state, &flat, &mut rng);
+        assert_eq!(weights[&'M'], weights[&'K']);
+    }
+
+    #[test]
+    fn a_fresh_session_gives_every_character_the_same_coverage_lift() {
+        // Nothing sampled yet, so there is no deficit to compute a ratio from.
+        let pool = ['K', 'M'];
+        let state = CharSamplingState::default();
+        let config = config(CharSetMode::Koch, 70);
+        let mut rng = FastrandRng::default();
+        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
+        assert_eq!(weights[&'K'], weights[&'M']);
+        assert!(weights[&'K'] > 0.0);
+    }
+
+    #[test]
+    fn error_weighting_can_be_switched_off() {
+        let pool = ['K', 'M'];
+        let mut state = CharSamplingState::default();
+        state.beliefs.insert(
+            'M',
+            CharBetaBelief {
+                alpha: 1.0,
+                beta: 20.0,
+            },
+        );
+        let mut config = config(CharSetMode::Koch, 70);
+        config.error_weight_strength = 0.0;
+        config.coverage_strength = 0.0;
+        let mut rng = FastrandRng::default();
+        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
+        assert_eq!(weights[&'K'], weights[&'M']);
+    }
+
+    #[test]
+    fn thompson_draws_stay_inside_the_unit_interval() {
+        let mut rng = FastrandRng(12345);
+        for _ in 0..200 {
+            let x = sample_beta(0.4, 2.5, &mut rng);
+            assert!((0.0..=1.0).contains(&x), "beta draw out of range: {x}");
+        }
+        // A degenerate pair cannot divide by zero.
+        assert_eq!(sample_beta(0.0, 0.0, &mut rng), 0.5);
+        assert_eq!(sample_beta(-1.0, -1.0, &mut rng), 0.5);
+    }
+
+    #[test]
+    fn weights_normalise_to_one_or_fall_back_to_uniform() {
+        let pool = ['K', 'M', 'U'];
+        let mut weights = BTreeMap::new();
+        weights.insert('K', 1.0);
+        weights.insert('M', 3.0);
+        let normalized = normalize_weights(&pool, &weights);
+        assert!((normalized.values().sum::<f64>() - 1.0).abs() < 1e-9);
+        assert_eq!(normalized[&'U'], 0.0);
+
+        // All-zero weights spread evenly rather than dividing by zero.
+        let zeroed = normalize_weights(&pool, &BTreeMap::new());
+        assert!(zeroed.values().all(|v| (*v - 1.0 / 3.0).abs() < 1e-9));
+        assert!(normalize_weights(&[], &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn sampling_an_empty_pool_returns_an_empty_group() {
+        let state = CharSamplingState::default();
+        let config = config(CharSetMode::Koch, 70);
+        let mut rng = FastrandRng::default();
+        let (group, next) = sample_training_group(&[], 3, &state, &config, &mut rng);
+        assert!(group.is_empty());
+        assert_eq!(next, state);
+        let (group, _) = sample_training_group(&['K'], 0, &state, &config, &mut rng);
+        assert!(group.is_empty());
+    }
+
+    #[test]
+    fn a_mixed_group_follows_the_letter_share() {
+        let pool = ['K', 'M', '0', '1'];
+        let state = CharSamplingState::default();
+        let config = config(CharSetMode::Mixed, 50);
+        // Draws below 0.5 pick letters, above pick digits. Each character costs
+        // two draws: one for the subset, one for the weighted pick.
+        let mut rng = ScriptedRng::new(&[0.1, 0.0, 0.9, 0.0]);
+        let (group, next) = sample_training_group(&pool, 2, &state, &config, &mut rng);
+        assert_eq!(group.chars().count(), 2);
+        let mut chars = group.chars();
+        assert!(!chars.next().unwrap().is_ascii_digit());
+        assert!(chars.next().unwrap().is_ascii_digit());
+        assert_eq!(next.session_sample_counts.values().sum::<u32>(), 2);
+    }
+
+    #[test]
+    fn a_mixed_group_with_only_letters_unlocked_still_fills() {
+        // No digits in the pool, so the digit half falls back to the whole pool.
+        let pool = ['K', 'M'];
+        let state = CharSamplingState::default();
+        let config = config(CharSetMode::Mixed, 50);
+        let mut rng = ScriptedRng::new(&[0.9, 0.0]);
+        let (group, _) = sample_training_group(&pool, 2, &state, &config, &mut rng);
+        assert_eq!(group.chars().count(), 2);
+        assert!(group.chars().all(|c| c == 'K' || c == 'M'));
+    }
+
+    #[test]
+    fn sample_counts_accumulate_across_groups() {
+        let pool = ['K'];
+        let state = CharSamplingState::default();
+        let config = config(CharSetMode::Koch, 70);
+        let mut rng = FastrandRng::default();
+        let (_, first) = sample_training_group(&pool, 2, &state, &config, &mut rng);
+        let (_, second) = sample_training_group(&pool, 2, &first, &config, &mut rng);
+        assert_eq!(second.session_sample_counts.get(&'K'), Some(&4));
+    }
+
+    #[test]
+    fn an_answer_moves_only_the_characters_that_were_sent() {
+        let state = CharSamplingState::default();
+        // "KM" copied as "KX": K right, M wrong, X never sent.
+        let next = update_sampling_state_from_answer(&state, "KM", "KX");
+        assert_eq!(next.beliefs[&'K'].alpha, CHAR_SAMPLING_PRIOR_ALPHA + 1.0);
+        assert_eq!(next.beliefs[&'K'].beta, CHAR_SAMPLING_PRIOR_BETA);
+        assert_eq!(next.beliefs[&'M'].beta, CHAR_SAMPLING_PRIOR_BETA + 1.0);
+        assert!(!next.beliefs.contains_key(&'X'));
+    }
+
+    #[test]
+    fn history_from_earlier_sessions_seeds_the_beliefs() {
+        let mut first = BTreeMap::new();
+        first.insert(
+            'K',
+            crate::alignment::LetterAccuracy {
+                correct: 3,
+                total: 5,
+            },
+        );
+        let mut second = BTreeMap::new();
+        second.insert(
+            'K',
+            crate::alignment::LetterAccuracy {
+                correct: 1,
+                total: 1,
+            },
+        );
+        let state = create_initial_sampling_state(&[&first, &second]);
+        let belief = state.beliefs[&'K'];
+        assert_eq!(belief.alpha, CHAR_SAMPLING_PRIOR_ALPHA + 4.0);
+        assert_eq!(belief.beta, CHAR_SAMPLING_PRIOR_BETA + 2.0);
+        assert!(state.session_sample_counts.is_empty());
+    }
+
+    #[test]
+    fn group_size_stays_inside_the_configured_range() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 4;
+        settings.curriculum.min_group_size = 2;
+        settings.curriculum.max_group_size = 5;
+        let state = CharSamplingState::default();
+        let mut rng = FastrandRng(99);
+        for _ in 0..50 {
+            let (group, _) = generate_training_group(&settings, &state, &mut rng);
+            let len = group.chars().count();
+            assert!(
+                (2..=5).contains(&len),
+                "group {group:?} has {len} characters"
+            );
+        }
+    }
+}

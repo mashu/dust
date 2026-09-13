@@ -842,3 +842,278 @@ mod tests {
         assert!(result.alphabet_fingerprint.is_empty());
     }
 }
+
+#[cfg(test)]
+mod accessor_tests {
+    use super::*;
+
+    fn session() -> GroupSession {
+        let mut settings = TrainingSettings::default();
+        settings.playback.lock_input_during_group_playback = true;
+        let mut session = GroupSession::new(SessionId::new(3), 500, 2, settings);
+        session.set_group(0, "KM".into());
+        session.set_group(1, "UR".into());
+        session
+    }
+
+    #[test]
+    fn a_session_id_survives_the_round_trip() {
+        assert_eq!(SessionId::from(9u64).raw(), 9);
+        assert_eq!(SessionId::new(4), SessionId::from(4u64));
+    }
+
+    #[test]
+    fn a_fresh_session_reports_its_own_shape() {
+        let session = session();
+        assert_eq!(session.session_id().raw(), 3);
+        assert_eq!(session.started_at(), 500);
+        assert_eq!(session.status(), RuntimeStatus::Starting);
+        assert_eq!(session.group_count(), 2);
+        assert_eq!(session.current_group(), 0);
+        assert_eq!(session.focused_group(), 0);
+        assert_eq!(session.sent_texts(), vec!["KM", "UR"]);
+        assert_eq!(session.inputs(), vec!["", ""]);
+        assert_eq!(session.confirmed_flags(), vec![false, false]);
+        assert!(!session.any_confirmed());
+        assert!(session.group(9).is_none());
+        assert_eq!(session.group_repeats(9), 1);
+        assert_eq!(session.played_wpm(0), None);
+        assert_eq!(session.group_start_ms(9), None);
+        // A session always has at least one group, even if asked for none.
+        assert_eq!(
+            GroupSession::new(SessionId::new(1), 0, 0, TrainingSettings::default()).group_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_view_mirrors_the_current_group() {
+        let mut session = session();
+        session.set_group_repeats(0, 3);
+        session.begin_group(0, 1_000);
+        session.note_play_finished(0);
+        let view = session.view();
+        assert_eq!(view.session_id, SessionId::new(3));
+        assert_eq!(view.status, RuntimeStatus::PlayingGroup);
+        assert_eq!(view.current, 0);
+        assert_eq!(view.repeat_total, 3);
+        assert_eq!(view.repeat_done, 1);
+        assert!(view.locked);
+        assert_eq!(session.group(0).map(Group::repeats), Some(3));
+        assert_eq!(session.group(0).map(Group::plays_done), Some(1));
+    }
+
+    #[test]
+    fn repeats_are_never_below_one() {
+        let mut session = session();
+        session.set_group_repeats(0, 0);
+        assert_eq!(session.group_repeats(0), 1);
+        // Setting repeats on a group that is not there is a no-op.
+        session.set_group_repeats(9, 4);
+        assert_eq!(session.group_count(), 2);
+        session.note_play_finished(9);
+    }
+
+    #[test]
+    fn beginning_a_group_that_is_not_there_changes_nothing() {
+        let mut session = session();
+        session.begin_group(9, 1_000);
+        assert_eq!(session.current_group(), 0);
+        assert_eq!(session.status(), RuntimeStatus::Starting);
+    }
+
+    #[test]
+    fn replacing_the_text_of_a_confirmed_group_keeps_the_answer() {
+        let mut session = session();
+        session.begin_group(0, 1_000);
+        session.confirm(0, "KM".into(), 1_500);
+        session.set_group(0, "XX".into());
+        assert_eq!(session.group(0).map(|g| g.input()), Some("KM"));
+        // An unconfirmed group loses whatever was typed into it.
+        session.set_group(9, "ZZ".into());
+        assert_eq!(session.sent_texts(), vec!["XX", "UR"]);
+    }
+
+    #[test]
+    fn input_is_only_accepted_for_the_current_unconfirmed_group() {
+        let mut session = session();
+        session.begin_group(0, 1_000);
+        session.set_input(1, "nope".into());
+        assert_eq!(session.group(1).map(|g| g.input()), Some(""));
+        session.set_input(0, "km".into());
+        assert_eq!(session.group(0).map(|g| g.input()), Some("km"));
+        session.confirm(0, "KM".into(), 1_200);
+        session.set_input(0, "later".into());
+        assert_eq!(session.group(0).map(|g| g.input()), Some("KM"));
+    }
+
+    #[test]
+    fn confirming_is_refused_for_anything_but_the_current_group() {
+        let mut session = session();
+        session.begin_group(0, 1_000);
+        assert!(!session.confirm(1, "UR".into(), 1_100));
+        assert!(!session.confirm(9, "??".into(), 1_100));
+        assert!(session.confirm(0, "KM".into(), 1_100));
+        assert!(!session.confirm(0, "KM".into(), 1_200));
+        assert!(session.any_confirmed());
+        // Confirming moves the focus onto the next group.
+        assert_eq!(session.focused_group(), 1);
+    }
+
+    #[test]
+    fn the_last_group_keeps_the_focus_when_it_is_confirmed() {
+        let mut session = session();
+        session.begin_group(1, 1_000);
+        assert!(session.confirm(1, "UR".into(), 1_100));
+        assert_eq!(session.focused_group(), 1);
+    }
+
+    #[test]
+    fn an_answer_stamp_is_kept_until_the_answer_changes_length() {
+        let mut session = session();
+        session.begin_group(0, 1_000);
+        session.record_answer_time_if_empty(0, 1_400);
+        session.record_answer_time_if_empty(0, 1_900);
+        session.clear_answer_time(9);
+        session.record_answer_time_if_empty(9, 1_900);
+        session.end_playback(0, 1_200, 20.0, 18.0);
+        let timings = session.build_timings(0.0);
+        // The first stamp is the one that counts.
+        assert_eq!(timings[0].time_to_complete_ms, 200.0);
+
+        session.clear_answer_time(0);
+        let timings = session.build_timings(0.0);
+        assert_eq!(timings[0].time_to_complete_ms, 0.0);
+        // Confirmed groups keep their stamp.
+        session.confirm(0, "KM".into(), 2_000);
+        session.clear_answer_time(0);
+        assert_eq!(session.build_timings(0.0)[0].time_to_complete_ms, 800.0);
+    }
+
+    #[test]
+    fn an_answer_that_beats_the_send_is_recorded_as_one_millisecond() {
+        let mut session = session();
+        session.begin_group(0, 1_000);
+        session.end_playback(0, 2_000, 20.0, 18.0);
+        session.record_answer_time_if_empty(0, 1_500);
+        let timings = session.build_timings(0.0);
+        assert_eq!(timings[0].time_to_complete_ms, 1.0);
+        assert_eq!(timings[0].per_char_ms, 1.0);
+        assert_eq!(timings[0].char_wpm, Some(20.0));
+    }
+
+    #[test]
+    fn an_unanswered_group_falls_back_to_the_timeout() {
+        let mut session = session();
+        session.begin_group(0, 1_000);
+        session.end_playback(0, 2_000, 20.0, 18.0);
+        let timings = session.build_timings(5_000.0);
+        assert_eq!(timings[0].time_to_complete_ms, 5_000.0);
+        assert_eq!(timings[0].per_char_ms, 2_500.0);
+        // A group that was never sent has no timing at all.
+        assert_eq!(timings[1].time_to_complete_ms, 0.0);
+        assert_eq!(timings[1].char_wpm, None);
+    }
+
+    #[test]
+    fn playback_speeds_are_reported_once_they_are_measured() {
+        let mut session = session();
+        session.begin_group(0, 1_000);
+        session.end_playback(9, 1_500, 25.0, 20.0);
+        assert_eq!(session.played_wpm(0), None);
+        session.end_playback(0, 1_500, 25.0, 20.0);
+        assert_eq!(session.played_wpm(0), Some((25.0, 20.0)));
+        assert_eq!(session.status(), RuntimeStatus::WaitingForAnswer);
+        assert!(!session.input_locked(0));
+    }
+
+    #[test]
+    fn all_groups_confirmed_needs_text_in_every_group() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.num_groups = 2;
+        let mut session = GroupSession::new(SessionId::new(1), 0, 2, settings);
+        assert!(!session.all_groups_confirmed());
+        session.set_group(0, "KM".into());
+        session.begin_group(0, 10);
+        session.confirm(0, "KM".into(), 20);
+        // Group 1 was never filled in, so the session is not complete.
+        assert!(!session.all_groups_confirmed());
+        session.set_group(1, "UR".into());
+        session.begin_group(1, 30);
+        session.confirm(1, "UR".into(), 40);
+        assert!(session.all_groups_confirmed());
+    }
+
+    #[test]
+    fn an_answer_matches_only_at_the_same_length() {
+        assert!(answer_length_matches("KM", "km"));
+        assert!(answer_length_matches("KM", " km "));
+        assert!(!answer_length_matches("KM", "k"));
+        assert!(!answer_length_matches("KM", "kmu"));
+        assert!(!answer_length_matches("", ""));
+    }
+
+    #[test]
+    fn history_is_reusable_only_for_the_same_alphabet() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        let mut session = GroupSession::new(SessionId::new(1), 0, 1, settings.clone());
+        session.set_group(0, "KM".into());
+        session.begin_group(0, 0);
+        session.confirm(0, "KM".into(), 10);
+        let result = build_session_result(&session, &settings, 20, "2026-09-01".into());
+        assert!(result.usable_for_sampling(&settings));
+
+        // A different character set never seeds another one's sampling.
+        let mut other = settings.clone();
+        other.curriculum.char_set_mode = CharSetMode::Digits;
+        assert!(!result.usable_for_sampling(&other));
+
+        // Same mode, different alphabet.
+        let mut resequenced = settings.clone();
+        resequenced.curriculum.custom_sequence = vec!['A', 'B', 'C'];
+        assert!(!result.usable_for_sampling(&resequenced));
+
+        // A legacy session carries no fingerprint and is accepted.
+        let mut legacy = result.clone();
+        legacy.alphabet_fingerprint.clear();
+        assert!(legacy.usable_for_sampling(&resequenced));
+
+        let summary = result.summary();
+        assert_eq!(summary.accuracy, result.accuracy);
+        assert_eq!(summary.groups, result.groups);
+        assert_eq!(summary.score, result.score);
+        assert_eq!(summary.avg_response_ms, result.avg_response_ms);
+    }
+
+    #[test]
+    fn an_unplayed_session_records_the_settings_speed() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.link_char_to_effective = false;
+        settings.playback.char_wpm_min = 22.0;
+        settings.playback.effective_wpm_min = 14.0;
+        let mut session = GroupSession::new(SessionId::new(1), 0, 1, settings.clone());
+        session.set_group(0, "KM".into());
+        session.begin_group(0, 0);
+        session.confirm(0, "KM".into(), 10);
+        let result = build_session_result(&session, &settings, 20, "2026-09-01".into());
+        assert_eq!(result.char_wpm, 22.0);
+        assert_eq!(result.effective_wpm, 14.0);
+        assert_eq!(result.level, settings.curriculum.level);
+    }
+
+    #[test]
+    fn a_digits_session_records_the_digits_level() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Digits;
+        settings.curriculum.digits_level = 4;
+        let mut session = GroupSession::new(SessionId::new(1), 0, 1, settings.clone());
+        session.set_group(0, "01".into());
+        session.begin_group(0, 0);
+        session.confirm(0, "01".into(), 10);
+        let result = build_session_result(&session, &settings, 20, "2026-09-01".into());
+        assert_eq!(result.level, 4);
+        assert_eq!(result.digits_level, 4);
+        assert_eq!(result.alphabet_fingerprint, "0123456789");
+    }
+}

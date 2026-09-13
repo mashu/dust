@@ -46,3 +46,33 @@ mod tests {
         assert_eq!(unlocked_prefix(&['X'], 1), vec!['X']);
     }
 }
+
+#[cfg(test)]
+mod level_tests {
+    use super::*;
+
+    #[test]
+    fn level_one_unlocks_two_characters() {
+        assert_eq!(unlocked_count_for_level(0), 2);
+        assert_eq!(unlocked_count_for_level(LEVEL_MIN), 2);
+        assert_eq!(unlocked_count_for_level(5), 6);
+    }
+
+    #[test]
+    fn the_top_level_is_one_below_the_alphabet_length() {
+        assert_eq!(max_level_for_len(0), LEVEL_MIN);
+        assert_eq!(max_level_for_len(1), LEVEL_MIN);
+        assert_eq!(max_level_for_len(2), LEVEL_MIN);
+        assert_eq!(max_level_for_len(10), 9);
+    }
+
+    #[test]
+    fn a_prefix_never_runs_past_the_alphabet() {
+        let alphabet = ['K', 'M', 'U'];
+        assert!(unlocked_prefix(&[], 4).is_empty());
+        assert_eq!(unlocked_prefix(&alphabet, 1), vec!['K', 'M']);
+        assert_eq!(unlocked_prefix(&alphabet, 99), vec!['K', 'M', 'U']);
+        // A one-character alphabet cannot be padded to two.
+        assert_eq!(unlocked_prefix(&['K'], 1), vec!['K']);
+    }
+}

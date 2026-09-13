@@ -1,54 +1,32 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+//! cpal output: ALSA/CoreAudio/WASAPI on desktop, AAudio through oboe on Android.
+//!
+//! Everything here that can run without a sound card lives in
+//! [`super::render`] and [`state`]; what is left is the device glue.
+
+mod state;
+
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
-use cw_core::band::{qsb_gain_at, BandMixer};
-use cw_core::{plan_morse_playback, PlaybackPlan, Rng, ToneEvent, TrainingSettings};
+use cw_core::band::BandMixer;
+use cw_core::{plan_morse_playback, FastrandRng, TrainingSettings};
 
-struct LiveQsb {
-    enabled: AtomicBool,
-    depth_bits: AtomicU64,
-    rate_bits: AtomicU64,
-}
-
-impl LiveQsb {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            enabled: AtomicBool::new(false),
-            depth_bits: AtomicU64::new(0.0f64.to_bits()),
-            rate_bits: AtomicU64::new(0.12f64.to_bits()),
-        })
-    }
-
-    fn store(&self, settings: &TrainingSettings) {
-        self.enabled
-            .store(settings.band.qsb_enabled, Ordering::Relaxed);
-        self.depth_bits
-            .store(settings.band.qsb_depth.to_bits(), Ordering::Relaxed);
-        self.rate_bits
-            .store(settings.band.qsb_rate_hz.to_bits(), Ordering::Relaxed);
-    }
-
-    fn gain_at(&self, t_sec: f64) -> f32 {
-        qsb_gain_at(
-            t_sec,
-            self.enabled.load(Ordering::Relaxed),
-            f64::from_bits(self.depth_bits.load(Ordering::Relaxed)),
-            f64::from_bits(self.rate_bits.load(Ordering::Relaxed)),
-        )
-    }
-}
+use super::render::{fill_band, render_plan, LiveQsb, TonePlayback};
+use super::{MorseBackend, PlaybackWait};
+use state::{PlayerState, ToneSignal};
 
 pub struct MorsePlayer {
-    stop_flag: Arc<AtomicBool>,
-    epoch: Arc<AtomicU64>,
+    state: PlayerState,
     band_stop: Arc<AtomicBool>,
     band_stream: Option<cpal::Stream>,
-    band_signature: String,
     tone_stream: Option<cpal::Stream>,
-    tone_finished: Arc<AtomicBool>,
     qsb: Arc<LiveQsb>,
+    /// When the player opened. Fading is read off this clock so it keeps
+    /// running between groups instead of restarting with every send.
+    opened_at: Instant,
 }
 
 /// iOS starts an app with no audio session, which leaves output silent, tied to
@@ -79,430 +57,251 @@ impl MorsePlayer {
             .default_output_device()
             .ok_or_else(|| "No audio output device found".to_string())?;
         Ok(Self {
-            stop_flag: Arc::new(AtomicBool::new(false)),
-            epoch: Arc::new(AtomicU64::new(0)),
+            state: PlayerState::new(),
             band_stop: Arc::new(AtomicBool::new(false)),
             band_stream: None,
-            band_signature: String::new(),
             tone_stream: None,
-            tone_finished: Arc::new(AtomicBool::new(true)),
             qsb: LiveQsb::new(),
+            opened_at: Instant::now(),
         })
-    }
-
-    pub fn resume_from_gesture(&self) {}
-
-    pub fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.qsb.store(settings);
-        let signature = settings.band_signature();
-        if signature == self.band_signature {
-            return Ok(());
-        }
-        self.stop_band();
-        if !BandMixer::needs_background(settings) {
-            self.band_signature = signature;
-            return Ok(());
-        }
-        // The receiver background is decoration. If its stream will not open —
-        // some Android devices refuse a second concurrent output stream — the
-        // Morse must still play, so this failure is swallowed rather than
-        // failing the whole player.
-        match start_band_stream(settings, Arc::clone(&self.band_stop)) {
-            Ok(stream) => {
-                self.band_stream = Some(stream);
-                self.band_signature = signature;
-            }
-            Err(_) => {
-                // Remember the signature anyway so a failing configuration is
-                // not retried on every settings change.
-                self.band_stream = None;
-                self.band_signature = signature;
-            }
-        }
-        Ok(())
     }
 
     fn stop_band(&mut self) {
         self.band_stop.store(true, Ordering::SeqCst);
         self.band_stream = None;
         self.band_stop = Arc::new(AtomicBool::new(false));
-        self.band_signature.clear();
+        self.state.forget_band();
     }
+}
 
-    fn bump_epoch(&self) -> u64 {
-        self.epoch.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    pub fn stop(&mut self) {
-        self.bump_epoch();
-        self.stop_flag.store(true, Ordering::SeqCst);
-        self.tone_stream = None;
-        self.tone_finished.store(true, Ordering::SeqCst);
-    }
-
-    pub fn shutdown(&mut self) {
-        self.stop();
+impl MorseBackend for MorsePlayer {
+    fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        self.qsb.store(settings);
+        if !self.state.band_needs_rebuild(settings) {
+            return Ok(());
+        }
         self.stop_band();
+        if !BandMixer::needs_background(settings) {
+            self.state.note_band(settings);
+            return Ok(());
+        }
+        // The receiver background is decoration. If its stream will not open —
+        // some Android devices refuse a second concurrent output stream — the
+        // Morse must still play, so this failure is swallowed rather than
+        // failing the whole player. The signature is remembered either way, so
+        // a configuration that cannot open is not retried on every change.
+        self.band_stream = start_band_stream(settings, Arc::clone(&self.band_stop)).ok();
+        self.state.note_band(settings);
+        Ok(())
     }
 
-    pub fn reset_stop_flag(&self) {
-        self.stop_flag.store(false, Ordering::SeqCst);
-    }
-
-    pub fn start_text(
+    fn start_text(
         &mut self,
         text: &str,
         settings: &TrainingSettings,
-        rng: &mut impl Rng,
-    ) -> Result<crate::audio::PlaybackWait, String> {
+        rng: &mut FastrandRng,
+    ) -> Result<PlaybackWait, String> {
         self.apply_band(settings)?;
         let plan = plan_morse_playback(text, settings, rng);
-        let epoch = self.bump_epoch();
-        self.reset_stop_flag();
+        // Drop the previous stream before the new epoch, so its callback cannot
+        // write into the run that is about to start.
         self.tone_stream = None;
-        let (stream, finished) =
-            start_tone_stream(&plan, Arc::clone(&self.qsb), Arc::clone(&self.stop_flag))?;
-        self.tone_finished = Arc::clone(&finished);
+        let armed = self.state.arm();
+        let (stream, finished) = start_tone_stream(
+            &plan,
+            self.opened_at.elapsed().as_secs_f64(),
+            Arc::clone(&self.qsb),
+            Arc::clone(armed.stop_flag()),
+        )
+        .inspect_err(|_| self.state.note_start_failed())?;
         self.tone_stream = Some(stream);
-        Ok(crate::audio::PlaybackWait::desktop(
+        Ok(PlaybackWait::new(
             plan.duration_sec,
             plan.resolved_char_wpm,
             plan.resolved_effective_wpm,
-            Arc::clone(&self.stop_flag),
-            epoch,
-            Arc::clone(&self.epoch),
-            finished,
+            std::rc::Rc::new(ToneSignal::new(armed, finished)),
         ))
     }
-}
 
-fn envelope_gain(event: &ToneEvent, t: f64) -> f32 {
-    let curve = &event.envelope;
-    if curve.len() < 2 || event.duration_sec <= 0.0 {
-        return event.target_gain as f32;
+    fn stop(&mut self) {
+        self.state.stop();
+        self.tone_stream = None;
     }
-    let rel = (t / event.duration_sec).clamp(0.0, 1.0);
-    let pos = rel * (curve.len() - 1) as f64;
-    let i = pos.floor() as usize;
-    let frac = (pos - i as f64) as f32;
-    let a = curve.get(i).copied().unwrap_or(0.0);
-    let b = curve.get(i + 1).copied().unwrap_or(a);
-    a * (1.0 - frac) + b * frac
-}
 
-fn render_plan(plan: &PlaybackPlan, sample_rate: u32) -> Vec<f32> {
-    let extra = sample_rate / 20;
-    let n = ((plan.duration_sec * f64::from(sample_rate)).ceil() as usize)
-        .saturating_add(extra as usize);
-    let mut buf = vec![0.0f32; n.max(1)];
-    let sr = f64::from(sample_rate);
-    for event in &plan.events {
-        let start = (event.start_sec * sr).round() as usize;
-        let len = ((event.duration_sec * sr).round() as usize).max(1);
-        let two_pi_f = 2.0 * std::f64::consts::PI * event.frequency_hz;
-        for i in 0..len {
-            let t = i as f64 / sr;
-            let sample = (two_pi_f * t).sin() as f32 * envelope_gain(event, t);
-            if let Some(slot) = buf.get_mut(start + i) {
-                *slot += sample;
-            }
-        }
+    fn shutdown(&mut self) {
+        self.stop();
+        self.stop_band();
     }
-    buf
 }
 
-fn start_tone_stream(
-    plan: &PlaybackPlan,
-    qsb: Arc<LiveQsb>,
-    stop: Arc<AtomicBool>,
-) -> Result<(cpal::Stream, Arc<AtomicBool>), String> {
-    let host = cpal::default_host();
-    let device = host
+/// Build an output stream that fills `T` samples from an `f32` source.
+fn build_stream<T, F>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    mut source: F,
+) -> Result<cpal::Stream, String>
+where
+    T: Sample + SizedSample + FromSample<f32>,
+    F: FnMut(&mut [f32], usize) + Send + 'static,
+{
+    let channels = channels.max(1);
+    // One scratch buffer, grown once and reused: an audio callback must not
+    // allocate.
+    let mut scratch: Vec<f32> = Vec::new();
+    device
+        .build_output_stream(
+            config,
+            move |output: &mut [T], _| {
+                scratch.clear();
+                scratch.resize(output.len(), 0.0);
+                source(&mut scratch, channels);
+                for (slot, value) in output.iter_mut().zip(scratch.iter()) {
+                    *slot = T::from_sample(*value);
+                }
+            },
+            |err| eprintln!("audio stream error: {err}"),
+            None,
+        )
+        .map_err(|e| format!("Audio stream: {e}"))
+}
+
+/// Build a stream in whatever sample format the device wants.
+fn build_for_format<F>(
+    device: &cpal::Device,
+    config: &cpal::SupportedStreamConfig,
+    channels: usize,
+    source: F,
+) -> Result<cpal::Stream, String>
+where
+    F: FnMut(&mut [f32], usize) + Send + 'static,
+{
+    let format = config.sample_format();
+    let stream_config: cpal::StreamConfig = config.clone().into();
+    match format {
+        SampleFormat::F32 => build_stream::<f32, F>(device, &stream_config, channels, source),
+        SampleFormat::F64 => build_stream::<f64, F>(device, &stream_config, channels, source),
+        SampleFormat::I16 => build_stream::<i16, F>(device, &stream_config, channels, source),
+        SampleFormat::I32 => build_stream::<i32, F>(device, &stream_config, channels, source),
+        SampleFormat::U16 => build_stream::<u16, F>(device, &stream_config, channels, source),
+        SampleFormat::U32 => build_stream::<u32, F>(device, &stream_config, channels, source),
+        SampleFormat::I8 => build_stream::<i8, F>(device, &stream_config, channels, source),
+        SampleFormat::U8 => build_stream::<u8, F>(device, &stream_config, channels, source),
+        other => Err(format!("Unsupported sample format: {other}")),
+    }
+}
+
+fn default_output() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
+    let device = cpal::default_host()
         .default_output_device()
         .ok_or_else(|| "No audio output device found".to_string())?;
     let config = device
         .default_output_config()
         .map_err(|e| format!("Audio config: {e}"))?;
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels() as usize;
-    let samples = render_plan(plan, sample_rate);
-    let pos = Arc::new(AtomicUsize::new(0));
-    let finished = Arc::new(AtomicBool::new(false));
-
-    let err_fn = |err| eprintln!("audio stream error: {err}");
-    let stream = match config.sample_format() {
-        SampleFormat::F32 => build_stream::<f32>(
-            &device,
-            &config.into(),
-            samples,
-            sample_rate,
-            channels,
-            qsb,
-            Arc::clone(&pos),
-            Arc::clone(&stop),
-            Arc::clone(&finished),
-            err_fn,
-        )?,
-        SampleFormat::F64 => build_stream::<f64>(
-            &device,
-            &config.into(),
-            samples,
-            sample_rate,
-            channels,
-            qsb,
-            Arc::clone(&pos),
-            Arc::clone(&stop),
-            Arc::clone(&finished),
-            err_fn,
-        )?,
-        SampleFormat::I16 => build_stream::<i16>(
-            &device,
-            &config.into(),
-            samples,
-            sample_rate,
-            channels,
-            qsb,
-            Arc::clone(&pos),
-            Arc::clone(&stop),
-            Arc::clone(&finished),
-            err_fn,
-        )?,
-        SampleFormat::I32 => build_stream::<i32>(
-            &device,
-            &config.into(),
-            samples,
-            sample_rate,
-            channels,
-            qsb,
-            Arc::clone(&pos),
-            Arc::clone(&stop),
-            Arc::clone(&finished),
-            err_fn,
-        )?,
-        SampleFormat::U16 => build_stream::<u16>(
-            &device,
-            &config.into(),
-            samples,
-            sample_rate,
-            channels,
-            qsb,
-            Arc::clone(&pos),
-            Arc::clone(&stop),
-            Arc::clone(&finished),
-            err_fn,
-        )?,
-        SampleFormat::U32 => build_stream::<u32>(
-            &device,
-            &config.into(),
-            samples,
-            sample_rate,
-            channels,
-            qsb,
-            Arc::clone(&pos),
-            Arc::clone(&stop),
-            Arc::clone(&finished),
-            err_fn,
-        )?,
-        SampleFormat::I8 => build_stream::<i8>(
-            &device,
-            &config.into(),
-            samples,
-            sample_rate,
-            channels,
-            qsb,
-            Arc::clone(&pos),
-            Arc::clone(&stop),
-            Arc::clone(&finished),
-            err_fn,
-        )?,
-        SampleFormat::U8 => build_stream::<u8>(
-            &device,
-            &config.into(),
-            samples,
-            sample_rate,
-            channels,
-            qsb,
-            Arc::clone(&pos),
-            Arc::clone(&stop),
-            Arc::clone(&finished),
-            err_fn,
-        )?,
-        other => return Err(format!("Unsupported sample format: {other}")),
-    };
-    stream.play().map_err(|e| format!("Audio play: {e}"))?;
-    Ok((stream, finished))
+    Ok((device, config))
 }
 
-fn build_stream<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    samples: Vec<f32>,
-    sample_rate: u32,
-    channels: usize,
+fn start_tone_stream(
+    plan: &cw_core::PlaybackPlan,
+    started_at_sec: f64,
     qsb: Arc<LiveQsb>,
-    pos: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
-    finished: Arc<AtomicBool>,
-    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
-) -> Result<cpal::Stream, String>
-where
-    T: Sample + SizedSample + FromSample<f32>,
-{
-    let channels = channels.max(1);
-    let sr = f64::from(sample_rate.max(1));
-    device
-        .build_output_stream(
-            config,
-            move |output: &mut [T], _| {
-                if stop.load(Ordering::SeqCst) {
-                    for sample in output.iter_mut() {
-                        *sample = T::from_sample(0.0);
-                    }
-                    finished.store(true, Ordering::SeqCst);
-                    return;
-                }
-                let mut i = pos.load(Ordering::SeqCst);
-                let mut out_i = 0;
-                while out_i < output.len() {
-                    let dry = samples.get(i).copied().unwrap_or(0.0);
-                    let value = dry * qsb.gain_at(i as f64 / sr);
-                    for _ in 0..channels {
-                        if out_i >= output.len() {
-                            break;
-                        }
-                        output[out_i] = T::from_sample(value);
-                        out_i += 1;
-                    }
-                    i += 1;
-                    if i >= samples.len() {
-                        finished.store(true, Ordering::SeqCst);
-                        while out_i < output.len() {
-                            output[out_i] = T::from_sample(0.0);
-                            out_i += 1;
-                        }
-                        break;
-                    }
-                }
-                pos.store(i, Ordering::SeqCst);
-                if i >= samples.len() {
-                    finished.store(true, Ordering::SeqCst);
-                }
-            },
-            err_fn,
-            None,
-        )
-        .map_err(|e| format!("Audio stream: {e}"))
+) -> Result<(cpal::Stream, Arc<AtomicBool>), String> {
+    let (device, config) = default_output()?;
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels() as usize;
+    let playback = TonePlayback::new(
+        render_plan(plan, sample_rate),
+        sample_rate,
+        started_at_sec,
+        qsb,
+        stop,
+    );
+    let finished = playback.finished_flag();
+    let stream = build_for_format(&device, &config, channels, move |out, channels| {
+        playback.fill(out, channels)
+    })?;
+    stream.play().map_err(|e| format!("Audio play: {e}"))?;
+    Ok((stream, finished))
 }
 
 fn start_band_stream(
     settings: &TrainingSettings,
     stop: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| "No audio output device found".to_string())?;
-    let config = device
-        .default_output_config()
-        .map_err(|e| format!("Audio config: {e}"))?;
+    let (device, config) = default_output()?;
     let sample_rate = config.sample_rate().0;
-    let channels = config.channels().max(1) as usize;
-    let mut mixer = BandMixer::new(sample_rate, settings, sample_rate as u64);
-    let err_fn = |err| eprintln!("band stream error: {err}");
-    let stream_config: cpal::StreamConfig = config.clone().into();
-    let stream = match config.sample_format() {
-        SampleFormat::F32 => device
-            .build_output_stream(
-                &stream_config,
-                move |output: &mut [f32], _| fill_band(output, channels, &mut mixer, &stop),
-                err_fn,
-                None,
-            )
-            .map_err(|e| format!("Band stream: {e}"))?,
-        SampleFormat::F64 => device
-            .build_output_stream(
-                &stream_config,
-                move |output: &mut [f64], _| fill_band(output, channels, &mut mixer, &stop),
-                err_fn,
-                None,
-            )
-            .map_err(|e| format!("Band stream: {e}"))?,
-        SampleFormat::I16 => device
-            .build_output_stream(
-                &stream_config,
-                move |output: &mut [i16], _| fill_band(output, channels, &mut mixer, &stop),
-                err_fn,
-                None,
-            )
-            .map_err(|e| format!("Band stream: {e}"))?,
-        SampleFormat::I32 => device
-            .build_output_stream(
-                &stream_config,
-                move |output: &mut [i32], _| fill_band(output, channels, &mut mixer, &stop),
-                err_fn,
-                None,
-            )
-            .map_err(|e| format!("Band stream: {e}"))?,
-        SampleFormat::U16 => device
-            .build_output_stream(
-                &stream_config,
-                move |output: &mut [u16], _| fill_band(output, channels, &mut mixer, &stop),
-                err_fn,
-                None,
-            )
-            .map_err(|e| format!("Band stream: {e}"))?,
-        SampleFormat::U32 => device
-            .build_output_stream(
-                &stream_config,
-                move |output: &mut [u32], _| fill_band(output, channels, &mut mixer, &stop),
-                err_fn,
-                None,
-            )
-            .map_err(|e| format!("Band stream: {e}"))?,
-        SampleFormat::I8 => device
-            .build_output_stream(
-                &stream_config,
-                move |output: &mut [i8], _| fill_band(output, channels, &mut mixer, &stop),
-                err_fn,
-                None,
-            )
-            .map_err(|e| format!("Band stream: {e}"))?,
-        SampleFormat::U8 => device
-            .build_output_stream(
-                &stream_config,
-                move |output: &mut [u8], _| fill_band(output, channels, &mut mixer, &stop),
-                err_fn,
-                None,
-            )
-            .map_err(|e| format!("Band stream: {e}"))?,
-        other => return Err(format!("Unsupported sample format: {other}")),
-    };
+    let channels = config.channels() as usize;
+    let mut mixer = BandMixer::new(sample_rate, settings, u64::from(sample_rate));
+    let stream = build_for_format(&device, &config, channels, move |out, channels| {
+        fill_band(out, channels, &mut mixer, &stop)
+    })?;
     stream.play().map_err(|e| format!("Band play: {e}"))?;
     Ok(stream)
 }
 
-fn fill_band<T: Sample + FromSample<f32>>(
-    output: &mut [T],
-    channels: usize,
-    mixer: &mut BandMixer,
-    stop: &AtomicBool,
-) {
-    if stop.load(Ordering::SeqCst) {
-        for sample in output.iter_mut() {
-            *sample = T::from_sample(0.0);
-        }
-        return;
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+
+    /// Opens the machine's default output. On a runner with no sound card, an
+    /// ALSA null device is enough; where there is nothing at all the test says
+    /// so and stops rather than failing.
+    fn player() -> Option<MorsePlayer> {
+        MorsePlayer::new().ok()
     }
-    let channels = channels.max(1);
-    let mut i = 0;
-    while i < output.len() {
-        let value = mixer.next_background();
-        for _ in 0..channels {
-            if i >= output.len() {
-                break;
-            }
-            output[i] = T::from_sample(value);
-            i += 1;
-        }
+
+    fn settings() -> TrainingSettings {
+        let mut settings = TrainingSettings::default();
+        settings.playback.char_wpm_min = 40.0;
+        settings.playback.char_wpm_max = 40.0;
+        // Quietly: on a developer's machine this opens the real output.
+        settings.band.link_volume = true;
+        settings.band.volume_min = 0.1;
+        settings.band.qrn_enabled = true;
+        settings.band.qrn_level = 0.3;
+        settings.band.qrm_enabled = true;
+        settings.band.qrm_level = 0.2;
+        settings
+    }
+
+    #[test]
+    fn a_send_runs_through_the_real_output() {
+        let Some(mut player) = player() else {
+            eprintln!("no audio device on this machine; skipping");
+            return;
+        };
+        let mut rng = FastrandRng(7);
+        let wait = player
+            .start_text("K", &settings(), &mut rng)
+            .expect("the device should take a send");
+        assert!(wait.duration_sec > 0.0);
+        assert!(wait.char_wpm >= 40.0);
+
+        // A second send retires the first.
+        let second = player
+            .start_text("M", &settings(), &mut rng)
+            .expect("a second send");
+        assert!(second.duration_sec > 0.0);
+
+        player.stop();
+        player.shutdown();
+    }
+
+    #[test]
+    fn the_background_is_only_rebuilt_when_it_changes() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        let mut settings = settings();
+        player.apply_band(&settings).expect("band");
+        player.apply_band(&settings).expect("band again");
+        settings.band.qrn_level = 0.9;
+        player.apply_band(&settings).expect("changed band");
+        // A silent band tears the stream down without complaining.
+        settings.band.qrn_enabled = false;
+        settings.band.qrm_enabled = false;
+        player.apply_band(&settings).expect("silent band");
+        player.shutdown();
     }
 }

@@ -1,144 +1,77 @@
+//! Audio backends and the waiting that goes with them.
+//!
+//! Every backend behind [`MorseBackend`] plays the same [`cw_core::PlaybackPlan`]
+//! and reports the same [`WaitFlags`], so the session runtime never has to know
+//! which one it is talking to.
+
 #[cfg(feature = "native-audio")]
 mod native;
+#[cfg(any(feature = "native-audio", test))]
+pub mod render;
 #[cfg(feature = "silent-audio")]
 mod silent;
+mod wait;
 #[cfg(feature = "web")]
 mod web;
 
-#[cfg(feature = "native-audio")]
-pub use native::MorsePlayer;
-#[cfg(feature = "silent-audio")]
-pub use silent::MorsePlayer;
-#[cfg(feature = "web")]
-pub use web::MorsePlayer;
+#[cfg_attr(not(test), allow(unused_imports))]
+pub use wait::PLAYBACK_TAIL_MS;
+pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
+
+use cw_core::{FastrandRng, TrainingSettings};
 
 /// True when the build has no audio output and only simulates the timing of a
-/// session — the Android build, for now.
+/// session.
 pub const AUDIO_IS_SILENT: bool = cfg!(feature = "silent-audio");
 
-use crate::time::{sleep_ms, POLL_MS};
+/// What the session runtime needs from a player. Object-safe on purpose: the
+/// runtime holds one boxed backend and tests put their own in its place.
+pub trait MorseBackend {
+    /// Browsers only start audio inside a user gesture; everywhere else this
+    /// does nothing.
+    fn resume_from_gesture(&mut self) {}
 
-#[cfg(any(feature = "web", feature = "silent-audio"))]
-const PLAYBACK_TAIL_MS: u32 = 24;
+    /// Bring the background layers in line with the settings.
+    fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String>;
 
-#[cfg(any(feature = "web", feature = "silent-audio"))]
-use std::cell::Cell;
-#[cfg(any(feature = "web", feature = "silent-audio"))]
-use std::rc::Rc;
-#[cfg(feature = "native-audio")]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(feature = "native-audio")]
-use std::sync::Arc;
+    /// Schedule one send and hand back something to wait on.
+    fn start_text(
+        &mut self,
+        text: &str,
+        settings: &TrainingSettings,
+        rng: &mut FastrandRng,
+    ) -> Result<PlaybackWait, String>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlaybackOutcome {
-    Completed,
-    Cancelled,
+    /// Silence the Morse, leaving the background alone.
+    fn stop(&mut self);
+
+    /// Silence everything, background included.
+    fn shutdown(&mut self);
+
+    /// The promise for a resumed browser audio context, if one is pending.
+    #[cfg(feature = "web")]
+    fn take_resume_promise(&self) -> Option<js_sys::Promise> {
+        None
+    }
 }
 
-/// Morse already scheduled; wait without holding the player `RefCell`.
-pub struct PlaybackWait {
-    pub duration_sec: f64,
-    pub char_wpm: f64,
-    pub effective_wpm: f64,
-    #[cfg(any(feature = "web", feature = "silent-audio"))]
-    stop_flag: Rc<Cell<bool>>,
-    #[cfg(any(feature = "web", feature = "silent-audio"))]
-    epoch: u64,
-    #[cfg(any(feature = "web", feature = "silent-audio"))]
-    current_epoch: Rc<Cell<u64>>,
+/// The player this build ships with.
+pub fn default_backend() -> Result<Box<dyn MorseBackend>, String> {
     #[cfg(feature = "native-audio")]
-    stop_flag: Arc<AtomicBool>,
-    #[cfg(feature = "native-audio")]
-    epoch: u64,
-    #[cfg(feature = "native-audio")]
-    current_epoch: Arc<AtomicU64>,
-    #[cfg(feature = "native-audio")]
-    finished: Arc<AtomicBool>,
-}
-
-impl PlaybackWait {
-    #[cfg(any(feature = "web", feature = "silent-audio"))]
-    pub(crate) fn polled(
-        duration_sec: f64,
-        char_wpm: f64,
-        effective_wpm: f64,
-        stop_flag: Rc<Cell<bool>>,
-        epoch: u64,
-        current_epoch: Rc<Cell<u64>>,
-    ) -> Self {
-        Self {
-            duration_sec,
-            char_wpm,
-            effective_wpm,
-            stop_flag,
-            epoch,
-            current_epoch,
-        }
+    {
+        Ok(Box::new(native::MorsePlayer::new()?))
     }
-
-    #[cfg(feature = "native-audio")]
-    pub(crate) fn desktop(
-        duration_sec: f64,
-        char_wpm: f64,
-        effective_wpm: f64,
-        stop_flag: Arc<AtomicBool>,
-        epoch: u64,
-        current_epoch: Arc<AtomicU64>,
-        finished: Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            duration_sec,
-            char_wpm,
-            effective_wpm,
-            stop_flag,
-            epoch,
-            current_epoch,
-            finished,
-        }
+    #[cfg(feature = "web")]
+    {
+        Ok(Box::new(web::MorsePlayer::new()?))
     }
-
-    pub async fn wait(self) -> PlaybackOutcome {
-        #[cfg(any(feature = "web", feature = "silent-audio"))]
-        {
-            let mut left =
-                ((self.duration_sec * 1000.0).ceil() as u32).saturating_add(PLAYBACK_TAIL_MS);
-            while left > 0 {
-                if self.stop_flag.get() || self.current_epoch.get() != self.epoch {
-                    return PlaybackOutcome::Cancelled;
-                }
-                let chunk = left.min(POLL_MS);
-                sleep_ms(chunk).await;
-                left = left.saturating_sub(chunk);
-            }
-            if self.stop_flag.get() || self.current_epoch.get() != self.epoch {
-                PlaybackOutcome::Cancelled
-            } else {
-                PlaybackOutcome::Completed
-            }
-        }
-        #[cfg(feature = "native-audio")]
-        {
-            let hang_ms = ((self.duration_sec * 1000.0).ceil() as u32).saturating_add(2_000);
-            let mut waited = 0u32;
-            while !self.finished.load(Ordering::SeqCst)
-                && !self.stop_flag.load(Ordering::SeqCst)
-                && self.current_epoch.load(Ordering::SeqCst) == self.epoch
-            {
-                if waited >= hang_ms {
-                    break;
-                }
-                sleep_ms(POLL_MS).await;
-                waited = waited.saturating_add(POLL_MS);
-            }
-            let stopped = self.stop_flag.load(Ordering::SeqCst)
-                || self.current_epoch.load(Ordering::SeqCst) != self.epoch;
-            if stopped {
-                PlaybackOutcome::Cancelled
-            } else {
-                PlaybackOutcome::Completed
-            }
-        }
+    #[cfg(feature = "silent-audio")]
+    {
+        Ok(Box::new(silent::MorsePlayer::new()?))
+    }
+    #[cfg(not(any(feature = "native-audio", feature = "web", feature = "silent-audio")))]
+    {
+        Err("This build has no audio backend.".to_string())
     }
 }
 
@@ -171,4 +104,209 @@ pub fn focus_group_input(index: usize) {
         }})()"#
     );
     let _ = dioxus::document::eval(&js);
+}
+
+/// A player that records what it was asked to do and plays nothing. Session
+/// tests drive the whole runtime through it.
+#[cfg(test)]
+pub mod fake {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Call {
+        New,
+        Band(String),
+        Start(String),
+        Stop,
+        Shutdown,
+    }
+
+    /// How the next send should behave.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Behaviour {
+        /// Plays for its full length and finishes.
+        Play,
+        /// `start_text` refuses.
+        RefuseToStart,
+        /// Starts, then reports a broken stream.
+        FailMidSend,
+        /// Starts and never gets anywhere: a stalled audio clock.
+        Stall,
+    }
+
+    #[derive(Default)]
+    pub struct Recorder {
+        pub calls: RefCell<Vec<Call>>,
+        pub behaviour: Cell<Option<Behaviour>>,
+        pub players_built: Cell<u32>,
+        pub build_error: Cell<bool>,
+        /// Sends that break before the good ones start, whatever `behaviour`
+        /// says. One per send, so a recovery can be tested exactly.
+        pub failures_left: Cell<u32>,
+    }
+
+    impl Recorder {
+        pub fn new() -> Rc<Self> {
+            Rc::new(Self {
+                behaviour: Cell::new(Some(Behaviour::Play)),
+                ..Self::default()
+            })
+        }
+
+        pub fn behaviour(&self) -> Behaviour {
+            self.behaviour.get().unwrap_or(Behaviour::Play)
+        }
+
+        pub fn set(&self, behaviour: Behaviour) {
+            self.behaviour.set(Some(behaviour));
+        }
+
+        /// Break the next `count` sends, then play normally.
+        pub fn fail_next(&self, count: u32) {
+            self.failures_left.set(count);
+        }
+
+        pub fn calls(&self) -> Vec<Call> {
+            self.calls.borrow().clone()
+        }
+
+        pub fn texts(&self) -> Vec<String> {
+            self.calls
+                .borrow()
+                .iter()
+                .filter_map(|call| match call {
+                    Call::Start(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        pub fn clear(&self) {
+            self.calls.borrow_mut().clear();
+        }
+
+        pub fn factory(self: &Rc<Self>) -> Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>> {
+            let recorder = Rc::clone(self);
+            Rc::new(move || {
+                if recorder.build_error.get() {
+                    return Err("No audio output device found".to_string());
+                }
+                recorder.players_built.set(recorder.players_built.get() + 1);
+                recorder.calls.borrow_mut().push(Call::New);
+                Ok(Box::new(FakePlayer {
+                    recorder: Rc::clone(&recorder),
+                    epoch: Rc::new(Cell::new(0)),
+                }))
+            })
+        }
+    }
+
+    pub struct FakePlayer {
+        recorder: Rc<Recorder>,
+        epoch: Rc<Cell<u64>>,
+    }
+
+    struct FakeSignal {
+        recorder: Rc<Recorder>,
+        epoch: Rc<Cell<u64>>,
+        mine: u64,
+        duration_ms: u32,
+        played: Cell<u32>,
+    }
+
+    impl PlaybackSignal for FakeSignal {
+        fn poll(&self) -> WaitFlags {
+            if self.epoch.get() != self.mine {
+                return WaitFlags {
+                    cancelled: true,
+                    ..Default::default()
+                };
+            }
+            if self.recorder.failures_left.get() > 0 {
+                self.recorder
+                    .failures_left
+                    .set(self.recorder.failures_left.get() - 1);
+                return WaitFlags {
+                    failed: true,
+                    ..Default::default()
+                };
+            }
+            match self.recorder.behaviour() {
+                Behaviour::FailMidSend => WaitFlags {
+                    failed: true,
+                    ..Default::default()
+                },
+                Behaviour::Stall => WaitFlags {
+                    played_ms: Some(0),
+                    ..Default::default()
+                },
+                _ => {
+                    // Each poll advances the "audio clock" by one tick, so a
+                    // send takes as long as its plan says it does.
+                    let played = self
+                        .played
+                        .get()
+                        .saturating_add(crate::time::POLL_MS)
+                        .min(self.duration_ms.saturating_add(PLAYBACK_TAIL_MS));
+                    self.played.set(played);
+                    WaitFlags {
+                        played_ms: Some(played),
+                        ..Default::default()
+                    }
+                }
+            }
+        }
+    }
+
+    impl MorseBackend for FakePlayer {
+        fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+            self.recorder
+                .calls
+                .borrow_mut()
+                .push(Call::Band(settings.band_signature()));
+            Ok(())
+        }
+
+        fn start_text(
+            &mut self,
+            text: &str,
+            settings: &TrainingSettings,
+            rng: &mut FastrandRng,
+        ) -> Result<PlaybackWait, String> {
+            self.recorder
+                .calls
+                .borrow_mut()
+                .push(Call::Start(text.to_string()));
+            if self.recorder.behaviour() == Behaviour::RefuseToStart {
+                return Err("Audio stream: device is gone".to_string());
+            }
+            let plan = cw_core::plan_morse_playback(text, settings, rng);
+            self.epoch.set(self.epoch.get() + 1);
+            let duration_ms = (plan.duration_sec * 1000.0).ceil().max(0.0) as u32;
+            Ok(PlaybackWait::new(
+                plan.duration_sec,
+                plan.resolved_char_wpm,
+                plan.resolved_effective_wpm,
+                Rc::new(FakeSignal {
+                    recorder: Rc::clone(&self.recorder),
+                    epoch: Rc::clone(&self.epoch),
+                    mine: self.epoch.get(),
+                    duration_ms,
+                    played: Cell::new(0),
+                }),
+            ))
+        }
+
+        fn stop(&mut self) {
+            self.recorder.calls.borrow_mut().push(Call::Stop);
+            self.epoch.set(self.epoch.get() + 1);
+        }
+
+        fn shutdown(&mut self) {
+            self.recorder.calls.borrow_mut().push(Call::Shutdown);
+            self.epoch.set(self.epoch.get() + 1);
+        }
+    }
 }

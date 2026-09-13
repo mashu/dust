@@ -174,6 +174,80 @@ mod tests {
     }
 
     #[test]
+    fn two_empty_strings_align_to_nothing() {
+        assert!(align_group("", "").is_empty());
+    }
+
+    #[test]
+    fn empty_sent_is_all_insertions() {
+        let a = align_group("", "KM");
+        assert_eq!(a.len(), 2);
+        assert!(a.iter().all(|p| p.sent_char.is_none() && !p.matched));
+        assert_eq!(a[0].received_char, Some('K'));
+    }
+
+    #[test]
+    fn a_dropped_character_is_a_deletion() {
+        // "KMU" copied as "KU": M was never typed.
+        let a = align_group("KMU", "KU");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[1].sent_char, Some('M'));
+        assert_eq!(a[1].received_char, None);
+        assert!(a[0].matched && a[2].matched);
+    }
+
+    #[test]
+    fn an_extra_character_is_an_insertion() {
+        // "KU" copied as "KMU": M was typed but never sent.
+        let a = align_group("KU", "KMU");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[1].sent_char, None);
+        assert_eq!(a[1].received_char, Some('M'));
+        assert!(a[0].matched && a[2].matched);
+    }
+
+    #[test]
+    fn a_missed_first_character_lines_the_rest_up() {
+        // The traceback runs out of received characters before sent ones.
+        let a = align_group("KMU", "MU");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0].sent_char, Some('K'));
+        assert_eq!(a[0].received_char, None);
+        assert!(a[1].matched && a[2].matched);
+    }
+
+    #[test]
+    fn a_character_typed_before_the_group_lines_the_rest_up() {
+        // The traceback runs out of sent characters before received ones.
+        let a = align_group("MU", "KMU");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0].sent_char, None);
+        assert_eq!(a[0].received_char, Some('K'));
+        assert!(a[1].matched && a[2].matched);
+    }
+
+    #[test]
+    fn alignment_is_case_insensitive() {
+        assert!(align_group("km", "KM").iter().all(|p| p.matched));
+    }
+
+    #[test]
+    fn letter_accuracy_counts_only_sent_characters() {
+        let groups = vec![("KM".to_string(), "KXU".to_string())];
+        let map = calculate_group_letter_accuracy(&groups);
+        assert_eq!(map.get(&'K').map(|a| (a.correct, a.total)), Some((1, 1)));
+        assert_eq!(map.get(&'M').map(|a| (a.correct, a.total)), Some((0, 1)));
+        // The typed-but-never-sent U is not a letter of its own.
+        assert!(!map.contains_key(&'U'));
+    }
+
+    #[test]
+    fn accuracy_of_nothing_is_zero() {
+        assert_eq!(calculate_overall_character_accuracy(&[]), 0.0);
+        assert!(calculate_group_letter_accuracy(&[]).is_empty());
+    }
+
+    #[test]
     fn overall_accuracy_counts_sent_letters() {
         let groups = vec![
             ("ABC".to_string(), "ABC".to_string()),

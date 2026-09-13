@@ -153,3 +153,73 @@ pub fn ListenView(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cw_core::{CharSetMode, PracticeWindow};
+
+    fn settings(mode: CharSetMode) -> TrainingSettings {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = mode;
+        settings.curriculum.level = 3;
+        settings.curriculum.digits_level = 3;
+        settings.curriculum.practice_window = Some(PracticeWindow::All);
+        settings
+    }
+
+    #[test]
+    fn an_empty_pool_has_no_newest_character() {
+        assert_eq!(newest_index(&TrainingSettings::default(), &[]), 0);
+    }
+
+    #[test]
+    fn the_newest_letter_is_the_one_the_last_level_added() {
+        let settings = settings(CharSetMode::Koch);
+        let pool = compute_char_pool(&settings);
+        // Level 3 unlocks four characters; the fourth is the new one.
+        assert_eq!(newest_index(&settings, &pool), pool.len() - 1);
+    }
+
+    #[test]
+    fn the_newest_digit_is_the_one_the_last_digits_level_added() {
+        let settings = settings(CharSetMode::Digits);
+        let pool = compute_char_pool(&settings);
+        assert_eq!(pool.len(), 4);
+        assert_eq!(newest_index(&settings, &pool), 3);
+    }
+
+    #[test]
+    fn mixed_points_at_the_axis_that_moved_last() {
+        let mut settings = settings(CharSetMode::Mixed);
+        let pool = compute_char_pool(&settings);
+
+        // The next adjustment is the letter axis, so the digit axis moved last.
+        settings.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        let digit_pick = newest_index(&settings, &pool);
+        assert!(pool[digit_pick].is_ascii_digit());
+
+        settings.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Digits;
+        let letter_pick = newest_index(&settings, &pool);
+        assert!(!pool[letter_pick].is_ascii_digit());
+    }
+
+    #[test]
+    fn a_letters_only_mix_falls_back_to_the_letter_axis() {
+        let mut settings = settings(CharSetMode::Mixed);
+        settings.curriculum.mixed_letters_percent = 100;
+        let pool = compute_char_pool(&settings);
+        settings.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Letters;
+        let index = newest_index(&settings, &pool);
+        assert!(!pool[index].is_ascii_digit());
+    }
+
+    #[test]
+    fn a_pool_that_never_changed_points_at_its_last_character() {
+        // Level 1 with a two-character alphabet: dropping a level adds nothing.
+        let mut settings = settings(CharSetMode::Koch);
+        settings.curriculum.level = 1;
+        let pool = compute_char_pool(&settings);
+        assert_eq!(newest_index(&settings, &pool), pool.len() - 1);
+    }
+}

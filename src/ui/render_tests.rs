@@ -484,3 +484,241 @@ fn training_without_repeats_omits_the_counter() {
     // The confirmed group shows its comparison.
     assert!(html.contains("ch sent-row"));
 }
+
+/// Components that own state, driven through their own controls.
+mod interactions {
+    use super::*;
+    use crate::testing::{stored_session, test_settings, Ui};
+    use crate::ui::band::BandConditionsCard;
+    use crate::ui::heatmap::ActivityHeatmap;
+    use crate::ui::settings::SettingsView;
+    use dioxus::prelude::Key;
+
+    #[component]
+    fn HeatmapHarness() -> Element {
+        rsx! {
+            ActivityHeatmap {
+                sessions: vec![
+                    stored_session("2026-09-07", &[("KM", "KM")]),
+                    stored_session("2026-09-08", &[("KM", "KX")]),
+                ],
+                today: "2026-09-09".to_string(),
+            }
+        }
+    }
+
+    #[test]
+    fn a_day_on_the_calendar_can_be_opened() {
+        let mut ui = Ui::new(HeatmapHarness, ());
+        assert!(ui.has("Tap a day for details."));
+        assert!(ui.has("Practice calendar"));
+        // Two segments and one button per day.
+        assert_eq!(ui.count("click"), 16 * 7 + 2);
+
+        // A day with practice on it reports what was done.
+        let mut opened = false;
+        for index in 0..ui.count("click") {
+            ui.click(index);
+            if ui.has("2026-09-08 · 1 session") {
+                opened = true;
+                break;
+            }
+        }
+        assert!(opened, "a practised day should show its summary");
+        assert!(ui.has("chars"));
+        assert!(ui.has("accuracy"));
+    }
+
+    #[test]
+    fn a_quiet_day_says_so() {
+        let mut ui = Ui::new(HeatmapHarness, ());
+        let mut opened = false;
+        for index in 0..ui.count("click") {
+            ui.click(index);
+            if ui.has("no practice") {
+                opened = true;
+                break;
+            }
+        }
+        assert!(opened, "an empty day should say nothing happened");
+    }
+
+    #[test]
+    fn the_calendar_can_be_coloured_by_accuracy() {
+        let mut ui = Ui::new(HeatmapHarness, ());
+        assert!(ui.has("More chars"));
+        let mut switched = None;
+        for index in 0..ui.count("click") {
+            ui.click(index);
+            if ui.has("Better copy") {
+                switched = Some(index);
+                break;
+            }
+        }
+        let accuracy = switched.expect("one of the segments colours by accuracy");
+        // Every day is coloured by how well it was copied, not how much.
+        assert!(ui.has("hsl("));
+        for index in 0..ui.count("click") {
+            if index == accuracy {
+                continue;
+            }
+            ui.click(index);
+            if ui.has("More chars") {
+                return;
+            }
+        }
+        panic!("nothing switched the calendar back to volume");
+    }
+
+    #[test]
+    fn a_history_that_predates_the_calendar_draws_an_empty_one() {
+        let html = render(|| {
+            rsx! {
+                ActivityHeatmap {
+                    sessions: vec![stored_session("2019-01-01", &[("KM", "KM")])],
+                    today: "2026-09-09".to_string(),
+                }
+            }
+        });
+        assert!(html.contains("Practice calendar"));
+        assert!(!html.contains("2019-01-01"));
+    }
+
+    #[test]
+    fn a_calendar_with_no_readable_date_draws_nothing() {
+        let html = render(|| {
+            rsx! {
+                ActivityHeatmap { sessions: Vec::new(), today: "nonsense".to_string() }
+            }
+        });
+        assert!(html.is_empty());
+    }
+
+    #[component]
+    fn BandHarness(previewing: bool) -> Element {
+        let settings = use_signal(test_settings);
+        rsx! {
+            BandConditionsCard {
+                settings,
+                previewing,
+                on_preview: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn the_band_card_opens_its_help_and_its_advanced_controls() {
+        let mut ui = Ui::new(BandHarness, BandHarnessProps { previewing: false });
+        assert!(ui.has("Live preview"));
+        assert!(!ui.has("Model gain"));
+        assert!(!ui.has("QSB slowly fades"));
+
+        // Press everything on the card: the help note and the advanced tuning
+        // both open, and no control leaves the card in a state it cannot draw.
+        let mut seen_help = false;
+        let mut seen_advanced = false;
+        let mut index = 0;
+        while index < ui.count("click") {
+            ui.click(index);
+            seen_help |= ui.has("QSB slowly fades");
+            seen_advanced |= ui.has("Model gain");
+            index += 1;
+        }
+        assert!(seen_help, "the help note should open");
+        assert!(seen_advanced, "the advanced tuning should open");
+
+        // Every slider on the opened card can be moved without breaking it.
+        let mut index = 0;
+        while index < ui.count("input") {
+            ui.input(index, "0.5");
+            index += 1;
+        }
+        let mut index = 0;
+        while index < ui.count("change") {
+            ui.change(index, "true");
+            ui.change(index, "false");
+            index += 1;
+        }
+        assert!(!ui.html().is_empty());
+    }
+
+    #[test]
+    fn a_running_preview_offers_a_stop_button() {
+        let mut ui = Ui::new(BandHarness, BandHarnessProps { previewing: true });
+        assert!(ui.has("Stop"));
+        ui.click(0);
+        assert!(!ui.html().is_empty());
+    }
+
+    #[component]
+    fn SettingsHarness() -> Element {
+        let settings = use_signal(test_settings);
+        rsx! {
+            SettingsView {
+                settings,
+                previewing: false,
+                sample_playing: Some("E".to_string()),
+                on_preview_band: move |_| {},
+                on_stop_band: move |_| {},
+                on_play_sample: move |_: String| {},
+            }
+        }
+    }
+
+    #[test]
+    fn a_sample_that_is_playing_offers_a_stop_button() {
+        let mut ui = Ui::new(SettingsHarness, ());
+        assert!(ui.has("test-chip playing"));
+        // Every control on the page, pressed in turn.
+        let mut index = 0;
+        while index < ui.count("click") {
+            ui.click(index);
+            index += 1;
+        }
+        let mut index = 0;
+        while index < ui.count("input") {
+            ui.input(index, "2");
+            index += 1;
+        }
+        assert!(!ui.html().is_empty());
+    }
+
+    #[component]
+    fn TrainingHarness() -> Element {
+        let mut focused = use_signal(|| 0usize);
+        let mut typed = use_signal(String::new);
+        rsx! {
+            TrainingView {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec![typed(), String::new()],
+                confirmed: vec![false, false],
+                focused: focused(),
+                playing: true,
+                locked: true,
+                repeat_total: 2,
+                repeat_done: 0,
+                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_confirm: move |_: usize| typed.set("confirmed".into()),
+                on_focus: move |index: usize| focused.set(index),
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn typing_is_refused_while_the_group_is_still_being_sent() {
+        let mut ui = Ui::new(TrainingHarness, ());
+        assert!(ui.has("answer locked"));
+        assert!(ui.has("Listening…"));
+        // The keypress is swallowed rather than confirming the group.
+        ui.keydown(0, Key::Enter);
+        assert!(!ui.has("confirmed"));
+        // Focusing a group reports it upwards.
+        ui.focus(0);
+        assert!(ui.has("group focused"));
+    }
+}

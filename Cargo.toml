@@ -69,6 +69,15 @@ objc2-avf-audio = { version = "0.3", default-features = false, features = [
 [dev-dependencies]
 # Renders components to HTML so the screens can be smoke-tested without a window.
 dioxus-ssr = "0.7.10"
+# `start_paused` runs the session runtime's timers on a virtual clock, so a
+# whole training session takes milliseconds and lands on the same instants
+# every run.
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "rt",
+    "time",
+    "test-util",
+] }
 
 [features]
 default = []

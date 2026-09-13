@@ -184,3 +184,90 @@ pub fn app_routes(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{run, test_settings, Ui};
+
+    /// The screens the router draws when the state behind them is not there
+    /// yet: the moment between starting a session and its first group, and a
+    /// results screen with nothing to show.
+    #[component]
+    fn EmptyRoute(screen: Screen) -> Element {
+        let screen = use_signal(|| screen);
+        let settings = use_signal(test_settings);
+        let sessions = use_signal(Vec::new);
+        let runtime = use_signal(|| None);
+        let result = use_signal(|| None);
+        let auto_message = use_signal(|| None);
+        let toast = use_signal(|| None);
+        let app = use_hook(|| Rc::new(AppState::new()));
+        let noop = EventHandler::new(move |_| {});
+        let noop_text = EventHandler::new(move |_: String| {});
+        app_routes(
+            screen,
+            settings,
+            sessions,
+            runtime,
+            result,
+            auto_message,
+            toast,
+            false,
+            false,
+            None,
+            app.clone(),
+            noop,
+            noop,
+            noop,
+            noop,
+            noop,
+            noop_text,
+            noop_text,
+        )
+    }
+
+    #[test]
+    fn a_session_that_has_not_started_says_so() {
+        run(|| async {
+            let ui = Ui::new(
+                EmptyRoute,
+                EmptyRouteProps {
+                    screen: Screen::Training,
+                },
+            );
+            assert!(ui.has("Starting…"));
+        });
+    }
+
+    #[test]
+    fn the_practice_screen_is_reachable_without_any_state() {
+        run(|| async {
+            let mut ui = Ui::new(
+                EmptyRoute,
+                EmptyRouteProps {
+                    screen: Screen::Home,
+                },
+            );
+            assert!(ui.has("Start training"));
+            // Both hero buttons report upwards without anything behind them.
+            for index in 0..ui.count("click") {
+                ui.click(index);
+            }
+            assert!(ui.has("Start training"));
+        });
+    }
+
+    #[test]
+    fn a_results_screen_with_no_result_says_so() {
+        run(|| async {
+            let ui = Ui::new(
+                EmptyRoute,
+                EmptyRouteProps {
+                    screen: Screen::Results,
+                },
+            );
+            assert!(ui.has("No result."));
+        });
+    }
+}

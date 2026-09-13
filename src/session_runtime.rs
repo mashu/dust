@@ -365,3 +365,649 @@ async fn handle_effect(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::fake::{Behaviour, Call};
+    use crate::engine::Screen;
+    use crate::testing::{run, test_settings, Harness};
+    use cw_core::SessionEffect;
+    use cw_core::SessionPhase;
+
+    /// A whole session, answered correctly, ends on the results screen with the
+    /// session stored.
+    #[test]
+    fn answering_every_group_finishes_the_session_and_stores_it() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let result = h.result.peek().clone().expect("a result");
+            assert_eq!(result.groups.len(), 2);
+            assert!(result.groups.iter().all(|g| g.correct));
+            assert_eq!(result.accuracy, 1.0);
+            assert_eq!(h.sessions.peek().len(), 1);
+            assert_eq!(crate::persist::load_sessions().len(), 1);
+            // The machine is torn down, and the audio with it.
+            assert!(h.app.machine.borrow().is_none());
+            assert!(h.calls().contains(&Call::Shutdown));
+            // Two groups, one send each.
+            assert_eq!(h.texts().len(), 2);
+        });
+    }
+
+    #[test]
+    fn a_group_nobody_answers_times_out_and_the_session_moves_on() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 1.0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            // Nothing typed: the answer window closes on its own.
+            assert!(
+                h.run_until(4_000, |h| h.texts().len() == 2).await,
+                "the second group should have been sent"
+            );
+            let confirmed = h.runtime.peek().as_ref().map(|s| s.confirmed_flags());
+            assert_eq!(confirmed, Some(vec![true, false]));
+            assert_eq!(
+                h.runtime
+                    .peek()
+                    .as_ref()
+                    .and_then(|s| s.group(0))
+                    .map(|g| g.input().to_string()),
+                Some(String::new())
+            );
+        });
+    }
+
+    #[test]
+    fn a_group_sent_more_than_once_opens_the_answer_box_only_at_the_end() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            settings.playback.group_repeat_min = 3;
+            settings.playback.group_repeat_max = 3;
+            settings.playback.link_group_repeat = true;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            let sent = h.sent(0);
+
+            assert!(h.run_until(20_000, |h| h.texts().len() == 3).await);
+            // Every send is the same group.
+            assert_eq!(h.texts(), vec![sent.clone(); 3]);
+            assert!(h.run_until(5_000, |h| h.awaiting_answer() == Some(0)).await);
+            // And no fourth send after the answer window opens.
+            h.advance(2_000).await;
+            assert_eq!(h.texts().len(), 3);
+        });
+    }
+
+    #[test]
+    fn a_matching_answer_confirms_itself_and_the_next_group_follows() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let first = h.sent(0);
+            h.type_answer(0, &first.to_lowercase());
+            // Nothing is confirmed until the auto-confirm delay has passed.
+            assert!(h
+                .runtime
+                .peek()
+                .as_ref()
+                .is_some_and(|s| !s.confirmed_flags()[0]));
+            assert!(
+                h.run_until(1_000, |h| h
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .await
+            );
+            // Typed in lower case, stored the way it was sent.
+            assert_eq!(
+                h.runtime
+                    .peek()
+                    .as_ref()
+                    .and_then(|s| s.group(0))
+                    .map(|g| g.input().to_string()),
+                Some(first)
+            );
+            // The next group is generated before it is played, never sent empty.
+            assert!(h.run_until(8_000, |h| h.texts().len() == 2).await);
+            assert!(h.texts().iter().all(|text| !text.is_empty()));
+            assert_ne!(h.sent(1), "");
+        });
+    }
+
+    #[test]
+    fn changing_an_answer_withdraws_the_confirm_that_was_pending() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            // Backspace inside the 300 ms window.
+            h.advance(100).await;
+            h.type_answer(0, &sent[..1]);
+            h.advance(1_000).await;
+            assert!(h
+                .runtime
+                .peek()
+                .as_ref()
+                .is_some_and(|s| !s.confirmed_flags()[0]));
+            assert_eq!(h.awaiting_answer(), Some(0));
+        });
+    }
+
+    #[test]
+    fn typing_is_refused_while_the_group_is_being_sent() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            h.advance(1_000).await;
+            assert!(h
+                .runtime
+                .peek()
+                .as_ref()
+                .is_some_and(|s| !s.confirmed_flags()[0]));
+        });
+    }
+
+    /// Starting a second session while the first one is still sending must not
+    /// leave the first session's effects running against the new one.
+    #[test]
+    fn starting_a_new_session_mid_send_leaves_nothing_of_the_old_one() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            let first_gen = h.app.session_gen.get();
+            let first_group = h.sent(0);
+            h.advance(100).await;
+
+            h.recorder.clear();
+            h.start_training();
+            let second_gen = h.app.session_gen.get();
+            assert!(second_gen > first_gen);
+            // The old send was stopped and a new one started.
+            assert!(h.calls().contains(&Call::Stop));
+            assert_eq!(h.texts().len(), 1);
+
+            // Let the old chain's cancellation land: it must not end the new session.
+            h.advance(2_000).await;
+            assert_eq!(h.screen(), Screen::Training);
+            assert!(!matches!(h.phase(), Some(SessionPhase::Aborted)));
+            assert_eq!(
+                h.app
+                    .machine
+                    .borrow()
+                    .as_ref()
+                    .map(|m| m.session().session_id().raw()),
+                Some(second_gen)
+            );
+            // And the session in view is the new one.
+            let _ = first_group;
+            assert!(h.run_until(6_000, |h| h.awaiting_answer() == Some(0)).await);
+        });
+    }
+
+    /// Leaving the session while a group is in flight: the cancelled send must
+    /// not drag the app back onto a results screen.
+    #[test]
+    fn walking_away_mid_send_goes_home_and_stays_there() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            h.advance(100).await;
+            h.send(SessionEvent::Abort);
+            assert_eq!(h.screen(), Screen::Home);
+            assert!(h.runtime.peek().is_none());
+            assert!(h.app.machine.borrow().is_none());
+
+            h.advance(5_000).await;
+            assert_eq!(h.screen(), Screen::Home);
+            assert!(h.result.peek().is_none());
+            assert!(h.sessions.peek().is_empty());
+        });
+    }
+
+    #[test]
+    fn ending_a_session_early_keeps_what_was_already_scored() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            assert!(
+                h.run_until(1_000, |h| h
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .await
+            );
+            h.send(SessionEvent::FinishNow);
+            h.advance(200).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let result = h.result.peek().clone().expect("a result");
+            assert_eq!(result.groups.len(), 1);
+            assert_eq!(h.sessions.peek().len(), 1);
+        });
+    }
+
+    /// The regression test for a send that is counted down on the wall clock:
+    /// with the audio clock frozen, the session must not walk on as though the
+    /// group had been heard.
+    #[test]
+    fn a_stalled_send_never_passes_for_a_finished_one() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.set_behaviour(Behaviour::Stall);
+            h.start_training();
+
+            // Well past the length of the group, and still nothing is confirmed
+            // and no answer window has opened.
+            h.advance(1_500).await;
+            assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
+            assert!(h.awaiting_answer().is_none());
+
+            // The stall is eventually reported, the player rebuilt, and after
+            // three attempts the session gives up rather than pretending.
+            assert!(
+                h.run_until(60_000, |h| h.screen() == Screen::Home).await,
+                "a stalled player should end the session, not hang"
+            );
+            assert!(h.recorder.players_built.get() > 1, "the player is rebuilt");
+            assert_eq!(h.toast().as_deref(), Some("Audio playback stalled."));
+            assert!(h.sessions.peek().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_broken_stream_is_retried_before_the_session_is_given_up() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.set_behaviour(Behaviour::FailMidSend);
+            h.start_training();
+            assert!(h.run_until(30_000, |h| h.screen() == Screen::Home).await);
+            // Three attempts, each on a freshly built player.
+            assert_eq!(h.texts().len(), 3);
+            assert!(h.recorder.players_built.get() >= 3);
+            assert!(h.toast().is_some());
+        });
+    }
+
+    #[test]
+    fn a_player_that_refuses_to_start_is_reported_once_the_retries_run_out() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.set_behaviour(Behaviour::RefuseToStart);
+            h.start_training();
+            assert!(h.run_until(30_000, |h| h.screen() == Screen::Home).await);
+            assert_eq!(h.toast().as_deref(), Some("Audio stream: device is gone"));
+        });
+    }
+
+    /// A device that comes back mid-session must not cost the user the session.
+    #[test]
+    fn a_send_that_fails_once_and_then_works_carries_on() {
+        run(|| async {
+            let mut h = Harness::new();
+            // The first send breaks; the device is back for the second.
+            h.recorder.fail_next(1);
+            h.start_training();
+            assert!(
+                h.run_until(20_000, |h| h.awaiting_answer() == Some(0))
+                    .await
+            );
+            assert_eq!(h.texts().len(), 2, "the group is sent again, not skipped");
+            assert!(h.recorder.players_built.get() >= 2, "the player is rebuilt");
+            assert_eq!(h.screen(), Screen::Training);
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            assert!(
+                h.run_until(2_000, |h| h
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .await
+            );
+        });
+    }
+
+    /// A hard audio failure after something has been scored keeps the score.
+    #[test]
+    fn audio_that_dies_after_a_scored_group_still_shows_the_results() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            assert!(
+                h.run_until(1_000, |h| h
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .await
+            );
+            h.set_behaviour(Behaviour::RefuseToStart);
+            assert!(h.run_until(30_000, |h| h.screen() == Screen::Results).await);
+            let result = h.result.peek().clone().expect("a result");
+            assert_eq!(result.groups.len(), 1);
+        });
+    }
+
+    #[test]
+    fn a_confirmed_group_teaches_the_sampler() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            let before = h.app.sampling.borrow().beliefs.clone();
+            h.type_answer(0, &sent);
+            assert!(
+                h.run_until(1_000, |h| h
+                    .runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| s.confirmed_flags()[0]))
+                    .await
+            );
+            let after = h.app.sampling.borrow().beliefs.clone();
+            assert_ne!(before, after, "a correct copy should raise the belief");
+            for ch in sent.chars() {
+                let belief = after.get(&ch).copied().expect("belief for a sent letter");
+                assert!(belief.alpha > 1.0, "{ch} should have been credited");
+            }
+        });
+    }
+
+    #[test]
+    fn an_event_for_a_session_that_is_gone_is_ignored() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            let stale_gen = h.app.session_gen.get();
+            let app = h.app.clone();
+            let runtime = h.runtime;
+            // The user leaves; an old effect chain then reports its send ended.
+            h.send(SessionEvent::Abort);
+            let effects = h.in_app(|| {
+                dispatch_event(
+                    &app,
+                    runtime,
+                    SessionEvent::PlaybackEnded {
+                        index: 0,
+                        duration_sec: 1.0,
+                        char_wpm: 20.0,
+                        effective_wpm: 20.0,
+                    },
+                    stale_gen,
+                )
+            });
+            assert!(effects.is_empty());
+            assert_eq!(h.screen(), Screen::Home);
+        });
+    }
+
+    #[test]
+    fn booting_a_session_that_was_already_cancelled_builds_nothing() {
+        run(|| async {
+            let h = Harness::new();
+            let app = h.app.clone();
+            let gen = app.session_gen.get();
+            // Something else claimed the audio between the two calls.
+            app.bump_session();
+            let effects = h.in_app(|| {
+                boot_machine_session(test_settings(), &[], &app, gen, h.runtime, h.screen)
+            });
+            assert!(effects.is_none());
+            assert!(app.machine.borrow().is_none());
+            assert_eq!(h.screen(), Screen::Home);
+        });
+    }
+
+    #[test]
+    fn a_session_at_the_end_of_its_groups_does_not_ask_for_another() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.texts().len(), 1);
+        });
+    }
+
+    #[test]
+    fn an_event_with_no_machine_behind_it_does_nothing() {
+        run(|| async {
+            let h = Harness::new();
+            let app = h.app.clone();
+            let gen = app.session_gen.get();
+            let effects = h.in_app(|| dispatch_event(&app, h.runtime, SessionEvent::Confirm, gen));
+            assert!(effects.is_empty());
+        });
+    }
+
+    #[test]
+    fn an_event_from_an_older_session_never_reaches_the_new_machine() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            let app = h.app.clone();
+            // The machine belongs to the current generation; ask it to accept an
+            // event stamped with a different one.
+            let effects = h.in_app(|| {
+                dispatch_event(
+                    &app,
+                    h.runtime,
+                    SessionEvent::Abort,
+                    app.session_gen.get() + 1,
+                )
+            });
+            assert!(effects.is_empty());
+            assert_eq!(h.screen(), Screen::Training);
+        });
+    }
+
+    /// Stopping the audio without ending the session is what a stray stop looks
+    /// like from inside: the send reports cancelled and the session is closed
+    /// with whatever it had, rather than sitting in silence.
+    #[test]
+    fn a_send_stopped_from_outside_ends_the_session_cleanly() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            h.advance(100).await;
+            h.app.stop_audio();
+            assert!(h.run_until(5_000, |h| h.screen() == Screen::Home).await);
+            assert!(h.sessions.peek().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_group_with_no_text_is_not_sent_at_all() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            let app = h.app.clone();
+            let gen = app.session_gen.get();
+            h.recorder.clear();
+            // An empty group can only come of a pool that generated nothing;
+            // playing it must not stall the session waiting for silence.
+            h.in_app(|| {
+                if let Some(machine) = app.machine.borrow_mut().as_mut() {
+                    machine.set_group_text(0, String::new(), 1);
+                }
+            });
+            let (runtime, screen) = (h.runtime, h.screen);
+            let (result, auto_message, sessions, settings, toast) =
+                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
+            let settings_now = h.settings.peek().clone();
+            h.in_app(|| {
+                spawn_effects(
+                    vec![SessionEffect::Play {
+                        index: 0,
+                        text: String::new(),
+                    }],
+                    settings_now,
+                    app.clone(),
+                    gen,
+                    runtime,
+                    screen,
+                    result,
+                    auto_message,
+                    sessions,
+                    settings,
+                    toast,
+                )
+            });
+            h.pump();
+            h.advance(200).await;
+            assert!(h.texts().is_empty(), "silence is not sent to the player");
+        });
+    }
+
+    #[test]
+    fn a_stale_sleep_does_not_move_the_session_on() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            let app = h.app.clone();
+            let gen = app.session_gen.get();
+            let settings_now = h.settings.peek().clone();
+            let (runtime, screen) = (h.runtime, h.screen);
+            let (result, auto_message, sessions, settings, toast) =
+                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
+            // A sleep the machine has already forgotten about.
+            h.in_app(|| {
+                spawn_effects(
+                    vec![SessionEffect::Sleep { id: 999, ms: 20 }],
+                    settings_now,
+                    app.clone(),
+                    gen,
+                    runtime,
+                    screen,
+                    result,
+                    auto_message,
+                    sessions,
+                    settings,
+                    toast,
+                )
+            });
+            h.pump();
+            h.advance(200).await;
+            assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
+        });
+    }
+
+    #[test]
+    fn effects_from_a_session_that_is_over_are_dropped() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            let app = h.app.clone();
+            let gen = app.session_gen.get();
+            let settings_now = h.settings.peek().clone();
+            let (runtime, screen) = (h.runtime, h.screen);
+            let (result, auto_message, sessions, settings, toast) =
+                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
+            h.send(SessionEvent::Abort);
+            h.recorder.clear();
+            h.in_app(|| {
+                spawn_effects(
+                    vec![
+                        SessionEffect::NeedGroup { index: 1 },
+                        SessionEffect::Play {
+                            index: 1,
+                            text: "KM".into(),
+                        },
+                    ],
+                    settings_now,
+                    app.clone(),
+                    gen,
+                    runtime,
+                    screen,
+                    result,
+                    auto_message,
+                    sessions,
+                    settings,
+                    toast,
+                )
+            });
+            h.pump();
+            h.advance(500).await;
+            assert!(h.texts().is_empty());
+            assert_eq!(h.screen(), Screen::Home);
+        });
+    }
+
+    #[test]
+    fn asking_for_a_group_a_finished_session_no_longer_needs_does_nothing() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            // The machine is gone; an effect that arrives late finds nothing.
+            let app = h.app.clone();
+            let gen = app.session_gen.get();
+            let settings_now = h.settings.peek().clone();
+            let (runtime, screen) = (h.runtime, h.screen);
+            let (result, auto_message, sessions, settings_sig, toast) =
+                (h.result, h.auto_message, h.sessions, h.settings, h.toast);
+            h.in_app(|| {
+                spawn_effects(
+                    vec![SessionEffect::NeedGroup { index: 0 }],
+                    settings_now,
+                    app.clone(),
+                    gen,
+                    runtime,
+                    screen,
+                    result,
+                    auto_message,
+                    sessions,
+                    settings_sig,
+                    toast,
+                )
+            });
+            h.pump();
+            h.advance(100).await;
+            assert_eq!(h.screen(), Screen::Results);
+        });
+    }
+
+    #[test]
+    fn a_session_plays_its_first_group_and_opens_the_answer_box() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            assert_eq!(h.screen(), Screen::Training);
+            assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
+            let sent = h.sent(0);
+            assert_eq!(sent.chars().count(), 2);
+            assert_eq!(h.texts(), vec![sent.clone()]);
+            // The answer box stays shut until the send is over.
+            assert!(h.runtime.peek().as_ref().is_some_and(|s| s.input_locked(0)));
+
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            assert!(!h.runtime.peek().as_ref().is_some_and(|s| s.input_locked(0)));
+        });
+    }
+}
