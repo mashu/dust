@@ -9,10 +9,10 @@
 
 use crate::machine::{SessionEffect, SessionEvent, SessionMachine, SessionPhase};
 use crate::{
-    align_group, build_session_result, calculate_group_letter_accuracy,
+    align_group, apply_auto_level, build_session_result, calculate_group_letter_accuracy,
     calculate_overall_character_accuracy, compute_char_pool, create_initial_sampling_state,
-    generate_training_group, plan_morse_playback, resolve_group_repeats, CharSetMode, FastrandRng,
-    Rng, SessionId, TrainingSettings,
+    evaluate_auto_level, generate_training_group, plan_morse_playback, resolve_group_repeats,
+    AutoLevelCounters, CharSetMode, FastrandRng, Rng, SessionId, TrainingSettings, LEVEL_MIN,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -458,5 +458,47 @@ fn settings_survive_storage_and_older_saves() {
             !repaired.active_alphabet().is_empty(),
             "seed {seed}: a save without {dropped:?} left nothing to practise"
         );
+    }
+}
+
+/// The trainer moves your level for you. However long it runs and whatever
+/// you score, it has to leave settings the trainer can still start from — and
+/// it has to stay inside the alphabet you are actually practising.
+#[test]
+fn auto_levelling_never_walks_the_settings_out_of_range() {
+    for seed in 0..SEEDS {
+        let mut rng = FastrandRng(seed.wrapping_mul(0x6C07_8965).wrapping_add(5));
+        let mut settings = wild_settings(&mut rng).clamp();
+        settings.auto_level.auto_adjust_level = true;
+        settings.auto_level.auto_adjust_above_threshold_count = rng.usize_in(0, 5) as u32;
+        settings.auto_level.auto_adjust_below_threshold_count = rng.usize_in(0, 5) as u32;
+        settings.auto_level.auto_adjust_threshold = rng.pick_in_range(0.0, 100.0);
+        let mut counters = AutoLevelCounters::default();
+
+        for round in 0..30 {
+            let accuracy = rng.pick_in_range(0.0, 1.0);
+            if let Some(result) = evaluate_auto_level(accuracy, &settings, &mut counters) {
+                assert!(
+                    result.delta == 1 || result.delta == -1,
+                    "seed {seed} round {round}: a level moved by {}",
+                    result.delta
+                );
+                assert!(result.next_level >= LEVEL_MIN, "seed {seed} round {round}");
+                apply_auto_level(&mut settings, &result);
+            }
+            assert_eq!(
+                settings.clone().clamp(),
+                settings,
+                "seed {seed} round {round}: auto-levelling left settings needing a clamp"
+            );
+            assert!(
+                !compute_char_pool(&settings).is_empty(),
+                "seed {seed} round {round}: nothing left to practise"
+            );
+            assert!(
+                settings.active_level() <= settings.max_active_level(),
+                "seed {seed} round {round}: level past the end of the alphabet"
+            );
+        }
     }
 }
