@@ -200,9 +200,9 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
             }
             if callsigns {
                 div { class: "eyebrow", "What this tier sends" }
-                div { class: "chars", style: "gap: 6px;",
+                div { class: "calls",
                     for call in tier_examples(s.curriculum.callsign_level) {
-                        span { class: "ch sent-row", "{call}" }
+                        span { class: "call", "{call}" }
                     }
                 }
                 p { class: "muted", style: "margin: 0;",

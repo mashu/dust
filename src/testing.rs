@@ -448,6 +448,34 @@ impl Ui {
         seen
     }
 
+    /// Every `.ch` on the page holds exactly one character.
+    ///
+    /// It is a fixed 21px box built for one glyph, so anything longer runs out
+    /// of it and across whatever is next to it — which is how the callsign
+    /// preview first shipped, four calls overlapping into mush. Checked on
+    /// every screen the sweeps visit, because the mistake is easy to repeat
+    /// and impossible to see from a passing test.
+    pub fn character_boxes_hold_single_characters(&self) {
+        let html = self.html();
+        for part in html.split("class=\"ch").skip(1) {
+            // `class="chars"` starts the same way and is the container.
+            if !part.starts_with('"') && !part.starts_with(' ') {
+                continue;
+            }
+            let Some(rest) = part.split_once('>') else {
+                continue;
+            };
+            let Some(text) = rest.1.split('<').next() else {
+                continue;
+            };
+            let text = text.trim();
+            assert!(
+                text.chars().count() <= 1,
+                "a character box holds {text:?}, which will overlap its neighbours"
+            );
+        }
+    }
+
     /// Which screen the shell is showing.
     pub fn screen(&self) -> String {
         self.html()

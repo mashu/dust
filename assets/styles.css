@@ -1178,6 +1178,24 @@ input[type="range"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .ch.miss { background: transparent; color: var(--ink-dim); border-color: var(--line-strong); border-style: dashed; }
 .ch.sent-row { background: var(--surface-sunken); border-color: var(--line); color: var(--ink-soft); }
 
+/* Callsign examples. These are words, not single characters, so they size to
+   their content — a `.ch` is a fixed 21px box and a call would spill out of it
+   and across its neighbours. */
+.calls { display: flex; gap: 6px; flex-wrap: wrap; }
+.call {
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  font-weight: 700;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
 .train-actions {
   display: flex;
   flex-wrap: wrap;

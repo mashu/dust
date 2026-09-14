@@ -1005,6 +1005,7 @@ mod ui_tests {
                 let stored = crate::persist::load_settings();
                 assert_eq!(stored.clone().clamp(), stored, "{value:?} into {control}");
                 assert!(!ui.html().is_empty());
+                ui.character_boxes_hold_single_characters();
             }
         }
     }
