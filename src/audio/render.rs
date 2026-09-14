@@ -43,6 +43,24 @@ impl LiveQsb {
     }
 }
 
+/// How long a stopped send takes to reach silence.
+///
+/// Matched to the keying envelope's own rise time: a trainer this careful
+/// about click-free keying should not end a session with a click. Short enough
+/// that "stop" still means stop.
+pub const RELEASE_MS: f64 = 8.0;
+
+/// The release shape — a raised cosine, the same family the keying envelope
+/// uses, so a cut send tails off like the end of a dit rather than a fade-out.
+pub fn release_gain(progress: f64) -> f32 {
+    let p = progress.clamp(0.0, 1.0);
+    (0.5 * (1.0 + (std::f64::consts::PI * p).cos())) as f32
+}
+
+fn release_samples(sample_rate: f64) -> usize {
+    ((RELEASE_MS / 1000.0) * sample_rate).round().max(1.0) as usize
+}
+
 pub fn envelope_gain(event: &ToneEvent, t: f64) -> f32 {
     let curve = &event.envelope;
     if curve.len() < 2 || event.duration_sec <= 0.0 {
@@ -106,6 +124,8 @@ pub struct TonePlayback {
     /// the QSB cycle would give every group an identical fade.
     started_at_sec: f64,
     pos: AtomicUsize,
+    /// How far into the release ramp a stopped send has got.
+    released: AtomicUsize,
     finished: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     qsb: Arc<LiveQsb>,
@@ -124,6 +144,7 @@ impl TonePlayback {
             sample_rate: f64::from(sample_rate.max(1)),
             started_at_sec,
             pos: AtomicUsize::new(0),
+            released: AtomicUsize::new(0),
             finished: Arc::new(AtomicBool::new(false)),
             stop,
             qsb,
@@ -137,8 +158,7 @@ impl TonePlayback {
     /// Fill one callback's worth of interleaved samples.
     pub fn fill(&self, out: &mut [f32], channels: usize) {
         if self.stop.load(Ordering::SeqCst) {
-            out.fill(0.0);
-            self.finished.store(true, Ordering::SeqCst);
+            self.fill_release(out, channels);
             return;
         }
         let mut i = self.pos.load(Ordering::SeqCst);
@@ -156,15 +176,74 @@ impl TonePlayback {
             self.finished.store(true, Ordering::SeqCst);
         }
     }
+
+    /// A stopped send keeps playing for a few milliseconds, under a falling
+    /// ramp. Cutting the samples to zero where they happen to be is a step in
+    /// the waveform, and a step is a click.
+    fn fill_release(&self, out: &mut [f32], channels: usize) {
+        let total = release_samples(self.sample_rate);
+        let mut done = self.released.load(Ordering::SeqCst);
+        let mut i = self.pos.load(Ordering::SeqCst);
+        let sr = self.sample_rate;
+        interleave(out, channels, || {
+            if done >= total {
+                return 0.0;
+            }
+            let dry = self.samples.get(i).copied().unwrap_or(0.0);
+            let value = dry
+                * self.qsb.gain_at(self.started_at_sec + i as f64 / sr)
+                * release_gain(done as f64 / total as f64);
+            i += 1;
+            done += 1;
+            value
+        });
+        self.pos.store(i, Ordering::SeqCst);
+        self.released.store(done, Ordering::SeqCst);
+        if done >= total {
+            self.finished.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 /// The receiver background, as the audio callback plays it out.
-pub fn fill_band(out: &mut [f32], channels: usize, mixer: &mut BandMixer, stop: &AtomicBool) {
-    if stop.load(Ordering::SeqCst) {
-        out.fill(0.0);
-        return;
+pub struct BandPlayback {
+    mixer: BandMixer,
+    stop: Arc<AtomicBool>,
+    released: usize,
+    sample_rate: f64,
+}
+
+impl BandPlayback {
+    pub fn new(mixer: BandMixer, stop: Arc<AtomicBool>, sample_rate: u32) -> Self {
+        Self {
+            mixer,
+            stop,
+            released: 0,
+            sample_rate: f64::from(sample_rate.max(1)),
+        }
     }
-    interleave(out, channels, || mixer.next_background());
+
+    /// Fill one callback's worth, fading out once the background is stopped
+    /// rather than dropping to silence mid-sample.
+    pub fn fill(&mut self, out: &mut [f32], channels: usize) {
+        if !self.stop.load(Ordering::SeqCst) {
+            let mixer = &mut self.mixer;
+            interleave(out, channels, || mixer.next_background());
+            return;
+        }
+        let total = release_samples(self.sample_rate);
+        let mut done = self.released;
+        let mixer = &mut self.mixer;
+        interleave(out, channels, || {
+            if done >= total {
+                return 0.0;
+            }
+            let value = mixer.next_background() * release_gain(done as f64 / total as f64);
+            done += 1;
+            value
+        });
+        self.released = done;
+    }
 }
 
 #[cfg(test)]
@@ -292,15 +371,57 @@ mod tests {
         assert_eq!(tail, [0.0; 4]);
     }
 
+    /// A send stopped mid-tone is ramped down, not cut. Dropping the samples
+    /// to zero where they happen to be is a step in the waveform, and a step
+    /// is a click — which is a strange way for a trainer that shapes every dit
+    /// to end a session.
     #[test]
-    fn stopping_silences_the_buffer_at_once() {
-        let stop = Arc::new(AtomicBool::new(true));
-        let playback = playback(vec![1.0; 64], stop);
+    fn stopping_rides_the_send_down_instead_of_cutting_it() {
+        let release = release_samples(8_000.0);
+        let stop = Arc::new(AtomicBool::new(false));
+        let playback = playback(vec![1.0; release * 4], Arc::clone(&stop));
         let finished = playback.finished_flag();
-        let mut out = [1.0f32; 8];
+
+        let mut out = vec![0.0f32; 16];
         playback.fill(&mut out, 1);
-        assert_eq!(out, [0.0; 8]);
+        assert!(out.iter().all(|s| *s == 1.0), "it should be sounding");
+
+        stop.store(true, Ordering::SeqCst);
+        let mut tail = vec![0.0f32; release + 16];
+        playback.fill(&mut tail, 1);
+
+        // It starts where the tone was, not at zero...
+        assert!(tail[0] > 0.99, "the ramp jumped: first sample {}", tail[0]);
+        // ...comes down without ever rising...
+        assert!(
+            tail.windows(2).all(|w| w[1] <= w[0] + 1e-6),
+            "the release should only ever fall"
+        );
+        // ...and gets all the way to silence within the release time.
+        assert_eq!(tail[release..], vec![0.0; tail.len() - release][..]);
         assert!(finished.load(Ordering::SeqCst));
+
+        // No step anywhere in it: every neighbouring pair is a small change.
+        let biggest = tail
+            .windows(2)
+            .map(|w| (w[0] - w[1]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(biggest < 0.05, "the release still had a step of {biggest}");
+    }
+
+    #[test]
+    fn the_release_shape_runs_from_full_to_silent() {
+        assert_eq!(release_gain(0.0), 1.0);
+        assert_eq!(release_gain(1.0), 0.0);
+        assert!(release_gain(0.5) > 0.4 && release_gain(0.5) < 0.6);
+        assert_eq!(release_gain(-1.0), 1.0, "out of range is still in range");
+        assert_eq!(release_gain(2.0), 0.0);
+        let mut previous = 2.0;
+        for step in 0..=20 {
+            let value = release_gain(f64::from(step) / 20.0);
+            assert!(value < previous, "the release rose at {step}");
+            previous = value;
+        }
     }
 
     #[test]
@@ -353,18 +474,25 @@ mod tests {
     }
 
     #[test]
-    fn the_background_fills_until_it_is_stopped() {
+    fn the_background_fills_until_it_is_stopped_and_then_fades() {
         let mut settings = TrainingSettings::default();
         settings.band.qrn_enabled = true;
         settings.band.qrn_level = 1.0;
         settings.band.qrm_enabled = false;
-        let mut mixer = BandMixer::new(8_000, &settings, 3);
-        let stop = AtomicBool::new(false);
+        let mixer = BandMixer::new(8_000, &settings, 3);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut playback = BandPlayback::new(mixer, Arc::clone(&stop), 8_000);
         let mut out = vec![0.0f32; 512];
-        fill_band(&mut out, 2, &mut mixer, &stop);
+        playback.fill(&mut out, 2);
         assert!(out.iter().any(|s| *s != 0.0));
+
         stop.store(true, Ordering::SeqCst);
-        fill_band(&mut out, 2, &mut mixer, &stop);
-        assert!(out.iter().all(|s| *s == 0.0));
+        // The ramp is 8 ms, so at 8 kHz it outlives one 512-frame callback.
+        playback.fill(&mut out, 2);
+        assert!(out.iter().any(|s| *s != 0.0), "it cut instead of fading");
+        for _ in 0..8 {
+            playback.fill(&mut out, 2);
+        }
+        assert!(out.iter().all(|s| *s == 0.0), "the fade never finished");
     }
 }

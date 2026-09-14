@@ -12,9 +12,9 @@ use std::time::Instant;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use cw_core::band::BandMixer;
-use cw_core::{plan_morse_playback, FastrandRng, TrainingSettings};
+use cw_core::{plan_morse_playback_for, StationVoice, TrainingSettings};
 
-use super::render::{fill_band, render_plan, LiveQsb, TonePlayback};
+use super::render::{render_plan, BandPlayback, LiveQsb, TonePlayback};
 use super::{MorseBackend, PlaybackWait};
 use state::{PlayerState, ToneSignal};
 
@@ -23,6 +23,11 @@ pub struct MorsePlayer {
     band_stop: Arc<AtomicBool>,
     band_stream: Option<cpal::Stream>,
     tone_stream: Option<cpal::Stream>,
+    /// Streams that have been told to fade and are still doing it. Dropping a
+    /// cpal stream stops it dead, so a stopped send has to keep its stream
+    /// until the ramp has run — otherwise the release is only ever theory.
+    /// They are released when the next send or band replaces them, long after.
+    retiring: Vec<cpal::Stream>,
     qsb: Arc<LiveQsb>,
     /// When the player opened. Fading is read off this clock so it keeps
     /// running between groups instead of restarting with every send.
@@ -61,16 +66,26 @@ impl MorsePlayer {
             band_stop: Arc::new(AtomicBool::new(false)),
             band_stream: None,
             tone_stream: None,
+            retiring: Vec::new(),
             qsb: LiveQsb::new(),
             opened_at: Instant::now(),
         })
     }
 
+    /// Tell the background to fade, and keep its stream alive long enough to.
     fn stop_band(&mut self) {
         self.band_stop.store(true, Ordering::SeqCst);
-        self.band_stream = None;
+        if let Some(stream) = self.band_stream.take() {
+            self.retiring.push(stream);
+        }
         self.band_stop = Arc::new(AtomicBool::new(false));
         self.state.forget_band();
+    }
+
+    /// Let go of everything that has finished fading. Called whenever a new
+    /// stream is about to open, by which time any ramp is milliseconds gone.
+    fn release_retired(&mut self) {
+        self.retiring.clear();
     }
 }
 
@@ -81,6 +96,7 @@ impl MorseBackend for MorsePlayer {
             return Ok(());
         }
         self.stop_band();
+        self.release_retired();
         if !BandMixer::needs_background(settings) {
             self.state.note_band(settings);
             return Ok(());
@@ -99,13 +115,15 @@ impl MorseBackend for MorsePlayer {
         &mut self,
         text: &str,
         settings: &TrainingSettings,
-        rng: &mut FastrandRng,
+        voice: &StationVoice,
     ) -> Result<PlaybackWait, String> {
         self.apply_band(settings)?;
-        let plan = plan_morse_playback(text, settings, rng);
+        let plan = plan_morse_playback_for(text, settings, voice);
         // Drop the previous stream before the new epoch, so its callback cannot
-        // write into the run that is about to start.
+        // write into the run that is about to start. Anything still fading has
+        // long finished by the time a new send begins.
         self.tone_stream = None;
+        self.release_retired();
         let armed = self.state.arm();
         let (stream, finished) = start_tone_stream(
             &plan,
@@ -125,7 +143,9 @@ impl MorseBackend for MorsePlayer {
 
     fn stop(&mut self) {
         self.state.stop();
-        self.tone_stream = None;
+        if let Some(stream) = self.tone_stream.take() {
+            self.retiring.push(stream);
+        }
     }
 
     fn shutdown(&mut self) {
@@ -232,9 +252,10 @@ fn start_band_stream(
     let (device, config) = default_output()?;
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
-    let mut mixer = BandMixer::new(sample_rate, settings, u64::from(sample_rate));
+    let mixer = BandMixer::new(sample_rate, settings, u64::from(sample_rate));
+    let mut playback = BandPlayback::new(mixer, stop, sample_rate);
     let stream = build_for_format(&device, &config, channels, move |out, channels| {
-        fill_band(out, channels, &mut mixer, &stop)
+        playback.fill(out, channels)
     })?;
     stream.play().map_err(|e| format!("Band play: {e}"))?;
     Ok(stream)
@@ -271,16 +292,16 @@ mod device_tests {
             eprintln!("no audio device on this machine; skipping");
             return;
         };
-        let mut rng = FastrandRng(7);
+        let voice = cw_core::resolve_station(&settings(), &mut cw_core::FastrandRng(7));
         let wait = player
-            .start_text("K", &settings(), &mut rng)
+            .start_text("K", &settings(), &voice)
             .expect("the device should take a send");
         assert!(wait.duration_sec > 0.0);
         assert!(wait.char_wpm >= 40.0);
 
         // A second send retires the first.
         let second = player
-            .start_text("M", &settings(), &mut rng)
+            .start_text("M", &settings(), &voice)
             .expect("a second send");
         assert!(second.duration_sec > 0.0);
 

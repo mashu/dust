@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use cw_core::{
     apply_auto_level, auto_level_progress, build_session_result, evaluate_auto_level,
-    fit_settings_to_alphabet, AutoLevelProgress, CharSamplingState, FastrandRng, GroupSession,
-    SessionMachine, SessionResult, TrainingSettings,
+    fit_settings_to_alphabet, resolve_station, AutoLevelProgress, CharSamplingState, FastrandRng,
+    GroupSession, SessionMachine, SessionResult, StationVoice, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -115,6 +115,16 @@ impl AppState {
         Ok(gen)
     }
 
+    /// Tune in a station, drawn from the app's own generator.
+    pub fn station(&self, settings: &TrainingSettings) -> StationVoice {
+        match self.rng.try_borrow_mut() {
+            Ok(mut rng) => resolve_station(settings, &mut *rng),
+            // Only reachable if a send were started from inside another; the
+            // point is a usable voice, not which one.
+            Err(_) => resolve_station(settings, &mut FastrandRng(crate::time::seed_rng())),
+        }
+    }
+
     pub fn apply_band_live(&self, settings: &TrainingSettings) {
         if let Ok(mut slot) = self.player.try_borrow_mut() {
             if let Some(player) = slot.as_mut() {
@@ -151,6 +161,7 @@ pub(crate) async fn play_text_now(
     gen: u64,
     text: &str,
     settings: &TrainingSettings,
+    voice: &StationVoice,
 ) -> Result<(f64, f64, f64), PlayError> {
     let mut last_err = None;
     for attempt in 0..PLAY_ATTEMPTS {
@@ -164,7 +175,7 @@ pub(crate) async fn play_text_now(
                 return Err(PlayError::Cancelled);
             }
         }
-        match schedule_text(app, gen, text, settings).await {
+        match schedule_text(app, gen, text, settings, voice).await {
             Ok(wait) => {
                 let duration = wait.duration_sec;
                 let char_wpm = wait.char_wpm;
@@ -203,6 +214,7 @@ async fn schedule_text(
     gen: u64,
     text: &str,
     settings: &TrainingSettings,
+    voice: &StationVoice,
 ) -> Result<crate::audio::PlaybackWait, String> {
     if app.session_gen.get() != gen {
         return Err("Cancelled.".into());
@@ -224,14 +236,14 @@ async fn schedule_text(
         if app.session_gen.get() != gen {
             return Err("Cancelled.".into());
         }
-        match (app.rng.try_borrow_mut(), app.player.try_borrow_mut()) {
-            (Ok(mut rng), Ok(mut slot)) => {
+        match app.player.try_borrow_mut() {
+            Ok(mut slot) => {
                 let Some(player) = slot.as_mut() else {
                     return Err("Audio is unavailable.".into());
                 };
-                return player.start_text(text, settings, &mut rng);
+                return player.start_text(text, settings, voice);
             }
-            _ => sleep_ms(POLL_MS).await,
+            Err(_) => sleep_ms(POLL_MS).await,
         }
     }
     Err("Audio is busy.".into())
@@ -320,11 +332,14 @@ pub async fn play_chars(
     mut toast: Signal<Option<String>>,
 ) {
     let chars: Vec<char> = chars.chars().collect();
+    // One operator for the whole run: a different pitch per letter would make
+    // the screen harder to learn from, not more realistic.
+    let voice = app.station(&settings);
     for (i, ch) in chars.iter().enumerate() {
         if app.session_gen.get() != gen {
             return;
         }
-        let play = play_text_now(&app, gen, &ch.to_string(), &settings).await;
+        let play = play_text_now(&app, gen, &ch.to_string(), &settings, &voice).await;
         if app.session_gen.get() != gen {
             return;
         }
@@ -350,7 +365,8 @@ pub async fn play_sample_text(
     text: String,
     mut toast: Signal<Option<String>>,
 ) {
-    match play_text_now(&app, gen, &text, &settings).await {
+    let voice = app.station(&settings);
+    match play_text_now(&app, gen, &text, &settings, &voice).await {
         Ok(_) | Err(PlayError::Cancelled) => {}
         Err(PlayError::Failed(message)) => toast.set(Some(message)),
     }
@@ -364,12 +380,15 @@ pub async fn loop_preview_text(
     gap_ms: u32,
     mut toast: Signal<Option<String>>,
 ) {
+    // One station calling, so moving a band slider changes the band and not
+    // the signal you are judging it against.
+    let voice = app.station(&settings().clamp());
     loop {
         if app.session_gen.get() != gen {
             return;
         }
         let settings_now = settings().clamp();
-        if let Err(err) = play_text_now(&app, gen, text, &settings_now).await {
+        if let Err(err) = play_text_now(&app, gen, text, &settings_now, &voice).await {
             match err {
                 PlayError::Cancelled => return,
                 PlayError::Failed(message) => {
@@ -758,7 +777,8 @@ mod tests {
             let sink = std::rc::Rc::clone(&outcome);
             h.in_app(|| {
                 spawn(async move {
-                    let result = play_text_now(&app, gen, "CQ", &settings).await;
+                    let voice = app.station(&settings);
+                    let result = play_text_now(&app, gen, "CQ", &settings, &voice).await;
                     *sink.borrow_mut() = Some(result);
                 });
             });
@@ -789,7 +809,9 @@ mod tests {
             let sink = std::rc::Rc::clone(&outcome);
             h.in_app(|| {
                 spawn(async move {
-                    *sink.borrow_mut() = Some(play_text_now(&app, gen, "CQ", &settings).await);
+                    let voice = app.station(&settings);
+                    *sink.borrow_mut() =
+                        Some(play_text_now(&app, gen, "CQ", &settings, &voice).await);
                 });
             });
             h.pump();

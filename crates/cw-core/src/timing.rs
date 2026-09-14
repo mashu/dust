@@ -150,18 +150,54 @@ pub fn build_envelope_curve(
     curve
 }
 
+/// Plan a send from a station tuned in on the spot — a preview, a sample, one
+/// character on the listen screen. A session uses [`plan_morse_playback_for`]
+/// so the station stays the same across a group's repeats.
 pub fn plan_morse_playback(
     text: &str,
     settings: &TrainingSettings,
     rng: &mut impl Rng,
 ) -> PlaybackPlan {
-    let resolved_char_wpm = resolve_char_wpm(settings, rng);
-    let resolved_effective_wpm = resolve_effective_wpm(settings, resolved_char_wpm, rng);
+    let voice = resolve_station(settings, rng);
+    plan_morse_playback_for(text, settings, &voice)
+}
+
+/// The operator at the other end: one pitch, one fist, one signal strength.
+///
+/// Drawn per station rather than per send, because a station that repeats its
+/// call does not change frequency, speed or strength between repeats. Leaving
+/// this to whenever the planner happened to reach for the RNG meant three
+/// sends of one group arrived as three different operators.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StationVoice {
+    pub tone_hz: f64,
+    pub char_wpm: f64,
+    pub effective_wpm: f64,
+    pub volume: f64,
+}
+
+/// Tune in a station, within whatever range the settings allow.
+pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> StationVoice {
+    let char_wpm = resolve_char_wpm(settings, rng);
+    StationVoice {
+        tone_hz: resolve_tone_hz(settings, rng),
+        char_wpm,
+        effective_wpm: resolve_effective_wpm(settings, char_wpm, rng),
+        volume: resolve_volume(settings, rng),
+    }
+}
+
+/// Plan a send from one station. Every repeat of a group uses the same voice.
+pub fn plan_morse_playback_for(
+    text: &str,
+    settings: &TrainingSettings,
+    voice: &StationVoice,
+) -> PlaybackPlan {
+    let resolved_char_wpm = voice.char_wpm.max(1.0);
+    let resolved_effective_wpm = voice.effective_wpm.max(1.0).min(resolved_char_wpm);
     let extra = clamp_extra_spacing(settings.playback.extra_word_space_multiplier);
-    let side_tone = resolve_tone_hz(settings, rng);
-    // Tone, speed and level are the station's, not the individual dit's: they
-    // are drawn once for the whole send, the way one operator sounds.
-    let target_gain = DEFAULT_TARGET_GAIN * resolve_volume(settings, rng);
+    let side_tone = voice.tone_hz;
+    let target_gain = DEFAULT_TARGET_GAIN * voice.volume.clamp(0.0, 1.0);
 
     let dot_char = dot_seconds(resolved_char_wpm);
     let dot_eff = dot_seconds(resolved_effective_wpm);

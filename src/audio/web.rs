@@ -1,8 +1,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use cw_core::band::{QRM_OUTPUT_GAIN, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, RINGING_OUTPUT_GAIN};
-use cw_core::{plan_morse_playback, FastrandRng, PlaybackPlan, QrmProfile, TrainingSettings};
+use cw_core::band::{
+    shaped_level, AtmosphericNoise, QRM_OUTPUT_GAIN, QRN_OUTPUT_GAIN, QSB_MIN_GAIN,
+    RINGING_OUTPUT_GAIN,
+};
+use cw_core::{plan_morse_playback_for, PlaybackPlan, QrmProfile, StationVoice, TrainingSettings};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -13,6 +16,14 @@ use web_sys::{
 use super::{MorseBackend, PlaybackSignal, PlaybackWait, WaitFlags};
 
 const NOISE_BUFFER_SECONDS: f32 = 2.0;
+
+/// Static is sparse, so its loop has to be long enough that the same crashes
+/// do not come round in a recognisable pattern.
+const ATMOSPHERIC_BUFFER_SECONDS: f32 = 12.0;
+
+/// How long a stopped send takes to reach silence. The native player's
+/// [`crate::audio::render::RELEASE_MS`] in seconds — the same ramp either side.
+const RELEASE_SEC: f64 = 0.008;
 
 /// What a scheduled send looks like to a waiter.
 ///
@@ -62,6 +73,8 @@ pub struct MorsePlayer {
     cw_gain: GainNode,
     group_gain: Option<GainNode>,
     band: BandGraph,
+    /// Group gains that are fading out, with the context time their ramp ends.
+    released: Vec<(GainNode, f64)>,
     pending_resume: RefCell<Option<js_sys::Promise>>,
 }
 
@@ -123,6 +136,7 @@ impl MorsePlayer {
             cw_gain,
             group_gain: None,
             band: BandGraph::new(),
+            released: Vec::new(),
             pending_resume: RefCell::new(None),
         })
     }
@@ -157,13 +171,35 @@ impl MorsePlayer {
         next
     }
 
+    /// Ramp a stopped send down instead of cutting it.
+    ///
+    /// Disconnecting on the spot is what made the old stop click: the fade was
+    /// scheduled and then the node that would have played it was taken out of
+    /// the graph in the same breath. The gain stays connected until the ramp
+    /// has run, and is let go on the next send — by which time it is silent.
     fn release_group_gain(&mut self) {
+        self.drop_released();
         if let Some(gain) = self.group_gain.take() {
             let now = self.ctx.current_time();
+            let done = now + RELEASE_SEC;
             let _ = gain.gain().cancel_scheduled_values(now);
-            let _ = gain.gain().set_target_at_time(0.0, now, 0.01);
-            let _ = gain.disconnect();
+            let _ = gain.gain().set_value_at_time(gain.gain().value(), now);
+            let _ = gain.gain().linear_ramp_to_value_at_time(0.0, done);
+            self.released.push((gain, done));
         }
+    }
+
+    /// Disconnect the gains whose ramp has finished.
+    fn drop_released(&mut self) {
+        let now = self.ctx.current_time();
+        self.released.retain(|(gain, done_at)| {
+            if *done_at <= now {
+                let _ = gain.disconnect();
+                false
+            } else {
+                true
+            }
+        });
     }
 
     pub fn reset_stop_flag(&self) {
@@ -174,14 +210,14 @@ impl MorsePlayer {
         &mut self,
         text: &str,
         settings: &TrainingSettings,
-        rng: &mut FastrandRng,
+        voice: &StationVoice,
     ) -> Result<PlaybackWait, String> {
         self.resume_from_gesture();
         self.release_group_gain();
         let epoch = self.bump_epoch();
         self.reset_stop_flag();
         self.apply_band_now(settings)?;
-        let plan = plan_morse_playback(text, settings, rng);
+        let plan = plan_morse_playback_for(text, settings, voice);
         let started_at = self.ctx.current_time();
         self.schedule_plan(&plan)?;
         Ok(PlaybackWait::new(
@@ -271,9 +307,9 @@ impl MorseBackend for MorsePlayer {
         &mut self,
         text: &str,
         settings: &TrainingSettings,
-        rng: &mut FastrandRng,
+        voice: &StationVoice,
     ) -> Result<PlaybackWait, String> {
-        self.start_send(text, settings, rng)
+        self.start_send(text, settings, voice)
     }
 
     fn stop(&mut self) {
@@ -285,6 +321,9 @@ impl MorseBackend for MorsePlayer {
     fn shutdown(&mut self) {
         MorseBackend::stop(self);
         self.band.stop_layers(&self.ctx, &self.cw_gain);
+        for (gain, _) in self.released.drain(..) {
+            let _ = gain.disconnect();
+        }
     }
 
     fn take_resume_promise(&self) -> Option<js_sys::Promise> {
@@ -350,18 +389,12 @@ fn add_frequency_modulation(
     Ok(())
 }
 
-fn fill_noise_buffer(
+fn fill_noise_buffer_seconds(
     ctx: &AudioContext,
-    fill: impl FnMut(usize) -> f32,
-) -> Result<web_sys::AudioBuffer, String> {
-    fill_noise_buffer_with(ctx, fill)
-}
-
-fn fill_noise_buffer_with(
-    ctx: &AudioContext,
+    seconds: f32,
     mut fill: impl FnMut(usize) -> f32,
 ) -> Result<web_sys::AudioBuffer, String> {
-    let frame_count = (ctx.sample_rate() * NOISE_BUFFER_SECONDS).floor().max(1.0) as u32;
+    let frame_count = (ctx.sample_rate() * seconds).floor().max(1.0) as u32;
     let buffer = ctx
         .create_buffer(1, frame_count, ctx.sample_rate())
         .map_err(|e| format!("buffer: {e:?}"))?;
@@ -387,8 +420,18 @@ fn looping_source(
     Ok(source)
 }
 
-fn create_white_noise(ctx: &AudioContext) -> Result<AudioBufferSourceNode, String> {
-    let buffer = fill_noise_buffer(ctx, |_| fastrand::f32() * 2.0 - 1.0)?;
+/// Atmospheric static, from the same model the native player uses — crashes
+/// rather than hiss — rendered into a long loop because Web Audio has no place
+/// to run a per-sample generator.
+fn create_atmospheric_noise(
+    ctx: &AudioContext,
+    level: f64,
+) -> Result<AudioBufferSourceNode, String> {
+    let sample_rate = ctx.sample_rate();
+    let mut model = AtmosphericNoise::new(sample_rate as u32, level, fastrand::u64(..) | 1);
+    let buffer = fill_noise_buffer_seconds(ctx, ATMOSPHERIC_BUFFER_SECONDS, move |_| {
+        model.next_sample() as f32
+    })?;
     looping_source(ctx, &buffer)
 }
 
@@ -402,7 +445,7 @@ fn create_resonator_source(
     let ring_decay = decay.clamp(0.5, 0.9999);
     let mut ringing_energy = 0.0f32;
     let mut peak = 0.0f32;
-    let buffer = fill_noise_buffer(ctx, |_| {
+    let buffer = fill_noise_buffer_seconds(ctx, NOISE_BUFFER_SECONDS, |_| {
         if fastrand::f64() < impulse_p {
             ringing_energy += (fastrand::f32() * 2.0 - 1.0) * (0.6 + fastrand::f32() * 0.4);
         }
@@ -476,7 +519,7 @@ fn add_qrn(
         return Ok(());
     }
     let level = settings.band.qrn_level.clamp(0.0, 1.0);
-    let source = create_white_noise(ctx)?;
+    let source = create_atmospheric_noise(ctx, level)?;
     let bandpass = ctx
         .create_biquad_filter()
         .map_err(|e| format!("qrn filter: {e:?}"))?;
@@ -491,7 +534,7 @@ fn add_qrn(
         .set_value_at_time(2.4, ctx.current_time())
         .map_err(|e| format!("qrn q: {e:?}"))?;
     gain.gain()
-        .set_value_at_time((QRN_OUTPUT_GAIN * level) as f32, ctx.current_time())
+        .set_value_at_time(QRN_OUTPUT_GAIN as f32, ctx.current_time())
         .map_err(|e| format!("qrn level: {e:?}"))?;
     source
         .connect_with_audio_node(&bandpass)
@@ -541,7 +584,7 @@ fn add_passband_qrm(
         .map_err(|e| format!("qrm lfo: {e:?}"))?;
     let amplitude_gain = ctx.create_gain().map_err(|e| format!("qrm ag: {e:?}"))?;
     let gain = ctx.create_gain().map_err(|e| format!("qrm g: {e:?}"))?;
-    let base_gain = QRM_OUTPUT_GAIN * level * model_gain;
+    let base_gain = QRM_OUTPUT_GAIN * shaped_level(level) * model_gain;
 
     primary.set_type(BiquadFilterType::Bandpass);
     primary
@@ -667,7 +710,7 @@ fn add_ringing_qrm(
     )?;
     gain.gain()
         .set_value_at_time(
-            (RINGING_OUTPUT_GAIN * level * model_gain) as f32,
+            (RINGING_OUTPUT_GAIN * shaped_level(level) * model_gain) as f32,
             ctx.current_time(),
         )
         .map_err(|e| format!("ring level: {e:?}"))?;

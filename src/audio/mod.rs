@@ -17,7 +17,7 @@ mod web;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
 
-use cw_core::{FastrandRng, TrainingSettings};
+use cw_core::{StationVoice, TrainingSettings};
 
 /// True when the build has no audio output and only simulates the timing of a
 /// session.
@@ -34,11 +34,13 @@ pub trait MorseBackend {
     fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String>;
 
     /// Schedule one send and hand back something to wait on.
+    /// Send `text` as one station. The caller owns the voice so every repeat
+    /// of a group arrives from the same operator.
     fn start_text(
         &mut self,
         text: &str,
         settings: &TrainingSettings,
-        rng: &mut FastrandRng,
+        voice: &StationVoice,
     ) -> Result<PlaybackWait, String>;
 
     /// Silence the Morse, leaving the background alone.
@@ -144,6 +146,9 @@ pub mod fake {
         /// The page is out of sight, the way a hidden browser tab is: the
         /// audio clock parks, and nothing charges the stall budget.
         pub page_hidden: Cell<bool>,
+        /// The station behind every send, in order, so a test can hear whether
+        /// a repeated group came from the same operator.
+        pub voices: RefCell<Vec<StationVoice>>,
         /// Sends that break before the good ones start, whatever `behaviour`
         /// says. One per send, so a recovery can be tested exactly.
         pub failures_left: Cell<u32>,
@@ -192,6 +197,11 @@ pub mod fake {
 
         pub fn clear(&self) {
             self.calls.borrow_mut().clear();
+            self.voices.borrow_mut().clear();
+        }
+
+        pub fn voices(&self) -> Vec<StationVoice> {
+            self.voices.borrow().clone()
         }
 
         pub fn factory(self: &Rc<Self>) -> Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>> {
@@ -289,16 +299,17 @@ pub mod fake {
             &mut self,
             text: &str,
             settings: &TrainingSettings,
-            rng: &mut FastrandRng,
+            voice: &StationVoice,
         ) -> Result<PlaybackWait, String> {
             self.recorder
                 .calls
                 .borrow_mut()
                 .push(Call::Start(text.to_string()));
+            self.recorder.voices.borrow_mut().push(*voice);
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
             }
-            let plan = cw_core::plan_morse_playback(text, settings, rng);
+            let plan = cw_core::plan_morse_playback_for(text, settings, voice);
             self.epoch.set(self.epoch.get() + 1);
             let duration_ms = (plan.duration_sec * 1000.0).ceil().max(0.0) as u32;
             Ok(PlaybackWait::new(

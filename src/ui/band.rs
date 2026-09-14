@@ -60,7 +60,7 @@ pub fn BandConditionsCard(
                 div { class: "tips",
                     span { class: "tips-mark", "QRx" }
                     p { class: "muted", style: "margin: 0;",
-                        "QSB slowly fades the signal. QRN is atmospheric static inside the CW passband. Receiver background is narrow-filter hiss and ringing."
+                        "QSB slowly fades the signal. QRN is lightning: sharp crashes through the CW passband, not a steady hiss. Receiver background is narrow-filter hiss, ringing and passband breathing. Turn the intensities up and the band reaches the signal."
                     }
                 }
             }
@@ -94,7 +94,7 @@ pub fn BandConditionsCard(
             }
             Switch {
                 title: "QRN static".to_string(),
-                description: "Atmospheric noise inside the passband.".to_string(),
+                description: "Crashes of static, the way lightning arrives.".to_string(),
                 checked: s.band.qrn_enabled,
                 onchange: move |on| settings.write().band.qrn_enabled = on,
             }

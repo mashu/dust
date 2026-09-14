@@ -1,8 +1,8 @@
 //! Owns the session machine, audio, and effect execution. UI sends events only.
 
 use cw_core::{
-    generate_training_group, resolve_group_repeats, SessionEffect, SessionEvent, SessionMachine,
-    SessionPhase, TrainingSettings,
+    generate_training_group, resolve_group_repeats, resolve_station, FastrandRng, SessionEffect,
+    SessionEvent, SessionMachine, SessionPhase, StationVoice, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -148,6 +148,23 @@ async fn drive_effects(
     }
 }
 
+/// The station behind one group.
+///
+/// Derived from the session and the group's place in it, so every repeat of
+/// that group comes from the same operator — a station repeating its call does
+/// not change frequency, speed or strength between sends — while the next
+/// group is somebody else. Deriving it beats remembering it: nothing has to be
+/// carried across the sends, and a retry after a stalled send tunes back in to
+/// the same station rather than a new one.
+fn station_for(settings: &TrainingSettings, gen: u64, index: usize) -> StationVoice {
+    let mut rng = FastrandRng(
+        gen.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(index as u64)
+            | 1,
+    );
+    resolve_station(settings, &mut rng)
+}
+
 async fn handle_effect(
     effect: SessionEffect,
     settings: &TrainingSettings,
@@ -221,7 +238,8 @@ async fn handle_effect(
             let outcome = if text.is_empty() {
                 Ok((0.0, 0.0, 0.0))
             } else {
-                play_text_now(app, gen, &text, &snapshot).await
+                let voice = station_for(&snapshot, gen, index);
+                play_text_now(app, gen, &text, &snapshot, &voice).await
             };
             if app.session_gen.get() != gen {
                 return Vec::new();
@@ -666,6 +684,57 @@ mod tests {
             assert!(
                 stored[0].usable_for_sampling(&callsigns),
                 "but every tier shares one callsign history"
+            );
+        });
+    }
+
+    /// A station repeating its call is the same station. Redrawing the tone,
+    /// speed and strength on every send made three repeats of one group arrive
+    /// as three different operators — which is what the screen promises they
+    /// are not, and which makes a repeat useless for confirming what you heard.
+    #[test]
+    fn every_repeat_of_a_group_comes_from_the_same_station() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 2;
+            settings.playback.group_repeat_min = 3;
+            settings.playback.group_repeat_max = 3;
+            // Ranges wide enough that a redraw could not pass for a repeat.
+            settings.playback.char_wpm_min = 15.0;
+            settings.playback.char_wpm_max = 40.0;
+            settings.playback.link_char_to_effective = true;
+            settings.band.side_tone_min = 400.0;
+            settings.band.side_tone_max = 900.0;
+            settings.band.volume_min = 0.2;
+            settings.band.volume_max = 1.0;
+            settings.band.link_volume = false;
+
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(200_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+
+            let voices = h.recorder.voices();
+            let texts = h.texts();
+            assert_eq!(voices.len(), texts.len());
+            assert_eq!(texts.len(), 6, "two groups, three sends each");
+
+            // Every send of one group is the same operator...
+            for group in texts.chunks(3).zip(voices.chunks(3)) {
+                let (group_texts, group_voices) = group;
+                assert!(
+                    group_texts.windows(2).all(|w| w[0] == w[1]),
+                    "a group's repeats should be the same text: {group_texts:?}"
+                );
+                assert!(
+                    group_voices.windows(2).all(|w| w[0] == w[1]),
+                    "a group's repeats changed station: {group_voices:?}"
+                );
+            }
+            // ...and the next group is somebody else.
+            assert_ne!(
+                voices[0], voices[3],
+                "every group came from the same station, which is its own problem"
             );
         });
     }
