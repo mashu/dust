@@ -184,12 +184,16 @@ pub const FILTER_BANDWIDTH_MAX: f64 = 2_000.0;
 pub const STATIONS_MIN: u32 = 1;
 pub const STATIONS_MAX: u32 = 5;
 /// How far either side of the wanted station the others can land, in hertz.
-pub const PILEUP_SPREAD_MIN: f64 = 20.0;
-pub const PILEUP_SPREAD_MAX: f64 = 400.0;
+/// The floor is above one critical band of hearing for a reason — see
+/// [`crate::timing::PILEUP_MIN_SEPARATION_HZ`].
+pub const PILEUP_SPREAD_MIN: f64 = 150.0;
+pub const PILEUP_SPREAD_MAX: f64 = 800.0;
 /// How far below the wanted station the others sit, in decibels. The floor is
-/// what keeps it answerable: the one you want stays the strongest.
-pub const PILEUP_LEVEL_MIN_DB: f64 = 4.0;
-pub const PILEUP_LEVEL_MAX_DB: f64 = 30.0;
+/// what keeps it answerable: the one you want stays the strongest. It is not
+/// far above zero because a station much more than ten decibels down, this
+/// close in pitch, is simply masked rather than quiet.
+pub const PILEUP_LEVEL_MIN_DB: f64 = 3.0;
+pub const PILEUP_LEVEL_MAX_DB: f64 = 20.0;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -273,8 +277,8 @@ impl Default for BandSettings {
             receiver_background_excitation_rate: 62.0,
             filter_bandwidth_hz: 500.0,
             stations_max: STATIONS_MIN,
-            pileup_spread_hz: 140.0,
-            pileup_level_db: 12.0,
+            pileup_spread_hz: 350.0,
+            pileup_level_db: 7.0,
             receiver_background_resonance: 66.0,
             receiver_background_decay: 0.984,
             receiver_background_offset_hz: 140.0,
@@ -767,10 +771,10 @@ mod defaults {
         super::STATIONS_MIN
     }
     pub fn pileup_spread_hz() -> f64 {
-        140.0
+        350.0
     }
     pub fn pileup_level_db() -> f64 {
-        12.0
+        7.0
     }
     pub fn receiver_background_decay() -> f64 {
         0.984

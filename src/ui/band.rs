@@ -96,7 +96,7 @@ pub fn BandConditionsCard(
             }
             if s.band.stations_max > STATIONS_MIN {
                 p { class: "muted", style: "margin: 0;",
-                    "Up to this many at once, drawn afresh for each group. The others sit either side of the one you want and a good way under it — copy the strongest, and narrow the filter on the rest."
+                    "Up to this many at once, drawn afresh for each group. The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them — copy the strongest, and narrow the filter until the rest drop away."
                 }
                 div { class: "field-grid",
                     SliderField {

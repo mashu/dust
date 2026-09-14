@@ -187,10 +187,14 @@ pub struct PlannedTransmission {
     pub others: Vec<PlaybackPlan>,
 }
 
-/// The closest another station may land to the one you want. Right on top of
-/// it there would be no picking them apart by ear or by filter, and the answer
-/// would be a coin toss rather than a copy.
-const PILEUP_MIN_SEPARATION_HZ: f64 = 25.0;
+/// The closest another station may land to the one you want.
+///
+/// This is a fact about ears, not about radios. Two tones within about a
+/// hundred hertz of each other at CW pitch fall inside one critical band, and
+/// the quieter one is then masked rather than heard — it arrives as roughness
+/// on the station you want, not as a second station. Twenty-five hertz apart,
+/// which is where this started, you hear one station and a warble.
+pub const PILEUP_MIN_SEPARATION_HZ: f64 = 130.0;
 /// The longest another station can wait before joining in.
 const PILEUP_MAX_DELAY_SEC: f64 = 0.6;
 
@@ -230,6 +234,28 @@ pub fn resolve_pileup(
         crate::settings::PILEUP_LEVEL_MAX_DB,
     );
 
+    // Where the others may sit is decided by the receiver, because the
+    // receiver is what you hear. Two rules fall out of that, and between them
+    // they are the whole placement.
+    //
+    // They have to land inside the passband, or they are not in the pile-up at
+    // all — which is why squeezing the filter thins it, and why reaching for
+    // the filter is worth teaching.
+    //
+    // And none of them may sit closer to the middle of the passband than the
+    // station you want, or the filter would favour the wrong one and hand you
+    // an interferer louder than your own station however far down we set it.
+    // Tuning the one you want toward the middle is the other half of the same
+    // tactic.
+    let centre = settings.side_tone_center();
+    let half = settings.band.filter_bandwidth_hz.clamp(
+        crate::settings::FILTER_BANDWIDTH_MIN,
+        crate::settings::FILTER_BANDWIDTH_MAX,
+    ) / 2.0;
+    let off_centre = (wanted.tone_hz - centre).abs();
+    let (outward_low, outward_high) = (centre - off_centre, centre + off_centre);
+    let (passband_low, passband_high) = (centre - half, centre + half);
+
     let mut others = Vec::new();
     for text in texts.iter().take(calling.saturating_sub(1)) {
         // Two stations with the same call is not a pile-up, it is a mistake —
@@ -239,17 +265,31 @@ pub fn resolve_pileup(
             continue;
         }
         let reach = spread.max(PILEUP_MIN_SEPARATION_HZ);
-        let magnitude = rng.pick_in_range(PILEUP_MIN_SEPARATION_HZ, reach);
-        let offset = if rng.f64() < 0.5 {
-            -magnitude
-        } else {
-            magnitude
+        // Either side: far enough off to be told apart, no further out than
+        // the spread allows, inside the passband, and no nearer the middle of
+        // it than the station you want. Whichever side still has room wins; if
+        // neither does, this caller is one the receiver does not give you.
+        let below = (
+            (wanted.tone_hz - reach).max(passband_low),
+            (wanted.tone_hz - PILEUP_MIN_SEPARATION_HZ).min(outward_low),
+        );
+        let above = (
+            (wanted.tone_hz + PILEUP_MIN_SEPARATION_HZ).max(outward_high),
+            (wanted.tone_hz + reach).min(passband_high),
+        );
+        let fits = |(low, high): (f64, f64)| high >= low;
+        let side = match (fits(below), fits(above)) {
+            (true, true) if rng.f64() < 0.5 => below,
+            (true, true) => above,
+            (true, false) => below,
+            (false, true) => above,
+            (false, false) => continue,
         };
         // Each one is its own operator, and its own distance away.
-        let extra_db = rng.pick_in_range(0.0, 6.0);
+        let extra_db = rng.pick_in_range(0.0, 5.0);
         let gain = 10f64.powf(-(down_db + extra_db) / 20.0);
         let mut voice = resolve_station(settings, rng);
-        voice.tone_hz = (wanted.tone_hz + offset).max(20.0);
+        voice.tone_hz = rng.pick_in_range(side.0, side.1).max(20.0);
         voice.volume = (wanted.volume * gain).clamp(0.0, 1.0);
         others.push(Interferer {
             text: text.clone(),
@@ -805,7 +845,8 @@ mod plan_tests {
 mod pileup_tests {
     use super::*;
     use crate::settings::{
-        TrainingSettings, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN,
+        TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, PILEUP_LEVEL_MIN_DB,
+        PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN,
     };
     use crate::FastrandRng;
 
@@ -1001,6 +1042,110 @@ mod pileup_tests {
                             assert!(event.duration_sec.is_finite() && event.duration_sec > 0.0);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Reaching for a narrower filter is the tactic this whole feature exists
+    /// to teach, so it has to work: squeeze the passband and the callers
+    /// beside you drop out of it one by one, until the only station left is
+    /// the one you were tuned to.
+    #[test]
+    fn a_narrower_filter_thins_the_pile_up() {
+        // The real side-tone spread, not a pinned tone: how much room there is
+        // beside you depends on where in the passband you happen to sit.
+        let base = {
+            let mut s = TrainingSettings::default();
+            s.band.stations_max = STATIONS_MAX;
+            s.clamp()
+        };
+
+        let heard = |bandwidth: f64| {
+            let mut s = base.clone();
+            s.band.filter_bandwidth_hz = bandwidth;
+            let s = s.clamp();
+            let centre = s.side_tone_center();
+            let half = s.band.filter_bandwidth_hz / 2.0;
+            let mut count = 0usize;
+            for seed in 0..400u64 {
+                let mut rng = FastrandRng(seed * 2_654_435_761 + 11);
+                let wanted = resolve_station(&s, &mut rng);
+                for other in resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng) {
+                    // Nobody is ever placed where the filter would bury them.
+                    assert!(
+                        other.voice.tone_hz >= centre - half - 0.001
+                            && other.voice.tone_hz <= centre + half + 0.001,
+                        "a station at {:.0} Hz sat outside a {bandwidth:.0} Hz passband",
+                        other.voice.tone_hz
+                    );
+                    count += 1;
+                }
+            }
+            count
+        };
+
+        let wide = heard(FILTER_BANDWIDTH_MAX);
+        let narrow = heard(FILTER_BANDWIDTH_MIN);
+
+        assert!(wide > 0, "nobody else was ever heard, even wide open");
+        // Wide open it is the spread that holds them in, not the filter, so a
+        // filter only starts costing callers once it is narrower than that.
+        // By the time it is at its narrowest, most of them are gone.
+        assert!(
+            narrow * 4 < wide,
+            "a {FILTER_BANDWIDTH_MIN:.0} Hz filter still passed {narrow} of {wide} callers"
+        );
+    }
+
+    /// The level setting says how far down the others are before the receiver.
+    /// What you hear is after it, and a filter does not treat every pitch
+    /// alike — so this is the one that matters: whatever the tuning and
+    /// whatever the bandwidth, the station you want comes out on top.
+    #[test]
+    fn the_station_you_want_is_still_the_strongest_through_the_filter() {
+        use crate::band::ReceiverFilter;
+
+        const SAMPLE_RATE: u32 = 48_000;
+
+        // Steady-state amplitude of a tone at `hz` once it is through the
+        // receiver: let the filter settle first, then measure.
+        fn through_filter(settings: &TrainingSettings, hz: f64) -> f64 {
+            let mut filter = ReceiverFilter::from_settings(SAMPLE_RATE, settings);
+            let step = std::f64::consts::TAU * hz / f64::from(SAMPLE_RATE);
+            let settle = SAMPLE_RATE as usize / 4;
+            let measure = SAMPLE_RATE as usize / 8;
+            let mut sum_sq = 0.0;
+            for n in 0..settle + measure {
+                let out = filter.process((step * n as f64).sin());
+                if n >= settle {
+                    sum_sq += out * out;
+                }
+            }
+            (sum_sq / measure as f64).sqrt()
+        }
+
+        for bandwidth in [FILTER_BANDWIDTH_MIN, 300.0, 500.0, FILTER_BANDWIDTH_MAX] {
+            let mut s = TrainingSettings::default();
+            s.band.stations_max = STATIONS_MAX;
+            s.band.filter_bandwidth_hz = bandwidth;
+            let s = s.clamp();
+            for seed in 0..150u64 {
+                let mut rng = FastrandRng(seed * 6_364_136_223 + 17);
+                let wanted = resolve_station(&s, &mut rng);
+                let yours = wanted.volume * through_filter(&s, wanted.tone_hz);
+                for other in resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng) {
+                    let theirs = other.voice.volume * through_filter(&s, other.voice.tone_hz);
+                    let margin = 20.0 * (yours / theirs).log10();
+                    // Not merely ahead — ahead by at least what the weakest
+                    // setting promises, or the two would be a coin toss.
+                    assert!(
+                        margin >= PILEUP_LEVEL_MIN_DB,
+                        "{bandwidth:.0} Hz, seed {seed}: a caller at {:.0} Hz came out only \
+                         {margin:.1} dB under the station you want at {:.0} Hz",
+                        other.voice.tone_hz,
+                        wanted.tone_hz
+                    );
                 }
             }
         }
