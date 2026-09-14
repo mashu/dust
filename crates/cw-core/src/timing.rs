@@ -150,6 +150,145 @@ pub fn build_envelope_curve(
     curve
 }
 
+/// Another station calling over the top of the one you want.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Interferer {
+    pub text: String,
+    pub voice: StationVoice,
+    /// How late this station starts. Nobody in a pile-up is synchronised, and
+    /// a stagger is most of what makes one hard to pick apart.
+    pub delay_sec: f64,
+}
+
+/// Everything the receiver hears during one send: the station you are copying,
+/// and whoever else is calling across it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transmission {
+    pub text: String,
+    pub voice: StationVoice,
+    pub others: Vec<Interferer>,
+}
+
+impl Transmission {
+    /// One station, alone on the frequency.
+    pub fn alone(text: impl Into<String>, voice: StationVoice) -> Self {
+        Self {
+            text: text.into(),
+            voice,
+            others: Vec::new(),
+        }
+    }
+}
+
+/// The wanted send and whatever is on top of it, as scheduled sound.
+#[derive(Clone, Debug)]
+pub struct PlannedTransmission {
+    pub wanted: PlaybackPlan,
+    pub others: Vec<PlaybackPlan>,
+}
+
+/// The closest another station may land to the one you want. Right on top of
+/// it there would be no picking them apart by ear or by filter, and the answer
+/// would be a coin toss rather than a copy.
+const PILEUP_MIN_SEPARATION_HZ: f64 = 25.0;
+/// The longest another station can wait before joining in.
+const PILEUP_MAX_DELAY_SEC: f64 = 0.6;
+
+/// Tune in whoever else is calling.
+///
+/// They sit either side of the wanted station, off-frequency and a good margin
+/// below it, so the one you want stays the strongest thing in the passband —
+/// the whole exercise is copying *that* one. Being off-frequency is what makes
+/// the receiver's filter worth reaching for: narrow it and they thin out,
+/// because they are further from its centre than the station you are on.
+///
+/// Takes more texts than it may need and decides how many stations are calling
+/// this time, so the count varies from group to group like a real pile-up.
+/// Anything matching `wanted_text` is dropped: nobody else has your callsign.
+pub fn resolve_pileup(
+    settings: &TrainingSettings,
+    wanted: &StationVoice,
+    wanted_text: &str,
+    texts: &[String],
+    rng: &mut impl Rng,
+) -> Vec<Interferer> {
+    let most = settings
+        .band
+        .stations_max
+        .clamp(crate::settings::STATIONS_MIN, crate::settings::STATIONS_MAX);
+    if most <= 1 || texts.is_empty() {
+        return Vec::new();
+    }
+    // One station, plus however many others turn up this time.
+    let calling = rng.usize_in(1, most as usize);
+    let spread = settings.band.pileup_spread_hz.clamp(
+        crate::settings::PILEUP_SPREAD_MIN,
+        crate::settings::PILEUP_SPREAD_MAX,
+    );
+    let down_db = settings.band.pileup_level_db.clamp(
+        crate::settings::PILEUP_LEVEL_MIN_DB,
+        crate::settings::PILEUP_LEVEL_MAX_DB,
+    );
+
+    let mut others = Vec::new();
+    for text in texts.iter().take(calling.saturating_sub(1)) {
+        // Two stations with the same call is not a pile-up, it is a mistake —
+        // and on a short alphabet the generator will hand us one sooner or
+        // later. Dropping it costs a station rather than the sense of it.
+        if text.is_empty() || text == wanted_text {
+            continue;
+        }
+        let reach = spread.max(PILEUP_MIN_SEPARATION_HZ);
+        let magnitude = rng.pick_in_range(PILEUP_MIN_SEPARATION_HZ, reach);
+        let offset = if rng.f64() < 0.5 {
+            -magnitude
+        } else {
+            magnitude
+        };
+        // Each one is its own operator, and its own distance away.
+        let extra_db = rng.pick_in_range(0.0, 6.0);
+        let gain = 10f64.powf(-(down_db + extra_db) / 20.0);
+        let mut voice = resolve_station(settings, rng);
+        voice.tone_hz = (wanted.tone_hz + offset).max(20.0);
+        voice.volume = (wanted.volume * gain).clamp(0.0, 1.0);
+        others.push(Interferer {
+            text: text.clone(),
+            voice,
+            delay_sec: rng.pick_in_range(0.0, PILEUP_MAX_DELAY_SEC),
+        });
+    }
+    others
+}
+
+/// Lay out every station's sound against one clock.
+///
+/// The others are pushed back by their own delay and cut off at the end of the
+/// wanted send — whole elements only, so nothing stops mid-tone. What the
+/// listener gets is stations still calling as the one they want finishes,
+/// which is exactly how it sounds on the air.
+pub fn plan_transmission(
+    transmission: &Transmission,
+    settings: &TrainingSettings,
+) -> PlannedTransmission {
+    let wanted = plan_morse_playback_for(&transmission.text, settings, &transmission.voice);
+    let ends_at = wanted.duration_sec;
+    let others = transmission
+        .others
+        .iter()
+        .map(|other| {
+            let mut plan = plan_morse_playback_for(&other.text, settings, &other.voice);
+            let delay = other.delay_sec.max(0.0);
+            plan.events.retain_mut(|event| {
+                event.start_sec += delay;
+                event.start_sec + event.duration_sec <= ends_at
+            });
+            plan.duration_sec = (plan.duration_sec + delay).min(ends_at);
+            plan
+        })
+        .collect();
+    PlannedTransmission { wanted, others }
+}
+
 /// Plan a send from a station tuned in on the spot — a preview, a sample, one
 /// character on the listen screen. A session uses [`plan_morse_playback_for`]
 /// so the station stays the same across a group's repeats.
@@ -659,5 +798,211 @@ mod plan_tests {
         let curve = build_envelope_curve(0.0, 0.0, 1.0, 0.5);
         assert!(curve.len() >= 2);
         assert!(curve.iter().all(|g| g.is_finite()));
+    }
+}
+
+#[cfg(test)]
+mod pileup_tests {
+    use super::*;
+    use crate::settings::{
+        TrainingSettings, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN,
+    };
+    use crate::FastrandRng;
+
+    fn settings(max: u32) -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.band.stations_max = max;
+        s.band.side_tone_min = 600.0;
+        s.band.side_tone_max = 600.0;
+        s.band.link_volume = true;
+        s.band.volume_min = 1.0;
+        s.clamp()
+    }
+
+    fn texts(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("TEST{i}")).collect()
+    }
+
+    fn pileup(max: u32, seed: u64) -> (StationVoice, Vec<Interferer>) {
+        let s = settings(max);
+        let mut rng = FastrandRng(seed.wrapping_mul(7919).wrapping_add(3));
+        let wanted = resolve_station(&s, &mut rng);
+        let others = resolve_pileup(&s, &wanted, "W1AW", &texts(max as usize), &mut rng);
+        (wanted, others)
+    }
+
+    /// The default is one station, alone. A pile-up is something you ask for.
+    #[test]
+    fn nobody_else_is_calling_until_you_say_so() {
+        assert_eq!(TrainingSettings::default().band.stations_max, STATIONS_MIN);
+        for seed in 0..50 {
+            assert!(pileup(STATIONS_MIN, seed).1.is_empty());
+        }
+    }
+
+    /// The exercise is copying the strongest station, so the one you want has
+    /// to be the strongest — every time, not usually.
+    #[test]
+    fn the_station_you_want_is_always_the_strongest() {
+        let floor = settings(STATIONS_MAX).band.pileup_level_db;
+        for seed in 0..400 {
+            let (wanted, others) = pileup(STATIONS_MAX, seed);
+            for other in &others {
+                assert!(
+                    other.voice.volume < wanted.volume,
+                    "seed {seed}: another station matched the one you want"
+                );
+                let under = -20.0 * (other.voice.volume / wanted.volume).log10();
+                assert!(
+                    under >= floor - 0.001,
+                    "seed {seed}: only {under:.1} dB under, asked for {floor}"
+                );
+            }
+        }
+    }
+
+    /// They sit either side, far enough off to be pickable apart by ear and by
+    /// filter, and not so far they stop being a pile-up.
+    #[test]
+    fn the_others_sit_around_you_rather_than_on_top_of_you() {
+        let spread = settings(STATIONS_MAX).band.pileup_spread_hz;
+        let mut below = 0;
+        let mut above = 0;
+        for seed in 0..400 {
+            let (wanted, others) = pileup(STATIONS_MAX, seed);
+            for other in &others {
+                let offset = other.voice.tone_hz - wanted.tone_hz;
+                assert!(
+                    offset.abs() >= PILEUP_MIN_SEPARATION_HZ - 0.001,
+                    "seed {seed}: a station landed {offset:.0} Hz away"
+                );
+                assert!(
+                    offset.abs() <= spread + 0.001,
+                    "seed {seed}: a station strayed {offset:.0} Hz out"
+                );
+                assert!(other.voice.tone_hz > 0.0);
+                if offset < 0.0 {
+                    below += 1;
+                } else {
+                    above += 1;
+                }
+            }
+        }
+        assert!(below > 0 && above > 0, "they all went the same way");
+    }
+
+    /// A pile-up that arrived the same way every time would be one puzzle, not
+    /// a drill.
+    #[test]
+    fn how_many_are_calling_changes_from_group_to_group() {
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..400 {
+            seen.insert(pileup(STATIONS_MAX, seed).1.len() + 1);
+        }
+        assert_eq!(
+            seen,
+            (1..=STATIONS_MAX as usize).collect(),
+            "every count from one to the maximum should turn up"
+        );
+
+        // And the stagger is real: they do not all start together.
+        let delays: Vec<f64> = (0..200)
+            .flat_map(|seed| pileup(STATIONS_MAX, seed).1)
+            .map(|other| other.delay_sec)
+            .collect();
+        assert!(delays.iter().any(|d| *d > 0.05), "nobody was late");
+        assert!(
+            delays
+                .iter()
+                .all(|d| (0.0..=PILEUP_MAX_DELAY_SEC).contains(d)),
+            "a station waited longer than the send"
+        );
+    }
+
+    /// The same group has to bring the same pile-up, or a repeat would be a
+    /// different puzzle and a retry after a stalled send would change the
+    /// answer underneath you.
+    #[test]
+    fn the_same_draw_brings_the_same_stations() {
+        let s = settings(STATIONS_MAX);
+        let once = {
+            let mut rng = FastrandRng(99);
+            let wanted = resolve_station(&s, &mut rng);
+            resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng)
+        };
+        let twice = {
+            let mut rng = FastrandRng(99);
+            let wanted = resolve_station(&s, &mut rng);
+            resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng)
+        };
+        assert_eq!(once, twice);
+    }
+
+    /// Everyone is laid against the wanted station's clock: pushed back by
+    /// their own delay, and cut at its end — whole elements only, because a
+    /// tone stopped halfway through is a click.
+    #[test]
+    fn the_others_are_cut_at_the_end_and_never_mid_tone() {
+        let s = settings(STATIONS_MAX);
+        for seed in 0..200 {
+            let mut rng = FastrandRng(seed * 31 + 7);
+            let wanted = resolve_station(&s, &mut rng);
+            let others = resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng);
+            if others.is_empty() {
+                continue;
+            }
+            let sent = Transmission {
+                text: "W1AW".into(),
+                voice: wanted,
+                others: others.clone(),
+            };
+            let planned = plan_transmission(&sent, &s);
+            let ends_at = planned.wanted.duration_sec;
+            assert!(ends_at > 0.0);
+            for (plan, other) in planned.others.iter().zip(&others) {
+                for event in &plan.events {
+                    assert!(
+                        event.start_sec >= other.delay_sec - 1e-9,
+                        "seed {seed}: a station started before it was due"
+                    );
+                    assert!(
+                        event.start_sec + event.duration_sec <= ends_at + 1e-9,
+                        "seed {seed}: a station ran past the send it was over"
+                    );
+                }
+                assert!(plan.duration_sec <= ends_at + 1e-9);
+            }
+        }
+    }
+
+    /// Whatever the settings say, what comes out has to be playable.
+    #[test]
+    fn a_pile_up_is_always_sendable() {
+        for max in STATIONS_MIN..=STATIONS_MAX {
+            for spread in [PILEUP_SPREAD_MIN, 140.0, PILEUP_SPREAD_MAX] {
+                let mut s = settings(max);
+                s.band.pileup_spread_hz = spread;
+                let s = s.clamp();
+                for seed in 0..40 {
+                    let mut rng = FastrandRng(seed * 13 + 1);
+                    let wanted = resolve_station(&s, &mut rng);
+                    let others =
+                        resolve_pileup(&s, &wanted, "K5ABC", &texts(max as usize), &mut rng);
+                    let sent = Transmission {
+                        text: "K5ABC".into(),
+                        voice: wanted,
+                        others,
+                    };
+                    let planned = plan_transmission(&sent, &s);
+                    for plan in std::iter::once(&planned.wanted).chain(&planned.others) {
+                        for event in &plan.events {
+                            assert!(event.frequency_hz.is_finite() && event.frequency_hz > 0.0);
+                            assert!(event.target_gain.is_finite() && event.target_gain >= 0.0);
+                            assert!(event.duration_sec.is_finite() && event.duration_sec > 0.0);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

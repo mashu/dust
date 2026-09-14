@@ -12,9 +12,9 @@ use std::time::Instant;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use cw_core::band::{BandMixer, ReceiverFilter};
-use cw_core::{plan_morse_playback_for, StationVoice, TrainingSettings};
+use cw_core::{plan_transmission, TrainingSettings, Transmission};
 
-use super::render::{render_plan, BandPlayback, LiveQsb, TonePlayback};
+use super::render::{mix_plan_into, render_plan, BandPlayback, LiveQsb, TonePlayback};
 use super::{MorseBackend, PlaybackWait};
 use state::{PlayerState, ToneSignal};
 
@@ -111,14 +111,14 @@ impl MorseBackend for MorsePlayer {
         Ok(())
     }
 
-    fn start_text(
+    fn start_transmission(
         &mut self,
-        text: &str,
+        transmission: &Transmission,
         settings: &TrainingSettings,
-        voice: &StationVoice,
     ) -> Result<PlaybackWait, String> {
         self.apply_band(settings)?;
-        let plan = plan_morse_playback_for(text, settings, voice);
+        let planned = plan_transmission(transmission, settings);
+        let plan = planned.wanted.clone();
         // Drop the previous stream before the new epoch, so its callback cannot
         // write into the run that is about to start. Anything still fading has
         // long finished by the time a new send begins.
@@ -126,7 +126,7 @@ impl MorseBackend for MorsePlayer {
         self.release_retired();
         let armed = self.state.arm();
         let (stream, finished) = start_tone_stream(
-            &plan,
+            &planned,
             settings,
             self.opened_at.elapsed().as_secs_f64(),
             Arc::clone(&self.qsb),
@@ -223,7 +223,7 @@ fn default_output() -> Result<(cpal::Device, cpal::SupportedStreamConfig), Strin
 }
 
 fn start_tone_stream(
-    plan: &cw_core::PlaybackPlan,
+    planned: &cw_core::PlannedTransmission,
     settings: &TrainingSettings,
     started_at_sec: f64,
     qsb: Arc<LiveQsb>,
@@ -236,7 +236,12 @@ fn start_tone_stream(
     // and the keying softens and rings, and a station off your pitch fades.
     // Filtering the send and the background separately comes to the same thing
     // as filtering their sum — they are two streams, and the filter is linear.
-    let mut samples = render_plan(plan, sample_rate);
+    let mut samples = render_plan(&planned.wanted, sample_rate);
+    // Everyone else calling lands in the same buffer: interference is addition,
+    // and each station already carries its own pitch and level.
+    for other in &planned.others {
+        mix_plan_into(&mut samples, other, sample_rate);
+    }
     ReceiverFilter::from_settings(sample_rate, settings).apply(&mut samples);
     let playback = TonePlayback::new(samples, sample_rate, started_at_sec, qsb, stop);
     let finished = playback.finished_flag();
@@ -296,14 +301,14 @@ mod device_tests {
         };
         let voice = cw_core::resolve_station(&settings(), &mut cw_core::FastrandRng(7));
         let wait = player
-            .start_text("K", &settings(), &voice)
+            .start_transmission(&Transmission::alone("K", voice), &settings())
             .expect("the device should take a send");
         assert!(wait.duration_sec > 0.0);
         assert!(wait.char_wpm >= 40.0);
 
         // A second send retires the first.
         let second = player
-            .start_text("M", &settings(), &voice)
+            .start_transmission(&Transmission::alone("M", voice), &settings())
             .expect("a second send");
         assert!(second.duration_sec > 0.0);
 

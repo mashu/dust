@@ -6,7 +6,7 @@ use cw_core::band::{
     RECEIVER_STAGES, RINGING_OUTPUT_GAIN,
 };
 use cw_core::{
-    plan_morse_playback_for, PlaybackPlan, ReceiverProfile, StationVoice, TrainingSettings,
+    plan_transmission, PlannedTransmission, ReceiverProfile, TrainingSettings, Transmission,
 };
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
@@ -241,18 +241,18 @@ impl MorsePlayer {
 
     fn start_send(
         &mut self,
-        text: &str,
+        transmission: &Transmission,
         settings: &TrainingSettings,
-        voice: &StationVoice,
     ) -> Result<PlaybackWait, String> {
         self.resume_from_gesture();
         self.release_group_gain();
         let epoch = self.bump_epoch();
         self.reset_stop_flag();
         self.apply_band_now(settings)?;
-        let plan = plan_morse_playback_for(text, settings, voice);
+        let planned = plan_transmission(transmission, settings);
+        let plan = &planned.wanted;
         let started_at = self.ctx.current_time();
-        self.schedule_plan(&plan)?;
+        self.schedule_plan(&planned)?;
         Ok(PlaybackWait::new(
             plan.duration_sec,
             plan.resolved_char_wpm,
@@ -267,7 +267,7 @@ impl MorsePlayer {
         ))
     }
 
-    fn schedule_plan(&mut self, plan: &PlaybackPlan) -> Result<(), String> {
+    fn schedule_plan(&mut self, planned: &PlannedTransmission) -> Result<(), String> {
         self.reset_stop_flag();
 
         let group_gain = self.ctx.create_gain().map_err(|e| format!("gain: {e:?}"))?;
@@ -281,7 +281,11 @@ impl MorsePlayer {
         self.group_gain = Some(group_gain.clone());
 
         let start = self.ctx.current_time();
-        for event in &plan.events {
+        // The wanted station and everyone calling over it go into the same
+        // gain: interference is addition, and each station's events already
+        // carry its own pitch and level.
+        let every_station = std::iter::once(&planned.wanted).chain(planned.others.iter());
+        for event in every_station.flat_map(|plan| plan.events.iter()) {
             if self.stop_flag.get() {
                 break;
             }
@@ -336,13 +340,12 @@ impl MorseBackend for MorsePlayer {
         self.apply_band_now(settings)
     }
 
-    fn start_text(
+    fn start_transmission(
         &mut self,
-        text: &str,
+        transmission: &Transmission,
         settings: &TrainingSettings,
-        voice: &StationVoice,
     ) -> Result<PlaybackWait, String> {
-        self.start_send(text, settings, voice)
+        self.start_send(transmission, settings)
     }
 
     fn stop(&mut self) {

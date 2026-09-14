@@ -1,8 +1,9 @@
 //! Owns the session machine, audio, and effect execution. UI sends events only.
 
 use cw_core::{
-    generate_training_group, resolve_group_repeats, resolve_station, FastrandRng, SessionEffect,
-    SessionEvent, SessionMachine, SessionPhase, StationVoice, TrainingSettings,
+    generate_training_group, resolve_group_repeats, resolve_pileup, resolve_station,
+    CharSamplingState, FastrandRng, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
+    StationVoice, TrainingSettings, Transmission,
 };
 use dioxus::prelude::*;
 
@@ -157,12 +158,49 @@ async fn drive_effects(
 /// carried across the sends, and a retry after a stalled send tunes back in to
 /// the same station rather than a new one.
 fn station_for(settings: &TrainingSettings, gen: u64, index: usize) -> StationVoice {
-    let mut rng = FastrandRng(
+    resolve_station(settings, &mut group_rng(gen, index, 0))
+}
+
+/// A generator that depends only on the session and the group, so every repeat
+/// of a group — and every retry after a stalled send — tunes back in to the
+/// same operators rather than a new set.
+fn group_rng(gen: u64, index: usize, salt: u64) -> FastrandRng {
+    FastrandRng(
         gen.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(index as u64)
+            .wrapping_add((index as u64).wrapping_mul(0x2545_F491))
+            .wrapping_add(salt)
             | 1,
-    );
-    resolve_station(settings, &mut rng)
+    )
+}
+
+/// What the receiver hears for this group: the station being copied, and
+/// whoever else is calling across it.
+///
+/// The others send groups of their own, drawn from the same curriculum so they
+/// sound like stations rather than noise — but from a generator of their own,
+/// off a blank slate, so a pile-up never teaches the sampler anything. Only
+/// the station you answer counts.
+fn transmission_for(
+    settings: &TrainingSettings,
+    gen: u64,
+    index: usize,
+    text: String,
+) -> Transmission {
+    let voice = station_for(settings, gen, index);
+    let most = settings.band.stations_max.max(1) as usize;
+    if most <= 1 {
+        return Transmission::alone(text, voice);
+    }
+    let mut rng = group_rng(gen, index, 0x51ED_2701);
+    let elsewhere = CharSamplingState::default();
+    let texts: Vec<String> = (0..most.saturating_sub(1))
+        .map(|_| generate_training_group(settings, &elsewhere, &mut rng).0)
+        .collect();
+    Transmission {
+        others: resolve_pileup(settings, &voice, &text, &texts, &mut rng),
+        text,
+        voice,
+    }
 }
 
 async fn handle_effect(
@@ -238,8 +276,8 @@ async fn handle_effect(
             let outcome = if text.is_empty() {
                 Ok((0.0, 0.0, 0.0))
             } else {
-                let voice = station_for(&snapshot, gen, index);
-                play_text_now(app, gen, &text, &snapshot, &voice).await
+                let transmission = transmission_for(&snapshot, gen, index, text.clone());
+                play_text_now(app, gen, &transmission, &snapshot).await
             };
             if app.session_gen.get() != gen {
                 return Vec::new();
@@ -736,6 +774,73 @@ mod tests {
                 voices[0], voices[3],
                 "every group came from the same station, which is its own problem"
             );
+        });
+    }
+
+    /// A pile-up changes what you hear, not what you answer. The session still
+    /// scores the station you were copying, and the others are only ever in the
+    /// way — which is the whole point of them.
+    #[test]
+    fn a_pile_up_is_heard_but_never_answered() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.band.stations_max = cw_core::STATIONS_MAX;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(200_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+
+            let sent = h.recorder.sent();
+            assert!(!sent.is_empty());
+            assert!(
+                sent.iter().any(|t| !t.others.is_empty()),
+                "with five allowed, somebody else should have called"
+            );
+            for transmission in &sent {
+                for other in &transmission.others {
+                    assert_ne!(
+                        other.text, transmission.text,
+                        "an interfering station sent the answer"
+                    );
+                    assert!(
+                        other.voice.volume < transmission.voice.volume,
+                        "an interfering station was the strongest"
+                    );
+                }
+            }
+
+            // Every group was answered correctly, because the pile-up is not
+            // part of the answer.
+            let result = h.result.peek().clone().expect("a result");
+            assert_eq!(result.accuracy, 1.0);
+            assert_eq!(h.sessions.peek().len(), 1);
+        });
+    }
+
+    /// A repeat is the same moment on the band, pile-up and all. Redrawing the
+    /// others would make a repeat a different puzzle rather than another look
+    /// at the same one.
+    #[test]
+    fn a_repeat_brings_back_the_same_pile_up() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 2;
+            settings.playback.group_repeat_min = 3;
+            settings.playback.group_repeat_max = 3;
+            settings.band.stations_max = cw_core::STATIONS_MAX;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(200_000).await;
+
+            let sent = h.recorder.sent();
+            assert_eq!(sent.len(), 6, "two groups, three sends each");
+            for group in sent.chunks(3) {
+                assert!(
+                    group.windows(2).all(|w| w[0] == w[1]),
+                    "a repeat brought a different pile-up"
+                );
+            }
+            assert_ne!(sent[0], sent[3], "both groups drew the same band");
         });
     }
 

@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use cw_core::{plan_morse_playback_for, StationVoice, TrainingSettings};
+use cw_core::{plan_morse_playback_for, TrainingSettings, Transmission};
 
 use super::{MorseBackend, PlaybackSignal, PlaybackWait, WaitFlags};
 
@@ -50,13 +50,14 @@ impl MorseBackend for MorsePlayer {
         Ok(())
     }
 
-    fn start_text(
+    fn start_transmission(
         &mut self,
-        text: &str,
+        transmission: &Transmission,
         settings: &TrainingSettings,
-        voice: &StationVoice,
     ) -> Result<PlaybackWait, String> {
-        let plan = plan_morse_playback_for(text, settings, voice);
+        // Nothing is heard, so the others change nothing but the timing, and
+        // they do not change that either.
+        let plan = plan_morse_playback_for(&transmission.text, settings, &transmission.voice);
         let mine = self.epoch.get().wrapping_add(1);
         self.epoch.set(mine);
         Ok(PlaybackWait::new(

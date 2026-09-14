@@ -12,8 +12,10 @@ use crate::{
     align_group, apply_auto_level, build_session_result, calculate_group_letter_accuracy,
     calculate_overall_character_accuracy, compute_char_pool, create_initial_sampling_state,
     evaluate_auto_level, generate_training_group, parse_callsign, plan_morse_playback,
-    resolve_group_repeats, AutoLevelCounters, CharSetMode, FastrandRng, Rng, SessionId,
-    TrainingSettings, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, LEVEL_MIN,
+    plan_transmission, resolve_group_repeats, resolve_pileup, resolve_station, AutoLevelCounters,
+    CharSetMode, FastrandRng, Rng, SessionId, TrainingSettings, Transmission, CALLSIGN_TIER_MAX,
+    CALLSIGN_TIER_MIN, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, LEVEL_MIN, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -61,6 +63,9 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.band.qrn_level = rng.pick_in_range(-1.0, 4.0);
     s.band.receiver_level = rng.pick_in_range(-1.0, 4.0);
     s.band.filter_bandwidth_hz = rng.pick_in_range(-500.0, 6_000.0);
+    s.band.stations_max = rng.usize_in(0, 12) as u32;
+    s.band.pileup_spread_hz = rng.pick_in_range(-100.0, 2_000.0);
+    s.band.pileup_level_db = rng.pick_in_range(-20.0, 90.0);
     s.band.receiver_background_resonance = rng.pick_in_range(-10.0, 600.0);
     s.band.receiver_background_offset_mod_depth_hz = rng.pick_in_range(-100.0, 4_000.0);
     s.band.receiver_background_offset_mod_rate_hz = rng.pick_in_range(-5.0, 80.0);
@@ -114,6 +119,26 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
     assert!(
         b.volume_max >= b.volume_min && b.volume_max <= 1.0,
         "seed {seed}"
+    );
+    assert!(
+        (FILTER_BANDWIDTH_MIN..=FILTER_BANDWIDTH_MAX).contains(&b.filter_bandwidth_hz),
+        "seed {seed}: the receiver came out {} Hz wide",
+        b.filter_bandwidth_hz
+    );
+    assert!(
+        (STATIONS_MIN..=STATIONS_MAX).contains(&b.stations_max),
+        "seed {seed}: {} stations",
+        b.stations_max
+    );
+    assert!(
+        (PILEUP_SPREAD_MIN..=PILEUP_SPREAD_MAX).contains(&b.pileup_spread_hz),
+        "seed {seed}: the pile-up spans {} Hz",
+        b.pileup_spread_hz
+    );
+    assert!(
+        (PILEUP_LEVEL_MIN_DB..=PILEUP_LEVEL_MAX_DB).contains(&b.pileup_level_db),
+        "seed {seed}: the pile-up is {} dB down",
+        b.pileup_level_db
     );
     assert!(
         !once.active_alphabet().is_empty(),
@@ -607,6 +632,55 @@ fn no_band_setting_makes_an_unlistenable_receiver() {
                 loudest > 1e-6,
                 "seed {seed}: the band was switched on and made no sound"
             );
+        }
+    }
+}
+
+/// However the band is set, a pile-up has to stay answerable: the station you
+/// are copying is the strongest, everyone else is off its frequency, and
+/// nothing runs past the send they are laid over.
+#[test]
+fn a_pile_up_is_always_something_you_could_copy() {
+    for seed in 0..SEEDS / 4 {
+        let mut rng = FastrandRng(seed.wrapping_mul(0x85EB_CA6B).wrapping_add(29));
+        let settings = wild_settings(&mut rng).clamp();
+        let state = create_initial_sampling_state(&[]);
+        let (wanted_text, _) = generate_training_group(&settings, &state, &mut rng);
+        let voice = resolve_station(&settings, &mut rng);
+        let texts: Vec<String> = (0..settings.band.stations_max)
+            .map(|_| generate_training_group(&settings, &state, &mut rng).0)
+            .collect();
+        let others = resolve_pileup(&settings, &voice, &wanted_text, &texts, &mut rng);
+
+        assert!(
+            others.len() < settings.band.stations_max as usize,
+            "seed {seed}: more stations than the settings allow"
+        );
+        for other in &others {
+            assert!(
+                other.voice.volume < voice.volume,
+                "seed {seed}: an interferer outgunned the station you want"
+            );
+            assert!(other.voice.tone_hz > 0.0 && other.voice.tone_hz.is_finite());
+            assert_ne!(other.text, wanted_text, "seed {seed}: a duplicate call");
+        }
+
+        let sent = Transmission {
+            text: wanted_text,
+            voice,
+            others,
+        };
+        let planned = plan_transmission(&sent, &settings);
+        let ends_at = planned.wanted.duration_sec;
+        for plan in &planned.others {
+            for event in &plan.events {
+                assert!(
+                    event.start_sec + event.duration_sec <= ends_at + 1e-9,
+                    "seed {seed}: a station ran past the send"
+                );
+                assert!(event.frequency_hz.is_finite() && event.frequency_hz > 0.0);
+                assert!(event.target_gain.is_finite() && event.target_gain >= 0.0);
+            }
         }
     }
 }

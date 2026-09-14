@@ -17,7 +17,7 @@ mod web;
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
 
-use cw_core::{StationVoice, TrainingSettings};
+use cw_core::{TrainingSettings, Transmission};
 
 /// True when the build has no audio output and only simulates the timing of a
 /// session.
@@ -34,13 +34,13 @@ pub trait MorseBackend {
     fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String>;
 
     /// Schedule one send and hand back something to wait on.
-    /// Send `text` as one station. The caller owns the voice so every repeat
-    /// of a group arrives from the same operator.
-    fn start_text(
+    /// Send what the receiver hears: the station being copied, and whoever
+    /// else is calling across it. The caller owns the stations, so every
+    /// repeat of a group arrives from the same operators.
+    fn start_transmission(
         &mut self,
-        text: &str,
+        transmission: &Transmission,
         settings: &TrainingSettings,
-        voice: &StationVoice,
     ) -> Result<PlaybackWait, String>;
 
     /// Silence the Morse, leaving the background alone.
@@ -146,9 +146,9 @@ pub mod fake {
         /// The page is out of sight, the way a hidden browser tab is: the
         /// audio clock parks, and nothing charges the stall budget.
         pub page_hidden: Cell<bool>,
-        /// The station behind every send, in order, so a test can hear whether
-        /// a repeated group came from the same operator.
-        pub voices: RefCell<Vec<StationVoice>>,
+        /// Every transmission, in order, so a test can hear whether a repeated
+        /// group came from the same operator and who else was calling.
+        pub sent: RefCell<Vec<Transmission>>,
         /// Whether the receiver background is running. The real player keeps
         /// it on its own stream, outliving any one send, so a test that only
         /// watches sends cannot tell when it has been left playing.
@@ -201,11 +201,15 @@ pub mod fake {
 
         pub fn clear(&self) {
             self.calls.borrow_mut().clear();
-            self.voices.borrow_mut().clear();
+            self.sent.borrow_mut().clear();
         }
 
-        pub fn voices(&self) -> Vec<StationVoice> {
-            self.voices.borrow().clone()
+        pub fn sent(&self) -> Vec<Transmission> {
+            self.sent.borrow().clone()
+        }
+
+        pub fn voices(&self) -> Vec<cw_core::StationVoice> {
+            self.sent.borrow().iter().map(|t| t.voice).collect()
         }
 
         pub fn factory(self: &Rc<Self>) -> Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>> {
@@ -302,21 +306,21 @@ pub mod fake {
             Ok(())
         }
 
-        fn start_text(
+        fn start_transmission(
             &mut self,
-            text: &str,
+            transmission: &Transmission,
             settings: &TrainingSettings,
-            voice: &StationVoice,
         ) -> Result<PlaybackWait, String> {
             self.recorder
                 .calls
                 .borrow_mut()
-                .push(Call::Start(text.to_string()));
-            self.recorder.voices.borrow_mut().push(*voice);
+                .push(Call::Start(transmission.text.clone()));
+            self.recorder.sent.borrow_mut().push(transmission.clone());
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
             }
-            let plan = cw_core::plan_morse_playback_for(text, settings, voice);
+            // The wanted station sets the length; the others are laid over it.
+            let plan = cw_core::plan_transmission(transmission, settings).wanted;
             self.epoch.set(self.epoch.get() + 1);
             let duration_ms = (plan.duration_sec * 1000.0).ceil().max(0.0) as u32;
             Ok(PlaybackWait::new(

@@ -850,6 +850,47 @@ mod ui_tests {
         });
     }
 
+    /// The pile-up controls only exist once more than one station can call, so
+    /// a sweep that never turns the count up never touches them — which is how
+    /// a card of sliders goes untested.
+    #[test]
+    fn the_pile_up_controls_appear_with_the_stations_and_work() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            assert!(!ui.has("Pile-up spread"), "one station needs no spread");
+
+            ui.commit("field-stations", "4");
+            ui.advance(50).await;
+            assert_eq!(crate::persist::load_settings().band.stations_max, 4);
+            assert!(
+                ui.has("Pile-up spread"),
+                "the controls should have appeared"
+            );
+
+            for (slider, value, reads) in [
+                ("slider-pile-up-spread", "260", "±260 Hz"),
+                ("slider-pile-up-is-weaker-by", "20", "20 dB"),
+            ] {
+                ui.type_into(slider, value);
+                ui.advance(50).await;
+                assert!(
+                    ui.has(&format!("class=\"slider-value\">{reads}<")),
+                    "{slider} should read {reads}"
+                );
+            }
+            let stored = crate::persist::load_settings();
+            assert_eq!(stored.band.pileup_spread_hz, 260.0);
+            assert_eq!(stored.band.pileup_level_db, 20.0);
+            assert_eq!(stored.clone().clamp(), stored);
+
+            // Back to one station and they go away again.
+            ui.commit("field-stations", "1");
+            ui.advance(50).await;
+            assert!(!ui.has("Pile-up spread"));
+        });
+    }
+
     /// Test settings run a dead-quiet band; these tests need one that is on.
     fn with_receiver() -> TrainingSettings {
         let mut settings = test_settings();

@@ -1,7 +1,11 @@
-use cw_core::{ReceiverProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN};
+use cw_core::{
+    ReceiverProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN,
+    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX,
+    STATIONS_MIN,
+};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, Icon, Seg, SliderField, Switch, DISCLOSURE};
+use crate::ui::widgets::{control_id, Icon, NumberField, Seg, SliderField, Switch, DISCLOSURE};
 
 #[component]
 pub fn BandConditionsCard(
@@ -78,6 +82,44 @@ pub fn BandConditionsCard(
             }
             p { class: "muted", style: "margin: 0;",
                 "Everything you hear comes through this. Narrow it and less static gets in and the filter rings longer, but a station off your pitch fades with it."
+            }
+            div { class: "field-grid",
+                NumberField {
+                    label: format!("Stations calling (1–{STATIONS_MAX})"),
+                    id: "field-stations".to_string(),
+                    value: s.band.stations_max as f64,
+                    min: STATIONS_MIN as f64,
+                    max: STATIONS_MAX as f64,
+                    step: 1.0,
+                    onchange: move |v| settings.write().band.stations_max = v as u32,
+                }
+            }
+            if s.band.stations_max > STATIONS_MIN {
+                p { class: "muted", style: "margin: 0;",
+                    "Up to this many at once, drawn afresh for each group. The others sit either side of the one you want and a good way under it — copy the strongest, and narrow the filter on the rest."
+                }
+                div { class: "field-grid",
+                    SliderField {
+                        label: "Pile-up spread".to_string(),
+                        value_label: format!("±{:.0} Hz", s.band.pileup_spread_hz),
+                        value: s.band.pileup_spread_hz,
+                        min: PILEUP_SPREAD_MIN,
+                        max: PILEUP_SPREAD_MAX,
+                        step: 5.0,
+                        disabled: false,
+                        onchange: move |v| settings.write().band.pileup_spread_hz = v,
+                    }
+                    SliderField {
+                        label: "Pile-up is weaker by".to_string(),
+                        value_label: format!("{:.0} dB", s.band.pileup_level_db),
+                        value: s.band.pileup_level_db,
+                        min: PILEUP_LEVEL_MIN_DB,
+                        max: PILEUP_LEVEL_MAX_DB,
+                        step: 1.0,
+                        disabled: false,
+                        onchange: move |v| settings.write().band.pileup_level_db = v,
+                    }
+                }
             }
             Switch {
                 title: "QSB fading".to_string(),

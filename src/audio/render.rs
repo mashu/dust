@@ -83,7 +83,17 @@ pub fn render_plan(plan: &PlaybackPlan, sample_rate: u32) -> Vec<f32> {
     let n = ((plan.duration_sec.max(0.0) * f64::from(sample_rate)).ceil() as usize)
         .saturating_add(extra as usize);
     let mut buf = vec![0.0f32; n.max(1)];
-    let sr = f64::from(sample_rate);
+    mix_plan_into(&mut buf, plan, sample_rate);
+    buf
+}
+
+/// Add one station's sound to a buffer that may already hold others.
+///
+/// Stations add — that is all interference is. Each one carries its own pitch
+/// and its own level in its events, so a pile-up is this called once per
+/// station over the same buffer.
+pub fn mix_plan_into(buf: &mut [f32], plan: &PlaybackPlan, sample_rate: u32) {
+    let sr = f64::from(sample_rate.max(1));
     for event in &plan.events {
         let start = (event.start_sec * sr).round().max(0.0) as usize;
         let len = ((event.duration_sec * sr).round().max(0.0) as usize).max(1);
@@ -96,7 +106,6 @@ pub fn render_plan(plan: &PlaybackPlan, sample_rate: u32) -> Vec<f32> {
             }
         }
     }
-    buf
 }
 
 /// Spread one mono sample across every channel of an interleaved buffer.

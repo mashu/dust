@@ -4,7 +4,7 @@ use std::rc::Rc;
 use cw_core::{
     apply_auto_level, auto_level_progress, build_session_result, evaluate_auto_level,
     fit_settings_to_alphabet, resolve_station, AutoLevelProgress, CharSamplingState, FastrandRng,
-    GroupSession, SessionMachine, SessionResult, StationVoice, TrainingSettings,
+    GroupSession, SessionMachine, SessionResult, StationVoice, TrainingSettings, Transmission,
 };
 use dioxus::prelude::*;
 
@@ -164,9 +164,8 @@ pub(crate) enum PlayError {
 pub(crate) async fn play_text_now(
     app: &AppState,
     gen: u64,
-    text: &str,
+    transmission: &Transmission,
     settings: &TrainingSettings,
-    voice: &StationVoice,
 ) -> Result<(f64, f64, f64), PlayError> {
     let mut last_err = None;
     for attempt in 0..PLAY_ATTEMPTS {
@@ -180,7 +179,7 @@ pub(crate) async fn play_text_now(
                 return Err(PlayError::Cancelled);
             }
         }
-        match schedule_text(app, gen, text, settings, voice).await {
+        match schedule_text(app, gen, transmission, settings).await {
             Ok(wait) => {
                 let duration = wait.duration_sec;
                 let char_wpm = wait.char_wpm;
@@ -217,9 +216,8 @@ pub(crate) async fn play_text_now(
 async fn schedule_text(
     app: &AppState,
     gen: u64,
-    text: &str,
+    transmission: &Transmission,
     settings: &TrainingSettings,
-    voice: &StationVoice,
 ) -> Result<crate::audio::PlaybackWait, String> {
     if app.session_gen.get() != gen {
         return Err("Cancelled.".into());
@@ -246,7 +244,7 @@ async fn schedule_text(
                 let Some(player) = slot.as_mut() else {
                     return Err("Audio is unavailable.".into());
                 };
-                return player.start_text(text, settings, voice);
+                return player.start_transmission(transmission, settings);
             }
             Err(_) => sleep_ms(POLL_MS).await,
         }
@@ -344,7 +342,8 @@ pub async fn play_chars(
         if app.session_gen.get() != gen {
             return;
         }
-        let play = play_text_now(&app, gen, &ch.to_string(), &settings, &voice).await;
+        let alone = Transmission::alone(ch.to_string(), voice);
+        let play = play_text_now(&app, gen, &alone, &settings).await;
         if app.session_gen.get() != gen {
             return;
         }
@@ -370,8 +369,8 @@ pub async fn play_sample_text(
     text: String,
     mut toast: Signal<Option<String>>,
 ) {
-    let voice = app.station(&settings);
-    match play_text_now(&app, gen, &text, &settings, &voice).await {
+    let alone = Transmission::alone(text, app.station(&settings));
+    match play_text_now(&app, gen, &alone, &settings).await {
         Ok(_) | Err(PlayError::Cancelled) => {}
         Err(PlayError::Failed(message)) => toast.set(Some(message)),
     }
@@ -393,7 +392,8 @@ pub async fn loop_preview_text(
             return;
         }
         let settings_now = settings().clamp();
-        if let Err(err) = play_text_now(&app, gen, text, &settings_now, &voice).await {
+        let alone = Transmission::alone(text, voice);
+        if let Err(err) = play_text_now(&app, gen, &alone, &settings_now).await {
             match err {
                 PlayError::Cancelled => return,
                 PlayError::Failed(message) => {
@@ -782,8 +782,8 @@ mod tests {
             let sink = std::rc::Rc::clone(&outcome);
             h.in_app(|| {
                 spawn(async move {
-                    let voice = app.station(&settings);
-                    let result = play_text_now(&app, gen, "CQ", &settings, &voice).await;
+                    let alone = Transmission::alone("CQ", app.station(&settings));
+                    let result = play_text_now(&app, gen, &alone, &settings).await;
                     *sink.borrow_mut() = Some(result);
                 });
             });
@@ -814,9 +814,8 @@ mod tests {
             let sink = std::rc::Rc::clone(&outcome);
             h.in_app(|| {
                 spawn(async move {
-                    let voice = app.station(&settings);
-                    *sink.borrow_mut() =
-                        Some(play_text_now(&app, gen, "CQ", &settings, &voice).await);
+                    let alone = Transmission::alone("CQ", app.station(&settings));
+                    *sink.borrow_mut() = Some(play_text_now(&app, gen, &alone, &settings).await);
                 });
             });
             h.pump();

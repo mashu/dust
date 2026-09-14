@@ -178,6 +178,19 @@ impl Default for PlaybackSettings {
 pub const FILTER_BANDWIDTH_MIN: f64 = 150.0;
 pub const FILTER_BANDWIDTH_MAX: f64 = 2_000.0;
 
+/// How many stations can be calling at once. One is just the station you want;
+/// above that the others are QRM, and the count is drawn fresh for each group
+/// so a pile-up never arrives the same way twice.
+pub const STATIONS_MIN: u32 = 1;
+pub const STATIONS_MAX: u32 = 5;
+/// How far either side of the wanted station the others can land, in hertz.
+pub const PILEUP_SPREAD_MIN: f64 = 20.0;
+pub const PILEUP_SPREAD_MAX: f64 = 400.0;
+/// How far below the wanted station the others sit, in decibels. The floor is
+/// what keeps it answerable: the one you want stays the strongest.
+pub const PILEUP_LEVEL_MIN_DB: f64 = 4.0;
+pub const PILEUP_LEVEL_MAX_DB: f64 = 30.0;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BandSettings {
@@ -216,6 +229,16 @@ pub struct BandSettings {
     /// loses a little of its keying sidebands, and the filter rings longer.
     #[serde(default = "defaults::filter_bandwidth_hz")]
     pub filter_bandwidth_hz: f64,
+    /// The most stations that can call at once, counting the one you want.
+    /// At 1 there is no pile-up, which is where this starts.
+    #[serde(default = "defaults::stations_max")]
+    pub stations_max: u32,
+    /// How far either side of the wanted station the others can land.
+    #[serde(default = "defaults::pileup_spread_hz")]
+    pub pileup_spread_hz: f64,
+    /// How far below the wanted station the others sit.
+    #[serde(default = "defaults::pileup_level_db")]
+    pub pileup_level_db: f64,
     #[serde(default = "defaults::receiver_background_resonance")]
     pub receiver_background_resonance: f64,
     #[serde(default = "defaults::receiver_background_decay")]
@@ -249,6 +272,9 @@ impl Default for BandSettings {
             receiver_background_gain: 20.0,
             receiver_background_excitation_rate: 62.0,
             filter_bandwidth_hz: 500.0,
+            stations_max: STATIONS_MIN,
+            pileup_spread_hz: 140.0,
+            pileup_level_db: 12.0,
             receiver_background_resonance: 66.0,
             receiver_background_decay: 0.984,
             receiver_background_offset_hz: 140.0,
@@ -457,6 +483,15 @@ impl TrainingSettings {
             .band
             .filter_bandwidth_hz
             .clamp(FILTER_BANDWIDTH_MIN, FILTER_BANDWIDTH_MAX);
+        self.band.stations_max = self.band.stations_max.clamp(STATIONS_MIN, STATIONS_MAX);
+        self.band.pileup_spread_hz = self
+            .band
+            .pileup_spread_hz
+            .clamp(PILEUP_SPREAD_MIN, PILEUP_SPREAD_MAX);
+        self.band.pileup_level_db = self
+            .band
+            .pileup_level_db
+            .clamp(PILEUP_LEVEL_MIN_DB, PILEUP_LEVEL_MAX_DB);
         self.band.side_tone_min = self.band.side_tone_min.clamp(200.0, 1200.0);
         self.band.side_tone_max = self
             .band
@@ -727,6 +762,15 @@ mod defaults {
     }
     pub fn filter_bandwidth_hz() -> f64 {
         500.0
+    }
+    pub fn stations_max() -> u32 {
+        super::STATIONS_MIN
+    }
+    pub fn pileup_spread_hz() -> f64 {
+        140.0
+    }
+    pub fn pileup_level_db() -> f64 {
+        12.0
     }
     pub fn receiver_background_decay() -> f64 {
         0.984

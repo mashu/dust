@@ -732,6 +732,28 @@ mod tests {
         }
     }
 
+    /// The filter is the answer to a pile-up as much as to static. Another
+    /// station off your pitch is further from the filter's centre than the one
+    /// you are on, so narrowing pushes it down and leaves yours alone — which
+    /// is what makes reaching for the filter a tactic rather than a fidget.
+    #[test]
+    fn narrowing_the_receiver_pushes_an_interfering_station_down() {
+        let offset = crate::settings::BandSettings::default().pileup_spread_hz;
+        let rejection = |bandwidth: f64| {
+            let wanted = response_at(bandwidth, 500.0);
+            let other = response_at(bandwidth, 500.0 + offset);
+            20.0 * (other / wanted.max(1e-12)).log10()
+        };
+        let wide = rejection(1_000.0);
+        let narrow = rejection(FILTER_BANDWIDTH_MIN);
+        assert!(
+            narrow < wide - 3.0,
+            "narrowing barely touched the pile-up: {wide:.1} dB wide vs {narrow:.1} dB narrow"
+        );
+        // The station you want is still there, whichever way the filter is set.
+        assert!(20.0 * response_at(FILTER_BANDWIDTH_MIN, 500.0).log10() > -1.0);
+    }
+
     /// The control has to mean what it says, or the numbers on the screen are
     /// decoration.
     #[test]
