@@ -478,7 +478,7 @@ mod tests {
         let mut settings = TrainingSettings::default();
         settings.band.qrn_enabled = true;
         settings.band.qrn_level = 1.0;
-        settings.band.qrm_enabled = false;
+        settings.band.receiver_enabled = false;
         let mixer = BandMixer::new(8_000, &settings, 3);
         let stop = Arc::new(AtomicBool::new(false));
         let mut playback = BandPlayback::new(mixer, Arc::clone(&stop), 8_000);

@@ -71,7 +71,7 @@ pub fn test_settings() -> TrainingSettings {
     settings.playback.link_group_repeat = true;
     settings.auto_level.auto_adjust_level = false;
     settings.band.qrn_enabled = false;
-    settings.band.qrm_enabled = false;
+    settings.band.receiver_enabled = false;
     settings.band.qsb_enabled = false;
     settings
 }

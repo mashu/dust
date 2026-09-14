@@ -1,4 +1,4 @@
-use cw_core::{QrmProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN};
+use cw_core::{ReceiverProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN};
 use dioxus::prelude::*;
 
 use crate::ui::widgets::{control_id, Icon, Seg, SliderField, Switch, DISCLOSURE};
@@ -127,40 +127,40 @@ pub fn BandConditionsCard(
             Switch {
                 title: "Receiver background".to_string(),
                 description: "Narrow-filter hiss, ringing and passband breathing.".to_string(),
-                checked: s.band.qrm_enabled,
-                onchange: move |on| settings.write().band.qrm_enabled = on,
+                checked: s.band.receiver_enabled,
+                onchange: move |on| settings.write().band.receiver_enabled = on,
             }
             SliderField {
                 label: "Intensity".to_string(),
-                id: "slider-qrm-intensity".to_string(),
-                value_label: format!("{:.0}%", s.band.qrm_level * 100.0),
-                value: s.band.qrm_level,
+                id: "slider-receiver-intensity".to_string(),
+                value_label: format!("{:.0}%", s.band.receiver_level * 100.0),
+                value: s.band.receiver_level,
                 min: 0.0,
                 max: 1.0,
                 step: 0.05,
-                disabled: !s.band.qrm_enabled,
-                onchange: move |v| settings.write().band.qrm_level = v,
+                disabled: !s.band.receiver_enabled,
+                onchange: move |v| settings.write().band.receiver_level = v,
             }
             div { class: "field",
                 span { class: "field-label", "Filter character" }
                 div { class: "segmented",
                     Seg {
                         label: "Whistle".to_string(),
-                        id: "seg-qrm-whistle".to_string(),
-                        active: s.band.qrm_profile == QrmProfile::Whistle,
-                        onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Whistle,
+                        id: "seg-receiver-whistle".to_string(),
+                        active: s.band.receiver_profile == ReceiverProfile::Whistle,
+                        onclick: move |_| settings.write().band.receiver_profile = ReceiverProfile::Whistle,
                     }
                     Seg {
                         label: "Ringing".to_string(),
-                        id: "seg-qrm-ringing".to_string(),
-                        active: s.band.qrm_profile == QrmProfile::Ringing,
-                        onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Ringing,
+                        id: "seg-receiver-ringing".to_string(),
+                        active: s.band.receiver_profile == ReceiverProfile::Ringing,
+                        onclick: move |_| settings.write().band.receiver_profile = ReceiverProfile::Ringing,
                     }
                     Seg {
                         label: "Mixed".to_string(),
-                        id: "seg-qrm-mixed".to_string(),
-                        active: s.band.qrm_profile == QrmProfile::Mixed,
-                        onclick: move |_| settings.write().band.qrm_profile = QrmProfile::Mixed,
+                        id: "seg-receiver-mixed".to_string(),
+                        active: s.band.receiver_profile == ReceiverProfile::Mixed,
+                        onclick: move |_| settings.write().band.receiver_profile = ReceiverProfile::Mixed,
                     }
                 }
             }
@@ -185,7 +185,7 @@ pub fn BandConditionsCard(
                         min: 0.0,
                         max: 20.0,
                         step: 0.1,
-                        disabled: !s.band.qrm_enabled,
+                        disabled: !s.band.receiver_enabled,
                         onchange: move |v| settings.write().band.receiver_background_gain = v,
                     }
                     SliderField {
@@ -195,7 +195,7 @@ pub fn BandConditionsCard(
                         min: 0.1,
                         max: 500.0,
                         step: 1.0,
-                        disabled: !s.band.qrm_enabled,
+                        disabled: !s.band.receiver_enabled,
                         onchange: move |v| settings.write().band.receiver_background_excitation_rate = v,
                     }
                     SliderField {
@@ -205,7 +205,7 @@ pub fn BandConditionsCard(
                         min: 0.5,
                         max: 240.0,
                         step: 0.5,
-                        disabled: !s.band.qrm_enabled,
+                        disabled: !s.band.receiver_enabled,
                         onchange: move |v| settings.write().band.receiver_background_resonance = v,
                     }
                     SliderField {
@@ -215,7 +215,7 @@ pub fn BandConditionsCard(
                         min: 0.5,
                         max: 0.9999,
                         step: 0.0001,
-                        disabled: !s.band.qrm_enabled,
+                        disabled: !s.band.receiver_enabled,
                         onchange: move |v| settings.write().band.receiver_background_decay = v,
                     }
                     SliderField {
@@ -225,7 +225,7 @@ pub fn BandConditionsCard(
                         min: -1000.0,
                         max: 1000.0,
                         step: 5.0,
-                        disabled: !s.band.qrm_enabled,
+                        disabled: !s.band.receiver_enabled,
                         onchange: move |v| settings.write().band.receiver_background_offset_hz = v,
                     }
                     SliderField {
@@ -235,7 +235,7 @@ pub fn BandConditionsCard(
                         min: 0.0,
                         max: 1000.0,
                         step: 5.0,
-                        disabled: !s.band.qrm_enabled,
+                        disabled: !s.band.receiver_enabled,
                         onchange: move |v| settings.write().band.receiver_background_offset_mod_depth_hz = v,
                     }
                     SliderField {
@@ -245,7 +245,7 @@ pub fn BandConditionsCard(
                         min: 0.0,
                         max: 20.0,
                         step: 0.01,
-                        disabled: !s.band.qrm_enabled,
+                        disabled: !s.band.receiver_enabled,
                         onchange: move |v| settings.write().band.receiver_background_offset_mod_rate_hz = v,
                     }
                 }

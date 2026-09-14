@@ -283,8 +283,8 @@ mod device_tests {
         settings.band.volume_min = 0.1;
         settings.band.qrn_enabled = true;
         settings.band.qrn_level = 0.3;
-        settings.band.qrm_enabled = true;
-        settings.band.qrm_level = 0.2;
+        settings.band.receiver_enabled = true;
+        settings.band.receiver_level = 0.2;
         settings
     }
 
@@ -323,7 +323,7 @@ mod device_tests {
         player.apply_band(&settings).expect("changed band");
         // A silent band tears the stream down without complaining.
         settings.band.qrn_enabled = false;
-        settings.band.qrm_enabled = false;
+        settings.band.receiver_enabled = false;
         player.apply_band(&settings).expect("silent band");
         player.shutdown();
     }

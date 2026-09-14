@@ -853,8 +853,8 @@ mod ui_tests {
     /// Test settings run a dead-quiet band; these tests need one that is on.
     fn with_receiver() -> TrainingSettings {
         let mut settings = test_settings();
-        settings.band.qrm_enabled = true;
-        settings.band.qrm_level = 0.4;
+        settings.band.receiver_enabled = true;
+        settings.band.receiver_level = 0.4;
         settings
     }
 

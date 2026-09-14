@@ -39,13 +39,13 @@ impl MixedAutoLevelAxis {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum QrmProfile {
+pub enum ReceiverProfile {
     Whistle,
     Ringing,
     Mixed,
 }
 
-impl Default for QrmProfile {
+impl Default for ReceiverProfile {
     fn default() -> Self {
         Self::Mixed
     }
@@ -198,12 +198,14 @@ pub struct BandSettings {
     pub qrn_enabled: bool,
     #[serde(default = "defaults::qrn_level")]
     pub qrn_level: f64,
-    #[serde(default = "defaults::enabled")]
-    pub qrm_enabled: bool,
-    #[serde(default = "defaults::qrm_level")]
-    pub qrm_level: f64,
-    #[serde(default)]
-    pub qrm_profile: QrmProfile,
+    // These three were called `qrm*` before the name went to the stations it
+    // belongs to. The aliases are what keep every save written until now.
+    #[serde(default = "defaults::enabled", alias = "qrmEnabled")]
+    pub receiver_enabled: bool,
+    #[serde(default = "defaults::receiver_level", alias = "qrmLevel")]
+    pub receiver_level: f64,
+    #[serde(default, alias = "qrmProfile")]
+    pub receiver_profile: ReceiverProfile,
     #[serde(default = "defaults::receiver_background_gain")]
     pub receiver_background_gain: f64,
     #[serde(default = "defaults::receiver_background_excitation_rate")]
@@ -241,9 +243,9 @@ impl Default for BandSettings {
             qsb_rate_hz: 0.12,
             qrn_enabled: true,
             qrn_level: 0.25,
-            qrm_enabled: true,
-            qrm_level: 0.2,
-            qrm_profile: QrmProfile::Mixed,
+            receiver_enabled: true,
+            receiver_level: 0.2,
+            receiver_profile: ReceiverProfile::Mixed,
             receiver_background_gain: 20.0,
             receiver_background_excitation_rate: 62.0,
             filter_bandwidth_hz: 500.0,
@@ -470,7 +472,7 @@ impl TrainingSettings {
         self.band.qsb_depth = self.band.qsb_depth.clamp(0.0, 1.0);
         self.band.qsb_rate_hz = self.band.qsb_rate_hz.clamp(0.03, 1.5);
         self.band.qrn_level = self.band.qrn_level.clamp(0.0, 1.0);
-        self.band.qrm_level = self.band.qrm_level.clamp(0.0, 1.0);
+        self.band.receiver_level = self.band.receiver_level.clamp(0.0, 1.0);
         self.band.receiver_background_gain = self.band.receiver_background_gain.clamp(0.0, 20.0);
         self.band.receiver_background_excitation_rate = self
             .band
@@ -677,9 +679,9 @@ impl TrainingSettings {
             self.band.qsb_rate_hz,
             self.band.qrn_enabled,
             self.band.qrn_level,
-            self.band.qrm_enabled,
-            self.band.qrm_level,
-            self.band.qrm_profile,
+            self.band.receiver_enabled,
+            self.band.receiver_level,
+            self.band.receiver_profile,
             self.band.receiver_background_gain,
             self.band.receiver_background_excitation_rate,
             self.band.receiver_background_resonance,
@@ -711,7 +713,7 @@ mod defaults {
     pub fn qrn_level() -> f64 {
         0.25
     }
-    pub fn qrm_level() -> f64 {
+    pub fn receiver_level() -> f64 {
         0.2
     }
     pub fn receiver_background_gain() -> f64 {
@@ -998,7 +1000,7 @@ mod invariant_tests {
         s.band.qsb_depth = 9.0;
         s.band.qsb_rate_hz = 9.0;
         s.band.qrn_level = 9.0;
-        s.band.qrm_level = 9.0;
+        s.band.receiver_level = 9.0;
         s.band.receiver_background_gain = 900.0;
         s.band.receiver_background_excitation_rate = 9_000.0;
         s.band.receiver_background_resonance = 9_000.0;
@@ -1096,7 +1098,7 @@ mod invariant_tests {
     #[test]
     fn defaults_are_the_documented_ones() {
         assert_eq!(CharSetMode::default(), CharSetMode::Mixed);
-        assert_eq!(QrmProfile::default(), QrmProfile::Mixed);
+        assert_eq!(ReceiverProfile::default(), ReceiverProfile::Mixed);
         assert_eq!(MixedAutoLevelAxis::default(), MixedAutoLevelAxis::Letters);
         assert_eq!(
             MixedAutoLevelAxis::Letters.flip(),
@@ -1157,9 +1159,9 @@ mod invariant_tests {
             |s| s.band.qsb_rate_hz = 0.9,
             |s| s.band.qrn_enabled = false,
             |s| s.band.qrn_level = 0.9,
-            |s| s.band.qrm_enabled = false,
-            |s| s.band.qrm_level = 0.9,
-            |s| s.band.qrm_profile = QrmProfile::Ringing,
+            |s| s.band.receiver_enabled = false,
+            |s| s.band.receiver_level = 0.9,
+            |s| s.band.receiver_profile = ReceiverProfile::Ringing,
             |s| s.band.receiver_background_gain = 3.0,
             |s| s.band.receiver_background_excitation_rate = 3.0,
             |s| s.band.receiver_background_resonance = 3.0,

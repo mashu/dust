@@ -59,7 +59,7 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.band.qsb_depth = rng.pick_in_range(-1.0, 4.0);
     s.band.qsb_rate_hz = rng.pick_in_range(-1.0, 40.0);
     s.band.qrn_level = rng.pick_in_range(-1.0, 4.0);
-    s.band.qrm_level = rng.pick_in_range(-1.0, 4.0);
+    s.band.receiver_level = rng.pick_in_range(-1.0, 4.0);
     s.band.filter_bandwidth_hz = rng.pick_in_range(-500.0, 6_000.0);
     s.band.receiver_background_resonance = rng.pick_in_range(-10.0, 600.0);
     s.band.receiver_background_offset_mod_depth_hz = rng.pick_in_range(-100.0, 4_000.0);
@@ -577,7 +577,7 @@ fn no_band_setting_makes_an_unlistenable_receiver() {
         let mut rng = FastrandRng(seed.wrapping_mul(0x27D4_EB2D).wrapping_add(19));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.band.qrn_enabled = true;
-        settings.band.qrm_enabled = true;
+        settings.band.receiver_enabled = true;
         let settings = settings.clamp();
 
         let mut mixer = crate::band::BandMixer::new(16_000, &settings, seed | 1);
@@ -602,7 +602,7 @@ fn no_band_setting_makes_an_unlistenable_receiver() {
             out.len()
         );
         let loudest = out.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        if settings.band.qrn_level > 0.05 || settings.band.qrm_level > 0.05 {
+        if settings.band.qrn_level > 0.05 || settings.band.receiver_level > 0.05 {
             assert!(
                 loudest > 1e-6,
                 "seed {seed}: the band was switched on and made no sound"

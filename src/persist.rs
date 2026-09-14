@@ -554,6 +554,22 @@ mod tests {
         assert_eq!(settings.curriculum.callsign_level, 1);
     }
 
+    /// The receiver-character settings were called `qrm*` until the name went
+    /// to the stations it belongs to. Every save written before that has to
+    /// keep loading, with its values intact rather than reset to defaults.
+    #[test]
+    fn a_save_that_still_calls_the_receiver_qrm_loads() {
+        let raw = r#"{"qrmEnabled":false,"qrmLevel":0.75,"qrmProfile":"ringing","charWpmMin":19}"#;
+        let settings = recover_settings(raw);
+        assert!(!settings.band.receiver_enabled);
+        assert_eq!(settings.band.receiver_level, 0.75);
+        assert_eq!(
+            settings.band.receiver_profile,
+            cw_core::ReceiverProfile::Ringing
+        );
+        assert_eq!(settings.playback.char_wpm_min, 19.0);
+    }
+
     /// A save written in callsign mode has to come back in callsign mode, tier
     /// and all — this is the field a user would lose on every restart if the
     /// serde default were wrong.

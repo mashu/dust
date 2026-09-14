@@ -1,7 +1,14 @@
-//! Sample-rate QSB / QRN / QRM mixing, shared by every backend.
+//! Sample-rate QSB, QRN and receiver-character mixing, shared by every backend.
+//!
+//! The names here mean what an operator means by them. QRN is atmospheric
+//! static. The receiver model is the set's own hiss and ringing — it used to
+//! be called QRM in this file, which is wrong: QRM is another station on top of
+//! yours, and that lives with the stations rather than in the noise.
 
 use crate::rng::{FastrandRng, Rng};
-use crate::settings::{QrmProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN};
+use crate::settings::{
+    ReceiverProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN,
+};
 
 pub const QSB_MIN_GAIN: f64 = 0.25;
 
@@ -12,7 +19,7 @@ pub const QSB_MIN_GAIN: f64 = 0.25;
 /// contact at the edge of readability is around 0 dB, so that is the far end
 /// worth having.
 pub const QRN_OUTPUT_GAIN: f64 = 1.30;
-pub const QRM_OUTPUT_GAIN: f64 = 0.75;
+pub const RECEIVER_OUTPUT_GAIN: f64 = 0.75;
 pub const RINGING_OUTPUT_GAIN: f64 = 0.55;
 
 /// The intensity controls are not linear in amplitude. A fader that is has
@@ -253,7 +260,8 @@ impl AtmosphericNoise {
     }
 }
 
-/// Real-time QRN/QRM generator. QSB is applied separately to Morse samples.
+/// Real-time static and receiver-character generator. QSB is applied
+/// separately, to the Morse samples themselves.
 pub struct BandMixer {
     sample_rate: f64,
     rng: FastrandRng,
@@ -262,9 +270,9 @@ pub struct BandMixer {
     ringing_energy: f64,
     atmospheric: AtmosphericNoise,
     receiver: ReceiverFilter,
-    qrm_primary: Svf,
-    qrm_secondary: Svf,
-    qrm_ring: Svf,
+    receiver_primary: Svf,
+    receiver_secondary: Svf,
+    receiver_ring: Svf,
 }
 
 impl BandMixer {
@@ -294,13 +302,13 @@ impl BandMixer {
             ringing_energy: 0.0,
             atmospheric,
             receiver: ReceiverFilter::from_settings(sample_rate.max(1), &settings_for_filter),
-            qrm_primary: Svf::bandpass(sr, (center + offset).max(20.0), resonance),
-            qrm_secondary: Svf::bandpass(
+            receiver_primary: Svf::bandpass(sr, (center + offset).max(20.0), resonance),
+            receiver_secondary: Svf::bandpass(
                 sr,
                 (center - (offset.abs() + 35.0).max(20.0)).max(20.0),
                 (resonance * 0.65).max(0.5),
             ),
-            qrm_ring: Svf::bandpass(
+            receiver_ring: Svf::bandpass(
                 sr,
                 (center + offset - 35.0).max(20.0),
                 (resonance * 1.45).min(320.0),
@@ -310,7 +318,7 @@ impl BandMixer {
 
     pub fn needs_background(settings: &TrainingSettings) -> bool {
         (settings.band.qrn_enabled && settings.band.qrn_level > 0.0)
-            || (settings.band.qrm_enabled && settings.band.qrm_level > 0.0)
+            || (settings.band.receiver_enabled && settings.band.receiver_level > 0.0)
     }
 
     fn excitation_sample(&mut self) -> f64 {
@@ -339,11 +347,11 @@ impl BandMixer {
         }
     }
 
-    fn qrm_sample(&mut self) -> f64 {
-        if !self.settings.band.qrm_enabled || self.settings.band.qrm_level <= 0.0 {
+    fn receiver_sample(&mut self) -> f64 {
+        if !self.settings.band.receiver_enabled || self.settings.band.receiver_level <= 0.0 {
             return 0.0;
         }
-        let level = shaped_level(self.settings.band.qrm_level);
+        let level = shaped_level(self.settings.band.receiver_level);
         let model_gain = self.settings.band.receiver_background_gain.clamp(0.0, 20.0);
         let center = self.settings.side_tone_center();
         let offset = self
@@ -368,28 +376,33 @@ impl BandMixer {
             .clamp(0.5, 240.0);
         let grain = self.excitation_sample();
         let mut out = 0.0;
-        let profile = self.settings.band.qrm_profile;
+        let profile = self.settings.band.receiver_profile;
 
-        if matches!(profile, QrmProfile::Whistle | QrmProfile::Mixed) {
+        if matches!(profile, ReceiverProfile::Whistle | ReceiverProfile::Mixed) {
             let primary_f = center + offset + Self::wobble(self.t, depth, rate);
             let secondary_f = center - (offset.abs() + 35.0).max(20.0)
                 + Self::wobble(self.t, depth * 0.65, rate * 0.73);
-            self.qrm_primary
+            self.receiver_primary
                 .set_bandpass(self.sample_rate, primary_f, resonance);
-            self.qrm_secondary.set_bandpass(
+            self.receiver_secondary.set_bandpass(
                 self.sample_rate,
                 secondary_f,
                 (resonance * 0.65).max(0.5),
             );
-            let base = QRM_OUTPUT_GAIN * level * model_gain * resonance_compensation(resonance);
+            let base =
+                RECEIVER_OUTPUT_GAIN * level * model_gain * resonance_compensation(resonance);
             let amp = base + base * 0.18 * (2.0 * std::f64::consts::PI * 0.11 * self.t).sin();
-            out += (self.qrm_primary.process(grain) + self.qrm_secondary.process(grain)) * amp;
+            out += (self.receiver_primary.process(grain) + self.receiver_secondary.process(grain))
+                * amp;
         }
-        if matches!(profile, QrmProfile::Ringing | QrmProfile::Mixed) {
+        if matches!(profile, ReceiverProfile::Ringing | ReceiverProfile::Mixed) {
             let ring_f = center + offset - 35.0 + Self::wobble(self.t, depth, rate);
-            self.qrm_ring
-                .set_bandpass(self.sample_rate, ring_f, (resonance * 1.45).min(320.0));
-            out += self.qrm_ring.process(grain)
+            self.receiver_ring.set_bandpass(
+                self.sample_rate,
+                ring_f,
+                (resonance * 1.45).min(320.0),
+            );
+            out += self.receiver_ring.process(grain)
                 * RINGING_OUTPUT_GAIN
                 * level
                 * model_gain
@@ -411,7 +424,7 @@ impl BandMixer {
     pub fn next_background(&mut self) -> f32 {
         // Everything meets at the receiver's filter, which is why narrowing it
         // quiets the whole band at once rather than one layer of it.
-        let raw = self.qrn_excitation() + self.qrm_sample();
+        let raw = self.qrn_excitation() + self.receiver_sample();
         let heard = self.receiver.process(raw);
         self.t += 1.0 / self.sample_rate;
         soft_limit(heard) as f32
@@ -468,17 +481,17 @@ mod tests {
 
     fn only_qrn(level: f64) -> TrainingSettings {
         let mut settings = TrainingSettings::default();
-        settings.band.qrm_enabled = false;
+        settings.band.receiver_enabled = false;
         settings.band.qrn_enabled = true;
         settings.band.qrn_level = level;
         settings.clamp()
     }
 
-    fn only_qrm(level: f64) -> TrainingSettings {
+    fn only_receiver(level: f64) -> TrainingSettings {
         let mut settings = TrainingSettings::default();
         settings.band.qrn_enabled = false;
-        settings.band.qrm_enabled = true;
-        settings.band.qrm_level = level;
+        settings.band.receiver_enabled = true;
+        settings.band.receiver_level = level;
         settings.clamp()
     }
 
@@ -526,7 +539,7 @@ mod tests {
         let levels: Vec<f32> = [0.5, 2.0, 20.0, 66.0, 240.0]
             .into_iter()
             .map(|q| {
-                let mut settings = only_qrm(0.5);
+                let mut settings = only_receiver(0.5);
                 settings.band.receiver_background_resonance = q;
                 rms(&background(&settings.clamp(), 2))
             })
@@ -548,7 +561,7 @@ mod tests {
         for resonance in [0.5, 66.0, 120.0, 240.0] {
             for depth in [0.0, 45.0, 1000.0] {
                 for rate in [0.0, 0.32, 5.0, 20.0] {
-                    let mut settings = only_qrm(1.0);
+                    let mut settings = only_receiver(1.0);
                     settings.band.receiver_background_resonance = resonance;
                     settings.band.receiver_background_gain = 20.0;
                     settings.band.receiver_background_offset_mod_depth_hz = depth;
@@ -588,7 +601,7 @@ mod tests {
 
         let mut loud = TrainingSettings::default();
         loud.band.qrn_level = 1.0;
-        loud.band.qrm_level = 1.0;
+        loud.band.receiver_level = 1.0;
         let hard = snr(&loud.clamp());
         assert!(
             hard < 6.0,
@@ -607,7 +620,7 @@ mod tests {
     fn the_loudest_band_is_limited_and_never_clipped() {
         let mut settings = TrainingSettings::default();
         settings.band.qrn_level = 1.0;
-        settings.band.qrm_level = 1.0;
+        settings.band.receiver_level = 1.0;
         settings.band.receiver_background_gain = 20.0;
         let out = background(&settings.clamp(), 4);
         assert!(
@@ -806,7 +819,7 @@ mod mixer_tests {
     fn quiet() -> TrainingSettings {
         let mut s = TrainingSettings::default();
         s.band.qrn_enabled = false;
-        s.band.qrm_enabled = false;
+        s.band.receiver_enabled = false;
         s
     }
 
@@ -824,8 +837,8 @@ mod mixer_tests {
         assert!(!BandMixer::needs_background(&static_only));
 
         let mut interference = quiet();
-        interference.band.qrm_enabled = true;
-        interference.band.qrm_level = 0.2;
+        interference.band.receiver_enabled = true;
+        interference.band.receiver_level = 0.2;
         assert!(BandMixer::needs_background(&interference));
     }
 
@@ -838,12 +851,16 @@ mod mixer_tests {
     }
 
     #[test]
-    fn every_qrm_profile_produces_sound_and_stays_in_range() {
-        for profile in [QrmProfile::Whistle, QrmProfile::Ringing, QrmProfile::Mixed] {
+    fn every_receiver_profile_produces_sound_and_stays_in_range() {
+        for profile in [
+            ReceiverProfile::Whistle,
+            ReceiverProfile::Ringing,
+            ReceiverProfile::Mixed,
+        ] {
             let mut settings = quiet();
-            settings.band.qrm_enabled = true;
-            settings.band.qrm_level = 1.0;
-            settings.band.qrm_profile = profile;
+            settings.band.receiver_enabled = true;
+            settings.band.receiver_level = 1.0;
+            settings.band.receiver_profile = profile;
             settings.band.qrn_enabled = true;
             settings.band.qrn_level = 1.0;
             let mut mixer = BandMixer::new(8_000, &settings, 7);

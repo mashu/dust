@@ -2,10 +2,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::band::{
-    shaped_level, AtmosphericNoise, QRM_OUTPUT_GAIN, QRN_OUTPUT_GAIN, QSB_MIN_GAIN,
+    shaped_level, AtmosphericNoise, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, RECEIVER_OUTPUT_GAIN,
     RECEIVER_STAGES, RINGING_OUTPUT_GAIN,
 };
-use cw_core::{plan_morse_playback_for, PlaybackPlan, QrmProfile, StationVoice, TrainingSettings};
+use cw_core::{
+    plan_morse_playback_for, PlaybackPlan, ReceiverProfile, StationVoice, TrainingSettings,
+};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -191,7 +193,7 @@ impl MorsePlayer {
         }
         add_qsb(&self.ctx, &self.cw_gain, settings, &mut self.band)?;
         add_qrn(&self.ctx, &self.mix_gain, settings, &mut self.band)?;
-        add_qrm(&self.ctx, &self.mix_gain, settings, &mut self.band)?;
+        add_receiver(&self.ctx, &self.mix_gain, settings, &mut self.band)?;
         self.band.signature = signature;
         Ok(())
     }
@@ -566,13 +568,13 @@ fn add_qrn(
     Ok(())
 }
 
-fn add_passband_qrm(
+fn add_passband_receiver(
     ctx: &AudioContext,
     mix_gain: &GainNode,
     settings: &TrainingSettings,
     graph: &mut BandGraph,
 ) -> Result<(), String> {
-    let level = settings.band.qrm_level.clamp(0.0, 1.0);
+    let level = settings.band.receiver_level.clamp(0.0, 1.0);
     let model_gain = settings.band.receiver_background_gain.clamp(0.0, 20.0);
     let resonance = settings
         .band
@@ -590,26 +592,30 @@ fn add_passband_qrm(
     )?;
     let primary = ctx
         .create_biquad_filter()
-        .map_err(|e| format!("qrm p: {e:?}"))?;
+        .map_err(|e| format!("receiver p: {e:?}"))?;
     let secondary = ctx
         .create_biquad_filter()
-        .map_err(|e| format!("qrm s: {e:?}"))?;
+        .map_err(|e| format!("receiver s: {e:?}"))?;
     let amplitude_lfo = ctx
         .create_oscillator()
-        .map_err(|e| format!("qrm lfo: {e:?}"))?;
-    let amplitude_gain = ctx.create_gain().map_err(|e| format!("qrm ag: {e:?}"))?;
-    let gain = ctx.create_gain().map_err(|e| format!("qrm g: {e:?}"))?;
-    let base_gain = QRM_OUTPUT_GAIN * shaped_level(level) * model_gain;
+        .map_err(|e| format!("receiver lfo: {e:?}"))?;
+    let amplitude_gain = ctx
+        .create_gain()
+        .map_err(|e| format!("receiver ag: {e:?}"))?;
+    let gain = ctx
+        .create_gain()
+        .map_err(|e| format!("receiver g: {e:?}"))?;
+    let base_gain = RECEIVER_OUTPUT_GAIN * shaped_level(level) * model_gain;
 
     primary.set_type(BiquadFilterType::Bandpass);
     primary
         .frequency()
         .set_value_at_time((center + offset_hz) as f32, ctx.current_time())
-        .map_err(|e| format!("qrm pf: {e:?}"))?;
+        .map_err(|e| format!("receiver pf: {e:?}"))?;
     primary
         .q()
         .set_value_at_time(resonance as f32, ctx.current_time())
-        .map_err(|e| format!("qrm pq: {e:?}"))?;
+        .map_err(|e| format!("receiver pq: {e:?}"))?;
     secondary.set_type(BiquadFilterType::Bandpass);
     secondary
         .frequency()
@@ -617,11 +623,11 @@ fn add_passband_qrm(
             (center - (offset_hz.abs() + 35.0).max(20.0)) as f32,
             ctx.current_time(),
         )
-        .map_err(|e| format!("qrm sf: {e:?}"))?;
+        .map_err(|e| format!("receiver sf: {e:?}"))?;
     secondary
         .q()
         .set_value_at_time((resonance * 0.65).max(0.5) as f32, ctx.current_time())
-        .map_err(|e| format!("qrm sq: {e:?}"))?;
+        .map_err(|e| format!("receiver sq: {e:?}"))?;
     add_frequency_modulation(
         ctx,
         &primary.frequency(),
@@ -640,38 +646,40 @@ fn add_passband_qrm(
     amplitude_lfo
         .frequency()
         .set_value_at_time(0.11, ctx.current_time())
-        .map_err(|e| format!("qrm lf: {e:?}"))?;
+        .map_err(|e| format!("receiver lf: {e:?}"))?;
     amplitude_gain
         .gain()
         .set_value_at_time((base_gain * 0.18) as f32, ctx.current_time())
-        .map_err(|e| format!("qrm ad: {e:?}"))?;
+        .map_err(|e| format!("receiver ad: {e:?}"))?;
     gain.gain()
         .set_value_at_time(base_gain as f32, ctx.current_time())
-        .map_err(|e| format!("qrm bg: {e:?}"))?;
+        .map_err(|e| format!("receiver bg: {e:?}"))?;
     source
         .connect_with_audio_node(&primary)
-        .map_err(|e| format!("qrm srcp: {e:?}"))?;
+        .map_err(|e| format!("receiver srcp: {e:?}"))?;
     source
         .connect_with_audio_node(&secondary)
-        .map_err(|e| format!("qrm srcs: {e:?}"))?;
+        .map_err(|e| format!("receiver srcs: {e:?}"))?;
     amplitude_lfo
         .connect_with_audio_node(&amplitude_gain)
-        .map_err(|e| format!("qrm lfo c: {e:?}"))?;
+        .map_err(|e| format!("receiver lfo c: {e:?}"))?;
     amplitude_gain
         .connect_with_audio_param(&gain.gain())
-        .map_err(|e| format!("qrm lfo p: {e:?}"))?;
+        .map_err(|e| format!("receiver lfo p: {e:?}"))?;
     primary
         .connect_with_audio_node(&gain)
-        .map_err(|e| format!("qrm pc: {e:?}"))?;
+        .map_err(|e| format!("receiver pc: {e:?}"))?;
     secondary
         .connect_with_audio_node(&gain)
-        .map_err(|e| format!("qrm sc: {e:?}"))?;
+        .map_err(|e| format!("receiver sc: {e:?}"))?;
     gain.connect_with_audio_node(mix_gain)
-        .map_err(|e| format!("qrm mix: {e:?}"))?;
-    source.start().map_err(|e| format!("qrm start: {e:?}"))?;
+        .map_err(|e| format!("receiver mix: {e:?}"))?;
+    source
+        .start()
+        .map_err(|e| format!("receiver start: {e:?}"))?;
     amplitude_lfo
         .start()
-        .map_err(|e| format!("qrm lfo start: {e:?}"))?;
+        .map_err(|e| format!("receiver lfo start: {e:?}"))?;
     push_source(graph, source);
     push_source(graph, amplitude_lfo);
     push_node(graph, primary);
@@ -681,13 +689,13 @@ fn add_passband_qrm(
     Ok(())
 }
 
-fn add_ringing_qrm(
+fn add_ringing_receiver(
     ctx: &AudioContext,
     mix_gain: &GainNode,
     settings: &TrainingSettings,
     graph: &mut BandGraph,
 ) -> Result<(), String> {
-    let level = settings.band.qrm_level.clamp(0.0, 1.0);
+    let level = settings.band.receiver_level.clamp(0.0, 1.0);
     let model_gain = settings.band.receiver_background_gain.clamp(0.0, 20.0);
     let resonance = settings
         .band
@@ -744,26 +752,26 @@ fn add_ringing_qrm(
     Ok(())
 }
 
-fn add_qrm(
+fn add_receiver(
     ctx: &AudioContext,
     mix_gain: &GainNode,
     settings: &TrainingSettings,
     graph: &mut BandGraph,
 ) -> Result<(), String> {
-    if !settings.band.qrm_enabled || settings.band.qrm_level <= 0.0 {
+    if !settings.band.receiver_enabled || settings.band.receiver_level <= 0.0 {
         return Ok(());
     }
     if matches!(
-        settings.band.qrm_profile,
-        QrmProfile::Whistle | QrmProfile::Mixed
+        settings.band.receiver_profile,
+        ReceiverProfile::Whistle | ReceiverProfile::Mixed
     ) {
-        add_passband_qrm(ctx, mix_gain, settings, graph)?;
+        add_passband_receiver(ctx, mix_gain, settings, graph)?;
     }
     if matches!(
-        settings.band.qrm_profile,
-        QrmProfile::Ringing | QrmProfile::Mixed
+        settings.band.receiver_profile,
+        ReceiverProfile::Ringing | ReceiverProfile::Mixed
     ) {
-        add_ringing_qrm(ctx, mix_gain, settings, graph)?;
+        add_ringing_receiver(ctx, mix_gain, settings, graph)?;
     }
     Ok(())
 }
