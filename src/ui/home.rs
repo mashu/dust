@@ -12,6 +12,9 @@ use crate::ui::widgets::{control_id, pretty_number, Icon};
 
 fn level_summary(settings: &TrainingSettings) -> String {
     match settings.curriculum.char_set_mode {
+        cw_core::CharSetMode::Callsign => {
+            format!("Callsign tier {}", settings.curriculum.callsign_level)
+        }
         cw_core::CharSetMode::Digits => {
             format!("Digits level {}", settings.curriculum.digits_level)
         }
@@ -44,11 +47,13 @@ pub fn Home(
     on_listen: EventHandler<()>,
 ) -> Element {
     let level_label = match settings.curriculum.char_set_mode {
+        cw_core::CharSetMode::Callsign => "Callsign tier",
         cw_core::CharSetMode::Digits => "Digits level",
         cw_core::CharSetMode::Mixed => "Levels",
         _ => "Level",
     };
     let level_value = match settings.curriculum.char_set_mode {
+        cw_core::CharSetMode::Callsign => format!("{}", settings.curriculum.callsign_level),
         cw_core::CharSetMode::Digits => format!("{}", settings.curriculum.digits_level),
         cw_core::CharSetMode::Mixed => {
             format!(

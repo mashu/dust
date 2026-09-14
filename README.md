@@ -8,6 +8,10 @@
 CW Morse **group trainer** in Rust. Hear a group, type it from memory, and get
 alignment-based accuracy, letter mastery and a skill score.
 
+Two ways to practise: Koch-style **character groups**, unlocked one letter at a
+time, or **callsigns** — real prefixes in realistic shapes, from `W1AW` up to
+`DL1ABC/P`, the drill MorseRunner and Morse Walker are built around.
+
 **[Try it in the browser →](https://mashu.github.io/dust/)**
 
 ## Platforms

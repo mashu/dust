@@ -975,6 +975,71 @@ mod ui_tests {
     }
 
     #[test]
+    fn nothing_on_the_settings_screen_can_break_callsign_mode() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.char_set_mode = CharSetMode::Callsign;
+            settings.curriculum.callsign_level = 4;
+            sweep("nav-settings", settings).await;
+        });
+    }
+
+    /// The controls that mean nothing for a callsign have to be gone, not just
+    /// ignored: a group-size slider that does nothing is worse than no slider.
+    #[test]
+    fn the_settings_screen_only_offers_what_a_callsign_has() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.char_set_mode = CharSetMode::Callsign;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            assert!(ui.has("Callsign tier"));
+            assert!(ui.has("Callsigns per session"));
+            assert!(ui.has("What this tier sends"));
+            for gone in [
+                "field-sequence-order",
+                "field-custom-alphabet",
+                "field-digits-level",
+            ] {
+                assert!(!ui.shows(gone), "{gone} has no meaning for a callsign");
+            }
+            assert!(!ui.has("Practice window"), "there is no unlock order");
+            assert!(!ui.has("Group size"), "a callsign is as long as it is");
+
+            // The tier changes what the preview shows.
+            let before = ui.html();
+            ui.commit("field-level", "6");
+            ui.advance(50).await;
+            assert_ne!(before, ui.html(), "the preview should follow the tier");
+            assert_eq!(crate::persist::load_settings().curriculum.callsign_level, 6);
+        });
+    }
+
+    /// Switching away and back must not leave one mode's level in the other's
+    /// field — the whole reason callsigns carry their own.
+    #[test]
+    fn each_character_set_keeps_its_own_level() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.level = 9;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.click("seg-callsigns");
+            ui.commit("field-level", "5");
+            ui.advance(50).await;
+            let stored = crate::persist::load_settings();
+            assert_eq!(stored.curriculum.callsign_level, 5);
+            assert_eq!(stored.curriculum.level, 9, "the Koch level is untouched");
+
+            ui.click("seg-koch");
+            ui.advance(50).await;
+            let stored = crate::persist::load_settings();
+            assert_eq!(stored.curriculum.level, 9);
+            assert_eq!(stored.curriculum.callsign_level, 5);
+        });
+    }
+
+    #[test]
     fn nothing_on_the_stats_screen_can_break_it() {
         run(|| async {
             sweep("nav-stats", TrainingSettings::default()).await;

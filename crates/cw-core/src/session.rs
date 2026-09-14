@@ -553,10 +553,9 @@ pub fn build_session_result(
         total_chars,
         effective_alphabet_size,
         score,
-        level: match settings.curriculum.char_set_mode {
-            CharSetMode::Digits => settings.curriculum.digits_level,
-            _ => settings.curriculum.level,
-        },
+        // One level per mode, and `level` is the one this mode was run at —
+        // callsigns need no second field the way Mixed needs `digits_level`.
+        level: settings.active_level(),
         digits_level: settings.curriculum.digits_level,
         char_set_mode: settings.curriculum.char_set_mode,
         char_wpm,

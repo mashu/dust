@@ -6,6 +6,7 @@
 pub mod alignment;
 pub mod auto_level;
 pub mod band;
+pub mod callsign;
 pub mod heatmap;
 pub mod level;
 pub mod machine;
@@ -31,6 +32,10 @@ pub use auto_level::{
     apply_auto_level, auto_level_progress, evaluate_auto_level, AutoAdjustMode, AutoLevelCounters,
     AutoLevelProgress, AutoLevelResult,
 };
+pub use callsign::{
+    callsign_pool, generate_callsign, parse_callsign, tier_examples, CallsignParts,
+    CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN,
+};
 pub use heatmap::{build_heatmap, HeatmapCell, HeatmapColorMode, HeatmapGrid, HEATMAP_WEEKS};
 pub use level::{max_level_for_len, unlocked_count_for_level, unlocked_prefix, LEVEL_MIN};
 pub use machine::{
@@ -47,8 +52,8 @@ pub use pool::{
 };
 pub use rng::{weighted_random_pick, FastrandRng, Rng};
 pub use sampling::{
-    create_initial_sampling_state, generate_training_group, update_sampling_state_from_answer,
-    CharSamplingState,
+    create_initial_sampling_state, generate_callsign_group, generate_training_group,
+    update_sampling_state_from_answer, CharSamplingState,
 };
 pub use sequences::{
     apply_custom_sequence, apply_sequence_preset, preset_by_id, preset_id_for, sequence_preset_id,

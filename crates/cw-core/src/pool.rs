@@ -6,6 +6,9 @@ use crate::settings::{CharSetMode, PracticeWindow, TrainingSettings};
 
 pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
     match settings.curriculum.char_set_mode {
+        // Callsigns need every character from the first tier, so there is no
+        // prefix to unlock and no practice window to narrow: this is the pool.
+        CharSetMode::Callsign => crate::callsign::callsign_pool(settings.curriculum.callsign_level),
         CharSetMode::Mixed => mixed_pool(settings),
         CharSetMode::Digits => leveled_pool(
             &settings.active_alphabet(),
@@ -22,6 +25,9 @@ pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
 
 pub fn unlocked_practice_count(settings: &TrainingSettings) -> usize {
     match settings.curriculum.char_set_mode {
+        CharSetMode::Callsign => {
+            crate::callsign::callsign_pool(settings.curriculum.callsign_level).len()
+        }
         CharSetMode::Digits => unlocked_prefix(DIGITS, settings.curriculum.digits_level).len(),
         CharSetMode::Mixed => {
             let pct = settings.curriculum.mixed_letters_percent.min(100);
@@ -115,6 +121,10 @@ pub fn fit_settings_to_alphabet(settings: &mut TrainingSettings) {
         .curriculum
         .digits_level
         .clamp(LEVEL_MIN, max_level_for_len(DIGITS.len()));
+    settings.curriculum.callsign_level = settings.curriculum.callsign_level.clamp(
+        crate::callsign::CALLSIGN_TIER_MIN,
+        crate::callsign::CALLSIGN_TIER_MAX,
+    );
     if settings.curriculum.practice_window.is_none() {
         settings.curriculum.practice_window = Some(named_practice_window(settings));
     }

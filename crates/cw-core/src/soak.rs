@@ -11,8 +11,9 @@ use crate::machine::{SessionEffect, SessionEvent, SessionMachine, SessionPhase};
 use crate::{
     align_group, apply_auto_level, build_session_result, calculate_group_letter_accuracy,
     calculate_overall_character_accuracy, compute_char_pool, create_initial_sampling_state,
-    evaluate_auto_level, generate_training_group, plan_morse_playback, resolve_group_repeats,
-    AutoLevelCounters, CharSetMode, FastrandRng, Rng, SessionId, TrainingSettings, LEVEL_MIN,
+    evaluate_auto_level, generate_training_group, parse_callsign, plan_morse_playback,
+    resolve_group_repeats, AutoLevelCounters, CharSetMode, FastrandRng, Rng, SessionId,
+    TrainingSettings, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, LEVEL_MIN,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -32,12 +33,14 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.curriculum.link_group_size = rng.f64() < 0.5;
     s.curriculum.sliding_window_start = rng.usize_in(0, 60) as u32;
     s.curriculum.sliding_window_end = rng.usize_in(0, 60) as u32;
-    s.curriculum.char_set_mode = match rng.usize_in(0, 3) {
+    s.curriculum.char_set_mode = match rng.usize_in(0, 4) {
         0 => CharSetMode::Koch,
         1 => CharSetMode::Digits,
         2 => CharSetMode::Mixed,
-        _ => CharSetMode::Custom,
+        3 => CharSetMode::Custom,
+        _ => CharSetMode::Callsign,
     };
+    s.curriculum.callsign_level = rng.usize_in(0, 20) as u32;
     if rng.f64() < 0.5 {
         let take = rng.usize_in(0, 10);
         s.curriculum.custom_set = "KMURESNAPTLWI0123456789".chars().take(take).collect();
@@ -74,6 +77,10 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
     );
     let c = &once.curriculum;
     assert!(c.num_groups >= 1, "seed {seed}");
+    assert!(
+        (CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX).contains(&c.callsign_level),
+        "seed {seed}"
+    );
     assert!(c.min_group_size >= 1, "seed {seed}");
     assert!(c.max_group_size >= c.min_group_size, "seed {seed}");
     let p = &once.playback;
@@ -125,14 +132,23 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
             !group.is_empty(),
             "an empty group is never sendable (seed {seed})"
         );
-        assert!(
-            group.chars().count() >= settings.curriculum.min_group_size as usize,
-            "seed {seed}: {group:?}"
-        );
-        assert!(
-            group.chars().count() <= settings.curriculum.max_group_size as usize,
-            "seed {seed}: {group:?}"
-        );
+        if settings.curriculum.char_set_mode == CharSetMode::Callsign {
+            // A callsign is as long as it is; the group-size settings have no
+            // say over it, which is why the screen hides them in this mode.
+            assert!(
+                parse_callsign(&group).is_some(),
+                "seed {seed}: {group:?} is not a callsign"
+            );
+        } else {
+            assert!(
+                group.chars().count() >= settings.curriculum.min_group_size as usize,
+                "seed {seed}: {group:?}"
+            );
+            assert!(
+                group.chars().count() <= settings.curriculum.max_group_size as usize,
+                "seed {seed}: {group:?}"
+            );
+        }
         // The pool, not `active_alphabet`: in Mixed mode that one is the letter
         // progression, and the sender draws digits alongside it.
         let pool = compute_char_pool(&settings);
@@ -500,5 +516,50 @@ fn auto_levelling_never_walks_the_settings_out_of_range() {
                 "seed {seed} round {round}: level past the end of the alphabet"
             );
         }
+    }
+}
+
+/// Callsigns are the one group the trainer does not draw character by
+/// character, so they get their own sweep: whatever the tier, what comes out
+/// has to be a callsign a radio could send and the app could score.
+#[test]
+fn every_callsign_the_trainer_can_send_is_a_real_one() {
+    for seed in 0..SEEDS {
+        let mut rng = FastrandRng(seed.wrapping_mul(0xB5297A4D).wrapping_add(17));
+        let mut settings = wild_settings(&mut rng).clamp();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.curriculum.callsign_level =
+            rng.usize_in(CALLSIGN_TIER_MIN as usize, CALLSIGN_TIER_MAX as usize) as u32;
+        let tier = settings.curriculum.callsign_level;
+        let pool = compute_char_pool(&settings);
+        let state = create_initial_sampling_state(&[]);
+
+        let (call, next) = generate_training_group(&settings, &state, &mut rng);
+        assert!(
+            parse_callsign(&call).is_some(),
+            "seed {seed} tier {tier}: {call:?} is not a callsign"
+        );
+        assert!(
+            call.chars().all(|ch| pool.contains(&ch)),
+            "seed {seed} tier {tier}: {call:?} strays outside the pool"
+        );
+        // Whatever was sent has to be counted, or coverage balancing goes blind.
+        for ch in call.chars() {
+            assert!(
+                next.session_sample_counts.get(&ch).copied().unwrap_or(0) > 0,
+                "seed {seed}: {ch:?} was sent but not counted"
+            );
+        }
+
+        // And it has to be sendable, at whatever speed the settings ask for.
+        let plan = plan_morse_playback(&call, &settings, &mut rng);
+        assert!(
+            plan.duration_sec.is_finite() && plan.duration_sec > 0.0,
+            "seed {seed}: {call:?} has no length"
+        );
+        assert!(
+            !plan.events.is_empty(),
+            "seed {seed}: {call:?} made no tones"
+        );
     }
 }

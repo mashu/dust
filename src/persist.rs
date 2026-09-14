@@ -549,6 +549,26 @@ mod tests {
         assert_eq!(settings.playback.char_wpm_min, 22.0);
         assert_eq!(settings.curriculum.num_groups, 15);
         assert_eq!(settings.playback.group_repeat_min, 1);
+        // Callsign mode did not exist then either, so its tier starts at one
+        // rather than resetting everything around it.
+        assert_eq!(settings.curriculum.callsign_level, 1);
+    }
+
+    /// A save written in callsign mode has to come back in callsign mode, tier
+    /// and all — this is the field a user would lose on every restart if the
+    /// serde default were wrong.
+    #[test]
+    fn a_callsign_save_comes_back_as_one() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.curriculum.callsign_level = 5;
+        settings.curriculum.level = 12;
+        let raw = serde_json::to_string(&settings).expect("settings serialize");
+        let back = recover_settings(&raw);
+        assert_eq!(back.curriculum.char_set_mode, CharSetMode::Callsign);
+        assert_eq!(back.curriculum.callsign_level, 5);
+        assert_eq!(back.curriculum.level, 12, "the Koch level rides along");
+        assert_eq!(back.active_level(), 5);
     }
 
     #[test]

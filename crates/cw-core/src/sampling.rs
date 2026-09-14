@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::align_group;
+use crate::callsign::generate_callsign;
 use crate::pool::{compute_char_pool, digits_subset, letters_subset};
 use crate::rng::{weighted_random_pick, Rng};
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -332,11 +333,77 @@ pub fn update_sampling_state_from_answer(
     }
 }
 
+/// How many realistic callsigns are weighed against each other before one is
+/// sent. Enough for the weak characters to show up, few enough that the mix
+/// still sounds like a band rather than a drill.
+const CALLSIGN_CANDIDATES: usize = 6;
+
+/// A callsign, chosen the way a group is: several realistic candidates, and the
+/// one whose characters the sampler wants most wins.
+///
+/// The structure is never bent to fit the sampler — every candidate is already
+/// a well-formed call — so this can only decide *which* real callsign to send.
+/// It scores them with [`compute_raw_sampling_weights`], the same weighting the
+/// group sampler uses, so the error-weight and coverage settings mean exactly
+/// what they mean everywhere else. With both turned off every weight is equal,
+/// the first candidate wins, and the draw is plainly random.
+pub fn generate_callsign_group(
+    settings: &TrainingSettings,
+    state: &CharSamplingState,
+    rng: &mut impl Rng,
+) -> (String, CharSamplingState) {
+    let tier = settings.curriculum.callsign_level;
+    let pool = compute_char_pool(settings);
+    let config = config_from_settings(settings);
+    let weights = compute_raw_sampling_weights(&pool, state, &config, rng);
+    let appetite = |call: &str| {
+        let mut total = 0.0;
+        let mut count = 0.0;
+        for ch in call.chars() {
+            total += weights.get(&ch).copied().unwrap_or(1.0);
+            count += 1.0;
+        }
+        if count > 0.0 {
+            total / count
+        } else {
+            0.0
+        }
+    };
+
+    let mut best = generate_callsign(tier, rng);
+    let mut best_appetite = appetite(&best);
+    for _ in 1..CALLSIGN_CANDIDATES {
+        let candidate = generate_callsign(tier, rng);
+        let candidate_appetite = appetite(&candidate);
+        if candidate_appetite > best_appetite {
+            best = candidate;
+            best_appetite = candidate_appetite;
+        }
+    }
+
+    let mut session_sample_counts = state.session_sample_counts.clone();
+    for character in best.chars() {
+        *session_sample_counts.entry(character).or_insert(0) += 1;
+    }
+    (
+        best,
+        CharSamplingState {
+            beliefs: state.beliefs.clone(),
+            session_sample_counts,
+        },
+    )
+}
+
 pub fn generate_training_group(
     settings: &TrainingSettings,
     state: &CharSamplingState,
     rng: &mut impl Rng,
 ) -> (String, CharSamplingState) {
+    // A callsign is a group like any other once it exists — it is only built
+    // differently. This is the single place the two modes part company.
+    if settings.curriculum.char_set_mode == CharSetMode::Callsign {
+        return generate_callsign_group(settings, state, rng);
+    }
     let pool = compute_char_pool(settings);
     let span = settings
         .curriculum

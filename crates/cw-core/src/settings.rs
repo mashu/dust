@@ -58,6 +58,9 @@ pub enum CharSetMode {
     Digits,
     Custom,
     Mixed,
+    /// Realistic amateur callsigns instead of drawn groups. The characters are
+    /// not what progresses here — the shape of the call is.
+    Callsign,
 }
 
 impl Default for CharSetMode {
@@ -94,6 +97,11 @@ pub struct CurriculumSettings {
     pub practice_window: Option<PracticeWindow>,
     pub sliding_window_start: u32,
     pub sliding_window_end: u32,
+    /// Callsign structure tier, the level of the callsign character set. Its own
+    /// field, the way digits have one, so switching modes never reinterprets a
+    /// number that meant something else.
+    #[serde(default = "defaults::level")]
+    pub callsign_level: u32,
     pub num_groups: u32,
     pub min_group_size: u32,
     pub max_group_size: u32,
@@ -111,6 +119,7 @@ impl Default for CurriculumSettings {
             custom_sequence: Vec::new(),
             sequence_is_custom: false,
             practice_window: Some(PracticeWindow::All),
+            callsign_level: LEVEL_MIN,
             sliding_window_start: DEFAULT_SLIDING_WINDOW_START,
             sliding_window_end: DEFAULT_SLIDING_WINDOW_END,
             num_groups: 20,
@@ -359,6 +368,7 @@ impl TrainingSettings {
     pub fn active_alphabet(&self) -> Vec<char> {
         match self.curriculum.char_set_mode {
             CharSetMode::Digits => crate::morse::DIGITS.to_vec(),
+            CharSetMode::Callsign => crate::callsign::callsign_pool(self.curriculum.callsign_level),
             _ => self.progress_alphabet(),
         }
     }
@@ -366,6 +376,7 @@ impl TrainingSettings {
     pub fn active_level(&self) -> u32 {
         match self.curriculum.char_set_mode {
             CharSetMode::Digits => self.curriculum.digits_level,
+            CharSetMode::Callsign => self.curriculum.callsign_level,
             _ => self.curriculum.level,
         }
     }
@@ -373,6 +384,7 @@ impl TrainingSettings {
     pub fn set_active_level(&mut self, value: u32) {
         match self.curriculum.char_set_mode {
             CharSetMode::Digits => self.curriculum.digits_level = value,
+            CharSetMode::Callsign => self.curriculum.callsign_level = value,
             _ => self.curriculum.level = value,
         }
     }
@@ -380,6 +392,7 @@ impl TrainingSettings {
     pub fn max_active_level(&self) -> u32 {
         match self.curriculum.char_set_mode {
             CharSetMode::Digits => max_level_for_len(crate::morse::DIGITS.len()),
+            CharSetMode::Callsign => crate::callsign::CALLSIGN_TIER_MAX,
             _ => self.max_letter_level(),
         }
     }
@@ -391,6 +404,10 @@ impl TrainingSettings {
             .curriculum
             .digits_level
             .clamp(LEVEL_MIN, max_level_for_len(crate::morse::DIGITS.len()));
+        self.curriculum.callsign_level = self.curriculum.callsign_level.clamp(
+            crate::callsign::CALLSIGN_TIER_MIN,
+            crate::callsign::CALLSIGN_TIER_MAX,
+        );
         self.curriculum.mixed_letters_percent = self.curriculum.mixed_letters_percent.min(100);
         self.curriculum.num_groups = self.curriculum.num_groups.clamp(1, 200);
         self.curriculum.min_group_size = self.curriculum.min_group_size.clamp(1, 20);
@@ -493,6 +510,9 @@ impl TrainingSettings {
     pub fn alphabet_fingerprint(&self) -> String {
         match self.curriculum.char_set_mode {
             CharSetMode::Digits => crate::morse::DIGITS.iter().copied().collect(),
+            // One fingerprint for every tier: the characters do not change as
+            // you climb, so what you learned at tier 1 still counts at tier 6.
+            CharSetMode::Callsign => "callsign".to_string(),
             _ => self.progress_alphabet().into_iter().collect(),
         }
     }

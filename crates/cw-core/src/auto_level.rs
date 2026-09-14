@@ -1,5 +1,6 @@
 //! Automatic level adjustment after a session.
 
+use crate::callsign::CALLSIGN_TIER_MAX;
 use crate::level::LEVEL_MIN;
 use crate::morse::{MAX_DIGITS_LEVEL, MIN_DIGITS_LEVEL};
 use crate::settings::{CharSetMode, MixedAutoLevelAxis, TrainingSettings};
@@ -9,6 +10,7 @@ pub enum AutoAdjustMode {
     Alphabet,
     Digits,
     Mixed,
+    Callsign,
 }
 
 impl AutoAdjustMode {
@@ -16,6 +18,7 @@ impl AutoAdjustMode {
         match mode {
             CharSetMode::Digits => Self::Digits,
             CharSetMode::Mixed => Self::Mixed,
+            CharSetMode::Callsign => Self::Callsign,
             CharSetMode::Koch | CharSetMode::Custom => Self::Alphabet,
         }
     }
@@ -23,6 +26,7 @@ impl AutoAdjustMode {
     pub fn level_for(self, settings: &TrainingSettings) -> u32 {
         match self {
             Self::Digits => settings.curriculum.digits_level,
+            Self::Callsign => settings.curriculum.callsign_level,
             _ => settings.curriculum.level,
         }
     }
@@ -51,6 +55,7 @@ impl AutoAdjustMode {
                 format!("mixed_{level}_{}_{fingerprint}", digits_level.unwrap_or(0))
             }
             Self::Digits => format!("digits_{level}_{fingerprint}"),
+            Self::Callsign => format!("callsign_{level}"),
             Self::Alphabet => match settings.curriculum.char_set_mode {
                 CharSetMode::Custom => format!("custom_{level}_{fingerprint}"),
                 _ => format!("koch_{level}_{fingerprint}"),
@@ -213,16 +218,13 @@ pub fn evaluate_auto_level(
         return None;
     }
 
-    let current_level = match mode {
-        AutoAdjustMode::Digits => settings.curriculum.digits_level,
-        _ => settings.curriculum.level,
-    };
+    let current_level = mode.level_for(settings);
 
     if mode != AutoAdjustMode::Mixed {
-        let max_level = if mode == AutoAdjustMode::Digits {
-            MAX_DIGITS_LEVEL
-        } else {
-            max_letter_level(settings)
+        let max_level = match mode {
+            AutoAdjustMode::Digits => MAX_DIGITS_LEVEL,
+            AutoAdjustMode::Callsign => CALLSIGN_TIER_MAX,
+            _ => max_letter_level(settings),
         };
         let next_level =
             (current_level as i32 + delta).clamp(LEVEL_MIN as i32, max_level as i32) as u32;
@@ -239,7 +241,10 @@ pub fn evaluate_auto_level(
         } else {
             format!("{} sessions below", counters.below)
         };
-        let label = "Level";
+        let label = match mode {
+            AutoAdjustMode::Callsign => "Callsign tier",
+            _ => "Level",
+        };
         let verb = if delta > 0 { "increased" } else { "decreased" };
         return Some(AutoLevelResult {
             delta,
@@ -311,6 +316,7 @@ pub fn apply_auto_level(settings: &mut TrainingSettings, result: &AutoLevelResul
     match AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode) {
         AutoAdjustMode::Digits => settings.curriculum.digits_level = result.next_level,
         AutoAdjustMode::Alphabet => settings.curriculum.level = result.next_level,
+        AutoAdjustMode::Callsign => settings.curriculum.callsign_level = result.next_level,
         AutoAdjustMode::Mixed => {
             settings.curriculum.level = result.next_level;
             if let Some(d) = result.next_digits_level {
@@ -769,5 +775,81 @@ mod edge_tests {
         assert_eq!(AutoAdjustMode::Digits.level_for(&digits), 1);
         assert_eq!(AutoAdjustMode::Alphabet.digits_for(&koch), None);
         assert_eq!(AutoAdjustMode::Mixed.digits_for(&mixed_settings), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod callsign_tests {
+    use super::*;
+    use crate::callsign::CALLSIGN_TIER_MIN;
+
+    fn callsign_settings() -> TrainingSettings {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.curriculum.callsign_level = 3;
+        // A level the Koch ladder could never reach, so a mix-up would show.
+        settings.curriculum.level = 30;
+        settings.auto_level.auto_adjust_level = true;
+        settings.auto_level.auto_adjust_above_threshold_count = 1;
+        settings.auto_level.auto_adjust_below_threshold_count = 1;
+        settings.auto_level.auto_adjust_threshold = 90.0;
+        settings
+    }
+
+    #[test]
+    fn a_good_run_moves_the_tier_and_leaves_the_koch_level_alone() {
+        let mut settings = callsign_settings();
+        let mut counters = AutoLevelCounters::default();
+        let result = evaluate_auto_level(0.98, &settings, &mut counters).expect("a tier change");
+        assert_eq!(result.delta, 1);
+        assert_eq!(result.next_level, 4);
+        assert!(result.message.starts_with("Callsign tier increased"));
+        apply_auto_level(&mut settings, &result);
+        assert_eq!(settings.curriculum.callsign_level, 4);
+        assert_eq!(settings.curriculum.level, 30, "the Koch level is untouched");
+    }
+
+    #[test]
+    fn a_bad_run_moves_it_back() {
+        let mut settings = callsign_settings();
+        let mut counters = AutoLevelCounters::default();
+        let result = evaluate_auto_level(0.2, &settings, &mut counters).expect("a tier change");
+        assert_eq!(result.delta, -1);
+        apply_auto_level(&mut settings, &result);
+        assert_eq!(settings.curriculum.callsign_level, 2);
+    }
+
+    #[test]
+    fn the_ladder_has_ends() {
+        let mut settings = callsign_settings();
+        settings.curriculum.callsign_level = CALLSIGN_TIER_MAX;
+        let mut counters = AutoLevelCounters::default();
+        assert!(
+            evaluate_auto_level(0.99, &settings, &mut counters).is_none(),
+            "there is nothing above the top tier"
+        );
+        settings.curriculum.callsign_level = CALLSIGN_TIER_MIN;
+        let mut counters = AutoLevelCounters::default();
+        assert!(
+            evaluate_auto_level(0.1, &settings, &mut counters).is_none(),
+            "there is nothing below the first tier"
+        );
+    }
+
+    #[test]
+    fn each_tier_counts_its_own_sessions() {
+        let settings = callsign_settings();
+        let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
+        assert_eq!(mode, AutoAdjustMode::Callsign);
+        let at_three = mode.storage_key_at(&settings, 3, None);
+        let at_four = mode.storage_key_at(&settings, 4, None);
+        assert_ne!(at_three, at_four);
+        assert!(at_three.starts_with("callsign_"));
+
+        // And they are not the Koch keys, whatever the Koch level happens to be.
+        let mut koch = settings.clone();
+        koch.curriculum.char_set_mode = CharSetMode::Koch;
+        let koch_mode = AutoAdjustMode::from_char_set(koch.curriculum.char_set_mode);
+        assert_ne!(at_three, koch_mode.storage_key_at(&koch, 3, None));
     }
 }

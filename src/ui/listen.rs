@@ -9,6 +9,9 @@ pub fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
     }
     let added_from = |previous: Vec<char>| pool.iter().rposition(|c| !previous.contains(c));
     match settings.curriculum.char_set_mode {
+        // Nothing is newly unlocked in callsign mode — every character is in
+        // play from tier one — so there is no "newest" to point at.
+        cw_core::CharSetMode::Callsign => 0,
         cw_core::CharSetMode::Digits => {
             let mut prev = settings.clone();
             prev.curriculum.digits_level = prev.curriculum.digits_level.saturating_sub(1).max(1);

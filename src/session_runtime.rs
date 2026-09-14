@@ -308,6 +308,7 @@ mod tests {
     use crate::audio::fake::{Behaviour, Call};
     use crate::engine::Screen;
     use crate::testing::{run, test_settings, Harness};
+    use cw_core::CharSetMode;
     use cw_core::SessionEffect;
     use cw_core::SessionPhase;
 
@@ -600,6 +601,72 @@ mod tests {
             assert_eq!(h.screen(), Screen::Training);
             h.play_through(120_000).await;
             assert_eq!(h.screen(), Screen::Results);
+        });
+    }
+
+    /// Callsign mode changes how a group is built and nothing else. The proof
+    /// is that a whole session runs through the same machine, the same audio
+    /// and the same scoring, and lands on the results screen with real
+    /// callsigns in it.
+    #[test]
+    fn a_callsign_session_runs_through_the_same_machine_as_any_other() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.char_set_mode = CharSetMode::Callsign;
+            settings.curriculum.callsign_level = cw_core::CALLSIGN_TIER_MAX;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(120_000).await;
+
+            assert_eq!(h.screen(), Screen::Results);
+            let result = h.result.peek().clone().expect("a result");
+            assert_eq!(result.groups.len(), 2);
+            assert_eq!(result.accuracy, 1.0, "every call was answered correctly");
+            for group in &result.groups {
+                assert!(
+                    cw_core::parse_callsign(&group.sent).is_some(),
+                    "{:?} is not a callsign",
+                    group.sent
+                );
+            }
+            // The tier is what this session was run at, not the Koch level.
+            assert_eq!(result.level, cw_core::CALLSIGN_TIER_MAX);
+            assert_eq!(result.char_set_mode, CharSetMode::Callsign);
+            assert_eq!(h.sessions.peek().len(), 1);
+            // And what was sent is what was played.
+            assert_eq!(h.texts().len(), 2);
+            for text in h.texts() {
+                assert!(cw_core::parse_callsign(&text).is_some(), "{text:?}");
+            }
+        });
+    }
+
+    /// A callsign session must not teach the group sampler, or a tier-6 call
+    /// full of `Q` and `Z` would drag the Koch curriculum around behind it.
+    #[test]
+    fn callsign_history_stays_out_of_the_group_sampler() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.char_set_mode = CharSetMode::Callsign;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(120_000).await;
+            let stored = h.sessions.peek().clone();
+            assert_eq!(stored.len(), 1);
+
+            let mut koch = test_settings();
+            koch.curriculum.char_set_mode = CharSetMode::Koch;
+            assert!(
+                !stored[0].usable_for_sampling(&koch),
+                "a callsign session must not seed the Koch sampler"
+            );
+            let mut callsigns = test_settings();
+            callsigns.curriculum.char_set_mode = CharSetMode::Callsign;
+            callsigns.curriculum.callsign_level = cw_core::CALLSIGN_TIER_MAX;
+            assert!(
+                stored[0].usable_for_sampling(&callsigns),
+                "but every tier shares one callsign history"
+            );
         });
     }
 

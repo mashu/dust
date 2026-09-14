@@ -10,7 +10,7 @@ use crate::sampling::{
     normalize_weights,
 };
 use crate::session::SessionResult;
-use crate::settings::TrainingSettings;
+use crate::settings::{CharSetMode, TrainingSettings};
 
 pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;
@@ -341,6 +341,38 @@ pub fn confusion_entries(sessions: &[SessionResult], limit: usize) -> Vec<Confus
     rows
 }
 
+/// How often each character actually turns up, measured by running the real
+/// callsign generator rather than modelling it. Nothing else can answer this:
+/// the share of `Q` depends on the prefix tables and the tier, not on a weight.
+fn callsign_character_shares(
+    settings: &TrainingSettings,
+    state: &crate::sampling::CharSamplingState,
+    pool: &[char],
+    rng: &mut impl crate::rng::Rng,
+) -> BTreeMap<char, f64> {
+    const DRAWS: usize = 1_000;
+    let mut counts: BTreeMap<char, f64> = pool.iter().map(|c| (*c, 0.0)).collect();
+    let mut total = 0.0;
+    let mut sampling = state.clone();
+    for _ in 0..DRAWS {
+        let (call, next) = crate::sampling::generate_callsign_group(settings, &sampling, rng);
+        sampling = next;
+        for ch in call.chars() {
+            if let Some(count) = counts.get_mut(&ch) {
+                *count += 1.0;
+                total += 1.0;
+            }
+        }
+    }
+    if total <= 0.0 {
+        return counts;
+    }
+    for count in counts.values_mut() {
+        *count /= total;
+    }
+    counts
+}
+
 pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SamplingRow> {
     let owned: Vec<BTreeMap<char, LetterAccuracy>> = sessions
         .iter()
@@ -353,8 +385,14 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
     let mut config = config_from_settings(settings);
     config.thompson_sampling = false;
     let mut rng = crate::rng::FastrandRng::default();
-    let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
-    let probs = normalize_weights(&pool, &weights);
+    let probs = if settings.curriculum.char_set_mode == CharSetMode::Callsign {
+        // Callsigns are not drawn character by character, so a per-character
+        // weight would not describe them. Ask the real generator instead.
+        callsign_character_shares(settings, &state, &pool, &mut rng)
+    } else {
+        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
+        normalize_weights(&pool, &weights)
+    };
     pool.into_iter()
         .map(|character| {
             let belief = belief_for(&state, character);
@@ -660,6 +698,44 @@ mod tests {
         assert!((total - 1.0).abs() < 1e-9);
         // With no history every character starts on the same flat prior.
         assert!(rows.iter().all(|r| (r.p_error - 0.5).abs() < 1e-9));
+    }
+
+    #[test]
+    fn callsign_sampling_shows_what_callsigns_actually_contain() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.curriculum.callsign_level = crate::callsign::CALLSIGN_TIER_MAX;
+        let rows = sampling_rows(&settings, &[]);
+
+        let pool = compute_char_pool(&settings);
+        assert_eq!(rows.len(), pool.len());
+        let total: f64 = rows.iter().map(|row| row.sampling_prob).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-6,
+            "the shares should account for every character sent, got {total}"
+        );
+        assert!(
+            rows.iter().all(|row| row.sampling_prob > 0.0),
+            "every character a callsign can contain should turn up"
+        );
+        // A share is measured, not modelled: the separator is a digit on every
+        // single call, so digits cannot be the rare ones here.
+        let digits: f64 = rows
+            .iter()
+            .filter(|row| row.character.is_ascii_digit())
+            .map(|row| row.sampling_prob)
+            .sum();
+        assert!(digits > 0.1, "digits carry every separator, got {digits}");
+
+        // A tier that sends no portables must never show a slash.
+        let mut tier_one = settings.clone();
+        tier_one.curriculum.callsign_level = crate::callsign::CALLSIGN_TIER_MIN;
+        assert!(
+            !sampling_rows(&tier_one, &[])
+                .iter()
+                .any(|row| row.character == '/'),
+            "tier 1 has no portable calls"
+        );
     }
 
     #[test]

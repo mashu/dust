@@ -1,7 +1,8 @@
 use cw_core::{
     apply_custom_sequence, apply_practice_window, apply_sequence_preset, current_practice_window,
-    fit_settings_to_alphabet, sequence_preset_id, unlocked_practice_count, CharSetMode,
-    PracticeWindow, TrainingSettings, MAX_DIGITS_LEVEL, SEQUENCE_PRESETS,
+    fit_settings_to_alphabet, sequence_preset_id, tier_examples, unlocked_practice_count,
+    CharSetMode, PracticeWindow, TrainingSettings, CALLSIGN_TIER_MAX, MAX_DIGITS_LEVEL,
+    SEQUENCE_PRESETS,
 };
 use dioxus::prelude::*;
 
@@ -16,11 +17,13 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let unlocked = unlocked_practice_count(&s);
     let window = current_practice_window(&s);
     let pool = cw_core::compute_char_pool(&s);
+    let callsigns = s.curriculum.char_set_mode == CharSetMode::Callsign;
     let mode_note = match s.curriculum.char_set_mode {
         CharSetMode::Koch => "Letters unlocked in Koch order",
         CharSetMode::Digits => "Digits only",
         CharSetMode::Mixed => "Letters and digits together",
         CharSetMode::Custom => "Your own character list",
+        CharSetMode::Callsign => "Real callsigns, off the air",
     };
     rsx! {
         div { class: "card stack-sm",
@@ -29,7 +32,11 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     span { class: "card-icon", Icon { name: "letters" } }
                     div {
                         h3 { class: "card-title", "Character set" }
-                        p { class: "card-note", "{mode_note} · {unlocked} in play" }
+                        if callsigns {
+                            p { class: "card-note", "{mode_note} · tier {s.curriculum.callsign_level} of {CALLSIGN_TIER_MAX}" }
+                        } else {
+                            p { class: "card-note", "{mode_note} · {unlocked} in play" }
+                        }
                     }
                 }
             }
@@ -39,6 +46,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     ("Digits", CharSetMode::Digits),
                     ("Mixed", CharSetMode::Mixed),
                     ("Custom", CharSetMode::Custom),
+                    ("Callsigns", CharSetMode::Callsign),
                 ] {
                     Seg {
                         label: label.to_string(),
@@ -51,7 +59,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     }
                 }
             }
-            if s.curriculum.char_set_mode != CharSetMode::Digits {
+            if s.curriculum.char_set_mode != CharSetMode::Digits && !callsigns {
                 div { class: "eyebrow", "Unlock order" }
                 div { class: "mode-pills",
                     for preset_def in SEQUENCE_PRESETS.iter() {
@@ -101,7 +109,11 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
             }
             div { class: "field-grid",
                 NumberField {
-                    label: format!("Level (1–{level_max})"),
+                    label: if callsigns {
+                        format!("Callsign tier (1–{level_max})")
+                    } else {
+                        format!("Level (1–{level_max})")
+                    },
                     id: "field-level".to_string(),
                     value: s.active_level() as f64,
                     min: 1.0,
@@ -162,6 +174,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
                 p { class: "muted", style: "margin: 0;", "Level unlocks this list from the start. Leave it empty to use the sequence above." }
             }
+            if !callsigns {
             div { class: "eyebrow", "Practice window" }
             div { class: "mode-pills",
                 ModePill {
@@ -182,6 +195,18 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         active: window == Some(PracticeWindow::Last5),
                         onclick: move |_| apply_practice_window(&mut settings.write(), PracticeWindow::Last5),
                     }
+                }
+            }
+            }
+            if callsigns {
+                div { class: "eyebrow", "What this tier sends" }
+                div { class: "chars", style: "gap: 6px;",
+                    for call in tier_examples(s.curriculum.callsign_level) {
+                        span { class: "ch sent-row", "{call}" }
+                    }
+                }
+                p { class: "muted", style: "margin: 0;",
+                    "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations, weighted the way you hear them."
                 }
             }
             div { class: "chars", style: "gap: 4px;",

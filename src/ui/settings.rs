@@ -1,4 +1,4 @@
-use cw_core::{RangeSetting, TrainingSettings, GROUP_REPEAT_MAX};
+use cw_core::{CharSetMode, RangeSetting, TrainingSettings, GROUP_REPEAT_MAX};
 use dioxus::prelude::*;
 
 use crate::ui::envelope::EnvelopeCard;
@@ -79,7 +79,11 @@ pub fn SettingsView(
                 }
                 div { class: "field-grid",
                     NumberField {
-                        label: "Groups per session".to_string(),
+                        label: if s.curriculum.char_set_mode == CharSetMode::Callsign {
+                        "Callsigns per session".to_string()
+                    } else {
+                        "Groups per session".to_string()
+                    },
                         value: s.curriculum.num_groups as f64,
                         min: 1.0,
                         max: 100.0,
@@ -96,14 +100,17 @@ pub fn SettingsView(
                         onchange: move |v| settings.write().playback.group_timeout = v,
                     }
                 }
-                SettingsRange {
-                    settings,
-                    which: RangeSetting::GroupSize,
-                    label: "Group size".to_string(),
-                    unit: "chars".to_string(),
-                    min_bound: 1.0,
-                    max_bound: 15.0,
-                    step: 1.0,
+                // A callsign is as long as it is, so there is nothing to set.
+                if s.curriculum.char_set_mode != CharSetMode::Callsign {
+                    SettingsRange {
+                        settings,
+                        which: RangeSetting::GroupSize,
+                        label: "Group size".to_string(),
+                        unit: "chars".to_string(),
+                        min_bound: 1.0,
+                        max_bound: 15.0,
+                        step: 1.0,
+                    }
                 }
                 SettingsRange {
                     settings,
