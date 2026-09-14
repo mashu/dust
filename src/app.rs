@@ -112,7 +112,7 @@ pub fn App() -> Element {
         let app = app.clone();
         move |(): ()| {
             app.bump_session();
-            app.shutdown_audio();
+            app.silence_audio();
             previewing.set(false);
             listen_playing.set(false);
             sample_playing.set(None);
@@ -174,7 +174,7 @@ pub fn App() -> Element {
                 play_chars(app_loop.clone(), gen, settings_now, chars, 420, toast).await;
                 if app_loop.session_gen.get() == gen {
                     listen_playing.set(false);
-                    app_loop.stop_audio();
+                    app_loop.silence_audio();
                 }
             });
         }
@@ -203,7 +203,7 @@ pub fn App() -> Element {
                 play_sample_text(app_loop.clone(), gen, settings_now, text, toast).await;
                 if app_loop.session_gen.get() == gen {
                     sample_playing.set(None);
-                    app_loop.stop_audio();
+                    app_loop.silence_audio();
                 }
             });
         }
@@ -243,7 +243,7 @@ pub fn App() -> Element {
                 return;
             }
             app.bump_session();
-            app.stop_audio();
+            app.silence_audio();
             previewing.set(false);
             listen_playing.set(false);
             sample_playing.set(None);
@@ -268,7 +268,7 @@ pub fn App() -> Element {
                 return;
             }
             app.bump_session();
-            app.stop_audio();
+            app.silence_audio();
             previewing.set(false);
             listen_playing.set(false);
             sample_playing.set(None);
@@ -282,7 +282,7 @@ pub fn App() -> Element {
                 return;
             }
             app.bump_session();
-            app.stop_audio();
+            app.silence_audio();
             previewing.set(false);
             listen_playing.set(false);
             sample_playing.set(None);
@@ -296,7 +296,7 @@ pub fn App() -> Element {
                 return;
             }
             app.bump_session();
-            app.stop_audio();
+            app.silence_audio();
             previewing.set(false);
             listen_playing.set(false);
             sample_playing.set(None);
@@ -847,6 +847,59 @@ mod ui_tests {
             ui.advance(3_000).await;
             assert_eq!(recorder.texts().len(), sent);
             assert!(ui.has("Live preview"));
+        });
+    }
+
+    /// Test settings run a dead-quiet band; these tests need one that is on.
+    fn with_receiver() -> TrainingSettings {
+        let mut settings = test_settings();
+        settings.band.qrm_enabled = true;
+        settings.band.qrm_level = 0.4;
+        settings
+    }
+
+    /// Pressing stop has to stop everything. The receiver background lives on
+    /// its own stream, outliving any one send, so stopping only the send left
+    /// it hissing away with nothing to hear it under — and the quieter the
+    /// band used to be, the longer that went unnoticed.
+    #[test]
+    fn stopping_the_preview_silences_the_receiver_too() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            assert!(
+                recorder.band_running.get(),
+                "the preview should have the receiver running"
+            );
+
+            ui.click("btn-band-stop");
+            ui.advance(200).await;
+            assert!(
+                !recorder.band_running.get(),
+                "stop left the receiver background playing"
+            );
+        });
+    }
+
+    /// Same for walking away from the screen that was making the sound.
+    #[test]
+    fn leaving_the_screen_silences_the_receiver_too() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            assert!(recorder.band_running.get());
+
+            ui.click("nav-practice");
+            ui.advance(200).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(
+                !recorder.band_running.get(),
+                "the receiver followed us off the screen"
+            );
         });
     }
 

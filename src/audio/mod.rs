@@ -149,6 +149,10 @@ pub mod fake {
         /// The station behind every send, in order, so a test can hear whether
         /// a repeated group came from the same operator.
         pub voices: RefCell<Vec<StationVoice>>,
+        /// Whether the receiver background is running. The real player keeps
+        /// it on its own stream, outliving any one send, so a test that only
+        /// watches sends cannot tell when it has been left playing.
+        pub band_running: Cell<bool>,
         /// Sends that break before the good ones start, whatever `behaviour`
         /// says. One per send, so a recovery can be tested exactly.
         pub failures_left: Cell<u32>,
@@ -292,6 +296,9 @@ pub mod fake {
                 .calls
                 .borrow_mut()
                 .push(Call::Band(settings.band_signature()));
+            self.recorder
+                .band_running
+                .set(cw_core::band::BandMixer::needs_background(settings));
             Ok(())
         }
 
@@ -333,6 +340,7 @@ pub mod fake {
 
         fn shutdown(&mut self) {
             self.recorder.calls.borrow_mut().push(Call::Shutdown);
+            self.recorder.band_running.set(false);
             self.epoch.set(self.epoch.get() + 1);
         }
     }

@@ -109,7 +109,7 @@ impl AppState {
 
     /// Stop current audio, invalidate waiters, then arm the player for a new gen.
     pub fn takeover_audio(&self, settings: &TrainingSettings) -> Result<u64, String> {
-        self.stop_audio();
+        self.stop_sending();
         let gen = self.bump_session();
         self.ensure_player(settings)?;
         Ok(gen)
@@ -133,7 +133,10 @@ impl AppState {
         }
     }
 
-    pub fn stop_audio(&self) {
+    /// Stop whatever is being sent, and leave the receiver running. Between
+    /// groups the background is meant to keep hissing — a real receiver does
+    /// not go silent because the other station stopped keying.
+    pub fn stop_sending(&self) {
         if let Ok(mut slot) = self.player.try_borrow_mut() {
             if let Some(player) = slot.as_mut() {
                 player.stop();
@@ -141,7 +144,9 @@ impl AppState {
         }
     }
 
-    pub fn shutdown_audio(&self) {
+    /// Everything off, receiver included. What "stop" means when the user
+    /// pressed it, or walked away from the screen that was making the sound.
+    pub fn silence_audio(&self) {
         if let Ok(mut slot) = self.player.try_borrow_mut() {
             if let Some(player) = slot.as_mut() {
                 player.shutdown();
@@ -276,7 +281,7 @@ pub fn finish_session(app: AppState, signals: SessionSignals) {
         return;
     }
     app.bump_session();
-    app.shutdown_audio();
+    app.silence_audio();
     // `runtime` was checked just above, so there is a session here.
     let Some(session) = runtime.read().clone() else {
         return;
@@ -444,8 +449,8 @@ mod tests {
     fn stopping_and_shutting_down_without_a_player_are_harmless() {
         run(|| async {
             let h = Harness::new();
-            h.app.stop_audio();
-            h.app.shutdown_audio();
+            h.app.stop_sending();
+            h.app.silence_audio();
             h.app.apply_band_live(&test_settings());
             assert!(h.calls().is_empty());
         });

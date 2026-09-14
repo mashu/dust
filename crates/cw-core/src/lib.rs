@@ -66,7 +66,7 @@ pub use session::{
 pub use settings::{
     AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, MixedAutoLevelAxis,
     PlaybackSettings, PracticeWindow, QrmProfile, RangeSetting, RangeValues, TrainingSettings,
-    GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
+    FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
 };
 pub use stats::{
     accuracy_chart, bigram_heatmap, character_diagnostics, confusion_entries, sampling_rows,

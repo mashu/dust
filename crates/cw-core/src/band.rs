@@ -1,7 +1,7 @@
 //! Sample-rate QSB / QRN / QRM mixing, shared by every backend.
 
 use crate::rng::{FastrandRng, Rng};
-use crate::settings::{QrmProfile, TrainingSettings};
+use crate::settings::{QrmProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN};
 
 pub const QSB_MIN_GAIN: f64 = 0.25;
 
@@ -81,7 +81,9 @@ impl Svf {
         // Nyquist wins over the 20 Hz floor: at an absurdly low sample rate the
         // upper bound would otherwise fall below the lower one and clamp panics.
         let freq = f0.clamp(20.0, (sr * 0.45).max(20.0));
-        let q = q.max(0.5);
+        // A wide-open receiver really is this broad: a 2 kHz passband around a
+        // 500 Hz note needs a Q well under one, and the structure is happy there.
+        let q = q.max(0.1);
         let g = (std::f64::consts::PI * freq / sr).tan();
         self.k = 1.0 / q;
         self.a1 = 1.0 / (1.0 + g * (g + self.k));
@@ -99,6 +101,77 @@ impl Svf {
         self.k * v1
     }
 }
+
+/// How many band-pass sections make up the receiver's filter.
+///
+/// One is not enough. A real CW filter is many poles deep, which is what gives
+/// it both steep skirts and the ringing everyone knows — a lone biquad at the
+/// same bandwidth rings about a third as long and lets far more static past
+/// the edges.
+pub const RECEIVER_STAGES: usize = 3;
+
+/// The receiver's own filter: the one thing every sound you hear has passed
+/// through.
+///
+/// Narrowing it does all three things at once, because they are the same
+/// thing: less static gets through (the noise it passes goes as its
+/// bandwidth), the signal loses a little as its keying sidebands run into the
+/// skirts, and the filter rings for longer. That is why this is one control
+/// and not three.
+pub struct ReceiverFilter {
+    stages: Vec<Svf>,
+}
+
+/// The Q each of the [`RECEIVER_STAGES`] sections needs to land the cascade on
+/// this bandwidth. Shared so the browser, which builds the same filter out of
+/// Web Audio nodes, gets the same passband as the native player.
+pub fn receiver_stage_q(center_hz: f64, bandwidth_hz: f64) -> f64 {
+    let center = center_hz.max(20.0);
+    let bandwidth = bandwidth_hz.clamp(FILTER_BANDWIDTH_MIN, FILTER_BANDWIDTH_MAX);
+    (center / (bandwidth * STAGE_WIDENING)).max(0.1)
+}
+
+impl ReceiverFilter {
+    pub fn new(sample_rate: u32, center_hz: f64, bandwidth_hz: f64) -> Self {
+        let sr = f64::from(sample_rate.max(1));
+        let center = center_hz.max(20.0);
+        // Each section is wider than the filter as a whole: put three in a row
+        // and the passband they share is narrower than any one of them.
+        let q = receiver_stage_q(center, bandwidth_hz);
+        Self {
+            stages: (0..RECEIVER_STAGES)
+                .map(|_| Svf::bandpass(sr, center, q))
+                .collect(),
+        }
+    }
+
+    pub fn from_settings(sample_rate: u32, settings: &TrainingSettings) -> Self {
+        Self::new(
+            sample_rate,
+            settings.side_tone_center(),
+            settings.band.filter_bandwidth_hz,
+        )
+    }
+
+    pub fn process(&mut self, input: f64) -> f64 {
+        self.stages
+            .iter_mut()
+            .fold(input, |signal, stage| stage.process(signal))
+    }
+
+    /// Run a rendered send through the receiver, in place.
+    pub fn apply(&mut self, samples: &mut [f32]) {
+        for sample in samples {
+            *sample = self.process(f64::from(*sample)) as f32;
+        }
+    }
+}
+
+/// Cascading sections narrows the result, so each one is widened to land the
+/// cascade on the bandwidth that was asked for. Three sections reach their
+/// combined -3 dB point where each is down to 2^(-1/6), which is this much
+/// wider than the whole.
+const STAGE_WIDENING: f64 = 1.96;
 
 /// A narrow filter passes less of a broadband input than a wide one, so
 /// without this the Resonance control would be a 28 dB volume control wearing
@@ -141,9 +214,6 @@ const CRASH_TAIL: f64 = 1.7;
 /// few milliseconds; the filter's own ringing adds the rest.
 const CRASH_TAU_MIN: f64 = 0.002;
 const CRASH_TAU_MAX: f64 = 0.020;
-/// The receiver's CW filter, roughly 200 Hz wide at a 500 Hz note. Wide enough
-/// that a crash keeps its sharpness instead of ringing like a bell.
-const QRN_FILTER_Q: f64 = 2.4;
 
 impl AtmosphericNoise {
     pub fn new(sample_rate: u32, level: f64, seed: u64) -> Self {
@@ -191,7 +261,7 @@ pub struct BandMixer {
     t: f64,
     ringing_energy: f64,
     atmospheric: AtmosphericNoise,
-    qrn: Svf,
+    receiver: ReceiverFilter,
     qrm_primary: Svf,
     qrm_secondary: Svf,
     qrm_ring: Svf,
@@ -201,6 +271,7 @@ impl BandMixer {
     pub fn new(sample_rate: u32, settings: &TrainingSettings, seed: u64) -> Self {
         let sr = f64::from(sample_rate.max(1));
         let settings = settings.clone().clamp();
+        let settings_for_filter = settings.clone();
         let center = settings.side_tone_center();
         let resonance = settings
             .band
@@ -222,7 +293,7 @@ impl BandMixer {
             t: 0.0,
             ringing_energy: 0.0,
             atmospheric,
-            qrn: Svf::bandpass(sr, center, QRN_FILTER_Q),
+            receiver: ReceiverFilter::from_settings(sample_rate.max(1), &settings_for_filter),
             qrm_primary: Svf::bandpass(sr, (center + offset).max(20.0), resonance),
             qrm_secondary: Svf::bandpass(
                 sr,
@@ -327,20 +398,23 @@ impl BandMixer {
         out
     }
 
-    fn qrn_sample(&mut self) -> f64 {
+    /// Static, before the receiver shapes it. The crashes are broadband where
+    /// they start; it is the filter that turns each one into the short ringing
+    /// burst you actually hear, and that filter is shared with everything else.
+    fn qrn_excitation(&mut self) -> f64 {
         if !self.settings.band.qrn_enabled || self.settings.band.qrn_level <= 0.0 {
             return 0.0;
         }
-        // The filter is the receiver, and it is what turns a crash into the
-        // short ringing burst you actually hear rather than a click.
-        let excitation = self.atmospheric.next_sample();
-        self.qrn.process(excitation) * QRN_OUTPUT_GAIN
+        self.atmospheric.next_sample() * QRN_OUTPUT_GAIN
     }
 
     pub fn next_background(&mut self) -> f32 {
-        let sample = self.qrn_sample() + self.qrm_sample();
+        // Everything meets at the receiver's filter, which is why narrowing it
+        // quiets the whole band at once rather than one layer of it.
+        let raw = self.qrn_excitation() + self.qrm_sample();
+        let heard = self.receiver.process(raw);
         self.t += 1.0 / self.sample_rate;
-        soft_limit(sample) as f32
+        soft_limit(heard) as f32
     }
 
     pub fn fill_background(&mut self, out: &mut [f32]) {
@@ -549,6 +623,126 @@ mod tests {
         assert!(soft_limit(-4.0) > -1.0 && soft_limit(-4.0) < -0.9);
         // Bigger in still means bigger out: limiting, not clipping flat.
         assert!(soft_limit(2.0) < soft_limit(3.0));
+    }
+
+    /// Steady-state amplitude response at one frequency.
+    fn response_at(bandwidth: f64, freq: f64) -> f64 {
+        const SR: u32 = 8_000;
+        let mut filter = ReceiverFilter::new(SR, 500.0, bandwidth);
+        let sr = f64::from(SR);
+        let mut settled = Vec::new();
+        for i in 0..(SR as usize * 2) {
+            let x = (2.0 * std::f64::consts::PI * freq * (i as f64 / sr)).sin();
+            let y = filter.process(x);
+            if i > SR as usize {
+                settled.push(y as f32);
+            }
+        }
+        f64::from(rms(&settled)) * std::f64::consts::SQRT_2
+    }
+
+    /// How long the filter keeps sounding after the key comes up, measured on
+    /// the envelope rather than on the waveform, which crosses zero.
+    fn ring_ms(bandwidth: f64) -> f64 {
+        const SR: u32 = 8_000;
+        let mut filter = ReceiverFilter::new(SR, 500.0, bandwidth);
+        let sr = f64::from(SR);
+        for i in 0..(SR as usize) {
+            filter.process((2.0 * std::f64::consts::PI * 500.0 * (i as f64 / sr)).sin());
+        }
+        let window = (SR / 500) as usize;
+        let mut first = 0.0;
+        for step in 0..500 {
+            let block: Vec<f32> = (0..window).map(|_| filter.process(0.0) as f32).collect();
+            let level = f64::from(rms(&block));
+            if step == 0 {
+                first = level;
+            } else if level < first * 0.05 {
+                return step as f64 * window as f64 / sr * 1000.0;
+            }
+        }
+        f64::MAX
+    }
+
+    fn band_noise(bandwidth: f64) -> f32 {
+        let mut settings = only_qrn(1.0);
+        settings.band.filter_bandwidth_hz = bandwidth;
+        settings.band.side_tone_min = 500.0;
+        settings.band.side_tone_max = 500.0;
+        rms(&background(&settings.clamp(), 4))
+    }
+
+    /// The whole point of the bandwidth control: it is one filter, so
+    /// narrowing it does the three things narrowing a real one does. This is
+    /// that claim, measured.
+    #[test]
+    fn a_narrower_receiver_is_quieter_choosier_and_rings_longer() {
+        let (wide, narrow) = (1_000.0, FILTER_BANDWIDTH_MIN);
+
+        // Quieter: the static it passes goes as its bandwidth.
+        let quieter = 20.0 * f64::from(band_noise(wide) / band_noise(narrow)).log10();
+        assert!(
+            quieter > 3.0,
+            "narrowing should cut the static, got {quieter:.1} dB"
+        );
+
+        // Choosier: a station off your pitch falls away.
+        let off_wide = 20.0 * (response_at(wide, 600.0) / response_at(wide, 500.0)).log10();
+        let off_narrow = 20.0 * (response_at(narrow, 600.0) / response_at(narrow, 500.0)).log10();
+        assert!(
+            off_narrow < off_wide - 2.0,
+            "a narrow filter should push an off-pitch station down: \
+             {off_wide:.1} dB wide vs {off_narrow:.1} dB narrow"
+        );
+        // But never to nothing, or half the stations would simply vanish.
+        assert!(
+            off_narrow > -12.0,
+            "off-pitch stations disappeared: {off_narrow:.1} dB"
+        );
+
+        // Rings longer, which is the sound everybody knows a narrow filter by.
+        assert!(
+            ring_ms(narrow) > ring_ms(wide) * 1.4,
+            "ringing barely changed: {:.1} ms wide vs {:.1} ms narrow",
+            ring_ms(wide),
+            ring_ms(narrow)
+        );
+
+        // And a station on your pitch is left alone: at CW speeds the signal
+        // is far narrower than the filter, so "slightly weaker" really is.
+        for bandwidth in [wide, 500.0, narrow] {
+            let on_pitch = 20.0 * response_at(bandwidth, 500.0).log10();
+            assert!(
+                on_pitch > -1.0,
+                "{bandwidth} Hz cost an on-pitch signal {on_pitch:.1} dB"
+            );
+        }
+    }
+
+    /// The control has to mean what it says, or the numbers on the screen are
+    /// decoration.
+    #[test]
+    fn the_bandwidth_control_is_in_hertz_and_lands_where_it_says() {
+        for asked in [1_000.0, 500.0, 250.0, FILTER_BANDWIDTH_MIN] {
+            let peak = response_at(asked, 500.0);
+            let target = peak / std::f64::consts::SQRT_2;
+            let edge = |direction: f64| {
+                let mut freq = 500.0;
+                while freq > 30.0 && freq < 3_500.0 {
+                    freq += direction * 2.0;
+                    if response_at(asked, freq) < target {
+                        return freq;
+                    }
+                }
+                freq
+            };
+            let measured = edge(1.0) - edge(-1.0);
+            let error = (measured - asked).abs() / asked;
+            assert!(
+                error < 0.15,
+                "asked for {asked} Hz and measured {measured:.0} Hz"
+            );
+        }
     }
 
     /// The fader curve keeps the bottom of the range gentle without costing

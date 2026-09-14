@@ -60,6 +60,10 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.band.qsb_rate_hz = rng.pick_in_range(-1.0, 40.0);
     s.band.qrn_level = rng.pick_in_range(-1.0, 4.0);
     s.band.qrm_level = rng.pick_in_range(-1.0, 4.0);
+    s.band.filter_bandwidth_hz = rng.pick_in_range(-500.0, 6_000.0);
+    s.band.receiver_background_resonance = rng.pick_in_range(-10.0, 600.0);
+    s.band.receiver_background_offset_mod_depth_hz = rng.pick_in_range(-100.0, 4_000.0);
+    s.band.receiver_background_offset_mod_rate_hz = rng.pick_in_range(-5.0, 80.0);
     s.band.side_tone_min = rng.pick_in_range(-100.0, 4_000.0);
     s.band.side_tone_max = rng.pick_in_range(-100.0, 4_000.0);
     s.band.volume_min = rng.pick_in_range(-1.0, 4.0);
@@ -561,5 +565,48 @@ fn every_callsign_the_trainer_can_send_is_a_real_one() {
             !plan.events.is_empty(),
             "seed {seed}: {call:?} made no tones"
         );
+    }
+}
+
+/// However the band is set, the receiver has to produce something a person
+/// could listen to: finite, inside full scale, and actually audible rather
+/// than a dead stream of zeros.
+#[test]
+fn no_band_setting_makes_an_unlistenable_receiver() {
+    for seed in 0..SEEDS / 20 {
+        let mut rng = FastrandRng(seed.wrapping_mul(0x27D4_EB2D).wrapping_add(19));
+        let mut settings = wild_settings(&mut rng).clamp();
+        settings.band.qrn_enabled = true;
+        settings.band.qrm_enabled = true;
+        let settings = settings.clamp();
+
+        let mut mixer = crate::band::BandMixer::new(16_000, &settings, seed | 1);
+        let mut out = vec![0.0f32; 16_000];
+        mixer.fill_background(&mut out);
+
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "seed {seed}: the band produced something that is not a number"
+        );
+        // A crash close enough to pin the receiver is a real thing, and the
+        // limiter is what catches it. What must never happen is the output
+        // *living* at full scale, which is a runaway rather than a crash.
+        let pinned = out.iter().filter(|s| s.abs() >= 1.0).count();
+        assert!(
+            out.iter().all(|s| s.abs() <= 1.0),
+            "seed {seed}: the band went past full scale"
+        );
+        assert!(
+            pinned * 20 < out.len(),
+            "seed {seed}: {pinned} of {} samples sat at full scale",
+            out.len()
+        );
+        let loudest = out.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        if settings.band.qrn_level > 0.05 || settings.band.qrm_level > 0.05 {
+            assert!(
+                loudest > 1e-6,
+                "seed {seed}: the band was switched on and made no sound"
+            );
+        }
     }
 }

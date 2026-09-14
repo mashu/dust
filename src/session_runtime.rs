@@ -184,7 +184,7 @@ async fn handle_effect(
             Vec::new()
         }
         SessionEffect::StopAudio => {
-            app.stop_audio();
+            app.stop_sending();
             Vec::new()
         }
         SessionEffect::NeedGroup { index } => {
@@ -311,7 +311,7 @@ async fn handle_effect(
         }
         SessionEffect::AbortToHome => {
             app.bump_session();
-            app.shutdown_audio();
+            app.silence_audio();
             *app.machine.borrow_mut() = None;
             runtime.set(None);
             screen.set(Screen::Home);
@@ -941,7 +941,7 @@ mod tests {
             let mut h = Harness::new();
             h.start_training();
             h.advance(100).await;
-            h.app.stop_audio();
+            h.app.stop_sending();
             assert!(h.run_until(5_000, |h| h.screen() == Screen::Home).await);
             assert!(h.sessions.peek().is_empty());
         });

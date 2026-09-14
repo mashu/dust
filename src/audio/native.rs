@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
-use cw_core::band::BandMixer;
+use cw_core::band::{BandMixer, ReceiverFilter};
 use cw_core::{plan_morse_playback_for, StationVoice, TrainingSettings};
 
 use super::render::{render_plan, BandPlayback, LiveQsb, TonePlayback};
@@ -127,6 +127,7 @@ impl MorseBackend for MorsePlayer {
         let armed = self.state.arm();
         let (stream, finished) = start_tone_stream(
             &plan,
+            settings,
             self.opened_at.elapsed().as_secs_f64(),
             Arc::clone(&self.qsb),
             Arc::clone(armed.stop_flag()),
@@ -223,6 +224,7 @@ fn default_output() -> Result<(cpal::Device, cpal::SupportedStreamConfig), Strin
 
 fn start_tone_stream(
     plan: &cw_core::PlaybackPlan,
+    settings: &TrainingSettings,
     started_at_sec: f64,
     qsb: Arc<LiveQsb>,
     stop: Arc<AtomicBool>,
@@ -230,13 +232,13 @@ fn start_tone_stream(
     let (device, config) = default_output()?;
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
-    let playback = TonePlayback::new(
-        render_plan(plan, sample_rate),
-        sample_rate,
-        started_at_sec,
-        qsb,
-        stop,
-    );
+    // The Morse is heard through the same filter as everything else: narrow it
+    // and the keying softens and rings, and a station off your pitch fades.
+    // Filtering the send and the background separately comes to the same thing
+    // as filtering their sum — they are two streams, and the filter is linear.
+    let mut samples = render_plan(plan, sample_rate);
+    ReceiverFilter::from_settings(sample_rate, settings).apply(&mut samples);
+    let playback = TonePlayback::new(samples, sample_rate, started_at_sec, qsb, stop);
     let finished = playback.finished_flag();
     let stream = build_for_format(&device, &config, channels, move |out, channels| {
         playback.fill(out, channels)

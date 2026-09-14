@@ -1,4 +1,4 @@
-use cw_core::{QrmProfile, TrainingSettings};
+use cw_core::{QrmProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN};
 use dioxus::prelude::*;
 
 use crate::ui::widgets::{control_id, Icon, Seg, SliderField, Switch, DISCLOSURE};
@@ -63,6 +63,21 @@ pub fn BandConditionsCard(
                         "QSB slowly fades the signal. QRN is lightning: sharp crashes through the CW passband, not a steady hiss. Receiver background is narrow-filter hiss, ringing and passband breathing. Turn the intensities up and the band reaches the signal."
                     }
                 }
+            }
+            div { class: "field-grid",
+                SliderField {
+                    label: "Filter width".to_string(),
+                    value_label: format!("{:.0} Hz", s.band.filter_bandwidth_hz),
+                    value: s.band.filter_bandwidth_hz,
+                    min: FILTER_BANDWIDTH_MIN,
+                    max: FILTER_BANDWIDTH_MAX,
+                    step: 10.0,
+                    disabled: false,
+                    onchange: move |v| settings.write().band.filter_bandwidth_hz = v,
+                }
+            }
+            p { class: "muted", style: "margin: 0;",
+                "Everything you hear comes through this. Narrow it and less static gets in and the filter rings longer, but a station off your pitch fades with it."
             }
             Switch {
                 title: "QSB fading".to_string(),

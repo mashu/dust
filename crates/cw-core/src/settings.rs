@@ -172,6 +172,12 @@ impl Default for PlaybackSettings {
     }
 }
 
+/// The narrowest and widest the receiver goes, in hertz. The bottom is the
+/// classic narrow CW position; the top is wide open, where the filter stops
+/// being the thing you notice.
+pub const FILTER_BANDWIDTH_MIN: f64 = 150.0;
+pub const FILTER_BANDWIDTH_MAX: f64 = 2_000.0;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BandSettings {
@@ -202,6 +208,12 @@ pub struct BandSettings {
     pub receiver_background_gain: f64,
     #[serde(default = "defaults::receiver_background_excitation_rate")]
     pub receiver_background_excitation_rate: f64,
+    /// The receiver's selectivity, in hertz. Everything you hear goes through
+    /// it — the Morse as much as the noise — so narrowing it does what
+    /// narrowing a real filter does: less static gets through, the signal
+    /// loses a little of its keying sidebands, and the filter rings longer.
+    #[serde(default = "defaults::filter_bandwidth_hz")]
+    pub filter_bandwidth_hz: f64,
     #[serde(default = "defaults::receiver_background_resonance")]
     pub receiver_background_resonance: f64,
     #[serde(default = "defaults::receiver_background_decay")]
@@ -234,6 +246,7 @@ impl Default for BandSettings {
             qrm_profile: QrmProfile::Mixed,
             receiver_background_gain: 20.0,
             receiver_background_excitation_rate: 62.0,
+            filter_bandwidth_hz: 500.0,
             receiver_background_resonance: 66.0,
             receiver_background_decay: 0.984,
             receiver_background_offset_hz: 140.0,
@@ -438,6 +451,10 @@ impl TrainingSettings {
             self.playback.effective_wpm_min = self.playback.char_wpm_min;
             self.playback.effective_wpm_max = self.playback.char_wpm_max;
         }
+        self.band.filter_bandwidth_hz = self
+            .band
+            .filter_bandwidth_hz
+            .clamp(FILTER_BANDWIDTH_MIN, FILTER_BANDWIDTH_MAX);
         self.band.side_tone_min = self.band.side_tone_min.clamp(200.0, 1200.0);
         self.band.side_tone_max = self
             .band
@@ -652,7 +669,7 @@ impl TrainingSettings {
 
     pub fn band_signature(&self) -> String {
         format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.band.side_tone_min,
             self.band.side_tone_max,
             self.band.qsb_enabled,
@@ -670,6 +687,7 @@ impl TrainingSettings {
             self.band.receiver_background_offset_hz,
             self.band.receiver_background_offset_mod_depth_hz,
             self.band.receiver_background_offset_mod_rate_hz,
+            self.band.filter_bandwidth_hz,
         )
     }
 }
@@ -704,6 +722,9 @@ mod defaults {
     }
     pub fn receiver_background_resonance() -> f64 {
         66.0
+    }
+    pub fn filter_bandwidth_hz() -> f64 {
+        500.0
     }
     pub fn receiver_background_decay() -> f64 {
         0.984

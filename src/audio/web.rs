@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use cw_core::band::{
     shaped_level, AtmosphericNoise, QRM_OUTPUT_GAIN, QRN_OUTPUT_GAIN, QSB_MIN_GAIN,
-    RINGING_OUTPUT_GAIN,
+    RECEIVER_STAGES, RINGING_OUTPUT_GAIN,
 };
 use cw_core::{plan_morse_playback_for, PlaybackPlan, QrmProfile, StationVoice, TrainingSettings};
 use wasm_bindgen::closure::Closure;
@@ -73,6 +73,8 @@ pub struct MorsePlayer {
     cw_gain: GainNode,
     group_gain: Option<GainNode>,
     band: BandGraph,
+    /// The receiver's own filter, as a cascade of band-pass nodes.
+    receiver: Vec<web_sys::BiquadFilterNode>,
     /// Group gains that are fading out, with the context time their ramp ends.
     released: Vec<(GainNode, f64)>,
     pending_resume: RefCell<Option<js_sys::Promise>>,
@@ -124,8 +126,23 @@ impl MorsePlayer {
         cw_gain
             .connect_with_audio_node(&mix_gain)
             .map_err(|e| format!("cw connect: {e:?}"))?;
-        mix_gain
-            .connect_with_audio_node(&ctx.destination())
+        // The receiver's filter sits where a real one does: at the end, with
+        // everything already mixed into it. The native player filters the send
+        // and the background separately, which comes to the same thing — a
+        // band-pass is linear — but here they are already together.
+        let mut receiver = Vec::with_capacity(RECEIVER_STAGES);
+        let mut tail: AudioNode = mix_gain.clone().unchecked_into();
+        for _ in 0..RECEIVER_STAGES {
+            let stage = ctx
+                .create_biquad_filter()
+                .map_err(|e| format!("receiver filter: {e:?}"))?;
+            stage.set_type(BiquadFilterType::Bandpass);
+            tail.connect_with_audio_node(&stage)
+                .map_err(|e| format!("receiver connect: {e:?}"))?;
+            tail = stage.clone().unchecked_into();
+            receiver.push(stage);
+        }
+        tail.connect_with_audio_node(&ctx.destination())
             .map_err(|e| format!("mix connect: {e:?}"))?;
         install_resume_on_foreground(&ctx);
         Ok(Self {
@@ -136,6 +153,7 @@ impl MorsePlayer {
             cw_gain,
             group_gain: None,
             band: BandGraph::new(),
+            receiver,
             released: Vec::new(),
             pending_resume: RefCell::new(None),
         })
@@ -149,7 +167,20 @@ impl MorsePlayer {
         }
     }
 
+    /// Retune the receiver to the current pitch and width. Cheap, and the
+    /// nodes stay put, so this can run on every send.
+    fn tune_receiver(&self, settings: &TrainingSettings) {
+        let now = self.ctx.current_time();
+        let center = settings.side_tone_center();
+        let q = cw_core::band::receiver_stage_q(center, settings.band.filter_bandwidth_hz);
+        for stage in &self.receiver {
+            let _ = stage.frequency().set_value_at_time(center as f32, now);
+            let _ = stage.q().set_value_at_time(q as f32, now);
+        }
+    }
+
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        self.tune_receiver(settings);
         let signature = settings.band_signature();
         if signature == self.band.signature {
             return Ok(());
@@ -520,33 +551,17 @@ fn add_qrn(
     }
     let level = settings.band.qrn_level.clamp(0.0, 1.0);
     let source = create_atmospheric_noise(ctx, level)?;
-    let bandpass = ctx
-        .create_biquad_filter()
-        .map_err(|e| format!("qrn filter: {e:?}"))?;
     let gain = ctx.create_gain().map_err(|e| format!("qrn gain: {e:?}"))?;
-    bandpass.set_type(BiquadFilterType::Bandpass);
-    bandpass
-        .frequency()
-        .set_value_at_time(settings.side_tone_center() as f32, ctx.current_time())
-        .map_err(|e| format!("qrn freq: {e:?}"))?;
-    bandpass
-        .q()
-        .set_value_at_time(2.4, ctx.current_time())
-        .map_err(|e| format!("qrn q: {e:?}"))?;
     gain.gain()
         .set_value_at_time(QRN_OUTPUT_GAIN as f32, ctx.current_time())
         .map_err(|e| format!("qrn level: {e:?}"))?;
     source
-        .connect_with_audio_node(&bandpass)
-        .map_err(|e| format!("qrn src: {e:?}"))?;
-    bandpass
         .connect_with_audio_node(&gain)
         .map_err(|e| format!("qrn bp: {e:?}"))?;
     gain.connect_with_audio_node(mix_gain)
         .map_err(|e| format!("qrn mix: {e:?}"))?;
     source.start().map_err(|e| format!("qrn start: {e:?}"))?;
     push_source(graph, source);
-    push_node(graph, bandpass);
     push_node(graph, gain);
     Ok(())
 }
