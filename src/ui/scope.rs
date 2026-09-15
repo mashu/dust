@@ -226,7 +226,12 @@ fn trace_path(settings: &TrainingSettings, sending: &[Heard], live: bool, frame:
 /// to, on a timebase short enough that the keying cannot be read off it, over
 /// the receiver's own hiss. Under it, where each station sits in the filter.
 #[component]
-pub fn BandScope(settings: TrainingSettings, sending: Vec<Heard>, live: bool) -> Element {
+pub fn BandScope(
+    settings: TrainingSettings,
+    sending: Vec<Heard>,
+    live: bool,
+    send_id: u64,
+) -> Element {
     // A scope only looks like a scope if it is redrawn. Everything else on the
     // screen is still, so this is the one place a frame loop earns its keep.
     let mut frame = use_signal(|| 0u64);
@@ -238,6 +243,17 @@ pub fn BandScope(settings: TrainingSettings, sending: Vec<Heard>, live: bool) ->
             }
         });
     });
+    // Every send starts the timebase again, because the keying it is drawn
+    // from starts again too: `Heard::key` is seconds from the top of *this*
+    // send, not from the top of the session. Free-running, the counter walked
+    // past the end of the keying within a group or two and every station read
+    // as silent from then on — a face showing nothing but hiss for the rest of
+    // the session. It also keeps the frame clock's drift to one send rather
+    // than letting it pile up all session.
+    use_effect(use_reactive!(|send_id| {
+        let _ = send_id;
+        frame.set(0);
+    }));
 
     let geometry = scope_geometry(&settings, &sending);
     let callers = geometry.blips.len();
@@ -343,6 +359,55 @@ mod tests {
             effective_wpm: 20.0,
             volume,
         }
+    }
+
+    /// A scope fed one station keyed for the first tenth of every send, with a
+    /// button that starts the next send.
+    #[component]
+    fn ScopeHarness() -> Element {
+        let mut send = use_signal(|| 0u64);
+        let mut station = heard(voice(500.0, 1.0), true);
+        station.key = vec![(0.0, 0.1)];
+        rsx! {
+            div {
+                button {
+                    id: crate::ui::widgets::control_id("btn", "next send"),
+                    onclick: move |_| send += 1,
+                    "next"
+                }
+                BandScope {
+                    settings: settings(500.0, 1),
+                    sending: vec![station],
+                    live: true,
+                    send_id: send(),
+                }
+            }
+        }
+    }
+
+    /// How far the rendered trace swings from the centre line.
+    fn drawn_height(html: &str) -> f64 {
+        let from = html
+            .find("class=\"scope-trace\"")
+            .expect("the trace should be on screen");
+        let d_at = html[from..].find("d=\"").expect("the trace needs a path") + from + 3;
+        let end = html[d_at..].find('"').unwrap() + d_at;
+        let mid = TRACE_H / 2.0;
+        html[d_at..end]
+            .split(['M', 'L'])
+            .filter_map(|point| point.split(',').nth(1))
+            .filter_map(|y| y.trim().parse::<f64>().ok())
+            .fold(0.0_f64, |acc, y| acc.max((y - mid).abs()))
+    }
+
+    /// How far the drawn trace swings away from the centre line.
+    fn trace_height(settings: &TrainingSettings, sending: &[Heard], frame: u64) -> f64 {
+        let mid = TRACE_H / 2.0;
+        trace_path(settings, sending, true, frame)
+            .split(['M', 'L'])
+            .filter_map(|point| point.split(',').nth(1))
+            .filter_map(|y| y.trim().parse::<f64>().ok())
+            .fold(0.0_f64, |acc, y| acc.max((y - mid).abs()))
     }
 
     fn heard(voice: StationVoice, wanted: bool) -> Heard {
@@ -484,18 +549,9 @@ mod tests {
         station.key = vec![(0.0, 0.1)];
         let sending = [station];
 
-        let height = |frame: u64| {
-            let path = trace_path(&s, &sending, true, frame);
-            let mid = TRACE_H / 2.0;
-            path.split(['M', 'L'])
-                .filter_map(|point| point.split(',').nth(1))
-                .filter_map(|y| y.trim().parse::<f64>().ok())
-                .fold(0.0_f64, |acc, y| acc.max((y - mid).abs()))
-        };
-
         // 40 ms per frame: frame 1 is mid-dit, frame 5 is 200 ms in and quiet.
-        let keyed = height(1);
-        let gap = height(5);
+        let keyed = trace_height(&s, &sending, 1);
+        let gap = trace_height(&s, &sending, 5);
         assert!(
             keyed > gap * 2.0,
             "key down drew {keyed:.1} against {gap:.1} in the gap — the trace \
@@ -548,5 +604,45 @@ mod tests {
         s.playback.char_wpm_min = 500.0;
         s.playback.char_wpm_max = 500.0;
         assert_eq!(s.clamp().playback.char_wpm_max, FASTEST_WPM);
+    }
+
+    /// The bug that made the scope useless after the first group: the trace
+    /// ran off a clock that started when the screen did, while the keying it
+    /// is drawn from starts again at zero on every send. A group or two in,
+    /// every station read as silent and the face showed nothing but hiss for
+    /// the rest of the session.
+    ///
+    /// This has to be driven through the component, because the timebase is
+    /// the component's: `trace_path` only ever sees a frame within one send.
+    #[test]
+    fn a_later_send_gets_a_live_trace_too() {
+        use crate::testing::{run, Ui};
+
+        run(|| async {
+            let mut ui = Ui::new(ScopeHarness, ());
+
+            // Into the first send, while the key is down.
+            ui.advance(u64::from(FRAME_MS) + 5).await;
+            let first_send = drawn_height(&ui.html());
+
+            // Well past the end of the keying: hiss only, as it should be.
+            ui.advance(3_000).await;
+            let between = drawn_height(&ui.html());
+            assert!(
+                first_send > between * 2.0,
+                "the first send drew {first_send:.1} against {between:.1} after it"
+            );
+
+            // The next send, at the same point in its keying, has to come back
+            // just as strongly. Before the fix it stayed at the noise floor.
+            ui.click(&crate::ui::widgets::control_id("btn", "next send"));
+            ui.advance(u64::from(FRAME_MS) + 5).await;
+            let later_send = drawn_height(&ui.html());
+            assert!(
+                later_send > between * 2.0,
+                "a later send drew {later_send:.1}, barely above the {between:.1} \
+                 noise floor — the scope stopped following the audio"
+            );
+        });
     }
 }

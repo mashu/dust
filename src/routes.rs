@@ -146,6 +146,9 @@ pub fn app_routes(
                         repeat_done: view.repeat_done,
                         settings: settings(),
                         heard,
+                        // Changes on every send, repeats included, so the
+                        // scope's timebase restarts with the keying.
+                        send_id: (view.current as u64) << 16 | u64::from(view.repeat_done),
                         on_change: move |(idx, value): (usize, String)| {
                             send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
                         },

@@ -18,6 +18,7 @@ pub fn TrainingView(
     repeat_done: u32,
     settings: cw_core::TrainingSettings,
     heard: Vec<Heard>,
+    send_id: u64,
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
     on_focus: EventHandler<usize>,
@@ -44,7 +45,7 @@ pub fn TrainingView(
     rsx! {
         div { class: "stack",
             ProgressHeader { current: focused, total, status, live: playing }
-            BandScope { settings, sending: heard, live: playing }
+            BandScope { settings, sending: heard, live: playing, send_id }
             div { class: "card",
                 div { class: "row-between",
                     p { class: "muted", style: "margin: 0;", "{hint}" }
