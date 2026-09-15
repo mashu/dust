@@ -15,9 +15,11 @@ use cw_core::band::receiver_response_at;
 use cw_core::scope::{scope_trace, ScopeStation, SCOPE_WINDOW_SEC};
 use cw_core::timing::StationVoice;
 use cw_core::TrainingSettings;
+use std::fmt::Write as _;
+
 use dioxus::prelude::*;
 
-use crate::time::sleep_ms;
+use crate::time::{mark, since_ms, sleep_ms};
 
 const VIEW_W: f64 = 320.0;
 const TRACE_H: f64 = 70.0;
@@ -25,8 +27,9 @@ const TRACE_H: f64 = 70.0;
 /// redrawing an SVG flat out for the length of a session.
 const FRAME_MS: u32 = 40;
 /// Enough points to show several cycles of a CW note without a path so long it
-/// costs more to diff than to draw.
-const TRACE_POINTS: usize = 190;
+/// costs more to ship to the renderer than to draw. At 600 Hz over an 8 ms
+/// face this is roughly twenty points a cycle, which is already smooth.
+const TRACE_POINTS: usize = 96;
 const VIEW_H: f64 = 96.0;
 const PAD_X: f64 = 8.0;
 const BASE_Y: f64 = 80.0;
@@ -180,10 +183,15 @@ fn scope_geometry(settings: &TrainingSettings, sending: &[Heard]) -> ScopeGeomet
 /// its own timeline, taken down by whatever the filter gives back at its pitch
 /// — so a station off to the side of a narrow filter draws a smaller trace,
 /// exactly as it sounds smaller.
-fn trace_path(settings: &TrainingSettings, sending: &[Heard], live: bool, frame: u64) -> String {
+fn trace_path(
+    settings: &TrainingSettings,
+    sending: &[Heard],
+    live: bool,
+    elapsed_ms: u64,
+) -> String {
     let centre = settings.side_tone_center();
     let bandwidth = settings.band.filter_bandwidth_hz;
-    let t_sec = frame as f64 * (f64::from(FRAME_MS) / 1000.0);
+    let t_sec = elapsed_ms as f64 / 1000.0;
     let stations: Vec<ScopeStation> = if live {
         sending
             .iter()
@@ -203,19 +211,26 @@ fn trace_path(settings: &TrainingSettings, sending: &[Heard], live: bool, frame:
     } else {
         0.012
     };
-    let values = scope_trace(&stations, noise, t_sec, TRACE_POINTS, frame.wrapping_add(1));
+    let values = scope_trace(
+        &stations,
+        noise,
+        t_sec,
+        TRACE_POINTS,
+        elapsed_ms.wrapping_add(1),
+    );
     let mid = TRACE_H / 2.0;
     let amp = TRACE_H / 2.0 - 3.0;
     let last = (values.len().max(2) - 1) as f64;
-    let mut path = String::with_capacity(values.len() * 12);
+    // Written straight into one buffer: this string is rebuilt every frame and
+    // shipped to the renderer whole, so its length is the per-frame cost.
+    let mut path = String::with_capacity(values.len() * 10);
     for (i, value) in values.iter().enumerate() {
         let x = i as f64 / last * VIEW_W;
         let y = mid - value * amp;
-        if i == 0 {
-            path.push_str(&format!("M{x:.1},{y:.1}"));
-        } else {
-            path.push_str(&format!(" L{x:.1},{y:.1}"));
-        }
+        // x is a fixed ramp, so it is the same every frame; rounding it to
+        // whole units to save a character would make the spacing uneven and
+        // the sine visibly lumpy, which is the one thing the face must not be.
+        let _ = write!(path, "{}{x:.1},{y:.1}", if i == 0 { "M" } else { "L" });
     }
     path
 }
@@ -234,31 +249,33 @@ pub fn BandScope(
 ) -> Element {
     // A scope only looks like a scope if it is redrawn. Everything else on the
     // screen is still, so this is the one place a frame loop earns its keep.
-    let mut frame = use_signal(|| 0u64);
+    // Where this send began. Everything on the face is drawn from the clock's
+    // distance past it, not from a count of frames: a frame costs 40 ms of
+    // waiting plus the render, so counting frames runs slow and the trace
+    // drifts further behind the sound the longer a send goes on. Reading the
+    // clock means a slow frame is a dropped frame, never a shifted one.
+    let mut started = use_signal(mark);
+    let mut elapsed_ms = use_signal(|| 0u64);
     use_hook(|| {
         spawn(async move {
             loop {
                 sleep_ms(FRAME_MS).await;
-                frame += 1;
+                let since = since_ms(*started.peek());
+                elapsed_ms.set(since);
             }
         });
     });
     // Every send starts the timebase again, because the keying it is drawn
     // from starts again too: `Heard::key` is seconds from the top of *this*
-    // send, not from the top of the session. Free-running, the counter walked
-    // past the end of the keying within a group or two and every station read
-    // as silent from then on — a face showing nothing but hiss for the rest of
-    // the session. It also keeps the frame clock's drift to one send rather
-    // than letting it pile up all session.
+    // send, not from the top of the session.
     use_effect(use_reactive!(|send_id| {
         let _ = send_id;
-        frame.set(0);
+        started.set(mark());
+        elapsed_ms.set(0);
     }));
-
     let geometry = scope_geometry(&settings, &sending);
     let callers = geometry.blips.len();
-    let frame_now = frame();
-    let trace = trace_path(&settings, &sending, live, frame_now);
+    let trace = trace_path(&settings, &sending, live, elapsed_ms());
     let caption = if !live {
         "Receiver idle".to_string()
     } else if callers > 1 {
@@ -385,6 +402,22 @@ mod tests {
         }
     }
 
+    /// A station that sounds at the top of the send and again a second later,
+    /// with a quiet stretch between the two.
+    #[component]
+    fn LateKeyHarness() -> Element {
+        let mut station = heard(voice(500.0, 1.0), true);
+        station.key = vec![(0.0, 0.1), (1.0, 1.1)];
+        rsx! {
+            BandScope {
+                settings: settings(500.0, 1),
+                sending: vec![station],
+                live: true,
+                send_id: 0,
+            }
+        }
+    }
+
     /// How far the rendered trace swings from the centre line.
     fn drawn_height(html: &str) -> f64 {
         let from = html
@@ -401,9 +434,9 @@ mod tests {
     }
 
     /// How far the drawn trace swings away from the centre line.
-    fn trace_height(settings: &TrainingSettings, sending: &[Heard], frame: u64) -> f64 {
+    fn trace_height(settings: &TrainingSettings, sending: &[Heard], elapsed_ms: u64) -> f64 {
         let mid = TRACE_H / 2.0;
-        trace_path(settings, sending, true, frame)
+        trace_path(settings, sending, true, elapsed_ms)
             .split(['M', 'L'])
             .filter_map(|point| point.split(',').nth(1))
             .filter_map(|y| y.trim().parse::<f64>().ok())
@@ -533,8 +566,8 @@ mod tests {
     fn the_trace_is_redrawn_every_frame() {
         let s = settings(500.0, 1);
         let sending = [heard(voice(600.0, 1.0), true)];
-        let first = trace_path(&s, &sending, true, 10);
-        let second = trace_path(&s, &sending, true, 11);
+        let first = trace_path(&s, &sending, true, 40);
+        let second = trace_path(&s, &sending, true, 80);
         assert!(!first.is_empty() && first.starts_with('M'));
         assert_ne!(first, second, "the trace stood still between frames");
     }
@@ -549,9 +582,10 @@ mod tests {
         station.key = vec![(0.0, 0.1)];
         let sending = [station];
 
-        // 40 ms per frame: frame 1 is mid-dit, frame 5 is 200 ms in and quiet.
-        let keyed = trace_height(&s, &sending, 1);
-        let gap = trace_height(&s, &sending, 5);
+        // Keyed for the first 100 ms: 50 ms in is mid-element, 500 ms is past
+        // the end of it and quiet.
+        let keyed = trace_height(&s, &sending, 50);
+        let gap = trace_height(&s, &sending, 500);
         assert!(
             keyed > gap * 2.0,
             "key down drew {keyed:.1} against {gap:.1} in the gap — the trace \
@@ -642,6 +676,47 @@ mod tests {
                 later_send > between * 2.0,
                 "a later send drew {later_send:.1}, barely above the {between:.1} \
                  noise floor — the scope stopped following the audio"
+            );
+        });
+    }
+
+    /// A second into a send, the face is drawing the second element — not
+    /// still somewhere in the quiet stretch before it.
+    ///
+    /// Note what this does *not* prove. The reason the face reads a clock
+    /// rather than counting frames is that a frame costs its 40 ms wait plus
+    /// the render, so a tally runs slow and the trace slides further behind
+    /// the sound the longer a send goes on. Under the paused test clock a
+    /// sleep is exact and nothing else consumes time, so a tally and the clock
+    /// agree perfectly and this test passes either way — the drift is a
+    /// property of real time and cannot be reproduced here. What is pinned is
+    /// the observable part: at a given moment in the send, the right thing is
+    /// on the face.
+    #[test]
+    fn the_face_is_on_the_right_moment_of_the_send() {
+        use crate::testing::{run, Ui};
+
+        run(|| async {
+            let mut ui = Ui::new(LateKeyHarness, ());
+
+            // Right at the start, while the first element is sounding.
+            ui.advance(u64::from(FRAME_MS) + 5).await;
+            let early = drawn_height(&ui.html());
+
+            // The quiet stretch in the middle.
+            ui.advance(500).await;
+            let quiet = drawn_height(&ui.html());
+            assert!(early > quiet * 2.0, "the first element should stand up");
+
+            // A full second in, where the second element sounds. A trace
+            // running off a frame tally would still be somewhere in the quiet
+            // stretch by now and would draw nothing.
+            ui.advance(560).await;
+            let late = drawn_height(&ui.html());
+            assert!(
+                late > quiet * 2.0,
+                "a second into the send the trace drew {late:.1}, barely over \
+                 the {quiet:.1} noise floor — the face is behind the sound"
             );
         });
     }
