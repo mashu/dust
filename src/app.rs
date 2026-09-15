@@ -860,13 +860,27 @@ mod ui_tests {
             ui.click("nav-settings");
             assert!(!ui.has("Pile-up spread"), "one station needs no spread");
 
-            ui.commit("field-stations", "4");
+            // One station is the pair held together, so the count is fixed.
+            assert!(ui.has("Fixed"));
+            ui.commit("fixed-stations-calling", "4");
             ui.advance(50).await;
-            assert_eq!(crate::persist::load_settings().band.stations_max, 4);
+            let stored = crate::persist::load_settings();
+            assert_eq!((stored.band.stations_min, stored.band.stations_max), (4, 4));
             assert!(
                 ui.has("Pile-up spread"),
                 "the controls should have appeared"
             );
+
+            // Opened up, it becomes a range with both ends editable.
+            ui.click("link-stations-calling");
+            ui.advance(50).await;
+            ui.commit("from-stations-calling", "2");
+            ui.advance(50).await;
+            ui.commit("to-stations-calling", "5");
+            ui.advance(50).await;
+            let stored = crate::persist::load_settings();
+            assert_eq!((stored.band.stations_min, stored.band.stations_max), (2, 5));
+            assert!(ui.has("2–5 at once"), "the range should read back");
 
             for (slider, value, reads) in [
                 ("slider-pile-up-spread", "260", "±260 Hz"),
@@ -884,9 +898,13 @@ mod ui_tests {
             assert_eq!(stored.band.pileup_level_db, 20.0);
             assert_eq!(stored.clone().clamp(), stored);
 
-            // Back to one station and they go away again.
-            ui.commit("field-stations", "1");
+            // Back to one station, alone, and they go away again.
+            ui.click("link-stations-calling");
             ui.advance(50).await;
+            ui.commit("fixed-stations-calling", "1");
+            ui.advance(50).await;
+            let stored = crate::persist::load_settings();
+            assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 1));
             assert!(!ui.has("Pile-up spread"));
         });
     }

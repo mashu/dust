@@ -223,8 +223,12 @@ pub fn resolve_pileup(
     if most <= 1 || texts.is_empty() {
         return Vec::new();
     }
-    // One station, plus however many others turn up this time.
-    let calling = rng.usize_in(1, most as usize);
+    // How many are calling this time, somewhere in the range asked for.
+    let fewest = settings
+        .band
+        .stations_min
+        .clamp(crate::settings::STATIONS_MIN, most) as usize;
+    let calling = rng.usize_in(fewest, most as usize);
     let spread = settings.band.pileup_spread_hz.clamp(
         crate::settings::PILEUP_SPREAD_MIN,
         crate::settings::PILEUP_SPREAD_MAX,
@@ -1147,6 +1151,72 @@ mod pileup_tests {
                         wanted.tone_hz
                     );
                 }
+            }
+        }
+    }
+
+    /// The floor is a floor: ask for at least three and three call, every
+    /// group, not "sometimes one".
+    ///
+    /// Given room to put them — a wide filter, so nobody is squeezed out of
+    /// the passband — the count drawn is the count you get.
+    #[test]
+    fn the_floor_is_how_many_call() {
+        for (fewest, most) in [(2u32, 5u32), (3, 3), (4, 5), (5, 5)] {
+            let mut s = settings(most);
+            s.band.stations_min = fewest;
+            s.band.filter_bandwidth_hz = crate::settings::FILTER_BANDWIDTH_MAX;
+            s.band.pileup_spread_hz = crate::settings::PILEUP_SPREAD_MAX;
+            let s = s.clamp();
+            for seed in 0..200u64 {
+                let mut rng = FastrandRng(seed * 7919 + 3);
+                let wanted = resolve_station(&s, &mut rng);
+                let others = resolve_pileup(&s, &wanted, "W1AW", &texts(most as usize), &mut rng);
+                let calling = others.len() + 1;
+                assert!(
+                    calling >= fewest as usize && calling <= most as usize,
+                    "seed {seed}: {calling} calling, asked for {fewest}..{most}"
+                );
+            }
+        }
+    }
+
+    /// Both ends together means the same number every time, which is the whole
+    /// reason to want a floor: a steady three-station pile-up to work on,
+    /// rather than one that keeps handing you an easy group.
+    #[test]
+    fn holding_both_ends_together_fixes_the_count() {
+        let mut s = settings(3);
+        s.band.stations_min = 3;
+        s.band.filter_bandwidth_hz = crate::settings::FILTER_BANDWIDTH_MAX;
+        s.band.pileup_spread_hz = crate::settings::PILEUP_SPREAD_MAX;
+        let s = s.clamp();
+        for seed in 0..200u64 {
+            let mut rng = FastrandRng(seed * 31 + 11);
+            let wanted = resolve_station(&s, &mut rng);
+            let others = resolve_pileup(&s, &wanted, "W1AW", &texts(3), &mut rng);
+            assert_eq!(others.len() + 1, 3, "seed {seed}");
+        }
+    }
+
+    /// A floor above the ceiling is not a range. Whatever is stored, what
+    /// comes out is the right way round.
+    #[test]
+    fn the_range_is_always_the_right_way_round() {
+        for fewest in 0..8u32 {
+            for most in 0..8u32 {
+                let mut s = TrainingSettings::default();
+                s.band.stations_min = fewest;
+                s.band.stations_max = most;
+                let s = s.clamp();
+                assert!(
+                    s.band.stations_min <= s.band.stations_max,
+                    "{fewest}..{most} clamped to {}..{}",
+                    s.band.stations_min,
+                    s.band.stations_max
+                );
+                assert!((STATIONS_MIN..=STATIONS_MAX).contains(&s.band.stations_min));
+                assert!((STATIONS_MIN..=STATIONS_MAX).contains(&s.band.stations_max));
             }
         }
     }

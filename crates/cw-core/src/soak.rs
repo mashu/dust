@@ -63,6 +63,7 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.band.qrn_level = rng.pick_in_range(-1.0, 4.0);
     s.band.receiver_level = rng.pick_in_range(-1.0, 4.0);
     s.band.filter_bandwidth_hz = rng.pick_in_range(-500.0, 6_000.0);
+    s.band.stations_min = rng.usize_in(0, 12) as u32;
     s.band.stations_max = rng.usize_in(0, 12) as u32;
     s.band.pileup_spread_hz = rng.pick_in_range(-100.0, 2_000.0);
     s.band.pileup_level_db = rng.pick_in_range(-20.0, 90.0);
@@ -126,8 +127,10 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
         b.filter_bandwidth_hz
     );
     assert!(
-        (STATIONS_MIN..=STATIONS_MAX).contains(&b.stations_max),
-        "seed {seed}: {} stations",
+        (STATIONS_MIN..=STATIONS_MAX).contains(&b.stations_min)
+            && (b.stations_min..=STATIONS_MAX).contains(&b.stations_max),
+        "seed {seed}: {}..{} stations",
+        b.stations_min,
         b.stations_max
     );
     assert!(
@@ -656,6 +659,11 @@ fn a_pile_up_is_always_something_you_could_copy() {
             others.len() < settings.band.stations_max as usize,
             "seed {seed}: more stations than the settings allow"
         );
+        // Note what the floor does *not* promise. It says how many call, not
+        // how many you end up hearing: a caller with nowhere to sit inside a
+        // narrow passband is one the receiver does not give you, which is the
+        // filter doing exactly what it is for. `the_floor_is_how_many_call`
+        // pins the floor itself, where there is room for everyone.
         for other in &others {
             assert!(
                 other.voice.volume < voice.volume,

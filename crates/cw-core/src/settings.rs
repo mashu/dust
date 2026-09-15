@@ -233,8 +233,14 @@ pub struct BandSettings {
     /// loses a little of its keying sidebands, and the filter rings longer.
     #[serde(default = "defaults::filter_bandwidth_hz")]
     pub filter_bandwidth_hz: f64,
-    /// The most stations that can call at once, counting the one you want.
-    /// At 1 there is no pile-up, which is where this starts.
+    /// The fewest stations that can call at once, counting the one you want.
+    ///
+    /// Saves written before the pile-up became a range said only "up to this
+    /// many", which is this floor left at one.
+    #[serde(default = "defaults::stations_min")]
+    pub stations_min: u32,
+    /// The most that can call at once. With both ends at 1 there is no
+    /// pile-up, which is where this starts.
     #[serde(default = "defaults::stations_max")]
     pub stations_max: u32,
     /// How far either side of the wanted station the others can land.
@@ -276,6 +282,7 @@ impl Default for BandSettings {
             receiver_background_gain: 20.0,
             receiver_background_excitation_rate: 62.0,
             filter_bandwidth_hz: 500.0,
+            stations_min: STATIONS_MIN,
             stations_max: STATIONS_MIN,
             pileup_spread_hz: 350.0,
             pileup_level_db: 7.0,
@@ -329,6 +336,7 @@ pub enum RangeSetting {
     GroupRepeat,
     SideTone,
     Volume,
+    Stations,
 }
 
 /// Current state of one range: the pair, and whether it is collapsed to a
@@ -487,7 +495,11 @@ impl TrainingSettings {
             .band
             .filter_bandwidth_hz
             .clamp(FILTER_BANDWIDTH_MIN, FILTER_BANDWIDTH_MAX);
-        self.band.stations_max = self.band.stations_max.clamp(STATIONS_MIN, STATIONS_MAX);
+        self.band.stations_min = self.band.stations_min.clamp(STATIONS_MIN, STATIONS_MAX);
+        self.band.stations_max = self
+            .band
+            .stations_max
+            .clamp(self.band.stations_min, STATIONS_MAX);
         self.band.pileup_spread_hz = self
             .band
             .pileup_spread_hz
@@ -609,6 +621,13 @@ impl TrainingSettings {
                 self.band.volume_max,
                 self.band.link_volume,
             ),
+            // Like the side tone, the bounds themselves say whether the count
+            // is fixed — there is no separate flag to keep in step with them.
+            RangeSetting::Stations => (
+                f64::from(self.band.stations_min),
+                f64::from(self.band.stations_max),
+                self.band.stations_min == self.band.stations_max,
+            ),
         };
         RangeValues { min, max, linked }
     }
@@ -645,7 +664,7 @@ impl TrainingSettings {
             RangeSetting::GroupSize => self.curriculum.link_group_size = linked,
             RangeSetting::GroupRepeat => self.playback.link_group_repeat = linked,
             // Nothing to store: the bounds themselves say whether it is fixed.
-            RangeSetting::SideTone => {}
+            RangeSetting::SideTone | RangeSetting::Stations => {}
             RangeSetting::Volume => self.band.link_volume = linked,
         }
         if linked {
@@ -653,6 +672,14 @@ impl TrainingSettings {
         } else if which == RangeSetting::SideTone {
             let max = (current.min + SIDE_TONE_SPREAD_HZ).min(SIDE_TONE_MAX_HZ);
             let min = (max - SIDE_TONE_SPREAD_HZ).max(SIDE_TONE_MIN_HZ);
+            self.write_range(which, min, max);
+        } else if which == RangeSetting::Stations {
+            // Neither of these stores a link flag — the bounds themselves say
+            // whether the value is fixed — so opening one back up has to push
+            // them apart, or the button would do nothing at all. One station
+            // either side is the smallest range that is still a range.
+            let max = (current.min + 1.0).min(f64::from(STATIONS_MAX));
+            let min = (max - 1.0).max(f64::from(STATIONS_MIN));
             self.write_range(which, min, max);
         }
     }
@@ -684,6 +711,10 @@ impl TrainingSettings {
             RangeSetting::Volume => {
                 self.band.volume_min = min;
                 self.band.volume_max = max;
+            }
+            RangeSetting::Stations => {
+                self.band.stations_min = as_u32(min);
+                self.band.stations_max = as_u32(max);
             }
         }
     }
@@ -768,6 +799,9 @@ mod defaults {
         500.0
     }
     pub fn stations_max() -> u32 {
+        super::STATIONS_MIN
+    }
+    pub fn stations_min() -> u32 {
         super::STATIONS_MIN
     }
     pub fn pileup_spread_hz() -> f64 {
@@ -1325,5 +1359,70 @@ mod invariant_tests {
         s.set_char_set_mode(CharSetMode::Digits);
         assert_eq!(s.curriculum.char_set_mode, CharSetMode::Digits);
         assert_eq!(s.curriculum.practice_window, Some(PracticeWindow::All));
+    }
+
+    /// Every save written before the pile-up became a range carries
+    /// `stationsMax` and no floor. Those have to load, and to mean what they
+    /// meant when they were written: up to that many, from one.
+    #[test]
+    fn a_save_from_before_the_range_still_means_what_it_said() {
+        // The sections are flattened, so a save is one flat object.
+        let older = serde_json::json!({ "stationsMax": 4, "filterBandwidthHz": 500.0 });
+        let settings: TrainingSettings =
+            serde_json::from_value(older).expect("an older save should load");
+        let settings = settings.clamp();
+        assert_eq!(settings.band.stations_min, STATIONS_MIN);
+        assert_eq!(settings.band.stations_max, 4);
+        assert!(!settings.range(RangeSetting::Stations).linked);
+    }
+
+    /// Dragging either end past the other takes the other with it, so the
+    /// range can never be stored back to front.
+    #[test]
+    fn the_ends_of_the_station_range_push_each_other() {
+        let mut s = TrainingSettings::default();
+        s.band.stations_min = 2;
+        s.band.stations_max = 4;
+
+        // The floor pushed above the ceiling carries it up.
+        s.set_range_min(RangeSetting::Stations, 5.0);
+        assert_eq!((s.band.stations_min, s.band.stations_max), (5, 5));
+
+        // And the ceiling pulled below the floor carries it down.
+        s.set_range_max(RangeSetting::Stations, 2.0);
+        assert_eq!((s.band.stations_min, s.band.stations_max), (2, 2));
+
+        // Held together, both ends move as one.
+        s.set_range_linked(RangeSetting::Stations, true);
+        s.set_range_max(RangeSetting::Stations, 4.0);
+        assert_eq!((s.band.stations_min, s.band.stations_max), (4, 4));
+        assert!(s.range(RangeSetting::Stations).linked);
+    }
+
+    /// The Fixed/Random button has to actually do something. Neither the side
+    /// tone nor the station count stores a link flag, so opening one up means
+    /// pushing its bounds apart — miss that and the button is dead.
+    #[test]
+    fn opening_the_station_range_back_up_gives_it_room() {
+        for start in STATIONS_MIN..=STATIONS_MAX {
+            let mut s = TrainingSettings::default();
+            s.band.stations_min = start;
+            s.band.stations_max = start;
+            assert!(s.range(RangeSetting::Stations).linked);
+
+            s.set_range_linked(RangeSetting::Stations, false);
+            let range = s.range(RangeSetting::Stations);
+            assert!(
+                !range.linked,
+                "unlinking at {start} left the ends together at {}",
+                range.min
+            );
+            assert_eq!(s.clone().clamp(), s, "unlinking left settings to repair");
+            assert!((STATIONS_MIN..=STATIONS_MAX).contains(&s.band.stations_max));
+
+            // And closing it again pins it to the floor.
+            s.set_range_linked(RangeSetting::Stations, true);
+            assert!(s.range(RangeSetting::Stations).linked);
+        }
     }
 }

@@ -1,11 +1,11 @@
 use cw_core::{
-    ReceiverProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN,
+    RangeSetting, ReceiverProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN,
     PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX,
     STATIONS_MIN,
 };
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, Icon, NumberField, Seg, SliderField, Switch, DISCLOSURE};
+use crate::ui::widgets::{control_id, Icon, LinkedRange, Seg, SliderField, Switch, DISCLOSURE};
 
 #[component]
 pub fn BandConditionsCard(
@@ -83,20 +83,23 @@ pub fn BandConditionsCard(
             p { class: "muted", style: "margin: 0;",
                 "Everything you hear comes through this. Narrow it and less static gets in and the filter rings longer, but a station off your pitch fades with it."
             }
-            div { class: "field-grid",
-                NumberField {
-                    label: format!("Stations calling (1–{STATIONS_MAX})"),
-                    id: "field-stations".to_string(),
-                    value: s.band.stations_max as f64,
-                    min: STATIONS_MIN as f64,
-                    max: STATIONS_MAX as f64,
-                    step: 1.0,
-                    onchange: move |v| settings.write().band.stations_max = v as u32,
-                }
+            LinkedRange {
+                label: "Stations calling".to_string(),
+                unit: "at once".to_string(),
+                min_value: f64::from(s.band.stations_min),
+                max_value: f64::from(s.band.stations_max),
+                linked: s.band.stations_min == s.band.stations_max,
+                min_bound: f64::from(STATIONS_MIN),
+                max_bound: f64::from(STATIONS_MAX),
+                step: 1.0,
+                hint: "How many call at once, drawn afresh for each group. Hold both ends together for the same number every time, or open them up so you never know what you are walking into.".to_string(),
+                on_min: move |v| settings.write().set_range_min(RangeSetting::Stations, v),
+                on_max: move |v| settings.write().set_range_max(RangeSetting::Stations, v),
+                on_link: move |on| settings.write().set_range_linked(RangeSetting::Stations, on),
             }
             if s.band.stations_max > STATIONS_MIN {
                 p { class: "muted", style: "margin: 0;",
-                    "Up to this many at once, drawn afresh for each group. The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them — copy the strongest, and narrow the filter until the rest drop away."
+                    "The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them — copy the strongest, and narrow the filter until the rest drop away."
                 }
                 div { class: "field-grid",
                     SliderField {
