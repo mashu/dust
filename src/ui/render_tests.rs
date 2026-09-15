@@ -428,6 +428,66 @@ fn listen_renders_the_selected_character() {
 }
 
 #[test]
+fn the_scope_shows_the_band_without_showing_the_answer() {
+    use super::scope::Heard;
+    use cw_core::timing::StationVoice;
+
+    fn voice(tone_hz: f64, volume: f64) -> StationVoice {
+        StationVoice {
+            tone_hz,
+            char_wpm: 20.0,
+            effective_wpm: 20.0,
+            volume,
+        }
+    }
+    let html = render(|| {
+        rsx! {
+            TrainingView {
+                current: 0,
+                total: 1,
+                groups: vec!["QRXZJ".to_string()],
+                inputs: vec![String::new()],
+                confirmed: vec![false],
+                focused: 0,
+                playing: true,
+                locked: true,
+                repeat_total: 1,
+                repeat_done: 0,
+                settings: TrainingSettings::default(),
+                heard: vec![
+                    Heard { voice: voice(520.0, 1.0), wanted: true },
+                    Heard { voice: voice(700.0, 0.4), wanted: false },
+                ],
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+
+    // The band is on screen: the filter, and a mark for each station in it.
+    assert!(html.contains("scope-curve"), "the filter should be drawn");
+    assert!(html.contains("scope-face"));
+    assert_eq!(
+        html.matches("scope-blip").count(),
+        2,
+        "both stations should be marked"
+    );
+    assert!(html.contains("2 stations in the passband"));
+
+    // And the group being sent is not, anywhere. A scope that showed the
+    // keying would let you read the answer off the screen instead of hearing
+    // it, which would quietly turn the trainer into a typing test.
+    assert!(
+        !html.contains("QRXZJ"),
+        "the group being sent leaked onto the screen"
+    );
+    assert!(html.contains("•••"), "an unanswered group stays hidden");
+}
+
+#[test]
 fn training_shows_the_send_counter_while_repeating() {
     let html = render(|| {
         rsx! {
@@ -442,6 +502,8 @@ fn training_shows_the_send_counter_while_repeating() {
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 1,
+                settings: cw_core::TrainingSettings::default(),
+                heard: Vec::new(),
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
                 on_focus: move |_: usize| {},
@@ -471,6 +533,8 @@ fn training_without_repeats_omits_the_counter() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
+                settings: cw_core::TrainingSettings::default(),
+                heard: Vec::new(),
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
                 on_focus: move |_: usize| {},
@@ -668,6 +732,8 @@ mod interactions {
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 0,
+                settings: cw_core::TrainingSettings::default(),
+                heard: Vec::new(),
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| typed.set("confirmed".into()),
                 on_focus: move |index: usize| focused.set(index),

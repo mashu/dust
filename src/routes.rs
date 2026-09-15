@@ -110,6 +110,23 @@ pub fn app_routes(
             if let Some(session) = session {
                 let view = session.view();
                 let playing = view.status == cw_core::RuntimeStatus::PlayingGroup;
+                // Between sends there is nobody in the passband, so the scope
+                // shows the filter alone rather than a station that has stopped.
+                let heard = if playing {
+                    view.sent
+                        .get(view.current)
+                        .map(|text| {
+                            crate::session_runtime::heard_for(
+                                &settings(),
+                                app.session_gen.get(),
+                                view.current,
+                                text,
+                            )
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let app_change = app.clone();
                 let app_confirm = app.clone();
                 let app_focus = app.clone();
@@ -127,6 +144,8 @@ pub fn app_routes(
                         locked: view.locked,
                         repeat_total: view.repeat_total,
                         repeat_done: view.repeat_done,
+                        settings: settings(),
+                        heard,
                         on_change: move |(idx, value): (usize, String)| {
                             send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
                         },

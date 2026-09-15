@@ -174,6 +174,23 @@ impl ReceiverFilter {
     }
 }
 
+/// How much of a steady tone at `hz` the receiver passes, as a gain between 0
+/// and 1.
+///
+/// This is the same filter [`ReceiverFilter`] runs, read off rather than run:
+/// the textbook magnitude of a second-order band-pass, raised to the number of
+/// sections in the cascade. A display that draws this is drawing the filter
+/// you are actually listening through, not a picture of one.
+pub fn receiver_response_at(center_hz: f64, bandwidth_hz: f64, hz: f64) -> f64 {
+    let center = center_hz.max(20.0);
+    let freq = hz.max(1e-6);
+    let q = receiver_stage_q(center, bandwidth_hz);
+    // Detuning term: zero at the centre, growing either side of it.
+    let detune = freq / center - center / freq;
+    let stage = 1.0 / (1.0 + q * q * detune * detune).sqrt();
+    stage.powi(RECEIVER_STAGES as i32)
+}
+
 /// Cascading sections narrows the result, so each one is widened to land the
 /// cascade on the bandwidth that was asked for. Three sections reach their
 /// combined -3 dB point where each is down to 2^(-1/6), which is this much
@@ -951,6 +968,78 @@ mod mixer_tests {
         // ...and nothing about the clock can make it produce a nonsense gain.
         for t in [0.0, -1.0, 1e9, f64::INFINITY] {
             assert!(qsb_gain_at(t, true, 0.6, 1.0).is_finite() || t.is_infinite());
+        }
+    }
+
+    /// The response the scope draws has to be the response the audio has, or
+    /// the display is a decoration. Measure the real filter and compare.
+    #[test]
+    fn the_drawn_response_is_the_filter_you_hear() {
+        const SAMPLE_RATE: u32 = 48_000;
+
+        fn measured(center: f64, bandwidth: f64, hz: f64) -> f64 {
+            let mut filter = ReceiverFilter::new(SAMPLE_RATE, center, bandwidth);
+            let step = std::f64::consts::TAU * hz / f64::from(SAMPLE_RATE);
+            let (settle, measure) = (24_000usize, 12_000usize);
+            let mut sum_sq = 0.0;
+            for n in 0..settle + measure {
+                let out = filter.process((step * n as f64).sin());
+                if n >= settle {
+                    sum_sq += out * out;
+                }
+            }
+            // Against a unit sine, whose RMS is 1/sqrt(2).
+            (sum_sq / measure as f64).sqrt() * std::f64::consts::SQRT_2
+        }
+
+        for (center, bandwidth) in [(500.0, 500.0), (600.0, 250.0), (700.0, 1_200.0)] {
+            for offset in [-400.0, -200.0, -80.0, 0.0, 80.0, 200.0, 400.0] {
+                let hz = center + offset;
+                if hz < 60.0 {
+                    continue;
+                }
+                let drawn = receiver_response_at(center, bandwidth, hz);
+                let real = measured(center, bandwidth, hz);
+                assert!(
+                    (drawn - real).abs() < 0.03,
+                    "{center} Hz / {bandwidth} Hz at {hz} Hz: drew {drawn:.3}, measured {real:.3}"
+                );
+            }
+        }
+    }
+
+    /// A band-pass is a band-pass: strongest where it is tuned, and falling
+    /// away either side of that however wide it is set.
+    #[test]
+    fn the_response_peaks_where_the_filter_is_tuned() {
+        for bandwidth in [FILTER_BANDWIDTH_MIN, 500.0, FILTER_BANDWIDTH_MAX] {
+            let peak = receiver_response_at(600.0, bandwidth, 600.0);
+            assert!((peak - 1.0).abs() < 1e-9, "the centre should pass in full");
+            let mut previous = peak;
+            for offset in [20.0, 60.0, 120.0, 260.0, 520.0, 1_040.0] {
+                let above = receiver_response_at(600.0, bandwidth, 600.0 + offset);
+                let below = receiver_response_at(600.0, bandwidth, 600.0 - offset);
+                assert!(
+                    above < previous && above > 0.0,
+                    "{bandwidth}: {offset} Hz up"
+                );
+                assert!(below < previous, "{bandwidth}: {offset} Hz down");
+                previous = above;
+            }
+        }
+    }
+
+    /// Narrower means narrower: at a fixed distance off the centre, squeezing
+    /// the filter always passes less of what is out there.
+    #[test]
+    fn narrowing_the_filter_passes_less_of_what_is_beside_you() {
+        for offset in [100.0, 200.0, 400.0] {
+            let wide = receiver_response_at(600.0, 1_000.0, 600.0 + offset);
+            let narrow = receiver_response_at(600.0, 200.0, 600.0 + offset);
+            assert!(
+                narrow < wide,
+                "{offset} Hz off: narrow passed {narrow:.4}, wide {wide:.4}"
+            );
         }
     }
 }

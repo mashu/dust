@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::audio::focus_group_input;
+use crate::ui::scope::{BandScope, Heard};
 use crate::ui::widgets::{control_id, Icon, ProgressHeader};
 
 #[component]
@@ -15,6 +16,8 @@ pub fn TrainingView(
     locked: bool,
     repeat_total: u32,
     repeat_done: u32,
+    settings: cw_core::TrainingSettings,
+    heard: Vec<Heard>,
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
     on_focus: EventHandler<usize>,
@@ -41,6 +44,7 @@ pub fn TrainingView(
     rsx! {
         div { class: "stack",
             ProgressHeader { current: focused, total, status, live: playing }
+            BandScope { settings, sending: heard, live: playing }
             div { class: "card",
                 div { class: "row-between",
                     p { class: "muted", style: "margin: 0;", "{hint}" }

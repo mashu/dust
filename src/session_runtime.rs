@@ -203,6 +203,31 @@ fn transmission_for(
     }
 }
 
+/// Who the receiver has in its passband for this group, as pitch and strength
+/// alone.
+///
+/// Derived the same way the audio is, from the same generator, so the scope
+/// draws the stations you are actually listening to rather than a plausible
+/// set. Only the voices come back: what anybody is sending stays out of the
+/// display, or the scope would hand you the answer you are meant to copy.
+pub fn heard_for(
+    settings: &TrainingSettings,
+    gen: u64,
+    index: usize,
+    text: &str,
+) -> Vec<crate::ui::scope::Heard> {
+    let sending = transmission_for(settings, gen, index, text.to_string());
+    std::iter::once(crate::ui::scope::Heard {
+        voice: sending.voice,
+        wanted: true,
+    })
+    .chain(sending.others.iter().map(|other| crate::ui::scope::Heard {
+        voice: other.voice,
+        wanted: false,
+    }))
+    .collect()
+}
+
 async fn handle_effect(
     effect: SessionEffect,
     settings: &TrainingSettings,

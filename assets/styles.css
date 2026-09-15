@@ -1554,6 +1554,75 @@ input[type="range"]:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn:hover, .letter-chip:hover, .icon-btn:hover { transform: none; }
 }
 
+/* ==========================================================================
+   Band scope — the receiver's passband and who is in it
+   ========================================================================== */
+
+.scope {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 0.6rem 0.7rem 0.5rem;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+.scope.live {
+  border-color: var(--copper);
+  box-shadow: var(--shadow-sm), 0 0 0 3px var(--copper-soft);
+}
+.scope-head { align-items: baseline; }
+.scope-title {
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+.scope-read {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+.scope-face {
+  display: block;
+  width: 100%;
+  height: 84px;
+  margin-top: 0.3rem;
+  overflow: visible;
+}
+.scope-window { fill: var(--copper); opacity: 0.06; }
+.scope-skirt { stroke: none; }
+.scope-curve { stroke: var(--copper); stroke-width: 1.5; stroke-linejoin: round; opacity: 0.75; }
+.scope-centre { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 2 4; }
+.scope-base { stroke: var(--line); stroke-width: 1; }
+
+/* A station moves because its pitch moved, so the mark slides rather than
+   jumping: the motion is the data changing, not decoration. */
+.scope-blip {
+  stroke: var(--ink-dim);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: all 0.45s var(--ease);
+}
+.scope-blip.wanted { stroke: var(--copper-deep); stroke-width: 3.5; }
+.scope-cap {
+  fill: var(--ink-dim);
+  transition: all 0.45s var(--ease);
+}
+.scope-cap.wanted { fill: var(--copper-deep); }
+.scope-foot {
+  margin-top: 0.15rem;
+  font-size: 0.66rem;
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+  gap: 0.5rem;
+}
+.scope-caption {
+  text-align: center;
+  font-variant-numeric: normal;
+  color: var(--ink-soft);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
