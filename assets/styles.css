@@ -626,27 +626,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   font-weight: 700;
 }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; }
-.hero-wave {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 18px;
-  margin-top: 1.05rem;
-  opacity: 0.7;
-}
-.hero-wave i {
-  display: block;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--copper-lift);
-  animation: trace 2.6s var(--ease) infinite;
-}
-.hero-wave i:nth-child(3n) { background: var(--hero-ink-soft); }
-@keyframes trace {
-  0%, 100% { opacity: 0.25; transform: scaleY(1); }
-  45% { opacity: 1; transform: scaleY(2.1); }
-}
-
 /* ==========================================================================
    Buttons
    ========================================================================== */

@@ -84,14 +84,6 @@ pub fn Home(
         settings.playback.group_repeat_max as f64,
     );
     let pool_len = pool.chars().count();
-    // Precomputed so the markup keeps only plain interpolation.
-    let bars: Vec<(u32, String)> = (0..22)
-        .map(|i| {
-            let width = if i % 3 == 0 { 15 } else { 6 };
-            (width, format!("{:.2}s", f64::from(i) * 0.09))
-        })
-        .collect();
-
     rsx! {
         div { class: "stack",
             header { class: "page-head",
@@ -158,11 +150,6 @@ pub fn Home(
                         onclick: move |_| on_listen.call(()),
                         Icon { name: "headphones" }
                         "Listen to letters"
-                    }
-                }
-                div { class: "hero-wave", "aria-hidden": "true",
-                    for (width, delay) in bars.iter() {
-                        i { style: "width: {width}px; animation-delay: {delay};" }
                     }
                 }
             }
