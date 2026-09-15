@@ -12,11 +12,21 @@
 //! only find that out by ear.
 
 use cw_core::band::receiver_response_at;
+use cw_core::scope::{scope_trace, ScopeStation, SCOPE_WINDOW_SEC};
 use cw_core::timing::StationVoice;
 use cw_core::TrainingSettings;
 use dioxus::prelude::*;
 
+use crate::time::sleep_ms;
+
 const VIEW_W: f64 = 320.0;
+const TRACE_H: f64 = 70.0;
+/// Fast enough to read as a live trace, slow enough that a phone is not
+/// redrawing an SVG flat out for the length of a session.
+const FRAME_MS: u32 = 40;
+/// Enough points to show several cycles of a CW note without a path so long it
+/// costs more to diff than to draw.
+const TRACE_POINTS: usize = 190;
 const VIEW_H: f64 = 96.0;
 const PAD_X: f64 = 8.0;
 const BASE_Y: f64 = 80.0;
@@ -27,11 +37,44 @@ const AMP: f64 = 62.0;
 /// Deliberately a pitch and a strength and nothing else. What a station is
 /// *sending* has no business on the screen you are copying on, so the text
 /// cannot reach here to be drawn by accident.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Heard {
     pub voice: StationVoice,
     /// The station being copied, as opposed to somebody calling across it.
     pub wanted: bool,
+    /// When this station's key is down, as `(start, end)` seconds from the
+    /// top of the send.
+    ///
+    /// The trace needs this to breathe with what you are hearing rather than
+    /// sitting at a constant height. It is never drawn as a shape — see the
+    /// module note on why an envelope trace would be a way of reading the
+    /// morse instead of copying it.
+    pub key: Vec<(f64, f64)>,
+    /// How long the keying takes to rise, so the trace softens at the edges
+    /// the way the audio does rather than snapping on.
+    pub rise_sec: f64,
+}
+
+impl Heard {
+    /// How loud this station is at `t_sec` into the send, before the filter.
+    pub fn amplitude_at(&self, t_sec: f64) -> f64 {
+        let rise = self.rise_sec.max(1e-4);
+        let shape = self
+            .key
+            .iter()
+            .map(|(start, end)| {
+                if t_sec < *start || t_sec > *end {
+                    return 0.0;
+                }
+                // Raised cosine in and out, which is the keying the audio uses.
+                let into = ((t_sec - start) / rise).clamp(0.0, 1.0);
+                let outof = ((end - t_sec) / rise).clamp(0.0, 1.0);
+                let ramp = |x: f64| 0.5 - 0.5 * (std::f64::consts::PI * x).cos();
+                ramp(into).min(ramp(outof))
+            })
+            .fold(0.0_f64, f64::max);
+        self.voice.volume * shape
+    }
 }
 
 /// One station as the scope draws it.
@@ -131,13 +174,77 @@ fn scope_geometry(settings: &TrainingSettings, sending: &[Heard]) -> ScopeGeomet
     }
 }
 
-/// The receiver's passband with whoever is in it right now.
+/// One frame of the trace, as an SVG path.
+///
+/// The height of each station is what you *hear* — its own strength, keyed by
+/// its own timeline, taken down by whatever the filter gives back at its pitch
+/// — so a station off to the side of a narrow filter draws a smaller trace,
+/// exactly as it sounds smaller.
+fn trace_path(settings: &TrainingSettings, sending: &[Heard], live: bool, frame: u64) -> String {
+    let centre = settings.side_tone_center();
+    let bandwidth = settings.band.filter_bandwidth_hz;
+    let t_sec = frame as f64 * (f64::from(FRAME_MS) / 1000.0);
+    let stations: Vec<ScopeStation> = if live {
+        sending
+            .iter()
+            .map(|station| ScopeStation {
+                tone_hz: station.voice.tone_hz,
+                amplitude: station.amplitude_at(t_sec)
+                    * receiver_response_at(centre, bandwidth, station.voice.tone_hz),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Even with nothing being sent the receiver is open, and an open receiver
+    // hisses. A flat line would say the radio was off.
+    let noise = if settings.band.qrn_enabled {
+        (settings.band.qrn_level * 0.22).clamp(0.012, 0.5)
+    } else {
+        0.012
+    };
+    let values = scope_trace(&stations, noise, t_sec, TRACE_POINTS, frame.wrapping_add(1));
+    let mid = TRACE_H / 2.0;
+    let amp = TRACE_H / 2.0 - 3.0;
+    let last = (values.len().max(2) - 1) as f64;
+    let mut path = String::with_capacity(values.len() * 12);
+    for (i, value) in values.iter().enumerate() {
+        let x = i as f64 / last * VIEW_W;
+        let y = mid - value * amp;
+        if i == 0 {
+            path.push_str(&format!("M{x:.1},{y:.1}"));
+        } else {
+            path.push_str(&format!(" L{x:.1},{y:.1}"));
+        }
+    }
+    path
+}
+
+/// The receiver, as a scope and a passband.
+///
+/// The face is live while a send is running: it is the tone you are listening
+/// to, on a timebase short enough that the keying cannot be read off it, over
+/// the receiver's own hiss. Under it, where each station sits in the filter.
 #[component]
 pub fn BandScope(settings: TrainingSettings, sending: Vec<Heard>, live: bool) -> Element {
+    // A scope only looks like a scope if it is redrawn. Everything else on the
+    // screen is still, so this is the one place a frame loop earns its keep.
+    let mut frame = use_signal(|| 0u64);
+    use_hook(|| {
+        spawn(async move {
+            loop {
+                sleep_ms(FRAME_MS).await;
+                frame += 1;
+            }
+        });
+    });
+
     let geometry = scope_geometry(&settings, &sending);
     let callers = geometry.blips.len();
+    let frame_now = frame();
+    let trace = trace_path(&settings, &sending, live, frame_now);
     let caption = if !live {
-        "Between sends".to_string()
+        "Receiver idle".to_string()
     } else if callers > 1 {
         format!("{callers} stations in the passband")
     } else {
@@ -146,22 +253,35 @@ pub fn BandScope(settings: TrainingSettings, sending: Vec<Heard>, live: bool) ->
     rsx! {
         div { class: if live { "scope live" } else { "scope" },
             div { class: "row-between scope-head",
-                span { class: "scope-title", "Passband" }
-                span { class: "scope-read", "{settings.band.filter_bandwidth_hz:.0} Hz wide" }
+                span { class: "scope-title", "Receiver" }
+                span { class: "scope-read", "{settings.band.filter_bandwidth_hz:.0} Hz · {SCOPE_WINDOW_SEC * 1000.0:.0} ms/div" }
+            }
+            svg {
+                class: "scope-trace-face",
+                view_box: "0 0 {VIEW_W} {TRACE_H}",
+                preserve_aspect_ratio: "none",
+                role: "img",
+                "aria-label": "{caption}",
+                line {
+                    class: "scope-base",
+                    x1: "0",
+                    y1: "{TRACE_H / 2.0:.1}",
+                    x2: "{VIEW_W:.1}",
+                    y2: "{TRACE_H / 2.0:.1}",
+                }
+                path { class: "scope-trace", d: "{trace}", fill: "none" }
             }
             svg {
                 class: "scope-face",
                 view_box: "0 0 {VIEW_W} {VIEW_H}",
                 preserve_aspect_ratio: "none",
-                role: "img",
-                "aria-label": "{caption}",
+                "aria-hidden": "true",
                 defs {
                     linearGradient { id: "dust-scope-fill", x1: "0", y1: "0", x2: "0", y2: "1",
                         stop { offset: "0%", stop_color: "var(--copper)", stop_opacity: "0.26" }
                         stop { offset: "100%", stop_color: "var(--copper)", stop_opacity: "0.02" }
                     }
                 }
-                // The bandwidth the control names, marked on the shape it makes.
                 rect {
                     class: "scope-window",
                     x: "{geometry.edge_low_x:.1}",
@@ -226,7 +346,14 @@ mod tests {
     }
 
     fn heard(voice: StationVoice, wanted: bool) -> Heard {
-        Heard { voice, wanted }
+        Heard {
+            voice,
+            wanted,
+            // Key down for a second straight, so amplitude_at is simple to
+            // reason about in the tests that care about it.
+            key: vec![(0.0, 1.0)],
+            rise_sec: 0.005,
+        }
     }
 
     fn settings(bandwidth: f64, stations: u32) -> TrainingSettings {
@@ -333,5 +460,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The trace has to be alive, or it is a picture of a scope. Two frames
+    /// apart it is a different drawing.
+    #[test]
+    fn the_trace_is_redrawn_every_frame() {
+        let s = settings(500.0, 1);
+        let sending = [heard(voice(600.0, 1.0), true)];
+        let first = trace_path(&s, &sending, true, 10);
+        let second = trace_path(&s, &sending, true, 11);
+        assert!(!first.is_empty() && first.starts_with('M'));
+        assert_ne!(first, second, "the trace stood still between frames");
+    }
+
+    /// And alive *because of the audio*: the face follows the keying, so it
+    /// stands up while the key is down and drops to the hiss in the gaps.
+    #[test]
+    fn the_trace_follows_the_keying() {
+        let s = settings(500.0, 1);
+        let mut station = heard(voice(500.0, 1.0), true);
+        // Key down for the first tenth of a second, then a gap.
+        station.key = vec![(0.0, 0.1)];
+        let sending = [station];
+
+        let height = |frame: u64| {
+            let path = trace_path(&s, &sending, true, frame);
+            let mid = TRACE_H / 2.0;
+            path.split(['M', 'L'])
+                .filter_map(|point| point.split(',').nth(1))
+                .filter_map(|y| y.trim().parse::<f64>().ok())
+                .fold(0.0_f64, |acc, y| acc.max((y - mid).abs()))
+        };
+
+        // 40 ms per frame: frame 1 is mid-dit, frame 5 is 200 ms in and quiet.
+        let keyed = height(1);
+        let gap = height(5);
+        assert!(
+            keyed > gap * 2.0,
+            "key down drew {keyed:.1} against {gap:.1} in the gap — the trace \
+             is not following the audio"
+        );
+    }
+
+    /// Between sends the receiver is still open, and an open receiver hisses.
+    /// A flat line would say the radio was off.
+    #[test]
+    fn an_idle_receiver_still_shows_its_own_noise() {
+        let s = settings(500.0, 1);
+        let path = trace_path(&s, &[], false, 3);
+        let mid = TRACE_H / 2.0;
+        let moved = path
+            .split(['M', 'L'])
+            .filter_map(|point| point.split(',').nth(1))
+            .filter_map(|y| y.trim().parse::<f64>().ok())
+            .any(|y| (y - mid).abs() > 0.2);
+        assert!(moved, "an idle receiver drew a dead flat line");
+    }
+
+    /// The keying drives the height, but its *shape* is never drawn. The face
+    /// never spans a whole element, at any speed the app allows, so there is
+    /// no dot or dash on it to read — what is drawn is the tone.
+    ///
+    /// At the trainer's usual speeds the margin is wide: 25 WPM puts a dit at
+    /// 48 ms against an 8 ms face. It narrows at the 80 WPM ceiling, where a
+    /// dit is 15 ms, and that is the case this pins.
+    #[test]
+    fn the_face_never_spans_a_whole_element() {
+        let dit_at = |wpm: f64| 1.2 / wpm;
+        assert!(
+            SCOPE_WINDOW_SEC < dit_at(FASTEST_WPM),
+            "the face spans {SCOPE_WINDOW_SEC}s against a {}s dit",
+            dit_at(FASTEST_WPM)
+        );
+        // And comfortably so wherever anyone actually practises.
+        assert!(SCOPE_WINDOW_SEC * 5.0 < dit_at(25.0));
+    }
+
+    /// The ceiling `TrainingSettings::clamp` puts on character speed. Pinned
+    /// here because the face has to stay shorter than a dit at that speed.
+    const FASTEST_WPM: f64 = 80.0;
+
+    #[test]
+    fn the_speed_ceiling_is_still_what_the_scope_assumes() {
+        let mut s = TrainingSettings::default();
+        s.playback.link_char_wpm = false;
+        s.playback.char_wpm_min = 500.0;
+        s.playback.char_wpm_max = 500.0;
+        assert_eq!(s.clamp().playback.char_wpm_max, FASTEST_WPM);
     }
 }

@@ -455,8 +455,8 @@ fn the_scope_shows_the_band_without_showing_the_answer() {
                 repeat_done: 0,
                 settings: TrainingSettings::default(),
                 heard: vec![
-                    Heard { voice: voice(520.0, 1.0), wanted: true },
-                    Heard { voice: voice(700.0, 0.4), wanted: false },
+                    Heard { voice: voice(520.0, 1.0), wanted: true, key: vec![(0.0, 1.0)], rise_sec: 0.005 },
+                    Heard { voice: voice(700.0, 0.4), wanted: false, key: vec![(0.0, 1.0)], rise_sec: 0.005 },
                 ],
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
@@ -743,16 +743,32 @@ mod interactions {
         }
     }
 
+    // Under a runtime because the training screen now carries a live scope,
+    // and a scope redraws itself on a timer.
     #[test]
     fn typing_is_refused_while_the_group_is_still_being_sent() {
-        let mut ui = Ui::new(TrainingHarness, ());
-        assert!(ui.has("answer locked"));
-        assert!(ui.has("Listening…"));
-        // The keypress is swallowed rather than confirming the group.
-        ui.press_enter("group-input-0");
-        assert!(!ui.has("confirmed"));
-        // Focusing a group reports it upwards.
-        ui.focus("group-input-0");
-        assert!(ui.has("group focused"));
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(TrainingHarness, ());
+            assert!(ui.has("answer locked"));
+            assert!(ui.has("Listening…"));
+            // The keypress is swallowed rather than confirming the group.
+            ui.press_enter("group-input-0");
+            assert!(!ui.has("confirmed"));
+            // Focusing a group reports it upwards.
+            ui.focus("group-input-0");
+            assert!(ui.has("group focused"));
+        });
+    }
+
+    /// The scope on the training screen really is running: left alone, it
+    /// redraws itself.
+    #[test]
+    fn the_scope_keeps_redrawing_while_the_screen_sits_there() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(TrainingHarness, ());
+            let first = ui.html();
+            ui.advance(200).await;
+            assert_ne!(first, ui.html(), "the scope stopped redrawing");
+        });
     }
 }
