@@ -227,17 +227,33 @@ pub struct AtmosphericNoise {
 
 /// Crashes per second at the extremes of the intensity control. Even a quiet
 /// band has the occasional one.
+/// Crashes a second at each end of the fader.
+///
+/// The ceiling rose when the crashes got shorter, because that is how a band
+/// actually gets noisy: a storm nearer or larger sends *more* sferics, it does
+/// not stretch each one out. Sixty a second at about ten milliseconds apiece
+/// is a busy crackle with gaps still in it. Past roughly a hundred they merge,
+/// the limiter works constantly, and it is a roar again.
 const CRASH_RATE_MIN: f64 = 0.4;
-const CRASH_RATE_MAX: f64 = 26.0;
+const CRASH_RATE_MAX: f64 = 60.0;
 /// How much of the output is the steady receiver floor rather than crashes.
 const HISS_SHARE: f64 = 0.16;
 /// Crash sizes are heavy-tailed — most are small, a few are very loud — which
 /// is what gives real static its restless, uneven character.
 const CRASH_TAIL: f64 = 1.7;
-/// Shortest and longest crash, in seconds. A discharge has structure over a
-/// few milliseconds; the filter's own ringing adds the rest.
-const CRASH_TAU_MIN: f64 = 0.002;
-const CRASH_TAU_MAX: f64 = 0.020;
+/// Shortest and longest crash, in seconds — of the *excitation*, before the
+/// receiver has had it.
+///
+/// A sferic reaches the antenna as very nearly an impulse. The crack you hear
+/// is not the lightning, it is your own filter being hit and ringing, so this
+/// has to stay well short of the ringing or the crash sets its own length.
+///
+/// It used to be 2 ms to 20 ms, which decay over 14 ms and 138 ms against a
+/// filter that rings for 5 to 14 — so every crash came out about 80 ms wide
+/// whatever the receiver was set to. That is a thump, not a crack, and closing
+/// the filter down did nothing to it.
+const CRASH_TAU_MIN: f64 = 0.000_10;
+const CRASH_TAU_MAX: f64 = 0.001_20;
 
 impl AtmosphericNoise {
     pub fn new(sample_rate: u32, level: f64, seed: u64) -> Self {
@@ -848,6 +864,82 @@ mod tests {
         let mut buf = vec![0.0f32; 2048];
         mixer.fill_background(&mut buf);
         assert!(buf.iter().all(|s| s.is_finite()));
+    }
+
+    /// Milliseconds for an envelope to fall 60 dB below its peak.
+    fn decay_ms(env: &[f64]) -> f64 {
+        let peak = env.iter().fold(0.0_f64, |a, v| a.max(*v));
+        let floor = peak / 1000.0;
+        env.iter().rposition(|v| *v > floor).unwrap_or(0) as f64 / 48.0
+    }
+
+    /// How long one crash lasts once the receiver has had it.
+    fn crash_ms(bandwidth: f64) -> f64 {
+        let mut noise = AtmosphericNoise::new(48_000, 1.0, 12_345);
+        let mut filter = ReceiverFilter::new(48_000, 600.0, bandwidth);
+        // One crash of the usual size, then no further arrivals.
+        noise.crash_energy = 1.0;
+        let tau = (CRASH_TAU_MIN + CRASH_TAU_MAX) / 2.0;
+        noise.crash_decay = (-1.0 / (tau * 48_000.0)).exp();
+        let env: Vec<f64> = (0..48_000)
+            .map(|_| {
+                let crash = noise.crash_energy * (noise.rng.f64() * 2.0 - 1.0);
+                noise.crash_energy *= noise.crash_decay;
+                filter.process(crash).abs()
+            })
+            .collect();
+        decay_ms(&env)
+    }
+
+    /// A static crash is your filter being hit, not the lightning itself, so
+    /// the excitation has to stay far shorter than the receiver rings.
+    ///
+    /// It did not: a 20 ms tail decays over 138 ms against a filter that rings
+    /// for 5 to 14, so the crash carried its own length and the receiver had
+    /// no say in it.
+    #[test]
+    fn a_crash_is_shorter_than_the_filter_it_rings() {
+        // Both to the same point — down to a twentieth, which is what
+        // `ring_ms` reports — so they are comparable.
+        let excitation = CRASH_TAU_MAX * (1.0f64 / 0.05).ln() * 1000.0;
+        // At the widest ordinary CW setting, the least ringing there is to
+        // hide behind.
+        let ringing = ring_ms(500.0);
+        assert!(
+            excitation < ringing,
+            "a crash decays over {excitation:.1} ms against a filter ringing for \
+             {ringing:.1} ms — the crash would be setting its own length"
+        );
+    }
+
+    /// And so the receiver decides how long a crash lasts. Close the filter
+    /// down and the crashes stretch and start to ring, which is the whole
+    /// character of a narrow filter on a noisy band.
+    #[test]
+    fn a_narrower_filter_makes_the_crashes_ring_longer() {
+        let wide = crash_ms(500.0);
+        let narrow = crash_ms(150.0);
+        assert!(
+            narrow > wide * 1.5,
+            "a 150 Hz filter rang a crash for {narrow:.1} ms against {wide:.1} ms \
+             at 500 Hz — the filter is not shaping the crash"
+        );
+    }
+
+    /// Static is impulsive, and the crest factor is the number that says so.
+    /// At the top of the fader this used to sit near nine with the limiter
+    /// working flat out, which is a roar rather than a crackle.
+    #[test]
+    fn the_static_stays_crackly_even_at_its_loudest() {
+        for level in [0.2, 0.5, 1.0] {
+            let noisy = background(&only_qrn(level), 4);
+            let crest = crest(&noisy);
+            assert!(
+                crest > 15.0,
+                "at {level:.1} the static came out at a crest of {crest:.1}, which \
+                 is a wash rather than crashes"
+            );
+        }
     }
 }
 
