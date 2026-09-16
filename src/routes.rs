@@ -131,7 +131,7 @@ pub fn app_routes(
                 let app_confirm = app.clone();
                 let app_focus = app.clone();
                 let app_submit = app.clone();
-                let app_stop = app.clone();
+                let app_stop = app;
                 rsx! {
                     TrainingView {
                         current: view.current,
@@ -216,7 +216,7 @@ mod tests {
                 listen_playing: false,
                 sample_playing: None,
             },
-            app.clone(),
+            app,
             AppCallbacks {
                 start_training: noop,
                 go_home: noop,

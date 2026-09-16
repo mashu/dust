@@ -728,7 +728,7 @@ mod tests {
         assert!(digits > 0.1, "digits carry every separator, got {digits}");
 
         // A tier that sends no portables must never show a slash.
-        let mut tier_one = settings.clone();
+        let mut tier_one = settings;
         tier_one.curriculum.callsign_level = crate::callsign::CALLSIGN_TIER_MIN;
         assert!(
             !sampling_rows(&tier_one, &[])

@@ -161,24 +161,49 @@ pub fn App() -> Element {
         }
     });
 
+    // Claiming the audio is the same move for everything that is not a
+    // session: hold if one is running, settle the settings, take the device
+    // over. It hands back the generation the caller has to stamp its work
+    // with, so a send that outlives its epoch can tell and stand down.
+    // Spelling it out at each call site was three chances to drop the guard,
+    // the clamp or the toast.
+    let claim_audio = use_callback({
+        let app = app.clone();
+        move |(): ()| -> Option<(u64, cw_core::TrainingSettings)> {
+            if session_running(screen, runtime) {
+                return None;
+            }
+            let settings_now = settings().clamp();
+            match app.takeover_audio(&settings_now) {
+                Ok(gen) => Some((gen, settings_now)),
+                Err(err) => {
+                    toast.set(Some(err));
+                    None
+                }
+            }
+        }
+    });
+
     let start_training = use_callback({
         let app = app.clone();
         move |(): ()| {
-            let mut settings_now = settings().clamp();
-            fit_settings_to_alphabet(&mut settings_now);
+            // Held before anything is written, not just before the audio is
+            // taken: a session already running must leave the stored settings
+            // exactly as they are.
             if session_running(screen, runtime) {
                 return;
             }
-            if settings.peek().clone() != settings_now {
-                settings.set(settings_now.clone());
+            // Starting a session first settles the alphabet, and stores the
+            // result, so the session and the screen agree on what is being
+            // practised before anything sounds.
+            let mut fitted = settings().clamp();
+            fit_settings_to_alphabet(&mut fitted);
+            if settings.peek().clone() != fitted {
+                settings.set(fitted);
             }
             preview.set(Preview::Idle);
-            let gen = match app.takeover_audio(&settings_now) {
-                Ok(gen) => gen,
-                Err(err) => {
-                    toast.set(Some(err));
-                    return;
-                }
+            let Some((gen, settings_now)) = claim_audio.call(()) else {
+                return;
             };
             let history = sessions();
             let Some(effects) =
@@ -193,16 +218,8 @@ pub fn App() -> Element {
     let start_listen = use_callback({
         let app = app.clone();
         move |chars: String| {
-            if session_running(screen, runtime) {
+            let Some((gen, settings_now)) = claim_audio.call(()) else {
                 return;
-            }
-            let settings_now = settings().clamp();
-            let gen = match app.takeover_audio(&settings_now) {
-                Ok(gen) => gen,
-                Err(err) => {
-                    toast.set(Some(err));
-                    return;
-                }
             };
             preview.set(Preview::Letters);
             let app_loop = (*app).clone();
@@ -220,16 +237,8 @@ pub fn App() -> Element {
     let play_sample = use_callback({
         let app = app.clone();
         move |text: String| {
-            if session_running(screen, runtime) {
+            let Some((gen, settings_now)) = claim_audio.call(()) else {
                 return;
-            }
-            let settings_now = settings().clamp();
-            let gen = match app.takeover_audio(&settings_now) {
-                Ok(gen) => gen,
-                Err(err) => {
-                    toast.set(Some(err));
-                    return;
-                }
             };
             preview.set(Preview::Sample(text.clone()));
             let app_loop = (*app).clone();
@@ -246,16 +255,8 @@ pub fn App() -> Element {
     let start_band_preview = use_callback({
         let app = app.clone();
         move |(): ()| {
-            if session_running(screen, runtime) {
+            let Some((gen, _settings_now)) = claim_audio.call(()) else {
                 return;
-            }
-            let settings_now = settings().clamp();
-            let gen = match app.takeover_audio(&settings_now) {
-                Ok(gen) => gen,
-                Err(err) => {
-                    toast.set(Some(err));
-                    return;
-                }
             };
             preview.set(Preview::Band);
             let app_loop = (*app).clone();
@@ -374,7 +375,7 @@ pub fn App() -> Element {
                             listen_playing: preview().is_letters(),
                             sample_playing: preview().sample(),
                         },
-                        app.clone(),
+                        app,
                         AppCallbacks {
                             start_training,
                             go_home,

@@ -79,6 +79,22 @@ tokio = { version = "1", default-features = false, features = [
     "test-util",
 ] }
 
+# Lint policy lives here rather than only in the CI command line, so a local
+# `cargo clippy` is the same check the pipeline runs and a finding shows up
+# where it is cheap to fix. Each of these has bitten this codebase or guards
+# something it depends on.
+[workspace.lints.clippy]
+# A `Ref` held across an await outlives the borrow it was taken for and
+# panics the next time anything writes. The session runtime is full of both.
+await_holding_refcell_ref = "deny"
+# Silently dropping a future is how a send goes missing.
+let_underscore_future = "deny"
+# Cheap to get right, and the audio path allocates per send.
+redundant_clone = "deny"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
 [features]
 default = []
 web = [
@@ -107,3 +123,6 @@ silent-audio = []
 lto = true
 codegen-units = 1
 strip = true
+
+[lints]
+workspace = true

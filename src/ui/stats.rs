@@ -83,7 +83,7 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartG
     let dots = if points.len() == 1 {
         vec![(CHART_W / 2.0, coords[0].1)]
     } else if points.len() <= 30 {
-        coords.clone()
+        coords
     } else {
         coords.last().copied().into_iter().collect()
     };
@@ -122,13 +122,13 @@ pub fn StatsView(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             match tab() {
                 StatsTab::Overview => rsx! {
                     OverviewTab {
-                        sessions: sessions.clone(),
+                        sessions: sessions,
                         threshold: settings.auto_level.auto_adjust_threshold,
                     }
                 },
                 StatsTab::Letters => rsx! { LettersTab { letters } },
-                StatsTab::Mistakes => rsx! { MistakesTab { sessions: sessions.clone() } },
-                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions: sessions.clone() } },
+                StatsTab::Mistakes => rsx! { MistakesTab { sessions: sessions } },
+                StatsTab::Sampling => rsx! { SamplingTab { settings, sessions: sessions } },
                 StatsTab::History => rsx! { HistoryTab { sessions } },
             }
         }

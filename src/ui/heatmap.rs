@@ -119,7 +119,7 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
                     }
                 }
             }
-            HeatmapGridView { grid: grid.clone(), selected: selected(), on_select: move |date| selected.set(Some(date)) }
+            HeatmapGridView { grid: grid, selected: selected(), on_select: move |date| selected.set(Some(date)) }
             div { class: "heatmap-legend",
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "Less" }
                 span { class: "heat-cell" }

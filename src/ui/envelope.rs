@@ -97,7 +97,7 @@ pub fn EnvelopeCard(
         "Hard — crisp edges, clicks on fast keying"
     };
     let rise_warning = shape.rise_share_of_dit > 0.45;
-    let playing = sample_playing.clone();
+    let playing = sample_playing;
     rsx! {
         div { class: "card stack-sm",
             div { class: "card-head",

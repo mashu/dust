@@ -308,7 +308,7 @@ mod tests {
         let pool = compute_char_pool(&s);
         assert_eq!(pool.len(), 10);
         s.curriculum.digits_level = 10;
-        let clamped = s.clone().clamp();
+        let clamped = s.clamp();
         assert_eq!(clamped.curriculum.digits_level, 9);
         assert_eq!(compute_char_pool(&clamped).len(), 10);
     }

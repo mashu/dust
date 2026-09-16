@@ -239,6 +239,19 @@ pub fn heard_for(
         .collect()
 }
 
+/// The settings a session was started with.
+///
+/// Every group in a session is built from these, not from whatever the
+/// settings screen holds now: a change made mid-session belongs to the next
+/// one, or the alphabet could shift under a session already being scored.
+/// Falls back to what the caller was handed when there is no machine yet.
+fn session_settings(
+    machine: Option<&SessionMachine>,
+    fallback: &TrainingSettings,
+) -> TrainingSettings {
+    machine.map_or_else(|| fallback.clone(), |m| m.session().settings().clone())
+}
+
 async fn handle_effect(
     effect: SessionEffect,
     settings: &TrainingSettings,
@@ -262,26 +275,22 @@ async fn handle_effect(
             Vec::new()
         }
         SessionEffect::NeedGroup { index } => {
-            let terminal = app
-                .machine
-                .borrow()
-                .as_ref()
-                .is_some_and(|m| m.is_terminal());
+            // One look at the machine for all three answers, so they are three
+            // facts about the same moment rather than three separate peeks.
+            let (terminal, snapshot, empty) = {
+                let machine = app.machine.borrow();
+                let machine = machine.as_ref();
+                (
+                    machine.is_some_and(SessionMachine::is_terminal),
+                    session_settings(machine, settings),
+                    machine
+                        .and_then(|m| m.session().group(index).map(|g| g.sent().is_empty()))
+                        .unwrap_or(true),
+                )
+            };
             if terminal || app.session_gen.get() != gen {
                 return Vec::new();
             }
-            let snapshot = app
-                .machine
-                .borrow()
-                .as_ref()
-                .map(|m| m.session().settings().clone())
-                .unwrap_or_else(|| settings.clone());
-            let empty = app
-                .machine
-                .borrow()
-                .as_ref()
-                .and_then(|m| m.session().group(index).map(|g| g.sent().is_empty()))
-                .unwrap_or(true);
             if empty {
                 let mut sampling = app.sampling.borrow_mut();
                 let mut rng = app.rng.borrow_mut();
@@ -303,12 +312,7 @@ async fn handle_effect(
             if app.session_gen.get() != gen {
                 return Vec::new();
             }
-            let snapshot = app
-                .machine
-                .borrow()
-                .as_ref()
-                .map(|m| m.session().settings().clone())
-                .unwrap_or_else(|| settings.clone());
+            let snapshot = session_settings(app.machine.borrow().as_ref(), settings);
             let outcome = if text.is_empty() {
                 Ok((0.0, 0.0, 0.0))
             } else {

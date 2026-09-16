@@ -774,7 +774,7 @@ mod tests {
         koch.alphabet_fingerprint = settings.alphabet_fingerprint();
         assert!(!koch.usable_for_sampling(&other_seq));
 
-        let mut legacy = koch.clone();
+        let mut legacy = koch;
         legacy.char_set_mode = CharSetMode::Koch;
         legacy.alphabet_fingerprint.clear();
         assert!(legacy.usable_for_sampling(&settings));
@@ -1069,7 +1069,7 @@ mod accessor_tests {
         assert!(!result.usable_for_sampling(&other));
 
         // Same mode, different alphabet.
-        let mut resequenced = settings.clone();
+        let mut resequenced = settings;
         resequenced.curriculum.custom_sequence = vec!['A', 'B', 'C'];
         assert!(!result.usable_for_sampling(&resequenced));
 

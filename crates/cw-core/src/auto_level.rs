@@ -847,7 +847,7 @@ mod callsign_tests {
         assert!(at_three.starts_with("callsign_"));
 
         // And they are not the Koch keys, whatever the Koch level happens to be.
-        let mut koch = settings.clone();
+        let mut koch = settings;
         koch.curriculum.char_set_mode = CharSetMode::Koch;
         let koch_mode = AutoAdjustMode::from_char_set(koch.curriculum.char_set_mode);
         assert_ne!(at_three, koch_mode.storage_key_at(&koch, 3, None));
