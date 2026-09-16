@@ -18,7 +18,13 @@ pub const QSB_MIN_GAIN: f64 = 0.25;
 /// reaches the signal, which is where copying gets genuinely hard. A CW
 /// contact at the edge of readability is around 0 dB, so that is the far end
 /// worth having.
-pub const QRN_OUTPUT_GAIN: f64 = 1.30;
+/// Static is quieter per crash now that each one is an impulse rather than a
+/// tail, so this makes back some of the bite the fader lost — but only some.
+/// Pushed further, the loudest crashes sit on the limiter and the crackle
+/// flattens into the wash this was trying to stop being: at 2.8 the crest
+/// factor falls from 24 to 13. Impulsive noise cannot be made loud in the
+/// average without being made smooth, and smooth is not what static is.
+pub const QRN_OUTPUT_GAIN: f64 = 1.80;
 pub const RECEIVER_OUTPUT_GAIN: f64 = 0.75;
 pub const RINGING_OUTPUT_GAIN: f64 = 0.55;
 
