@@ -13,6 +13,50 @@ use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::widgets::{control_id, Icon};
 
+/// What the app is playing when no session is running.
+///
+/// These are the four things that can be true of the audio outside training,
+/// and exactly one of them is: the band preview, the letter player and an
+/// envelope sample all want the same hardware, so a second one starting means
+/// the first has stopped.
+///
+/// They used to be three signals — a `bool`, a `bool` and an `Option<String>`
+/// — which said none of that. "Nothing is playing" was three writes in a row,
+/// spelled out eight times across the callbacks and already not spelled the
+/// same way twice; "two previews at once" was a state the types allowed and
+/// only care kept from happening. One value cannot be in two of these at once,
+/// so neither can the app.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Preview {
+    /// Nothing is playing, or a session has the audio.
+    #[default]
+    Idle,
+    /// The band-conditions preview, looping until stopped.
+    Band,
+    /// The Listen screen playing a character or the whole pool.
+    Letters,
+    /// One short envelope sample, named so the chip that sent it can show it.
+    Sample(String),
+}
+
+impl Preview {
+    pub fn is_band(&self) -> bool {
+        matches!(self, Self::Band)
+    }
+
+    pub fn is_letters(&self) -> bool {
+        matches!(self, Self::Letters)
+    }
+
+    /// The sample now sounding, for the chip that is waiting to light up.
+    pub fn sample(&self) -> Option<String> {
+        match self {
+            Self::Sample(text) => Some(text.clone()),
+            _ => None,
+        }
+    }
+}
+
 /// Head tags are injected once, on mount. They live in their own component so
 /// that App re-renders do not re-run them — `dioxus-document` warns on every
 /// prop update of a head element ("Changing the props of `Style {}` is not
@@ -46,9 +90,7 @@ pub fn App() -> Element {
     let result = use_signal(|| None::<cw_core::SessionResult>);
     let auto_message = use_signal(|| None::<String>);
     let mut toast = use_signal(|| None::<String>);
-    let mut previewing = use_signal(|| false);
-    let mut listen_playing = use_signal(|| false);
-    let mut sample_playing = use_signal(|| None::<String>);
+    let mut preview = use_signal(Preview::default);
     let mut theme = use_signal(|| Theme::from_key(&load_theme()));
     // The audio backend is injectable through context so a test can drive the
     // whole app with a player that records instead of one that needs a device.
@@ -113,9 +155,7 @@ pub fn App() -> Element {
         move |(): ()| {
             app.bump_session();
             app.silence_audio();
-            previewing.set(false);
-            listen_playing.set(false);
-            sample_playing.set(None);
+            preview.set(Preview::Idle);
             runtime.set(None);
             screen.set(Screen::Home);
         }
@@ -132,9 +172,7 @@ pub fn App() -> Element {
             if settings.peek().clone() != settings_now {
                 settings.set(settings_now.clone());
             }
-            previewing.set(false);
-            listen_playing.set(false);
-            sample_playing.set(None);
+            preview.set(Preview::Idle);
             let gen = match app.takeover_audio(&settings_now) {
                 Ok(gen) => gen,
                 Err(err) => {
@@ -159,8 +197,6 @@ pub fn App() -> Element {
                 return;
             }
             let settings_now = settings().clamp();
-            previewing.set(false);
-            sample_playing.set(None);
             let gen = match app.takeover_audio(&settings_now) {
                 Ok(gen) => gen,
                 Err(err) => {
@@ -168,12 +204,12 @@ pub fn App() -> Element {
                     return;
                 }
             };
-            listen_playing.set(true);
+            preview.set(Preview::Letters);
             let app_loop = (*app).clone();
             spawn(async move {
                 play_chars(app_loop.clone(), gen, settings_now, chars, 420, toast).await;
                 if app_loop.session_gen.get() == gen {
-                    listen_playing.set(false);
+                    preview.set(Preview::Idle);
                     app_loop.silence_audio();
                 }
             });
@@ -195,14 +231,12 @@ pub fn App() -> Element {
                     return;
                 }
             };
-            previewing.set(false);
-            listen_playing.set(false);
-            sample_playing.set(Some(text.clone()));
+            preview.set(Preview::Sample(text.clone()));
             let app_loop = (*app).clone();
             spawn(async move {
                 play_sample_text(app_loop.clone(), gen, settings_now, text, toast).await;
                 if app_loop.session_gen.get() == gen {
-                    sample_playing.set(None);
+                    preview.set(Preview::Idle);
                     app_loop.silence_audio();
                 }
             });
@@ -223,14 +257,12 @@ pub fn App() -> Element {
                     return;
                 }
             };
-            previewing.set(true);
-            listen_playing.set(false);
-            sample_playing.set(None);
+            preview.set(Preview::Band);
             let app_loop = (*app).clone();
             spawn(async move {
                 loop_preview_text(app_loop.clone(), gen, settings, "CQ", 280, toast).await;
                 if app_loop.session_gen.get() == gen {
-                    previewing.set(false);
+                    preview.set(Preview::Idle);
                 }
             });
         }
@@ -244,16 +276,14 @@ pub fn App() -> Element {
             }
             app.bump_session();
             app.silence_audio();
-            previewing.set(false);
-            listen_playing.set(false);
-            sample_playing.set(None);
+            preview.set(Preview::Idle);
         }
     });
 
     use_effect({
         let app = (*app).clone();
         move || {
-            if !previewing() {
+            if !preview().is_band() {
                 return;
             }
             let settings_now = settings().clamp();
@@ -261,46 +291,20 @@ pub fn App() -> Element {
         }
     });
 
-    let go_listen = use_callback({
+    // Leaving for another screen is the same move wherever you are going:
+    // a session in progress holds you, and otherwise whatever was sounding
+    // stops before the screen changes. Three copies of it was three chances
+    // to forget a line.
+    let go_to = use_callback({
         let app = app.clone();
-        move |(): ()| {
+        move |to: Screen| {
             if session_running(screen, runtime) {
                 return;
             }
             app.bump_session();
             app.silence_audio();
-            previewing.set(false);
-            listen_playing.set(false);
-            sample_playing.set(None);
-            screen.set(Screen::Listen);
-        }
-    });
-    let go_stats = use_callback({
-        let app = app.clone();
-        move |(): ()| {
-            if session_running(screen, runtime) {
-                return;
-            }
-            app.bump_session();
-            app.silence_audio();
-            previewing.set(false);
-            listen_playing.set(false);
-            sample_playing.set(None);
-            screen.set(Screen::Stats);
-        }
-    });
-    let go_settings = use_callback({
-        let app = app.clone();
-        move |(): ()| {
-            if session_running(screen, runtime) {
-                return;
-            }
-            app.bump_session();
-            app.silence_audio();
-            previewing.set(false);
-            listen_playing.set(false);
-            sample_playing.set(None);
-            screen.set(Screen::Settings);
+            preview.set(Preview::Idle);
+            screen.set(to);
         }
     });
     let exit_training = use_callback({
@@ -366,15 +370,15 @@ pub fn App() -> Element {
                     { app_routes(
                         signals,
                         ViewState {
-                            previewing: previewing(),
-                            listen_playing: listen_playing(),
-                            sample_playing: sample_playing(),
+                            previewing: preview().is_band(),
+                            listen_playing: preview().is_letters(),
+                            sample_playing: preview().sample(),
                         },
                         app.clone(),
                         AppCallbacks {
                             start_training,
                             go_home,
-                            go_listen,
+                            go_listen: EventHandler::new(move |()| go_to.call(Screen::Listen)),
                             start_band_preview,
                             stop_preview,
                             start_listen,
@@ -395,14 +399,14 @@ pub fn App() -> Element {
                     button {
                         id: control_id("nav", "stats"),
                         class: if screen() == Screen::Stats { "nav-item active" } else { "nav-item" },
-                        onclick: move |_| go_stats.call(()),
+                        onclick: move |_| go_to.call(Screen::Stats),
                         Icon { name: "chart" }
                         span { "Stats" }
                     }
                     button {
                         id: control_id("nav", "settings"),
                         class: if screen() == Screen::Settings { "nav-item active" } else { "nav-item" },
-                        onclick: move |_| go_settings.call(()),
+                        onclick: move |_| go_to.call(Screen::Settings),
                         Icon { name: "sliders" }
                         span { "Settings" }
                     }
@@ -832,6 +836,41 @@ mod ui_tests {
             let sent = recorder.texts().len();
             ui.advance(3_000).await;
             assert_eq!(recorder.texts().len(), sent, "the loop should have stopped");
+        });
+    }
+
+    /// The band preview, the letter player and an envelope sample all want the
+    /// same audio, so starting one has to stop whatever else was sounding.
+    ///
+    /// That used to be three separate flags reset by hand at every call site,
+    /// eight times over and already not the same twice. It is one value now,
+    /// which cannot hold two of them at once — this is that promise, checked
+    /// from the outside.
+    #[test]
+    fn starting_one_preview_stops_whatever_else_was_playing() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            ui.open_disclosures();
+
+            // The band preview is running and says so.
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            assert!(ui.has("Stop"), "the preview should be showing as live");
+
+            // A sample chip takes the audio, and the preview gives it up.
+            ui.click("chip-dit");
+            ui.advance(50).await;
+            assert!(
+                ui.has("Live preview"),
+                "the band preview should have stopped when the sample started"
+            );
+
+            // And the sample finishes on its own, leaving nothing playing.
+            assert!(ui.run_until(20_000, |ui| ui.has("Live preview")).await);
+            let settled = recorder.texts().len();
+            ui.advance(3_000).await;
+            assert_eq!(recorder.texts().len(), settled, "nothing should still loop");
         });
     }
 

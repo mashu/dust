@@ -5,16 +5,16 @@ use crate::ui::widgets::{control_id, Icon, Seg};
 
 #[component]
 pub fn StreakCard(status: StreakStatus) -> Element {
-    if status.state == StreakState::None {
-        return rsx! {};
-    }
     let freeze = if status.freezes_available > 0 {
         Some(status.freezes_available)
     } else {
         None
     };
-    let (class, emoji, body) = match status.state {
-        StreakState::Safe => {
+    // No streak is no card. Answering that here rather than in a guard above
+    // means there is no arm left to be unreachable — and no panic a later edit
+    // to the guard could reach.
+    let Some((class, emoji, body)) = (match status.state {
+        StreakState::Safe => Some({
             let used = if status.freezes_used > 0 {
                 let noun = if status.freezes_used == 1 {
                     "freeze"
@@ -30,24 +30,26 @@ pub fn StreakCard(status: StreakStatus) -> Element {
                 "🔥",
                 format!("{}-day streak — today is in the bag.{used}", status.days),
             )
-        }
-        StreakState::AtRisk => (
+        }),
+        StreakState::AtRisk => Some((
             "streak risk",
             "⚠️",
             format!(
                 "{}-day streak at risk — practice today to keep it alive.",
                 status.days
             ),
-        ),
-        StreakState::Lost => (
+        )),
+        StreakState::Lost => Some((
             "streak lost",
             "💔",
             format!(
                 "Your {}-day streak ended — one session today starts the next one.",
                 status.lost_streak_days.unwrap_or(0)
             ),
-        ),
-        StreakState::None => unreachable!(),
+        )),
+        StreakState::None => None,
+    }) else {
+        return rsx! {};
     };
     rsx! {
         div { class: class,
