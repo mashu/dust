@@ -438,6 +438,8 @@ fn the_scope_shows_the_band_without_showing_the_answer() {
             char_wpm: 20.0,
             effective_wpm: 20.0,
             volume,
+            weight: 1.0,
+            dash_ratio: 3.0,
         }
     }
     let html = render(|| {

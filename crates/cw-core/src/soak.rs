@@ -58,6 +58,7 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.playback.group_timeout = rng.pick_in_range(-5.0, 600.0);
     s.playback.group_repeat_min = rng.usize_in(0, 12) as u32;
     s.playback.group_repeat_max = rng.usize_in(0, 12) as u32;
+    s.playback.fist_variation = rng.pick_in_range(-1.0, 4.0);
     s.band.qsb_depth = rng.pick_in_range(-1.0, 4.0);
     s.band.qsb_rate_hz = rng.pick_in_range(-1.0, 40.0);
     s.band.qrn_level = rng.pick_in_range(-1.0, 4.0);
@@ -105,6 +106,11 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
         "seed {seed}"
     );
     assert!(p.effective_wpm_max >= p.effective_wpm_min, "seed {seed}");
+    assert!(
+        (0.0..=1.0).contains(&p.fist_variation),
+        "seed {seed}: fists stray by {}",
+        p.fist_variation
+    );
     assert!(p.group_repeat_min >= 1, "seed {seed}");
     assert!(p.group_repeat_max >= p.group_repeat_min, "seed {seed}");
     // Zero is the "wait for me" setting, so only a negative or wild one is wrong.

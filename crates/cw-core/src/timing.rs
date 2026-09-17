@@ -357,16 +357,34 @@ pub struct StationVoice {
     pub char_wpm: f64,
     pub effective_wpm: f64,
     pub volume: f64,
+    /// How heavy this operator's fist is: how much of each element is key-down
+    /// against the gap after it. One is a keyer. Above one the elements run
+    /// long and crowd the spaces, below it they are clipped and airy.
+    pub weight: f64,
+    /// How long their dahs run against their dits. Three is the book; real
+    /// fists sit anywhere either side of it, and it is the first thing you
+    /// notice about somebody's sending.
+    pub dash_ratio: f64,
 }
 
 /// Tune in a station, within whatever range the settings allow.
+/// How far a fist can stray from a keyer's at the top of the setting.
+const WEIGHT_SPREAD: f64 = 0.18;
+const DASH_RATIO_SPREAD: f64 = 0.45;
+
 pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> StationVoice {
     let char_wpm = resolve_char_wpm(settings, rng);
+    // Every station is somebody, and on the air most of them are not keyers.
+    // Drawn once per station and carried, so a repeat is the same operator
+    // sending again rather than a different one with the same call.
+    let spread = settings.playback.fist_variation.clamp(0.0, 1.0);
     StationVoice {
         tone_hz: resolve_tone_hz(settings, rng),
         char_wpm,
         effective_wpm: resolve_effective_wpm(settings, char_wpm, rng),
         volume: resolve_volume(settings, rng),
+        weight: 1.0 + spread * rng.pick_in_range(-WEIGHT_SPREAD, WEIGHT_SPREAD),
+        dash_ratio: 3.0 + spread * rng.pick_in_range(-DASH_RATIO_SPREAD, DASH_RATIO_SPREAD),
     }
 }
 
@@ -384,9 +402,15 @@ pub fn plan_morse_playback_for(
 
     let dot_char = dot_seconds(resolved_char_wpm);
     let dot_eff = dot_seconds(resolved_effective_wpm);
-    let dot_duration = dot_char;
-    let dash_duration = dot_char * 3.0;
-    let symbol_space = dot_char;
+    // The operator's fist. Elements are stretched or clipped by their weight
+    // and the gap after them takes the difference back, so a heavy fist
+    // crowds its spaces rather than simply sending slower — which is what
+    // weight actually is, and why it does not quietly change the speed.
+    let weight = voice.weight.clamp(0.7, 1.3);
+    let dash_ratio = voice.dash_ratio.clamp(2.0, 4.5);
+    let dot_duration = dot_char * weight;
+    let dash_duration = dot_char * dash_ratio * weight;
+    let symbol_space = dot_char * (2.0 - weight);
     let char_space = dot_eff * 3.0;
     let word_space = dot_eff * 7.0 * extra;
     let rise_time = settings.band.steepness / 1000.0;
@@ -1219,5 +1243,113 @@ mod pileup_tests {
                 assert!((STATIONS_MIN..=STATIONS_MAX).contains(&s.band.stations_max));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fist_tests {
+    use super::*;
+    use crate::settings::TrainingSettings;
+    use crate::FastrandRng;
+
+    fn settings(variation: f64) -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.playback.fist_variation = variation;
+        s.band.side_tone_min = 600.0;
+        s.band.side_tone_max = 600.0;
+        s.clamp()
+    }
+
+    /// Turned off, every station is a keyer — which is what the trainer was
+    /// before there was a setting, and what somebody learning their first
+    /// characters should be able to get back.
+    #[test]
+    fn at_zero_every_station_is_a_keyer() {
+        let s = settings(0.0);
+        for seed in 0..100u64 {
+            let voice = resolve_station(&s, &mut FastrandRng(seed * 31 + 7));
+            assert!((voice.weight - 1.0).abs() < 1e-9);
+            assert!((voice.dash_ratio - 3.0).abs() < 1e-9);
+        }
+    }
+
+    /// Turned up, they are people: no two send quite alike.
+    #[test]
+    fn every_operator_has_their_own_fist() {
+        let s = settings(1.0);
+        let fists: Vec<(f64, f64)> = (0..100u64)
+            .map(|seed| {
+                let v = resolve_station(&s, &mut FastrandRng(seed * 2_654_435_761 + 11));
+                (v.weight, v.dash_ratio)
+            })
+            .collect();
+        let heaviest = fists.iter().map(|f| f.0).fold(f64::MIN, f64::max);
+        let lightest = fists.iter().map(|f| f.0).fold(f64::MAX, f64::min);
+        assert!(
+            heaviest - lightest > 0.1,
+            "every fist came out the same weight: {lightest:.3}..{heaviest:.3}"
+        );
+        let longest = fists.iter().map(|f| f.1).fold(f64::MIN, f64::max);
+        let shortest = fists.iter().map(|f| f.1).fold(f64::MAX, f64::min);
+        assert!(
+            longest - shortest > 0.3,
+            "every dah was the same length: {shortest:.2}..{longest:.2}"
+        );
+    }
+
+    /// A fist is a person, not a moment. The same station sending again sends
+    /// the same way, or a repeat would be a different operator with your call.
+    #[test]
+    fn a_repeat_is_the_same_operator() {
+        let s = settings(1.0);
+        let voice = resolve_station(&s, &mut FastrandRng(99));
+        let once = plan_morse_playback_for("W1AW", &s, &voice);
+        let twice = plan_morse_playback_for("W1AW", &s, &voice);
+        assert_eq!(once.events.len(), twice.events.len());
+        for (a, b) in once.events.iter().zip(&twice.events) {
+            assert!((a.start_sec - b.start_sec).abs() < 1e-12);
+            assert!((a.duration_sec - b.duration_sec).abs() < 1e-12);
+        }
+    }
+
+    /// Weight is how the time inside a character is divided, not how much of
+    /// it there is. A heavy fist crowds its spaces; it does not send slower,
+    /// or the speed setting would stop meaning anything.
+    #[test]
+    fn a_heavy_fist_is_not_a_slow_one() {
+        let s = settings(1.0);
+        let keyer = StationVoice {
+            tone_hz: 600.0,
+            char_wpm: 20.0,
+            effective_wpm: 20.0,
+            volume: 1.0,
+            weight: 1.0,
+            dash_ratio: 3.0,
+        };
+        let heavy = StationVoice {
+            weight: 1.18,
+            ..keyer
+        };
+        let light = StationVoice {
+            weight: 0.82,
+            ..keyer
+        };
+        // "EEEEE" is all dits and gaps, where weight trades one against the
+        // other exactly.
+        let at = |voice: &StationVoice| plan_morse_playback_for("EEEEE", &s, voice).duration_sec;
+        let (base, long, short) = (at(&keyer), at(&heavy), at(&light));
+        assert!(
+            (long - base).abs() / base < 0.05 && (short - base).abs() / base < 0.05,
+            "weight moved the speed: {short:.3}s and {long:.3}s against {base:.3}s"
+        );
+        // But the key-down time really did change, which is the audible part.
+        let down = |voice: &StationVoice| {
+            plan_morse_playback_for("EEEEE", &s, voice)
+                .events
+                .iter()
+                .map(|e| e.duration_sec)
+                .sum::<f64>()
+        };
+        assert!(down(&heavy) > down(&light) * 1.2, "the fists sound alike");
     }
 }

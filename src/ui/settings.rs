@@ -3,7 +3,9 @@ use dioxus::prelude::*;
 
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::settings_charset::CharsetCard;
-use crate::ui::widgets::{Icon, LinkedRange, NumberField, SectionReset, Switch};
+use crate::ui::widgets::{
+    control_id, Icon, LinkedRange, NumberField, SectionReset, SliderField, Switch,
+};
 
 #[component]
 fn SectionHead(
@@ -174,6 +176,24 @@ pub fn SettingsView(
                         step: 1.0,
                         hint: "Farnsworth: characters stay fast, the gaps between them stretch.".to_string(),
                     }
+                }
+                SliderField {
+                    label: "Operator fists".to_string(),
+                    id: control_id("slider", "operator fists"),
+                    value_label: if s.playback.fist_variation <= 0.0 {
+                        "Keyers".to_string()
+                    } else {
+                        format!("{:.0}%", s.playback.fist_variation * 100.0)
+                    },
+                    value: s.playback.fist_variation,
+                    min: 0.0,
+                    max: 1.0,
+                    step: 0.05,
+                    disabled: false,
+                    onchange: move |v| settings.write().playback.fist_variation = v,
+                }
+                p { class: "muted", style: "margin: 0;",
+                    "How far the stations calling stray from a keyer — heavier or lighter elements, longer or shorter dahs, each operator sending their own way. At zero every station is a machine, which is what you want while a character is still new."
                 }
                 NumberField {
                     label: "Extra word spacing".to_string(),

@@ -375,6 +375,8 @@ mod tests {
             char_wpm: 20.0,
             effective_wpm: 20.0,
             volume,
+            weight: 1.0,
+            dash_ratio: 3.0,
         }
     }
 

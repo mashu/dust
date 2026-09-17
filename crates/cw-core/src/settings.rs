@@ -143,6 +143,10 @@ pub struct PlaybackSettings {
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
     pub lock_input_during_group_playback: bool,
+    /// How far operators' fists stray from a keyer's. Zero is a band of
+    /// machines, which is what this was before there was a setting.
+    #[serde(default = "defaults::fist_variation")]
+    pub fist_variation: f64,
     /// Lowest number of times a group is sent before the answer window opens.
     #[serde(default = "defaults::group_repeat")]
     pub group_repeat_min: u32,
@@ -165,6 +169,7 @@ impl Default for PlaybackSettings {
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
             lock_input_during_group_playback: true,
+            fist_variation: 0.35,
             group_repeat_min: 1,
             group_repeat_max: 1,
             link_group_repeat: true,
@@ -527,6 +532,7 @@ impl TrainingSettings {
         if self.curriculum.link_group_size {
             self.curriculum.max_group_size = self.curriculum.min_group_size;
         }
+        self.playback.fist_variation = self.playback.fist_variation.clamp(0.0, 1.0);
         self.playback.char_wpm_min = self.playback.char_wpm_min.clamp(5.0, 80.0);
         self.playback.char_wpm_max = self
             .playback
@@ -675,6 +681,7 @@ impl TrainingSettings {
                 self.playback.link_effective_wpm = d.playback.link_effective_wpm;
                 self.playback.link_char_to_effective = d.playback.link_char_to_effective;
                 self.playback.extra_word_space_multiplier = d.playback.extra_word_space_multiplier;
+                self.playback.fist_variation = d.playback.fist_variation;
             }
             SettingsSection::KeyingEnvelope => {
                 self.band.steepness = d.band.steepness;
@@ -959,6 +966,9 @@ mod defaults {
     }
     pub fn stations_min() -> u32 {
         super::STATIONS_MIN
+    }
+    pub fn fist_variation() -> f64 {
+        0.35
     }
     pub fn pileup_spread_hz() -> f64 {
         350.0
