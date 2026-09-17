@@ -66,10 +66,10 @@ pub use session::{
 };
 pub use settings::{
     AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, MixedAutoLevelAxis,
-    PlaybackSettings, PracticeWindow, RangeSetting, RangeValues, ReceiverProfile, TrainingSettings,
-    FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
-    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX,
-    STATIONS_MIN,
+    PlaybackSettings, PracticeWindow, RangeSetting, RangeValues, ReceiverProfile, SettingsSection,
+    TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, GROUP_REPEAT_MAX,
+    GROUP_REPEAT_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
+    PILEUP_SPREAD_MIN, RECEIVER_MODEL_GAIN_MAX, STATIONS_MAX, STATIONS_MIN,
 };
 pub use stats::{
     accuracy_chart, bigram_heatmap, character_diagnostics, confusion_entries, sampling_rows,

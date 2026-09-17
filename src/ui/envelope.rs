@@ -1,10 +1,10 @@
 //! Keying-envelope scope: draws the exact attack/decay shape the audio backends
 //! apply, and sends short test samples with the current settings.
 
-use cw_core::{envelope_shape, EnvelopeShape, TrainingSettings};
+use cw_core::{envelope_shape, EnvelopeShape, SettingsSection, TrainingSettings};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, pretty_number, Icon, SliderField};
+use crate::ui::widgets::{control_id, pretty_number, Icon, SectionReset, SliderField};
 
 const VIEW_W: f64 = 320.0;
 const VIEW_H: f64 = 120.0;
@@ -108,6 +108,14 @@ pub fn EnvelopeCard(
                         p { class: "card-note",
                             "A dit and a dah at {shape.wpm as u32} WPM · dit {dot_ms} ms"
                         }
+                    }
+                }
+                div { class: "card-tools",
+                    SectionReset {
+                        label: "keying envelope".to_string(),
+                        on_reset: move |()| {
+                            settings.write().reset_section(SettingsSection::KeyingEnvelope);
+                        },
                     }
                 }
             }

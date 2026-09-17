@@ -1,11 +1,13 @@
 use cw_core::{
-    RangeSetting, ReceiverProfile, TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN,
-    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX,
-    STATIONS_MIN,
+    RangeSetting, ReceiverProfile, SettingsSection, TrainingSettings, FILTER_BANDWIDTH_MAX,
+    FILTER_BANDWIDTH_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
+    PILEUP_SPREAD_MIN, RECEIVER_MODEL_GAIN_MAX, STATIONS_MAX, STATIONS_MIN,
 };
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, Icon, LinkedRange, Seg, SliderField, Switch, DISCLOSURE};
+use crate::ui::widgets::{
+    control_id, Icon, LinkedRange, SectionReset, Seg, SliderField, Switch, DISCLOSURE,
+};
 
 #[component]
 pub fn BandConditionsCard(
@@ -44,6 +46,12 @@ pub fn BandConditionsCard(
                             Icon { name: "play" }
                             "Live preview"
                         }
+                    }
+                    SectionReset {
+                        label: "band conditions".to_string(),
+                        on_reset: move |()| {
+                            settings.write().reset_section(SettingsSection::BandConditions);
+                        },
                     }
                     button {
                         id: control_id(DISCLOSURE, "band help"),
@@ -222,13 +230,24 @@ pub fn BandConditionsCard(
                 Icon { name: "chevron" }
             }
             if show_advanced() {
+                div { class: "row-between",
+                    p { class: "muted", style: "margin: 0;",
+                        "The model behind the receiver's own hiss and ringing."
+                    }
+                    SectionReset {
+                        label: "receiver model".to_string(),
+                        on_reset: move |()| {
+                            settings.write().reset_section(SettingsSection::ReceiverModel);
+                        },
+                    }
+                }
                 div { class: "field-grid",
                     SliderField {
                         label: "Model gain".to_string(),
                         value_label: format!("{:.1}×", s.band.receiver_background_gain),
                         value: s.band.receiver_background_gain,
                         min: 0.0,
-                        max: 20.0,
+                        max: RECEIVER_MODEL_GAIN_MAX,
                         step: 0.1,
                         disabled: !s.band.receiver_enabled,
                         onchange: move |v| settings.write().band.receiver_background_gain = v,

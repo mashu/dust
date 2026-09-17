@@ -181,6 +181,14 @@ pub const FILTER_BANDWIDTH_MAX: f64 = 2_000.0;
 /// How many stations can be calling at once. One is just the station you want;
 /// above that the others are QRM, and the count is drawn fresh for each group
 /// so a pile-up never arrives the same way twice.
+/// How far the receiver-character model's gain can be pushed.
+///
+/// This used to be 20, which was also its default — so the slider could only
+/// ever come down from where it started, and anyone wanting more character
+/// found it already against the stop. The model feeds the same soft limiter as
+/// everything else, so the top of the range is loud rather than broken.
+pub const RECEIVER_MODEL_GAIN_MAX: f64 = 80.0;
+
 pub const STATIONS_MIN: u32 = 1;
 pub const STATIONS_MAX: u32 = 5;
 /// How far either side of the wanted station the others can land, in hertz.
@@ -328,6 +336,54 @@ impl Default for AutoLevelSettings {
 /// The min/max pairs the settings screen edits. Keeping the invariants here —
 /// max never below min, "linked" collapsing the pair, character speed dragging
 /// effective speed along — keeps them testable and out of the UI's callbacks.
+/// A card on the settings screen, as far as "put this back how it was" is
+/// concerned.
+///
+/// Between them these cover every stored preference exactly once, which is
+/// what `every_setting_belongs_to_exactly_one_section` holds them to: add a
+/// field and forget to put it in a section and that test fails rather than the
+/// reset button quietly missing it.
+///
+/// Progress is not a preference, so the level you have reached, what the
+/// sampler has learned about you and your history are not in here and no
+/// reset touches them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SettingsSection {
+    /// How many groups, how long, how often repeated.
+    SessionShape,
+    /// Character and effective speed, and the spacing between words.
+    Speed,
+    /// Attack and decay of the keying.
+    KeyingEnvelope,
+    /// Which characters are practised, and how far into them you are.
+    CharacterSet,
+    /// Pitch and level of the station you are copying.
+    ToneAndVolume,
+    /// Fading, static, the filter and who else is calling.
+    BandConditions,
+    /// The advanced receiver-character model behind the background.
+    ReceiverModel,
+    /// Whether the trainer moves your level for you, and on what evidence.
+    AutoLevel,
+    /// How the next group is drawn from the characters you know.
+    CharacterSampling,
+}
+
+impl SettingsSection {
+    /// Every section, for the tests and for anything that wants to sweep them.
+    pub const ALL: [Self; 9] = [
+        Self::SessionShape,
+        Self::Speed,
+        Self::KeyingEnvelope,
+        Self::CharacterSet,
+        Self::ToneAndVolume,
+        Self::BandConditions,
+        Self::ReceiverModel,
+        Self::AutoLevel,
+        Self::CharacterSampling,
+    ];
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeSetting {
     CharWpm,
@@ -524,7 +580,10 @@ impl TrainingSettings {
         self.band.qsb_rate_hz = self.band.qsb_rate_hz.clamp(0.03, 1.5);
         self.band.qrn_level = self.band.qrn_level.clamp(0.0, 1.0);
         self.band.receiver_level = self.band.receiver_level.clamp(0.0, 1.0);
-        self.band.receiver_background_gain = self.band.receiver_background_gain.clamp(0.0, 20.0);
+        self.band.receiver_background_gain = self
+            .band
+            .receiver_background_gain
+            .clamp(0.0, RECEIVER_MODEL_GAIN_MAX);
         self.band.receiver_background_excitation_rate = self
             .band
             .receiver_background_excitation_rate
@@ -584,6 +643,103 @@ impl TrainingSettings {
             // you climb, so what you learned at tier 1 still counts at tier 6.
             CharSetMode::Callsign => "callsign".to_string(),
             _ => self.progress_alphabet().into_iter().collect(),
+        }
+    }
+
+    /// Put one card back the way it shipped, leaving every other card, and all
+    /// of your progress, alone.
+    ///
+    /// Values come from `Self::default()` rather than being written out again
+    /// here, so a changed default reaches the reset button on its own.
+    pub fn reset_section(&mut self, which: SettingsSection) {
+        let d = Self::default();
+        match which {
+            SettingsSection::SessionShape => {
+                self.curriculum.num_groups = d.curriculum.num_groups;
+                self.curriculum.min_group_size = d.curriculum.min_group_size;
+                self.curriculum.max_group_size = d.curriculum.max_group_size;
+                self.curriculum.link_group_size = d.curriculum.link_group_size;
+                self.playback.group_repeat_min = d.playback.group_repeat_min;
+                self.playback.group_repeat_max = d.playback.group_repeat_max;
+                self.playback.link_group_repeat = d.playback.link_group_repeat;
+                self.playback.group_timeout = d.playback.group_timeout;
+                self.playback.lock_input_during_group_playback =
+                    d.playback.lock_input_during_group_playback;
+            }
+            SettingsSection::Speed => {
+                self.playback.char_wpm_min = d.playback.char_wpm_min;
+                self.playback.char_wpm_max = d.playback.char_wpm_max;
+                self.playback.link_char_wpm = d.playback.link_char_wpm;
+                self.playback.effective_wpm_min = d.playback.effective_wpm_min;
+                self.playback.effective_wpm_max = d.playback.effective_wpm_max;
+                self.playback.link_effective_wpm = d.playback.link_effective_wpm;
+                self.playback.link_char_to_effective = d.playback.link_char_to_effective;
+                self.playback.extra_word_space_multiplier = d.playback.extra_word_space_multiplier;
+            }
+            SettingsSection::KeyingEnvelope => {
+                self.band.steepness = d.band.steepness;
+                self.band.envelope_smoothing = d.band.envelope_smoothing;
+            }
+            SettingsSection::CharacterSet => {
+                self.curriculum.char_set_mode = d.curriculum.char_set_mode;
+                self.curriculum.mixed_letters_percent = d.curriculum.mixed_letters_percent;
+                self.curriculum.custom_set = d.curriculum.custom_set.clone();
+                self.curriculum.custom_sequence = d.curriculum.custom_sequence.clone();
+                self.curriculum.sequence_is_custom = d.curriculum.sequence_is_custom;
+                self.curriculum.practice_window = d.curriculum.practice_window;
+                self.curriculum.sliding_window_start = d.curriculum.sliding_window_start;
+                self.curriculum.sliding_window_end = d.curriculum.sliding_window_end;
+            }
+            SettingsSection::ToneAndVolume => {
+                self.band.side_tone_min = d.band.side_tone_min;
+                self.band.side_tone_max = d.band.side_tone_max;
+                self.band.volume_min = d.band.volume_min;
+                self.band.volume_max = d.band.volume_max;
+                self.band.link_volume = d.band.link_volume;
+            }
+            SettingsSection::BandConditions => {
+                self.band.qsb_enabled = d.band.qsb_enabled;
+                self.band.qsb_depth = d.band.qsb_depth;
+                self.band.qsb_rate_hz = d.band.qsb_rate_hz;
+                self.band.qrn_enabled = d.band.qrn_enabled;
+                self.band.qrn_level = d.band.qrn_level;
+                self.band.receiver_enabled = d.band.receiver_enabled;
+                self.band.receiver_level = d.band.receiver_level;
+                self.band.receiver_profile = d.band.receiver_profile;
+                self.band.filter_bandwidth_hz = d.band.filter_bandwidth_hz;
+                self.band.stations_min = d.band.stations_min;
+                self.band.stations_max = d.band.stations_max;
+                self.band.pileup_spread_hz = d.band.pileup_spread_hz;
+                self.band.pileup_level_db = d.band.pileup_level_db;
+            }
+            SettingsSection::ReceiverModel => {
+                self.band.receiver_background_gain = d.band.receiver_background_gain;
+                self.band.receiver_background_excitation_rate =
+                    d.band.receiver_background_excitation_rate;
+                self.band.receiver_background_resonance = d.band.receiver_background_resonance;
+                self.band.receiver_background_decay = d.band.receiver_background_decay;
+                self.band.receiver_background_offset_hz = d.band.receiver_background_offset_hz;
+                self.band.receiver_background_offset_mod_depth_hz =
+                    d.band.receiver_background_offset_mod_depth_hz;
+                self.band.receiver_background_offset_mod_rate_hz =
+                    d.band.receiver_background_offset_mod_rate_hz;
+            }
+            SettingsSection::AutoLevel => {
+                self.auto_level.auto_adjust_level = d.auto_level.auto_adjust_level;
+                self.auto_level.auto_adjust_threshold = d.auto_level.auto_adjust_threshold;
+                self.auto_level.auto_adjust_below_threshold_count =
+                    d.auto_level.auto_adjust_below_threshold_count;
+                self.auto_level.auto_adjust_above_threshold_count =
+                    d.auto_level.auto_adjust_above_threshold_count;
+                self.auto_level.mixed_auto_level_next_axis =
+                    d.auto_level.mixed_auto_level_next_axis;
+            }
+            SettingsSection::CharacterSampling => {
+                self.auto_level.error_weight_strength = d.auto_level.error_weight_strength;
+                self.auto_level.char_sampling_coverage_strength =
+                    d.auto_level.char_sampling_coverage_strength;
+                self.auto_level.char_sampling_thompson = d.auto_level.char_sampling_thompson;
+            }
         }
     }
 
@@ -1424,5 +1580,135 @@ mod invariant_tests {
             s.set_range_linked(RangeSetting::Stations, true);
             assert!(s.range(RangeSetting::Stations).linked);
         }
+    }
+
+    /// The reset buttons have to cover everything between them, or one card
+    /// keeps a setting nobody can put back.
+    ///
+    /// Rather than restate the field lists here — which would only be the same
+    /// mistake written twice — this walks a fully-changed settings object
+    /// through every section's reset and checks what is left. Anything still
+    /// altered is a preference no card owns. Add a field, forget to place it,
+    /// and this names it.
+    #[test]
+    fn every_setting_belongs_to_exactly_one_section() {
+        // Progress, not preference: where you have got to, and what the
+        // sampler has learned. No reset button touches these.
+        const PROGRESS: &[&str] = &["level", "digitsLevel", "callsignLevel"];
+
+        let mut changed = wildly_different();
+        for section in SettingsSection::ALL {
+            changed.reset_section(section);
+        }
+
+        let after = serde_json::to_value(&changed).expect("serialize");
+        let fresh = serde_json::to_value(TrainingSettings::default()).expect("serialize");
+        let (after, fresh) = (
+            after.as_object().expect("an object"),
+            fresh.as_object().expect("an object"),
+        );
+
+        let orphans: Vec<&String> = after
+            .iter()
+            .filter(|(key, value)| {
+                !PROGRESS.contains(&key.as_str()) && fresh.get(*key) != Some(*value)
+            })
+            .map(|(key, _)| key)
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "no section resets these, so nothing can put them back: {orphans:?}"
+        );
+    }
+
+    /// And a reset stays inside its own card: changing everything, then
+    /// resetting one section, must leave the other sections changed.
+    #[test]
+    fn resetting_one_section_leaves_the_others_alone() {
+        for section in SettingsSection::ALL {
+            let mut one = wildly_different();
+            one.reset_section(section);
+
+            let mut all = wildly_different();
+            for other in SettingsSection::ALL {
+                all.reset_section(other);
+            }
+            assert_ne!(
+                one, all,
+                "{section:?} on its own put everything back — it is too broad"
+            );
+            assert_ne!(
+                one,
+                wildly_different(),
+                "{section:?} changed nothing at all"
+            );
+        }
+    }
+
+    /// Settings with every stored preference moved off its default, so a reset
+    /// has something to undo whichever section it is asked about.
+    fn wildly_different() -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        s.curriculum.num_groups = 7;
+        s.curriculum.min_group_size = 2;
+        s.curriculum.max_group_size = 9;
+        s.curriculum.link_group_size = true;
+        s.curriculum.char_set_mode = CharSetMode::Koch;
+        s.curriculum.mixed_letters_percent = 33;
+        s.curriculum.custom_set = vec!['Q', 'Z'];
+        s.curriculum.custom_sequence = vec!['Z', 'Q'];
+        s.curriculum.sequence_is_custom = true;
+        s.curriculum.practice_window = Some(PracticeWindow::Last3);
+        s.curriculum.sliding_window_start = 3;
+        s.curriculum.sliding_window_end = 9;
+        s.playback.char_wpm_min = 31.0;
+        s.playback.char_wpm_max = 33.0;
+        s.playback.link_char_wpm = true;
+        s.playback.effective_wpm_min = 11.0;
+        s.playback.effective_wpm_max = 13.0;
+        s.playback.link_effective_wpm = true;
+        s.playback.link_char_to_effective = false;
+        s.playback.extra_word_space_multiplier = 2.5;
+        s.playback.group_timeout = 9_000.0;
+        s.playback.lock_input_during_group_playback = false;
+        s.playback.group_repeat_min = 2;
+        s.playback.group_repeat_max = 4;
+        s.playback.link_group_repeat = true;
+        s.band.side_tone_min = 700.0;
+        s.band.side_tone_max = 900.0;
+        s.band.volume_min = 0.3;
+        s.band.volume_max = 0.6;
+        s.band.link_volume = true;
+        s.band.steepness = 7.0;
+        s.band.envelope_smoothing = 0.7;
+        s.band.qsb_enabled = false;
+        s.band.qsb_depth = 0.9;
+        s.band.qsb_rate_hz = 0.9;
+        s.band.qrn_enabled = false;
+        s.band.qrn_level = 0.9;
+        s.band.receiver_enabled = false;
+        s.band.receiver_level = 0.9;
+        s.band.receiver_profile = ReceiverProfile::Whistle;
+        s.band.filter_bandwidth_hz = 250.0;
+        s.band.stations_min = 2;
+        s.band.stations_max = 4;
+        s.band.pileup_spread_hz = 400.0;
+        s.band.pileup_level_db = 9.0;
+        s.band.receiver_background_gain = 3.0;
+        s.band.receiver_background_excitation_rate = 22.0;
+        s.band.receiver_background_resonance = 30.0;
+        s.band.receiver_background_decay = 0.9;
+        s.band.receiver_background_offset_hz = 40.0;
+        s.band.receiver_background_offset_mod_depth_hz = 12.0;
+        s.band.receiver_background_offset_mod_rate_hz = 3.0;
+        s.auto_level.auto_adjust_level = false;
+        s.auto_level.auto_adjust_threshold = 77.0;
+        s.auto_level.auto_adjust_below_threshold_count = 4;
+        s.auto_level.auto_adjust_above_threshold_count = 9;
+        s.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Digits;
+        s.auto_level.error_weight_strength = 0.9;
+        s.auto_level.char_sampling_coverage_strength = 0.9;
+        s.auto_level.char_sampling_thompson = false;
+        s
     }
 }

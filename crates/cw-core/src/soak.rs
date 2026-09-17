@@ -67,6 +67,7 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.band.stations_max = rng.usize_in(0, 12) as u32;
     s.band.pileup_spread_hz = rng.pick_in_range(-100.0, 2_000.0);
     s.band.pileup_level_db = rng.pick_in_range(-20.0, 90.0);
+    s.band.receiver_background_gain = rng.pick_in_range(-5.0, 200.0);
     s.band.receiver_background_resonance = rng.pick_in_range(-10.0, 600.0);
     s.band.receiver_background_offset_mod_depth_hz = rng.pick_in_range(-100.0, 4_000.0);
     s.band.receiver_background_offset_mod_rate_hz = rng.pick_in_range(-5.0, 80.0);
@@ -125,6 +126,11 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
         (FILTER_BANDWIDTH_MIN..=FILTER_BANDWIDTH_MAX).contains(&b.filter_bandwidth_hz),
         "seed {seed}: the receiver came out {} Hz wide",
         b.filter_bandwidth_hz
+    );
+    assert!(
+        (0.0..=crate::settings::RECEIVER_MODEL_GAIN_MAX).contains(&b.receiver_background_gain),
+        "seed {seed}: the receiver model came out at {}x",
+        b.receiver_background_gain
     );
     assert!(
         (STATIONS_MIN..=STATIONS_MAX).contains(&b.stations_min)
@@ -630,7 +636,11 @@ fn no_band_setting_makes_an_unlistenable_receiver() {
             out.len()
         );
         let loudest = out.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        if settings.band.qrn_level > 0.05 || settings.band.receiver_level > 0.05 {
+        // A model at no gain is a model that is off, however the switch above
+        // it is set — so it does not count as something that should be heard.
+        let receiver_sounds =
+            settings.band.receiver_level > 0.05 && settings.band.receiver_background_gain > 0.0;
+        if settings.band.qrn_level > 0.05 || receiver_sounds {
             assert!(
                 loudest > 1e-6,
                 "seed {seed}: the band was switched on and made no sound"

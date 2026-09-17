@@ -1,12 +1,18 @@
-use cw_core::{CharSetMode, RangeSetting, TrainingSettings, GROUP_REPEAT_MAX};
+use cw_core::{CharSetMode, RangeSetting, SettingsSection, TrainingSettings, GROUP_REPEAT_MAX};
 use dioxus::prelude::*;
 
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::settings_charset::CharsetCard;
-use crate::ui::widgets::{Icon, LinkedRange, NumberField, Switch};
+use crate::ui::widgets::{Icon, LinkedRange, NumberField, SectionReset, Switch};
 
 #[component]
-fn SectionHead(icon: &'static str, title: &'static str, note: &'static str) -> Element {
+fn SectionHead(
+    icon: &'static str,
+    title: &'static str,
+    note: &'static str,
+    settings: Signal<TrainingSettings>,
+    section: SettingsSection,
+) -> Element {
     rsx! {
         div { class: "card-head",
             div { class: "card-head-main",
@@ -14,6 +20,14 @@ fn SectionHead(icon: &'static str, title: &'static str, note: &'static str) -> E
                 div {
                     h3 { class: "card-title", "{title}" }
                     p { class: "card-note", "{note}" }
+                }
+            }
+            div { class: "card-tools",
+                SectionReset {
+                    label: title.to_lowercase(),
+                    on_reset: move |()| {
+                        settings.write().reset_section(section);
+                    },
                 }
             }
         }
@@ -76,6 +90,8 @@ pub fn SettingsView(
                     icon: "timer",
                     title: "Session shape",
                     note: "How much gets sent in one run",
+                    settings,
+                    section: SettingsSection::SessionShape,
                 }
                 div { class: "field-grid",
                     NumberField {
@@ -135,6 +151,8 @@ pub fn SettingsView(
                     icon: "gauge",
                     title: "Speed",
                     note: "Character speed and Farnsworth spacing",
+                    settings,
+                    section: SettingsSection::Speed,
                 }
                 SettingsRange {
                     settings,
@@ -183,6 +201,8 @@ pub fn SettingsView(
                     icon: "volume",
                     title: "Tone & volume",
                     note: "Side tone pitch and sending level",
+                    settings,
+                    section: SettingsSection::ToneAndVolume,
                 }
                 SettingsRange {
                     settings,
@@ -217,6 +237,8 @@ pub fn SettingsView(
                     icon: "target",
                     title: "Auto level",
                     note: "Move the level from session accuracy",
+                    settings,
+                    section: SettingsSection::AutoLevel,
                 }
                 Switch {
                     title: "Adjust the level for me".to_string(),
@@ -258,6 +280,8 @@ pub fn SettingsView(
                     icon: "shuffle",
                     title: "Character sampling",
                     note: "Which characters come round more often",
+                    settings,
+                    section: SettingsSection::CharacterSampling,
                 }
                 div { class: "field-grid",
                     NumberField {

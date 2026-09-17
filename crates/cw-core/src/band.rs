@@ -391,7 +391,11 @@ impl BandMixer {
             return 0.0;
         }
         let level = shaped_level(self.settings.band.receiver_level);
-        let model_gain = self.settings.band.receiver_background_gain.clamp(0.0, 20.0);
+        let model_gain = self
+            .settings
+            .band
+            .receiver_background_gain
+            .clamp(0.0, crate::settings::RECEIVER_MODEL_GAIN_MAX);
         let center = self.settings.side_tone_center();
         let offset = self
             .settings

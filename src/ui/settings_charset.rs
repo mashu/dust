@@ -1,12 +1,12 @@
 use cw_core::{
     apply_custom_sequence, apply_practice_window, apply_sequence_preset, current_practice_window,
     fit_settings_to_alphabet, sequence_preset_id, tier_examples, unlocked_practice_count,
-    CharSetMode, PracticeWindow, TrainingSettings, CALLSIGN_TIER_MAX, MAX_DIGITS_LEVEL,
-    SEQUENCE_PRESETS,
+    CharSetMode, PracticeWindow, SettingsSection, TrainingSettings, CALLSIGN_TIER_MAX,
+    MAX_DIGITS_LEVEL, SEQUENCE_PRESETS,
 };
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, Icon, ModePill, NumberField, Seg};
+use crate::ui::widgets::{control_id, Icon, ModePill, NumberField, SectionReset, Seg};
 
 #[component]
 pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
@@ -37,6 +37,14 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         } else {
                             p { class: "card-note", "{mode_note} · {unlocked} in play" }
                         }
+                    }
+                }
+                div { class: "card-tools",
+                    SectionReset {
+                        label: "character set".to_string(),
+                        on_reset: move |()| {
+                            settings.write().reset_section(SettingsSection::CharacterSet);
+                        },
                     }
                 }
             }

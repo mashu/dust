@@ -893,6 +893,51 @@ mod ui_tests {
     /// The pile-up controls only exist once more than one station can call, so
     /// a sweep that never turns the count up never touches them — which is how
     /// a card of sliders goes untested.
+    /// Each card can be put back on its own, without taking the rest of the
+    /// screen with it.
+    #[test]
+    fn a_section_resets_itself_and_leaves_the_others_alone() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            ui.open_disclosures();
+
+            // Move something on two different cards.
+            ui.type_into("slider-qrn-intensity", "0.9");
+            ui.advance(50).await;
+            ui.commit("fixed-stations-calling", "4");
+            ui.advance(50).await;
+            ui.type_into("slider-model-gain", "55");
+            ui.advance(50).await;
+
+            let changed = crate::persist::load_settings();
+            assert_eq!(changed.band.stations_max, 4);
+            assert!((changed.band.receiver_background_gain - 55.0).abs() < 0.5);
+
+            // Reset the receiver model only.
+            ui.click("reset-receiver-model");
+            ui.advance(50).await;
+            let after = crate::persist::load_settings();
+            let fresh = cw_core::TrainingSettings::default();
+            assert!(
+                (after.band.receiver_background_gain - fresh.band.receiver_background_gain).abs()
+                    < 0.001,
+                "the model gain should be back to its default"
+            );
+            assert_eq!(
+                after.band.stations_max, 4,
+                "resetting the receiver model must not touch the band conditions"
+            );
+
+            // And now the band conditions, which owns the stations.
+            ui.click("reset-band-conditions");
+            ui.advance(50).await;
+            let after = crate::persist::load_settings();
+            assert_eq!(after.band.stations_max, fresh.band.stations_max);
+            assert!((after.band.qrn_level - fresh.band.qrn_level).abs() < 0.001);
+        });
+    }
+
     #[test]
     fn the_pile_up_controls_appear_with_the_stations_and_work() {
         run(|| async {

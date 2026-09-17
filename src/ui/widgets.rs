@@ -146,6 +146,8 @@ pub fn Icon(name: String) -> Element {
             "M7 21.5l-4-4 4-4",
             "M21 12.5v1a4 4 0 01-4 4H3",
         ],
+        // A single turn back round: undo, not the two-arrow loop of "repeat".
+        "reset" => &["M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8", "M3 3.5V8h4.5"],
         "letters" => &["M3 18l5-12 5 12", "M5 14h6", "M16 9h5", "M18.5 9v9"],
         "timer" => &[
             "M20 13.5a8 8 0 11-16 0 8 8 0 0116 0z",
@@ -424,6 +426,28 @@ pub fn NumberField(
 }
 
 /// A value that is either fixed or drawn from a min–max range each time it is used.
+/// Put one card back to its defaults.
+///
+/// Sits with the card's own tools rather than in one page-wide "reset
+/// everything", because the thing you want back is almost always the corner
+/// you have just been experimenting in — and a single global reset is the one
+/// nobody dares press.
+#[component]
+pub fn SectionReset(label: String, on_reset: EventHandler<()>) -> Element {
+    let title = format!("Reset {label} to defaults");
+    rsx! {
+        button {
+            id: control_id("reset", &label),
+            class: "icon-btn",
+            r#type: "button",
+            title: "{title}",
+            aria_label: "{title}",
+            onclick: move |_| on_reset.call(()),
+            Icon { name: "reset" }
+        }
+    }
+}
+
 #[component]
 pub fn LinkedRange(
     label: String,
