@@ -11,7 +11,7 @@ use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
-use crate::ui::training::TrainingView;
+use crate::ui::training::{TrainingScope, TrainingView};
 
 /// What the screens show beyond the session itself: whichever preview is
 /// running, and the sample chip that is lit.
@@ -133,37 +133,45 @@ pub fn app_routes(
                 let app_submit = app.clone();
                 let app_stop = app;
                 rsx! {
-                    TrainingView {
-                        current: view.current,
-                        total: view.sent.len(),
-                        groups: view.sent,
-                        inputs: view.inputs,
-                        confirmed: view.confirmed,
-                        focused: view.focused,
-                        playing,
-                        locked: view.locked,
-                        repeat_total: view.repeat_total,
-                        repeat_done: view.repeat_done,
-                        settings: settings(),
-                        heard,
-                        // Changes on every send, repeats included, so the
-                        // scope's timebase restarts with the keying.
-                        send_id: (view.current as u64) << 16 | u64::from(view.repeat_done),
-                        on_change: move |(idx, value): (usize, String)| {
-                            send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
-                        },
-                        on_confirm: move |_idx| {
-                            send_command((*app_confirm).clone(), signals, SessionEvent::Confirm);
-                        },
-                        on_focus: move |idx| {
-                            send_command((*app_focus).clone(), signals, SessionEvent::Focus { index: idx });
-                        },
-                        on_submit: move |_| {
-                            send_command((*app_submit).clone(), signals, SessionEvent::FinishNow);
-                        },
-                        on_stop: move |_| {
-                            send_command((*app_stop).clone(), signals, SessionEvent::Abort);
-                        },
+                    div { class: "stack",
+                        TrainingScope {
+                            focused: view.focused,
+                            total: view.sent.len(),
+                            playing,
+                            repeat_total: view.repeat_total,
+                            repeat_done: view.repeat_done,
+                            settings: settings(),
+                            heard,
+                            // Changes on every send, repeats included, so the
+                            // scope's timebase restarts with the keying.
+                            send_id: (view.current as u64) << 16 | u64::from(view.repeat_done),
+                        }
+                        TrainingView {
+                            current: view.current,
+                            groups: view.sent,
+                            inputs: view.inputs,
+                            confirmed: view.confirmed,
+                            focused: view.focused,
+                            playing,
+                            locked: view.locked,
+                            repeat_total: view.repeat_total,
+                            repeat_done: view.repeat_done,
+                            on_change: move |(idx, value): (usize, String)| {
+                                send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
+                            },
+                            on_confirm: move |_idx| {
+                                send_command((*app_confirm).clone(), signals, SessionEvent::Confirm);
+                            },
+                            on_focus: move |idx| {
+                                send_command((*app_focus).clone(), signals, SessionEvent::Focus { index: idx });
+                            },
+                            on_submit: move |_| {
+                                send_command((*app_submit).clone(), signals, SessionEvent::FinishNow);
+                            },
+                            on_stop: move |_| {
+                                send_command((*app_stop).clone(), signals, SessionEvent::Abort);
+                            },
+                        }
                     }
                 }
             } else {

@@ -247,8 +247,10 @@ pub fn BandScope(
     live: bool,
     send_id: u64,
 ) -> Element {
-    // A scope only looks like a scope if it is redrawn. Everything else on the
-    // screen is still, so this is the one place a frame loop earns its keep.
+    // A scope only looks like a scope if it is redrawn, and only while a send
+    // is running. After that the face holds a still of the receiver's hiss —
+    // an open set, not a dead line — and the 40 ms loop stops so the answer
+    // box does not share the renderer with a 25 fps SVG.
     // Where this send began. Everything on the face is drawn from the clock's
     // distance past it, not from a count of frames: a frame costs 40 ms of
     // waiting plus the render, so counting frames runs slow and the trace
@@ -256,14 +258,34 @@ pub fn BandScope(
     // clock means a slow frame is a dropped frame, never a shifted one.
     let mut started = use_signal(mark);
     let mut elapsed_ms = use_signal(|| 0u64);
-    use_hook(|| {
+    // Each live run gets its own epoch. Bumping it is how a send that has
+    // ended — or a scope that has unmounted — tells its frame loop to stop,
+    // instead of painting idle hiss at 25 fps while the answer box is trying
+    // to keep up with the keys.
+    let mut epoch = use_signal(|| 0u64);
+    use_effect(use_reactive!(|live| {
+        if !live {
+            let next = epoch.peek().saturating_add(1);
+            epoch.set(next);
+            return;
+        }
+        let this_epoch = epoch.peek().saturating_add(1);
+        epoch.set(this_epoch);
+        started.set(mark());
+        elapsed_ms.set(0);
         spawn(async move {
             loop {
                 sleep_ms(FRAME_MS).await;
-                let since = since_ms(*started.peek());
-                elapsed_ms.set(since);
+                if *epoch.peek() != this_epoch {
+                    return;
+                }
+                elapsed_ms.set(since_ms(*started.peek()));
             }
         });
+    }));
+    use_drop(move || {
+        let next = epoch.peek().saturating_add(1);
+        epoch.set(next);
     });
     // Every send starts the timebase again, because the keying it is drawn
     // from starts again too: `Heard::key` is seconds from the top of *this*
@@ -377,6 +399,19 @@ mod tests {
             volume,
             weight: 1.0,
             dash_ratio: 3.0,
+        }
+    }
+
+    /// A scope with nobody sending: the loop must not run.
+    #[component]
+    fn IdleScopeHarness() -> Element {
+        rsx! {
+            BandScope {
+                settings: settings(500.0, 1),
+                sending: Vec::new(),
+                live: false,
+                send_id: 0,
+            }
         }
     }
 
@@ -560,6 +595,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Idle hiss is a still of an open receiver, not a 25 fps animation. The
+    /// answer box has to share the renderer with this face, so once the send
+    /// is over the loop stops.
+    #[test]
+    fn an_idle_scope_does_not_keep_redrawing() {
+        use crate::testing::{run, Ui};
+
+        run(|| async {
+            let mut ui = Ui::new(IdleScopeHarness, ());
+            let first = ui.html();
+            ui.advance(200).await;
+            assert_eq!(first, ui.html(), "an idle scope kept redrawing");
+        });
     }
 
     /// The trace has to be alive, or it is a picture of a scope. Two frames

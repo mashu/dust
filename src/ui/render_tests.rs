@@ -17,9 +17,65 @@ use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
 use super::results::ResultsView;
+use super::scope::Heard;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
-use super::training::TrainingView;
+use super::training::{TrainingScope, TrainingView};
+
+/// Same shape the router draws: the scope is a sibling of the answer list,
+/// not a child of it.
+#[component]
+fn TrainingScreen(
+    current: usize,
+    total: usize,
+    groups: Vec<String>,
+    inputs: Vec<String>,
+    confirmed: Vec<bool>,
+    focused: usize,
+    playing: bool,
+    locked: bool,
+    repeat_total: u32,
+    repeat_done: u32,
+    settings: TrainingSettings,
+    heard: Vec<Heard>,
+    send_id: u64,
+    on_change: EventHandler<(usize, String)>,
+    on_confirm: EventHandler<usize>,
+    on_focus: EventHandler<usize>,
+    on_submit: EventHandler<()>,
+    on_stop: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div { class: "stack",
+            TrainingScope {
+                focused,
+                total,
+                playing,
+                repeat_total,
+                repeat_done,
+                settings,
+                heard,
+                send_id,
+            }
+            TrainingView {
+                current,
+                groups,
+                inputs,
+                confirmed,
+                focused,
+                playing,
+                locked,
+                repeat_total,
+                repeat_done,
+                on_change,
+                on_confirm,
+                on_focus,
+                on_submit,
+                on_stop,
+            }
+        }
+    }
+}
 
 fn render(app: fn() -> Element) -> String {
     let mut dom = VirtualDom::new(app);
@@ -429,7 +485,6 @@ fn listen_renders_the_selected_character() {
 
 #[test]
 fn the_scope_shows_the_band_without_showing_the_answer() {
-    use super::scope::Heard;
     use cw_core::timing::StationVoice;
 
     fn voice(tone_hz: f64, volume: f64) -> StationVoice {
@@ -444,7 +499,7 @@ fn the_scope_shows_the_band_without_showing_the_answer() {
     }
     let html = render(|| {
         rsx! {
-            TrainingView {
+            TrainingScreen {
                 current: 0,
                 total: 1,
                 groups: vec!["QRXZJ".to_string()],
@@ -494,7 +549,7 @@ fn the_scope_shows_the_band_without_showing_the_answer() {
 fn training_shows_the_send_counter_while_repeating() {
     let html = render(|| {
         rsx! {
-            TrainingView {
+            TrainingScreen {
                 current: 0,
                 total: 3,
                 groups: vec!["KM".to_string(), String::new(), String::new()],
@@ -526,7 +581,7 @@ fn training_shows_the_send_counter_while_repeating() {
 fn training_without_repeats_omits_the_counter() {
     let html = render(|| {
         rsx! {
-            TrainingView {
+            TrainingScreen {
                 current: 1,
                 total: 2,
                 groups: vec!["KM".to_string(), "UR".to_string()],
@@ -726,7 +781,7 @@ mod interactions {
         let mut focused = use_signal(|| 0usize);
         let mut typed = use_signal(String::new);
         rsx! {
-            TrainingView {
+            TrainingScreen {
                 current: 0,
                 total: 2,
                 groups: vec!["KM".to_string(), "UR".to_string()],
@@ -775,6 +830,102 @@ mod interactions {
             let first = ui.html();
             ui.advance(200).await;
             assert_ne!(first, ui.html(), "the scope stopped redrawing");
+        });
+    }
+
+    fn scope_trace_path(html: &str) -> String {
+        let from = html
+            .find("class=\"scope-trace\"")
+            .expect("the trace should be on screen");
+        let d_at = html[from..].find("d=\"").expect("the trace needs a path") + from + 3;
+        let end = html[d_at..].find('"').unwrap() + d_at;
+        html[d_at..end].to_string()
+    }
+
+    #[component]
+    fn AnsweringHarness() -> Element {
+        let mut typed = use_signal(String::new);
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec![typed(), String::new()],
+                confirmed: vec![false, false],
+                focused: 0,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                settings: cw_core::TrainingSettings::default(),
+                heard: Vec::new(),
+                send_id: 0,
+                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+            if !typed().is_empty() {
+                p { id: "committed-answer", "committed:{typed()}" }
+            }
+        }
+    }
+
+    /// After playout the loop is off, so waiting does not paint a new trace.
+    #[test]
+    fn an_idle_training_scope_stays_still() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            let first = scope_trace_path(&ui.html());
+            ui.advance(200).await;
+            assert_eq!(
+                first,
+                scope_trace_path(&ui.html()),
+                "the idle training scope kept redrawing"
+            );
+        });
+    }
+
+    /// Typing is the group list's business. The scope's path must not change
+    /// when a key lands in the answer box.
+    #[test]
+    fn typing_does_not_redraw_the_scope() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            let first = scope_trace_path(&ui.html());
+            ui.type_into("group-input-0", "K");
+            assert!(ui.has("K"));
+            assert_eq!(
+                first,
+                scope_trace_path(&ui.html()),
+                "typing rebuilt the scope"
+            );
+        });
+    }
+
+    /// One character short of the send stays in the box. The session does not
+    /// hear it until the debounce has sat still.
+    #[test]
+    fn an_incomplete_answer_stays_local_until_debounce() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            ui.type_into("group-input-0", "K");
+            assert!(ui.has("K"));
+            assert!(!ui.has("committed:"));
+            ui.advance(48).await;
+            assert!(ui.has("committed:K"));
+        });
+    }
+
+    /// A full-length answer is the one case that cannot wait: auto-confirm
+    /// starts from this commit.
+    #[test]
+    fn a_full_length_answer_commits_on_the_key() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            ui.type_into("group-input-0", "KM");
+            assert!(ui.has("committed:KM"));
         });
     }
 }
