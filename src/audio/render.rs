@@ -54,12 +54,22 @@ impl LiveQsb {
 /// do next door.
 pub struct LiveAgc {
     gain_bits: AtomicU64,
+    /// How loud the send itself is right now, before the AGC has had it.
+    ///
+    /// A receiver's gain answers to everything reaching it, signal included,
+    /// not to the noise alone. The browser gets that for nothing — its
+    /// compressor sits after the mix, where the two are already one sound.
+    /// Here they are two device streams, so the send has to say how loud it is
+    /// and the background has to listen. Pre-gain, so this cannot feed back
+    /// into the gain it is about to be multiplied by.
+    send_bits: AtomicU64,
 }
 
 impl LiveAgc {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             gain_bits: AtomicU64::new(1.0f64.to_bits()),
+            send_bits: AtomicU64::new(0.0f64.to_bits()),
         })
     }
 
@@ -70,6 +80,14 @@ impl LiveAgc {
     /// One, when no background is running — nothing is there to duck behind.
     pub fn gain(&self) -> f32 {
         f64::from_bits(self.gain_bits.load(Ordering::Relaxed)) as f32
+    }
+
+    pub fn note_send(&self, level: f64) {
+        self.send_bits.store(level.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn send_level(&self) -> f64 {
+        f64::from_bits(self.send_bits.load(Ordering::Relaxed))
     }
 }
 
@@ -206,18 +224,22 @@ impl TonePlayback {
         }
         let mut i = self.pos.load(Ordering::SeqCst);
         let sr = self.sample_rate;
+        let mut loudest = 0.0f32;
         interleave(out, channels, || {
             let Some(dry) = self.samples.get(i).copied() else {
                 return 0.0;
             };
-            let value =
-                dry * self.qsb.gain_at(self.started_at_sec + i as f64 / sr) * self.agc.gain();
+            let faded = dry * self.qsb.gain_at(self.started_at_sec + i as f64 / sr);
+            loudest = loudest.max(faded.abs());
             i += 1;
-            value
+            faded * self.agc.gain()
         });
         self.pos.store(i, Ordering::SeqCst);
+        // What the receiver has to ride, alongside the noise.
+        self.agc.note_send(f64::from(loudest));
         if i >= self.samples.len() {
             self.finished.store(true, Ordering::SeqCst);
+            self.agc.note_send(0.0);
         }
     }
 
@@ -279,7 +301,9 @@ impl BandPlayback {
     /// rather than dropping to silence mid-sample.
     pub fn fill(&mut self, out: &mut [f32], channels: usize) {
         if !self.stop.load(Ordering::SeqCst) {
+            let send = self.agc.send_level();
             let mixer = &mut self.mixer;
+            mixer.note_send_level(send);
             interleave(out, channels, || mixer.next_background());
             // Published once a buffer rather than once a sample: the release
             // runs over the best part of a second, so a buffer's worth of lag

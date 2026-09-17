@@ -335,18 +335,18 @@ pub struct Agc {
 /// How far above the band's standing level a peak has to be before the gain
 /// comes down. Below this the receiver is riding a steady band and leaves it
 /// alone.
-const AGC_TRIGGER: f64 = 2.2;
+pub const AGC_TRIGGER: f64 = 2.2;
 /// Seconds for the gain to close on a level it has to duck to.
-const AGC_ATTACK_SEC: f64 = 0.002;
+pub const AGC_ATTACK_SEC: f64 = 0.002;
 /// Seconds for it to walk back up once the crash has gone.
-const AGC_RELEASE_SEC: f64 = 0.45;
+pub const AGC_RELEASE_SEC: f64 = 0.45;
 /// How quickly the fast follower forgets a peak.
 const AGC_FAST_SEC: f64 = 0.06;
 /// How long the receiver takes to decide what the band's standing level is.
 const AGC_STANDING_SEC: f64 = 1.5;
 /// How far down it will ever pull. Past this a crash is silencing the band
 /// rather than riding over it, and a group would be lost rather than hard.
-const AGC_MAX_DUCK: f64 = 0.25;
+pub const AGC_MAX_DUCK: f64 = 0.25;
 
 impl Agc {
     pub fn new(sample_rate: u32) -> Self {
@@ -421,6 +421,31 @@ impl Agc {
     pub fn gain(&self) -> f64 {
         self.gain
     }
+
+    /// What the receiver currently reckons the band's standing level is.
+    pub fn standing(&self) -> f64 {
+        self.standing
+    }
+}
+
+/// How loud this band sits when nothing unusual is happening.
+///
+/// The browser cannot run the receiver's own AGC — its noise is a buffer and
+/// its Morse is live, and there is no arithmetic it can do across both. What
+/// it has is a compressor node, and a compressor needs a threshold in absolute
+/// terms, which is the very thing that would undo the filter. So it is given
+/// one measured from these settings: narrow the receiver, the floor drops, the
+/// threshold drops with it, and a crash still has to stand the same distance
+/// above the band to duck it. Scale-invariant by measurement rather than by
+/// arithmetic, which is the same property arrived at the other way round.
+pub fn band_standing_level(sample_rate: u32, settings: &TrainingSettings) -> f64 {
+    let mut mixer = BandMixer::new(sample_rate, settings, 0x5EED_1234);
+    let seconds = 3;
+    let mut buf = vec![0.0f32; sample_rate.max(1) as usize];
+    for _ in 0..seconds {
+        mixer.fill_background(&mut buf);
+    }
+    mixer.agc_standing()
 }
 
 /// Real-time static and receiver-character generator. QSB is applied
@@ -437,6 +462,7 @@ pub struct BandMixer {
     receiver_secondary: Svf,
     receiver_ring: Svf,
     agc: Agc,
+    send_level: f64,
 }
 
 impl BandMixer {
@@ -466,6 +492,7 @@ impl BandMixer {
             ringing_energy: 0.0,
             atmospheric,
             agc: Agc::new(sample_rate.max(1)),
+            send_level: 0.0,
             receiver: ReceiverFilter::from_settings(sample_rate.max(1), &settings_for_filter),
             receiver_primary: Svf::bandpass(sr, (center + offset).max(20.0), resonance),
             receiver_secondary: Svf::bandpass(
@@ -599,8 +626,16 @@ impl BandMixer {
         // The gain the receiver is riding at, which a crash has just pulled
         // down and which everything else has to come down with — including the
         // send, which reads this through `agc_gain`.
-        let gain = self.agc.next_gain(heard);
+        let gain = self.agc.next_gain(heard.abs().max(self.send_level));
         soft_limit(heard * gain) as f32
+    }
+
+    /// How loud the send is, so the receiver's gain answers to everything
+    /// reaching it rather than to the noise alone — which is what a real one
+    /// does, and what the browser's compressor does for free by sitting where
+    /// the two have already met.
+    pub fn note_send_level(&mut self, level: f64) {
+        self.send_level = level.max(0.0);
     }
 
     /// What the AGC is holding the band down to right now.
@@ -614,6 +649,11 @@ impl BandMixer {
     /// it does not.
     pub fn agc_gain(&self) -> f64 {
         self.agc.gain()
+    }
+
+    /// What the AGC reckons this band's standing level is.
+    pub fn agc_standing(&self) -> f64 {
+        self.agc.standing()
     }
 
     pub fn fill_background(&mut self, out: &mut [f32]) {
@@ -1223,6 +1263,60 @@ mod tests {
         assert!(
             quieter > 3.0,
             "narrowing only bought {quieter:.1} dB — the AGC is turning it back up"
+        );
+    }
+
+    /// The browser's compressor is pointed at this number, so it has to fall
+    /// with the filter. If it did not, closing the receiver down would lower
+    /// the noise and the compressor would push it straight back up — the very
+    /// failure the native AGC was redesigned to avoid.
+    #[test]
+    fn the_measured_floor_falls_with_the_filter() {
+        let mut s = TrainingSettings::default();
+        s.band.qrn_enabled = true;
+        s.band.qrn_level = 0.6;
+        s.band.receiver_enabled = true;
+        s.band.receiver_level = 0.6;
+
+        let floor_at = |bandwidth: f64| {
+            let mut s = s.clone();
+            s.band.filter_bandwidth_hz = bandwidth;
+            band_standing_level(48_000, &s.clamp())
+        };
+        let wide = floor_at(1_000.0);
+        let narrow = floor_at(FILTER_BANDWIDTH_MIN);
+        assert!(wide > 0.0 && narrow > 0.0, "the band measured as silent");
+        assert!(
+            wide > narrow * 1.4,
+            "the floor barely moved: {wide:.5} wide against {narrow:.5} narrow"
+        );
+    }
+
+    /// A receiver's gain answers to everything reaching it, the signal
+    /// included — which the browser gets for free from where its compressor
+    /// sits, and which the native player has to be told.
+    #[test]
+    fn a_loud_send_rides_the_gain_down_too() {
+        let mut s = TrainingSettings::default();
+        s.band.qrn_enabled = false;
+        s.band.receiver_enabled = true;
+        s.band.receiver_level = 0.2;
+        let s = s.clamp();
+
+        let settle = |send: f64| {
+            let mut mixer = BandMixer::new(48_000, &s, 7);
+            let mut buf = vec![0.0f32; 48_000];
+            mixer.note_send_level(0.0);
+            mixer.fill_background(&mut buf);
+            mixer.note_send_level(send);
+            mixer.fill_background(&mut buf);
+            mixer.agc_gain()
+        };
+        assert!(settle(0.0) > 0.95, "a quiet band should be left alone");
+        assert!(
+            settle(1.0) < 0.8,
+            "a send at full scale should have pulled the gain down, it sat at {:.2}",
+            settle(1.0)
         );
     }
 }

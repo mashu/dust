@@ -2,8 +2,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::band::{
-    qsb_path, shaped_level, AtmosphericNoise, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD,
-    RECEIVER_OUTPUT_GAIN, RECEIVER_STAGES, RINGING_OUTPUT_GAIN,
+    band_standing_level, qsb_path, shaped_level, AtmosphericNoise, AGC_ATTACK_SEC, AGC_RELEASE_SEC,
+    AGC_TRIGGER, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_OUTPUT_GAIN,
+    RECEIVER_STAGES, RINGING_OUTPUT_GAIN,
 };
 use cw_core::{
     plan_transmission, PlannedTransmission, ReceiverProfile, TrainingSettings, Transmission,
@@ -77,6 +78,7 @@ pub struct MorsePlayer {
     band: BandGraph,
     /// The receiver's own filter, as a cascade of band-pass nodes.
     receiver: Vec<web_sys::BiquadFilterNode>,
+    agc: web_sys::DynamicsCompressorNode,
     /// Group gains that are fading out, with the context time their ramp ends.
     released: Vec<(GainNode, f64)>,
     pending_resume: RefCell<Option<js_sys::Promise>>,
@@ -144,7 +146,30 @@ impl MorsePlayer {
             tail = stage.clone().unchecked_into();
             receiver.push(stage);
         }
-        tail.connect_with_audio_node(&ctx.destination())
+        // The receiver's AGC, in the one place the browser can put it: after
+        // the filter, with the send and the background already together. The
+        // native player works the same gain out in Rust and hands it to both
+        // streams; here a compressor does it, because the two halves only meet
+        // as sound. Its threshold is set per-settings from the measured floor,
+        // which is what stops it undoing the filter.
+        let agc = ctx
+            .create_dynamics_compressor()
+            .map_err(|e| format!("agc: {e:?}"))?;
+        agc.knee()
+            .set_value_at_time(6.0, ctx.current_time())
+            .map_err(|e| format!("agc knee: {e:?}"))?;
+        agc.ratio()
+            .set_value_at_time(12.0, ctx.current_time())
+            .map_err(|e| format!("agc ratio: {e:?}"))?;
+        agc.attack()
+            .set_value_at_time(AGC_ATTACK_SEC as f32, ctx.current_time())
+            .map_err(|e| format!("agc attack: {e:?}"))?;
+        agc.release()
+            .set_value_at_time(AGC_RELEASE_SEC as f32, ctx.current_time())
+            .map_err(|e| format!("agc release: {e:?}"))?;
+        tail.connect_with_audio_node(&agc)
+            .map_err(|e| format!("agc connect: {e:?}"))?;
+        agc.connect_with_audio_node(&ctx.destination())
             .map_err(|e| format!("mix connect: {e:?}"))?;
         install_resume_on_foreground(&ctx);
         Ok(Self {
@@ -156,6 +181,7 @@ impl MorsePlayer {
             group_gain: None,
             band: BandGraph::new(),
             receiver,
+            agc,
             released: Vec::new(),
             pending_resume: RefCell::new(None),
         })
@@ -194,8 +220,33 @@ impl MorsePlayer {
         add_qsb(&self.ctx, &self.cw_gain, settings, &mut self.band)?;
         add_qrn(&self.ctx, &self.mix_gain, settings, &mut self.band)?;
         add_receiver(&self.ctx, &self.mix_gain, settings, &mut self.band)?;
+        self.tune_agc(settings);
         self.band.signature = signature;
         Ok(())
+    }
+
+    /// Point the compressor at this band's own floor.
+    ///
+    /// This is the whole reason it can be a compressor at all. Left at a fixed
+    /// threshold it would ride the level rather than the crashes, and closing
+    /// the filter — which is exactly what the app is trying to teach — would
+    /// pull the noise down and the compressor would push it straight back up.
+    /// Measured from the settings instead, a narrower receiver has a lower
+    /// floor and a lower threshold to match, so a crash still has to stand the
+    /// same distance above the band before anything ducks.
+    fn tune_agc(&self, settings: &TrainingSettings) {
+        let standing = band_standing_level(self.ctx.sample_rate() as u32, settings);
+        // A band with nothing on it has no floor to measure. Park the threshold
+        // at the top, where the compressor has nothing to do.
+        let threshold_db = if standing > 1e-6 {
+            (20.0 * (standing * AGC_TRIGGER).log10()).clamp(-100.0, 0.0)
+        } else {
+            0.0
+        };
+        let _ = self
+            .agc
+            .threshold()
+            .set_value_at_time(threshold_db as f32, self.ctx.current_time());
     }
 
     fn bump_epoch(&self) -> u64 {
