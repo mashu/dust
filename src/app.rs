@@ -1243,4 +1243,40 @@ mod ui_tests {
             sweep("nav-stats", TrainingSettings::default()).await;
         });
     }
+
+    /// Nothing that happens over and over may cost the renderer more than a
+    /// handful of mutations.
+    ///
+    /// On the desktop build every mutation crosses to the webview on the same
+    /// loop that carries your keystrokes, so this is the number that decides
+    /// whether typing feels immediate. Building a screen is allowed to be
+    /// expensive — opening Settings is hundreds, and it happens once. What is
+    /// not allowed is a repeating cost that scales with anything.
+    #[test]
+    fn nothing_that_repeats_costs_the_renderer_much() {
+        run(|| async {
+            let (mut ui, _rec) = Ui::app_with_settings(test_settings());
+            ui.click("btn-start-training");
+            assert!(ui.run_until(20_000, |ui| ui.screen() == "training").await);
+
+            // A frame of the receiver trace while a group is sending.
+            let _ = ui.take_work();
+            ui.advance(40).await;
+            let frame = ui.take_work();
+            assert!(frame <= 4, "a scope frame cost {frame} mutations");
+
+            assert!(ui.run_until(30_000, |ui| ui.has("Your turn")).await);
+
+            // Nothing may run on its own while you are reading and typing.
+            let _ = ui.take_work();
+            ui.advance(400).await;
+            let idle = ui.take_work();
+            assert_eq!(idle, 0, "the screen repainted {idle} times doing nothing");
+
+            // And a key is one box, not the list.
+            ui.type_into("group-input-0", "K");
+            let key = ui.take_work();
+            assert!(key <= 4, "a keystroke cost {key} mutations");
+        });
+    }
 }
