@@ -53,6 +53,11 @@ web-sys = { version = "0.3", optional = true, features = [
     "Storage",
 ] }
 
+# The wgpu renderer: Blitz draws the same markup on the GPU instead of handing
+# it to a system webview. Behind its own feature because it is a different
+# stack, not a setting — different layout engine, different CSS coverage.
+dioxus-native = { version = "0.7", optional = true }
+
 # Linux / desktop
 cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
@@ -107,6 +112,9 @@ web = [
     "dep:web-sys",
 ]
 desktop = ["dioxus/desktop", "native-runtime", "native-audio"]
+# The same app drawn by Blitz on wgpu rather than by a webview. An experiment:
+# see `docs/gpu.md` for what it does and does not render.
+gpu = ["dep:dioxus-native", "native-runtime", "native-audio"]
 # Android/iOS run the same webview stack as the desktop build. `dx` enables this
 # feature automatically for `--platform android`.
 mobile = ["dioxus/mobile", "native-runtime", "native-audio"]

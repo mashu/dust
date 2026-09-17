@@ -17,6 +17,12 @@ mod ui;
 
 use crate::app::App;
 
+// Two renderers both owning `main` would launch twice, or launch the wrong one
+// depending on which `cfg` block returns first. They are alternatives, so say
+// so here rather than find out at run time.
+#[cfg(all(feature = "gpu", feature = "desktop"))]
+compile_error!("`gpu` and `desktop` are two renderers for the same app: pick one");
+
 #[cfg(feature = "desktop")]
 fn themed_document_head() -> String {
     let mut head = String::from("<style>");
@@ -42,6 +48,13 @@ mod tests {
 }
 
 fn main() {
+    // Blitz owns its own window and draws through wgpu, so none of the webview
+    // window configuration below applies — and the stylesheet goes in through
+    // the document rather than a custom head.
+    #[cfg(feature = "gpu")]
+    {
+        dioxus_native::launch(App);
+    }
     #[cfg(feature = "desktop")]
     {
         #[cfg(target_os = "linux")]
