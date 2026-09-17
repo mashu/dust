@@ -2,8 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::band::{
-    shaped_level, AtmosphericNoise, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, RECEIVER_OUTPUT_GAIN,
-    RECEIVER_STAGES, RINGING_OUTPUT_GAIN,
+    qsb_path, shaped_level, AtmosphericNoise, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD,
+    RECEIVER_OUTPUT_GAIN, RECEIVER_STAGES, RINGING_OUTPUT_GAIN,
 };
 use cw_core::{
     plan_transmission, PlannedTransmission, ReceiverProfile, TrainingSettings, Transmission,
@@ -518,30 +518,40 @@ fn add_qsb(
     let rate = settings.band.qsb_rate_hz.clamp(0.03, 1.5);
     let gain_range = depth.min(1.0 - QSB_MIN_GAIN);
     let base_gain = 1.0 - gain_range / 2.0;
-    let lfo = ctx
-        .create_oscillator()
-        .map_err(|e| format!("qsb osc: {e:?}"))?;
-    let lfo_gain = ctx.create_gain().map_err(|e| format!("qsb gain: {e:?}"))?;
     cw_gain
         .gain()
         .set_value_at_time(base_gain as f32, ctx.current_time())
         .map_err(|e| format!("qsb base: {e:?}"))?;
-    lfo.set_type(OscillatorType::Sine);
-    lfo.frequency()
-        .set_value_at_time(rate as f32, ctx.current_time())
-        .map_err(|e| format!("qsb rate: {e:?}"))?;
-    lfo_gain
-        .gain()
-        .set_value_at_time((gain_range / 2.0) as f32, ctx.current_time())
-        .map_err(|e| format!("qsb depth: {e:?}"))?;
-    lfo.connect_with_audio_node(&lfo_gain)
-        .map_err(|e| format!("qsb connect: {e:?}"))?;
-    lfo_gain
-        .connect_with_audio_param(&cw_gain.gain())
-        .map_err(|e| format!("qsb param: {e:?}"))?;
-    lfo.start().map_err(|e| format!("qsb start: {e:?}"))?;
-    push_source(graph, lfo);
-    push_node(graph, lfo_gain);
+    // One oscillator per propagation path, summed into the same gain — which
+    // is the same arithmetic `qsb_gain_at` does for the native player, so the
+    // browser wanders the same way rather than keeping the old tremolo. Every
+    // oscillator starts at zero phase, as the shared model assumes.
+    for path in 0..QSB_PATHS {
+        let (multiple, weight) = qsb_path(path);
+        let lfo = ctx
+            .create_oscillator()
+            .map_err(|e| format!("qsb osc: {e:?}"))?;
+        let lfo_gain = ctx.create_gain().map_err(|e| format!("qsb gain: {e:?}"))?;
+        lfo.set_type(OscillatorType::Sine);
+        lfo.frequency()
+            .set_value_at_time((rate * multiple) as f32, ctx.current_time())
+            .map_err(|e| format!("qsb rate: {e:?}"))?;
+        lfo_gain
+            .gain()
+            .set_value_at_time(
+                (gain_range / 2.0 * weight * QSB_SPREAD) as f32,
+                ctx.current_time(),
+            )
+            .map_err(|e| format!("qsb depth: {e:?}"))?;
+        lfo.connect_with_audio_node(&lfo_gain)
+            .map_err(|e| format!("qsb connect: {e:?}"))?;
+        lfo_gain
+            .connect_with_audio_param(&cw_gain.gain())
+            .map_err(|e| format!("qsb param: {e:?}"))?;
+        lfo.start().map_err(|e| format!("qsb start: {e:?}"))?;
+        push_source(graph, lfo);
+        push_node(graph, lfo_gain);
+    }
     Ok(())
 }
 

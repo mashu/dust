@@ -476,10 +476,26 @@ mod tests {
             playback.fill(&mut out, 1);
             out[0]
         };
-        // A quarter of a cycle later the same send comes out at a different
-        // level; a whole cycle later it is back where it started.
+        // The same send played at a different point on the band's clock comes
+        // out at a different level.
         assert!((level_at(0.0) - level_at(0.5)).abs() > 0.05);
-        assert_eq!(level_at(0.0), level_at(2.0));
+
+        // And that level is the band's, not the send's: what a send hears is
+        // whatever the fading is doing at the moment it starts, so a send is
+        // dropped into a fade already in progress rather than starting one.
+        //
+        // This used to be checked by playing a whole cycle later and expecting
+        // the same level back. That only held while fading was a single sine,
+        // and a fade you can predict a cycle ahead is the one thing real QSB
+        // never is — so it asks the shared clock directly now.
+        for offset in [0.0, 0.37, 1.4, 6.25, 41.0] {
+            let expected = cw_core::band::qsb_gain_at(offset, true, 0.75, 0.5);
+            assert!(
+                (level_at(offset) - expected).abs() < 1e-6,
+                "a send at {offset}s played at {}, but the band was at {expected}",
+                level_at(offset)
+            );
+        }
     }
 
     #[test]
