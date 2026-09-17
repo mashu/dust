@@ -904,6 +904,67 @@ mod interactions {
         });
     }
 
+    #[component]
+    fn ManyGroupsHarness(count: usize) -> Element {
+        let mut typed = use_signal(String::new);
+        let groups: Vec<String> = (0..count).map(|_| "KM".to_string()).collect();
+        let mut inputs = vec![String::new(); count];
+        inputs[0] = typed();
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: count,
+                groups,
+                inputs,
+                confirmed: vec![false; count],
+                focused: 0,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                settings: cw_core::TrainingSettings::default(),
+                heard: Vec::new(),
+                send_id: 0,
+                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    }
+
+    /// A key lands in one box, so it must cost one box.
+    ///
+    /// The group card used to be written inline in the list's loop, which put
+    /// the draft signal inside every iteration: one keystroke rebuilt and
+    /// re-diffed every card on screen, and on the desktop build every one of
+    /// those mutations crosses to the webview between the key going down and
+    /// the letter appearing. With twenty groups that is most of a session's
+    /// worth of DOM per character, and it is what made typing feel like wading.
+    ///
+    /// So the measure is scaling, not a number: typing into a session of
+    /// thirty groups must cost about what it costs in a session of three.
+    #[test]
+    fn typing_costs_the_same_whatever_the_session_length() {
+        crate::testing::run(|| async {
+            let cost_at = |count: usize| {
+                let mut ui = Ui::new(ManyGroupsHarness, ManyGroupsHarnessProps { count });
+                let _ = ui.take_work();
+                ui.type_into("group-input-0", "K");
+                ui.take_work()
+            };
+            let small = cost_at(3);
+            let large = cost_at(30);
+            assert!(small > 0, "the keystroke did nothing at all");
+            assert!(
+                large <= small * 2,
+                "a key cost {small} mutations in a three-group session and {large} in a \
+                 thirty-group one — the whole list is being rebuilt per character"
+            );
+        });
+    }
+
     /// One character short of the send stays in the box. The session does not
     /// hear it until the debounce has sat still.
     #[test]

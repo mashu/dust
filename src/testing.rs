@@ -285,6 +285,8 @@ pub struct Ui {
     dom: VirtualDom,
     /// Live elements by the `id` their markup gives them.
     ids: Vec<(String, ElementId)>,
+    /// Mutations since the last time anybody asked.
+    work: usize,
 }
 
 /// Ids and removals, as the renderer reports them.
@@ -292,15 +294,26 @@ pub struct Ui {
 struct IdLog {
     named: Vec<(String, ElementId)>,
     gone: Vec<ElementId>,
+    /// Mutations the renderer would have had to carry out. On the desktop
+    /// build every one of these crosses to the webview, so it is the closest
+    /// thing a headless test has to "how much did that cost".
+    work: usize,
 }
 
 impl dioxus::core::WriteMutations for IdLog {
-    fn append_children(&mut self, _: ElementId, _: usize) {}
+    fn append_children(&mut self, _: ElementId, _: usize) {
+        self.work += 1;
+    }
     fn assign_node_id(&mut self, _: &'static [u8], _: ElementId) {}
     fn create_placeholder(&mut self, _: ElementId) {}
-    fn create_text_node(&mut self, _: &str, _: ElementId) {}
-    fn load_template(&mut self, _: dioxus::core::Template, _: usize, _: ElementId) {}
+    fn create_text_node(&mut self, _: &str, _: ElementId) {
+        self.work += 1;
+    }
+    fn load_template(&mut self, _: dioxus::core::Template, _: usize, _: ElementId) {
+        self.work += 1;
+    }
     fn replace_node_with(&mut self, id: ElementId, _: usize) {
+        self.work += 1;
         self.gone.push(id);
     }
     fn replace_placeholder_with_nodes(&mut self, _: &'static [u8], _: usize) {}
@@ -313,6 +326,7 @@ impl dioxus::core::WriteMutations for IdLog {
         value: &dioxus::core::AttributeValue,
         id: ElementId,
     ) {
+        self.work += 1;
         if name != "id" {
             return;
         }
@@ -320,10 +334,13 @@ impl dioxus::core::WriteMutations for IdLog {
             self.named.push((text.clone(), id));
         }
     }
-    fn set_node_text(&mut self, _: &str, _: ElementId) {}
+    fn set_node_text(&mut self, _: &str, _: ElementId) {
+        self.work += 1;
+    }
     fn create_event_listener(&mut self, _: &'static str, _: ElementId) {}
     fn remove_event_listener(&mut self, _: &'static str, _: ElementId) {}
     fn remove_node(&mut self, id: ElementId) {
+        self.work += 1;
         self.gone.push(id);
     }
     fn push_root(&mut self, _: ElementId) {}
@@ -366,6 +383,7 @@ impl Ui {
         let mut ui = Self {
             dom,
             ids: Vec::new(),
+            work: 0,
         };
         let mut log = IdLog::default();
         ui.dom.rebuild(&mut log);
@@ -375,6 +393,7 @@ impl Ui {
     }
 
     fn apply(&mut self, log: IdLog) {
+        self.work += log.work;
         for id in log.gone {
             self.ids.retain(|(_, held)| *held != id);
         }
@@ -419,6 +438,15 @@ impl Ui {
             waited += u64::from(POLL_MS);
         }
         done(self)
+    }
+
+    /// How much the renderer has been asked to do since this was last called.
+    ///
+    /// The unit is one mutation — a template loaded, an attribute set, a text
+    /// node written. On the desktop build each of them crosses to the webview,
+    /// so this is what a keystroke actually costs.
+    pub fn take_work(&mut self) -> usize {
+        std::mem::take(&mut self.work)
     }
 
     pub fn html(&self) -> String {

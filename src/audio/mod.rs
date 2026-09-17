@@ -85,7 +85,12 @@ pub fn focus_group_input(index: usize) {
             const apply = () => {{
                 const card = document.getElementById(cardId);
                 if (card && !scrolled) {{
-                    card.scrollIntoView({{ behavior: "smooth", block: "center", inline: "nearest" }});
+                    // Instant, not smooth. A smooth scroll is an animation
+                    // running for a few hundred milliseconds starting exactly
+                    // when the next group opens and you begin typing into it,
+                    // and the browser spends that time laying out rather than
+                    // echoing your keys.
+                    card.scrollIntoView({{ block: "center", inline: "nearest" }});
                     scrolled = true;
                 }}
                 const el = document.getElementById(inputId);
@@ -97,11 +102,10 @@ pub fn focus_group_input(index: usize) {
                 }}
             }};
             apply();
-            requestAnimationFrame(() => {{
-                apply();
-                setTimeout(apply, 50);
-                setTimeout(apply, 180);
-            }});
+            // One retry after the frame the card is mounted in. The two later
+            // ones bought nothing the frame had not already settled, and each
+            // was another scroll and focus landing mid-keystroke.
+            requestAnimationFrame(apply);
         }})()"#
     );
     let _ = dioxus::document::eval(&js);
