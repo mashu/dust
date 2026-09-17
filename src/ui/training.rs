@@ -3,7 +3,6 @@ use dioxus::prelude::*;
 
 use crate::audio::focus_group_input;
 use crate::time::sleep_ms;
-use crate::ui::scope::{BandScope, Heard};
 use crate::ui::widgets::{control_id, Icon, ProgressHeader};
 
 /// Incomplete answers wait this long before the session sees them. Short
@@ -13,8 +12,7 @@ const INPUT_COMMIT_DEBOUNCE_MS: u32 = 48;
 
 const _: () = assert!(INPUT_COMMIT_DEBOUNCE_MS < cw_core::AUTO_CONFIRM_DELAY_MS);
 
-/// Header and receiver. No answer state: a child that owns the trace must
-/// not sit under the view that updates on every key.
+/// The progress header, kept out of the view that updates on every key.
 #[component]
 pub fn TrainingScope(
     focused: usize,
@@ -22,9 +20,6 @@ pub fn TrainingScope(
     playing: bool,
     repeat_total: u32,
     repeat_done: u32,
-    settings: cw_core::TrainingSettings,
-    heard: Vec<Heard>,
-    send_id: u64,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
     let status = if playing && repeat_total > 1 {
@@ -37,7 +32,6 @@ pub fn TrainingScope(
     rsx! {
         div { style: "display: contents;",
             ProgressHeader { current: focused, total, status, live: playing }
-            BandScope { settings, sending: heard, live: playing, send_id }
         }
     }
 }

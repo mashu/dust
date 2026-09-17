@@ -5,7 +5,6 @@ pub mod heatmap;
 pub mod home;
 pub mod listen;
 pub mod results;
-pub mod scope;
 pub mod settings;
 pub mod settings_charset;
 pub mod stats;

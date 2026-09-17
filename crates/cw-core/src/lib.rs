@@ -14,7 +14,6 @@ pub mod morse;
 pub mod pool;
 pub mod rng;
 pub mod sampling;
-pub mod scope;
 pub mod score;
 pub mod sequences;
 pub mod session;

@@ -1,6 +1,5 @@
 //! Owns the session machine, audio, and effect execution. UI sends events only.
 
-use cw_core::timing::plan_transmission;
 use cw_core::{
     generate_training_group, resolve_group_repeats, resolve_pileup, resolve_station,
     CharSamplingState, FastrandRng, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
@@ -202,41 +201,6 @@ fn transmission_for(
         text,
         voice,
     }
-}
-
-/// Who the receiver has in its passband for this group, as pitch and strength
-/// alone.
-///
-/// Derived the same way the audio is, from the same generator, so the scope
-/// draws the stations you are actually listening to rather than a plausible
-/// set. Only the voices come back: what anybody is sending stays out of the
-/// display, or the scope would hand you the answer you are meant to copy.
-pub fn heard_for(
-    settings: &TrainingSettings,
-    gen: u64,
-    index: usize,
-    text: &str,
-) -> Vec<crate::ui::scope::Heard> {
-    let sending = transmission_for(settings, gen, index, text.to_string());
-    let planned = plan_transmission(&sending, settings);
-    let voices = std::iter::once((sending.voice, true))
-        .chain(sending.others.iter().map(|other| (other.voice, false)));
-    let plans = std::iter::once(&planned.wanted).chain(planned.others.iter());
-    voices
-        .zip(plans)
-        .map(|((voice, wanted), plan)| crate::ui::scope::Heard {
-            voice,
-            wanted,
-            // When this station's key is down. Times only — never the text, so
-            // nothing that could be read as morse can reach the display.
-            key: plan
-                .events
-                .iter()
-                .map(|event| (event.start_sec, event.start_sec + event.duration_sec))
-                .collect(),
-            rise_sec: plan.rise_time_sec,
-        })
-        .collect()
 }
 
 /// The settings a session was started with.

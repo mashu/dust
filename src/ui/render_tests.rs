@@ -17,7 +17,6 @@ use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
 use super::results::ResultsView;
-use super::scope::Heard;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
 use super::training::{TrainingScope, TrainingView};
@@ -36,9 +35,6 @@ fn TrainingScreen(
     locked: bool,
     repeat_total: u32,
     repeat_done: u32,
-    settings: TrainingSettings,
-    heard: Vec<Heard>,
-    send_id: u64,
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
     on_focus: EventHandler<usize>,
@@ -53,9 +49,6 @@ fn TrainingScreen(
                 playing,
                 repeat_total,
                 repeat_done,
-                settings,
-                heard,
-                send_id,
             }
             TrainingView {
                 current,
@@ -484,68 +477,6 @@ fn listen_renders_the_selected_character() {
 }
 
 #[test]
-fn the_scope_shows_the_band_without_showing_the_answer() {
-    use cw_core::timing::StationVoice;
-
-    fn voice(tone_hz: f64, volume: f64) -> StationVoice {
-        StationVoice {
-            tone_hz,
-            char_wpm: 20.0,
-            effective_wpm: 20.0,
-            volume,
-            weight: 1.0,
-            dash_ratio: 3.0,
-        }
-    }
-    let html = render(|| {
-        rsx! {
-            TrainingScreen {
-                current: 0,
-                total: 1,
-                groups: vec!["QRXZJ".to_string()],
-                inputs: vec![String::new()],
-                confirmed: vec![false],
-                focused: 0,
-                playing: true,
-                locked: true,
-                repeat_total: 1,
-                repeat_done: 0,
-                settings: TrainingSettings::default(),
-                heard: vec![
-                    Heard { voice: voice(520.0, 1.0), wanted: true, key: vec![(0.0, 1.0)], rise_sec: 0.005 },
-                    Heard { voice: voice(700.0, 0.4), wanted: false, key: vec![(0.0, 1.0)], rise_sec: 0.005 },
-                ],
-                send_id: 0,
-                on_change: move |_: (usize, String)| {},
-                on_confirm: move |_: usize| {},
-                on_focus: move |_: usize| {},
-                on_submit: move |_| {},
-                on_stop: move |_| {},
-            }
-        }
-    });
-
-    // The band is on screen: the filter, and a mark for each station in it.
-    assert!(html.contains("scope-curve"), "the filter should be drawn");
-    assert!(html.contains("scope-face"));
-    assert_eq!(
-        html.matches("scope-blip").count(),
-        2,
-        "both stations should be marked"
-    );
-    assert!(html.contains("2 stations in the passband"));
-
-    // And the group being sent is not, anywhere. A scope that showed the
-    // keying would let you read the answer off the screen instead of hearing
-    // it, which would quietly turn the trainer into a typing test.
-    assert!(
-        !html.contains("QRXZJ"),
-        "the group being sent leaked onto the screen"
-    );
-    assert!(html.contains("•••"), "an unanswered group stays hidden");
-}
-
-#[test]
 fn training_shows_the_send_counter_while_repeating() {
     let html = render(|| {
         rsx! {
@@ -560,9 +491,6 @@ fn training_shows_the_send_counter_while_repeating() {
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 1,
-                settings: cw_core::TrainingSettings::default(),
-                heard: Vec::new(),
-                send_id: 0,
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
                 on_focus: move |_: usize| {},
@@ -592,9 +520,6 @@ fn training_without_repeats_omits_the_counter() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                settings: cw_core::TrainingSettings::default(),
-                heard: Vec::new(),
-                send_id: 0,
                 on_change: move |_: (usize, String)| {},
                 on_confirm: move |_: usize| {},
                 on_focus: move |_: usize| {},
@@ -792,9 +717,6 @@ mod interactions {
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 0,
-                settings: cw_core::TrainingSettings::default(),
-                heard: Vec::new(),
-                send_id: 0,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| typed.set("confirmed".into()),
                 on_focus: move |index: usize| focused.set(index),
@@ -821,27 +743,6 @@ mod interactions {
         });
     }
 
-    /// The scope on the training screen really is running: left alone, it
-    /// redraws itself.
-    #[test]
-    fn the_scope_keeps_redrawing_while_the_screen_sits_there() {
-        crate::testing::run(|| async {
-            let mut ui = Ui::new(TrainingHarness, ());
-            let first = ui.html();
-            ui.advance(200).await;
-            assert_ne!(first, ui.html(), "the scope stopped redrawing");
-        });
-    }
-
-    fn scope_trace_path(html: &str) -> String {
-        let from = html
-            .find("class=\"scope-trace\"")
-            .expect("the trace should be on screen");
-        let d_at = html[from..].find("d=\"").expect("the trace needs a path") + from + 3;
-        let end = html[d_at..].find('"').unwrap() + d_at;
-        html[d_at..end].to_string()
-    }
-
     #[component]
     fn AnsweringHarness() -> Element {
         let mut typed = use_signal(String::new);
@@ -857,9 +758,6 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                settings: cw_core::TrainingSettings::default(),
-                heard: Vec::new(),
-                send_id: 0,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| {},
                 on_focus: move |_: usize| {},
@@ -870,38 +768,6 @@ mod interactions {
                 p { id: "committed-answer", "committed:{typed()}" }
             }
         }
-    }
-
-    /// After playout the loop is off, so waiting does not paint a new trace.
-    #[test]
-    fn an_idle_training_scope_stays_still() {
-        crate::testing::run(|| async {
-            let mut ui = Ui::new(AnsweringHarness, ());
-            let first = scope_trace_path(&ui.html());
-            ui.advance(200).await;
-            assert_eq!(
-                first,
-                scope_trace_path(&ui.html()),
-                "the idle training scope kept redrawing"
-            );
-        });
-    }
-
-    /// Typing is the group list's business. The scope's path must not change
-    /// when a key lands in the answer box.
-    #[test]
-    fn typing_does_not_redraw_the_scope() {
-        crate::testing::run(|| async {
-            let mut ui = Ui::new(AnsweringHarness, ());
-            let first = scope_trace_path(&ui.html());
-            ui.type_into("group-input-0", "K");
-            assert!(ui.has("K"));
-            assert_eq!(
-                first,
-                scope_trace_path(&ui.html()),
-                "typing rebuilt the scope"
-            );
-        });
     }
 
     #[component]
@@ -922,9 +788,6 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                settings: cw_core::TrainingSettings::default(),
-                heard: Vec::new(),
-                send_id: 0,
                 on_change: move |(_, value): (usize, String)| typed.set(value),
                 on_confirm: move |_: usize| {},
                 on_focus: move |_: usize| {},
