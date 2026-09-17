@@ -43,6 +43,36 @@ impl LiveQsb {
     }
 }
 
+/// The gain the receiver's AGC is holding the band down to, shared across the
+/// two streams.
+///
+/// Native plays the background and the send on separate devices streams, so
+/// they never meet in a buffer we own. A crash ducking the Morse as well — the
+/// whole reason for an AGC — therefore has to travel: the background stream
+/// works out the gain, writes it here, and the send reads it. A number crossing
+/// between two real-time callbacks, which is what the fading settings already
+/// do next door.
+pub struct LiveAgc {
+    gain_bits: AtomicU64,
+}
+
+impl LiveAgc {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            gain_bits: AtomicU64::new(1.0f64.to_bits()),
+        })
+    }
+
+    pub fn store(&self, gain: f64) {
+        self.gain_bits.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    /// One, when no background is running — nothing is there to duck behind.
+    pub fn gain(&self) -> f32 {
+        f64::from_bits(self.gain_bits.load(Ordering::Relaxed)) as f32
+    }
+}
+
 /// How long a stopped send takes to reach silence.
 ///
 /// Matched to the keying envelope's own rise time: a trainer this careful
@@ -138,6 +168,8 @@ pub struct TonePlayback {
     finished: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     qsb: Arc<LiveQsb>,
+    /// What the receiver's AGC is doing to everything, this send included.
+    agc: Arc<LiveAgc>,
 }
 
 impl TonePlayback {
@@ -147,6 +179,7 @@ impl TonePlayback {
         started_at_sec: f64,
         qsb: Arc<LiveQsb>,
         stop: Arc<AtomicBool>,
+        agc: Arc<LiveAgc>,
     ) -> Self {
         Self {
             samples,
@@ -157,6 +190,7 @@ impl TonePlayback {
             finished: Arc::new(AtomicBool::new(false)),
             stop,
             qsb,
+            agc,
         }
     }
 
@@ -176,7 +210,8 @@ impl TonePlayback {
             let Some(dry) = self.samples.get(i).copied() else {
                 return 0.0;
             };
-            let value = dry * self.qsb.gain_at(self.started_at_sec + i as f64 / sr);
+            let value =
+                dry * self.qsb.gain_at(self.started_at_sec + i as f64 / sr) * self.agc.gain();
             i += 1;
             value
         });
@@ -201,6 +236,7 @@ impl TonePlayback {
             let dry = self.samples.get(i).copied().unwrap_or(0.0);
             let value = dry
                 * self.qsb.gain_at(self.started_at_sec + i as f64 / sr)
+                * self.agc.gain()
                 * release_gain(done as f64 / total as f64);
             i += 1;
             done += 1;
@@ -220,15 +256,22 @@ pub struct BandPlayback {
     stop: Arc<AtomicBool>,
     released: usize,
     sample_rate: f64,
+    agc: Arc<LiveAgc>,
 }
 
 impl BandPlayback {
-    pub fn new(mixer: BandMixer, stop: Arc<AtomicBool>, sample_rate: u32) -> Self {
+    pub fn new(
+        mixer: BandMixer,
+        stop: Arc<AtomicBool>,
+        sample_rate: u32,
+        agc: Arc<LiveAgc>,
+    ) -> Self {
         Self {
             mixer,
             stop,
             released: 0,
             sample_rate: f64::from(sample_rate.max(1)),
+            agc,
         }
     }
 
@@ -238,8 +281,14 @@ impl BandPlayback {
         if !self.stop.load(Ordering::SeqCst) {
             let mixer = &mut self.mixer;
             interleave(out, channels, || mixer.next_background());
+            // Published once a buffer rather than once a sample: the release
+            // runs over the best part of a second, so a buffer's worth of lag
+            // is far below anything you could hear.
+            self.agc.store(self.mixer.agc_gain());
             return;
         }
+        // Nothing is playing behind the send any more, so nothing is ducking it.
+        self.agc.store(1.0);
         let total = release_samples(self.sample_rate);
         let mut done = self.released;
         let mixer = &mut self.mixer;
@@ -359,7 +408,7 @@ mod tests {
         let mut settings = TrainingSettings::default();
         settings.band.qsb_enabled = false;
         qsb.store(&settings);
-        TonePlayback::new(samples, 8_000, 0.0, qsb, stop)
+        TonePlayback::new(samples, 8_000, 0.0, qsb, stop, LiveAgc::new())
     }
 
     #[test]
@@ -447,6 +496,7 @@ mod tests {
             0.0,
             qsb,
             Arc::new(AtomicBool::new(false)),
+            LiveAgc::new(),
         );
         let mut out = vec![0.0f32; 8_000];
         playback.fill(&mut out, 1);
@@ -454,6 +504,43 @@ mod tests {
         let max = out.iter().copied().fold(f32::MIN, f32::max);
         assert!(max - min > 0.1, "fading did not move the level");
         assert!(out.iter().all(|s| *s >= 0.0 && *s <= 1.0));
+    }
+
+    /// The point of an AGC: a crash does not just make the noise loud, it
+    /// pulls the whole band down — the station you are copying with it. The
+    /// two run on separate device streams, so the only way that can happen is
+    /// for the send to read the gain the background arrived at.
+    #[test]
+    fn the_send_ducks_with_the_band() {
+        let agc = LiveAgc::new();
+        let qsb = LiveQsb::new();
+        let mut settings = TrainingSettings::default();
+        settings.band.qsb_enabled = false;
+        qsb.store(&settings);
+
+        let level = |gain: f64| {
+            agc.store(gain);
+            let playback = TonePlayback::new(
+                vec![1.0; 8],
+                8_000,
+                0.0,
+                Arc::clone(&qsb),
+                Arc::new(AtomicBool::new(false)),
+                Arc::clone(&agc),
+            );
+            let mut out = [0.0f32; 8];
+            playback.fill(&mut out, 1);
+            out[0]
+        };
+
+        assert!(
+            (level(1.0) - 1.0).abs() < 1e-6,
+            "an open band plays in full"
+        );
+        assert!(
+            (level(0.4) - 0.4).abs() < 1e-6,
+            "the send should have come down with the band"
+        );
     }
 
     #[test]
@@ -471,6 +558,7 @@ mod tests {
                 offset,
                 Arc::clone(&qsb),
                 Arc::new(AtomicBool::new(false)),
+                LiveAgc::new(),
             );
             let mut out = [0.0f32; 8];
             playback.fill(&mut out, 1);
@@ -506,7 +594,7 @@ mod tests {
         settings.band.receiver_enabled = false;
         let mixer = BandMixer::new(8_000, &settings, 3);
         let stop = Arc::new(AtomicBool::new(false));
-        let mut playback = BandPlayback::new(mixer, Arc::clone(&stop), 8_000);
+        let mut playback = BandPlayback::new(mixer, Arc::clone(&stop), 8_000, LiveAgc::new());
         let mut out = vec![0.0f32; 512];
         playback.fill(&mut out, 2);
         assert!(out.iter().any(|s| *s != 0.0));

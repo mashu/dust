@@ -14,7 +14,7 @@ use cpal::{FromSample, Sample, SampleFormat, SizedSample};
 use cw_core::band::{BandMixer, ReceiverFilter};
 use cw_core::{plan_transmission, TrainingSettings, Transmission};
 
-use super::render::{mix_plan_into, render_plan, BandPlayback, LiveQsb, TonePlayback};
+use super::render::{mix_plan_into, render_plan, BandPlayback, LiveAgc, LiveQsb, TonePlayback};
 use super::{MorseBackend, PlaybackWait};
 use state::{PlayerState, ToneSignal};
 
@@ -29,6 +29,8 @@ pub struct MorsePlayer {
     /// They are released when the next send or band replaces them, long after.
     retiring: Vec<cpal::Stream>,
     qsb: Arc<LiveQsb>,
+    /// What the background's AGC is holding everything down to.
+    agc: Arc<LiveAgc>,
     /// When the player opened. Fading is read off this clock so it keeps
     /// running between groups instead of restarting with every send.
     opened_at: Instant,
@@ -68,6 +70,7 @@ impl MorsePlayer {
             tone_stream: None,
             retiring: Vec::new(),
             qsb: LiveQsb::new(),
+            agc: LiveAgc::new(),
             opened_at: Instant::now(),
         })
     }
@@ -106,7 +109,8 @@ impl MorseBackend for MorsePlayer {
         // Morse must still play, so this failure is swallowed rather than
         // failing the whole player. The signature is remembered either way, so
         // a configuration that cannot open is not retried on every change.
-        self.band_stream = start_band_stream(settings, Arc::clone(&self.band_stop)).ok();
+        self.band_stream =
+            start_band_stream(settings, Arc::clone(&self.band_stop), Arc::clone(&self.agc)).ok();
         self.state.note_band(settings);
         Ok(())
     }
@@ -131,6 +135,7 @@ impl MorseBackend for MorsePlayer {
             self.opened_at.elapsed().as_secs_f64(),
             Arc::clone(&self.qsb),
             Arc::clone(armed.stop_flag()),
+            Arc::clone(&self.agc),
         )
         .inspect_err(|_| self.state.note_start_failed())?;
         self.tone_stream = Some(stream);
@@ -228,6 +233,7 @@ fn start_tone_stream(
     started_at_sec: f64,
     qsb: Arc<LiveQsb>,
     stop: Arc<AtomicBool>,
+    agc: Arc<LiveAgc>,
 ) -> Result<(cpal::Stream, Arc<AtomicBool>), String> {
     let (device, config) = default_output()?;
     let sample_rate = config.sample_rate().0;
@@ -243,7 +249,7 @@ fn start_tone_stream(
         mix_plan_into(&mut samples, other, sample_rate);
     }
     ReceiverFilter::from_settings(sample_rate, settings).apply(&mut samples);
-    let playback = TonePlayback::new(samples, sample_rate, started_at_sec, qsb, stop);
+    let playback = TonePlayback::new(samples, sample_rate, started_at_sec, qsb, stop, agc);
     let finished = playback.finished_flag();
     let stream = build_for_format(&device, &config, channels, move |out, channels| {
         playback.fill(out, channels)
@@ -255,12 +261,13 @@ fn start_tone_stream(
 fn start_band_stream(
     settings: &TrainingSettings,
     stop: Arc<AtomicBool>,
+    agc: Arc<LiveAgc>,
 ) -> Result<cpal::Stream, String> {
     let (device, config) = default_output()?;
     let sample_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
     let mixer = BandMixer::new(sample_rate, settings, u64::from(sample_rate));
-    let mut playback = BandPlayback::new(mixer, stop, sample_rate);
+    let mut playback = BandPlayback::new(mixer, stop, sample_rate, agc);
     let stream = build_for_format(&device, &config, channels, move |out, channels| {
         playback.fill(out, channels)
     })?;

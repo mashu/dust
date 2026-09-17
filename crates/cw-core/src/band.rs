@@ -306,6 +306,123 @@ impl AtmosphericNoise {
     }
 }
 
+/// The receiver's automatic gain control.
+///
+/// Not a limiter. A limiter squashes each sample where it stands and is done
+/// with it; an AGC has a memory, and that memory is most of what a crowded
+/// band sounds like. A crash arrives, the gain comes down within a couple of
+/// milliseconds, and then it stays down and walks back up over the best part
+/// of a second — so the whole band ducks behind the crash, the signal you were
+/// copying with it, and comes back afterwards. Every operator knows that
+/// sound, and the trainer had none of it.
+///
+/// Attack is fast because a receiver has to catch a crash before it is
+/// deafening. Release is slow because that is what CW operators run: a fast
+/// release pumps audibly between elements and makes the noise floor breathe in
+/// time with the keying.
+pub struct Agc {
+    fast: f64,
+    standing: f64,
+    /// Samples left before the receiver trusts what it thinks the band is.
+    warm_up: u32,
+    gain: f64,
+    attack: f64,
+    release: f64,
+    fast_fall: f64,
+    standing_fall: f64,
+}
+
+/// How far above the band's standing level a peak has to be before the gain
+/// comes down. Below this the receiver is riding a steady band and leaves it
+/// alone.
+const AGC_TRIGGER: f64 = 2.2;
+/// Seconds for the gain to close on a level it has to duck to.
+const AGC_ATTACK_SEC: f64 = 0.002;
+/// Seconds for it to walk back up once the crash has gone.
+const AGC_RELEASE_SEC: f64 = 0.45;
+/// How quickly the fast follower forgets a peak.
+const AGC_FAST_SEC: f64 = 0.06;
+/// How long the receiver takes to decide what the band's standing level is.
+const AGC_STANDING_SEC: f64 = 1.5;
+/// How far down it will ever pull. Past this a crash is silencing the band
+/// rather than riding over it, and a group would be lost rather than hard.
+const AGC_MAX_DUCK: f64 = 0.25;
+
+impl Agc {
+    pub fn new(sample_rate: u32) -> Self {
+        let sr = f64::from(sample_rate.max(1));
+        let coefficient = |seconds: f64| (-1.0 / (seconds * sr)).exp();
+        Self {
+            fast: 0.0,
+            standing: 0.0,
+            // A fifth of a second listening before it judges anything. Without
+            // it the standing level starts at nothing, the first sound of the
+            // session stands infinitely above it, and the receiver spends the
+            // next second and a half ducked for no reason.
+            warm_up: sample_rate.max(1) / 5,
+            gain: 1.0,
+            attack: coefficient(AGC_ATTACK_SEC),
+            release: coefficient(AGC_RELEASE_SEC),
+            fast_fall: coefficient(AGC_FAST_SEC),
+            standing_fall: coefficient(AGC_STANDING_SEC),
+        }
+    }
+
+    /// Feed one sample of what the receiver is putting out; get back the gain
+    /// everything should be riding at.
+    pub fn next_gain(&mut self, sample: f64) -> f64 {
+        let level = sample.abs();
+        // A peak follower for the crash, and a long average *of that follower*
+        // for the band it arrived on.
+        //
+        // Both halves of that are load-bearing. A standing level that is also
+        // a peak follower leaps up with the crash, the ratio never moves and
+        // the gain sits at one through everything. A standing level averaging
+        // the raw samples instead measures something different in kind from
+        // the peak above it — a steady sine already stands 1.57 times its own
+        // mean — so the two are barely comparable and a quiet steady tone
+        // reads as a crash. Averaging the follower makes the ratio one for any
+        // steady signal whatever its shape, and large only when something has
+        // just arrived.
+        self.fast = level.max(self.fast * self.fast_fall);
+        if self.warm_up > 0 {
+            // Still learning the band: follow it exactly, and judge nothing.
+            self.warm_up -= 1;
+            self.standing = self.fast;
+            self.gain = 1.0;
+            return self.gain;
+        }
+        self.standing += (self.fast - self.standing) * (1.0 - self.standing_fall);
+
+        // What matters is how far a peak stands above the band, not how loud
+        // it is — which is what keeps this from quietly undoing the filter. A
+        // narrower receiver passes less of everything, both followers come down
+        // together, and the ratio between them does not move. An AGC watching
+        // absolute level instead turns the gain back up as the filter closes
+        // and hands back most of the quiet the filter just bought; measured,
+        // it cost about five of the seven decibels.
+        let standing = self.standing.max(1e-6);
+        let excess = self.fast / standing;
+        let wanted = if excess > AGC_TRIGGER {
+            (AGC_TRIGGER / excess).max(AGC_MAX_DUCK)
+        } else {
+            1.0
+        };
+        // Down fast, up slowly — the asymmetry is the whole character.
+        let coefficient = if wanted < self.gain {
+            self.attack
+        } else {
+            self.release
+        };
+        self.gain = wanted + (self.gain - wanted) * coefficient;
+        self.gain
+    }
+
+    pub fn gain(&self) -> f64 {
+        self.gain
+    }
+}
+
 /// Real-time static and receiver-character generator. QSB is applied
 /// separately, to the Morse samples themselves.
 pub struct BandMixer {
@@ -319,6 +436,7 @@ pub struct BandMixer {
     receiver_primary: Svf,
     receiver_secondary: Svf,
     receiver_ring: Svf,
+    agc: Agc,
 }
 
 impl BandMixer {
@@ -347,6 +465,7 @@ impl BandMixer {
             t: 0.0,
             ringing_energy: 0.0,
             atmospheric,
+            agc: Agc::new(sample_rate.max(1)),
             receiver: ReceiverFilter::from_settings(sample_rate.max(1), &settings_for_filter),
             receiver_primary: Svf::bandpass(sr, (center + offset).max(20.0), resonance),
             receiver_secondary: Svf::bandpass(
@@ -477,7 +596,24 @@ impl BandMixer {
         let raw = self.qrn_excitation() + self.receiver_sample();
         let heard = self.receiver.process(raw);
         self.t += 1.0 / self.sample_rate;
-        soft_limit(heard) as f32
+        // The gain the receiver is riding at, which a crash has just pulled
+        // down and which everything else has to come down with — including the
+        // send, which reads this through `agc_gain`.
+        let gain = self.agc.next_gain(heard);
+        soft_limit(heard * gain) as f32
+    }
+
+    /// What the AGC is holding the band down to right now.
+    ///
+    /// The send rides this too. The two are separate streams by the time they
+    /// reach the sound card, so the only honest way for a crash to duck the
+    /// Morse as well is for the send to read the gain the receiver arrived at.
+    /// It is driven by the noise alone rather than by noise and signal
+    /// together, which is the one place this parts company with a real
+    /// receiver — a very strong signal would ride its own gain down, and here
+    /// it does not.
+    pub fn agc_gain(&self) -> f64 {
+        self.agc.gain()
     }
 
     pub fn fill_background(&mut self, out: &mut [f32]) {
@@ -1034,6 +1170,60 @@ mod tests {
         );
         assert!(max >= 0.97, "the signal never came back up: {max:.3}");
         assert!(min >= QSB_MIN_GAIN - 1e-6, "faded past the floor: {min:.3}");
+    }
+
+    /// A crash has to duck the band and then let it back up — that memory is
+    /// the difference between an AGC and a limiter, and it is most of what a
+    /// crowded band sounds like.
+    #[test]
+    fn a_crash_ducks_the_band_and_it_comes_back() {
+        const SR: u32 = 48_000;
+        let mut agc = Agc::new(SR);
+        // A steady band for a second: nothing to react to.
+        let mut steady = 1.0;
+        for i in 0..SR {
+            let x = 0.05 * (std::f64::consts::TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
+            steady = agc.next_gain(x);
+        }
+        assert!(
+            steady > 0.98,
+            "a steady band should be left alone, but the gain sat at {steady:.2}"
+        );
+
+        // Then a crash, twenty times the standing level.
+        let mut ducked = 1.0_f64;
+        for i in 0..(SR / 100) {
+            let x = 1.0 * (std::f64::consts::TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
+            ducked = ducked.min(agc.next_gain(x));
+        }
+        assert!(
+            ducked < 0.5,
+            "the crash should have pulled the band down, gain only reached {ducked:.2}"
+        );
+
+        // And within a second of the band going quiet again it is back up.
+        let mut recovered = 0.0_f64;
+        for i in 0..SR {
+            let x = 0.05 * (std::f64::consts::TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
+            recovered = agc.next_gain(x);
+        }
+        assert!(
+            recovered > 0.9,
+            "the band never came back up, gain stuck at {recovered:.2}"
+        );
+    }
+
+    /// And it must never hand back the quiet a narrower filter just bought.
+    /// An AGC watching absolute level does exactly that, which is why this one
+    /// watches how far a peak stands above the band instead.
+    #[test]
+    fn the_agc_does_not_undo_the_filter() {
+        let quieter =
+            20.0 * f64::from(band_noise(1_000.0) / band_noise(FILTER_BANDWIDTH_MIN)).log10();
+        assert!(
+            quieter > 3.0,
+            "narrowing only bought {quieter:.1} dB — the AGC is turning it back up"
+        );
     }
 }
 
