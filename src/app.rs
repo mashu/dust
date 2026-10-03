@@ -12,9 +12,9 @@ use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::widgets::{control_id, Icon};
 
-// Desktop inlines this in the window head. Web loads `assets/styles.css`
-// from Dioxus.toml. Compiling the sheet into the wasm blob as well would
-// ship it twice and make the parser run over it twice.
+// Desktop inlines this in the window head. Web loads it through `asset!` so
+// `dx bundle` copies the file; compiling the sheet into wasm would ship it
+// twice. Mobile has neither, so it injects this string from AppHead.
 #[cfg(not(feature = "web"))]
 pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
 
@@ -69,15 +69,24 @@ impl Preview {
 }
 
 fn injected_stylesheet() -> Element {
-    // Desktop inlines the sheet in the window head. Web loads it from
-    // Dioxus.toml. Mobile has neither, so the sheet is injected here.
-    #[cfg(not(any(feature = "desktop", feature = "web")))]
+    // `dx bundle` does not copy Dioxus.toml [web.resource] style files into
+    // the site — Pages then 404s `assets/styles.css` and the UI renders raw.
+    // `asset!` is what actually puts the sheet next to the wasm.
+    #[cfg(feature = "web")]
+    {
+        rsx! {
+            document::Stylesheet {
+                href: asset!("/assets/styles.css")
+            }
+        }
+    }
+    #[cfg(all(not(feature = "desktop"), not(feature = "web")))]
     {
         rsx! {
             document::Style { { STYLESHEET } }
         }
     }
-    #[cfg(any(feature = "desktop", feature = "web"))]
+    #[cfg(feature = "desktop")]
     {
         rsx! {}
     }

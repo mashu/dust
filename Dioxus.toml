@@ -8,9 +8,9 @@ title = "Dust"
 watch_path = ["src", "assets", "crates"]
 
 [web.resource]
-# The only copy of the sheet on web. Desktop inlines it in the window head;
-# AppHead does not inject it again.
-style = ["assets/styles.css"]
+# Do not list styles.css here. `dx bundle` injects the <link> but does not
+# copy the file; AppHead loads the sheet through `asset!` instead.
+style = []
 script = []
 
 [web.resource.dev]

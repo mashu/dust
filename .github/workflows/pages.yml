@@ -95,7 +95,12 @@ jobs:
           cp -a "$src"/. site/
           cp site/index.html site/404.html
           touch site/.nojekyll
-          ls -lh site
+          if ! find site -name '*.css' | grep -q .; then
+            echo "Bundled site has no stylesheet"
+            find site -maxdepth 3 -type f
+            exit 1
+          fi
+          ls -lh site site/assets
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
