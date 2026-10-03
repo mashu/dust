@@ -1,0 +1,5 @@
+# wasm-bindgen reads `__wasm_bindgen_unstable` out of rustc's output.
+# Profile `strip = true` is --strip-all; LLVM 23+ then removes that section
+# before `dx bundle` can run wasm-bindgen. Never strip wasm objects.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "strip=none"]

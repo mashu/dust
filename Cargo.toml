@@ -132,7 +132,10 @@ silent-audio = []
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true
+# `true` is llvm-objcopy --strip-all. Since LLVM 23 that drops every custom
+# section, including `__wasm_bindgen_unstable`, so `dx bundle --platform web`
+# never produces dust_bg.wasm. Debuginfo is the bulk of what we want gone.
+strip = "debuginfo"
 
 [lints]
 workspace = true

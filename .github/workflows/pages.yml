@@ -23,6 +23,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   DIOXUS_CLI_VERSION: "0.7.10"
+  # Belt and braces with .cargo/config.toml: a Pages runner on a new LLVM
+  # must not strip the wasm-bindgen metadata section.
+  CARGO_PROFILE_RELEASE_STRIP: none
 
 jobs:
   build:
