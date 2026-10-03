@@ -103,6 +103,10 @@ impl Group {
     pub fn plays_done(&self) -> u32 {
         self.plays_done
     }
+
+    pub fn char_wpm(&self) -> f64 {
+        self.char_wpm
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

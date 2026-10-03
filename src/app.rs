@@ -13,6 +13,12 @@ use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::widgets::{control_id, Icon};
 
+// Desktop inlines this in the window head. Web loads `assets/styles.css`
+// from Dioxus.toml. Compiling the sheet into the wasm blob as well would
+// ship it twice and make the parser run over it twice.
+#[cfg(not(feature = "web"))]
+pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
+
 /// What the app is playing when no session is running.
 ///
 /// These are the four things that can be true of the audio outside training,
@@ -57,6 +63,37 @@ impl Preview {
     }
 }
 
+fn injected_stylesheet() -> Element {
+    // Desktop inlines the sheet in the window head. Web loads it from
+    // Dioxus.toml. Mobile has neither, so the sheet is injected here.
+    #[cfg(not(any(feature = "desktop", feature = "web")))]
+    {
+        rsx! {
+            document::Style { { STYLESHEET } }
+        }
+    }
+    #[cfg(any(feature = "desktop", feature = "web"))]
+    {
+        rsx! {}
+    }
+}
+
+fn font_link() -> Element {
+    #[cfg(feature = "desktop")]
+    {
+        rsx! {}
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        rsx! {
+            document::Link {
+                rel: "stylesheet",
+                href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional",
+            }
+        }
+    }
+}
+
 /// Head tags are injected once, on mount. They live in their own component so
 /// that App re-renders do not re-run them — `dioxus-document` warns on every
 /// prop update of a head element ("Changing the props of `Style {}` is not
@@ -65,7 +102,8 @@ impl Preview {
 fn AppHead() -> Element {
     rsx! {
         document::Title { "Dust" }
-        document::Style { { include_str!("../assets/styles.css") } }
+        {injected_stylesheet()}
+        {font_link()}
         document::Meta {
             name: "viewport",
             content: "width=device-width, initial-scale=1, viewport-fit=cover",
@@ -74,10 +112,6 @@ fn AppHead() -> Element {
         document::Meta { name: "mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-capable", content: "yes" }
         document::Meta { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" }
-        document::Link {
-            rel: "stylesheet",
-            href: "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional",
-        }
     }
 }
 
@@ -110,8 +144,7 @@ pub fn App() -> Element {
         let key = theme().key();
         save_theme(key);
         // Theme is a data-theme attribute on the app root, not a JS write to
-        // <html>. The wgpu renderer has no document.eval, and the webview
-        // path does not need one either once CSS keys off .app-root.
+        // <html>. Both the desktop webview and the web build key CSS off that.
     });
 
     use_effect(move || {
@@ -318,11 +351,7 @@ pub fn App() -> Element {
     let show_nav = !matches!(screen(), Screen::Training);
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };
     let screen_key = screen_key(screen());
-    let theme_attr = match theme() {
-        Theme::Auto => None,
-        Theme::Light => Some("light"),
-        Theme::Dark => Some("dark"),
-    };
+    let theme_attr = theme().key();
 
     rsx! {
         AppHead {}
@@ -388,32 +417,36 @@ pub fn App() -> Element {
                 }
             }
             if show_nav {
-                nav { class: "bottom-nav",
-                    button {
-                        id: control_id("nav", "practice"),
-                        class: if matches!(screen(), Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
-                        onclick: move |_| go_home.call(()),
-                        Icon { name: "signal" }
-                        span { "Practice" }
-                    }
-                    button {
-                        id: control_id("nav", "stats"),
-                        class: if screen() == Screen::Stats { "nav-item active" } else { "nav-item" },
-                        onclick: move |_| go_to.call(Screen::Stats),
-                        Icon { name: "chart" }
-                        span { "Stats" }
-                    }
-                    button {
-                        id: control_id("nav", "settings"),
-                        class: if screen() == Screen::Settings { "nav-item active" } else { "nav-item" },
-                        onclick: move |_| go_to.call(Screen::Settings),
-                        Icon { name: "sliders" }
-                        span { "Settings" }
+                div { class: "bottom-dock",
+                    nav { class: "bottom-nav",
+                        button {
+                            id: control_id("nav", "practice"),
+                            class: if matches!(screen(), Screen::Home | Screen::Listen | Screen::Results) { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| go_home.call(()),
+                            Icon { name: "signal" }
+                            span { "Practice" }
+                        }
+                        button {
+                            id: control_id("nav", "stats"),
+                            class: if screen() == Screen::Stats { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| go_to.call(Screen::Stats),
+                            Icon { name: "chart" }
+                            span { "Stats" }
+                        }
+                        button {
+                            id: control_id("nav", "settings"),
+                            class: if screen() == Screen::Settings { "nav-item active" } else { "nav-item" },
+                            onclick: move |_| go_to.call(Screen::Settings),
+                            Icon { name: "sliders" }
+                            span { "Settings" }
+                        }
                     }
                 }
             }
             if let Some(message) = toast() {
-                div { class: "toast", "{message}" }
+                div { class: if show_nav { "toast-dock has-nav" } else { "toast-dock" },
+                    div { class: "toast", "{message}" }
+                }
             }
         }
     }
@@ -435,7 +468,7 @@ fn session_running(screen: Signal<Screen>, runtime: Signal<Option<GroupSession>>
 }
 
 fn toggle_fullscreen() {
-    #[cfg(feature = "webview")]
+    #[cfg(feature = "desktop")]
     {
         let desktop = dioxus::desktop::window();
         let fullscreen = desktop.window.fullscreen().is_some();
@@ -566,6 +599,72 @@ mod ui_tests {
             assert!(ui.has("Session complete"));
             assert!(ui.has("Clean copy"));
             assert_eq!(crate::persist::load_sessions().len(), 1);
+        });
+    }
+
+    #[test]
+    fn a_group_locks_while_it_plays_then_unlocks_with_autofocus() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 2;
+            settings.playback.lock_input_during_group_playback = true;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            assert!(ui.has("Listen — the answer box unlocks"));
+            let sending = ui.input_tag("group-input-0");
+            assert!(sending.contains("readonly"), "{sending}");
+            assert!(!sending.contains("autofocus"), "{sending}");
+            ui.type_into("group-input-0", "XX");
+            assert!(!ui.has("committed"), "{}", ui.html());
+
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let open = ui.input_tag("group-input-0");
+            assert!(!open.contains("readonly"), "{open}");
+            assert!(!open.contains("disabled"), "{open}");
+            assert!(open.contains("autofocus"), "{open}");
+
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(
+                ui.run_until(5_000, |ui| ui
+                    .input_tag("group-input-1")
+                    .contains("readonly"))
+                    .await,
+                "the next group should lock while it plays: {}",
+                ui.html()
+            );
+            assert!(
+                ui.run_until(8_000, |ui| {
+                    let tag = ui.input_tag("group-input-1");
+                    tag.contains("autofocus")
+                        && !tag.contains("readonly")
+                        && !tag.contains("disabled")
+                })
+                .await,
+                "the next group's box should unlock and autofocus: {}",
+                ui.html()
+            );
+            let first = ui.input_tag("group-input-0");
+            assert!(
+                first.contains("disabled") || first.contains("readonly"),
+                "the finished group must not stay live: {first}"
+            );
+        });
+    }
+
+    #[test]
+    fn the_answer_box_stays_open_when_lock_while_sending_is_off() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.playback.lock_input_during_group_playback = false;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            assert!(ui.has("Listen, or type along"));
+            let tag = ui.input_tag("group-input-0");
+            assert!(!tag.contains("readonly"), "{tag}");
+            assert!(!tag.contains("disabled"), "{tag}");
+            assert!(tag.contains("autofocus"), "{tag}");
         });
     }
 

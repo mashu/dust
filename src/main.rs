@@ -1,9 +1,5 @@
 #![cfg_attr(
-    all(
-        any(feature = "desktop", feature = "gpu", feature = "webview"),
-        target_os = "windows",
-        not(debug_assertions)
-    ),
+    all(feature = "desktop", target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]
 
@@ -21,14 +17,10 @@ mod ui;
 
 use crate::app::App;
 
-// Native (wgpu) and the system webview both own `main`. They are alternatives.
-#[cfg(all(any(feature = "desktop", feature = "gpu"), feature = "webview"))]
-compile_error!("`desktop`/`gpu` (wgpu) and `webview` are two renderers for the same app: pick one");
-
-#[cfg(feature = "webview")]
+#[cfg(feature = "desktop")]
 fn themed_document_head() -> String {
     let mut head = String::from("<style>");
-    head.push_str(include_str!("../assets/styles.css"));
+    head.push_str(crate::app::STYLESHEET);
     head.push_str("</style>");
     head.push_str(
         r#"<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional" media="print" onload="this.media='all'">"#,
@@ -36,7 +28,7 @@ fn themed_document_head() -> String {
     head
 }
 
-#[cfg(all(test, feature = "webview"))]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     #[test]
     fn the_desktop_head_carries_the_stylesheet_and_the_fonts() {
@@ -49,24 +41,8 @@ mod tests {
     }
 }
 
-#[cfg(any(feature = "desktop", feature = "gpu"))]
-fn launch_native() {
-    use dioxus_native::{Config, LogicalSize, WindowAttributes};
-    dioxus_native::launch_cfg(
-        App,
-        vec![],
-        vec![Box::new(
-            Config::default().with_window_attributes(
-                WindowAttributes::default()
-                    .with_title("Dust")
-                    .with_inner_size(LogicalSize::new(560.0, 860.0)),
-            ),
-        )],
-    );
-}
-
-#[cfg(feature = "webview")]
-fn launch_webview() {
+#[cfg(feature = "desktop")]
+fn launch_desktop() {
     #[cfg(target_os = "linux")]
     {
         // GTK client-side decorations draw a thick header with the window title.
@@ -95,19 +71,12 @@ fn launch_webview() {
 }
 
 fn main() {
-    // Blitz paints through wgpu in-process. That is the desktop path: a
-    // keystroke is layout and a GPU frame, not an IPC round-trip into a
-    // webview that is sharing its thread with the answer box.
-    #[cfg(any(feature = "desktop", feature = "gpu"))]
+    #[cfg(feature = "desktop")]
     {
-        launch_native();
-    }
-    #[cfg(feature = "webview")]
-    {
-        launch_webview();
+        launch_desktop();
     }
     // Android, iOS and the web build still use a webview the OS owns.
-    #[cfg(not(any(feature = "desktop", feature = "gpu", feature = "webview")))]
+    #[cfg(not(feature = "desktop"))]
     {
         dioxus::launch(App);
     }

@@ -8,6 +8,7 @@ pub mod auto_level;
 pub mod band;
 pub mod callsign;
 pub mod heatmap;
+pub mod keyer;
 pub mod level;
 pub mod machine;
 pub mod morse;
@@ -37,6 +38,10 @@ pub use callsign::{
     CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN,
 };
 pub use heatmap::{build_heatmap, HeatmapCell, HeatmapColorMode, HeatmapGrid, HEATMAP_WEEKS};
+pub use keyer::{
+    dit_ms_for_wpm, paddle_from_bracket, KeyerMode, Paddle, PaddleDecoder, PaddleKeyer,
+    LETTER_GAP_DITS, STRAIGHT_DAH_DITS,
+};
 pub use level::{max_level_for_len, unlocked_count_for_level, unlocked_prefix, LEVEL_MIN};
 pub use machine::{
     SessionEffect, SessionEvent, SessionMachine, SessionPhase, AUTO_CONFIRM_DELAY_MS,

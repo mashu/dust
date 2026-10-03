@@ -1,9 +1,11 @@
-use cw_core::answer_length_matches;
+use cw_core::{
+    answer_length_matches, paddle_from_bracket, KeyerMode, Paddle, PaddleKeyer, LETTER_GAP_DITS,
+};
 use dioxus::prelude::*;
 
 use crate::audio::focus_group_input;
-use crate::time::sleep_ms;
-use crate::ui::widgets::{control_id, Icon, ProgressHeader};
+use crate::time::{mono_ms, sleep_ms, POLL_MS};
+use crate::ui::widgets::{control_id, html_bool, Icon, ProgressHeader};
 
 /// Incomplete answers wait this long before the session sees them. Short
 /// enough that a pause still lands well before auto-confirm would have cared,
@@ -42,6 +44,79 @@ fn bump_epoch(mut epoch: Signal<u64>) -> u64 {
     next
 }
 
+fn bracket_from_key(e: &Event<KeyboardData>) -> Option<char> {
+    match e.key() {
+        Key::Character(ref s) if s == "[" => Some('['),
+        Key::Character(ref s) if s == "]" => Some(']'),
+        _ => match e.code() {
+            Code::BracketLeft => Some('['),
+            Code::BracketRight => Some(']'),
+            _ => None,
+        },
+    }
+}
+
+fn commit_draft(
+    idx: usize,
+    value: String,
+    sent: &str,
+    mut draft: Signal<String>,
+    mut draft_at: Signal<usize>,
+    mut committed: Signal<String>,
+    mut committed_at: Signal<usize>,
+    debounce_gen: Signal<u64>,
+    on_change: EventHandler<(usize, String)>,
+) {
+    draft_at.set(idx);
+    draft.set(value.clone());
+    let matches_now = answer_length_matches(sent, &value);
+    let matches_committed =
+        *committed_at.peek() == idx && answer_length_matches(sent, committed.peek().as_str());
+    if matches_now || matches_committed {
+        let _ = bump_epoch(debounce_gen);
+        committed.set(value.clone());
+        committed_at.set(idx);
+        on_change.call((idx, value));
+        return;
+    }
+    let gen = bump_epoch(debounce_gen);
+    spawn(async move {
+        sleep_ms(INPUT_COMMIT_DEBOUNCE_MS).await;
+        if *debounce_gen.peek() != gen {
+            return;
+        }
+        committed.set(value.clone());
+        committed_at.set(idx);
+        on_change.call((idx, value));
+    });
+}
+
+fn push_keyed_char(
+    ch: char,
+    current: usize,
+    sent_now: &str,
+    draft: Signal<String>,
+    draft_at: Signal<usize>,
+    committed: Signal<String>,
+    committed_at: Signal<usize>,
+    debounce_gen: Signal<u64>,
+    on_change: EventHandler<(usize, String)>,
+) {
+    let mut text = draft.peek().clone();
+    text.push(ch);
+    commit_draft(
+        current,
+        text,
+        sent_now,
+        draft,
+        draft_at,
+        committed,
+        committed_at,
+        debounce_gen,
+        on_change,
+    );
+}
+
 /// One group: what was sent, the box you answer it in, and the comparison
 /// once it is confirmed.
 ///
@@ -77,9 +152,10 @@ fn GroupCard(
     on_change: EventHandler<(usize, String)>,
     on_confirm: EventHandler<usize>,
     on_focus: EventHandler<usize>,
+    #[props(default)] paddle_swap: bool,
+    #[props(default)] on_paddle_down: EventHandler<Paddle>,
+    #[props(default)] on_paddle_up: EventHandler<Paddle>,
 ) -> Element {
-    let mut draft = draft;
-    let mut draft_at = draft_at;
     let mut committed = committed;
     let mut committed_at = committed_at;
     let cls = if is_focused {
@@ -95,7 +171,8 @@ fn GroupCard(
         "answer"
     };
     let sent_for_input = sent.clone();
-    let display = if is_active && !is_confirmed && draft_at() == idx {
+    let closed = disabled || input_locked;
+    let display = if is_active && draft_at() == idx {
         draft()
     } else {
         value.clone()
@@ -119,12 +196,13 @@ fn GroupCard(
                 }
             }
             input {
+                key: if is_active && !input_locked { "live" } else { "idle" },
                 id: "group-input-{idx}",
                 class: input_cls,
                 value: "{display}",
-                disabled,
-                readonly: input_locked,
-                autofocus: is_active && !is_confirmed,
+                disabled: html_bool(disabled),
+                readonly: html_bool(input_locked || is_confirmed),
+                autofocus: html_bool(is_active && !input_locked),
                 placeholder: "{placeholder}",
                 autocomplete: "off",
                 autocorrect: "off",
@@ -133,41 +211,52 @@ fn GroupCard(
                 enterkeyhint: "done",
                 inputmode: "text",
                 lang: "zxx",
+                onmounted: move |evt| {
+                    if is_active && !input_locked {
+                        focus_group_input(idx);
+                        // Tests rebuild a VirtualDom with no webview; set_focus
+                        // panics if it tries to query one.
+                        #[cfg(not(test))]
+                        spawn(async move {
+                            let _ = evt.data().set_focus(true).await;
+                        });
+                        #[cfg(test)]
+                        let _ = evt;
+                    }
+                },
                 onfocus: move |_| on_focus.call(idx),
                 oninput: move |e| {
-                    if input_locked {
+                    if closed {
                         return;
                     }
-                    let value = e.value();
-                    draft_at.set(idx);
-                    draft.set(value.clone());
-                    let matches_now = answer_length_matches(&sent_for_input, &value);
-                    let matches_committed = *committed_at.peek() == idx
-                        && answer_length_matches(&sent_for_input, committed.peek().as_str());
-                    if matches_now || matches_committed {
-                        let _ = bump_epoch(debounce_gen);
-                        committed.set(value.clone());
-                        committed_at.set(idx);
-                        on_change.call((idx, value));
-                        return;
-                    }
-                    let gen = bump_epoch(debounce_gen);
-                    spawn(async move {
-                        sleep_ms(INPUT_COMMIT_DEBOUNCE_MS).await;
-                        if *debounce_gen.peek() != gen {
-                            return;
-                        }
-                        committed.set(value.clone());
-                        committed_at.set(idx);
-                        on_change.call((idx, value));
-                    });
+                    commit_draft(
+                        idx,
+                        e.value(),
+                        &sent_for_input,
+                        draft,
+                        draft_at,
+                        committed,
+                        committed_at,
+                        debounce_gen,
+                        on_change,
+                    );
                 },
                 onkeydown: move |e| {
-                    if input_locked {
+                    if let Some(ch) = bracket_from_key(&e) {
+                        e.prevent_default();
+                        if e.is_auto_repeating() {
+                            return;
+                        }
+                        if let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
+                            on_paddle_down.call(paddle);
+                        }
+                        return;
+                    }
+                    if closed {
                         e.prevent_default();
                         return;
                     }
-                    if e.key() == Key::Enter && !disabled {
+                    if e.key() == Key::Enter {
                         let value = draft.peek().clone();
                         let _ = bump_epoch(debounce_gen);
                         if *committed_at.peek() != idx || committed.peek().as_str() != value {
@@ -176,6 +265,14 @@ fn GroupCard(
                             on_change.call((idx, value));
                         }
                         on_confirm.call(idx);
+                    }
+                },
+                onkeyup: move |e| {
+                    if let Some(ch) = bracket_from_key(&e) {
+                        e.prevent_default();
+                        if let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
+                            on_paddle_up.call(paddle);
+                        }
                     }
                 }
             }
@@ -212,28 +309,205 @@ pub fn TrainingView(
     on_focus: EventHandler<usize>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
+    #[props(default)] paddle_swap: bool,
+    #[props(default)] keyer_mode: KeyerMode,
+    #[props(default)] dit_ms: u64,
+    #[props(default)] on_tone: EventHandler<bool>,
 ) -> Element {
+    let dit_ms = if dit_ms == 0 { 60 } else { dit_ms };
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
-    let draft = use_signal(String::new);
-    let draft_at = use_signal(|| usize::MAX);
+    let mut draft = use_signal(String::new);
+    let mut draft_at = use_signal(|| usize::MAX);
     let mut committed = use_signal(String::new);
     let mut committed_at = use_signal(|| usize::MAX);
     let debounce_gen = use_signal(|| 0u64);
-    use_effect(use_reactive!(|focused, current| {
-        let _ = current;
-        focus_group_input(focused);
+    let mut keyer = use_signal(|| PaddleKeyer::with_mode(keyer_mode));
+    let mut keying = use_signal(|| false);
+    let paddle_gen = use_signal(|| 0u64);
+    let current_done = confirmed.get(current).copied().unwrap_or(false);
+    let can_paddle = !playing && !locked && !current_done;
+    let sent_now = groups.get(current).cloned().unwrap_or_default();
+    // The live box remounts when the send ends. `focused`/`current` do not
+    // change then, so this effect has to watch the lock as well — otherwise
+    // the webview never hears that it should grab the new node.
+    let box_open = !current_done && !(playing && locked);
+    use_effect(use_reactive!(|focused, box_open| {
+        if box_open {
+            focus_group_input(focused);
+        }
     }));
-    use_effect(use_reactive!(|current| {
-        let _ = current;
+    use_effect(use_reactive!(|keyer_mode| {
+        keyer.write().set_mode(keyer_mode);
+    }));
+    use_effect(use_reactive!(|current, current_done| {
         let _ = bump_epoch(debounce_gen);
+        let _ = bump_epoch(paddle_gen);
+        keyer.write().reset();
+        keying.set(false);
+        on_tone.call(false);
+        if current_done {
+            draft.set(String::new());
+            draft_at.set(usize::MAX);
+        }
+        let _ = current;
     }));
     use_drop(move || {
         let _ = bump_epoch(debounce_gen);
+        let _ = bump_epoch(paddle_gen);
+        on_tone.call(false);
     });
-    let hint = if playing {
+    let on_paddle_down = EventHandler::new({
+        let sent_now = sent_now.clone();
+        move |paddle: Paddle| {
+            if !can_paddle {
+                return;
+            }
+            if keyer.peek().mode().is_straight() {
+                let already = keyer.peek().any_held();
+                let _ = bump_epoch(paddle_gen);
+                keyer.write().press_at(paddle, mono_ms());
+                if !already {
+                    on_tone.call(true);
+                }
+                return;
+            }
+            keyer.write().press(paddle);
+            if *keying.peek() {
+                return;
+            }
+            keying.set(true);
+            let gen = bump_epoch(paddle_gen);
+            let sent_now = sent_now.clone();
+            spawn(async move {
+                loop {
+                    if *paddle_gen.peek() != gen {
+                        on_tone.call(false);
+                        keying.set(false);
+                        return;
+                    }
+                    let next = keyer.write().next_element();
+                    if let Some(paddle) = next {
+                        on_tone.call(true);
+                        keyer.write().decoder_mut().push(paddle);
+                        sleep_ms(dit_ms.saturating_mul(paddle.dits()).max(1) as u32).await;
+                        if *paddle_gen.peek() != gen {
+                            on_tone.call(false);
+                            keying.set(false);
+                            return;
+                        }
+                        on_tone.call(false);
+                        sleep_ms(dit_ms.max(1) as u32).await;
+                        continue;
+                    }
+                    let mut left = dit_ms.saturating_mul(LETTER_GAP_DITS).max(1);
+                    let mut squeezed = false;
+                    while left > 0 {
+                        if *paddle_gen.peek() != gen {
+                            keying.set(false);
+                            return;
+                        }
+                        if keyer.peek().any_held() {
+                            squeezed = true;
+                            break;
+                        }
+                        let step = left.min(u64::from(POLL_MS)).max(1);
+                        sleep_ms(step as u32).await;
+                        left = left.saturating_sub(step);
+                    }
+                    if squeezed {
+                        continue;
+                    }
+                    if *paddle_gen.peek() != gen {
+                        keying.set(false);
+                        return;
+                    }
+                    keying.set(false);
+                    let Some(ch) = keyer.write().decoder_mut().take_letter() else {
+                        return;
+                    };
+                    push_keyed_char(
+                        ch,
+                        current,
+                        &sent_now,
+                        draft,
+                        draft_at,
+                        committed,
+                        committed_at,
+                        debounce_gen,
+                        on_change,
+                    );
+                    return;
+                }
+            });
+        }
+    });
+    let on_paddle_up = EventHandler::new({
+        let sent_now = sent_now.clone();
+        move |paddle: Paddle| {
+            if keyer.peek().mode().is_straight() {
+                keyer.write().release(paddle);
+                if keyer.peek().any_held() {
+                    return;
+                }
+                on_tone.call(false);
+                let Some(element) = keyer.write().take_straight(mono_ms(), dit_ms) else {
+                    return;
+                };
+                keyer.write().decoder_mut().push(element);
+                let gen = bump_epoch(paddle_gen);
+                let sent_now = sent_now.clone();
+                spawn(async move {
+                    let mut left = dit_ms.saturating_mul(LETTER_GAP_DITS).max(1);
+                    while left > 0 {
+                        if *paddle_gen.peek() != gen {
+                            return;
+                        }
+                        if keyer.peek().any_held() {
+                            return;
+                        }
+                        let step = left.min(u64::from(POLL_MS)).max(1);
+                        sleep_ms(step as u32).await;
+                        left = left.saturating_sub(step);
+                    }
+                    if *paddle_gen.peek() != gen {
+                        return;
+                    }
+                    let Some(ch) = keyer.write().decoder_mut().take_letter() else {
+                        return;
+                    };
+                    push_keyed_char(
+                        ch,
+                        current,
+                        &sent_now,
+                        draft,
+                        draft_at,
+                        committed,
+                        committed_at,
+                        debounce_gen,
+                        on_change,
+                    );
+                });
+                return;
+            }
+            keyer.write().release(paddle);
+        }
+    });
+    let hint = if playing && locked {
         "Listen — the answer box unlocks when the group finishes."
+    } else if playing {
+        "Listen, or type along — the box stays open while this group is sent."
     } else {
-        "Type what you heard. It advances on its own when the length matches."
+        match keyer_mode {
+            KeyerMode::Straight => {
+                "Type the letters, or hold [ or ] as a straight key — a short press is a dit, a long one a dah."
+            }
+            KeyerMode::Ultimatic => {
+                "Type the letters, or hold [ for dits and ] for dahs. The last paddle you close repeats — squeeze for the middle of X or P."
+            }
+            KeyerMode::IambicA | KeyerMode::IambicB => {
+                "Type the letters, or hold [ for dits and ] for dahs. Squeeze both to alternate. A hold repeats at the character speed."
+            }
+        }
     };
     rsx! {
         div { style: "display: contents;",
@@ -251,17 +525,21 @@ pub fn TrainingView(
                     for (idx, sent) in groups.iter().enumerate() {
                         {
                             let is_focused = focused == idx;
-                            let is_active = current == idx;
                             let is_confirmed = confirmed.get(idx).copied().unwrap_or(false);
+                            let is_active = current == idx && !is_confirmed;
                             let awaiting_play = is_focused && !is_active && !is_confirmed;
                             let disabled = is_confirmed || (!is_active && !awaiting_play);
                             let input_locked =
                                 (locked && is_active && !is_confirmed) || awaiting_play;
                             let value = inputs.get(idx).cloned().unwrap_or_default();
                             let correct = value.trim().eq_ignore_ascii_case(sent);
+                            let card_key = format!(
+                                "{idx}-{}",
+                                if is_active && !input_locked { "live" } else { "wait" }
+                            );
                             rsx! {
                                 GroupCard {
-                                    key: "{idx}",
+                                    key: "{card_key}",
                                     idx,
                                     sent: sent.clone(),
                                     shown: if is_confirmed { sent.clone() } else { "•••".into() },
@@ -291,6 +569,9 @@ pub fn TrainingView(
                                     on_change,
                                     on_confirm,
                                     on_focus,
+                                    paddle_swap,
+                                    on_paddle_down,
+                                    on_paddle_up,
                                 }
                             }
                         }

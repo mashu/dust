@@ -8,6 +8,8 @@ title = "Dust"
 watch_path = ["src", "assets", "crates"]
 
 [web.resource]
+# The only copy of the sheet on web. Desktop inlines it in the window head;
+# AppHead does not inject it again.
 style = ["assets/styles.css"]
 script = []
 

@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::keyer::KeyerMode;
 use crate::level::{max_level_for_len, LEVEL_MIN};
 use crate::morse::{is_digit, morse_for, DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START};
 
@@ -143,6 +144,13 @@ pub struct PlaybackSettings {
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
     pub lock_input_during_group_playback: bool,
+    /// `[` is dit and `]` is dah on a USB keyer. Set when the paddles are wired the other way.
+    #[serde(default)]
+    pub paddle_swap: bool,
+    /// How the `[` / `]` paddles time elements. Older saves have no field and
+    /// load as Iambic A — finish the element you were on, then stop.
+    #[serde(default)]
+    pub keyer_mode: KeyerMode,
     /// How far operators' fists stray from a keyer's. Zero is a band of
     /// machines, which is what this was before there was a setting.
     #[serde(default = "defaults::fist_variation")]
@@ -169,6 +177,8 @@ impl Default for PlaybackSettings {
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
             lock_input_during_group_playback: true,
+            paddle_swap: false,
+            keyer_mode: KeyerMode::IambicA,
             fist_variation: 0.35,
             group_repeat_min: 1,
             group_repeat_max: 1,
@@ -671,6 +681,8 @@ impl TrainingSettings {
                 self.playback.group_timeout = d.playback.group_timeout;
                 self.playback.lock_input_during_group_playback =
                     d.playback.lock_input_during_group_playback;
+                self.playback.paddle_swap = d.playback.paddle_swap;
+                self.playback.keyer_mode = d.playback.keyer_mode;
             }
             SettingsSection::Speed => {
                 self.playback.char_wpm_min = d.playback.char_wpm_min;
@@ -1194,6 +1206,7 @@ mod tests {
         assert_eq!(s.playback.group_repeat_min, 1);
         assert_eq!(s.playback.group_repeat_max, 1);
         assert!(s.playback.link_group_repeat);
+        assert_eq!(s.playback.keyer_mode, crate::keyer::KeyerMode::IambicA);
         let koch: TrainingSettings = serde_json::from_str(r#"{"charSetMode":"koch"}"#).unwrap();
         assert_eq!(koch.curriculum.char_set_mode, CharSetMode::Koch);
         assert_eq!(koch.curriculum.mixed_letters_percent, 70);
@@ -1346,6 +1359,7 @@ mod invariant_tests {
     #[test]
     fn defaults_are_the_documented_ones() {
         assert_eq!(CharSetMode::default(), CharSetMode::Mixed);
+        assert_eq!(crate::keyer::KeyerMode::default(), crate::keyer::KeyerMode::IambicA);
         assert_eq!(ReceiverProfile::default(), ReceiverProfile::Mixed);
         assert_eq!(MixedAutoLevelAxis::default(), MixedAutoLevelAxis::Letters);
         assert_eq!(
@@ -1681,6 +1695,8 @@ mod invariant_tests {
         s.playback.extra_word_space_multiplier = 2.5;
         s.playback.group_timeout = 9_000.0;
         s.playback.lock_input_during_group_playback = false;
+        s.playback.paddle_swap = true;
+        s.playback.keyer_mode = KeyerMode::Ultimatic;
         s.playback.group_repeat_min = 2;
         s.playback.group_repeat_max = 4;
         s.playback.link_group_repeat = true;

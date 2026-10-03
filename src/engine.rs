@@ -153,6 +153,16 @@ impl AppState {
             }
         }
     }
+
+    /// Paddle sidetone: on for the squeeze, off on release. No-op if nothing
+    /// has opened the player yet.
+    pub fn set_live_tone(&self, on: bool, frequency_hz: f64, gain: f64) {
+        if let Ok(mut slot) = self.player.try_borrow_mut() {
+            if let Some(player) = slot.as_mut() {
+                player.set_live_tone(on, frequency_hz, gain);
+            }
+        }
+    }
 }
 
 #[derive(Debug)]

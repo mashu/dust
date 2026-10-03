@@ -49,6 +49,12 @@ pub trait MorseBackend {
     /// Silence everything, background included.
     fn shutdown(&mut self);
 
+    /// Gate a live sidetone for paddle practice. Kept as a running stream so a
+    /// squeeze is one buffer of latency, not a stream start.
+    fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
+        let _ = (on, frequency_hz, gain);
+    }
+
     /// The promise for a resumed browser audio context, if one is pending.
     #[cfg(feature = "web")]
     fn take_resume_promise(&self) -> Option<js_sys::Promise> {
@@ -77,13 +83,12 @@ pub fn default_backend() -> Result<Box<dyn MorseBackend>, String> {
 }
 
 pub fn focus_group_input(index: usize) {
-    // The wgpu renderer has no JS. Autofocus on the active box is enough
-    // there; this scroll-and-focus helper is for the webview path.
-    #[cfg(not(any(feature = "web", feature = "webview")))]
-    {
-        let _ = index;
-    }
-    #[cfg(any(feature = "web", feature = "webview"))]
+    // Must run from a component (use_effect / onmounted). `document::eval`
+    // without a Document context is a no-op, which is what the session
+    // runtime's Focus effect used to hit — the box unlocked and nobody
+    // asked the webview to focus it.
+    // Tests rebuild a VirtualDom with no document, so eval stays off there.
+    #[cfg(all(any(feature = "web", feature = "desktop"), not(test)))]
     {
         let js = format!(
             r#"(() => {{
@@ -91,6 +96,10 @@ pub fn focus_group_input(index: usize) {
             const inputId = "group-input-{index}";
             let scrolled = false;
             const apply = () => {{
+                const el = document.getElementById(inputId);
+                if (!el || el.disabled || el.readOnly) {{
+                    return false;
+                }}
                 const card = document.getElementById(cardId);
                 if (card && !scrolled) {{
                     // Instant, not smooth. A smooth scroll is an animation
@@ -101,22 +110,29 @@ pub fn focus_group_input(index: usize) {
                     card.scrollIntoView({{ block: "center", inline: "nearest" }});
                     scrolled = true;
                 }}
-                const el = document.getElementById(inputId);
-                if (!el || el.disabled) {{
-                    return;
-                }}
                 if (document.activeElement !== el) {{
                     el.focus({{ preventScroll: true }});
                 }}
+                return document.activeElement === el;
             }};
-            apply();
-            // One retry after the frame the card is mounted in. The two later
-            // ones bought nothing the frame had not already settled, and each
-            // was another scroll and focus landing mid-keystroke.
-            requestAnimationFrame(apply);
+            if (apply()) {{
+                return;
+            }}
+            const delays = [0, 32, 80, 160];
+            const tick = (i) => {{
+                if (apply() || i >= delays.length) {{
+                    return;
+                }}
+                setTimeout(() => tick(i + 1), delays[i]);
+            }};
+            requestAnimationFrame(() => tick(0));
         }})()"#
         );
         let _ = dioxus::document::eval(&js);
+    }
+    #[cfg(not(all(any(feature = "web", feature = "desktop"), not(test))))]
+    {
+        let _ = index;
     }
 }
 

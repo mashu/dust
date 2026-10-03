@@ -70,6 +70,15 @@ pub fn control_id(prefix: &str, label: &str) -> String {
     }
 }
 
+/// Emit a boolean HTML attribute only when it should apply.
+///
+/// HTML treats the *presence* of `disabled` / `readonly` / `autofocus` as
+/// true. Dioxus still serializes `false` as `"false"`, which leaves the
+/// control unfocusable.
+pub fn html_bool(on: bool) -> Option<bool> {
+    on.then_some(true)
+}
+
 /// Trim trailing zeros so 18.0 reads as "18" and 0.75 stays "0.75".
 pub fn pretty_number(value: f64) -> String {
     let rounded = (value * 1000.0).round() / 1000.0;
@@ -337,25 +346,52 @@ pub fn SliderField(
     onchange: EventHandler<f64>,
 ) -> Element {
     let pct = pct_between(value, min, max);
+    let name = id.unwrap_or_else(|| control_id("slider", &label));
+    let at_min = value <= min;
+    let at_max = value >= max;
     rsx! {
         div { class: if disabled { "slider disabled" } else { "slider" },
             div { class: "slider-head",
                 span { class: "slider-name", "{label}" }
                 span { class: "slider-value", "{value_label}" }
             }
-            input {
-                id: id.unwrap_or_else(|| control_id("slider", &label)),
-                r#type: "range",
-                min: "{min}",
-                max: "{max}",
-                step: "{step}",
-                value: "{value}",
-                disabled,
-                style: "--pct: {pct}%;",
-                oninput: move |e| {
-                    if let Ok(v) = e.value().parse::<f64>() {
-                        onchange.call(v);
+            div { class: "slider-row",
+                button {
+                    id: control_id("less", &name),
+                    class: "step",
+                    r#type: "button",
+                    aria_label: "Decrease",
+                    disabled: html_bool(disabled || at_min),
+                    onclick: move |_| onchange.call(nudge(value - step, step, min, max)),
+                    "−"
+                }
+                div { class: "slider-bar",
+                    span { class: "slider-track" }
+                    span { class: "slider-fill", style: "width: {pct}%;" }
+                    span { class: "slider-knob", style: "left: {pct}%;" }
+                    input {
+                        id: name.clone(),
+                        r#type: "range",
+                        min: "{min}",
+                        max: "{max}",
+                        step: "{step}",
+                        value: "{value}",
+                        disabled: html_bool(disabled),
+                        oninput: move |e| {
+                            if let Ok(v) = e.value().parse::<f64>() {
+                                onchange.call(v);
+                            }
+                        }
                     }
+                }
+                button {
+                    id: control_id("more", &name),
+                    class: "step",
+                    r#type: "button",
+                    aria_label: "Increase",
+                    disabled: html_bool(disabled || at_max),
+                    onclick: move |_| onchange.call(nudge(value + step, step, min, max)),
+                    "+"
                 }
             }
         }
@@ -385,7 +421,7 @@ pub fn NumberField(
                     class: "step",
                     r#type: "button",
                     aria_label: "Decrease",
-                    disabled: value <= min,
+                    disabled: html_bool(value <= min),
                     onclick: move |_| onchange.call(nudge(value - step, step, min, max)),
                     "−"
                 }
@@ -416,7 +452,7 @@ pub fn NumberField(
                     class: "step",
                     r#type: "button",
                     aria_label: "Increase",
-                    disabled: value >= max,
+                    disabled: html_bool(value >= max),
                     onclick: move |_| onchange.call(nudge(value + step, step, min, max)),
                     "+"
                 }
@@ -604,7 +640,7 @@ pub fn ScoreRing(pct: f64, value: String, caption: String) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{control_id, nudge, parse_number_input, pct_between, pretty_number};
+    use super::{control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number};
 
     #[test]
     fn typing_below_min_is_kept_until_commit() {
@@ -644,6 +680,12 @@ mod tests {
         assert_eq!(pretty_number(18.0), "18");
         assert_eq!(pretty_number(0.75), "0.75");
         assert_eq!(pretty_number(0.1 + 0.2), "0.3");
+    }
+
+    #[test]
+    fn boolean_html_attributes_are_omitted_when_off() {
+        assert_eq!(html_bool(true), Some(true));
+        assert_eq!(html_bool(false), None);
     }
 
     #[test]

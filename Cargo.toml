@@ -20,14 +20,10 @@ description = "Dust — CW Morse group trainer (desktop and WebAssembly)"
 [dependencies]
 cw-core = { path = "crates/cw-core" }
 dioxus = "0.7.10"
-# Event serialization is off in dioxus's default html features; the UI tests
-# fire synthetic clicks and keys through it. Enabling it here unifies with
-# the copy dioxus already uses.
-dioxus-html = { version = "0.7.10", features = ["serialize"] }
-fastrand = "2"
+fastrand = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 # Web / WASM
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
@@ -57,10 +53,6 @@ web-sys = { version = "0.3", optional = true, features = [
     "Storage",
 ] }
 
-# The wgpu renderer: Blitz draws the same markup on the GPU instead of handing
-# it to a system webview. Desktop and `gpu` enable this; `webview` is the fallback.
-dioxus-native = { version = "0.7", optional = true }
-
 # Linux / desktop
 cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
@@ -78,6 +70,9 @@ objc2-avf-audio = { version = "0.3", default-features = false, features = [
 [dev-dependencies]
 # Renders components to HTML so the screens can be smoke-tested without a window.
 dioxus-ssr = "0.7.10"
+# Event serialization is off in dioxus's default html features; the UI tests
+# fire synthetic clicks and keys through it.
+dioxus-html = { version = "0.7.10", features = ["serialize"] }
 # `start_paused` runs the session runtime's timers on a virtual clock, so a
 # whole training session takes milliseconds and lands on the same instants
 # every run.
@@ -108,18 +103,19 @@ unsafe_op_in_unsafe_fn = "deny"
 default = []
 web = [
     "dioxus/web",
+    "chrono/wasmbind",
+    "dep:fastrand",
     "dep:gloo-timers",
     "dep:js-sys",
     "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
     "dep:web-sys",
 ]
-# Desktop is Blitz on wgpu: in-process layout and paint, no webview IPC.
-# `gpu` is the same feature under the name the docs started with.
-desktop = ["dep:dioxus-native", "native-runtime", "native-audio"]
-gpu = ["desktop"]
-# The old wry/WebKit path, kept for machines where wgpu will not come up.
-webview = ["dioxus/desktop", "native-runtime", "native-audio"]
+# Desktop is the system webview (wry). `dx serve --platform desktop` and the
+# shipped installers use this.
+desktop = ["dioxus/desktop", "native-runtime", "native-audio"]
+# Old name for the same renderer.
+webview = ["desktop"]
 # Android/iOS still use a system webview. `dx` enables this feature
 # automatically for `--platform android`.
 mobile = ["dioxus/mobile", "native-runtime", "native-audio"]

@@ -15,3 +15,5 @@ pub mod widgets;
 
 #[cfg(test)]
 mod render_tests;
+#[cfg(test)]
+mod styles_tests;

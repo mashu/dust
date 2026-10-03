@@ -5,7 +5,7 @@
 
 mod state;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -34,6 +34,8 @@ pub struct MorsePlayer {
     /// When the player opened. Fading is read off this clock so it keeps
     /// running between groups instead of restarting with every send.
     opened_at: Instant,
+    live: Arc<LiveSidetone>,
+    live_stream: Option<cpal::Stream>,
 }
 
 /// iOS starts an app with no audio session, which leaves output silent, tied to
@@ -72,6 +74,8 @@ impl MorsePlayer {
             qsb: LiveQsb::new(),
             agc: LiveAgc::new(),
             opened_at: Instant::now(),
+            live: LiveSidetone::new(),
+            live_stream: None,
         })
     }
 
@@ -121,6 +125,7 @@ impl MorseBackend for MorsePlayer {
         settings: &TrainingSettings,
     ) -> Result<PlaybackWait, String> {
         self.apply_band(settings)?;
+        self.live.set_on(false);
         let planned = plan_transmission(transmission, settings);
         let plan = planned.wanted.clone();
         // Drop the previous stream before the new epoch, so its callback cannot
@@ -157,6 +162,22 @@ impl MorseBackend for MorsePlayer {
     fn shutdown(&mut self) {
         self.stop();
         self.stop_band();
+        self.live.set_on(false);
+        self.live_stream = None;
+    }
+
+    fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
+        self.live.set(on, frequency_hz, gain);
+        if !on {
+            return;
+        }
+        if self.live_stream.is_some() {
+            return;
+        }
+        match start_live_stream(Arc::clone(&self.live)) {
+            Ok(stream) => self.live_stream = Some(stream),
+            Err(err) => eprintln!("live sidetone: {err}"),
+        }
     }
 }
 
@@ -272,6 +293,72 @@ fn start_band_stream(
         playback.fill(out, channels)
     })?;
     stream.play().map_err(|e| format!("Band play: {e}"))?;
+    Ok(stream)
+}
+
+/// Gate and pitch for the paddle sidetone. The stream stays up; only these
+/// atomics change per squeeze, so the lag is one audio buffer.
+struct LiveSidetone {
+    on: AtomicBool,
+    hz: AtomicU32,
+    gain_bits: AtomicU32,
+}
+
+impl LiveSidetone {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            on: AtomicBool::new(false),
+            hz: AtomicU32::new(500),
+            gain_bits: AtomicU32::new(0.2f32.to_bits()),
+        })
+    }
+
+    fn set_on(&self, on: bool) {
+        self.on.store(on, Ordering::Relaxed);
+    }
+
+    fn set(&self, on: bool, frequency_hz: f64, gain: f64) {
+        let hz = frequency_hz.round().clamp(100.0, 2_000.0) as u32;
+        let gain = gain.clamp(0.0, 1.0) as f32;
+        self.hz.store(hz, Ordering::Relaxed);
+        self.gain_bits.store(gain.to_bits(), Ordering::Relaxed);
+        self.set_on(on);
+    }
+}
+
+fn start_live_stream(tone: Arc<LiveSidetone>) -> Result<cpal::Stream, String> {
+    let (device, config) = default_output()?;
+    let sample_rate = config.sample_rate().0 as f32;
+    let channels = config.channels() as usize;
+    let mut phase = 0.0f32;
+    let mut env = 0.0f32;
+    // ~2 ms to the target so a squeeze is not a click, and not a fade.
+    let coeff = 1.0 - (-1.0f32 / (sample_rate * 0.002)).exp();
+    let two_pi = std::f32::consts::TAU;
+    let stream = build_for_format(&device, &config, channels, move |out, channels| {
+        let hz = tone.hz.load(Ordering::Relaxed) as f32;
+        let gain = f32::from_bits(tone.gain_bits.load(Ordering::Relaxed));
+        let want = if tone.on.load(Ordering::Relaxed) {
+            1.0
+        } else {
+            0.0
+        };
+        let incr = two_pi * hz / sample_rate.max(1.0);
+        for frame in out.chunks_mut(channels.max(1)) {
+            env += (want - env) * coeff;
+            let sample = phase.sin() * env * gain;
+            phase += incr;
+            if phase >= two_pi {
+                phase -= two_pi;
+            }
+            for slot in frame {
+                *slot = sample;
+            }
+        }
+    })?;
+    stream
+        .play()
+        .map_err(|e| format!("Live sidetone play: {e}"))?;
     Ok(stream)
 }
 

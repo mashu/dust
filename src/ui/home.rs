@@ -110,7 +110,7 @@ pub fn Home(
                     }
                 }
                 if chars.is_empty() {
-                    p { class: "muted", style: "color: rgb(248 241 227 / 70%);", "No characters unlocked yet." }
+                    p { class: "muted", style: "color: var(--hero-ink-soft);", "No characters unlocked yet." }
                 } else {
                     div { class: "pool-chips",
                         for (i, ch) in chars.iter().copied().enumerate() {

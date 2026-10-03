@@ -1,7 +1,7 @@
 use cw_core::{HeatmapColorMode, HeatmapGrid, SessionResult, StreakState, StreakStatus};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, Icon, Seg};
+use crate::ui::widgets::{control_id, html_bool, Icon, Seg};
 
 #[component]
 pub fn StreakCard(status: StreakStatus) -> Element {
@@ -169,7 +169,7 @@ fn HeatmapGridView(
                                 class: cls,
                                 style: paint,
                                 title: "{title}",
-                                disabled: cell.in_future,
+                                disabled: html_bool(cell.in_future),
                                 onclick: move |_| on_select.call(date.clone()),
                             }
                         }

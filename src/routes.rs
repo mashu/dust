@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use cw_core::{compute_char_pool, SessionEvent};
+use cw_core::{compute_char_pool, dit_ms_for_wpm, SessionEvent};
 use dioxus::prelude::*;
 
 use crate::engine::{current_auto_progress, AppState, Screen, SessionSignals};
@@ -114,7 +114,19 @@ pub fn app_routes(
                 let app_confirm = app.clone();
                 let app_focus = app.clone();
                 let app_submit = app.clone();
-                let app_stop = app;
+                let app_stop = app.clone();
+                let app_tone = app.clone();
+                let settings = session.settings();
+                let wpm = session
+                    .group(view.current)
+                    .map(|g| g.char_wpm())
+                    .filter(|wpm| *wpm > 0.0)
+                    .unwrap_or(settings.playback.char_wpm_min);
+                let dit_ms = dit_ms_for_wpm(wpm);
+                let tone_hz = settings.side_tone_center();
+                let tone_gain = settings.band.volume_min;
+                let paddle_swap = settings.playback.paddle_swap;
+                let keyer_mode = settings.playback.keyer_mode;
                 rsx! {
                     div { class: "stack",
                         TrainingScope {
@@ -134,6 +146,12 @@ pub fn app_routes(
                             locked: view.locked,
                             repeat_total: view.repeat_total,
                             repeat_done: view.repeat_done,
+                            paddle_swap,
+                            keyer_mode,
+                            dit_ms,
+                            on_tone: move |on| {
+                                app_tone.set_live_tone(on, tone_hz, tone_gain);
+                            },
                             on_change: move |(idx, value): (usize, String)| {
                                 send_command((*app_change).clone(), signals, SessionEvent::Input { index: idx, text: value });
                             },

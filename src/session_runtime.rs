@@ -7,7 +7,6 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::audio::focus_group_input;
 use crate::engine::{
     finish_session, play_text_now, sleep_cancelable, AppState, PlayError, Screen, SessionSignals,
 };
@@ -230,8 +229,9 @@ async fn handle_effect(
         ..
     } = signals;
     match effect {
-        SessionEffect::Focus { index } => {
-            focus_group_input(index);
+        SessionEffect::Focus { index: _ } => {
+            // Focus is grabbed from TrainingView when the live box mounts.
+            // `document::eval` here has no Document context and is a no-op.
             Vec::new()
         }
         SessionEffect::StopAudio => {

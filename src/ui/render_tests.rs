@@ -6,8 +6,8 @@
 //! thrown away.
 
 use cw_core::{
-    AutoLevelProgress, CharSetMode, GroupResult, MixedAutoLevelAxis, SessionResult, SessionTiming,
-    StreakState, StreakStatus, TrainingSettings,
+    AutoLevelProgress, CharSetMode, GroupResult, KeyerMode, MixedAutoLevelAxis, SessionResult,
+    SessionTiming, StreakState, StreakStatus, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -40,6 +40,7 @@ fn TrainingScreen(
     on_focus: EventHandler<usize>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
+    #[props(default)] keyer_mode: KeyerMode,
 ) -> Element {
     rsx! {
         div { class: "stack",
@@ -60,6 +61,7 @@ fn TrainingScreen(
                 locked,
                 repeat_total,
                 repeat_done,
+                keyer_mode,
                 on_change,
                 on_confirm,
                 on_focus,
@@ -259,7 +261,9 @@ fn streak_card_renders_each_state() {
 fn the_app_shell_renders_the_practice_screen() {
     let html = render(crate::app::App);
     assert!(html.contains("class=\"app-root\""));
+    assert!(html.contains("data-theme=\"auto\""));
     assert!(html.contains("brand-mark"));
+    assert!(html.contains("bottom-dock"));
     assert!(html.contains("bottom-nav"));
     // Home is the landing screen.
     assert!(html.contains("Start training"));
@@ -376,6 +380,8 @@ fn settings_renders_every_card() {
         "Character set",
         "Session shape",
         "Sends per group",
+        "Iambic A",
+        "Ultimatic",
         "Speed",
         // dioxus-ssr escapes the ampersand, so match the card note instead.
         "Side tone pitch and sending level",
@@ -386,6 +392,18 @@ fn settings_renders_every_card() {
     ] {
         assert!(html.contains(needle), "settings should render {needle}");
     }
+    assert!(
+        html.contains("slider-bar") && html.contains("slider-fill") && html.contains("slider-knob"),
+        "sliders must paint a track of their own, not a naked range input"
+    );
+    assert!(
+        html.contains("less-slider-") && html.contains("more-slider-"),
+        "sliders need step buttons so values can change without dragging a range thumb"
+    );
+    assert!(
+        html.contains("class=\"stepper\""),
+        "number fields should keep their steppers"
+    );
 }
 
 #[test]
@@ -534,6 +552,127 @@ fn training_without_repeats_omits_the_counter() {
     assert!(html.contains("ch sent-row"));
 }
 
+fn input_open_tag(html: &str, id: &str) -> String {
+    let needle = format!("id=\"{id}\"");
+    let start = html
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no element with {needle}"));
+    let open = html[..start]
+        .rfind('<')
+        .unwrap_or_else(|| panic!("{id} tag has no opening bracket"));
+    let close = html[start..]
+        .find('>')
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("{id} tag is unclosed"));
+    html[open..=close].to_string()
+}
+
+#[test]
+fn an_unlocked_answer_box_does_not_look_disabled() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 1,
+                groups: vec!["KM".to_string()],
+                inputs: vec![String::new()],
+                confirmed: vec![false],
+                focused: 0,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    let tag = input_open_tag(&html, "group-input-0");
+    assert!(
+        !tag.contains("disabled"),
+        "HTML treats disabled=\"false\" as disabled, so the attribute must be absent: {tag}"
+    );
+    assert!(
+        !tag.contains("readonly"),
+        "HTML treats readonly=\"false\" as readonly, so the attribute must be absent: {tag}"
+    );
+    assert!(
+        tag.contains("autofocus"),
+        "the live box must autofocus so typing works without a click: {tag}"
+    );
+}
+
+#[test]
+fn a_locked_answer_box_is_readonly_not_disabled() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 1,
+                groups: vec!["KM".to_string()],
+                inputs: vec![String::new()],
+                confirmed: vec![false],
+                focused: 0,
+                playing: true,
+                locked: true,
+                repeat_total: 1,
+                repeat_done: 0,
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    let tag = input_open_tag(&html, "group-input-0");
+    assert!(
+        tag.contains("readonly"),
+        "the listening box should be readonly: {tag}"
+    );
+    assert!(
+        !tag.contains("disabled"),
+        "disabled would also swallow the click that focuses it after the send: {tag}"
+    );
+    assert!(
+        !tag.contains("autofocus"),
+        "autofocus on a locked box would steal keys while the group is still being sent: {tag}"
+    );
+}
+
+#[test]
+fn a_confirmed_answer_box_cannot_be_typed_in() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec!["KM".to_string(), String::new()],
+                confirmed: vec![true, false],
+                focused: 1,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    let tag = input_open_tag(&html, "group-input-0");
+    assert!(
+        tag.contains("disabled") || tag.contains("readonly"),
+        "a finished group must not still look like an answer box: {tag}"
+    );
+}
+
 /// Components that own state, driven through their own controls.
 mod interactions {
     use super::*;
@@ -541,6 +680,8 @@ mod interactions {
     use crate::ui::band::BandConditionsCard;
     use crate::ui::heatmap::ActivityHeatmap;
     use crate::ui::settings::SettingsView;
+    use crate::ui::widgets::control_id;
+    use dioxus::prelude::{Code, Key};
 
     #[component]
     fn HeatmapHarness() -> Element {
@@ -671,6 +812,24 @@ mod interactions {
     }
 
     #[test]
+    fn a_slider_step_button_moves_the_value() {
+        let mut ui = Ui::new(BandHarness, BandHarnessProps { previewing: false });
+        assert!(ui.has("slider-bar"), "the track has to be in the markup");
+        ui.click("switch-qrn-static");
+        assert!(
+            ui.has("class=\"slider-value\">25%<"),
+            "QRN starts at a quarter"
+        );
+        ui.click("more-slider-qrn-intensity");
+        assert!(
+            ui.has("class=\"slider-value\">30%<"),
+            "the + button is how the value moves when range thumbs do not paint"
+        );
+        ui.click("less-slider-qrn-intensity");
+        assert!(ui.has("class=\"slider-value\">25%<"));
+    }
+
+    #[test]
     fn a_running_preview_offers_a_stop_button() {
         let mut ui = Ui::new(BandHarness, BandHarnessProps { previewing: true });
         assert!(ui.has("Looping “CQ”"));
@@ -699,6 +858,23 @@ mod interactions {
         assert!(ui.has("test-chip playing"));
         ui.click("btn-sample-stop");
         assert!(ui.has("Keying envelope"));
+    }
+
+    #[test]
+    fn the_keyer_mode_can_be_switched() {
+        let mut ui = Ui::new(SettingsHarness, ());
+        ui.click("seg-ultimatic");
+        assert!(ui.has("Last paddle you close wins"));
+        ui.click("seg-straight");
+        assert!(ui.has("One contact"));
+        assert!(
+            !ui.has("Swap [ and ] paddles"),
+            "a straight key has no paddle direction: {}",
+            ui.html()
+        );
+        ui.click("seg-iambic-b");
+        assert!(ui.has("one extra opposite element"));
+        assert!(ui.has("Swap [ and ] paddles"));
     }
 
     #[component]
@@ -754,6 +930,33 @@ mod interactions {
                 inputs: vec![typed(), String::new()],
                 confirmed: vec![false, false],
                 focused: 0,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+            if !typed().is_empty() {
+                p { id: "committed-answer", "committed:{typed()}" }
+            }
+        }
+    }
+
+    #[component]
+    fn FinishedGroupHarness() -> Element {
+        let mut typed = use_signal(String::new);
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec!["KM".to_string(), String::new()],
+                confirmed: vec![true, false],
+                focused: 1,
                 playing: false,
                 locked: false,
                 repeat_total: 1,
@@ -850,6 +1053,143 @@ mod interactions {
             let mut ui = Ui::new(AnsweringHarness, ());
             ui.type_into("group-input-0", "KM");
             assert!(ui.has("committed:KM"));
+        });
+    }
+
+    #[test]
+    fn holding_the_dah_paddle_sends_o() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(AnsweringHarness, ());
+            let key = Key::Character("]".into());
+            let code = Code::BracketRight;
+            ui.press_key("group-input-0", key.clone(), code);
+            // Three dahs at 60 ms: each is 3 dits on + 1 dit space = 240 ms.
+            // The third starts at 480 ms; release before the fourth at 720 ms.
+            // The in-progress dah still finishes (a keyer does not clip it).
+            ui.advance(500).await;
+            ui.release_key("group-input-0", key, code);
+            ui.advance(160).await; // rest of the third dah
+            ui.advance(60).await; // trailing element space
+            ui.advance(120).await; // letter gap
+            ui.advance(48).await;
+            assert!(ui.has("committed:O"), "{}", ui.html());
+            assert!(
+                !ui.html().contains("value=\"]\""),
+                "the dah paddle must not land as a bracket: {}",
+                ui.html()
+            );
+        });
+    }
+
+    #[component]
+    fn StraightKeyHarness() -> Element {
+        let mut typed = use_signal(String::new);
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 1,
+                groups: vec!["E".to_string()],
+                inputs: vec![typed()],
+                confirmed: vec![false],
+                focused: 0,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                keyer_mode: KeyerMode::Straight,
+                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+            if !typed().is_empty() {
+                p { id: "committed-answer", "committed:{typed()}" }
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_straight_key_press_sends_e() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(StraightKeyHarness, ());
+            let key = Key::Character("[".into());
+            let code = Code::BracketLeft;
+            ui.press_key("group-input-0", key.clone(), code);
+            ui.advance(50).await;
+            ui.release_key("group-input-0", key, code);
+            ui.advance(120).await;
+            ui.advance(48).await;
+            assert!(ui.has("committed:E"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn LockCycleHarness() -> Element {
+        let mut locked = use_signal(|| true);
+        let mut playing = use_signal(|| true);
+        let mut typed = use_signal(String::new);
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 1,
+                groups: vec!["KM".to_string()],
+                inputs: vec![typed()],
+                confirmed: vec![false],
+                focused: 0,
+                playing: playing(),
+                locked: locked(),
+                repeat_total: 1,
+                repeat_done: if playing() { 0 } else { 1 },
+                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_confirm: move |_: usize| {},
+                on_focus: move |_: usize| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+            button {
+                id: control_id("btn", "unlock group"),
+                onclick: move |_| {
+                    playing.set(false);
+                    locked.set(false);
+                },
+                "unlock"
+            }
+            if !typed().is_empty() {
+                p { id: "committed-answer", "committed:{typed()}" }
+            }
+        }
+    }
+
+    /// The live box used to keep its first-mount identity when the send ended.
+    /// Webview autofocus only applies on first insert of that node, so unlock
+    /// remounts it (`key=live`) with autofocus set.
+    #[test]
+    fn unlocking_the_answer_box_remounts_it_with_autofocus() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(LockCycleHarness, ());
+            let locked = ui.input_tag("group-input-0");
+            assert!(locked.contains("readonly"), "{locked}");
+            assert!(!locked.contains("autofocus"), "{locked}");
+            ui.type_into("group-input-0", "KM");
+            assert!(!ui.has("committed:"), "typing must not land while locked");
+
+            ui.click("btn-unlock-group");
+            let open = ui.input_tag("group-input-0");
+            assert!(!open.contains("readonly"), "{open}");
+            assert!(!open.contains("disabled"), "{open}");
+            assert!(open.contains("autofocus"), "{open}");
+            ui.type_into("group-input-0", "KM");
+            assert!(ui.has("committed:KM"), "{}", ui.html());
+        });
+    }
+
+    #[test]
+    fn typing_into_a_finished_group_is_ignored() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(FinishedGroupHarness, ());
+            ui.type_into("group-input-0", "XX");
+            assert!(!ui.has("committed:"));
         });
     }
 }

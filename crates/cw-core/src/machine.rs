@@ -295,9 +295,20 @@ impl SessionMachine {
             .group(index)
             .map(|g| g.sent().to_string())
             .unwrap_or_default();
+        let previous = self
+            .session
+            .group(index)
+            .map(|g| g.input().to_string())
+            .unwrap_or_default();
         self.session.set_input(index, text.clone());
         if answer_length_matches(&sent, &text) {
             self.session.record_answer_time_if_empty(index, now_ms);
+            // The renderer can re-fire Input with the same text on every
+            // paint. Restarting the timer then would mean the group never
+            // confirms and the next send never starts.
+            if self.pending_auto_confirm.is_some() && previous == text {
+                return Vec::new();
+            }
             let id = self.alloc_id();
             self.pending_auto_confirm = Some(id);
             vec![SessionEffect::AutoConfirm {
@@ -994,6 +1005,43 @@ mod guard_tests {
             )
             .is_empty());
         assert!(!machine.session().confirmed_flags()[0]);
+    }
+
+    #[test]
+    fn repeating_the_same_full_answer_does_not_restart_auto_confirm() {
+        let mut machine = started(true, 10.0);
+        finished_play(&mut machine, 0);
+        let first = machine.apply(
+            SessionEvent::Input {
+                index: 0,
+                text: "KM".into(),
+            },
+            1_100,
+        );
+        let SessionEffect::AutoConfirm { id, .. } = first[0].clone() else {
+            panic!("expected an auto-confirm, got {first:?}");
+        };
+        assert!(machine
+            .apply(
+                SessionEvent::Input {
+                    index: 0,
+                    text: "KM".into(),
+                },
+                1_150,
+            )
+            .is_empty());
+        let done = machine.apply(
+            SessionEvent::AutoConfirmDue {
+                id,
+                index: 0,
+                value: "KM".into(),
+            },
+            1_400,
+        );
+        assert!(machine.session().confirmed_flags()[0]);
+        assert!(done
+            .iter()
+            .any(|e| matches!(e, SessionEffect::NeedGroup { index: 1 })));
     }
 
     #[test]

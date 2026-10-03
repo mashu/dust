@@ -1,10 +1,12 @@
-use cw_core::{CharSetMode, RangeSetting, SettingsSection, TrainingSettings, GROUP_REPEAT_MAX};
+use cw_core::{
+    CharSetMode, KeyerMode, RangeSetting, SettingsSection, TrainingSettings, GROUP_REPEAT_MAX,
+};
 use dioxus::prelude::*;
 
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::widgets::{
-    control_id, Icon, LinkedRange, NumberField, SectionReset, SliderField, Switch,
+    control_id, Icon, LinkedRange, NumberField, SectionReset, Seg, SliderField, Switch,
 };
 
 #[component]
@@ -78,6 +80,20 @@ pub fn SettingsView(
     on_play_sample: EventHandler<String>,
 ) -> Element {
     let s = settings();
+    let keyer_hint = match s.playback.keyer_mode {
+        KeyerMode::Straight => {
+            "One contact. Hold [ or ] — a short press is a dit, a long one a dah. You time the elements."
+        }
+        KeyerMode::IambicA => {
+            "Hold a paddle and it repeats at the character speed. Squeeze both to alternate. Let go and the element you were on finishes, then it stops."
+        }
+        KeyerMode::IambicB => {
+            "Like Iambic A, but releasing a squeeze sends one extra opposite element — the extra dit after a dah is how C is often sent."
+        }
+        KeyerMode::Ultimatic => {
+            "Last paddle you close wins and repeats. It does not alternate. Squeeze the dit paddle in a dah for the two dits in X, then let the dit go for the last dah."
+        }
+    };
     rsx! {
         div { class: "stack settings-page",
             header { class: "page-head",
@@ -145,6 +161,40 @@ pub fn SettingsView(
                     description: "Keeps you copying by ear instead of typing along.".to_string(),
                     checked: s.playback.lock_input_during_group_playback,
                     onchange: move |on| settings.write().playback.lock_input_during_group_playback = on,
+                }
+                div { class: "field",
+                    span { class: "field-label", "Key" }
+                    div { class: "segmented",
+                        Seg {
+                            label: "Straight".to_string(),
+                            active: s.playback.keyer_mode == KeyerMode::Straight,
+                            onclick: move |_| settings.write().playback.keyer_mode = KeyerMode::Straight,
+                        }
+                        Seg {
+                            label: "Iambic A".to_string(),
+                            active: s.playback.keyer_mode == KeyerMode::IambicA,
+                            onclick: move |_| settings.write().playback.keyer_mode = KeyerMode::IambicA,
+                        }
+                        Seg {
+                            label: "Iambic B".to_string(),
+                            active: s.playback.keyer_mode == KeyerMode::IambicB,
+                            onclick: move |_| settings.write().playback.keyer_mode = KeyerMode::IambicB,
+                        }
+                        Seg {
+                            label: "Ultimatic".to_string(),
+                            active: s.playback.keyer_mode == KeyerMode::Ultimatic,
+                            onclick: move |_| settings.write().playback.keyer_mode = KeyerMode::Ultimatic,
+                        }
+                    }
+                    p { class: "muted", style: "margin: 0; font-size: 0.8rem;", "{keyer_hint}" }
+                }
+                if !s.playback.keyer_mode.is_straight() {
+                    Switch {
+                        title: "Swap [ and ] paddles".to_string(),
+                        description: "[ is dit and ] is dah. Turn this on if your paddles are the other way around.".to_string(),
+                        checked: s.playback.paddle_swap,
+                        onchange: move |on| settings.write().playback.paddle_swap = on,
+                    }
                 }
             }
 

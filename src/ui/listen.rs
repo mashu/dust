@@ -1,7 +1,7 @@
 use cw_core::{compute_char_pool, morse_for, MixedAutoLevelAxis, TrainingSettings};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, Icon};
+use crate::ui::widgets::{control_id, html_bool, Icon};
 
 pub fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
     if pool.is_empty() {
@@ -155,7 +155,7 @@ pub fn ListenView(
                     button {
                         id: control_id("btn", "play all"),
                         class: "btn btn-secondary",
-                        disabled: all_chars.is_empty(),
+                        disabled: html_bool(all_chars.is_empty()),
                         onclick: move |_| on_play.call(all_chars.clone()),
                         Icon { name: "headphones" }
                         "Play all"

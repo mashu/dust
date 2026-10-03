@@ -264,6 +264,7 @@ impl Harness {
 
 /// Run a test body on a paused clock.
 pub fn run<F: std::future::Future<Output = ()>>(body: impl FnOnce() -> F) {
+    crate::time::reset_mono_clock();
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
@@ -457,6 +458,24 @@ impl Ui {
         self.html().contains(needle)
     }
 
+    /// The opening tag of an element the markup names, so a test can see
+    /// `disabled` / `readonly` / `autofocus` without scraping the whole page.
+    pub fn input_tag(&self, id: &str) -> String {
+        let html = self.html();
+        let needle = format!("id=\"{id}\"");
+        let start = html
+            .find(&needle)
+            .unwrap_or_else(|| panic!("no element with {needle}"));
+        let open = html[..start]
+            .rfind('<')
+            .unwrap_or_else(|| panic!("{id} tag has no opening bracket"));
+        let close = html[start..]
+            .find('>')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("{id} tag is unclosed"));
+        html[open..=close].to_string()
+    }
+
     /// The ids of everything on the page, and a check that each is unique: two
     /// elements answering to one name would make both the page and this
     /// harness ambiguous.
@@ -623,12 +642,31 @@ impl Ui {
     }
 
     pub fn press_enter(&mut self, id: &str) {
+        self.press_key(id, Key::Enter, dioxus::prelude::Code::Enter);
+    }
+
+    pub fn press_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) {
         self.fire(
             "keydown",
             id,
             Box::new(dioxus::html::SerializedKeyboardData::new(
-                Key::Enter,
-                dioxus::prelude::Code::Enter,
+                key,
+                code,
+                dioxus::prelude::Location::Standard,
+                false,
+                dioxus::prelude::Modifiers::empty(),
+                false,
+            )),
+        );
+    }
+
+    pub fn release_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) {
+        self.fire(
+            "keyup",
+            id,
+            Box::new(dioxus::html::SerializedKeyboardData::new(
+                key,
+                code,
                 dioxus::prelude::Location::Standard,
                 false,
                 dioxus::prelude::Modifiers::empty(),
