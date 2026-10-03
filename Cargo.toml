@@ -20,6 +20,10 @@ description = "Dust — CW Morse group trainer (desktop and WebAssembly)"
 [dependencies]
 cw-core = { path = "crates/cw-core" }
 dioxus = "0.7.10"
+# Event serialization is off in dioxus's default html features; the UI tests
+# fire synthetic clicks and keys through it. Enabling it here unifies with
+# the copy dioxus already uses.
+dioxus-html = { version = "0.7.10", features = ["serialize"] }
 fastrand = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
@@ -54,8 +58,7 @@ web-sys = { version = "0.3", optional = true, features = [
 ] }
 
 # The wgpu renderer: Blitz draws the same markup on the GPU instead of handing
-# it to a system webview. Behind its own feature because it is a different
-# stack, not a setting — different layout engine, different CSS coverage.
+# it to a system webview. Desktop and `gpu` enable this; `webview` is the fallback.
 dioxus-native = { version = "0.7", optional = true }
 
 # Linux / desktop
@@ -111,12 +114,14 @@ web = [
     "dep:wasm-bindgen-futures",
     "dep:web-sys",
 ]
-desktop = ["dioxus/desktop", "native-runtime", "native-audio"]
-# The same app drawn by Blitz on wgpu rather than by a webview. An experiment:
-# see `docs/gpu.md` for what it does and does not render.
-gpu = ["dep:dioxus-native", "native-runtime", "native-audio"]
-# Android/iOS run the same webview stack as the desktop build. `dx` enables this
-# feature automatically for `--platform android`.
+# Desktop is Blitz on wgpu: in-process layout and paint, no webview IPC.
+# `gpu` is the same feature under the name the docs started with.
+desktop = ["dep:dioxus-native", "native-runtime", "native-audio"]
+gpu = ["desktop"]
+# The old wry/WebKit path, kept for machines where wgpu will not come up.
+webview = ["dioxus/desktop", "native-runtime", "native-audio"]
+# Android/iOS still use a system webview. `dx` enables this feature
+# automatically for `--platform android`.
 mobile = ["dioxus/mobile", "native-runtime", "native-audio"]
 # Same, minus the audio backend: a fallback for bringing up a new mobile
 # toolchain, since cpal on Android pulls the NDK C++ build for oboe.

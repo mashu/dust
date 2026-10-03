@@ -1,5 +1,9 @@
 #![cfg_attr(
-    all(feature = "desktop", target_os = "windows", not(debug_assertions)),
+    all(
+        any(feature = "desktop", feature = "gpu", feature = "webview"),
+        target_os = "windows",
+        not(debug_assertions)
+    ),
     windows_subsystem = "windows"
 )]
 
@@ -17,13 +21,11 @@ mod ui;
 
 use crate::app::App;
 
-// Two renderers both owning `main` would launch twice, or launch the wrong one
-// depending on which `cfg` block returns first. They are alternatives, so say
-// so here rather than find out at run time.
-#[cfg(all(feature = "gpu", feature = "desktop"))]
-compile_error!("`gpu` and `desktop` are two renderers for the same app: pick one");
+// Native (wgpu) and the system webview both own `main`. They are alternatives.
+#[cfg(all(any(feature = "desktop", feature = "gpu"), feature = "webview"))]
+compile_error!("`desktop`/`gpu` (wgpu) and `webview` are two renderers for the same app: pick one");
 
-#[cfg(feature = "desktop")]
+#[cfg(feature = "webview")]
 fn themed_document_head() -> String {
     let mut head = String::from("<style>");
     head.push_str(include_str!("../assets/styles.css"));
@@ -34,7 +36,7 @@ fn themed_document_head() -> String {
     head
 }
 
-#[cfg(all(test, feature = "desktop"))]
+#[cfg(all(test, feature = "webview"))]
 mod tests {
     #[test]
     fn the_desktop_head_carries_the_stylesheet_and_the_fonts() {
@@ -47,45 +49,65 @@ mod tests {
     }
 }
 
-fn main() {
-    // Blitz owns its own window and draws through wgpu, so none of the webview
-    // window configuration below applies — and the stylesheet goes in through
-    // the document rather than a custom head.
-    #[cfg(feature = "gpu")]
+#[cfg(any(feature = "desktop", feature = "gpu"))]
+fn launch_native() {
+    use dioxus_native::{Config, LogicalSize, WindowAttributes};
+    dioxus_native::launch_cfg(
+        App,
+        vec![],
+        vec![Box::new(
+            Config::default().with_window_attributes(
+                WindowAttributes::default()
+                    .with_title("Dust")
+                    .with_inner_size(LogicalSize::new(560.0, 860.0)),
+            ),
+        )],
+    );
+}
+
+#[cfg(feature = "webview")]
+fn launch_webview() {
+    #[cfg(target_os = "linux")]
     {
-        dioxus_native::launch(App);
-    }
-    #[cfg(feature = "desktop")]
-    {
-        #[cfg(target_os = "linux")]
-        {
-            // GTK client-side decorations draw a thick header with the window title.
-            // Prefer the window manager's normal title bar instead.
-            #[allow(unused_unsafe)]
-            // Safety: process start, before other threads exist.
-            unsafe {
-                std::env::set_var("GTK_CSD", "0");
-            }
+        // GTK client-side decorations draw a thick header with the window title.
+        // Prefer the window manager's normal title bar instead.
+        #[allow(unused_unsafe)]
+        // Safety: process start, before other threads exist.
+        unsafe {
+            std::env::set_var("GTK_CSD", "0");
         }
-        use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
-        dioxus::LaunchBuilder::desktop()
-            .with_cfg(
-                Config::new()
-                    .with_menu(None)
-                    .with_background_color((243, 234, 217, 255))
-                    .with_custom_head(themed_document_head())
-                    .with_window(
-                        WindowBuilder::new()
-                            .with_title("Dust")
-                            .with_inner_size(LogicalSize::new(560.0, 860.0))
-                            .with_min_inner_size(LogicalSize::new(420.0, 640.0)),
-                    ),
-            )
-            .launch(App);
     }
-    // Android and iOS run the same webview stack, but the OS owns the window,
-    // so there is nothing to configure — and the web build launches the same way.
-    #[cfg(not(feature = "desktop"))]
+    use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(
+            Config::new()
+                .with_menu(None)
+                .with_background_color((243, 234, 217, 255))
+                .with_custom_head(themed_document_head())
+                .with_window(
+                    WindowBuilder::new()
+                        .with_title("Dust")
+                        .with_inner_size(LogicalSize::new(560.0, 860.0))
+                        .with_min_inner_size(LogicalSize::new(420.0, 640.0)),
+                ),
+        )
+        .launch(App);
+}
+
+fn main() {
+    // Blitz paints through wgpu in-process. That is the desktop path: a
+    // keystroke is layout and a GPU frame, not an IPC round-trip into a
+    // webview that is sharing its thread with the answer box.
+    #[cfg(any(feature = "desktop", feature = "gpu"))]
+    {
+        launch_native();
+    }
+    #[cfg(feature = "webview")]
+    {
+        launch_webview();
+    }
+    // Android, iOS and the web build still use a webview the OS owns.
+    #[cfg(not(any(feature = "desktop", feature = "gpu", feature = "webview")))]
     {
         dioxus::launch(App);
     }

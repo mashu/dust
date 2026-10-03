@@ -37,15 +37,18 @@ Settings and history stay on the device and are never synced —
 ```bash
 curl -sSL https://dioxus.dev/install.sh | bash   # once
 
-dx serve --platform desktop
+dx serve --platform desktop          # wgpu
 dx serve --platform web --port 8080
 ```
 
-The Linux desktop build needs GTK, WebKit and ALSA:
+Desktop paints with wgpu ([how](docs/gpu.md)). The Linux build needs ALSA and
+a Vulkan or OpenGL stack. The older WebKit window is `--features webview`:
 
 ```bash
+sudo apt install libasound2-dev libvulkan-dev libwayland-dev libxkbcommon-dev
+# webview fallback only:
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev \
-  libayatana-appindicator3-dev librsvg2-dev libasound2-dev
+  libayatana-appindicator3-dev librsvg2-dev
 ```
 
 ## Test
@@ -81,7 +84,7 @@ hold the desktop bundles back: if one fails, the release publishes without it.
 crates/cw-core   Morse, Koch pools, Farnsworth timing, sampling, score, session
 src/             Dioxus app: screens, session runtime, audio backends, storage
 assets/          CSS
-docs/            Platform notes
+docs/            Platform notes, including the wgpu desktop renderer
 ```
 
 MIT — see [LICENSE](LICENSE).

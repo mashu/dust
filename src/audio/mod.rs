@@ -77,8 +77,16 @@ pub fn default_backend() -> Result<Box<dyn MorseBackend>, String> {
 }
 
 pub fn focus_group_input(index: usize) {
-    let js = format!(
-        r#"(() => {{
+    // The wgpu renderer has no JS. Autofocus on the active box is enough
+    // there; this scroll-and-focus helper is for the webview path.
+    #[cfg(not(any(feature = "web", feature = "webview")))]
+    {
+        let _ = index;
+    }
+    #[cfg(any(feature = "web", feature = "webview"))]
+    {
+        let js = format!(
+            r#"(() => {{
             const cardId = "group-card-{index}";
             const inputId = "group-input-{index}";
             let scrolled = false;
@@ -107,8 +115,9 @@ pub fn focus_group_input(index: usize) {
             // was another scroll and focus landing mid-keystroke.
             requestAnimationFrame(apply);
         }})()"#
-    );
-    let _ = dioxus::document::eval(&js);
+        );
+        let _ = dioxus::document::eval(&js);
+    }
 }
 
 /// A player that records what it was asked to do and plays nothing. Session

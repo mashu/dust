@@ -114,9 +114,10 @@ and covers the audio-session code and cpal's CoreAudio backend.
 ## Desktop bundles
 
 `dx bundle --platform desktop --release` writes to
-`target/dx/dust/release/linux/` and friends. macOS builds are unsigned
-(right-click → Open the first time). Windows needs WebView2, which is already
-present on typical Windows 10/11 systems.
+`target/dx/dust/release/linux/` and friends. The desktop feature paints with
+wgpu; `--features webview` is the WebKit window if you need it. macOS builds
+are unsigned (right-click → Open the first time). Windows wgpu uses DX12/Vulkan;
+the webview fallback needs WebView2, already present on typical Windows 10/11.
 
 ## Where your progress lives
 

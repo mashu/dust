@@ -52,9 +52,8 @@ fn bump_epoch(mut epoch: Signal<u64>) -> u64 {
 /// between the key going down and the letter appearing. Given props to compare
 /// instead, the nineteen that did not move are skipped.
 ///
-/// So nothing in here may read the draft signal. The value arrives already
-/// worked out; reading it here would subscribe every card to every keystroke
-/// again and quietly undo the whole thing.
+/// The active card may read the draft signal. The others must not: a read
+/// would subscribe every card to every keystroke and quietly undo the split.
 #[component]
 #[allow(clippy::too_many_arguments)]
 fn GroupCard(
@@ -96,6 +95,11 @@ fn GroupCard(
         "answer"
     };
     let sent_for_input = sent.clone();
+    let display = if is_active && !is_confirmed && draft_at() == idx {
+        draft()
+    } else {
+        value.clone()
+    };
     rsx! {
         div { id: "group-card-{idx}", class: cls,
             div { class: "row-between",
@@ -117,7 +121,7 @@ fn GroupCard(
             input {
                 id: "group-input-{idx}",
                 class: input_cls,
-                value: "{value}",
+                value: "{display}",
                 disabled,
                 readonly: input_locked,
                 autofocus: is_active && !is_confirmed,
@@ -253,11 +257,7 @@ pub fn TrainingView(
                             let disabled = is_confirmed || (!is_active && !awaiting_play);
                             let input_locked =
                                 (locked && is_active && !is_confirmed) || awaiting_play;
-                            let value = if !is_confirmed && is_active && draft_at() == idx {
-                                draft()
-                            } else {
-                                inputs.get(idx).cloned().unwrap_or_default()
-                            };
+                            let value = inputs.get(idx).cloned().unwrap_or_default();
                             let correct = value.trim().eq_ignore_ascii_case(sent);
                             rsx! {
                                 GroupCard {

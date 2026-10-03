@@ -2568,6 +2568,7 @@ dependencies = [
  "cpal",
  "cw-core",
  "dioxus",
+ "dioxus-html",
  "dioxus-native",
  "dioxus-ssr",
  "dirs",

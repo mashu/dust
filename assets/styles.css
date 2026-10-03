@@ -1,10 +1,11 @@
 /* ==========================================================================
    Dust — CW trainer
    Theme tokens. Light is the base; dark follows the OS unless the header
-   toggle pins a theme (data-theme on <html>).
+   toggle pins a theme (data-theme on .app-root, and on <html> for older
+   webview builds that still set it there).
    ========================================================================== */
 
-:root {
+:root, .app-root[data-theme="light"] {
   color-scheme: light;
 
   /* Surfaces */
@@ -128,7 +129,8 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root:not([data-theme="light"]),
+  .app-root:not([data-theme="light"]) {
     color-scheme: dark;
 
     --bg-deep: #05070c;
@@ -190,7 +192,8 @@
   }
 }
 
-:root[data-theme="dark"] {
+:root[data-theme="dark"],
+.app-root[data-theme="dark"] {
   color-scheme: dark;
 
   --bg-deep: #05070c;
@@ -271,7 +274,7 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-.app-root { min-height: 100%; }
+.app-root { min-height: 100%; color: var(--ink); background: var(--bg); }
 
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; touch-action: manipulation; background: none; border: 0; }
@@ -407,7 +410,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   box-shadow: inset 0 0 0 1px rgb(196 92 38 / 18%);
 }
 :root[data-theme="dark"] .nav-item.active,
-:root:not([data-theme="light"]) .nav-item.active { color: var(--copper-lift); }
+:root:not([data-theme="light"]) .nav-item.active,
+.app-root[data-theme="dark"] .nav-item.active,
+.app-root:not([data-theme="light"]) .nav-item.active { color: var(--copper-lift); }
 
 /* ==========================================================================
    Typography helpers

@@ -1,66 +1,50 @@
-# The GPU renderer
+# Desktop rendering
 
-An experiment, on a branch. `--features gpu` draws the same app with
-[Blitz](https://github.com/DioxusLabs/blitz) — its own layout engine painting
-through Vello onto wgpu — instead of handing markup to the system webview.
+Desktop draws with [Blitz](https://github.com/DioxusLabs/blitz) through Vello
+onto wgpu. The same markup as the web build, laid out and painted in-process.
 
 ```bash
-cargo run --no-default-features --features gpu
+dx serve --platform desktop          # wgpu (the `desktop` / `gpu` feature)
+cargo run --release --features desktop
 ```
 
-`gpu` and `desktop` are alternatives, not a stack: enabling both is a compile
+The system webview is still there if a machine cannot bring wgpu up:
+
+```bash
+cargo run --release --features webview
+```
+
+`desktop`/`gpu` and `webview` are alternatives. Enabling both is a compile
 error rather than a race between two `main` branches.
 
-## Why it might be worth it
+## Why this is the desktop path
 
 The webview build has no GPU-side compositor doing the diffing. Every change is
 an IPC message plus DOM work on the webview's main thread — the same thread that
-delivers key events. That is why a keystroke costing twenty mutations felt like
-wading and one does not: there is nowhere for the work to go but in front of
+delivers key events. A handful of mutations is still a round trip in front of
 your typing.
 
 Blitz owns the whole pipeline. Layout and paint happen in-process and land on
 the GPU, so there is no IPC hop and no borrowed main thread.
 
-## What is actually verified
+## CSS and theme
 
-Honestly, not much yet — a headless container has no display.
+Theme is `data-theme` on `.app-root`, not a JS write to `<html>`. Custom
+properties, the dark media query, and the pinned light/dark tokens all key off
+that node so both renderers see the same toggle.
 
-- It resolves: `dioxus-native 0.7.10`, matching the app's Dioxus version. The
-  0.8 alpha that `cargo info` shows is for a Dioxus this app is not on.
-- It compiles and links, with `wgpu 26` under `vello 0.6`.
-- It starts, and gets as far as asking for a window before dying on
-  `neither WAYLAND_DISPLAY nor WAYLAND_SOCKET nor DISPLAY is set` — the one
-  step this environment cannot do.
+Blitz implements a subset of CSS. Things that may still look wrong:
 
-Nothing below the window has been seen.
-
-## What to look at first
-
-Blitz implements a subset of CSS, and this app's stylesheet is not a simple
-one. In rough order of how likely each is to be missing or wrong:
-
-- `position: sticky`, which holds the receiver panel above the group list
-- `contain: paint` on the scope's face
-- Custom properties, which the entire theme is built from — including the
-  `prefers-color-scheme` and `[data-theme]` blocks that switch it
+- `position: sticky` on the header
 - Layered `linear-gradient` / `repeating-linear-gradient` backgrounds
-- Inline SVG: the scope trace, the accuracy chart, the keying envelope, every
-  icon. `dioxus-native` does enable its `svg` feature by default.
-- Form behaviour: focus, caret, `autocapitalize`, `enterkeyhint`. The training
-  screen is a column of text inputs, so this is the one that decides whether
-  the experiment is usable at all.
+- `backdrop-filter` on the header
+- Google Fonts over the network (system fallbacks are already in the sheet)
+- Form extras: `autocapitalize`, `enterkeyhint`
+
+Inline SVG is enabled in `dioxus-native` by default (icons, charts, envelope).
 
 ## The cost
 
-The dependency tree goes from 890 crates to 1422, and a clean debug build takes
-a couple of minutes rather than seconds. That is the price of carrying a layout
-engine and a GPU stack instead of borrowing the system's.
-
-## Where this stands
-
-The typing lag that prompted this is already fixed on the webview build:
-measured through the renderer, a keystroke costs one mutation, a scope frame
-one, and an idle screen zero. So this is no longer a rescue — it is a question
-about whether a different stack is better, which wants someone to look at it on
-a machine with a screen.
+The dependency tree is larger than the webview build, and a clean debug build
+takes longer. That is the price of carrying a layout engine and a GPU stack
+instead of borrowing the system's.

@@ -109,16 +109,9 @@ pub fn App() -> Element {
     use_effect(move || {
         let key = theme().key();
         save_theme(key);
-        let _ = dioxus::document::eval(&format!(
-            r#"(() => {{
-                const root = document.documentElement;
-                if ("{key}" === "auto") {{
-                    root.removeAttribute("data-theme");
-                }} else {{
-                    root.setAttribute("data-theme", "{key}");
-                }}
-            }})()"#
-        ));
+        // Theme is a data-theme attribute on the app root, not a JS write to
+        // <html>. The wgpu renderer has no document.eval, and the webview
+        // path does not need one either once CSS keys off .app-root.
     });
 
     use_effect(move || {
@@ -325,11 +318,17 @@ pub fn App() -> Element {
     let show_nav = !matches!(screen(), Screen::Training);
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };
     let screen_key = screen_key(screen());
+    let theme_attr = match theme() {
+        Theme::Auto => None,
+        Theme::Light => Some("light"),
+        Theme::Dark => Some("dark"),
+    };
 
     rsx! {
         AppHead {}
         div {
             class: "app-root",
+            "data-theme": theme_attr,
             onkeydown: move |e| {
                 if e.key() == Key::F11 {
                     e.prevent_default();
@@ -436,7 +435,7 @@ fn session_running(screen: Signal<Screen>, runtime: Signal<Option<GroupSession>>
 }
 
 fn toggle_fullscreen() {
-    #[cfg(feature = "desktop")]
+    #[cfg(feature = "webview")]
     {
         let desktop = dioxus::desktop::window();
         let fullscreen = desktop.window.fullscreen().is_some();
