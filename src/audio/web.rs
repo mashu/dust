@@ -82,6 +82,8 @@ pub struct MorsePlayer {
     /// Group gains that are fading out, with the context time their ramp ends.
     released: Vec<(GainNode, f64)>,
     pending_resume: RefCell<Option<js_sys::Promise>>,
+    live_osc: Option<web_sys::OscillatorNode>,
+    live_gain: Option<GainNode>,
 }
 
 struct BandGraph {
@@ -184,6 +186,8 @@ impl MorsePlayer {
             agc,
             released: Vec::new(),
             pending_resume: RefCell::new(None),
+            live_osc: None,
+            live_gain: None,
         })
     }
 
@@ -193,6 +197,38 @@ impl MorsePlayer {
                 *self.pending_resume.borrow_mut() = Some(promise);
             }
         }
+    }
+
+    fn ensure_live_tone(&mut self) -> Result<(), String> {
+        if self.live_gain.is_some() {
+            return Ok(());
+        }
+        let osc = self
+            .ctx
+            .create_oscillator()
+            .map_err(|e| format!("live osc: {e:?}"))?;
+        let gain = self
+            .ctx
+            .create_gain()
+            .map_err(|e| format!("live gain: {e:?}"))?;
+        osc.set_type(OscillatorType::Sine);
+        let now = self.ctx.current_time();
+        osc.frequency()
+            .set_value_at_time(500.0, now)
+            .map_err(|e| format!("live freq: {e:?}"))?;
+        gain.gain()
+            .set_value_at_time(0.0, now)
+            .map_err(|e| format!("live mute: {e:?}"))?;
+        osc.connect_with_audio_node(&gain)
+            .map_err(|e| format!("live osc connect: {e:?}"))?;
+        // Straight to the speakers: the receiver filter is for what you copy,
+        // not for the sidetone of the key in your hand.
+        gain.connect_with_audio_node(&self.ctx.destination())
+            .map_err(|e| format!("live out: {e:?}"))?;
+        osc.start().map_err(|e| format!("live start: {e:?}"))?;
+        self.live_osc = Some(osc);
+        self.live_gain = Some(gain);
+        Ok(())
     }
 
     /// Retune the receiver to the current pitch and width. Cheap, and the
@@ -411,6 +447,34 @@ impl MorseBackend for MorsePlayer {
         for (gain, _) in self.released.drain(..) {
             let _ = gain.disconnect();
         }
+        if let Some(gain) = &self.live_gain {
+            let now = self.ctx.current_time();
+            let _ = gain.gain().cancel_scheduled_values(now);
+            let _ = gain.gain().set_value_at_time(0.0, now);
+        }
+    }
+
+    fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
+        self.resume_from_gesture();
+        if self.ensure_live_tone().is_err() {
+            return;
+        }
+        let Some(osc) = self.live_osc.as_ref() else {
+            return;
+        };
+        let Some(live_gain) = self.live_gain.as_ref() else {
+            return;
+        };
+        let now = self.ctx.current_time();
+        let hz = frequency_hz.clamp(100.0, 2_000.0) as f32;
+        let level = if on { gain.clamp(0.0, 1.0) as f32 } else { 0.0 };
+        let _ = osc.frequency().set_value_at_time(hz, now);
+        let _ = live_gain.gain().cancel_scheduled_values(now);
+        let current = live_gain.gain().value();
+        let _ = live_gain.gain().set_value_at_time(current, now);
+        let _ = live_gain
+            .gain()
+            .linear_ramp_to_value_at_time(level, now + 0.001);
     }
 
     fn take_resume_promise(&self) -> Option<js_sys::Promise> {

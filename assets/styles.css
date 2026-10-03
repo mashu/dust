@@ -1359,6 +1359,29 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
   background: var(--surface);
 }
 
+.paddle-practice {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-sunken);
+}
+.paddle-practice:focus {
+  outline: 2px solid var(--copper);
+  outline-offset: 1px;
+}
+.paddle-heard {
+  margin: 0;
+  min-height: 1.5em;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 1.2rem;
+  letter-spacing: 0.14em;
+  color: var(--ink);
+}
+
 /* ==========================================================================
    Stats
    ========================================================================== */

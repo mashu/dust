@@ -1640,6 +1640,7 @@ dependencies = [
  "objc2-avf-audio",
  "serde",
  "serde_json",
+ "tao",
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",

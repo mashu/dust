@@ -43,25 +43,16 @@ impl LiveQsb {
     }
 }
 
-/// The gain the receiver's AGC is holding the band down to, shared across the
-/// two streams.
+/// The gain the receiver's AGC is holding the band down to.
 ///
-/// Native plays the background and the send on separate devices streams, so
-/// they never meet in a buffer we own. A crash ducking the Morse as well — the
-/// whole reason for an AGC — therefore has to travel: the background stream
-/// works out the gain, writes it here, and the send reads it. A number crossing
-/// between two real-time callbacks, which is what the fading settings already
-/// do next door.
+/// Band and send are mixed in one callback, but they are still two playback
+/// objects. A crash has to duck the Morse as well — the whole reason for an
+/// AGC — so the background works out the gain, writes it here, and the send
+/// reads it. Pre-gain on the send, so this cannot feed back into the gain it
+/// is about to be multiplied by.
 pub struct LiveAgc {
     gain_bits: AtomicU64,
     /// How loud the send itself is right now, before the AGC has had it.
-    ///
-    /// A receiver's gain answers to everything reaching it, signal included,
-    /// not to the noise alone. The browser gets that for nothing — its
-    /// compressor sits after the mix, where the two are already one sound.
-    /// Here they are two device streams, so the send has to say how loud it is
-    /// and the background has to listen. Pre-gain, so this cannot feed back
-    /// into the gain it is about to be multiplied by.
     send_bits: AtomicU64,
 }
 
@@ -157,7 +148,16 @@ pub fn mix_plan_into(buf: &mut [f32], plan: &PlaybackPlan, sample_rate: u32) {
 }
 
 /// Spread one mono sample across every channel of an interleaved buffer.
-pub fn interleave(out: &mut [f32], channels: usize, mut next: impl FnMut() -> f32) {
+pub fn interleave(out: &mut [f32], channels: usize, next: impl FnMut() -> f32) {
+    write_interleaved(out, channels, false, next);
+}
+
+#[cfg(test)]
+fn mix_interleave(out: &mut [f32], channels: usize, next: impl FnMut() -> f32) {
+    write_interleaved(out, channels, true, next);
+}
+
+fn write_interleaved(out: &mut [f32], channels: usize, mix: bool, mut next: impl FnMut() -> f32) {
     let channels = channels.max(1);
     let mut i = 0;
     while i < out.len() {
@@ -166,7 +166,11 @@ pub fn interleave(out: &mut [f32], channels: usize, mut next: impl FnMut() -> f3
             if i >= out.len() {
                 break;
             }
-            out[i] = value;
+            out[i] = if mix {
+                (out[i] + value).clamp(-1.0, 1.0)
+            } else {
+                value
+            };
             i += 1;
         }
     }
@@ -217,15 +221,25 @@ impl TonePlayback {
     }
 
     /// Fill one callback's worth of interleaved samples.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn fill(&self, out: &mut [f32], channels: usize) {
+        self.write(out, channels, false);
+    }
+
+    /// Add this send on top of a buffer that already has the band in it.
+    pub fn mix_into(&self, out: &mut [f32], channels: usize) {
+        self.write(out, channels, true);
+    }
+
+    fn write(&self, out: &mut [f32], channels: usize, mix: bool) {
         if self.stop.load(Ordering::SeqCst) {
-            self.fill_release(out, channels);
+            self.write_release(out, channels, mix);
             return;
         }
         let mut i = self.pos.load(Ordering::SeqCst);
         let sr = self.sample_rate;
         let mut loudest = 0.0f32;
-        interleave(out, channels, || {
+        write_interleaved(out, channels, mix, || {
             let Some(dry) = self.samples.get(i).copied() else {
                 return 0.0;
             };
@@ -246,12 +260,12 @@ impl TonePlayback {
     /// A stopped send keeps playing for a few milliseconds, under a falling
     /// ramp. Cutting the samples to zero where they happen to be is a step in
     /// the waveform, and a step is a click.
-    fn fill_release(&self, out: &mut [f32], channels: usize) {
+    fn write_release(&self, out: &mut [f32], channels: usize, mix: bool) {
         let total = release_samples(self.sample_rate);
         let mut done = self.released.load(Ordering::SeqCst);
         let mut i = self.pos.load(Ordering::SeqCst);
         let sr = self.sample_rate;
-        interleave(out, channels, || {
+        write_interleaved(out, channels, mix, || {
             if done >= total {
                 return 0.0;
             }
@@ -425,6 +439,17 @@ mod tests {
         interleave(&mut out, 2, || 1.0);
         assert_eq!(out, [1.0, 1.0, 1.0]);
         interleave(&mut [], 2, || panic!("nothing to fill"));
+    }
+
+    #[test]
+    fn mixing_adds_on_top_of_what_is_already_there() {
+        let mut out = [0.5f32; 4];
+        let mut n = 0.0;
+        mix_interleave(&mut out, 2, || {
+            n += 0.25;
+            n
+        });
+        assert_eq!(out, [0.75, 0.75, 1.0, 1.0]);
     }
 
     fn playback(samples: Vec<f32>, stop: Arc<AtomicBool>) -> TonePlayback {

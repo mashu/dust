@@ -56,6 +56,7 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.playback.link_char_to_effective = rng.f64() < 0.5;
     s.playback.extra_word_space_multiplier = rng.pick_in_range(-5.0, 30.0);
     s.playback.group_timeout = rng.pick_in_range(-5.0, 600.0);
+    s.playback.group_pause_sec = rng.pick_in_range(-5.0, 40.0);
     s.playback.group_repeat_min = rng.usize_in(0, 12) as u32;
     s.playback.group_repeat_max = rng.usize_in(0, 12) as u32;
     s.playback.fist_variation = rng.pick_in_range(-1.0, 4.0);
@@ -116,6 +117,10 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
     // Zero is the "wait for me" setting, so only a negative or wild one is wrong.
     assert!(
         p.group_timeout.is_finite() && p.group_timeout >= 0.0,
+        "seed {seed}"
+    );
+    assert!(
+        p.group_pause_sec.is_finite() && (0.0..=15.0).contains(&p.group_pause_sec),
         "seed {seed}"
     );
     let b = &once.band;

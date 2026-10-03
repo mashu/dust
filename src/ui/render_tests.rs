@@ -6,8 +6,8 @@
 //! thrown away.
 
 use cw_core::{
-    AutoLevelProgress, CharSetMode, GroupResult, KeyerMode, MixedAutoLevelAxis, SessionResult,
-    SessionTiming, StreakState, StreakStatus, TrainingSettings,
+    AutoLevelProgress, CharSetMode, GroupResult, KeyerMode, MixedAutoLevelAxis, Paddle,
+    PaddleKeyer, SessionResult, SessionTiming, StreakState, StreakStatus, TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -16,6 +16,7 @@ use super::envelope::EnvelopeCard;
 use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
+use super::paddle::{paddle_down, paddle_up, PaddlePad};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
@@ -379,6 +380,7 @@ fn settings_renders_every_card() {
     for needle in [
         "Character set",
         "Session shape",
+        "Pause after each group",
         "Sends per group",
         "Iambic A",
         "Ultimatic",
@@ -876,6 +878,63 @@ mod interactions {
         ui.click("seg-iambic-b");
         assert!(ui.has("one extra opposite element"));
         assert!(ui.has("Swap [ and ] paddles"));
+        assert!(
+            ui.has("paddle-practice"),
+            "the paddles have to be tryable in settings: {}",
+            ui.html()
+        );
+        assert!(
+            ui.has("Key speed"),
+            "the paddle has its own speed, not the station's: {}",
+            ui.html()
+        );
+    }
+
+    #[component]
+    fn PaddlePadHarness() -> Element {
+        let keyer = use_signal(|| PaddleKeyer::with_mode(KeyerMode::IambicA));
+        let keying = use_signal(|| false);
+        let gen = use_signal(|| 0u64);
+        let mut heard = use_signal(String::new);
+        let on_tone = EventHandler::new(move |_: bool| {});
+        let on_letter = EventHandler::new(move |ch: char| {
+            heard.write().push(ch);
+        });
+        let down = EventHandler::new(move |paddle: Paddle| {
+            paddle_down(paddle, 60, true, keyer, keying, gen, on_tone, on_letter);
+        });
+        let up = EventHandler::new(move |paddle: Paddle| {
+            paddle_up(paddle, 60, keyer, gen, on_tone, on_letter);
+        });
+        rsx! {
+            PaddlePad {
+                heard: heard(),
+                mode: KeyerMode::IambicA,
+                capture_keys: true,
+                on_down: down,
+                on_up: up,
+            }
+        }
+    }
+
+    #[test]
+    fn holding_the_dah_paddle_outside_training_sends_o() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let key = Key::Character("]".into());
+            let code = Code::BracketRight;
+            ui.press_key("paddle-practice", key.clone(), code);
+            ui.advance(500).await;
+            ui.release_key("paddle-practice", key, code);
+            ui.advance(160).await;
+            ui.advance(60).await;
+            ui.advance(120).await;
+            assert!(
+                ui.has("paddle-heard") && ui.has(">O<"),
+                "decoded letters have to land on the pad: {}",
+                ui.html()
+            );
+        });
     }
 
     #[component]

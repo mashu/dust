@@ -1,10 +1,11 @@
-use cw_core::{
-    answer_length_matches, paddle_from_bracket, KeyerMode, Paddle, PaddleKeyer, LETTER_GAP_DITS,
-};
+use cw_core::{answer_length_matches, paddle_from_bracket, KeyerMode, Paddle, PaddleKeyer};
 use dioxus::prelude::*;
 
-use crate::time::{mono_ms, sleep_ms, POLL_MS};
+use crate::time::sleep_ms;
 use crate::ui::focus::focus_group_input;
+use crate::ui::paddle::{
+    bracket_from_key, bump_epoch, capture_dom_paddles, paddle_down, paddle_up, TrainingPaddleSink,
+};
 use crate::ui::widgets::{control_id, html_bool, Icon, ProgressHeader};
 
 /// Incomplete answers wait this long before the session sees them. Short
@@ -35,24 +36,6 @@ pub fn TrainingScope(
         div { style: "display: contents;",
             ProgressHeader { current: focused, total, status, live: playing }
         }
-    }
-}
-
-fn bump_epoch(mut epoch: Signal<u64>) -> u64 {
-    let next = epoch.peek().saturating_add(1);
-    epoch.set(next);
-    next
-}
-
-fn bracket_from_key(e: &Event<KeyboardData>) -> Option<char> {
-    match e.key() {
-        Key::Character(ref s) if s == "[" => Some('['),
-        Key::Character(ref s) if s == "]" => Some(']'),
-        _ => match e.code() {
-            Code::BracketLeft => Some('['),
-            Code::BracketRight => Some(']'),
-            _ => None,
-        },
     }
 }
 
@@ -249,8 +232,10 @@ fn GroupCard(
                         if e.is_auto_repeating() {
                             return;
                         }
-                        if let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
-                            on_paddle_down.call(paddle);
+                        if capture_dom_paddles() {
+                            if let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
+                                on_paddle_down.call(paddle);
+                            }
                         }
                         return;
                     }
@@ -272,8 +257,10 @@ fn GroupCard(
                 onkeyup: move |e| {
                     if let Some(ch) = bracket_from_key(&e) {
                         e.prevent_default();
-                        if let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
-                            on_paddle_up.call(paddle);
+                        if capture_dom_paddles() {
+                            if let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
+                                on_paddle_up.call(paddle);
+                            }
                         }
                     }
                 }
@@ -326,6 +313,7 @@ pub fn TrainingView(
     let mut keyer = use_signal(|| PaddleKeyer::with_mode(keyer_mode));
     let mut keying = use_signal(|| false);
     let paddle_gen = use_signal(|| 0u64);
+    let training_sink = use_hook(try_consume_context::<TrainingPaddleSink>);
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     let can_paddle = !playing && !locked && !current_done;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
@@ -361,72 +349,9 @@ pub fn TrainingView(
     let on_paddle_down = EventHandler::new({
         let sent_now = sent_now.clone();
         move |paddle: Paddle| {
-            if !can_paddle {
-                return;
-            }
-            if keyer.peek().mode().is_straight() {
-                let already = keyer.peek().any_held();
-                let _ = bump_epoch(paddle_gen);
-                keyer.write().press_at(paddle, mono_ms());
-                if !already {
-                    on_tone.call(true);
-                }
-                return;
-            }
-            keyer.write().press(paddle);
-            if *keying.peek() {
-                return;
-            }
-            keying.set(true);
-            let gen = bump_epoch(paddle_gen);
-            let sent_now = sent_now.clone();
-            spawn(async move {
-                loop {
-                    if *paddle_gen.peek() != gen {
-                        on_tone.call(false);
-                        keying.set(false);
-                        return;
-                    }
-                    let next = keyer.write().next_element();
-                    if let Some(paddle) = next {
-                        on_tone.call(true);
-                        keyer.write().decoder_mut().push(paddle);
-                        sleep_ms(dit_ms.saturating_mul(paddle.dits()).max(1) as u32).await;
-                        if *paddle_gen.peek() != gen {
-                            on_tone.call(false);
-                            keying.set(false);
-                            return;
-                        }
-                        on_tone.call(false);
-                        sleep_ms(dit_ms.max(1) as u32).await;
-                        continue;
-                    }
-                    let mut left = dit_ms.saturating_mul(LETTER_GAP_DITS).max(1);
-                    let mut squeezed = false;
-                    while left > 0 {
-                        if *paddle_gen.peek() != gen {
-                            keying.set(false);
-                            return;
-                        }
-                        if keyer.peek().any_held() {
-                            squeezed = true;
-                            break;
-                        }
-                        let step = left.min(u64::from(POLL_MS)).max(1);
-                        sleep_ms(step as u32).await;
-                        left = left.saturating_sub(step);
-                    }
-                    if squeezed {
-                        continue;
-                    }
-                    if *paddle_gen.peek() != gen {
-                        keying.set(false);
-                        return;
-                    }
-                    keying.set(false);
-                    let Some(ch) = keyer.write().decoder_mut().take_letter() else {
-                        return;
-                    };
+            let on_letter = EventHandler::new({
+                let sent_now = sent_now.clone();
+                move |ch: char| {
                     push_keyed_char(
                         ch,
                         current,
@@ -438,44 +363,18 @@ pub fn TrainingView(
                         debounce_gen,
                         on_change,
                     );
-                    return;
                 }
             });
+            paddle_down(
+                paddle, dit_ms, can_paddle, keyer, keying, paddle_gen, on_tone, on_letter,
+            );
         }
     });
     let on_paddle_up = EventHandler::new({
         move |paddle: Paddle| {
-            if keyer.peek().mode().is_straight() {
-                keyer.write().release(paddle);
-                if keyer.peek().any_held() {
-                    return;
-                }
-                on_tone.call(false);
-                let Some(element) = keyer.write().take_straight(mono_ms(), dit_ms) else {
-                    return;
-                };
-                keyer.write().decoder_mut().push(element);
-                let gen = bump_epoch(paddle_gen);
+            let on_letter = EventHandler::new({
                 let sent_now = sent_now.clone();
-                spawn(async move {
-                    let mut left = dit_ms.saturating_mul(LETTER_GAP_DITS).max(1);
-                    while left > 0 {
-                        if *paddle_gen.peek() != gen {
-                            return;
-                        }
-                        if keyer.peek().any_held() {
-                            return;
-                        }
-                        let step = left.min(u64::from(POLL_MS)).max(1);
-                        sleep_ms(step as u32).await;
-                        left = left.saturating_sub(step);
-                    }
-                    if *paddle_gen.peek() != gen {
-                        return;
-                    }
-                    let Some(ch) = keyer.write().decoder_mut().take_letter() else {
-                        return;
-                    };
+                move |ch: char| {
                     push_keyed_char(
                         ch,
                         current,
@@ -487,10 +386,17 @@ pub fn TrainingView(
                         debounce_gen,
                         on_change,
                     );
-                });
-                return;
-            }
-            keyer.write().release(paddle);
+                }
+            });
+            paddle_up(paddle, dit_ms, keyer, paddle_gen, on_tone, on_letter);
+        }
+    });
+    if let Some(sink) = &training_sink {
+        sink.bind(on_paddle_down, on_paddle_up);
+    }
+    use_drop(move || {
+        if let Some(sink) = training_sink {
+            sink.clear();
         }
     });
     let hint = if playing && locked {
@@ -506,7 +412,7 @@ pub fn TrainingView(
                 "Type the letters, or hold [ for dits and ] for dahs. The last paddle you close repeats — squeeze for the middle of X or P."
             }
             KeyerMode::IambicA | KeyerMode::IambicB => {
-                "Type the letters, or hold [ for dits and ] for dahs. Squeeze both to alternate. A hold repeats at the character speed."
+                "Type the letters, or hold [ for dits and ] for dahs. Squeeze both to alternate. A hold repeats at the key speed."
             }
         }
     };

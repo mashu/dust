@@ -48,6 +48,7 @@ impl TrainingSettings {
             self.playback.effective_wpm_min = self.playback.char_wpm_min;
             self.playback.effective_wpm_max = self.playback.char_wpm_max;
         }
+        self.playback.keyer_wpm = self.playback.keyer_wpm.clamp(5.0, 80.0);
         self.band.filter_bandwidth_hz = self
             .band
             .filter_bandwidth_hz
@@ -119,6 +120,7 @@ impl TrainingSettings {
         self.playback.extra_word_space_multiplier =
             self.playback.extra_word_space_multiplier.max(0.1);
         self.playback.group_timeout = self.playback.group_timeout.clamp(0.0, 120.0);
+        self.playback.group_pause_sec = self.playback.group_pause_sec.clamp(0.0, 15.0);
         self.auto_level.auto_adjust_threshold =
             self.auto_level.auto_adjust_threshold.clamp(0.0, 100.0);
         self.auto_level.error_weight_strength = self.auto_level.error_weight_strength.max(0.0);

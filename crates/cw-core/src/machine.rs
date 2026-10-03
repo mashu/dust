@@ -3,7 +3,7 @@
 
 use crate::session::{answer_length_matches, GroupSession, SessionId, SessionView};
 use crate::settings::TrainingSettings;
-use crate::timing::compute_group_gap_for_wpm;
+use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};
 
 pub const AUTO_CONFIRM_DELAY_MS: u32 = 300;
 
@@ -427,14 +427,18 @@ impl SessionMachine {
     }
 
     fn group_gap_ms(&self, next: usize) -> u32 {
-        let prev = next.saturating_sub(1);
-        match self.session.played_wpm(prev) {
-            Some((char_wpm, effective_wpm)) => compute_group_gap_for_wpm(
-                char_wpm,
-                effective_wpm,
-                self.session.settings().playback.extra_word_space_multiplier,
+        let pause = self.session.settings().playback.group_pause_sec;
+        let extra = self.session.settings().playback.extra_word_space_multiplier;
+        match self.session.played_wpm(next.saturating_sub(1)) {
+            Some((char_wpm, effective_wpm)) => {
+                compute_after_group_gap_ms(char_wpm, effective_wpm, extra, pause)
+            }
+            None => compute_after_group_gap_ms(
+                self.session.settings().playback.char_wpm_min,
+                self.session.settings().playback.effective_wpm_min,
+                extra,
+                pause,
             ),
-            None => crate::timing::compute_group_gap_ms(self.session.settings()),
         }
     }
 
@@ -531,7 +535,11 @@ mod tests {
         let Some(SessionEffect::Sleep { id, ms }) = effects.first().cloned() else {
             panic!("expected a repeat gap sleep, got {effects:?}");
         };
-        assert!(ms > 0);
+        assert_eq!(
+            ms,
+            compute_group_gap_for_wpm(20.0, 18.0, 1.0),
+            "a repeat is a word space, not the reading pause"
+        );
         assert!(m.sleep_is_current(id));
 
         let effects = m.apply(SessionEvent::GapElapsed, 900);
@@ -1228,7 +1236,16 @@ mod guard_tests {
         };
         assert_eq!(
             ms,
-            crate::timing::compute_group_gap_ms(machine.session().settings())
+            crate::timing::compute_after_group_gap_ms(
+                machine.session().settings().playback.char_wpm_min,
+                machine.session().settings().playback.effective_wpm_min,
+                machine
+                    .session()
+                    .settings()
+                    .playback
+                    .extra_word_space_multiplier,
+                machine.session().settings().playback.group_pause_sec,
+            )
         );
     }
 

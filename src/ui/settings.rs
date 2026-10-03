@@ -1,9 +1,11 @@
 use cw_core::{
-    CharSetMode, KeyerMode, RangeSetting, SettingsSection, TrainingSettings, GROUP_REPEAT_MAX,
+    CharSetMode, KeyerMode, Paddle, RangeSetting, SettingsSection, TrainingSettings,
+    GROUP_REPEAT_MAX,
 };
 use dioxus::prelude::*;
 
 use crate::ui::envelope::EnvelopeCard;
+use crate::ui::paddle::{capture_dom_paddles, PaddlePad};
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::widgets::{
     control_id, Icon, LinkedRange, NumberField, SectionReset, Seg, SliderField, Switch,
@@ -78,6 +80,9 @@ pub fn SettingsView(
     on_preview_band: EventHandler<()>,
     on_stop_band: EventHandler<()>,
     on_play_sample: EventHandler<String>,
+    #[props(default)] paddle_heard: String,
+    #[props(default)] on_paddle_down: EventHandler<Paddle>,
+    #[props(default)] on_paddle_up: EventHandler<Paddle>,
 ) -> Element {
     let s = settings();
     let keyer_hint = match s.playback.keyer_mode {
@@ -85,7 +90,7 @@ pub fn SettingsView(
             "One contact. Hold [ or ] — a short press is a dit, a long one a dah. You time the elements."
         }
         KeyerMode::IambicA => {
-            "Hold a paddle and it repeats at the character speed. Squeeze both to alternate. Let go and the element you were on finishes, then it stops."
+            "Hold a paddle and it repeats at the key speed you set. Squeeze both to alternate. Let go and the element you were on finishes, then it stops."
         }
         KeyerMode::IambicB => {
             "Like Iambic A, but releasing a squeeze sends one extra opposite element — the extra dit after a dah is how C is often sent."
@@ -133,6 +138,18 @@ pub fn SettingsView(
                         unit: "sec".to_string(),
                         onchange: move |v| settings.write().playback.group_timeout = v,
                     }
+                    NumberField {
+                        label: "Pause after each group".to_string(),
+                        value: s.playback.group_pause_sec,
+                        min: 0.0,
+                        max: 15.0,
+                        step: 0.5,
+                        unit: "sec".to_string(),
+                        onchange: move |v| settings.write().playback.group_pause_sec = v,
+                    }
+                }
+                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "Time to read the last group before the next send. Zero keeps contest pace. Repeats of the same group stay a word space apart."
                 }
                 // A callsign is as long as it is, so there is nothing to set.
                 if s.curriculum.char_set_mode != CharSetMode::Callsign {
@@ -187,6 +204,23 @@ pub fn SettingsView(
                         }
                     }
                     p { class: "muted", style: "margin: 0; font-size: 0.8rem;", "{keyer_hint}" }
+                }
+                NumberField {
+                    label: "Key speed".to_string(),
+                    value: s.playback.keyer_wpm,
+                    min: 5.0,
+                    max: 60.0,
+                    step: 1.0,
+                    unit: "WPM".to_string(),
+                    onchange: move |v| settings.write().playback.keyer_wpm = v,
+                }
+                PaddlePad {
+                    heard: paddle_heard,
+                    mode: s.playback.keyer_mode,
+                    swap: s.playback.paddle_swap,
+                    capture_keys: capture_dom_paddles(),
+                    on_down: on_paddle_down,
+                    on_up: on_paddle_up,
                 }
                 if !s.playback.keyer_mode.is_straight() {
                     Switch {

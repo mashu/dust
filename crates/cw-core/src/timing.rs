@@ -27,6 +27,18 @@ pub fn compute_group_gap_ms(settings: &TrainingSettings) -> u32 {
     )
 }
 
+/// Word space plus the reading pause, used between different groups.
+pub fn compute_after_group_gap_ms(
+    char_wpm: f64,
+    effective_wpm: f64,
+    extra_word_space: f64,
+    pause_sec: f64,
+) -> u32 {
+    let word = compute_group_gap_for_wpm(char_wpm, effective_wpm, extra_word_space);
+    let pause = (pause_sec.max(0.0) * 1000.0).round() as u32;
+    word.saturating_add(pause)
+}
+
 /// Word-space gap for the WPM that was actually sent, not the settings minimum.
 pub fn compute_group_gap_for_wpm(char_wpm: f64, effective_wpm: f64, extra_word_space: f64) -> u32 {
     let char_wpm = char_wpm.max(1.0);
@@ -825,6 +837,17 @@ mod plan_tests {
         // Nonsense speeds do not divide by zero.
         assert!(compute_group_gap_for_wpm(0.0, 0.0, 0.0) > 0);
         assert_eq!(clamp_extra_spacing(-1.0), EXTRA_SPACING_MULTIPLIER_MIN);
+    }
+
+    #[test]
+    fn the_pause_after_a_group_sits_on_top_of_the_word_space() {
+        let word = compute_group_gap_for_wpm(20.0, 20.0, 1.0);
+        assert_eq!(
+            compute_after_group_gap_ms(20.0, 20.0, 1.0, 2.0),
+            word + 2_000
+        );
+        assert_eq!(compute_after_group_gap_ms(20.0, 20.0, 1.0, 0.0), word);
+        assert_eq!(compute_after_group_gap_ms(20.0, 20.0, 1.0, -1.0), word);
     }
 
     #[test]

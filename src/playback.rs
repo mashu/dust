@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use cw_core::{
-    compute_group_gap_for_wpm, generate_training_group, CharSamplingState, FastrandRng,
+    compute_after_group_gap_ms, generate_training_group, CharSamplingState, FastrandRng,
     TrainingSettings, Transmission,
 };
 use dioxus::prelude::*;
@@ -269,10 +269,11 @@ pub async fn loop_stream_groups(
             list.drain(..extra);
         }
         heard.set(list);
-        let gap = compute_group_gap_for_wpm(
+        let gap = compute_after_group_gap_ms(
             char_wpm,
             effective_wpm,
             settings_now.playback.extra_word_space_multiplier,
+            settings_now.playback.group_pause_sec,
         );
         if !sleep_cancelable(gap, gen, app.session_gen.clone()).await {
             return;

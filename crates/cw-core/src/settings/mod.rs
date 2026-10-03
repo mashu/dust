@@ -143,6 +143,11 @@ pub struct PlaybackSettings {
     pub link_char_to_effective: bool,
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
+    /// Seconds to sit on the last group after it is sent, so the card can be
+    /// read before the next one starts. Zero is contest pace. This is not
+    /// Morse spacing — repeats of the same group still use a word space.
+    #[serde(default = "defaults::group_pause_sec")]
+    pub group_pause_sec: f64,
     pub lock_input_during_group_playback: bool,
     /// `[` is dit and `]` is dah on a USB keyer. Set when the paddles are wired the other way.
     #[serde(default)]
@@ -151,6 +156,10 @@ pub struct PlaybackSettings {
     /// load as Iambic A — finish the element you were on, then stop.
     #[serde(default)]
     pub keyer_mode: KeyerMode,
+    /// Speed the paddles send at. Independent of the station's character
+    /// speed, which can be a random range.
+    #[serde(default = "defaults::keyer_wpm")]
+    pub keyer_wpm: f64,
     /// How far operators' fists stray from a keyer's. Zero is a band of
     /// machines, which is what this was before there was a setting.
     #[serde(default = "defaults::fist_variation")]
@@ -176,9 +185,11 @@ impl Default for PlaybackSettings {
             link_char_to_effective: true,
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
+            group_pause_sec: defaults::group_pause_sec(),
             lock_input_during_group_playback: true,
             paddle_swap: false,
             keyer_mode: KeyerMode::IambicA,
+            keyer_wpm: defaults::keyer_wpm(),
             fist_variation: 0.35,
             group_repeat_min: 1,
             group_repeat_max: 1,
@@ -491,6 +502,12 @@ mod defaults {
     pub fn fist_variation() -> f64 {
         0.35
     }
+    pub fn keyer_wpm() -> f64 {
+        20.0
+    }
+    pub fn group_pause_sec() -> f64 {
+        2.0
+    }
     pub fn pileup_spread_hz() -> f64 {
         350.0
     }
@@ -534,6 +551,23 @@ mod tests {
         assert_eq!(s.curriculum.min_group_size, 8);
         assert_eq!(s.curriculum.max_group_size, 8);
         assert_eq!(s.curriculum.level, s.max_letter_level());
+    }
+
+    #[test]
+    fn paddle_speed_is_not_the_station_speed() {
+        let mut s = TrainingSettings::default();
+        s.playback.char_wpm_min = 18.0;
+        s.playback.char_wpm_max = 40.0;
+        s.playback.link_char_wpm = false;
+        s.playback.keyer_wpm = 25.0;
+        let s = s.clamp();
+        assert_eq!(s.playback.keyer_wpm, 25.0);
+        assert_eq!(s.playback.char_wpm_min, 18.0);
+        assert_eq!(s.playback.char_wpm_max, 40.0);
+        let mut s = s;
+        s.playback.keyer_wpm = 900.0;
+        let s = s.clamp();
+        assert_eq!(s.playback.keyer_wpm, 80.0);
     }
 
     #[test]
@@ -708,6 +742,7 @@ mod tests {
         assert!(s.playback.lock_input_during_group_playback);
         assert!(s.playback.link_char_to_effective);
         assert_eq!(s.playback.group_timeout, 10.0);
+        assert_eq!(s.playback.group_pause_sec, 2.0);
         assert_eq!(s.auto_level.auto_adjust_threshold, 90.0);
         assert_eq!(s.curriculum.num_groups, 20);
         assert_eq!(s.curriculum.digits_level, 1);
@@ -716,6 +751,7 @@ mod tests {
         assert_eq!(s.playback.group_repeat_max, 1);
         assert!(s.playback.link_group_repeat);
         assert_eq!(s.playback.keyer_mode, crate::keyer::KeyerMode::IambicA);
+        assert_eq!(s.playback.keyer_wpm, 20.0);
         let koch: TrainingSettings = serde_json::from_str(r#"{"charSetMode":"koch"}"#).unwrap();
         assert_eq!(koch.curriculum.char_set_mode, CharSetMode::Koch);
         assert_eq!(koch.curriculum.mixed_letters_percent, 70);
@@ -755,10 +791,12 @@ mod invariant_tests {
         s.curriculum.sliding_window_end = 0;
         s.playback.char_wpm_min = 900.0;
         s.playback.char_wpm_max = -5.0;
+        s.playback.keyer_wpm = 900.0;
         s.playback.effective_wpm_min = -1.0;
         s.playback.effective_wpm_max = 900.0;
         s.playback.extra_word_space_multiplier = -3.0;
         s.playback.group_timeout = 9_000.0;
+        s.playback.group_pause_sec = 9_000.0;
         s.playback.group_repeat_min = 99;
         s.playback.group_repeat_max = 0;
         s.band.side_tone_min = 9_000.0;
@@ -825,6 +863,7 @@ mod invariant_tests {
         assert_eq!(s.curriculum.mixed_letters_percent, 100);
         assert_eq!(s.curriculum.num_groups, 200);
         assert_eq!(s.playback.group_timeout, 120.0);
+        assert_eq!(s.playback.group_pause_sec, 15.0);
         assert_eq!(s.playback.group_repeat_max, GROUP_REPEAT_MAX);
         assert_eq!(s.band.steepness, 50.0);
         assert_eq!(s.band.envelope_smoothing, 1.0);
@@ -1206,9 +1245,11 @@ mod invariant_tests {
         s.playback.link_char_to_effective = false;
         s.playback.extra_word_space_multiplier = 2.5;
         s.playback.group_timeout = 9_000.0;
+        s.playback.group_pause_sec = 6.0;
         s.playback.lock_input_during_group_playback = false;
         s.playback.paddle_swap = true;
         s.playback.keyer_mode = KeyerMode::Ultimatic;
+        s.playback.keyer_wpm = 32.0;
         s.playback.group_repeat_min = 2;
         s.playback.group_repeat_max = 4;
         s.playback.link_group_repeat = true;

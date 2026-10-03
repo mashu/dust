@@ -554,6 +554,8 @@ mod tests {
         assert_eq!(settings.playback.char_wpm_min, 22.0);
         assert_eq!(settings.curriculum.num_groups, 15);
         assert_eq!(settings.playback.group_repeat_min, 1);
+        assert_eq!(settings.playback.keyer_wpm, 20.0);
+        assert_eq!(settings.playback.group_pause_sec, 2.0);
         // Callsign mode did not exist then either, so its tier starts at one
         // rather than resetting everything around it.
         assert_eq!(settings.curriculum.callsign_level, 1);

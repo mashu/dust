@@ -82,6 +82,11 @@ impl AppState {
         if let Some(player) = slot.as_mut() {
             player.resume_from_gesture();
             player.apply_band(settings)?;
+            player.set_live_tone(
+                false,
+                settings.side_tone_center(),
+                settings.band.volume_min.max(0.15),
+            );
         }
         Ok(())
     }
@@ -145,14 +150,33 @@ impl AppState {
         }
     }
 
-    /// Paddle sidetone: on for the squeeze, off on release. No-op if nothing
-    /// has opened the player yet.
-    pub fn set_live_tone(&self, on: bool, frequency_hz: f64, gain: f64) {
+    /// Gate a live sidetone for paddle practice. Opens the player if needed so
+    /// a squeeze outside training still has somewhere to go.
+    pub fn set_live_tone(&self, on: bool, settings: &TrainingSettings) {
+        let hz = settings.side_tone_center();
+        let gain = settings.band.volume_min.max(0.15);
         if let Ok(mut slot) = self.player.try_borrow_mut() {
+            if slot.is_none() {
+                match (self.make_player)() {
+                    Ok(player) => *slot = Some(player),
+                    Err(_) => return,
+                }
+            }
             if let Some(player) = slot.as_mut() {
-                player.set_live_tone(on, frequency_hz, gain);
+                player.resume_from_gesture();
+                player.set_live_tone(on, hz, gain);
             }
         }
+    }
+
+    /// Open the silent sidetone stream so the first paddle squeeze is one
+    /// audio buffer of lag, not a stream start.
+    pub fn ensure_live_sidetone(&self, settings: &TrainingSettings) -> Result<(), String> {
+        self.set_live_tone(false, settings);
+        if self.player.borrow().is_none() {
+            return Err("No audio output device found".to_string());
+        }
+        Ok(())
     }
 }
 

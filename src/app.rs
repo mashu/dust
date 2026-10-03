@@ -10,6 +10,7 @@ use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
 use crate::state::{AppState, Screen, SessionSignals};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
+use crate::ui::paddle::use_paddle_keys;
 use crate::ui::widgets::{control_id, Icon};
 
 // Desktop inlines this in the window head. Web loads it through `asset!` so
@@ -145,6 +146,7 @@ pub fn App() -> Element {
     // whole app with a player that records instead of one that needs a device.
     let app = use_hook(|| try_consume_context::<AppState>().unwrap_or_else(AppState::new));
     let app = Rc::new(app);
+    let paddle = use_paddle_keys(settings, screen, app.clone());
     let signals = SessionSignals {
         screen,
         runtime,
@@ -398,8 +400,11 @@ pub fn App() -> Element {
                 if e.key() == Key::F11 {
                     e.prevent_default();
                     toggle_fullscreen();
+                    return;
                 }
+                paddle.keydown.call(e);
             },
+            onkeyup: move |e| paddle.keyup.call(e),
             div { class: shell_class,
                 header { class: "header-bar",
                     div { class: "brand",
@@ -440,6 +445,7 @@ pub fn App() -> Element {
                             listen_streaming: preview().is_stream(),
                             stream_heard: stream_heard(),
                             sample_playing: preview().sample(),
+                            paddle_heard: (paddle.heard)(),
                         },
                         app,
                         AppCallbacks {
@@ -451,6 +457,8 @@ pub fn App() -> Element {
                             start_listen,
                             start_stream,
                             play_sample,
+                            on_paddle_down: paddle.down,
+                            on_paddle_up: paddle.up,
                         },
                     ) }
                 }

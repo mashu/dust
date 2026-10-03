@@ -18,10 +18,12 @@ impl TrainingSettings {
                 self.playback.group_repeat_max = d.playback.group_repeat_max;
                 self.playback.link_group_repeat = d.playback.link_group_repeat;
                 self.playback.group_timeout = d.playback.group_timeout;
+                self.playback.group_pause_sec = d.playback.group_pause_sec;
                 self.playback.lock_input_during_group_playback =
                     d.playback.lock_input_during_group_playback;
                 self.playback.paddle_swap = d.playback.paddle_swap;
                 self.playback.keyer_mode = d.playback.keyer_mode;
+                self.playback.keyer_wpm = d.playback.keyer_wpm;
             }
             SettingsSection::Speed => {
                 self.playback.char_wpm_min = d.playback.char_wpm_min;

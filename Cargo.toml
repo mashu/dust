@@ -56,6 +56,7 @@ web-sys = { version = "0.3", optional = true, features = [
 # Linux / desktop
 cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
+tao = { version = "0.34", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt"] }
 
 # iOS: claiming an audio session is what makes the app audible at all, and cpal
@@ -113,7 +114,7 @@ web = [
 ]
 # Desktop is the system webview (wry). `dx serve --platform desktop` and the
 # shipped installers use this.
-desktop = ["dioxus/desktop", "native-runtime", "native-audio"]
+desktop = ["dioxus/desktop", "native-runtime", "native-audio", "dep:tao"]
 # Old name for the same renderer.
 webview = ["desktop"]
 # Android/iOS still use a system webview. `dx` enables this feature

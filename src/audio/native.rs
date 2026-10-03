@@ -5,12 +5,13 @@
 
 mod state;
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, Sample, SampleFormat, SizedSample};
+use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
 use cw_core::band::{BandMixer, ReceiverFilter};
 use cw_core::{plan_transmission, TrainingSettings, Transmission};
 
@@ -18,16 +19,21 @@ use super::render::{mix_plan_into, render_plan, BandPlayback, LiveAgc, LiveQsb, 
 use super::{MorseBackend, PlaybackWait};
 use state::{PlayerState, ToneSignal};
 
+/// Band and Morse share the paddle's output stream. Three device streams on
+/// Pulse/PipeWire underrun: the sidetone stutters, turns to noise, then drops.
+struct MixerSlots {
+    band: Mutex<Option<BandPlayback>>,
+    tone: Mutex<Option<Arc<TonePlayback>>>,
+}
+
 pub struct MorsePlayer {
     state: PlayerState,
     band_stop: Arc<AtomicBool>,
-    band_stream: Option<cpal::Stream>,
-    tone_stream: Option<cpal::Stream>,
-    /// Streams that have been told to fade and are still doing it. Dropping a
-    /// cpal stream stops it dead, so a stopped send has to keep its stream
-    /// until the ramp has run — otherwise the release is only ever theory.
-    /// They are released when the next send or band replaces them, long after.
-    retiring: Vec<cpal::Stream>,
+    slots: Arc<MixerSlots>,
+    /// The one output stream. Morse, receiver hiss and paddle sidetone are
+    /// mixed here so the device is not asked for three concurrent writers.
+    stream: Option<cpal::Stream>,
+    sample_rate: u32,
     qsb: Arc<LiveQsb>,
     /// What the background's AGC is holding everything down to.
     agc: Arc<LiveAgc>,
@@ -35,7 +41,6 @@ pub struct MorsePlayer {
     /// running between groups instead of restarting with every send.
     opened_at: Instant,
     live: Arc<LiveSidetone>,
-    live_stream: Option<cpal::Stream>,
 }
 
 /// iOS starts an app with no audio session, which leaves output silent, tied to
@@ -62,37 +67,55 @@ impl MorsePlayer {
     pub fn new() -> Result<Self, String> {
         #[cfg(target_os = "ios")]
         claim_audio_session();
-        let _ = cpal::default_host()
-            .default_output_device()
-            .ok_or_else(|| "No audio output device found".to_string())?;
+        let (_, supported) = default_output()?;
+        let sample_rate = supported.sample_rate().0;
+        let live = LiveSidetone::new();
+        let slots = Arc::new(MixerSlots {
+            band: Mutex::new(None),
+            tone: Mutex::new(None),
+        });
+        let stream = start_mixer(Arc::clone(&live), Arc::clone(&slots)).ok();
         Ok(Self {
             state: PlayerState::new(),
             band_stop: Arc::new(AtomicBool::new(false)),
-            band_stream: None,
-            tone_stream: None,
-            retiring: Vec::new(),
+            slots,
+            stream,
+            sample_rate,
             qsb: LiveQsb::new(),
             agc: LiveAgc::new(),
             opened_at: Instant::now(),
-            live: LiveSidetone::new(),
-            live_stream: None,
+            live,
         })
     }
 
-    /// Tell the background to fade, and keep its stream alive long enough to.
+    /// Tell the background to fade. The mixer keeps playing it until a new
+    /// band replaces it, so the release is heard rather than a click.
     fn stop_band(&mut self) {
         self.band_stop.store(true, Ordering::SeqCst);
-        if let Some(stream) = self.band_stream.take() {
-            self.retiring.push(stream);
-        }
         self.band_stop = Arc::new(AtomicBool::new(false));
         self.state.forget_band();
     }
 
-    /// Let go of everything that has finished fading. Called whenever a new
-    /// stream is about to open, by which time any ramp is milliseconds gone.
-    fn release_retired(&mut self) {
-        self.retiring.clear();
+    fn set_band(&self, band: Option<BandPlayback>) {
+        if let Ok(mut slot) = self.slots.band.lock() {
+            *slot = band;
+        }
+    }
+
+    fn set_tone(&self, tone: Option<Arc<TonePlayback>>) {
+        if let Ok(mut slot) = self.slots.tone.lock() {
+            *slot = tone;
+        }
+    }
+
+    fn ensure_mixer(&mut self) {
+        if self.stream.is_some() {
+            return;
+        }
+        match start_mixer(Arc::clone(&self.live), Arc::clone(&self.slots)) {
+            Ok(stream) => self.stream = Some(stream),
+            Err(err) => eprintln!("audio mixer: {err}"),
+        }
     }
 }
 
@@ -103,19 +126,21 @@ impl MorseBackend for MorsePlayer {
             return Ok(());
         }
         self.stop_band();
-        self.release_retired();
         if !BandMixer::needs_background(settings) {
+            self.set_band(None);
             self.state.note_band(settings);
+            self.ensure_mixer();
             return Ok(());
         }
-        // The receiver background is decoration. If its stream will not open —
-        // some Android devices refuse a second concurrent output stream — the
-        // Morse must still play, so this failure is swallowed rather than
-        // failing the whole player. The signature is remembered either way, so
-        // a configuration that cannot open is not retried on every change.
-        self.band_stream =
-            start_band_stream(settings, Arc::clone(&self.band_stop), Arc::clone(&self.agc)).ok();
+        let mixer = BandMixer::new(self.sample_rate, settings, u64::from(self.sample_rate));
+        self.set_band(Some(BandPlayback::new(
+            mixer,
+            Arc::clone(&self.band_stop),
+            self.sample_rate,
+            Arc::clone(&self.agc),
+        )));
         self.state.note_band(settings);
+        self.ensure_mixer();
         Ok(())
     }
 
@@ -128,22 +153,24 @@ impl MorseBackend for MorsePlayer {
         self.live.set_on(false);
         let planned = plan_transmission(transmission, settings);
         let plan = planned.wanted.clone();
-        // Drop the previous stream before the new epoch, so its callback cannot
-        // write into the run that is about to start. Anything still fading has
-        // long finished by the time a new send begins.
-        self.tone_stream = None;
-        self.release_retired();
+        self.set_tone(None);
         let armed = self.state.arm();
-        let (stream, finished) = start_tone_stream(
-            &planned,
-            settings,
+        let samples = render_send(&planned, settings, self.sample_rate);
+        let playback = Arc::new(TonePlayback::new(
+            samples,
+            self.sample_rate,
             self.opened_at.elapsed().as_secs_f64(),
             Arc::clone(&self.qsb),
             Arc::clone(armed.stop_flag()),
             Arc::clone(&self.agc),
-        )
-        .inspect_err(|_| self.state.note_start_failed())?;
-        self.tone_stream = Some(stream);
+        ));
+        let finished = playback.finished_flag();
+        self.set_tone(Some(Arc::clone(&playback)));
+        self.ensure_mixer();
+        if self.stream.is_none() {
+            self.state.note_start_failed();
+            return Err("Audio mixer failed to open".to_string());
+        }
         Ok(PlaybackWait::new(
             plan.duration_sec,
             plan.resolved_char_wpm,
@@ -154,30 +181,19 @@ impl MorseBackend for MorsePlayer {
 
     fn stop(&mut self) {
         self.state.stop();
-        if let Some(stream) = self.tone_stream.take() {
-            self.retiring.push(stream);
-        }
     }
 
     fn shutdown(&mut self) {
         self.stop();
         self.stop_band();
         self.live.set_on(false);
-        self.live_stream = None;
+        self.set_band(None);
+        self.set_tone(None);
     }
 
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
         self.live.set(on, frequency_hz, gain);
-        if !on {
-            return;
-        }
-        if self.live_stream.is_some() {
-            return;
-        }
-        match start_live_stream(Arc::clone(&self.live)) {
-            Ok(stream) => self.live_stream = Some(stream),
-            Err(err) => eprintln!("live sidetone: {err}"),
-        }
+        self.ensure_mixer();
     }
 }
 
@@ -194,17 +210,27 @@ where
 {
     let channels = channels.max(1);
     // One scratch buffer, grown once and reused: an audio callback must not
-    // allocate.
-    let mut scratch: Vec<f32> = Vec::new();
+    // allocate. 16k frames covers a default host period with headroom.
+    let mut scratch: Vec<f32> = vec![0.0; 16_384];
     device
         .build_output_stream(
             config,
             move |output: &mut [T], _| {
-                scratch.clear();
-                scratch.resize(output.len(), 0.0);
-                source(&mut scratch, channels);
-                for (slot, value) in output.iter_mut().zip(scratch.iter()) {
-                    *slot = T::from_sample(*value);
+                if scratch.len() < output.len() {
+                    scratch.resize(output.len(), 0.0);
+                }
+                let n = output.len();
+                scratch[..n].fill(0.0);
+                let _ = catch_unwind(AssertUnwindSafe(|| {
+                    source(&mut scratch[..n], channels);
+                }));
+                for (slot, value) in output.iter_mut().zip(&scratch[..n]) {
+                    let sample = if value.is_finite() {
+                        value.clamp(-1.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    *slot = T::from_sample(sample);
                 }
             },
             |err| eprintln!("audio stream error: {err}"),
@@ -216,26 +242,40 @@ where
 /// Build a stream in whatever sample format the device wants.
 fn build_for_format<F>(
     device: &cpal::Device,
-    config: &cpal::SupportedStreamConfig,
+    supported: &cpal::SupportedStreamConfig,
+    stream_config: &cpal::StreamConfig,
     channels: usize,
     source: F,
 ) -> Result<cpal::Stream, String>
 where
     F: FnMut(&mut [f32], usize) + Send + 'static,
 {
-    let format = config.sample_format();
-    let stream_config: cpal::StreamConfig = config.clone().into();
+    let format = supported.sample_format();
     match format {
-        SampleFormat::F32 => build_stream::<f32, F>(device, &stream_config, channels, source),
-        SampleFormat::F64 => build_stream::<f64, F>(device, &stream_config, channels, source),
-        SampleFormat::I16 => build_stream::<i16, F>(device, &stream_config, channels, source),
-        SampleFormat::I32 => build_stream::<i32, F>(device, &stream_config, channels, source),
-        SampleFormat::U16 => build_stream::<u16, F>(device, &stream_config, channels, source),
-        SampleFormat::U32 => build_stream::<u32, F>(device, &stream_config, channels, source),
-        SampleFormat::I8 => build_stream::<i8, F>(device, &stream_config, channels, source),
-        SampleFormat::U8 => build_stream::<u8, F>(device, &stream_config, channels, source),
+        SampleFormat::F32 => build_stream::<f32, F>(device, stream_config, channels, source),
+        SampleFormat::F64 => build_stream::<f64, F>(device, stream_config, channels, source),
+        SampleFormat::I16 => build_stream::<i16, F>(device, stream_config, channels, source),
+        SampleFormat::I32 => build_stream::<i32, F>(device, stream_config, channels, source),
+        SampleFormat::U16 => build_stream::<u16, F>(device, stream_config, channels, source),
+        SampleFormat::U32 => build_stream::<u32, F>(device, stream_config, channels, source),
+        SampleFormat::I8 => build_stream::<i8, F>(device, stream_config, channels, source),
+        SampleFormat::U8 => build_stream::<u8, F>(device, stream_config, channels, source),
         other => Err(format!("Unsupported sample format: {other}")),
     }
+}
+
+/// ~5–20 ms first. Default Pulse periods are often a third of a second, which
+/// is a dah of lag and a buffer that keeps sounding after the paddle is up.
+fn mixer_configs(supported: &cpal::SupportedStreamConfig) -> Vec<cpal::StreamConfig> {
+    let fallback: cpal::StreamConfig = supported.clone().into();
+    let mut configs = Vec::new();
+    for frames in [256u32, 512, 1024] {
+        let mut config = fallback.clone();
+        config.buffer_size = BufferSize::Fixed(frames);
+        configs.push(config);
+    }
+    configs.push(fallback);
+    configs
 }
 
 fn default_output() -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
@@ -248,56 +288,21 @@ fn default_output() -> Result<(cpal::Device, cpal::SupportedStreamConfig), Strin
     Ok((device, config))
 }
 
-fn start_tone_stream(
+fn render_send(
     planned: &cw_core::PlannedTransmission,
     settings: &TrainingSettings,
-    started_at_sec: f64,
-    qsb: Arc<LiveQsb>,
-    stop: Arc<AtomicBool>,
-    agc: Arc<LiveAgc>,
-) -> Result<(cpal::Stream, Arc<AtomicBool>), String> {
-    let (device, config) = default_output()?;
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels() as usize;
-    // The Morse is heard through the same filter as everything else: narrow it
-    // and the keying softens and rings, and a station off your pitch fades.
-    // Filtering the send and the background separately comes to the same thing
-    // as filtering their sum — they are two streams, and the filter is linear.
+    sample_rate: u32,
+) -> Vec<f32> {
     let mut samples = render_plan(&planned.wanted, sample_rate);
-    // Everyone else calling lands in the same buffer: interference is addition,
-    // and each station already carries its own pitch and level.
     for other in &planned.others {
         mix_plan_into(&mut samples, other, sample_rate);
     }
     ReceiverFilter::from_settings(sample_rate, settings).apply(&mut samples);
-    let playback = TonePlayback::new(samples, sample_rate, started_at_sec, qsb, stop, agc);
-    let finished = playback.finished_flag();
-    let stream = build_for_format(&device, &config, channels, move |out, channels| {
-        playback.fill(out, channels)
-    })?;
-    stream.play().map_err(|e| format!("Audio play: {e}"))?;
-    Ok((stream, finished))
+    samples
 }
 
-fn start_band_stream(
-    settings: &TrainingSettings,
-    stop: Arc<AtomicBool>,
-    agc: Arc<LiveAgc>,
-) -> Result<cpal::Stream, String> {
-    let (device, config) = default_output()?;
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels() as usize;
-    let mixer = BandMixer::new(sample_rate, settings, u64::from(sample_rate));
-    let mut playback = BandPlayback::new(mixer, stop, sample_rate, agc);
-    let stream = build_for_format(&device, &config, channels, move |out, channels| {
-        playback.fill(out, channels)
-    })?;
-    stream.play().map_err(|e| format!("Band play: {e}"))?;
-    Ok(stream)
-}
-
-/// Gate and pitch for the paddle sidetone. The stream stays up; only these
-/// atomics change per squeeze, so the lag is one audio buffer.
+/// Gate and pitch for the paddle sidetone. The mixer stream stays up; only
+/// these atomics change per squeeze, so the lag is one audio buffer.
 struct LiveSidetone {
     on: AtomicBool,
     hz: AtomicU32,
@@ -326,39 +331,85 @@ impl LiveSidetone {
     }
 }
 
-fn start_live_stream(tone: Arc<LiveSidetone>) -> Result<cpal::Stream, String> {
-    let (device, config) = default_output()?;
-    let sample_rate = config.sample_rate().0 as f32;
-    let channels = config.channels() as usize;
+fn start_mixer(live: Arc<LiveSidetone>, slots: Arc<MixerSlots>) -> Result<cpal::Stream, String> {
+    let (device, supported) = default_output()?;
+    let channels = supported.channels() as usize;
+    let mut last_err = None;
+    for config in mixer_configs(&supported) {
+        match start_mixer_on(
+            &device,
+            &supported,
+            &config,
+            channels,
+            Arc::clone(&live),
+            Arc::clone(&slots),
+        ) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "Audio mixer: no stream config worked".to_string()))
+}
+
+fn start_mixer_on(
+    device: &cpal::Device,
+    supported: &cpal::SupportedStreamConfig,
+    stream_config: &cpal::StreamConfig,
+    channels: usize,
+    live: Arc<LiveSidetone>,
+    slots: Arc<MixerSlots>,
+) -> Result<cpal::Stream, String> {
+    let sample_rate = supported.sample_rate().0 as f32;
     let mut phase = 0.0f32;
     let mut env = 0.0f32;
-    // ~2 ms to the target so a squeeze is not a click, and not a fade.
-    let coeff = 1.0 - (-1.0f32 / (sample_rate * 0.002)).exp();
+    let coeff = 1.0 - (-1.0f32 / (sample_rate.max(1.0) * 0.0005)).exp();
     let two_pi = std::f32::consts::TAU;
-    let stream = build_for_format(&device, &config, channels, move |out, channels| {
-        let hz = tone.hz.load(Ordering::Relaxed) as f32;
-        let gain = f32::from_bits(tone.gain_bits.load(Ordering::Relaxed));
-        let want = if tone.on.load(Ordering::Relaxed) {
-            1.0
-        } else {
-            0.0
-        };
-        let incr = two_pi * hz / sample_rate.max(1.0);
-        for frame in out.chunks_mut(channels.max(1)) {
-            env += (want - env) * coeff;
-            let sample = phase.sin() * env * gain;
-            phase += incr;
-            if phase >= two_pi {
-                phase -= two_pi;
+    let stream = build_for_format(
+        device,
+        supported,
+        stream_config,
+        channels,
+        move |out, channels| {
+            if let Ok(mut band) = slots.band.try_lock() {
+                if let Some(playback) = band.as_mut() {
+                    playback.fill(out, channels);
+                }
             }
-            for slot in frame {
-                *slot = sample;
+            let tone = slots.tone.try_lock().ok().and_then(|slot| slot.clone());
+            if let Some(playback) = tone {
+                playback.mix_into(out, channels);
             }
-        }
-    })?;
-    stream
-        .play()
-        .map_err(|e| format!("Live sidetone play: {e}"))?;
+            let hz = live.hz.load(Ordering::Relaxed) as f32;
+            let gain = f32::from_bits(live.gain_bits.load(Ordering::Relaxed));
+            let incr = two_pi * hz / sample_rate.max(1.0);
+            for frame in out.chunks_mut(channels.max(1)) {
+                // Read the gate every frame. A Default Pulse callback can be
+                // hundreds of milliseconds: one sample of "on" would otherwise
+                // fill the whole thing.
+                let want = if live.on.load(Ordering::Relaxed) {
+                    1.0
+                } else {
+                    0.0
+                };
+                env += (want - env) * coeff;
+                if env < 1e-5 && want == 0.0 {
+                    env = 0.0;
+                }
+                let sample = phase.sin() * env * gain;
+                phase += incr;
+                if phase >= two_pi {
+                    phase -= two_pi;
+                }
+                if !sample.is_finite() || sample == 0.0 {
+                    continue;
+                }
+                for slot in frame {
+                    *slot = (*slot + sample).clamp(-1.0, 1.0);
+                }
+            }
+        },
+    )?;
+    stream.play().map_err(|e| format!("Audio play: {e}"))?;
     Ok(stream)
 }
 
@@ -424,6 +475,17 @@ mod device_tests {
         settings.band.qrn_enabled = false;
         settings.band.receiver_enabled = false;
         player.apply_band(&settings).expect("silent band");
+        player.shutdown();
+    }
+
+    #[test]
+    fn the_paddle_sidetone_opens_a_stream_before_the_first_squeeze() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        player.set_live_tone(false, 600.0, 0.2);
+        player.set_live_tone(true, 600.0, 0.2);
+        player.set_live_tone(false, 600.0, 0.2);
         player.shutdown();
     }
 }
