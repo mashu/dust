@@ -4,7 +4,7 @@ use cw_core::{fit_settings_to_alphabet, GroupSession, SessionEvent};
 use dioxus::prelude::*;
 
 use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
-use crate::playback::{loop_preview_text, play_chars, play_sample_text};
+use crate::playback::{loop_preview_text, loop_stream_groups, play_chars, play_sample_text};
 use crate::routes::{app_routes, AppCallbacks, ViewState};
 use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
 use crate::state::{AppState, Screen, SessionSignals};
@@ -40,6 +40,8 @@ pub enum Preview {
     Band,
     /// The Listen screen playing a character or the whole pool.
     Letters,
+    /// Groups looping with no answers and no score — copy while you do something else.
+    Stream,
     /// One short envelope sample, named so the chip that sent it can show it.
     Sample(String),
 }
@@ -51,6 +53,10 @@ impl Preview {
 
     pub fn is_letters(&self) -> bool {
         matches!(self, Self::Letters)
+    }
+
+    pub fn is_stream(&self) -> bool {
+        matches!(self, Self::Stream)
     }
 
     /// The sample now sounding, for the chip that is waiting to light up.
@@ -124,6 +130,7 @@ pub fn App() -> Element {
     let auto_message = use_signal(|| None::<String>);
     let mut toast = use_signal(|| None::<String>);
     let mut preview = use_signal(Preview::default);
+    let mut stream_heard = use_signal(Vec::<String>::new);
     let mut theme = use_signal(|| Theme::from_key(&load_theme()));
     // The audio backend is injectable through context so a test can drive the
     // whole app with a player that records instead of one that needs a device.
@@ -181,6 +188,7 @@ pub fn App() -> Element {
             app.bump_session();
             app.silence_audio();
             preview.set(Preview::Idle);
+            stream_heard.set(Vec::new());
             runtime.set(None);
             screen.set(Screen::Home);
         }
@@ -250,6 +258,25 @@ pub fn App() -> Element {
             let app_loop = (*app).clone();
             spawn(async move {
                 play_chars(app_loop.clone(), gen, settings_now, chars, 420, toast).await;
+                if app_loop.session_gen.get() == gen {
+                    preview.set(Preview::Idle);
+                    app_loop.silence_audio();
+                }
+            });
+        }
+    });
+
+    let start_stream = use_callback({
+        let app = app.clone();
+        move |(): ()| {
+            let Some((gen, _settings_now)) = claim_audio.call(()) else {
+                return;
+            };
+            stream_heard.set(Vec::new());
+            preview.set(Preview::Stream);
+            let app_loop = (*app).clone();
+            spawn(async move {
+                loop_stream_groups(app_loop.clone(), gen, settings, stream_heard, toast).await;
                 if app_loop.session_gen.get() == gen {
                     preview.set(Preview::Idle);
                     app_loop.silence_audio();
@@ -330,6 +357,7 @@ pub fn App() -> Element {
             app.bump_session();
             app.silence_audio();
             preview.set(Preview::Idle);
+            stream_heard.set(Vec::new());
             screen.set(to);
         }
     });
@@ -400,6 +428,8 @@ pub fn App() -> Element {
                         ViewState {
                             previewing: preview().is_band(),
                             listen_playing: preview().is_letters(),
+                            listen_streaming: preview().is_stream(),
+                            stream_heard: stream_heard(),
                             sample_playing: preview().sample(),
                         },
                         app,
@@ -410,6 +440,7 @@ pub fn App() -> Element {
                             start_band_preview,
                             stop_preview,
                             start_listen,
+                            start_stream,
                             play_sample,
                         },
                     ) }
@@ -792,6 +823,26 @@ mod ui_tests {
             ui.click("btn-play-all");
             assert!(ui.run_until(20_000, |_| recorder.texts().len() >= 2).await);
             assert_eq!(recorder.texts()[..2], ["K".to_string(), "M".to_string()]);
+        });
+    }
+
+    #[test]
+    fn the_listen_screen_can_stream_groups_without_storing_anything() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            ui.click("btn-listen-to-letters");
+            assert!(ui.has("Stream groups"));
+            ui.click("btn-stream-groups");
+            assert!(ui.has("Stop"));
+            assert!(ui.has("Nothing is scored"));
+            assert!(ui.run_until(20_000, |_| recorder.texts().len() >= 2).await);
+            assert!(recorder.texts().iter().all(|text| text.len() == 2));
+            assert!(ui.run_until(20_000, |ui| ui.has("listen-heard")).await);
+            ui.click("btn-stop");
+            assert!(ui.has("Play all"));
+            assert!(ui.has("Stream groups"));
+            assert_eq!(ui.screen(), "listen");
+            assert!(crate::persist::load_sessions().is_empty());
         });
     }
 

@@ -65,6 +65,9 @@ pub fn ListenView(
     on_play: EventHandler<String>,
     on_stop: EventHandler<()>,
     on_back: EventHandler<()>,
+    #[props(default)] streaming: bool,
+    #[props(default)] heard: Vec<String>,
+    #[props(default)] on_stream: EventHandler<()>,
 ) -> Element {
     let pool = compute_char_pool(&settings);
     let default_idx = newest_index(&settings, &pool);
@@ -81,12 +84,20 @@ pub fn ListenView(
         .trim_end()
         .to_string();
     let all_chars: String = pool.iter().collect();
+    let pool_empty = all_chars.is_empty();
+    let busy = playing || streaming;
     rsx! {
         div { class: "stack listen-page",
             header { class: "row-between",
                 div {
                     h2 { class: "page-title", "Listen" }
-                    p { class: "page-sub", "Play one character, or the whole unlocked pool." }
+                    p { class: "page-sub",
+                        if streaming {
+                            "Groups from your current settings. Nothing is scored."
+                        } else {
+                            "Play one character, the pool, or a stream of groups."
+                        }
+                    }
                 }
                 button {
                     id: control_id("btn", "listen back"),
@@ -100,7 +111,7 @@ pub fn ListenView(
                 for (i, ch) in pool.iter().copied().enumerate() {
                     {
                         let newest = i == default_idx;
-                        let active = i == idx;
+                        let active = i == idx && !streaming;
                         let class = if active {
                             "letter-chip active"
                         } else if newest {
@@ -120,7 +131,32 @@ pub fn ListenView(
                 }
             }
             div { class: "card listen-stage",
-                if let Some(ch) = current {
+                if streaming {
+                    p { class: "listen-glyph",
+                        if let Some(last) = heard.last() {
+                            "{last}"
+                        } else {
+                            "·−"
+                        }
+                    }
+                    p { class: "muted", style: "margin: 0.5rem 0 0;",
+                        if heard.is_empty() {
+                            "Listening — groups appear here after they are sent."
+                        } else {
+                            "Last group. Earlier ones sit underneath."
+                        }
+                    }
+                    if !heard.is_empty() {
+                        div { class: "listen-heard",
+                            for (i, group) in heard.iter().enumerate() {
+                                span {
+                                    class: if i + 1 == heard.len() { "listen-heard-item latest" } else { "listen-heard-item" },
+                                    "{group}"
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(ch) = current {
                     div { class: "listen-glyph", "{ch}" }
                     MorseBars { pattern: pattern.to_string() }
                     p { class: "mono", style: "margin: 0; letter-spacing: 0.16em; color: var(--copper-deep); font-size: 0.9rem;",
@@ -134,7 +170,7 @@ pub fn ListenView(
                 }
             }
             div { class: "hero-actions",
-                if playing {
+                if busy {
                     button {
                         id: control_id("btn", "stop"),
                         class: "btn btn-secondary",
@@ -155,10 +191,18 @@ pub fn ListenView(
                     button {
                         id: control_id("btn", "play all"),
                         class: "btn btn-secondary",
-                        disabled: html_bool(all_chars.is_empty()),
+                        disabled: html_bool(pool_empty),
                         onclick: move |_| on_play.call(all_chars.clone()),
                         Icon { name: "headphones" }
                         "Play all"
+                    }
+                    button {
+                        id: control_id("btn", "stream groups"),
+                        class: "btn btn-secondary",
+                        disabled: html_bool(pool_empty),
+                        onclick: move |_| on_stream.call(()),
+                        Icon { name: "repeat" }
+                        "Stream groups"
                     }
                 }
             }

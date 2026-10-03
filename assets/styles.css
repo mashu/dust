@@ -1336,6 +1336,28 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .hero-figure {
 }
 .listen-morse i.dit { width: 10px; }
 .listen-morse i.dah { width: 32px; }
+.listen-heard {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  margin: 1rem 0 0;
+}
+.listen-heard-item {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  padding: 0.25rem 0.55rem;
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
+  border: 1px solid var(--line);
+}
+.listen-heard-item.latest {
+  color: var(--ink);
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
 
 /* ==========================================================================
    Stats

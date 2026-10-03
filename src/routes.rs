@@ -20,6 +20,8 @@ use crate::ui::training::{TrainingScope, TrainingView};
 pub struct ViewState {
     pub previewing: bool,
     pub listen_playing: bool,
+    pub listen_streaming: bool,
+    pub stream_heard: Vec<String>,
     pub sample_playing: Option<String>,
 }
 
@@ -32,6 +34,7 @@ pub struct AppCallbacks {
     pub start_band_preview: EventHandler<()>,
     pub stop_preview: EventHandler<()>,
     pub start_listen: EventHandler<String>,
+    pub start_stream: EventHandler<()>,
     pub play_sample: EventHandler<String>,
 }
 
@@ -53,6 +56,8 @@ pub fn app_routes(
     let ViewState {
         previewing,
         listen_playing,
+        listen_streaming,
+        stream_heard,
         sample_playing,
     } = view;
     let AppCallbacks {
@@ -62,6 +67,7 @@ pub fn app_routes(
         start_band_preview,
         stop_preview,
         start_listen,
+        start_stream,
         play_sample,
     } = callbacks;
     match screen() {
@@ -101,7 +107,10 @@ pub fn app_routes(
             ListenView {
                 settings: settings(),
                 playing: listen_playing,
+                streaming: listen_streaming,
+                heard: stream_heard,
                 on_play: start_listen,
+                on_stream: start_stream,
                 on_stop: stop_preview,
                 on_back: move |_| go_home.call(()),
             }
@@ -219,6 +228,8 @@ mod tests {
             ViewState {
                 previewing: false,
                 listen_playing: false,
+                listen_streaming: false,
+                stream_heard: Vec::new(),
                 sample_playing: None,
             },
             app,
@@ -229,6 +240,7 @@ mod tests {
                 start_band_preview: noop,
                 stop_preview: noop,
                 start_listen: noop_text,
+                start_stream: noop,
                 play_sample: noop_text,
             },
         )

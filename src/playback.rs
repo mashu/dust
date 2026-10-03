@@ -1,12 +1,18 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::{TrainingSettings, Transmission};
+use cw_core::{
+    compute_group_gap_for_wpm, generate_training_group, CharSamplingState, FastrandRng,
+    TrainingSettings, Transmission,
+};
 use dioxus::prelude::*;
 
 use crate::audio::PlaybackOutcome;
 use crate::state::AppState;
-use crate::time::{sleep_ms, POLL_MS};
+use crate::time::{seed_rng, sleep_ms, POLL_MS};
+
+/// How many sent groups the stream keeps on screen for a glance-back.
+const STREAM_HEARD_KEEP: usize = 12;
 
 /// How many times one group is re-armed before the session is told the audio
 /// is gone. Each retry rebuilds the player, which is what picks up a device
@@ -200,6 +206,75 @@ pub async fn loop_preview_text(
             }
         }
         if !sleep_cancelable(gap_ms, gen, app.session_gen.clone()).await {
+            return;
+        }
+    }
+}
+
+fn next_stream_group(
+    app: &AppState,
+    settings: &TrainingSettings,
+    sampling: &mut CharSamplingState,
+) -> String {
+    let (group, next) = match app.rng.try_borrow_mut() {
+        Ok(mut rng) => generate_training_group(settings, sampling, &mut *rng),
+        Err(_) => generate_training_group(settings, sampling, &mut FastrandRng(seed_rng())),
+    };
+    *sampling = next;
+    group
+}
+
+/// Send groups from the current alphabet until the generation moves on.
+///
+/// This is not a training session: sampling is copied so the stream cannot
+/// change what the next scored session draws, and nothing is stored.
+pub async fn loop_stream_groups(
+    app: AppState,
+    gen: u64,
+    settings: Signal<TrainingSettings>,
+    mut heard: Signal<Vec<String>>,
+    mut toast: Signal<Option<String>>,
+) {
+    let mut sampling = app.sampling.borrow().clone();
+    let voice = app.station(&settings().clamp());
+    loop {
+        if app.session_gen.get() != gen {
+            return;
+        }
+        let settings_now = settings().clamp();
+        let group = next_stream_group(&app, &settings_now, &mut sampling);
+        if group.is_empty() {
+            if !sleep_cancelable(POLL_MS, gen, app.session_gen.clone()).await {
+                return;
+            }
+            continue;
+        }
+        let alone = Transmission::alone(group.clone(), voice);
+        let played = play_text_now(&app, gen, &alone, &settings_now).await;
+        if app.session_gen.get() != gen {
+            return;
+        }
+        let (char_wpm, effective_wpm) = match played {
+            Ok((_, char_wpm, effective_wpm)) => (char_wpm, effective_wpm),
+            Err(PlayError::Cancelled) => return,
+            Err(PlayError::Failed(message)) => {
+                toast.set(Some(message));
+                return;
+            }
+        };
+        let mut list = heard();
+        list.push(group);
+        let extra = list.len().saturating_sub(STREAM_HEARD_KEEP);
+        if extra > 0 {
+            list.drain(..extra);
+        }
+        heard.set(list);
+        let gap = compute_group_gap_for_wpm(
+            char_wpm,
+            effective_wpm,
+            settings_now.playback.extra_word_space_multiplier,
+        );
+        if !sleep_cancelable(gap, gen, app.session_gen.clone()).await {
             return;
         }
     }
@@ -457,6 +532,63 @@ mod tests {
                 Some(Err(PlayError::Cancelled))
             ));
             assert!(h.texts().is_empty(), "nothing should have been sent");
+        });
+    }
+
+    #[test]
+    fn a_group_stream_keeps_sending_until_it_is_stopped() {
+        run(|| async {
+            let mut h = Harness::new();
+            let settings = test_settings();
+            let sampling_before = h.app.sampling.borrow().clone();
+            let gen = h.app.takeover_audio(&settings).expect("player");
+            let app = h.app.clone();
+            let (settings_sig, toast) = (h.settings, h.toast);
+            let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
+            h.in_app(|| {
+                spawn(loop_stream_groups(app, gen, settings_sig, heard, toast));
+            });
+            h.pump();
+            assert!(h.run_until(20_000, |h| h.texts().len() >= 3).await);
+            assert!(
+                h.texts().iter().all(|text| text.len() == 2),
+                "each send is one training group"
+            );
+            assert!(
+                heard.peek().len() >= 2,
+                "finished groups show up after they play"
+            );
+            h.app.bump_session();
+            let played = h.texts().len();
+            h.advance(5_000).await;
+            assert_eq!(h.texts().len(), played, "the stream stopped");
+            assert_eq!(
+                *h.app.sampling.borrow(),
+                sampling_before,
+                "a listen stream must not change what training will draw"
+            );
+        });
+    }
+
+    #[test]
+    fn a_group_stream_gives_up_when_the_audio_fails() {
+        run(|| async {
+            let mut h = Harness::new();
+            let settings = test_settings();
+            let gen = h.app.takeover_audio(&settings).expect("player");
+            h.set_behaviour(Behaviour::RefuseToStart);
+            let app = h.app.clone();
+            let (settings_sig, toast) = (h.settings, h.toast);
+            let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
+            h.in_app(|| {
+                spawn(loop_stream_groups(app, gen, settings_sig, heard, toast));
+            });
+            h.pump();
+            assert!(h.run_until(20_000, |h| h.toast().is_some()).await);
+            let played = h.texts().len();
+            h.advance(5_000).await;
+            assert_eq!(h.texts().len(), played, "the stream stopped");
+            assert!(heard.peek().is_empty());
         });
     }
 }

@@ -492,6 +492,7 @@ fn listen_renders_the_selected_character() {
     assert!(html.contains("listen-glyph"));
     assert!(html.contains("letter-chip"));
     assert!(html.contains("Play all"));
+    assert!(html.contains("Stream groups"));
 }
 
 #[test]

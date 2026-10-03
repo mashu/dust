@@ -88,7 +88,7 @@ pub fn Home(
         div { class: "stack",
             header { class: "page-head",
                 h2 { class: "page-title", "Practice" }
-                p { class: "page-sub", "Hear the group first, then answer from memory." }
+                    p { class: "page-sub", "Hear a group and type it back — or just listen." }
             }
             if AUDIO_IS_SILENT {
                 div { class: "notice",
@@ -149,7 +149,7 @@ pub fn Home(
                         class: "btn btn-hero",
                         onclick: move |_| on_listen.call(()),
                         Icon { name: "headphones" }
-                        "Listen to letters"
+                        "Listen"
                     }
                 }
             }
