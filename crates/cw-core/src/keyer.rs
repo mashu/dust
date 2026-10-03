@@ -311,6 +311,22 @@ impl PaddleKeyer {
         })
     }
 
+    /// Ultimatic: a tap of the opposite paddle inserts one remembered element
+    /// even while the other paddle is still held. That has to win over the
+    /// generic "held paddle repeats" rule below.
+    fn ultimatic_memory_override(&self) -> Option<Paddle> {
+        if self.mode != KeyerMode::Ultimatic {
+            return None;
+        }
+        if self.dit_held && self.dah_mem {
+            Some(Paddle::Dah)
+        } else if self.dah_held && self.dit_mem {
+            Some(Paddle::Dit)
+        } else {
+            None
+        }
+    }
+
     /// The element to send at the next slot. None means the paddles are up and
     /// no memory is waiting.
     pub fn next_element(&mut self) -> Option<Paddle> {
@@ -327,10 +343,8 @@ impl PaddleKeyer {
                     .unwrap_or(Paddle::Dit),
                 KeyerMode::Straight => return None,
             }
-        } else if self.mode == KeyerMode::Ultimatic && self.dit_held && self.dah_mem {
-            Paddle::Dah
-        } else if self.mode == KeyerMode::Ultimatic && self.dah_held && self.dit_mem {
-            Paddle::Dit
+        } else if let Some(paddle) = self.ultimatic_memory_override() {
+            paddle
         } else if self.dit_held {
             Paddle::Dit
         } else if self.dah_held {

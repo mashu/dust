@@ -56,6 +56,7 @@ fn bracket_from_key(e: &Event<KeyboardData>) -> Option<char> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_draft(
     idx: usize,
     value: String,
@@ -91,6 +92,7 @@ fn commit_draft(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_keyed_char(
     ch: char,
     current: usize,
@@ -442,7 +444,6 @@ pub fn TrainingView(
         }
     });
     let on_paddle_up = EventHandler::new({
-        let sent_now = sent_now.clone();
         move |paddle: Paddle| {
             if keyer.peek().mode().is_straight() {
                 keyer.write().release(paddle);

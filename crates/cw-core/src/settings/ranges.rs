@@ -54,7 +54,6 @@ impl TrainingSettings {
 
     /// Move the lower bound. The upper bound follows when it would end up below
     /// it, or when the pair is linked.
-
     pub fn set_range_min(&mut self, which: RangeSetting, value: f64) {
         let current = self.range(which);
         let max = if current.linked || value > current.max {
@@ -66,7 +65,6 @@ impl TrainingSettings {
     }
 
     /// Move the upper bound, dragging the lower one down if it would overtake it.
-
     pub fn set_range_max(&mut self, which: RangeSetting, value: f64) {
         let current = self.range(which);
         let min = if current.linked || value < current.min {
@@ -78,7 +76,6 @@ impl TrainingSettings {
     }
 
     /// Collapse a range to its lower bound, or open a fixed value back up.
-
     pub fn set_range_linked(&mut self, which: RangeSetting, linked: bool) {
         let current = self.range(which);
         match which {
@@ -143,7 +140,6 @@ impl TrainingSettings {
     }
 
     /// Farnsworth off: effective speed simply mirrors character speed.
-
     pub fn sync_effective_to_char(&mut self) {
         if self.playback.link_char_to_effective {
             self.playback.effective_wpm_min = self.playback.char_wpm_min;

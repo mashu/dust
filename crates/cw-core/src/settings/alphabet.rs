@@ -20,7 +20,6 @@ impl TrainingSettings {
 
     /// Ordered alphabet that `level` unlocks. Custom uses `custom_set` when set.
     /// Mixed drops digits so the letter axis and digits axis stay separate.
-
     pub fn progress_alphabet(&self) -> Vec<char> {
         let base = if self.curriculum.char_set_mode == CharSetMode::Custom {
             let custom = Self::unique_alphabet(&self.curriculum.custom_set);
@@ -85,7 +84,6 @@ impl TrainingSettings {
 
     /// Identity of the alphabet this mode is training, used to isolate auto-level
     /// counters and sampling history when the user switches sequence or custom set.
-
     pub fn alphabet_fingerprint(&self) -> String {
         match self.curriculum.char_set_mode {
             CharSetMode::Digits => crate::morse::DIGITS.iter().copied().collect(),

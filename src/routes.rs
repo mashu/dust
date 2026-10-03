@@ -125,7 +125,7 @@ pub fn app_routes(
                 let app_focus = app.clone();
                 let app_submit = app.clone();
                 let app_stop = app.clone();
-                let app_tone = app.clone();
+                let app_tone = app;
                 let settings = session.settings();
                 let wpm = session
                     .group(view.current)
