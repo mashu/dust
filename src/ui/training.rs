@@ -3,8 +3,8 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::audio::focus_group_input;
 use crate::time::{mono_ms, sleep_ms, POLL_MS};
+use crate::ui::focus::focus_group_input;
 use crate::ui::widgets::{control_id, html_bool, Icon, ProgressHeader};
 
 /// Incomplete answers wait this long before the session sees them. Short

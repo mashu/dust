@@ -3,12 +3,11 @@ use std::rc::Rc;
 use cw_core::{fit_settings_to_alphabet, GroupSession, SessionEvent};
 use dioxus::prelude::*;
 
-use crate::engine::{
-    loop_preview_text, play_chars, play_sample_text, AppState, Screen, SessionSignals,
-};
 use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
+use crate::playback::{loop_preview_text, play_chars, play_sample_text};
 use crate::routes::{app_routes, AppCallbacks, ViewState};
 use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
+use crate::state::{AppState, Screen, SessionSignals};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::widgets::{control_id, Icon};
@@ -495,7 +494,7 @@ fn toggle_fullscreen() {
 #[cfg(test)]
 mod tests {
     use super::screen_key;
-    use crate::engine::Screen;
+    use crate::state::Screen;
 
     #[test]
     fn every_screen_has_its_own_key() {

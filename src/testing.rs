@@ -15,8 +15,8 @@ use dioxus::core::{ElementId, NoOpMutations};
 use dioxus::prelude::*;
 
 use crate::audio::fake::{Behaviour, Call, Recorder};
-use crate::engine::{AppState, Screen, SessionSignals};
 use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
+use crate::state::{AppState, Screen, SessionSignals};
 use crate::time::POLL_MS;
 use crate::ui::widgets::DISCLOSURE;
 

@@ -1,169 +1,17 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::{
-    apply_auto_level, auto_level_progress, build_session_result, evaluate_auto_level,
-    fit_settings_to_alphabet, resolve_station, AutoLevelProgress, CharSamplingState, FastrandRng,
-    GroupSession, SessionMachine, SessionResult, StationVoice, TrainingSettings, Transmission,
-};
+use cw_core::{TrainingSettings, Transmission};
 use dioxus::prelude::*;
 
-use crate::audio::{MorseBackend, PlaybackOutcome};
-use crate::persist::{
-    clear_auto_counters, load_auto_counters, save_auto_counters, save_sessions, save_settings,
-};
-use crate::time::{local_date_string, now_ms, seed_rng, sleep_ms, POLL_MS};
+use crate::audio::PlaybackOutcome;
+use crate::state::AppState;
+use crate::time::{sleep_ms, POLL_MS};
 
 /// How many times one group is re-armed before the session is told the audio
 /// is gone. Each retry rebuilds the player, which is what picks up a device
 /// that was swapped, unplugged or suspended mid-session.
 const PLAY_ATTEMPTS: u32 = 3;
-
-/// A factory for the audio backend. Injectable so the session runtime can be
-/// driven without a sound card.
-pub type BackendFactory = Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>>;
-
-/// Everything a session writes back into the app: the screen it is on, the
-/// session in flight, the history it joins, and the messages it raises.
-/// Signals are cheap to copy, so this travels by value.
-#[derive(Clone, Copy)]
-pub struct SessionSignals {
-    pub screen: Signal<Screen>,
-    pub runtime: Signal<Option<GroupSession>>,
-    pub result: Signal<Option<SessionResult>>,
-    pub auto_message: Signal<Option<String>>,
-    pub sessions: Signal<Vec<SessionResult>>,
-    pub settings: Signal<TrainingSettings>,
-    pub toast: Signal<Option<String>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Screen {
-    Home,
-    Settings,
-    Training,
-    Results,
-    Stats,
-    Listen,
-}
-
-#[derive(Clone)]
-pub struct AppState {
-    pub session_gen: Rc<Cell<u64>>,
-    pub player: Rc<RefCell<Option<Box<dyn MorseBackend>>>>,
-    pub rng: Rc<RefCell<FastrandRng>>,
-    pub sampling: Rc<RefCell<CharSamplingState>>,
-    pub machine: Rc<RefCell<Option<SessionMachine>>>,
-    make_player: BackendFactory,
-}
-
-impl AppState {
-    pub fn new() -> Self {
-        Self::with_backend(Rc::new(crate::audio::default_backend))
-    }
-
-    pub fn with_backend(make_player: BackendFactory) -> Self {
-        Self {
-            session_gen: Rc::new(Cell::new(0)),
-            player: Rc::new(RefCell::new(None)),
-            rng: Rc::new(RefCell::new(FastrandRng(seed_rng()))),
-            sampling: Rc::new(RefCell::new(CharSamplingState::default())),
-            machine: Rc::new(RefCell::new(None)),
-            make_player,
-        }
-    }
-
-    pub fn bump_session(&self) -> u64 {
-        let next = self.session_gen.get() + 1;
-        self.session_gen.set(next);
-        *self.machine.borrow_mut() = None;
-        next
-    }
-
-    fn ensure_player(&self, settings: &TrainingSettings) -> Result<(), String> {
-        let mut slot = self
-            .player
-            .try_borrow_mut()
-            .map_err(|_| "Audio is busy.".to_string())?;
-        if slot.is_none() {
-            *slot = Some((self.make_player)()?);
-        }
-        if let Some(player) = slot.as_mut() {
-            player.resume_from_gesture();
-            player.apply_band(settings)?;
-        }
-        Ok(())
-    }
-
-    fn rebuild_player(&self, settings: &TrainingSettings) -> Result<(), String> {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                player.shutdown();
-            }
-            *slot = None;
-        } else {
-            return Err("Audio is busy.".into());
-        }
-        self.ensure_player(settings)
-    }
-
-    /// Stop current audio, invalidate waiters, then arm the player for a new gen.
-    pub fn takeover_audio(&self, settings: &TrainingSettings) -> Result<u64, String> {
-        self.stop_sending();
-        let gen = self.bump_session();
-        self.ensure_player(settings)?;
-        Ok(gen)
-    }
-
-    /// Tune in a station, drawn from the app's own generator.
-    pub fn station(&self, settings: &TrainingSettings) -> StationVoice {
-        match self.rng.try_borrow_mut() {
-            Ok(mut rng) => resolve_station(settings, &mut *rng),
-            // Only reachable if a send were started from inside another; the
-            // point is a usable voice, not which one.
-            Err(_) => resolve_station(settings, &mut FastrandRng(crate::time::seed_rng())),
-        }
-    }
-
-    pub fn apply_band_live(&self, settings: &TrainingSettings) {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                let _ = player.apply_band(settings);
-            }
-        }
-    }
-
-    /// Stop whatever is being sent, and leave the receiver running. Between
-    /// groups the background is meant to keep hissing — a real receiver does
-    /// not go silent because the other station stopped keying.
-    pub fn stop_sending(&self) {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                player.stop();
-            }
-        }
-    }
-
-    /// Everything off, receiver included. What "stop" means when the user
-    /// pressed it, or walked away from the screen that was making the sound.
-    pub fn silence_audio(&self) {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                player.shutdown();
-            }
-        }
-    }
-
-    /// Paddle sidetone: on for the squeeze, off on release. No-op if nothing
-    /// has opened the player yet.
-    pub fn set_live_tone(&self, on: bool, frequency_hz: f64, gain: f64) {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                player.set_live_tone(on, frequency_hz, gain);
-            }
-        }
-    }
-}
 
 #[derive(Debug)]
 pub(crate) enum PlayError {
@@ -275,67 +123,6 @@ pub async fn sleep_cancelable(ms: u32, gen: u64, session_gen: Rc<Cell<u64>>) -> 
     session_gen.get() == gen
 }
 
-pub fn finish_session(app: AppState, signals: SessionSignals) {
-    let SessionSignals {
-        mut screen,
-        mut runtime,
-        mut result,
-        mut auto_message,
-        mut sessions,
-        settings: mut settings_sig,
-        mut toast,
-    } = signals;
-    if matches!(screen(), Screen::Results) || runtime.read().is_none() {
-        return;
-    }
-    app.bump_session();
-    app.silence_audio();
-    // `runtime` was checked just above, so there is a session here.
-    let Some(session) = runtime.read().clone() else {
-        return;
-    };
-    if !session.any_confirmed() {
-        runtime.set(None);
-        screen.set(Screen::Home);
-        return;
-    }
-    let settings = session.settings().clone();
-    let built = build_session_result(&session, &settings, now_ms(), local_date_string());
-    if built.groups.is_empty() {
-        runtime.set(None);
-        screen.set(Screen::Home);
-        return;
-    }
-
-    let mut counters = load_auto_counters(&settings);
-    let mut next_settings = settings.clone();
-    if let Some(adj) = evaluate_auto_level(built.accuracy, &settings, &mut counters) {
-        clear_auto_counters(&adj.counters_cleared_keys);
-        apply_auto_level(&mut next_settings, &adj);
-        fit_settings_to_alphabet(&mut next_settings);
-        next_settings = next_settings.clamp();
-        settings_sig.set(next_settings.clone());
-        save_settings(&next_settings);
-        auto_message.set(Some(adj.message.clone()));
-        toast.set(Some(adj.message));
-    } else {
-        save_auto_counters(&settings, counters);
-        auto_message.set(None);
-    }
-
-    let mut history = sessions();
-    history.push(built.clone());
-    save_sessions(&history);
-    sessions.set(history);
-    result.set(Some(built));
-    runtime.set(None);
-    screen.set(Screen::Results);
-}
-
-pub fn current_auto_progress(settings: &TrainingSettings) -> Option<AutoLevelProgress> {
-    auto_level_progress(settings, load_auto_counters(settings))
-}
-
 pub async fn play_chars(
     app: AppState,
     gen: u64,
@@ -421,64 +208,8 @@ pub async fn loop_preview_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::fake::{Behaviour, Call};
+    use crate::audio::fake::Behaviour;
     use crate::testing::{run, test_settings, Harness};
-    use cw_core::{AutoLevelCounters, CharSetMode};
-
-    #[test]
-    fn taking_the_audio_over_stops_what_was_playing_and_moves_the_generation_on() {
-        run(|| async {
-            let h = Harness::new();
-            let settings = test_settings();
-            let first = h.app.takeover_audio(&settings).expect("player");
-            assert_eq!(first, 1);
-            assert!(h.calls().contains(&Call::New));
-
-            h.recorder.clear();
-            let second = h.app.takeover_audio(&settings).expect("player");
-            assert_eq!(second, 2);
-            assert!(h.calls().contains(&Call::Stop));
-            // The same player is reused: taking over is not a rebuild.
-            assert_eq!(h.recorder.players_built.get(), 1);
-        });
-    }
-
-    #[test]
-    fn a_player_that_will_not_open_is_reported_rather_than_ignored() {
-        run(|| async {
-            let h = Harness::new();
-            h.recorder.build_error.set(true);
-            let err = h.app.takeover_audio(&test_settings()).unwrap_err();
-            assert_eq!(err, "No audio output device found");
-            // The generation still moved, so nothing stale survives the attempt.
-            assert_eq!(h.app.session_gen.get(), 1);
-        });
-    }
-
-    #[test]
-    fn stopping_and_shutting_down_without_a_player_are_harmless() {
-        run(|| async {
-            let h = Harness::new();
-            h.app.stop_sending();
-            h.app.silence_audio();
-            h.app.apply_band_live(&test_settings());
-            assert!(h.calls().is_empty());
-        });
-    }
-
-    #[test]
-    fn the_band_follows_the_settings_while_a_preview_runs() {
-        run(|| async {
-            let h = Harness::new();
-            let mut settings = test_settings();
-            h.app.takeover_audio(&settings).expect("player");
-            h.recorder.clear();
-            settings.band.qrn_enabled = true;
-            settings.band.qrn_level = 0.4;
-            h.app.apply_band_live(&settings);
-            assert_eq!(h.calls(), vec![Call::Band(settings.band_signature())]);
-        });
-    }
 
     #[test]
     fn a_cancelable_sleep_stops_the_moment_the_session_moves_on() {
@@ -627,101 +358,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn finishing_with_nothing_answered_goes_home_without_storing_anything() {
-        run(|| async {
-            let mut h = Harness::new();
-            h.start_training();
-            let (app, signals) = (h.app.clone(), h.signals());
-            h.in_app(|| finish_session(app, signals));
-            h.pump();
-            assert_eq!(h.screen(), Screen::Home);
-            assert!(h.sessions.peek().is_empty());
-            assert!(h.result.peek().is_none());
-        });
-    }
-
-    #[test]
-    fn finishing_without_a_session_at_all_is_a_no_op() {
-        run(|| async {
-            let mut h = Harness::new();
-            let (app, signals) = (h.app.clone(), h.signals());
-            h.in_app(|| finish_session(app, signals));
-            h.pump();
-            assert_eq!(h.screen(), Screen::Home);
-        });
-    }
-
-    #[test]
-    fn a_session_of_nothing_but_silence_is_not_stored() {
-        run(|| async {
-            let mut h = Harness::new();
-            h.start_training();
-            // A confirmed group with nothing in it scores nothing at all.
-            let app = h.app.clone();
-            h.in_app(|| {
-                if let Some(machine) = app.machine.borrow_mut().as_mut() {
-                    machine.set_group_text(0, String::new(), 1);
-                    machine.session_mut().confirm(0, String::new(), 10);
-                }
-            });
-            let session = h.app.machine.borrow().as_ref().map(|m| m.session().clone());
-            h.runtime.set(session);
-            h.pump();
-            let (app, signals) = (h.app.clone(), h.signals());
-            h.in_app(|| finish_session(app, signals));
-            h.pump();
-            assert_eq!(h.screen(), Screen::Home);
-            assert!(h.sessions.peek().is_empty());
-            assert!(h.runtime.peek().is_none());
-        });
-    }
-
-    #[test]
-    fn a_good_session_can_move_the_level_and_says_so() {
-        run(|| async {
-            let mut settings = test_settings();
-            settings.auto_level.auto_adjust_level = true;
-            settings.auto_level.auto_adjust_above_threshold_count = 1;
-            settings.auto_level.auto_adjust_threshold = 50.0;
-            settings.curriculum.level = 1;
-            let mut h = Harness::with_settings(settings);
-            h.start_training();
-            h.play_through(60_000).await;
-            assert_eq!(h.screen(), Screen::Results);
-            assert_eq!(h.settings.peek().curriculum.level, 2);
-            let message = h.auto_message.peek().clone().expect("a message");
-            assert!(message.contains("Level increased to 2"), "{message}");
-            assert_eq!(h.toast().as_deref(), Some(message.as_str()));
-            // The level that was just left behind keeps no counters.
-            assert_eq!(
-                crate::persist::load_auto_counters(&h.settings.peek().clone()),
-                AutoLevelCounters::default()
-            );
-        });
-    }
-
-    #[test]
-    fn a_session_that_does_not_move_the_level_keeps_counting() {
-        run(|| async {
-            let mut settings = test_settings();
-            settings.auto_level.auto_adjust_level = true;
-            settings.auto_level.auto_adjust_above_threshold_count = 5;
-            settings.auto_level.auto_adjust_threshold = 50.0;
-            let mut h = Harness::with_settings(settings.clone());
-            h.start_training();
-            h.play_through(60_000).await;
-            assert!(h.auto_message.peek().is_none());
-            assert_eq!(
-                crate::persist::load_auto_counters(&settings),
-                AutoLevelCounters { above: 1, below: 0 }
-            );
-            let progress = current_auto_progress(&settings).expect("progress");
-            assert_eq!(progress.above_count, 1);
-            assert_eq!(progress.above_target, 5);
-        });
-    }
-
     /// Holding the player borrow across the await is the point of the test:
     /// it is how a second caller sees the player while it is in use.
     #[allow(clippy::await_holding_refcell_ref)]
@@ -743,20 +379,6 @@ mod tests {
             h.pump();
             assert!(h.run_until(30_000, |h| h.toast().is_some()).await);
             assert_eq!(h.toast().as_deref(), Some("Audio is busy."));
-            drop(held);
-        });
-    }
-
-    #[test]
-    fn taking_over_a_borrowed_player_is_refused() {
-        run(|| async {
-            let h = Harness::new();
-            let player = h.app.player.clone();
-            let held = player.borrow_mut();
-            assert_eq!(
-                h.app.takeover_audio(&test_settings()).unwrap_err(),
-                "Audio is busy."
-            );
             drop(held);
         });
     }
@@ -836,15 +458,5 @@ mod tests {
             ));
             assert!(h.texts().is_empty(), "nothing should have been sent");
         });
-    }
-
-    #[test]
-    fn auto_level_progress_is_hidden_when_the_setting_is_off() {
-        let mut settings = test_settings();
-        settings.auto_level.auto_adjust_level = false;
-        assert!(current_auto_progress(&settings).is_none());
-        settings.auto_level.auto_adjust_level = true;
-        settings.curriculum.char_set_mode = CharSetMode::Mixed;
-        assert!(current_auto_progress(&settings).is_some());
     }
 }

@@ -1,5 +1,6 @@
 use cw_core::{
-    fit_settings_to_alphabet, AutoAdjustMode, AutoLevelCounters, SessionResult, TrainingSettings,
+    auto_level_progress, fit_settings_to_alphabet, AutoAdjustMode, AutoLevelCounters,
+    AutoLevelProgress, SessionResult, TrainingSettings,
 };
 
 /// How much history is kept. Sessions are a few KB each, so this stays well
@@ -382,6 +383,10 @@ pub fn save_auto_counters(settings: &TrainingSettings, counters: AutoLevelCounte
 
 pub fn clear_auto_counters(keys: &[String]) {
     default_store().clear_auto_counters(keys)
+}
+
+pub fn current_auto_progress(settings: &TrainingSettings) -> Option<AutoLevelProgress> {
+    auto_level_progress(settings, load_auto_counters(settings))
 }
 
 /// An in-memory stand-in for the real store, one per test thread.
@@ -820,5 +825,15 @@ mod tests {
         // A desktop process name has no dots and must not become a /data/data path.
         assert_eq!(package_from_cmdline(b"dust\0"), None);
         assert_eq!(package_from_cmdline(b"/usr/bin/dust\0"), None);
+    }
+
+    #[test]
+    fn auto_level_progress_is_hidden_when_the_setting_is_off() {
+        let mut settings = TrainingSettings::default();
+        settings.auto_level.auto_adjust_level = false;
+        assert!(current_auto_progress(&settings).is_none());
+        settings.auto_level.auto_adjust_level = true;
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        assert!(current_auto_progress(&settings).is_some());
     }
 }

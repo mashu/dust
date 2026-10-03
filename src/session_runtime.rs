@@ -1,16 +1,19 @@
 //! Owns the session machine, audio, and effect execution. UI sends events only.
 
 use cw_core::{
+    apply_auto_level, build_session_result, evaluate_auto_level, fit_settings_to_alphabet,
     generate_training_group, resolve_group_repeats, resolve_pileup, resolve_station,
     CharSamplingState, FastrandRng, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
     StationVoice, TrainingSettings, Transmission,
 };
 use dioxus::prelude::*;
 
-use crate::engine::{
-    finish_session, play_text_now, sleep_cancelable, AppState, PlayError, Screen, SessionSignals,
+use crate::persist::{
+    clear_auto_counters, load_auto_counters, save_auto_counters, save_sessions, save_settings,
 };
-use crate::time::now_ms;
+use crate::playback::{play_text_now, sleep_cancelable, PlayError};
+use crate::state::{AppState, Screen, SessionSignals};
+use crate::time::{local_date_string, now_ms};
 
 pub fn dispatch_event(
     app: &AppState,
@@ -230,8 +233,10 @@ async fn handle_effect(
     } = signals;
     match effect {
         SessionEffect::Focus { index: _ } => {
-            // Focus is grabbed from TrainingView when the live box mounts.
-            // `document::eval` here has no Document context and is a no-op.
+            // The machine already wrote the live group into the session
+            // snapshot that `dispatch_event` published. TrainingView focuses
+            // that box when it mounts. JS eval from here has no Document
+            // context and would be a no-op.
             Vec::new()
         }
         SessionEffect::StopAudio => {
@@ -362,12 +367,69 @@ async fn handle_effect(
     }
 }
 
+pub fn finish_session(app: AppState, signals: SessionSignals) {
+    let SessionSignals {
+        mut screen,
+        mut runtime,
+        mut result,
+        mut auto_message,
+        mut sessions,
+        settings: mut settings_sig,
+        mut toast,
+    } = signals;
+    if matches!(screen(), Screen::Results) || runtime.read().is_none() {
+        return;
+    }
+    app.bump_session();
+    app.silence_audio();
+    // `runtime` was checked just above, so there is a session here.
+    let Some(session) = runtime.read().clone() else {
+        return;
+    };
+    if !session.any_confirmed() {
+        runtime.set(None);
+        screen.set(Screen::Home);
+        return;
+    }
+    let settings = session.settings().clone();
+    let built = build_session_result(&session, &settings, now_ms(), local_date_string());
+    if built.groups.is_empty() {
+        runtime.set(None);
+        screen.set(Screen::Home);
+        return;
+    }
+
+    let mut counters = load_auto_counters(&settings);
+    let mut next_settings = settings.clone();
+    if let Some(adj) = evaluate_auto_level(built.accuracy, &settings, &mut counters) {
+        clear_auto_counters(&adj.counters_cleared_keys);
+        apply_auto_level(&mut next_settings, &adj);
+        fit_settings_to_alphabet(&mut next_settings);
+        next_settings = next_settings.clamp();
+        settings_sig.set(next_settings.clone());
+        save_settings(&next_settings);
+        auto_message.set(Some(adj.message.clone()));
+        toast.set(Some(adj.message));
+    } else {
+        save_auto_counters(&settings, counters);
+        auto_message.set(None);
+    }
+
+    let mut history = sessions();
+    history.push(built.clone());
+    save_sessions(&history);
+    sessions.set(history);
+    result.set(Some(built));
+    runtime.set(None);
+    screen.set(Screen::Results);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::audio::fake::{Behaviour, Call};
-    use crate::engine::Screen;
     use crate::testing::{run, test_settings, Harness};
+    use cw_core::AutoLevelCounters;
     use cw_core::CharSetMode;
     use cw_core::SessionEffect;
     use cw_core::SessionPhase;
@@ -1193,6 +1255,101 @@ mod tests {
 
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
             assert!(!h.runtime.peek().as_ref().is_some_and(|s| s.input_locked(0)));
+        });
+    }
+
+    #[test]
+    fn finishing_with_nothing_answered_goes_home_without_storing_anything() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            let (app, signals) = (h.app.clone(), h.signals());
+            h.in_app(|| finish_session(app, signals));
+            h.pump();
+            assert_eq!(h.screen(), Screen::Home);
+            assert!(h.sessions.peek().is_empty());
+            assert!(h.result.peek().is_none());
+        });
+    }
+
+    #[test]
+    fn finishing_without_a_session_at_all_is_a_no_op() {
+        run(|| async {
+            let mut h = Harness::new();
+            let (app, signals) = (h.app.clone(), h.signals());
+            h.in_app(|| finish_session(app, signals));
+            h.pump();
+            assert_eq!(h.screen(), Screen::Home);
+        });
+    }
+
+    #[test]
+    fn a_session_of_nothing_but_silence_is_not_stored() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            // A confirmed group with nothing in it scores nothing at all.
+            let app = h.app.clone();
+            h.in_app(|| {
+                if let Some(machine) = app.machine.borrow_mut().as_mut() {
+                    machine.set_group_text(0, String::new(), 1);
+                    machine.session_mut().confirm(0, String::new(), 10);
+                }
+            });
+            let session = h.app.machine.borrow().as_ref().map(|m| m.session().clone());
+            h.runtime.set(session);
+            h.pump();
+            let (app, signals) = (h.app.clone(), h.signals());
+            h.in_app(|| finish_session(app, signals));
+            h.pump();
+            assert_eq!(h.screen(), Screen::Home);
+            assert!(h.sessions.peek().is_empty());
+            assert!(h.runtime.peek().is_none());
+        });
+    }
+
+    #[test]
+    fn a_good_session_can_move_the_level_and_says_so() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.auto_level.auto_adjust_level = true;
+            settings.auto_level.auto_adjust_above_threshold_count = 1;
+            settings.auto_level.auto_adjust_threshold = 50.0;
+            settings.curriculum.level = 1;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.settings.peek().curriculum.level, 2);
+            let message = h.auto_message.peek().clone().expect("a message");
+            assert!(message.contains("Level increased to 2"), "{message}");
+            assert_eq!(h.toast().as_deref(), Some(message.as_str()));
+            // The level that was just left behind keeps no counters.
+            assert_eq!(
+                crate::persist::load_auto_counters(&h.settings.peek().clone()),
+                AutoLevelCounters::default()
+            );
+        });
+    }
+
+    #[test]
+    fn a_session_that_does_not_move_the_level_keeps_counting() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.auto_level.auto_adjust_level = true;
+            settings.auto_level.auto_adjust_above_threshold_count = 5;
+            settings.auto_level.auto_adjust_threshold = 50.0;
+            let mut h = Harness::with_settings(settings.clone());
+            h.start_training();
+            h.play_through(60_000).await;
+            assert!(h.auto_message.peek().is_none());
+            assert_eq!(
+                crate::persist::load_auto_counters(&settings),
+                AutoLevelCounters { above: 1, below: 0 }
+            );
+            let progress = crate::persist::current_auto_progress(&settings).expect("progress");
+            assert_eq!(progress.above_count, 1);
+            assert_eq!(progress.above_target, 5);
         });
     }
 }

@@ -3,8 +3,9 @@ use std::rc::Rc;
 use cw_core::{compute_char_pool, dit_ms_for_wpm, SessionEvent};
 use dioxus::prelude::*;
 
-use crate::engine::{current_auto_progress, AppState, Screen, SessionSignals};
+use crate::persist::current_auto_progress;
 use crate::session_runtime::send_command;
+use crate::state::{AppState, Screen, SessionSignals};
 use crate::time::local_date_string;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
