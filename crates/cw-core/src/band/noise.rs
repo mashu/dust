@@ -38,7 +38,7 @@ const NOISE_SNR_LOUD_DB: f64 = 2.0;
 /// The noise level QRN is calibrated against — the default floor — so static
 /// sits the same distance above an ordinary band whether or not the floor is
 /// switched on.
-const QRN_REFERENCE_NOISE_LEVEL: f64 = 0.5;
+pub(crate) const QRN_REFERENCE_NOISE_LEVEL: f64 = 0.5;
 
 /// Signal-to-noise of the floor at `level`, in decibels in the reference
 /// bandwidth.
@@ -173,16 +173,20 @@ impl NoiseFloor {
 ///   couple a second on a quiet band, over a hundred when it is bad.
 /// - **Crashes.** A storm near enough to matter is heard flash by flash. A
 ///   cloud-to-ground flash is a handful of return strokes, about sixty
-///   milliseconds apart, each a cluster of impulses, laid over a train of
-///   smaller in-cloud discharges (K-changes) every dozen milliseconds or so
-///   for a few hundred milliseconds. Half of all flashes stay inside the
-///   cloud and are only the train. Through the filter that is a crash with
-///   texture: a few loud cracks inside a crackling burst, and then the AGC
-///   letting the band back up.
+///   milliseconds apart, each a cluster of impulses, laid over a dense train
+///   of smaller in-cloud discharges (K-changes) every two or three
+///   milliseconds for a few hundred milliseconds. Half of all flashes stay
+///   inside the cloud and are only the train. Through the filter the train
+///   runs together into a continuous rattle that holds the band 6-9 dB up
+///   for the length of the flash, with a few loud cracks inside it — a
+///   ragged "krrsh", not a few ticks with the hiss showing between them.
 ///
 /// The figures are the measured ones: 3.8 strokes a flash on average with one
-/// in five single-stroke, 60 ms between strokes, K-changes at about 12 ms,
-/// flashes of about 0.3 s.
+/// in five single-stroke, 60 ms between strokes, flashes of about 0.3 s. The
+/// K-change train is set by off-air recordings of the 20 m band (KiwiSDR and
+/// Hermes-Lite 2 IQ): inside real crashes broadband impulses arrive every
+/// 1.3-5 ms, and the crash's body sits +5 to +9.5 dB over the band, above
+/// +6 dB for half to seven tenths of its length.
 ///
 /// Allocation-free and constant-time per sample, because it runs inside the
 /// audio callback.
@@ -203,7 +207,9 @@ pub struct Atmospherics {
 
 /// Impulse clusters that can be sounding at once. More would only be needed
 /// at rates where they merge into a roar anyway; a cluster that finds no room
-/// is dropped.
+/// is dropped. A K-change is a millisecond or two of impulses, so even the
+/// dense train of a flash keeps only a couple in play: two minutes of the
+/// worst storm the control makes never has more than a handful going at once.
 const MAX_BURSTS: usize = 24;
 /// Flashes that can overlap. Two at once is already a violent storm.
 const MAX_FLASHES: usize = 4;
@@ -245,14 +251,20 @@ const STROKE_IMPULSES: (usize, usize) = (5, 20);
 const STROKE_SPAN_SEC: (f64, f64) = (0.001, 0.005);
 /// Share of flashes that never reach the ground.
 const INTRA_CLOUD_SHARE: f64 = 0.5;
-/// Flash duration: log-normal, geometric mean 0.3 s.
+/// Flash duration: log-normal, geometric mean 0.3 s, and never more than
+/// 0.6 s. Real crashes rattle for 150-350 ms; a longer train at the level of
+/// a loud flash is a plateau louder and longer than anything recorded.
 const FLASH_SEC: (f64, f64) = (0.3, 0.5);
-const FLASH_LIMITS_SEC: (f64, f64) = (0.15, 1.0);
-/// K-change spacing: log-normal, geometric mean 12 ms.
-const K_CHANGE_SEC: (f64, f64) = (0.012, 0.6);
-const K_CHANGE_LIMITS_SEC: (f64, f64) = (0.002, 0.060);
-/// How far below the flash's first stroke its K-changes sit.
-const K_CHANGE_BELOW_DB: (f64, f64) = (12.0, 20.0);
+const FLASH_LIMITS_SEC: (f64, f64) = (0.15, 0.6);
+/// K-change spacing: log-normal, geometric mean 2.5 ms, from 0.7 to 20 ms —
+/// the 1.3-5 ms impulse spacing inside real crashes. The 12 ms often quoted
+/// is the spacing of the large K-changes alone.
+const K_CHANGE_SEC: (f64, f64) = (0.0025, 0.6);
+const K_CHANGE_LIMITS_SEC: (f64, f64) = (0.0007, 0.020);
+/// How far below the flash's first stroke its K-changes sit. It is their
+/// density, not their level, that makes a crash's body: louder K-changes are
+/// only louder ticks.
+const K_CHANGE_BELOW_DB: (f64, f64) = (12.0, 18.0);
 const K_CHANGE_SIGMA_DB: f64 = 4.0;
 
 impl Atmospherics {
@@ -628,9 +640,12 @@ mod tests {
         assert!(ground.iter().all(|c| *c <= f64::from(MAX_STROKES)));
     }
 
-    /// Strokes about sixty milliseconds apart, in-cloud pulses about twelve:
-    /// that spacing is what turns a crash from one click into the ragged
-    /// "krrsh" of a real one.
+    /// Strokes about sixty milliseconds apart, in-cloud pulses every two or
+    /// three: that spacing is what turns a crash from a few clicks into the
+    /// continuous, ragged "krrsh" of a real one. Inside real crashes the
+    /// broadband impulses come every 1.3-5 ms; the old twelve-millisecond
+    /// spacing was only the big K-changes, and left the hiss showing between
+    /// them.
     #[test]
     fn strokes_and_k_changes_are_spaced_like_real_ones() {
         let mut sky = Atmospherics::new(SR, 0.5, 5);
@@ -639,6 +654,9 @@ mod tests {
             sky.flash_slots = [Flash::default(); MAX_FLASHES];
             sky.bursts = [Burst::default(); MAX_BURSTS];
             sky.start_flash();
+            // No flash rattles on for longer than real crashes do.
+            let train = f64::from(sky.flash_slots[0].k_left) / f64::from(SR);
+            assert!((0.149..=0.601).contains(&train), "a {train:.3} s flash");
             let (mut last_stroke, mut last_k) = (None, None);
             let mut t = 0u32;
             while sky.flash_slots[0].is_active() {
@@ -669,10 +687,122 @@ mod tests {
             "strokes {stroke_gm:.4} s apart"
         );
         assert!(
-            (0.010..0.015).contains(&k_gm),
+            (0.0022..0.0029).contains(&k_gm),
             "K-changes {k_gm:.4} s apart"
         );
         assert!(strokes.iter().all(|s| (0.0099..=0.3001).contains(s)));
+        assert!(k_changes.iter().all(|s| (0.0007..=0.0201).contains(s)));
+    }
+
+    /// What a crash sounds like, measured the way the real ones were: ten
+    /// minutes of the default band through the receiver with no AGC, events
+    /// where the envelope stands 13 dB over its median, a crash wherever three
+    /// or more come within 100 ms of each other. Real crashes (KiwiSDR and
+    /// Hermes-Lite 2 off-air IQ, 20 m) hold the band +5 to +9.5 dB up between
+    /// their first and last events, over +6 dB for half their length or more,
+    /// with ten to twenty events across 150-350 ms. Sparse K-changes made
+    /// crashes a few ticks with hiss between them: +3 dB, and a third filled.
+    #[test]
+    fn a_crash_is_a_continuous_rattle_rather_than_separate_ticks() {
+        // The band is calibrated to sound the same at any rate, and this one
+        // keeps ten minutes quick.
+        const RATE: u32 = 16_000;
+        let mut settings = TrainingSettings::default();
+        settings.band.side_tone_min = 600.0;
+        settings.band.side_tone_max = 600.0;
+        settings.band.activity_enabled = false;
+        let settings = settings.clamp();
+        let mut source = BandSource::new(RATE, &settings, 101);
+        let mut receiver = super::super::ReceiverFilter::from_settings(RATE, &settings);
+        // One millisecond at a time: its peak, which is the envelope, and its
+        // power, which is the level.
+        let ms = RATE as usize / 1_000;
+        let (mut peaks, mut powers) = (Vec::new(), Vec::new());
+        for _ in 0..600_000 {
+            let (mut peak, mut power) = (0.0f64, 0.0);
+            for _ in 0..ms {
+                let x = receiver.process(source.next_sample());
+                peak = peak.max(x.abs());
+                power += x * x;
+            }
+            peaks.push(peak);
+            powers.push(power);
+        }
+        let re_median = |v: &[f64], scale: f64| {
+            let mut sorted = v.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            let median = sorted[sorted.len() / 2];
+            v.iter()
+                .map(|x| scale * (x / median).log10())
+                .collect::<Vec<f64>>()
+        };
+        let envelope = re_median(&peaks, 20.0);
+        let level = re_median(&powers, 10.0);
+        // Events: runs above +13 dB, merged when under 2 ms apart.
+        let mut events: Vec<(usize, usize)> = Vec::new();
+        for (i, db) in envelope.iter().enumerate() {
+            if *db > 13.0 {
+                match events.last_mut() {
+                    Some((_, end)) if i < *end + 2 => *end = i + 1,
+                    _ => events.push((i, i + 1)),
+                }
+            }
+        }
+        let crashes: Vec<&[(usize, usize)]> = events
+            .chunk_by(|a, b| b.0 - a.0 <= 100)
+            .filter(|c| c.len() >= 3)
+            .collect();
+        assert!(crashes.len() >= 8, "only {} crashes", crashes.len());
+        let median = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let (mut body, mut fill, mut count, mut span) = (vec![], vec![], vec![], vec![]);
+        for crash in &crashes {
+            let inside = &level[crash[0].0..crash[crash.len() - 1].1];
+            body.push(median(inside.to_vec()));
+            fill.push(inside.iter().filter(|db| **db > 6.0).count() as f64 / inside.len() as f64);
+            count.push(crash.len() as f64);
+            span.push(inside.len() as f64);
+        }
+        let (body, fill) = (median(body), median(fill));
+        let (count, span) = (median(count), median(span));
+        let onsets: Vec<usize> = events.iter().map(|e| e.0).collect();
+        let close = onsets.windows(2).filter(|w| w[1] - w[0] < 10).count();
+        let close = close as f64 / (onsets.len() - 1) as f64;
+        let report = format!(
+            "{} crashes: body {body:.1} dB, fill {fill:.2}, {count} events over {span} ms, \
+             {close:.2} of gaps under 10 ms",
+            crashes.len()
+        );
+        // A millisecond's peak is a coarser envelope than the analytic one
+        // the real crashes were measured with: it merges impulses closer
+        // than a millisecond or two, so it counts fewer events and closes
+        // fewer gaps, and the lower bounds give that away. The old model
+        // read +4.0 dB, 0.39, 7 events over 169 ms, 0.08 of gaps.
+        assert!((5.5..=9.5).contains(&body), "{report}");
+        assert!((0.45..=0.7).contains(&fill), "{report}");
+        assert!((9.0..=20.0).contains(&count), "{report}");
+        assert!((180.0..=350.0).contains(&span), "{report}");
+        assert!((0.18..=0.40).contains(&close), "{report}");
+    }
+
+    /// The burst pool is fixed so nothing allocates in the audio callback,
+    /// and a cluster that finds it full is dropped. Dense K-changes are many
+    /// more clusters than sparse ones, so the pool has to be big enough that
+    /// even the worst storm never fills it.
+    #[test]
+    fn the_burst_pool_never_fills_even_in_the_worst_storm() {
+        let mut sky = Atmospherics::new(SR, 1.0, 17);
+        let mut busiest = 0;
+        for _ in 0..SR * 120 {
+            sky.next_sample();
+            busiest = busiest.max(sky.bursts.iter().filter(|b| b.left > 0).count());
+        }
+        assert!(
+            busiest < MAX_BURSTS,
+            "{busiest} of {MAX_BURSTS} bursts in use at once"
+        );
     }
 
     /// A Poisson process arrives at its rate, and an off one never arrives.

@@ -16,8 +16,9 @@
 //!    makes every crash and every dit ring; narrowing it quiets the band,
 //!    pushes off-frequency stations down and lengthens the ringing, all at
 //!    once, because those are one thing.
-//! 3. The AGC rides the gain ([`agc`]), ducking the whole band behind a
-//!    crash and letting it back up.
+//! 3. The AGC rides the gain ([`agc`]): a steady few decibels down under a
+//!    keyed station, back up in the pauses, and only a moment's duck for a
+//!    crash.
 //!
 //! What it deliberately does not do is invent a sound the receiver would not
 //! make. An earlier model fed sparse clicks into resonators a few hertz wide
@@ -32,7 +33,11 @@ pub mod noise;
 pub mod qsb;
 
 pub use activity::BandActivity;
-pub use agc::{AGC_ATTACK_SEC, AGC_MAX_DUCK, AGC_RELEASE_SEC, AGC_TRIGGER, Agc};
+pub use agc::{
+    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_COMPRESSOR_RATIO, AGC_HANG_SEC, AGC_MAX_DUCK_DB,
+    AGC_RELEASE_SEC, AGC_SLOPE, AGC_TRIGGER, Agc, CompressorSetting, agc_compressor,
+    agc_compressor_threshold_db, agc_law_db, compressor_curve_db, compressor_makeup_db,
+};
 pub use filter::{
     FilterDesign, RECEIVER_SECTIONS, ReceiverFilter, Section, mirror_hz, passband_edges,
 };
@@ -78,22 +83,90 @@ pub fn soft_limit_curve(points: usize) -> Vec<f32> {
         .collect()
 }
 
-/// How loud this band sits when nothing unusual is happening.
+/// How high this band's floor ordinarily peaks, through the receiver.
 ///
-/// The browser cannot run the receiver's own AGC — its noise and its Morse
-/// only meet as sound, and there is no arithmetic it can do across both. What
-/// it has is a compressor node, and a compressor needs a threshold in absolute
-/// terms, which is the very thing that would undo the filter. So it is given
-/// one measured from these settings: narrow the receiver, the floor drops, the
-/// threshold drops with it, and a crash still has to stand the same distance
-/// above the band to duck it.
+/// The level a 60 ms peak follower on the filtered band sits at, as a median
+/// over three seconds so a crash that happens to land in the measurement does
+/// not move it: about 2.2 times the floor's RMS for plain hiss, more on a band
+/// busy with crackle. Other stations are left out — they are what the AGC
+/// rides over, not the floor it is set against.
+///
+/// Measured rather than worked out, because the filter's shape and width and
+/// the static all move it. The band is calibrated to sound the same at any
+/// sample rate, so a low rate measures it as well as a high one.
 pub fn band_standing_level(sample_rate: u32, settings: &TrainingSettings) -> f64 {
-    let mut mixer = BandMixer::new(sample_rate, settings, 0x5EED_1234);
-    let mut buf = vec![0.0f32; sample_rate.max(1) as usize];
-    for _ in 0..3 {
-        mixer.fill_background(&mut buf);
+    const SEED: u64 = 0x5EED_1234;
+    const SETTLE_SEC: f64 = 0.25;
+    const MEASURE_SEC: f64 = 2.75;
+    const FOLLOWER_SEC: f64 = 0.06;
+    const BLOCK_SEC: f64 = 0.01;
+    let sample_rate = sample_rate.max(1);
+    let sr = f64::from(sample_rate);
+    let mut floor = settings.clone().clamp();
+    floor.band.activity_enabled = false;
+    let mut source = BandSource::new(sample_rate, &floor, SEED);
+    let mut receiver = ReceiverFilter::from_settings(sample_rate, &floor);
+    let fall = (-1.0 / (FOLLOWER_SEC * sr)).exp();
+    let mut follower = 0.0f64;
+    let mut step = || {
+        let heard = receiver.process(source.next_sample()).abs();
+        follower = heard.max(follower * fall);
+        follower
+    };
+    for _ in 0..(SETTLE_SEC * sr) as usize {
+        step();
     }
-    mixer.agc_standing()
+    let block = ((BLOCK_SEC * sr) as usize).max(1);
+    let mut levels: Vec<f64> = (0..((MEASURE_SEC / BLOCK_SEC) as usize))
+        .map(|_| {
+            let mut last = 0.0;
+            for _ in 0..block {
+                last = step();
+            }
+            last
+        })
+        .collect();
+    levels.sort_by(f64::total_cmp);
+    levels.get(levels.len() / 2).copied().unwrap_or(0.0)
+}
+
+/// The rate the floor is measured at for the AGC's knee. Both backends use
+/// it, so both arrive at the same knee to the bit; it is low because the
+/// browser measures on its main thread every time a band setting moves.
+pub const FLOOR_MEASURE_RATE: u32 = 16_000;
+
+/// Where the receiver's AGC starts to turn the gain down, as the amplitude of
+/// a steady tone; `None` with the AGC switched off.
+///
+/// [`AGC_TRIGGER`] times the band's own floor ([`band_standing_level`]), and
+/// never below that of the default floor heard through a
+/// [`REFERENCE_BANDWIDTH_HZ`] filter. Above that it follows the floor, the way
+/// an operator backs the RF gain off on a noisy band or a wide filter, so the
+/// hiss on its own never pumps the gain. Below it, it stays put, as a real
+/// receiver's AGC threshold does: closing the filter or finding a quiet band
+/// takes noise away from under the knee, and leaves the station you are
+/// copying exactly as loud as it was.
+pub fn agc_knee(settings: &TrainingSettings) -> Option<f64> {
+    if !settings.band.agc_enabled {
+        return None;
+    }
+    let floor = band_standing_level(FLOOR_MEASURE_RATE, settings).max(reference_floor_level());
+    Some(AGC_TRIGGER * floor)
+}
+
+/// [`band_standing_level`] of the default floor alone, through a filter
+/// [`REFERENCE_BANDWIDTH_HZ`] wide. Measured once.
+fn reference_floor_level() -> f64 {
+    static LEVEL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *LEVEL.get_or_init(|| {
+        let mut settings = TrainingSettings::default();
+        settings.band.noise_enabled = true;
+        settings.band.noise_level = noise::QRN_REFERENCE_NOISE_LEVEL;
+        settings.band.qrn_enabled = false;
+        settings.band.activity_enabled = false;
+        settings.band.filter_bandwidth_hz = REFERENCE_BANDWIDTH_HZ;
+        band_standing_level(FLOOR_MEASURE_RATE, &settings)
+    })
 }
 
 /// The native receiver: the band, through the filter, under the AGC, one
@@ -114,7 +187,10 @@ impl BandMixer {
         Self {
             source: BandSource::new(sample_rate, &settings, seed),
             receiver: ReceiverFilter::from_settings(sample_rate, &settings),
-            agc: Agc::new(sample_rate),
+            agc: match agc_knee(&settings) {
+                Some(knee) => Agc::new(sample_rate, knee),
+                None => Agc::off(),
+            },
             send_level: 0.0,
         }
     }
@@ -132,15 +208,15 @@ impl BandMixer {
         // Everything meets at the receiver's filter, which is why narrowing
         // it quiets the whole band at once rather than one layer of it.
         let heard = self.receiver.process(self.source.next_sample());
-        // The gain the receiver is riding at, which a crash has just pulled
-        // down and which everything else has to come down with — including
-        // the send, which reads this through `agc_gain`.
-        let gain = self.agc.next_gain(heard.abs().max(self.send_level));
-        soft_limit(heard * gain) as f32
+        // At the gain the receiver is riding at, which a crash has just
+        // pulled down and which everything else has to come down with —
+        // including the send, which reads this through `agc_gain`.
+        soft_limit(self.agc.process(heard, self.send_level)) as f32
     }
 
-    /// How loud the send is, so the receiver's gain answers to everything
-    /// reaching it rather than to the noise alone — which is what a real one
+    /// How loud the send is — its peak, as the native player hands it over a
+    /// buffer at a time — so the receiver's gain answers to everything
+    /// reaching it rather than to the noise alone. That is what a real one
     /// does, and what the browser's compressor does for free by sitting where
     /// the two have already met.
     pub fn note_send_level(&mut self, level: f64) {
@@ -161,9 +237,9 @@ impl BandMixer {
         self.agc.gain()
     }
 
-    /// What the AGC reckons this band's standing level is.
-    pub fn agc_standing(&self) -> f64 {
-        self.agc.standing()
+    /// Where this receiver's AGC starts to act; `None` when it is off.
+    pub fn agc_knee(&self) -> Option<f64> {
+        self.agc.knee()
     }
 
     pub fn fill_background(&mut self, out: &mut [f32]) {
