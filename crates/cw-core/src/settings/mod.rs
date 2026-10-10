@@ -246,6 +246,17 @@ pub struct BandSettings {
     /// its value says nothing about how much hiss someone wants.
     #[serde(default = "defaults::noise_level")]
     pub noise_level: f64,
+    /// Other stations on the band: faint CW at other pitches and speeds,
+    /// coming and going, the way a real CW segment is never empty.
+    #[serde(default = "defaults::enabled")]
+    pub activity_enabled: bool,
+    /// How busy the band is, from a quiet evening (0) to a contest (1).
+    #[serde(default = "defaults::activity_level")]
+    pub activity_level: f64,
+    /// The receiver's automatic gain control. Off is a receiver run on its
+    /// RF gain, the way contesters often do.
+    #[serde(default = "defaults::enabled")]
+    pub agc_enabled: bool,
     /// The receiver's selectivity, in hertz. Everything you hear goes through
     /// it — the Morse as much as the noise — so narrowing it does what
     /// narrowing a real filter does: less static gets through, the signal
@@ -291,6 +302,9 @@ impl Default for BandSettings {
             qrn_level: 0.25,
             noise_enabled: true,
             noise_level: defaults::noise_level(),
+            activity_enabled: true,
+            activity_level: defaults::activity_level(),
+            agc_enabled: true,
             filter_bandwidth_hz: 500.0,
             filter_shape: FilterShape::Sharp,
             stations_min: STATIONS_MIN,
@@ -435,6 +449,9 @@ mod defaults {
     }
     pub fn qrn_level() -> f64 {
         0.25
+    }
+    pub fn activity_level() -> f64 {
+        0.5
     }
     pub fn noise_level() -> f64 {
         0.5
@@ -746,6 +763,7 @@ mod invariant_tests {
         s.band.qsb_rate_hz = 9.0;
         s.band.qrn_level = 9.0;
         s.band.noise_level = 9.0;
+        s.band.activity_level = -9.0;
         s.band.filter_bandwidth_hz = 90_000.0;
         s.auto_level.auto_adjust_threshold = 900.0;
         s.auto_level.error_weight_strength = -1.0;
@@ -808,6 +826,7 @@ mod invariant_tests {
             s.band.qsb_rate_hz = bad;
             s.band.qrn_level = bad;
             s.band.noise_level = bad;
+            s.band.activity_level = bad;
             s.band.filter_bandwidth_hz = bad;
             s.band.pileup_spread_hz = bad;
             s.band.pileup_level_db = bad;
@@ -847,6 +866,7 @@ mod invariant_tests {
         assert_eq!(s.band.steepness, 50.0);
         assert_eq!(s.band.envelope_smoothing, 1.0);
         assert_eq!(s.band.noise_level, 1.0);
+        assert_eq!(s.band.activity_level, 0.0);
         assert_eq!(s.band.filter_bandwidth_hz, FILTER_BANDWIDTH_MAX);
         assert_eq!(s.playback.extra_word_space_multiplier, 0.1);
         assert_eq!(s.auto_level.auto_adjust_threshold, 100.0);
@@ -951,6 +971,9 @@ mod invariant_tests {
             |s| s.band.qrn_level = 0.9,
             |s| s.band.noise_enabled = false,
             |s| s.band.noise_level = 0.9,
+            |s| s.band.activity_enabled = false,
+            |s| s.band.activity_level = 0.9,
+            |s| s.band.agc_enabled = false,
             |s| s.band.filter_bandwidth_hz = 250.0,
             |s| s.band.filter_shape = FilterShape::Soft,
         ];
@@ -1238,6 +1261,9 @@ mod invariant_tests {
         s.band.qrn_level = 0.9;
         s.band.noise_enabled = false;
         s.band.noise_level = 0.9;
+        s.band.activity_enabled = false;
+        s.band.activity_level = 0.9;
+        s.band.agc_enabled = false;
         s.band.filter_bandwidth_hz = 250.0;
         s.band.filter_shape = FilterShape::Soft;
         s.band.stations_min = 2;

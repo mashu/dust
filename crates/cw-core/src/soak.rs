@@ -64,6 +64,9 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.band.qsb_rate_hz = rng.pick_in_range(-1.0, 40.0);
     s.band.qrn_level = rng.pick_in_range(-1.0, 4.0);
     s.band.noise_level = rng.pick_in_range(-1.0, 4.0);
+    s.band.activity_level = rng.pick_in_range(-1.0, 4.0);
+    s.band.activity_enabled = rng.f64() < 0.5;
+    s.band.agc_enabled = rng.f64() < 0.5;
     s.band.filter_shape = if rng.f64() < 0.5 {
         crate::settings::FilterShape::Soft
     } else {

@@ -25,11 +25,13 @@
 //! sounded like one. A real CW filter is hundreds of hertz wide, sits still,
 //! and is fed with continuous noise; this is that.
 
+pub mod activity;
 pub mod agc;
 pub mod filter;
 pub mod noise;
 pub mod qsb;
 
+pub use activity::BandActivity;
 pub use agc::{AGC_ATTACK_SEC, AGC_MAX_DUCK, AGC_RELEASE_SEC, AGC_TRIGGER, Agc};
 pub use filter::{
     FilterDesign, RECEIVER_SECTIONS, ReceiverFilter, Section, mirror_hz, passband_edges,
@@ -121,7 +123,9 @@ impl BandMixer {
     /// not, there is no background stream to run.
     pub fn needs_background(settings: &TrainingSettings) -> bool {
         let band = &settings.band;
-        (band.qrn_enabled && band.qrn_level > 0.0) || (band.noise_enabled && band.noise_level > 0.0)
+        (band.qrn_enabled && band.qrn_level > 0.0)
+            || (band.noise_enabled && band.noise_level > 0.0)
+            || (band.activity_enabled && band.activity_level > 0.0)
     }
 
     pub fn next_background(&mut self) -> f32 {

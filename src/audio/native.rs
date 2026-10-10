@@ -616,6 +616,7 @@ mod device_tests {
         // A silent band tears the stream down without complaining.
         settings.band.qrn_enabled = false;
         settings.band.noise_enabled = false;
+        settings.band.activity_enabled = false;
         player.apply_band(&settings).expect("silent band");
         player.shutdown();
     }
@@ -634,6 +635,7 @@ mod device_tests {
         player.agc.store(0.3);
         settings.band.qrn_enabled = false;
         settings.band.noise_enabled = false;
+        settings.band.activity_enabled = false;
         player.apply_band(&settings).expect("silent band");
         assert!(lock_slot(&player.slots.band).is_none());
         assert!(

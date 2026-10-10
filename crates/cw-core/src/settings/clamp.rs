@@ -87,6 +87,7 @@ impl TrainingSettings {
         self.band.qsb_rate_hz = self.band.qsb_rate_hz.clamp(0.03, 1.5);
         self.band.qrn_level = self.band.qrn_level.clamp(0.0, 1.0);
         self.band.noise_level = self.band.noise_level.clamp(0.0, 1.0);
+        self.band.activity_level = self.band.activity_level.clamp(0.0, 1.0);
         self.playback.group_repeat_min = self
             .playback
             .group_repeat_min
@@ -148,6 +149,7 @@ impl TrainingSettings {
         fix(&mut b.qsb_rate_hz, db.qsb_rate_hz);
         fix(&mut b.qrn_level, db.qrn_level);
         fix(&mut b.noise_level, db.noise_level);
+        fix(&mut b.activity_level, db.activity_level);
         fix(&mut b.filter_bandwidth_hz, db.filter_bandwidth_hz);
         fix(&mut b.pileup_spread_hz, db.pileup_spread_hz);
         fix(&mut b.pileup_level_db, db.pileup_level_db);

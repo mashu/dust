@@ -159,7 +159,7 @@ impl TrainingSettings {
     pub fn band_signature(&self) -> String {
         let band = &self.band;
         format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}",
             band.side_tone_min,
             band.side_tone_max,
             band.qsb_enabled,
@@ -169,6 +169,9 @@ impl TrainingSettings {
             band.qrn_level,
             band.noise_enabled,
             band.noise_level,
+            band.activity_enabled,
+            band.activity_level,
+            band.agc_enabled,
             band.filter_bandwidth_hz,
             band.filter_shape,
         )

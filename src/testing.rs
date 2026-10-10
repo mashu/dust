@@ -72,6 +72,7 @@ pub fn test_settings() -> TrainingSettings {
     settings.auto_level.auto_adjust_level = false;
     settings.band.qrn_enabled = false;
     settings.band.noise_enabled = false;
+    settings.band.activity_enabled = false;
     settings.band.qsb_enabled = false;
     settings
 }

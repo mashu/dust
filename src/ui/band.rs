@@ -205,6 +205,23 @@ pub fn BandConditionsCard(
                 onchange: move |v| settings.write().band.qrn_level = v,
             }
             Switch {
+                title: "Band activity".to_string(),
+                description: "Other stations: faint CW at other pitches, coming and going.".to_string(),
+                checked: s.band.activity_enabled,
+                onchange: move |on| settings.write().band.activity_enabled = on,
+            }
+            SliderField {
+                label: "Busy".to_string(),
+                id: "slider-activity-level".to_string(),
+                value_label: activity_reading(s.band.activity_level),
+                value: s.band.activity_level,
+                min: 0.0,
+                max: 1.0,
+                step: 0.05,
+                disabled: !s.band.activity_enabled,
+                onchange: move |v| settings.write().band.activity_level = v,
+            }
+            Switch {
                 title: "Band noise".to_string(),
                 description: "The steady hiss of the band, through your filter.".to_string(),
                 checked: s.band.noise_enabled,
@@ -221,6 +238,24 @@ pub fn BandConditionsCard(
                 disabled: !s.band.noise_enabled,
                 onchange: move |v| settings.write().band.noise_level = v,
             }
+            Switch {
+                title: "AGC".to_string(),
+                description: "The receiver rides its gain: the band ducks under a strong station and behind a crash.".to_string(),
+                checked: s.band.agc_enabled,
+                onchange: move |on| settings.write().band.agc_enabled = on,
+            }
         }
     }
+}
+
+/// The busy-ness control, in words a ham would use.
+fn activity_reading(level: f64) -> String {
+    match level {
+        l if l <= 0.0 => "Off",
+        l if l < 0.3 => "Quiet",
+        l if l < 0.7 => "Normal",
+        l if l < 0.9 => "Busy",
+        _ => "Contest",
+    }
+    .to_string()
 }

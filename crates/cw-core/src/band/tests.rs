@@ -59,6 +59,7 @@ fn quiet() -> TrainingSettings {
     let mut s = TrainingSettings::default();
     s.band.qrn_enabled = false;
     s.band.noise_enabled = false;
+    s.band.activity_enabled = false;
     s
 }
 

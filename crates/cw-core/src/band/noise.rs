@@ -16,6 +16,7 @@
 
 use std::f64::consts::{SQRT_2, TAU};
 
+use super::activity::BandActivity;
 use crate::rng::{FastrandRng, Rng};
 use crate::settings::TrainingSettings;
 use crate::timing::DEFAULT_TARGET_GAIN;
@@ -538,6 +539,7 @@ impl Flash {
 pub struct BandSource {
     floor: NoiseFloor,
     atmospherics: Atmospherics,
+    activity: BandActivity,
 }
 
 impl BandSource {
@@ -545,15 +547,16 @@ impl BandSource {
         Self {
             floor: NoiseFloor::from_settings(sample_rate, settings, seed ^ 0x9E37_79B9_7F4A_7C15),
             atmospherics: Atmospherics::from_settings(sample_rate, settings, seed ^ 0x51ED_2701),
+            activity: BandActivity::from_settings(sample_rate, settings, seed ^ 0xAC71_7174),
         }
     }
 
     pub fn is_silent(&self) -> bool {
-        self.floor.is_silent() && self.atmospherics.is_silent()
+        self.floor.is_silent() && self.atmospherics.is_silent() && self.activity.is_silent()
     }
 
     pub fn next_sample(&mut self) -> f64 {
-        self.floor.next_sample() + self.atmospherics.next_sample()
+        self.floor.next_sample() + self.atmospherics.next_sample() + self.activity.next_sample()
     }
 
     pub fn fill(&mut self, out: &mut [f32]) {
