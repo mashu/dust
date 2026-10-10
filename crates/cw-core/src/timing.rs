@@ -276,11 +276,11 @@ pub fn resolve_pileup(
     // Tuning the one you want toward the middle is the other half of the same
     // tactic.
     //
-    // Both rules are the filter's own geometry, which is geometric: a
-    // band-pass at audio frequencies passes a tone at f exactly as well as one
-    // at centre²/f. "No nearer the middle" therefore means outside the pair
-    // the wanted tone and its mirror make — not the same number of hertz the
-    // other side, which a steep filter treats very differently.
+    // Both rules are the filter's own geometry. Like a real IF filter it is
+    // symmetric in hertz, passing a tone at f exactly as well as one at
+    // 2·centre − f, so "no nearer the middle" means outside the pair the
+    // wanted tone and its mirror make; and its passband stops short of zero
+    // beat, where a wide filter would only be offering the other sideband.
     let centre = settings.side_tone_center();
     let mirror = crate::band::mirror_hz(centre, wanted.tone_hz);
     let (outward_low, outward_high) = (wanted.tone_hz.min(mirror), wanted.tone_hz.max(mirror));

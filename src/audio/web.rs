@@ -4,16 +4,18 @@ use std::rc::Rc;
 
 use cw_core::band::{
     AGC_ATTACK_SEC, AGC_RELEASE_SEC, AGC_TRIGGER, BandMixer, BandSource, FilterDesign,
-    QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_SECTIONS, SOFT_LIMIT_HEADROOM,
+    QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_SECTIONS, SOFT_LIMIT_HEADROOM, Section,
     band_standing_level, qsb_path, soft_limit_curve,
 };
-use cw_core::{PlannedTransmission, TrainingSettings, Transmission, plan_transmission};
+use cw_core::{
+    FilterShape, PlannedTransmission, TrainingSettings, Transmission, plan_transmission,
+};
 use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{
     AudioBufferSourceNode, AudioContext, AudioContextState, AudioNode, AudioScheduledSourceNode,
-    BiquadFilterType, GainNode, OscillatorType,
+    GainNode, OscillatorType,
 };
 
 use super::{MorseBackend, PlaybackSignal, PlaybackWait, WaitFlags};
@@ -89,10 +91,14 @@ pub struct MorsePlayer {
     cw_gain: GainNode,
     group_gain: Option<GainNode>,
     band: BandGraph,
-    /// The receiver's own filter, as a cascade of band-pass nodes — the same
-    /// sections the native player runs — and the gain that brings its centre
-    /// back to unity.
-    receiver: Vec<web_sys::BiquadFilterNode>,
+    /// The receiver's own filter — the same resonators the native player
+    /// runs — built for the current pitch, width and shape. None until the
+    /// first send or band change tunes it.
+    receiver: Option<ReceiverBank>,
+    /// Banks a retune replaced, fading out, with the context time their fade
+    /// ends.
+    retired_receivers: Vec<(ReceiverBank, f64)>,
+    /// Where every bank's output meets, on its way to the AGC.
     receiver_gain: GainNode,
     agc: web_sys::DynamicsCompressorNode,
     /// Gains that are fading out, with the context time their ramp ends: a
@@ -141,6 +147,118 @@ impl BandGraph {
         let _ = cw_gain.gain().set_value_at_time(1.0, now);
         self.signature.clear();
         fading
+    }
+}
+
+/// What a receiver bank was built for. Compared straight off the settings, so
+/// a send that changes nothing costs nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReceiverKey {
+    pitch_hz: f64,
+    bandwidth_hz: f64,
+    shape: FilterShape,
+}
+
+impl ReceiverKey {
+    fn of(settings: &TrainingSettings) -> Self {
+        Self {
+            pitch_hz: settings.side_tone_center(),
+            bandwidth_hz: settings.band.filter_bandwidth_hz,
+            shape: settings.band.filter_shape,
+        }
+    }
+}
+
+/// The receiver's filter in nodes: one `IIRFilterNode` per resonator of the
+/// design, side by side between the mix and a gain that sums them — the
+/// native player's [`cw_core::band::ReceiverFilter`], node for resonator,
+/// from the same coefficients.
+///
+/// It used to be a chain of `BiquadFilterNode`s of type `bandpass`, and those
+/// cannot be this filter. Their numerator is fixed — zeros at DC and Nyquist,
+/// unit peak at the pole — which is right for an audio band-pass and wrong for
+/// a low-pass moved up to the pitch: put the translated filter's own poles
+/// under it and a 500 Hz passband tilts by 25 dB from edge to edge
+/// (`a_chain_of_bandpass_biquads_cannot_be_the_translated_filter`). An
+/// `IIRFilterNode` takes the numerator the design asks for.
+///
+/// Its coefficients are fixed once it is made, so a retune builds a new bank
+/// and crossfades to it rather than moving the old one.
+struct ReceiverBank {
+    key: ReceiverKey,
+    sections: Vec<web_sys::IirFilterNode>,
+    /// Sums the sections. Ramped in and out across a retune.
+    output: GainNode,
+}
+
+impl ReceiverBank {
+    /// Build a bank for `design` at the context's rate, fed from `input` and
+    /// summed into `into`, its output gain starting silent.
+    fn build(
+        ctx: &AudioContext,
+        input: &GainNode,
+        into: &GainNode,
+        design: &FilterDesign,
+        key: ReceiverKey,
+    ) -> Result<Self, String> {
+        let output = ctx
+            .create_gain()
+            .map_err(|e| format!("receiver output: {e:?}"))?;
+        output
+            .gain()
+            .set_value_at_time(0.0, ctx.current_time())
+            .map_err(|e| format!("receiver output set: {e:?}"))?;
+        let mut bank = Self {
+            key,
+            sections: Vec::with_capacity(RECEIVER_SECTIONS),
+            output,
+        };
+        let sample_rate = f64::from(ctx.sample_rate());
+        for section in design.sections(sample_rate) {
+            if let Err(e) = bank.add_section(ctx, input, section) {
+                bank.disconnect(input);
+                return Err(e);
+            }
+        }
+        if let Err(e) = bank.output.connect_with_audio_node(into) {
+            bank.disconnect(input);
+            return Err(format!("receiver output connect: {e:?}"));
+        }
+        Ok(bank)
+    }
+
+    fn add_section(
+        &mut self,
+        ctx: &AudioContext,
+        input: &GainNode,
+        section: Section,
+    ) -> Result<(), String> {
+        let [b0, b1] = section.feedforward;
+        let [a0, a1, a2] = section.feedback;
+        let feedforward = js_sys::Array::of2(&b0.into(), &b1.into());
+        let feedback = js_sys::Array::of3(&a0.into(), &a1.into(), &a2.into());
+        let node = ctx
+            .create_iir_filter(&feedforward, &feedback)
+            .map_err(|e| format!("receiver section: {e:?}"))?;
+        // Kept before connecting, so a failure part-way still disconnects it.
+        self.sections.push(node.clone());
+        input
+            .connect_with_audio_node(&node)
+            .map_err(|e| format!("receiver section in: {e:?}"))?;
+        node.connect_with_audio_node(&self.output)
+            .map_err(|e| format!("receiver section out: {e:?}"))?;
+        Ok(())
+    }
+
+    /// Take the bank out of the graph: off the mix it was fed from, and away
+    /// from the sum. A node left connected to the mix would go on filtering
+    /// silence into nothing for the life of the page.
+    fn disconnect(&self, input: &GainNode) {
+        for node in &self.sections {
+            let _ = input.disconnect_with_audio_node(node);
+            let _ = node.disconnect();
+        }
+        let _ = self.output.disconnect();
     }
 }
 
@@ -297,25 +415,17 @@ impl MorsePlayer {
             .map_err(|e| format!("cw connect: {e:?}"))?;
         // The receiver's filter sits where a real one does: at the end, with
         // everything already mixed into it. The native player filters the send
-        // and the background separately, which comes to the same thing — a
-        // band-pass is linear — but here they are already together.
-        let mut receiver = Vec::with_capacity(RECEIVER_SECTIONS);
-        let mut tail: AudioNode = mix_gain.clone().unchecked_into();
-        for _ in 0..RECEIVER_SECTIONS {
-            let stage = ctx
-                .create_biquad_filter()
-                .map_err(|e| format!("receiver filter: {e:?}"))?;
-            stage.set_type(BiquadFilterType::Bandpass);
-            tail.connect_with_audio_node(&stage)
-                .map_err(|e| format!("receiver connect: {e:?}"))?;
-            tail = stage.clone().unchecked_into();
-            receiver.push(stage);
-        }
+        // and the background separately, which comes to the same thing — the
+        // filter is linear — but here they are already together. Its
+        // resonators go in between `mix_gain` and `receiver_gain` once the
+        // settings say what to build ([`MorsePlayer::tune_receiver`]).
         let receiver_gain = ctx
             .create_gain()
             .map_err(|e| format!("receiver gain: {e:?}"))?;
-        tail.connect_with_audio_node(&receiver_gain)
-            .map_err(|e| format!("receiver gain connect: {e:?}"))?;
+        receiver_gain
+            .gain()
+            .set_value_at_time(1.0, ctx.current_time())
+            .map_err(|e| format!("receiver gain set: {e:?}"))?;
         let tail: AudioNode = receiver_gain.clone().unchecked_into();
         // The receiver's AGC, in the one place the browser can put it: after
         // the filter, with the send and the background already together. The
@@ -373,7 +483,8 @@ impl MorsePlayer {
             cw_gain,
             group_gain: None,
             band: BandGraph::new(),
-            receiver,
+            receiver: None,
+            retired_receivers: Vec::new(),
             receiver_gain,
             agc,
             released: Vec::new(),
@@ -424,25 +535,58 @@ impl MorsePlayer {
         Ok(())
     }
 
-    /// Retune the receiver to the current pitch, width and shape. Cheap, and
-    /// the nodes stay put, so this can run on every send.
-    fn tune_receiver(&self, settings: &TrainingSettings) {
-        let now = self.ctx.current_time();
-        let design = FilterDesign::from_settings(settings);
-        for (stage, section) in self.receiver.iter().zip(design.sections()) {
-            let _ = stage
-                .frequency()
-                .set_value_at_time(section.center_hz as f32, now);
-            let _ = stage.q().set_value_at_time(section.q as f32, now);
+    /// Tune the receiver to the current pitch, width and shape.
+    ///
+    /// Runs on every send, and costs a comparison when nothing has moved.
+    /// When something has, a new bank is built — an `IIRFilterNode` cannot be
+    /// retuned — and the old one fades out over [`STREAM_FADE_SEC`] while the
+    /// new one fades in, then is taken out of the graph.
+    fn tune_receiver(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        self.drop_retired_receivers();
+        let key = ReceiverKey::of(settings);
+        if self.receiver.as_ref().is_some_and(|bank| bank.key == key) {
+            return Ok(());
         }
-        let _ = self
-            .receiver_gain
-            .gain()
-            .set_value_at_time(design.gain() as f32, now);
+        let design = FilterDesign::from_settings(settings);
+        let bank =
+            ReceiverBank::build(&self.ctx, &self.mix_gain, &self.receiver_gain, &design, key)?;
+        let now = self.ctx.current_time();
+        let gain = bank.output.gain();
+        match self.receiver.replace(bank) {
+            Some(old) => {
+                let done = now + STREAM_FADE_SEC;
+                let _ = gain.set_value_at_time(0.0, now);
+                let _ = gain.linear_ramp_to_value_at_time(1.0, done);
+                let fading = old.output.gain();
+                let _ = fading.cancel_scheduled_values(now);
+                let _ = fading.set_value_at_time(fading.value(), now);
+                let _ = fading.linear_ramp_to_value_at_time(0.0, done);
+                self.retired_receivers.push((old, done));
+            }
+            // Nothing playing through it yet: straight in.
+            None => {
+                let _ = gain.set_value_at_time(1.0, now);
+            }
+        }
+        Ok(())
+    }
+
+    /// Take out the receiver banks whose fade has finished.
+    fn drop_retired_receivers(&mut self) {
+        let now = self.ctx.current_time();
+        let mix = &self.mix_gain;
+        self.retired_receivers.retain(|(bank, done_at)| {
+            if *done_at <= now {
+                bank.disconnect(mix);
+                false
+            } else {
+                true
+            }
+        });
     }
 
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.tune_receiver(settings);
+        self.tune_receiver(settings)?;
         let signature = settings.band_signature();
         if signature == self.band.signature {
             return Ok(());

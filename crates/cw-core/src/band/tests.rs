@@ -158,7 +158,11 @@ fn measured(sample_rate: u32, design: &FilterDesign, hz: f64) -> f64 {
 }
 
 /// The control has to mean what it says: asked for so many hertz between the
-/// 3 dB points, that is what you get, sharp or soft.
+/// 3 dB points, that is what you get, sharp or soft — half of it either side
+/// of the pitch, because an IF filter is symmetric in hertz.
+///
+/// Measured at a pitch high enough that even the widest setting stays clear of
+/// zero beat, so what is measured is the filter and not the folded sideband.
 #[test]
 fn the_bandwidth_control_is_in_hertz_and_lands_where_it_says() {
     for shape in SHAPES {
@@ -169,9 +173,10 @@ fn the_bandwidth_control_is_in_hertz_and_lands_where_it_says() {
             1_000.0,
             FILTER_BANDWIDTH_MAX,
         ] {
-            let design = FilterDesign::new(600.0, asked, shape);
+            let pitch = (2.0 * asked).max(600.0);
+            let design = FilterDesign::new(pitch, asked, shape);
             let edge = |direction: f64| {
-                let mut hz = 600.0;
+                let mut hz = pitch;
                 while design.response_at(hz) > 1.0 / SQRT_2 && hz > 1.0 {
                     hz += direction * 0.25;
                 }
@@ -184,8 +189,11 @@ fn the_bandwidth_control_is_in_hertz_and_lands_where_it_says() {
                 "{shape:?}: asked for {asked} Hz and got {:.1} Hz",
                 high - low
             );
-            // Geometric symmetry: the edges multiply to the centre squared.
-            assert!(((low * high).sqrt() - 600.0).abs() < 1.0);
+            // Arithmetic symmetry: the edges straddle the pitch evenly.
+            assert!(
+                ((low + high) / 2.0 - pitch).abs() < 1.0,
+                "{shape:?} {asked}: edges at {low}/{high} around {pitch}"
+            );
         }
     }
 }
@@ -206,13 +214,11 @@ fn the_design_response_is_the_filter_you_hear() {
                 let hz = center + offset;
                 let drawn = design.response_at(hz);
                 let real = measured(SR, &design, hz);
-                // Each section is pre-warped at its own centre. Across a
-                // passband narrower than its own centre frequency — every CW
-                // setting — that is exact to a percent; wider than that, the
-                // sections are far enough apart for a few percent to show.
-                let tolerance = if bandwidth <= center { 0.01 } else { 0.04 };
+                // The digital filter is the analogue one sampled, so the two
+                // agree as closely as a quarter-second tone can measure them,
+                // the folded sideband of the widest setting included.
                 assert!(
-                    (drawn - real).abs() < tolerance,
+                    (drawn - real).abs() < 0.005,
                     "{shape:?} {center}/{bandwidth} at {hz} Hz: design {drawn:.4}, measured {real:.4}"
                 );
             }
@@ -229,32 +235,44 @@ fn the_response_peaks_where_the_filter_is_tuned() {
         for bandwidth in [FILTER_BANDWIDTH_MIN, 500.0, FILTER_BANDWIDTH_MAX] {
             let design = FilterDesign::new(600.0, bandwidth, shape);
             assert!((design.response_at(600.0) - 1.0).abs() < 1e-9);
-            // Monotonic in the band-pass frequency variable, either side.
-            let mut previous = (1.0, 1.0);
-            for step in 1..200 {
-                let ratio = 1.0 + f64::from(step) * 0.02;
-                let above = design.response_at(600.0 * ratio);
-                let below = design.response_at(600.0 / ratio);
-                assert!(above <= previous.0 + 1e-12 && below <= previous.1 + 1e-12);
-                assert!(
-                    (above - below).abs() < 1e-9,
-                    "{shape:?} {bandwidth}: not geometrically symmetric at ×{ratio}"
-                );
-                previous = (above, below);
+            // Nowhere in the audible passband louder than the pitch, however
+            // far the filter reaches towards zero beat; and where it does not
+            // reach that far, falling steadily away above the pitch. (Below
+            // it is the mirror image; the filter's own tests check that.)
+            let mut previous = 1.0;
+            for step in 1..400 {
+                let offset = f64::from(step) * 5.0;
+                let above = design.response_at(600.0 + offset);
+                if bandwidth < 600.0 {
+                    assert!(
+                        above <= previous + 1e-12,
+                        "{shape:?} {bandwidth}: rose again {offset} Hz above the pitch"
+                    );
+                }
+                previous = above;
+                for hz in [600.0 + offset, 600.0 - offset] {
+                    if hz >= filter::LOWEST_EDGE_HZ {
+                        let db = 20.0 * design.response_at(hz).log10();
+                        assert!(db < 0.75, "{shape:?} {bandwidth}: {db:+.2} dB at {hz} Hz");
+                    }
+                }
             }
         }
     }
 }
 
-/// The two prototypes are what they claim to be. Butterworth is maximally
-/// flat — |H|² = 1/(1+Ω¹⁶) for eight poles — and the soft one is the Bessel
-/// polynomial, 3 dB down at the band edge.
+/// The two prototypes are what they claim to be, moved to the pitch.
+/// Butterworth is maximally flat — |H|² = 1/(1+Ω¹⁶) for eight poles, with Ω
+/// the distance from the pitch in half-bandwidths — and the soft one is the
+/// Bessel polynomial, 3 dB down at the band edge. Checked at a pitch where the
+/// folded sideband is far out of the way.
 #[test]
 fn the_prototypes_are_butterworth_and_bessel() {
-    let (center, bandwidth) = (600.0, 300.0);
+    let (center, bandwidth) = (1_200.0, 300.0);
+    let offsets = [-400.0, -150.0, -100.0, 0.0, 100.0, 160.0, 300.0, 800.0];
     let sharp = FilterDesign::new(center, bandwidth, FilterShape::Sharp);
-    for hz in [300.0, 450.0, 500.0, 600.0, 700.0, 760.0, 900.0, 1_400.0] {
-        let omega: f64 = (hz / center - center / hz) * center / bandwidth;
+    for hz in offsets.map(|o| center + o) {
+        let omega: f64 = (hz - center) / (bandwidth / 2.0);
         let ideal = 1.0 / (1.0 + omega.powi(2 * RECEIVER_SECTIONS as i32)).sqrt();
         assert!(
             (sharp.response_at(hz) - ideal).abs() < 1e-9,
@@ -278,8 +296,8 @@ fn the_prototypes_are_butterworth_and_bessel() {
     ];
     const OMEGA_C: f64 = 3.179_617_237_511;
     let soft = FilterDesign::new(center, bandwidth, FilterShape::Soft);
-    for hz in [300.0, 450.0, 500.0, 600.0, 700.0, 760.0, 900.0, 1_400.0] {
-        let omega = (hz / center - center / hz) * center / bandwidth * OMEGA_C;
+    for hz in offsets.map(|o| center + o) {
+        let omega = (hz - center) / (bandwidth / 2.0) * OMEGA_C;
         // θ(jΩ): even powers are real with alternating signs, odd imaginary.
         let (mut re, mut im) = (0.0, 0.0);
         for (k, c) in THETA.iter().enumerate() {
@@ -300,60 +318,63 @@ fn the_prototypes_are_butterworth_and_bessel() {
     }
 }
 
-/// Each section is the "band-pass, 0 dB peak" biquad of the Audio EQ
-/// Cookbook — the very filter a Web Audio `BiquadFilterNode` of type
-/// `bandpass` runs — so the browser can build this receiver out of nodes and
-/// get the same sound. Checked against the cookbook's own coefficients.
+/// The browser used to build the receiver from a chain of `bandpass`
+/// `BiquadFilterNode`s, and a node of that type cannot be this filter: its
+/// numerator is fixed at (1 − z⁻²), unit peak at its own pole. Put the
+/// translated filter's own pole pairs under that numerator and the passband
+/// tilts by tens of decibels — which is why the browser builds it from IIR
+/// nodes carrying the design's own numerators instead.
 #[test]
-fn a_section_is_the_browsers_band_pass_biquad() {
-    for (f0, q) in [(450.0, 0.8), (600.0, 4.0), (712.0, 17.0)] {
-        let design = FilterDesign {
-            sections: [Section { center_hz: f0, q }; RECEIVER_SECTIONS],
-            gain: 1.0,
-        };
-        let w0 = TAU * f0 / f64::from(SR);
-        let alpha = w0.sin() / (2.0 * q);
-        let (b0, b2) = (alpha, -alpha);
-        let (a0, a1, a2) = (1.0 + alpha, -2.0 * w0.cos(), 1.0 - alpha);
-        for hz in [200.0, 440.0, f0, 800.0, 1_500.0] {
-            let w = TAU * hz / f64::from(SR);
-            // H(e^jw), one section.
-            let num = (b0 + b2 * (2.0 * w).cos(), -b2 * (2.0 * w).sin());
-            let den = (
-                a0 + a1 * w.cos() + a2 * (2.0 * w).cos(),
-                -a1 * w.sin() - a2 * (2.0 * w).sin(),
-            );
-            let section = num.0.hypot(num.1) / den.0.hypot(den.1);
-            let cascade = section.powi(RECEIVER_SECTIONS as i32);
-            let real = measured(SR, &design, hz);
-            assert!(
-                (cascade - real).abs() < 1e-3 * cascade.max(1e-3),
-                "{f0} Hz Q {q} at {hz} Hz: cookbook {cascade:.6}, ours {real:.6}"
-            );
-        }
-    }
+fn a_chain_of_bandpass_biquads_cannot_be_the_translated_filter() {
+    let design = FilterDesign::new(600.0, 500.0, FilterShape::Sharp);
+    let sr = f64::from(SR);
+    let sections = design.sections(sr);
+    let chain_db = |hz: f64| {
+        let w = TAU * hz / sr;
+        sections
+            .iter()
+            .map(|section| {
+                let [_, a1, a2] = section.feedback;
+                let at = |w: f64| {
+                    let num = (1.0 - (2.0 * w).cos()).hypot((2.0 * w).sin());
+                    let den = (1.0 + a1 * w.cos() + a2 * (2.0 * w).cos())
+                        .hypot(a1 * w.sin() + a2 * (2.0 * w).sin());
+                    num / den
+                };
+                // Unit peak, as the node normalises it: at the pole's angle.
+                let angle = (-a1 / (2.0 * a2.sqrt())).clamp(-1.0, 1.0).acos();
+                20.0 * (at(w) / at(angle)).log10()
+            })
+            .sum::<f64>()
+    };
+    let tilt = chain_db(800.0) - chain_db(400.0);
+    println!("bandpass biquads on the translated poles: {tilt:+.1} dB from 400 to 800 Hz");
+    let ours = 20.0 * (design.response_at(800.0) / design.response_at(400.0)).log10();
+    assert!(ours.abs() < 0.01, "the translated filter itself is level");
+    assert!(
+        tilt.abs() > 20.0,
+        "biquads on the same poles tilted only {tilt:.1} dB across the passband"
+    );
 }
 
 /// Sharp is steep: between its 6 dB and 60 dB widths, about the factor of two
 /// a good eight-pole crystal filter has. Soft rolls off more gently, which is
 /// the point of it — but neither is the wide-skirted mush of a single tuned
-/// circuit.
+/// circuit. Read off the upper skirt, which the folded sideband never
+/// reaches; the lower one is its mirror image.
 #[test]
 fn sharp_has_crystal_filter_skirts_and_soft_is_gentler() {
     let shape_factor = |shape| {
         let design = FilterDesign::new(600.0, 400.0, shape);
-        let width_at = |db: f64| {
+        let half_width_at = |db: f64| {
             let target = 10f64.powf(-db / 20.0);
-            let edge = |direction: f64| {
-                let mut hz = 600.0;
-                while design.response_at(hz) > target && hz > 1.0 {
-                    hz += direction * 0.5;
-                }
-                hz
-            };
-            edge(1.0) - edge(-1.0)
+            let mut hz = 600.0;
+            while design.response_at(hz) > target {
+                hz += 0.5;
+            }
+            hz - 600.0
         };
-        width_at(60.0) / width_at(6.0)
+        half_width_at(60.0) / half_width_at(6.0)
     };
     let sharp = shape_factor(FilterShape::Sharp);
     let soft = shape_factor(FilterShape::Soft);
@@ -567,9 +588,10 @@ fn the_noise_floor_is_centred_on_the_pitch() {
         let power = psd(&x, SR, &freqs, 4_800);
         let total: f64 = power.iter().sum();
         let centroid = power.iter().zip(&freqs).map(|(p, f)| p * f).sum::<f64>() / total;
-        // A band-pass at audio frequencies is geometrically symmetric, so the
-        // power sits a little above the pitch in hertz. Where exactly is the
-        // filter's business, and the noise has to agree with it.
+        // An IF filter is symmetric in hertz, so the hiss is centred on the
+        // note itself, as it is off the air — not tens of hertz above it,
+        // where an audio band-pass would put it. The noise has to agree with
+        // the filter, and the filter with the pitch.
         let weights: Vec<f64> = freqs
             .iter()
             .map(|f| design.response_at(*f).powi(2))
@@ -581,8 +603,12 @@ fn the_noise_floor_is_centred_on_the_pitch() {
             "{shape:?}: the hiss centred on {centroid:.0} Hz, the filter on {expected:.0} Hz"
         );
         assert!(
-            (expected - center).abs() < 0.1 * center,
+            (expected - center).abs() < 1.0,
             "{shape:?}: the filter itself centred on {expected:.0} Hz for a {center} Hz pitch"
+        );
+        assert!(
+            (centroid - center).abs() < 8.0,
+            "{shape:?}: the hiss centred on {centroid:.0} Hz for a {center} Hz note"
         );
         let inside: f64 = power
             .iter()
@@ -614,8 +640,9 @@ fn the_noise_floor_sits_at_its_signal_to_noise_ratio() {
             let x = filtered_floor(sample_rate, level, &settings, 6.0);
             let snr = 20.0 * (SIGNAL_RMS / f64::from(rms(&x))).log10();
             // An eight-pole Butterworth passes a touch more noise than an
-            // ideal filter of the same 3 dB width.
-            let expected = noise_floor_snr_db(level) - 10.0 * (1.026f64).log10();
+            // ideal filter of the same 3 dB width: (π/16) / sin(π/16), 0.6%.
+            let enbw = (std::f64::consts::PI / 16.0) / (std::f64::consts::PI / 16.0).sin();
+            let expected = noise_floor_snr_db(level) - 10.0 * enbw.log10();
             assert!(
                 (snr - expected).abs() < 0.4,
                 "{sample_rate} Hz, level {level}: {snr:.2} dB, wanted {expected:.2} dB"
@@ -939,8 +966,9 @@ fn the_measured_floor_does_not_depend_on_the_sample_rate() {
 }
 
 /// Extreme corners of the controls still make a filter a browser can build:
-/// every section inside the audio band with a sane Q, and a make-up gain that
-/// is large but finite.
+/// at any rate a sound card or browser runs at, every section a stable pole
+/// pair with finite coefficients, and a make-up gain that stays modest even
+/// where the filter reaches past zero beat.
 #[test]
 fn every_corner_of_the_controls_makes_a_buildable_filter() {
     for shape in SHAPES {
@@ -948,21 +976,21 @@ fn every_corner_of_the_controls_makes_a_buildable_filter() {
             for bandwidth in [FILTER_BANDWIDTH_MIN, 500.0, FILTER_BANDWIDTH_MAX] {
                 let design = FilterDesign::new(center, bandwidth, shape);
                 assert!(
-                    design.gain().is_finite() && design.gain() < 1e30,
+                    design.gain().is_finite() && design.gain() < 4.0,
                     "{shape:?} {center}/{bandwidth}: gain {}",
                     design.gain()
                 );
-                for section in design.sections() {
-                    // Below the Nyquist frequency of any rate a sound card
-                    // or browser runs at, 22.05 kHz and up.
-                    assert!(
-                        (20.0..10_000.0).contains(&section.center_hz),
-                        "{shape:?} {center}/{bandwidth}: {section:?}"
-                    );
-                    assert!(
-                        (0.05..60.0).contains(&section.q),
-                        "{shape:?} {center}/{bandwidth}: {section:?}"
-                    );
+                for sample_rate in [22_050.0, 44_100.0, 48_000.0, 96_000.0] {
+                    for section in design.sections(sample_rate) {
+                        let [one, a1, a2] = section.feedback;
+                        assert!(
+                            one == 1.0
+                                && section.feedforward.iter().all(|b| b.is_finite())
+                                && (0.0..1.0).contains(&a2)
+                                && a1.abs() < 1.0 + a2,
+                            "{shape:?} {center}/{bandwidth} at {sample_rate}: {section:?}"
+                        );
+                    }
                 }
             }
         }
@@ -1186,18 +1214,16 @@ fn fading_spans_its_depth_and_stays_inside_it() {
 }
 
 /// The edges the pile-up is placed between are the filter's own 3 dB points,
-/// and a tone and its mirror are passed exactly alike.
+/// and a tone and its mirror — the same number of hertz the other side — are
+/// passed alike, wherever the folded sideband is out of the way.
 #[test]
 fn the_passband_edges_are_the_filters_and_mirrors_pass_alike() {
     for shape in SHAPES {
-        for (center, bandwidth) in [
-            (500.0, 150.0),
-            (600.0, 500.0),
-            (400.0, FILTER_BANDWIDTH_MAX),
-        ] {
+        for (center, bandwidth) in [(500.0, 150.0), (1_200.0, 500.0)] {
             let design = FilterDesign::new(center, bandwidth, shape);
             let (low, high) = passband_edges(center, bandwidth);
             assert!(((high - low) - bandwidth).abs() < 1e-9);
+            assert!(((low + high) / 2.0 - center).abs() < 1e-9);
             for edge in [low, high] {
                 let db = 20.0 * design.response_at(edge).log10();
                 assert!(
@@ -1208,10 +1234,19 @@ fn the_passband_edges_are_the_filters_and_mirrors_pass_alike() {
             for hz in [center * 0.7, center * 0.9, center * 1.3] {
                 let a = design.response_at(hz);
                 let b = design.response_at(mirror_hz(center, hz));
-                assert!((a - b).abs() < 1e-9);
+                assert!(
+                    (a - b).abs() < 1e-3 * a.max(b),
+                    "{shape:?} {center}/{bandwidth}: {a:.3e} at {hz} Hz, {b:.3e} at its mirror"
+                );
             }
         }
     }
+    // Wider than twice the pitch, the passband stops short of zero beat
+    // rather than offering room that is really the other sideband.
+    assert_eq!(
+        passband_edges(400.0, FILTER_BANDWIDTH_MAX),
+        (filter::LOWEST_EDGE_HZ, 1_400.0)
+    );
     assert!(passband_edges(f64::NAN, f64::NAN).0.is_finite());
     assert!(mirror_hz(500.0, 0.0).is_finite());
 }

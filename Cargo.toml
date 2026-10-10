@@ -50,6 +50,7 @@ web-sys = { version = "0.3", optional = true, features = [
     "BiquadFilterNode",
     "DynamicsCompressorNode",
     "BiquadFilterType",
+    "IirFilterNode",
     "Storage",
     "WaveShaperNode",
     "OverSampleType",
