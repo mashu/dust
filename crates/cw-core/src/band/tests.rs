@@ -898,9 +898,8 @@ fn a_narrower_receiver_is_quieter_and_the_agc_does_not_undo_it() {
     assert!(quieter > 6.0, "narrowing only bought {quieter:.1} dB");
 }
 
-/// The browser's compressor is pointed at this number, so it has to fall with
-/// the filter. If it did not, closing the receiver down would lower the noise
-/// and the compressor would push it straight back up.
+/// The AGC's knee follows this number up on a noisy band, so it has to be
+/// the floor the receiver actually hears: it falls with the filter.
 #[test]
 fn the_measured_floor_falls_with_the_filter() {
     let mut s = TrainingSettings::default();
@@ -919,8 +918,9 @@ fn the_measured_floor_falls_with_the_filter() {
     );
 }
 
-/// The browser measures the floor at a low sample rate to keep the main
-/// thread free, which is only sound because the floor does not depend on it.
+/// Both backends measure the floor at a low sample rate — the browser does it
+/// on its main thread — which is only sound because the floor does not
+/// depend on it.
 #[test]
 fn the_measured_floor_does_not_depend_on_the_sample_rate() {
     for shape in SHAPES {
@@ -969,58 +969,81 @@ fn every_corner_of_the_controls_makes_a_buildable_filter() {
     }
 }
 
-/// A crash has to duck the band and then let it back up — that memory is the
-/// difference between an AGC and a limiter.
+/// A crash has to duck the band — the AGC catching it within a couple of
+/// milliseconds — and then let it straight back up. A crash is a few
+/// milliseconds of ringing; a receiver that held the band down for most of a
+/// second after each one dug holes in the floor that real ones do not.
 #[test]
 fn a_crash_ducks_the_band_and_it_comes_back() {
-    let mut agc = Agc::new(SR);
+    // The knee a band at 0.05 would have: its peaks, 2.2 times over.
+    let mut agc = Agc::new(SR, 0.05 * AGC_TRIGGER);
     let tone =
         |amplitude: f64, i: u32| amplitude * (TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
     let mut steady = 1.0;
     for i in 0..SR {
-        steady = agc.next_gain(tone(0.05, i));
+        steady = agc.next_gain(tone(0.05, i), 0.0);
     }
     assert!(
-        steady > 0.98,
+        steady == 1.0,
         "a steady band should be left alone, gain {steady:.2}"
     );
 
     let mut ducked = 1.0_f64;
     for i in 0..SR / 100 {
-        ducked = ducked.min(agc.next_gain(tone(1.0, i)));
+        ducked = ducked.min(agc.next_gain(tone(1.0, i), 0.0));
     }
     assert!(
         ducked < 0.5,
         "the crash should have pulled the band down, gain {ducked:.2}"
     );
 
-    let mut recovered = 0.0;
-    for i in 0..SR {
-        recovered = agc.next_gain(tone(0.05, i));
+    let mut back = 0.0;
+    for i in 0..SR / 10 {
+        back = agc.next_gain(tone(0.05, i), 0.0);
     }
     assert!(
-        recovered > 0.9,
-        "the band never came back up, gain {recovered:.2}"
+        back > 0.9,
+        "a tenth of a second on the band was still down at {back:.2}"
     );
 }
 
-/// A receiver's gain answers to everything reaching it, the signal included.
+/// A receiver's gain answers to everything reaching it, the signal included,
+/// and it holds for as long as the signal does: the band sits the same
+/// distance down from the start of a send to its end, then comes back.
 #[test]
 fn a_loud_send_rides_the_gain_down_too() {
     let settings = only_noise(0.3);
-    let settle = |send: f64| {
-        let mut mixer = BandMixer::new(SR, &settings, 7);
-        let mut buf = vec![0.0f32; SR as usize];
-        mixer.note_send_level(0.0);
-        mixer.fill_background(&mut buf);
-        mixer.note_send_level(send);
-        mixer.fill_background(&mut buf);
-        mixer.agc_gain()
-    };
-    assert!(settle(0.0) > 0.95, "a quiet band should be left alone");
+    let mut mixer = BandMixer::new(SR, &settings, 7);
+    let mut buf = vec![0.0f32; SR as usize / 4];
+    mixer.note_send_level(0.0);
+    mixer.fill_background(&mut buf);
+    assert_eq!(mixer.agc_gain(), 1.0, "a quiet band should be left alone");
+    mixer.note_send_level(1.0);
+    let held: Vec<f64> = (0..16)
+        .map(|_| {
+            mixer.fill_background(&mut buf);
+            mixer.agc_gain()
+        })
+        .collect();
     assert!(
-        settle(1.0) < 0.8,
-        "a send at full scale should pull the gain down"
+        held.iter().all(|g| *g < 0.8),
+        "a send at full scale should pull the gain down: {held:?}"
+    );
+    let (low, high) = held
+        .iter()
+        .fold((f64::MAX, 0.0f64), |(l, h), g| (l.min(*g), h.max(*g)));
+    assert!(
+        20.0 * (high / low).log10() < 0.2,
+        "the duck should hold steady under the send: {held:?}"
+    );
+    mixer.note_send_level(0.0);
+    for _ in 0..6 {
+        mixer.fill_background(&mut buf);
+    }
+    assert!(
+        mixer.agc_gain() > 0.95,
+        "the band should be back after the send, at {:.2}",
+        mixer.agc_gain()
     );
     // A nonsense level is ignored rather than wedging the AGC.
     let mut mixer = BandMixer::new(SR, &settings, 7);

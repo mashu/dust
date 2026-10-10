@@ -3,9 +3,9 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use cw_core::band::{
-    AGC_ATTACK_SEC, AGC_RELEASE_SEC, AGC_TRIGGER, BandMixer, BandSource, FilterDesign,
-    QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_SECTIONS, SOFT_LIMIT_HEADROOM,
-    band_standing_level, qsb_path, soft_limit_curve,
+    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, BandMixer, BandSource, FilterDesign,
+    QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_SECTIONS, SOFT_LIMIT_HEADROOM, agc_compressor,
+    agc_knee, qsb_path, soft_limit_curve,
 };
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission, plan_transmission};
 use gloo_timers::callback::Interval;
@@ -31,8 +31,6 @@ const STREAM_LEAD_HIDDEN_SEC: f64 = 2.5;
 const STREAM_TICK_MS: u32 = 100;
 /// Points in the soft limiter's lookup table.
 const LIMITER_POINTS: usize = 4_097;
-/// The rate the band's standing level is measured at for the compressor.
-const STANDING_MEASURE_RATE: u32 = 16_000;
 /// Fade between one band and the next when the settings change. Long enough
 /// to hide the seam, short enough that the change is immediate.
 const STREAM_FADE_SEC: f64 = 0.02;
@@ -95,6 +93,9 @@ pub struct MorsePlayer {
     receiver: Vec<web_sys::BiquadFilterNode>,
     receiver_gain: GainNode,
     agc: web_sys::DynamicsCompressorNode,
+    /// The gain into the limiter, which also takes back the make-up gain the
+    /// compressor adds of its own accord.
+    limiter_in: GainNode,
     /// Gains that are fading out, with the context time their ramp ends: a
     /// stopped send's, or the band stream that was just replaced.
     released: Vec<(GainNode, f64)>,
@@ -321,16 +322,19 @@ impl MorsePlayer {
         // the filter, with the send and the background already together. The
         // native player works the same gain out in Rust and hands it to both
         // streams; here a compressor does it, because the two halves only meet
-        // as sound. Its threshold is set per-settings from the measured floor,
-        // which is what stops it undoing the filter.
+        // as sound. Its threshold and ratio are set per band from the native
+        // AGC's knee; until then it is parked where it does nothing.
         let agc = ctx
             .create_dynamics_compressor()
             .map_err(|e| format!("agc: {e:?}"))?;
         agc.knee()
-            .set_value_at_time(6.0, ctx.current_time())
+            .set_value_at_time(AGC_COMPRESSOR_KNEE_DB as f32, ctx.current_time())
             .map_err(|e| format!("agc knee: {e:?}"))?;
+        agc.threshold()
+            .set_value_at_time(0.0, ctx.current_time())
+            .map_err(|e| format!("agc threshold: {e:?}"))?;
         agc.ratio()
-            .set_value_at_time(12.0, ctx.current_time())
+            .set_value_at_time(1.0, ctx.current_time())
             .map_err(|e| format!("agc ratio: {e:?}"))?;
         agc.attack()
             .set_value_at_time(AGC_ATTACK_SEC as f32, ctx.current_time())
@@ -376,6 +380,7 @@ impl MorsePlayer {
             receiver,
             receiver_gain,
             agc,
+            limiter_in: headroom,
             released: Vec::new(),
             pending_resume: RefCell::new(None),
             live_osc: None,
@@ -468,31 +473,41 @@ impl MorsePlayer {
         }
     }
 
-    /// Point the compressor at this band's own floor.
+    /// Set the compressor to the native AGC's law for this band.
     ///
-    /// This is the whole reason it can be a compressor at all. Left at a fixed
-    /// threshold it would ride the level rather than the crashes, and closing
-    /// the filter — which is exactly what the app is trying to teach — would
-    /// pull the noise down and the compressor would push it straight back up.
-    /// Measured from the settings instead, a narrower receiver has a lower
-    /// floor and a lower threshold to match, so a crash still has to stand the
-    /// same distance above the band before anything ducks.
+    /// The same knee the native receiver uses ([`agc_knee`]: set from the
+    /// band's own floor, measured at a low rate because this runs on the main
+    /// thread every time a band setting moves), the same two-to-one slope
+    /// above it, attack and release to match. A compressor has no hang, so
+    /// between elements it lets go a little where the native AGC holds — a
+    /// decibel or two of ripple — but its static curve is the native one.
+    /// With the AGC off, or nothing on the band for it to ride, it is parked
+    /// where it is transparent, as the native player is with no band running.
+    ///
+    /// Every browser adds make-up gain after a compressor, scaled by how hard
+    /// it compresses at full scale. A receiver's AGC only ever turns things
+    /// down, so the gain into the limiter takes that back off.
     fn tune_agc(&self, settings: &TrainingSettings) {
-        // Measured at a third of the device rate: the band is calibrated to
-        // sound the same at any rate, and this runs on the main thread every
-        // time a band setting moves.
-        let standing = band_standing_level(STANDING_MEASURE_RATE, settings);
-        // A band with nothing on it has no floor to measure. Park the threshold
-        // at the top, where the compressor has nothing to do.
-        let threshold_db = if standing > 1e-6 {
-            (20.0 * (standing * AGC_TRIGGER).log10()).clamp(-100.0, 0.0)
+        let knee = if BandMixer::needs_background(settings) {
+            agc_knee(settings)
         } else {
-            0.0
+            None
         };
+        let setting = agc_compressor(knee);
+        let now = self.ctx.current_time();
         let _ = self
             .agc
             .threshold()
-            .set_value_at_time(threshold_db as f32, self.ctx.current_time());
+            .set_value_at_time(setting.threshold_db.clamp(-100.0, 0.0) as f32, now);
+        let _ = self
+            .agc
+            .ratio()
+            .set_value_at_time(setting.ratio.clamp(1.0, 20.0) as f32, now);
+        let makeup = 10f64.powf(-setting.makeup_db / 20.0);
+        let _ = self
+            .limiter_in
+            .gain()
+            .set_value_at_time((makeup / SOFT_LIMIT_HEADROOM) as f32, now);
     }
 
     fn bump_epoch(&self) -> u64 {
