@@ -386,10 +386,10 @@ fn heard_at(level: f64) -> (f64, f64) {
 }
 
 /// The calibration target. Through the default 500 Hz filter another station
-/// is heard in 0.12-0.36 of one-second stretches on the 20 m recordings, and
-/// inside the passband in 0.10-0.27.
+/// is heard in 0.12-0.53 of one-second stretches on the 20 m recordings, and
+/// inside the passband in 0.10-0.30; the normal band sits in the middle.
 #[test]
-fn a_normal_band_has_someone_on_it_about_a_quarter_of_the_time() {
+fn a_normal_band_has_someone_on_it_about_a_third_of_the_time() {
     let (near, inside) = heard_at(0.5);
     assert!((0.15..0.4).contains(&near), "occupied {near:.3}");
     assert!(

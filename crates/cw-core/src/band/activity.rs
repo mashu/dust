@@ -16,11 +16,12 @@
 //! (KiwiSDR, Hermes-Lite 2 and contest captures), measured the way an
 //! operator would hear them through this receiver's 500 Hz filter:
 //!
-//! - **How busy.** On an ordinary evening another station is audible in about
-//!   a quarter of all one-second stretches (0.12-0.53 across recordings), and
-//!   inside the passband itself in 0.10-0.30 of them. A quiet band is about
-//!   0.05; a contest 0.5-0.7. That is 0.3-0.5 stations transmitting per kHz
-//!   at once on a normal band, about 0.8 in a contest.
+//! - **How busy.** Another station is audible in 0.12-0.53 of all one-second
+//!   stretches across the recordings, and inside the passband itself in
+//!   0.10-0.30 of them; tuned to random spots, the seven recordings average
+//!   0.44. The normal band here sits at about 0.3, in the middle of that. A
+//!   quiet band is about 0.05; a contest 0.5-0.7. That is 0.3-0.6 stations
+//!   transmitting per kHz at once on a normal band, about 0.8 in a contest.
 //! - **How loud.** Per 5.86 Hz analysis bin, over the noise in that bin: a
 //!   median of about 22 dB with a spread of 9 dB, from barely there to 50 dB.
 //!   Contest stations run about 8 dB louder.
@@ -103,10 +104,11 @@ const GUARD_MARGIN_HZ: f64 = 150.0;
 
 /// Stations arriving per kHz per minute at the quiet end of the control, in
 /// the middle and at a contest, spread on a log scale in between. Chosen so a
-/// 500 Hz filter hears another station in about 5%, 30% and 60% of one-second
-/// stretches, which is what the recordings give.
+/// 500 Hz filter hears another station in about 8%, 30% and 53% of one-second
+/// stretches, which is where the recordings put a quiet band, an ordinary one
+/// and a contest.
 const ARRIVALS_QUIET: f64 = 0.55;
-const ARRIVALS_NORMAL: f64 = 2.9;
+const ARRIVALS_NORMAL: f64 = 3.5;
 const ARRIVALS_CONTEST: f64 = 7.2;
 
 /// Where stations land: from just above the bottom of the audio passband to

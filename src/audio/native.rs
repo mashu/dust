@@ -163,8 +163,11 @@ impl MorsePlayer {
         }
         if self.state.band_needs_rebuild(settings) {
             let band = BandMixer::needs_background(settings).then(|| {
+                // A fresh band every time, as the browser's is: with stations
+                // on it, a fixed seed would replay the same callsigns at the
+                // same moments in every session.
                 BandPlayback::new(
-                    BandMixer::new(self.sample_rate, settings, u64::from(self.sample_rate)),
+                    BandMixer::new(self.sample_rate, settings, crate::time::seed_rng()),
                     self.sample_rate,
                     Arc::clone(&self.agc),
                 )
