@@ -2,10 +2,10 @@
 //! arithmetic that turns a [`PlaybackPlan`] into samples. Kept apart from the
 //! cpal glue so every part of it can be tested on a machine with no sound card.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use cw_core::band::{qsb_gain_at, BandMixer};
+use cw_core::band::{BandMixer, qsb_gain_at};
 use cw_core::{PlaybackPlan, ToneEvent, TrainingSettings};
 
 /// Fading settings the audio callback can read while the UI changes them.
@@ -148,7 +148,8 @@ pub fn mix_plan_into(buf: &mut [f32], plan: &PlaybackPlan, sample_rate: u32) {
 }
 
 /// Spread one mono sample across every channel of an interleaved buffer.
-pub fn interleave(out: &mut [f32], channels: usize, next: impl FnMut() -> f32) {
+#[cfg(test)]
+fn interleave(out: &mut [f32], channels: usize, next: impl FnMut() -> f32) {
     write_interleaved(out, channels, false, next);
 }
 
@@ -287,50 +288,61 @@ impl TonePlayback {
 }
 
 /// The receiver background, as the audio callback plays it out.
+///
+/// Owned by the player's mixer slot. Replacing it does not drop it on the
+/// spot: the player moves it aside and calls [`BandPlayback::release`], and
+/// the mixer keeps adding it in until its release ramp has run — a band cut
+/// mid-sample is a step, and a step is a click.
 pub struct BandPlayback {
     mixer: BandMixer,
-    stop: Arc<AtomicBool>,
+    stopping: bool,
     released: usize,
     sample_rate: f64,
     agc: Arc<LiveAgc>,
 }
 
 impl BandPlayback {
-    pub fn new(
-        mixer: BandMixer,
-        stop: Arc<AtomicBool>,
-        sample_rate: u32,
-        agc: Arc<LiveAgc>,
-    ) -> Self {
+    pub fn new(mixer: BandMixer, sample_rate: u32, agc: Arc<LiveAgc>) -> Self {
         Self {
             mixer,
-            stop,
+            stopping: false,
             released: 0,
             sample_rate: f64::from(sample_rate.max(1)),
             agc,
         }
     }
 
-    /// Fill one callback's worth, fading out once the background is stopped
-    /// rather than dropping to silence mid-sample.
-    pub fn fill(&mut self, out: &mut [f32], channels: usize) {
-        if !self.stop.load(Ordering::SeqCst) {
+    /// Start fading out. The band keeps sounding for one release time.
+    pub fn release(&mut self) {
+        self.stopping = true;
+    }
+
+    /// True once a released band has faded all the way to silence.
+    pub fn is_released(&self) -> bool {
+        self.stopping && self.released >= release_samples(self.sample_rate)
+    }
+
+    /// Add one callback's worth on top of whatever is already in the buffer.
+    pub fn mix_into(&mut self, out: &mut [f32], channels: usize) {
+        if !self.stopping {
             let send = self.agc.send_level();
             let mixer = &mut self.mixer;
             mixer.note_send_level(send);
-            interleave(out, channels, || mixer.next_background());
+            write_interleaved(out, channels, true, || mixer.next_background());
             // Published once a buffer rather than once a sample: the release
             // runs over the best part of a second, so a buffer's worth of lag
             // is far below anything you could hear.
             self.agc.store(self.mixer.agc_gain());
             return;
         }
-        // Nothing is playing behind the send any more, so nothing is ducking it.
+        // Nothing is playing behind the send any more, so nothing is ducking
+        // it. A band that replaced this one is mixed after it and has the last
+        // word.
         self.agc.store(1.0);
         let total = release_samples(self.sample_rate);
         let mut done = self.released;
         let mixer = &mut self.mixer;
-        interleave(out, channels, || {
+        write_interleaved(out, channels, true, || {
             if done >= total {
                 return 0.0;
             }
@@ -345,7 +357,7 @@ impl BandPlayback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cw_core::{plan_morse_playback, FastrandRng};
+    use cw_core::{FastrandRng, plan_morse_playback};
 
     fn plan(text: &str) -> PlaybackPlan {
         let mut settings = TrainingSettings::default();
@@ -635,26 +647,75 @@ mod tests {
         }
     }
 
+    fn noisy_band() -> BandPlayback {
+        let mut settings = TrainingSettings::default();
+        settings.band.qrn_enabled = false;
+        settings.band.noise_enabled = true;
+        settings.band.noise_level = 1.0;
+        let mixer = BandMixer::new(8_000, &settings, 3);
+        BandPlayback::new(mixer, 8_000, LiveAgc::new())
+    }
+
     #[test]
-    fn the_background_fills_until_it_is_stopped_and_then_fades() {
+    fn the_background_plays_until_it_is_released_and_then_fades() {
+        let mut playback = noisy_band();
+        let mut out = vec![0.0f32; 512];
+        playback.mix_into(&mut out, 2);
+        assert!(out.iter().any(|s| *s != 0.0));
+        assert!(!playback.is_released());
+
+        playback.release();
+        // The ramp is 8 ms — 64 frames at 8 kHz — so it starts where the band
+        // was and ends in silence inside one 256-frame callback.
+        let mut out = vec![0.0f32; 512];
+        playback.mix_into(&mut out, 2);
+        assert!(
+            out[..8].iter().any(|s| *s != 0.0),
+            "it cut instead of fading"
+        );
+        assert!(
+            out[256..].iter().all(|s| *s == 0.0),
+            "the fade never finished"
+        );
+        assert!(playback.is_released());
+
+        let mut later = vec![0.0f32; 512];
+        playback.mix_into(&mut later, 2);
+        assert!(
+            later.iter().all(|s| *s == 0.0),
+            "a released band stays silent"
+        );
+    }
+
+    /// The band is added to what is already in the buffer — the band it is
+    /// replacing, fading out — rather than writing over it.
+    #[test]
+    fn the_background_mixes_rather_than_overwrites() {
+        let mut playback = noisy_band();
+        let mut silent_start = vec![0.0f32; 64];
+        let mut offset_start = vec![0.25f32; 64];
+        let mut twin = noisy_band();
+        playback.mix_into(&mut silent_start, 1);
+        twin.mix_into(&mut offset_start, 1);
+        for (a, b) in silent_start.iter().zip(&offset_start) {
+            assert!((b - a - 0.25).abs() < 1e-6 || b.abs() >= 0.999);
+        }
+    }
+
+    /// A band on its way out stops ducking the send: the AGC goes back to one
+    /// as soon as there is nothing behind the station to duck for.
+    #[test]
+    fn a_released_band_lets_go_of_the_agc() {
+        let agc = LiveAgc::new();
         let mut settings = TrainingSettings::default();
         settings.band.qrn_enabled = true;
         settings.band.qrn_level = 1.0;
-        settings.band.receiver_enabled = false;
-        let mixer = BandMixer::new(8_000, &settings, 3);
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut playback = BandPlayback::new(mixer, Arc::clone(&stop), 8_000, LiveAgc::new());
-        let mut out = vec![0.0f32; 512];
-        playback.fill(&mut out, 2);
-        assert!(out.iter().any(|s| *s != 0.0));
-
-        stop.store(true, Ordering::SeqCst);
-        // The ramp is 8 ms, so at 8 kHz it outlives one 512-frame callback.
-        playback.fill(&mut out, 2);
-        assert!(out.iter().any(|s| *s != 0.0), "it cut instead of fading");
-        for _ in 0..8 {
-            playback.fill(&mut out, 2);
-        }
-        assert!(out.iter().all(|s| *s == 0.0), "the fade never finished");
+        let mut playback =
+            BandPlayback::new(BandMixer::new(8_000, &settings, 3), 8_000, Arc::clone(&agc));
+        agc.store(0.3);
+        playback.release();
+        let mut out = vec![0.0f32; 64];
+        playback.mix_into(&mut out, 1);
+        assert!((agc.gain() - 1.0).abs() < 1e-6);
     }
 }

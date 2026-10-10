@@ -56,15 +56,15 @@ fn regex_rgb_slash(css: &str) -> Vec<String> {
     let needle = b"rgb(";
     let mut i = 0;
     while i + 4 < bytes.len() {
-        if bytes[i..].starts_with(needle) {
-            if let Some(end) = css[i..].find(')') {
-                let token = &css[i..i + end + 1];
-                if token.contains('/') {
-                    hits.push(token.to_string());
-                }
-                i += end + 1;
-                continue;
+        if bytes[i..].starts_with(needle)
+            && let Some(end) = css[i..].find(')')
+        {
+            let token = &css[i..i + end + 1];
+            if token.contains('/') {
+                hits.push(token.to_string());
             }
+            i += end + 1;
+            continue;
         }
         i += 1;
     }

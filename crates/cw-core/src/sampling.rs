@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::alignment::align_group;
 use crate::callsign::generate_callsign;
 use crate::pool::{compute_char_pool, digits_subset, letters_subset};
-use crate::rng::{weighted_random_pick, Rng};
+use crate::rng::{Rng, weighted_random_pick};
 use crate::settings::{CharSetMode, TrainingSettings};
 
 pub const CHAR_SAMPLING_PRIOR_ALPHA: f64 = 1.0;
@@ -131,20 +131,24 @@ fn difficulty_factor(p_error: f64, error_weight_strength: f64) -> f64 {
     }
 }
 
+/// A standard normal deviate, by Box–Muller. Straight-line: no draw is
+/// retried, so no generator — however badly behaved — can keep it spinning.
 fn random_normal(rng: &mut impl Rng) -> f64 {
-    let mut u = 0.0;
-    let mut v = 0.0;
-    while u <= f64::EPSILON {
-        u = rng.f64();
-    }
-    while v <= f64::EPSILON {
-        v = rng.f64();
-    }
+    // 1 − u maps [0, 1) onto (0, 1], where the logarithm is finite.
+    let u = (1.0 - rng.f64()).clamp(f64::EPSILON, 1.0);
+    let v = rng.f64();
     (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * v).cos()
 }
 
+/// Marsaglia–Tsang rejection sampling. Each rejection loop is bounded: real
+/// draws accept within a handful of tries, and only a generator stuck on one
+/// value could exhaust them, in which case the mean is as good an answer as
+/// any.
 fn sample_gamma(shape: f64, rng: &mut impl Rng) -> f64 {
-    if shape <= 0.0 {
+    const TRIES: usize = 64;
+    // Not `shape <= 0.0`: NaN fails every comparison and would fall through
+    // into a loop that can never accept.
+    if !(shape > 0.0 && shape.is_finite()) {
         return 0.0;
     }
     if shape < 1.0 {
@@ -153,35 +157,31 @@ fn sample_gamma(shape: f64, rng: &mut impl Rng) -> f64 {
     }
     let d = shape - 1.0 / 3.0;
     let c = 1.0 / (9.0 * d).sqrt();
-    loop {
-        let mut x;
-        let mut v;
-        loop {
-            x = random_normal(rng);
-            v = 1.0 + c * x;
-            if v > 0.0 {
-                break;
-            }
-        }
-        v = v * v * v;
+    for _ in 0..TRIES {
+        let Some((x, v)) = (0..TRIES).find_map(|_| {
+            let x = random_normal(rng);
+            let v = 1.0 + c * x;
+            (v > 0.0).then_some((x, v))
+        }) else {
+            break;
+        };
+        let v = v * v * v;
         let u = rng.f64();
-        if u < 1.0 - 0.0331 * x * x * x * x {
-            return d * v;
-        }
-        if u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
+        if u < 1.0 - 0.0331 * x * x * x * x || u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
             return d * v;
         }
     }
+    shape
 }
 
 pub fn sample_beta(alpha: f64, beta: f64, rng: &mut impl Rng) -> f64 {
     let x = sample_gamma(alpha, rng);
     let y = sample_gamma(beta, rng);
     let denom = x + y;
-    if denom <= 0.0 {
-        0.5
-    } else {
+    if denom.is_finite() && denom > 0.0 {
         x / denom
+    } else {
+        0.5
     }
 }
 
@@ -363,11 +363,7 @@ pub fn generate_callsign_group(
             total += weights.get(&ch).copied().unwrap_or(1.0);
             count += 1.0;
         }
-        if count > 0.0 {
-            total / count
-        } else {
-            0.0
-        }
+        if count > 0.0 { total / count } else { 0.0 }
     };
 
     let mut best = generate_callsign(tier, rng);
@@ -418,6 +414,48 @@ pub fn generate_training_group(
 
 #[cfg(test)]
 mod tests {
+    /// A generator stuck on one value: the worst a broken stub can do.
+    struct Stuck(f64);
+
+    impl crate::rng::Rng for Stuck {
+        fn f64(&mut self) -> f64 {
+            self.0
+        }
+    }
+
+    /// Nothing about the shape or the generator can hang the sampler. A NaN
+    /// shape used to fall through the guard into a loop that never accepts,
+    /// and a generator stuck on zero spun the normal draw forever.
+    #[test]
+    fn the_samplers_always_come_back() {
+        for shape in [f64::NAN, f64::INFINITY, -1.0, 0.0, 1e-9, 0.5, 3.0, 1e6] {
+            for stuck in [0.0, 0.5, 0.999_999, 1.0] {
+                let g = sample_gamma(shape, &mut Stuck(stuck));
+                assert!(g.is_finite() && g >= 0.0, "gamma({shape}) on {stuck}: {g}");
+                let b = sample_beta(shape, 2.0, &mut Stuck(stuck));
+                assert!((0.0..=1.0).contains(&b), "beta({shape}, 2) on {stuck}: {b}");
+            }
+        }
+        let n = random_normal(&mut Stuck(0.0));
+        assert!(n.is_finite());
+    }
+
+    /// And the real thing is still the real thing: Beta(α, β) has mean
+    /// α/(α+β).
+    #[test]
+    fn beta_draws_have_the_right_mean() {
+        let mut rng = crate::rng::FastrandRng(42);
+        for (a, b) in [(2.0, 5.0), (0.5, 0.5), (9.0, 1.0)] {
+            let n = 20_000;
+            let mean = (0..n).map(|_| sample_beta(a, b, &mut rng)).sum::<f64>() / f64::from(n);
+            let expected = a / (a + b);
+            assert!(
+                (mean - expected).abs() < 0.01,
+                "Beta({a}, {b}): mean {mean:.4}, wanted {expected:.4}"
+            );
+        }
+    }
+
     use super::*;
     use crate::rng::FastrandRng;
 

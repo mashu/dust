@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use cw_core::{
-    dit_ms_for_wpm, paddle_from_bracket, KeyerMode, Paddle, PaddleKeyer, LETTER_GAP_DITS,
+    KeyerMode, LETTER_GAP_DITS, Paddle, PaddleKeyer, dit_ms_for_wpm, paddle_from_bracket,
 };
 use dioxus::prelude::*;
 
@@ -26,10 +26,13 @@ const KEYER_POLL_MS: u32 = 4;
 /// X11 key auto-repeat is a fake release+press pair. tao on Linux never marks
 /// those as `repeat`, so a leftover press after you let go keeps the keyer
 /// running. Wait this long for the fake press; a real re-squeeze is slower.
-#[cfg_attr(not(all(feature = "desktop", not(test))), allow(dead_code))]
+#[cfg(all(feature = "desktop", not(test)))]
 const REPEAT_RELEASE_MS: u32 = 16;
 
-/// Held-paddle contacts after X11 auto-repeat has been stripped.
+/// Held-paddle contacts after X11 auto-repeat has been stripped. Only the
+/// desktop build listens to raw key events, so only it — and the tests — need
+/// one.
+#[cfg(any(feature = "desktop", test))]
 #[derive(Clone, Copy, Debug, Default)]
 struct RepeatFilter {
     dit: bool,
@@ -38,6 +41,7 @@ struct RepeatFilter {
     dah_release: u64,
 }
 
+#[cfg(any(feature = "desktop", test))]
 impl RepeatFilter {
     fn slot(&mut self, paddle: Paddle) -> (&mut bool, &mut u64) {
         match paddle {
@@ -49,8 +53,8 @@ impl RepeatFilter {
     /// A press that is not the matching half of a fake release. `true` means
     /// the paddle just closed.
     fn press(&mut self, paddle: Paddle) -> bool {
-        let (down, gen) = self.slot(paddle);
-        *gen = gen.wrapping_add(1);
+        let (down, generation) = self.slot(paddle);
+        *generation = generation.wrapping_add(1);
         if *down {
             false
         } else {
@@ -62,17 +66,17 @@ impl RepeatFilter {
     /// Start a delayed release. The generation is what [`confirm_release`]
     /// needs so a following fake press can cancel it.
     fn release(&mut self, paddle: Paddle) -> Option<u64> {
-        let (down, gen) = self.slot(paddle);
+        let (down, generation) = self.slot(paddle);
         if !*down {
             return None;
         }
-        *gen = gen.wrapping_add(1);
-        Some(*gen)
+        *generation = generation.wrapping_add(1);
+        Some(*generation)
     }
 
-    fn confirm_release(&mut self, paddle: Paddle, gen: u64) -> bool {
+    fn confirm_release(&mut self, paddle: Paddle, generation: u64) -> bool {
         let (down, current) = self.slot(paddle);
-        if *current != gen {
+        if *current != generation {
             return false;
         }
         *down = false;
@@ -134,7 +138,7 @@ pub fn paddle_down(
     enabled: bool,
     mut keyer: Signal<PaddleKeyer>,
     mut keying: Signal<bool>,
-    gen: Signal<u64>,
+    generation: Signal<u64>,
     on_tone: EventHandler<bool>,
     on_letter: EventHandler<char>,
 ) {
@@ -144,7 +148,7 @@ pub fn paddle_down(
     let dit_ms = dit_ms.max(1);
     if keyer.peek().mode().is_straight() {
         let already = keyer.peek().any_held();
-        let _ = bump_epoch(gen);
+        let _ = bump_epoch(generation);
         keyer.write().press_at(paddle, mono_ms());
         if !already {
             on_tone.call(true);
@@ -156,7 +160,7 @@ pub fn paddle_down(
         return;
     }
     keying.set(true);
-    let run = bump_epoch(gen);
+    let run = bump_epoch(generation);
     // The first element has to start in this keydown, not after spawn is
     // polled — a dit at 20 WPM is 60 ms, and a tick of delay is the whole
     // character feeling late.
@@ -168,14 +172,14 @@ pub fn paddle_down(
     keyer.write().decoder_mut().push(first);
     spawn(async move {
         sleep_element(dit_ms.saturating_mul(first.dits()).max(1) as u32).await;
-        if *gen.peek() != run {
+        if *generation.peek() != run {
             on_tone.call(false);
             keying.set(false);
             return;
         }
         on_tone.call(false);
         sleep_element(dit_ms as u32).await;
-        run_iambic_loop(dit_ms, keyer, keying, gen, run, on_tone, on_letter).await;
+        run_iambic_loop(dit_ms, keyer, keying, generation, run, on_tone, on_letter).await;
     });
 }
 
@@ -183,13 +187,13 @@ async fn run_iambic_loop(
     dit_ms: u64,
     mut keyer: Signal<PaddleKeyer>,
     mut keying: Signal<bool>,
-    gen: Signal<u64>,
+    generation: Signal<u64>,
     run: u64,
     on_tone: EventHandler<bool>,
     on_letter: EventHandler<char>,
 ) {
     loop {
-        if *gen.peek() != run {
+        if *generation.peek() != run {
             on_tone.call(false);
             keying.set(false);
             return;
@@ -199,7 +203,7 @@ async fn run_iambic_loop(
             on_tone.call(true);
             keyer.write().decoder_mut().push(paddle);
             sleep_element(dit_ms.saturating_mul(paddle.dits()).max(1) as u32).await;
-            if *gen.peek() != run {
+            if *generation.peek() != run {
                 on_tone.call(false);
                 keying.set(false);
                 return;
@@ -211,7 +215,7 @@ async fn run_iambic_loop(
         let mut left = dit_ms.saturating_mul(LETTER_GAP_DITS).max(1);
         let mut squeezed = false;
         while left > 0 {
-            if *gen.peek() != run {
+            if *generation.peek() != run {
                 keying.set(false);
                 return;
             }
@@ -226,7 +230,7 @@ async fn run_iambic_loop(
         if squeezed {
             continue;
         }
-        if *gen.peek() != run {
+        if *generation.peek() != run {
             keying.set(false);
             return;
         }
@@ -242,7 +246,7 @@ pub fn paddle_up(
     paddle: Paddle,
     dit_ms: u64,
     mut keyer: Signal<PaddleKeyer>,
-    gen: Signal<u64>,
+    generation: Signal<u64>,
     on_tone: EventHandler<bool>,
     on_letter: EventHandler<char>,
 ) {
@@ -257,11 +261,11 @@ pub fn paddle_up(
             return;
         };
         keyer.write().decoder_mut().push(element);
-        let run = bump_epoch(gen);
+        let run = bump_epoch(generation);
         spawn(async move {
             let mut left = dit_ms.saturating_mul(LETTER_GAP_DITS).max(1);
             while left > 0 {
-                if *gen.peek() != run {
+                if *generation.peek() != run {
                     return;
                 }
                 if keyer.peek().any_held() {
@@ -271,7 +275,7 @@ pub fn paddle_up(
                 sleep_element(step as u32).await;
                 left = left.saturating_sub(step);
             }
-            if *gen.peek() != run {
+            if *generation.peek() != run {
                 return;
             }
             if let Some(ch) = keyer.write().decoder_mut().take_letter() {
@@ -312,12 +316,12 @@ impl TrainingPaddleSink {
         *self.up.borrow_mut() = EventHandler::new(|_| {});
     }
 
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg(all(feature = "desktop", not(test)))]
     fn call_down(&self, paddle: Paddle) {
         self.down.borrow().call(paddle);
     }
 
-    #[cfg_attr(test, allow(dead_code))]
+    #[cfg(all(feature = "desktop", not(test)))]
     fn call_up(&self, paddle: Paddle) {
         self.up.borrow().call(paddle);
     }
@@ -339,7 +343,7 @@ pub fn use_paddle_keys(
 ) -> PaddleKeys {
     let mut keyer = use_signal(|| PaddleKeyer::with_mode(settings.peek().playback.keyer_mode));
     let mut keying = use_signal(|| false);
-    let gen = use_signal(|| 0u64);
+    let generation = use_signal(|| 0u64);
     let mut heard = use_signal(String::new);
     let training = use_hook(TrainingPaddleSink::default);
     use_hook({
@@ -358,7 +362,7 @@ pub fn use_paddle_keys(
 
     use_effect(use_reactive!(|screen| {
         if matches!(screen(), Screen::Training) {
-            let _ = bump_epoch(gen);
+            let _ = bump_epoch(generation);
             keyer.write().reset();
             keying.set(false);
             app_tone.set_live_tone(false, &settings.peek());
@@ -387,7 +391,9 @@ pub fn use_paddle_keys(
                 return;
             }
             let dit_ms = dit_ms_for_wpm(settings.peek().playback.keyer_wpm);
-            paddle_down(paddle, dit_ms, true, keyer, keying, gen, on_tone, on_letter);
+            paddle_down(
+                paddle, dit_ms, true, keyer, keying, generation, on_tone, on_letter,
+            );
         }
     });
     let up = EventHandler::new({
@@ -396,7 +402,7 @@ pub fn use_paddle_keys(
                 return;
             }
             let dit_ms = dit_ms_for_wpm(settings.peek().playback.keyer_wpm);
-            paddle_up(paddle, dit_ms, keyer, gen, on_tone, on_letter);
+            paddle_up(paddle, dit_ms, keyer, generation, on_tone, on_letter);
         }
     });
 
@@ -472,14 +478,14 @@ fn listen_native_paddles(
                 }
                 return;
             }
-            let Some(gen) = contacts.borrow_mut().release(paddle) else {
+            let Some(generation) = contacts.borrow_mut().release(paddle) else {
                 return;
             };
             let contacts = Rc::clone(&contacts);
             let training = training.clone();
             spawn(async move {
                 sleep_element(REPEAT_RELEASE_MS).await;
-                if !contacts.borrow_mut().confirm_release(paddle, gen) {
+                if !contacts.borrow_mut().confirm_release(paddle, generation) {
                     return;
                 }
                 if matches!(*screen.peek(), Screen::Training) {
@@ -544,7 +550,9 @@ pub fn PaddlePad(
     #[props(default)] swap: bool,
 ) -> Element {
     let hint = match mode {
-        KeyerMode::Straight => "Hold [ or ] as a straight key — a short press is a dit, a long one a dah.",
+        KeyerMode::Straight => {
+            "Hold [ or ] as a straight key — a short press is a dit, a long one a dah."
+        }
         KeyerMode::Ultimatic => {
             "Hold [ for dits and ] for dahs. The last paddle you close repeats. The sidetone plays here, not only in training."
         }
@@ -612,9 +620,9 @@ mod tests {
         let mut contacts = RepeatFilter::default();
         assert!(contacts.press(Paddle::Dah));
         assert!(!contacts.press(Paddle::Dah));
-        let gen = contacts.release(Paddle::Dah).expect("was down");
+        let generation = contacts.release(Paddle::Dah).expect("was down");
         assert!(!contacts.press(Paddle::Dah));
-        assert!(!contacts.confirm_release(Paddle::Dah, gen));
+        assert!(!contacts.confirm_release(Paddle::Dah, generation));
         let later = contacts.release(Paddle::Dah).expect("still down");
         assert!(contacts.confirm_release(Paddle::Dah, later));
         assert!(contacts.release(Paddle::Dah).is_none());
@@ -624,8 +632,8 @@ mod tests {
     fn a_real_release_is_confirmed_when_no_press_follows() {
         let mut contacts = RepeatFilter::default();
         assert!(contacts.press(Paddle::Dit));
-        let gen = contacts.release(Paddle::Dit).expect("was down");
-        assert!(contacts.confirm_release(Paddle::Dit, gen));
+        let generation = contacts.release(Paddle::Dit).expect("was down");
+        assert!(contacts.confirm_release(Paddle::Dit, generation));
         assert!(contacts.press(Paddle::Dit));
     }
 }

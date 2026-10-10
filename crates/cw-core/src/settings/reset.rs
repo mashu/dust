@@ -63,26 +63,14 @@ impl TrainingSettings {
                 self.band.qsb_rate_hz = d.band.qsb_rate_hz;
                 self.band.qrn_enabled = d.band.qrn_enabled;
                 self.band.qrn_level = d.band.qrn_level;
-                self.band.receiver_enabled = d.band.receiver_enabled;
-                self.band.receiver_level = d.band.receiver_level;
-                self.band.receiver_profile = d.band.receiver_profile;
+                self.band.noise_enabled = d.band.noise_enabled;
+                self.band.noise_level = d.band.noise_level;
                 self.band.filter_bandwidth_hz = d.band.filter_bandwidth_hz;
+                self.band.filter_shape = d.band.filter_shape;
                 self.band.stations_min = d.band.stations_min;
                 self.band.stations_max = d.band.stations_max;
                 self.band.pileup_spread_hz = d.band.pileup_spread_hz;
                 self.band.pileup_level_db = d.band.pileup_level_db;
-            }
-            SettingsSection::ReceiverModel => {
-                self.band.receiver_background_gain = d.band.receiver_background_gain;
-                self.band.receiver_background_excitation_rate =
-                    d.band.receiver_background_excitation_rate;
-                self.band.receiver_background_resonance = d.band.receiver_background_resonance;
-                self.band.receiver_background_decay = d.band.receiver_background_decay;
-                self.band.receiver_background_offset_hz = d.band.receiver_background_offset_hz;
-                self.band.receiver_background_offset_mod_depth_hz =
-                    d.band.receiver_background_offset_mod_depth_hz;
-                self.band.receiver_background_offset_mod_rate_hz =
-                    d.band.receiver_background_offset_mod_rate_hz;
             }
             SettingsSection::AutoLevel => {
                 self.auto_level.auto_adjust_level = d.auto_level.auto_adjust_level;

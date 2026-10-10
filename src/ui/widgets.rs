@@ -1,4 +1,4 @@
-use cw_core::{align_group, GroupResult};
+use cw_core::{GroupResult, align_group};
 use dioxus::prelude::*;
 
 fn parse_number_input(raw: &str, min: f64, max: f64, commit: bool) -> Option<f64> {

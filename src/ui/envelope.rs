@@ -1,10 +1,10 @@
 //! Keying-envelope scope: draws the exact attack/decay shape the audio backends
 //! apply, and sends short test samples with the current settings.
 
-use cw_core::{envelope_shape, EnvelopeShape, SettingsSection, TrainingSettings};
+use cw_core::{EnvelopeShape, SettingsSection, TrainingSettings, envelope_shape};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, pretty_number, Icon, SectionReset, SliderField};
+use crate::ui::widgets::{Icon, SectionReset, SliderField, control_id, pretty_number};
 
 const VIEW_W: f64 = 320.0;
 const VIEW_H: f64 = 120.0;
@@ -240,8 +240,8 @@ pub fn EnvelopeCard(
 
 #[cfg(test)]
 mod tests {
-    use super::{envelope_path, x_at, PAD_X, VIEW_W};
-    use cw_core::{envelope_shape, EnvelopePoint, EnvelopeShape, TrainingSettings};
+    use super::{PAD_X, VIEW_W, envelope_path, x_at};
+    use cw_core::{EnvelopePoint, EnvelopeShape, TrainingSettings, envelope_shape};
 
     fn shape() -> EnvelopeShape {
         let mut settings = TrainingSettings::default();

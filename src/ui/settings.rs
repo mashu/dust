@@ -1,14 +1,14 @@
 use cw_core::{
-    CharSetMode, KeyerMode, Paddle, RangeSetting, SettingsSection, TrainingSettings,
-    GROUP_REPEAT_MAX,
+    CharSetMode, GROUP_REPEAT_MAX, KeyerMode, Paddle, RangeSetting, SettingsSection,
+    TrainingSettings,
 };
 use dioxus::prelude::*;
 
 use crate::ui::envelope::EnvelopeCard;
-use crate::ui::paddle::{capture_dom_paddles, PaddlePad};
+use crate::ui::paddle::{PaddlePad, capture_dom_paddles};
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::widgets::{
-    control_id, Icon, LinkedRange, NumberField, SectionReset, Seg, SliderField, Switch,
+    Icon, LinkedRange, NumberField, SectionReset, Seg, SliderField, Switch, control_id,
 };
 
 #[component]

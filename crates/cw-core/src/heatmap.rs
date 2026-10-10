@@ -22,14 +22,18 @@ pub struct HeatmapDay {
     pub sessions: u32,
     pub group_count: u32,
     pub accuracy_sum: f64,
+    /// Sessions whose accuracy could be read, which is what the average is
+    /// over. A session with a broken accuracy still practised that day, but
+    /// it says nothing about how well.
+    pub accuracy_sessions: u32,
 }
 
 impl HeatmapDay {
     pub fn avg_accuracy(&self) -> Option<f64> {
-        if self.sessions == 0 {
+        if self.accuracy_sessions == 0 {
             None
         } else {
-            Some(self.accuracy_sum / f64::from(self.sessions))
+            Some(self.accuracy_sum / f64::from(self.accuracy_sessions))
         }
     }
 }
@@ -66,12 +70,16 @@ pub fn aggregate_heatmap(sessions: &[SessionResult]) -> BTreeMap<String, Heatmap
                 sessions: 0,
                 group_count: 0,
                 accuracy_sum: 0.0,
+                accuracy_sessions: 0,
             });
-        entry.chars += session.total_chars;
-        entry.sessions += 1;
-        entry.group_count += session.groups.len() as u32;
+        entry.chars = entry.chars.saturating_add(session.total_chars);
+        entry.sessions = entry.sessions.saturating_add(1);
+        entry.group_count = entry
+            .group_count
+            .saturating_add(u32::try_from(session.groups.len()).unwrap_or(u32::MAX));
         if session.accuracy.is_finite() && (0.0..=1.0).contains(&session.accuracy) {
             entry.accuracy_sum += session.accuracy;
+            entry.accuracy_sessions += 1;
         }
     }
     days
@@ -224,6 +232,20 @@ mod tests {
         let day = days.get("2026-07-17").expect("day");
         assert_eq!(day.sessions, 1);
         assert_eq!(day.accuracy_sum, 0.0);
+        assert_eq!(day.avg_accuracy(), None);
+    }
+
+    /// A broken session counts as practice that day, but not as a zero in
+    /// the day's accuracy — which would drag a good day's colour towards red.
+    #[test]
+    fn an_unreadable_accuracy_does_not_drag_the_average_down() {
+        let days = aggregate_heatmap(&[
+            session("2026-07-17", 4, 0.9),
+            session("2026-07-17", 4, f64::NAN),
+        ]);
+        let day = days.get("2026-07-17").expect("day");
+        assert_eq!(day.sessions, 2);
+        assert_eq!(day.avg_accuracy(), Some(0.9));
     }
 
     #[test]
@@ -234,6 +256,7 @@ mod tests {
             sessions: 0,
             group_count: 0,
             accuracy_sum: 0.0,
+            accuracy_sessions: 0,
         };
         assert_eq!(day.avg_accuracy(), None);
     }

@@ -11,7 +11,7 @@ pub const LCWO_SEQUENCE: &[char] = &[
 ];
 
 pub use crate::level::{
-    unlocked_count_for_level as unlocked_char_count_for_level, LEVEL_MIN as KOCH_LEVEL_MIN,
+    LEVEL_MIN as KOCH_LEVEL_MIN, unlocked_count_for_level as unlocked_char_count_for_level,
 };
 /// Final level of the built-in LCWO curriculum (`LCWO_SEQUENCE.len() - 1`).
 pub const KOCH_LEVEL_MAX: u32 = (LCWO_SEQUENCE.len() as u32).saturating_sub(1);

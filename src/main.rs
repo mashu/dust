@@ -3,6 +3,16 @@
     windows_subsystem = "windows"
 )]
 
+// The targets are alternatives, not layers: each brings its own runtime and
+// its own audio backend. Say so plainly rather than fail later on a type
+// mismatch three modules away.
+#[cfg(all(feature = "web", feature = "native-runtime"))]
+compile_error!("`web` is the browser build; build it on its own, not with `desktop` or `mobile`.");
+#[cfg(all(feature = "native-audio", feature = "silent-audio"))]
+compile_error!(
+    "`mobile-silent` replaces the audio backend; build it on its own, not with `desktop` or `mobile`."
+);
+
 mod app;
 mod audio;
 mod persist;
@@ -48,7 +58,6 @@ fn launch_desktop() {
     {
         // GTK client-side decorations draw a thick header with the window title.
         // Prefer the window manager's normal title bar instead.
-        #[allow(unused_unsafe)]
         // Safety: process start, before other threads exist.
         unsafe {
             std::env::set_var("GTK_CSD", "0");

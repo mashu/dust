@@ -1,6 +1,6 @@
 use cw_core::{
-    auto_level_progress, fit_settings_to_alphabet, AutoAdjustMode, AutoLevelCounters,
-    AutoLevelProgress, SessionResult, TrainingSettings,
+    AutoAdjustMode, AutoLevelCounters, AutoLevelProgress, SessionResult, TrainingSettings,
+    auto_level_progress, fit_settings_to_alphabet,
 };
 
 /// How much history is kept. Sessions are a few KB each, so this stays well
@@ -19,14 +19,20 @@ pub trait Store {
     fn clear_auto_counters(&self, keys: &[String]);
 }
 
-fn recover_sessions(raw: &str) -> Vec<SessionResult> {
-    let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
-        return Vec::new();
-    };
-    values
-        .into_iter()
-        .filter_map(|value| serde_json::from_value(value).ok())
-        .collect()
+/// Read a stored history, keeping every session that still parses.
+///
+/// `None` means the history as a whole is unreadable — not a list at all.
+/// That is different from an empty one: the caller has to set the stored copy
+/// aside before anything writes over it, or the first session finished after
+/// a bad write would replace years of history with itself.
+fn recover_sessions(raw: &str) -> Option<Vec<SessionResult>> {
+    let values = serde_json::from_str::<Vec<serde_json::Value>>(raw).ok()?;
+    Some(
+        values
+            .into_iter()
+            .filter_map(|value| serde_json::from_value(value).ok())
+            .collect(),
+    )
 }
 
 /// Load settings without throwing away everything for one bad field.
@@ -110,7 +116,12 @@ impl Store for WebStore {
         let Ok(Some(raw)) = store.get_item(SESSIONS_KEY) else {
             return Vec::new();
         };
-        recover_sessions(&raw)
+        recover_sessions(&raw).unwrap_or_else(|| {
+            // Keep the unreadable copy where the next save cannot reach it.
+            let _ = store.set_item(UNREADABLE_SESSIONS_KEY, &raw);
+            let _ = store.remove_item(SESSIONS_KEY);
+            Vec::new()
+        })
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) {
@@ -171,6 +182,8 @@ const THEME_KEY: &str = "dust_theme";
 const SETTINGS_KEY: &str = "dust_settings";
 #[cfg(feature = "web")]
 const SESSIONS_KEY: &str = "dust_sessions";
+#[cfg(feature = "web")]
+const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
 #[cfg(feature = "web")]
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
 
@@ -254,10 +267,22 @@ impl Store for DesktopStore {
     }
 
     fn load_sessions(&self) -> Vec<SessionResult> {
-        let Ok(raw) = std::fs::read_to_string(self.root.join("sessions.json")) else {
+        let path = self.root.join("sessions.json");
+        let Ok(raw) = std::fs::read_to_string(&path) else {
             return Vec::new();
         };
-        recover_sessions(&raw)
+        recover_sessions(&raw).unwrap_or_else(|| {
+            // Moved aside, not deleted and not left in the way: the next save
+            // writes a fresh file, and the old one is still there to recover.
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs());
+            let aside = self.root.join(format!("sessions.unreadable-{stamp}.json"));
+            if let Err(err) = std::fs::rename(&path, &aside) {
+                eprintln!("could not set aside an unreadable history: {err}");
+            }
+            Vec::new()
+        })
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) {
@@ -318,10 +343,15 @@ fn android_data_dir() -> Option<std::path::PathBuf> {
 /// is what a portable install or a test run uses.
 #[cfg(feature = "native-runtime")]
 fn data_dir() -> std::path::PathBuf {
-    if let Some(dir) = std::env::var_os("DUST_DATA_DIR") {
-        if !dir.is_empty() {
-            return std::path::PathBuf::from(dir);
-        }
+    data_dir_from(std::env::var_os("DUST_DATA_DIR"))
+}
+
+/// The same, with the override passed in rather than read from the process
+/// environment — which a test may not change while other threads run.
+#[cfg(feature = "native-runtime")]
+fn data_dir_from(overridden: Option<std::ffi::OsString>) -> std::path::PathBuf {
+    if let Some(dir) = overridden.filter(|dir| !dir.is_empty()) {
+        return std::path::PathBuf::from(dir);
     }
     #[cfg(target_os = "android")]
     if let Some(dir) = android_data_dir() {
@@ -510,12 +540,14 @@ mod tests {
     fn a_corrupt_session_is_dropped_instead_of_losing_the_file() {
         let good = serde_json::to_string(&session("2026-09-01")).unwrap();
         let raw = format!("[{good}, {{\"date\": \"nonsense\"}}]");
-        let recovered = recover_sessions(&raw);
+        let recovered = recover_sessions(&raw).expect("a list");
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].date, "2026-09-01");
-        // A file that is not even a list gives an empty history, not a panic.
-        assert!(recover_sessions("{}").is_empty());
-        assert!(recover_sessions("").is_empty());
+        // A file that is not even a list is unreadable, which is not the same
+        // as empty: the caller has to keep it safe.
+        assert!(recover_sessions("{}").is_none());
+        assert!(recover_sessions("").is_none());
+        assert_eq!(recover_sessions("[]"), Some(Vec::new()));
     }
 
     #[test]
@@ -561,20 +593,39 @@ mod tests {
         assert_eq!(settings.curriculum.callsign_level, 1);
     }
 
-    /// The receiver-character settings were called `qrm*` until the name went
-    /// to the stations it belongs to. Every save written before that has to
-    /// keep loading, with its values intact rather than reset to defaults.
+    /// The background switch has been called `qrm*`, then `receiver*`, and is
+    /// now the band noise. Every save written under either old name keeps its
+    /// on/off choice. The old level and the resonator model's knobs drove a
+    /// sound that no longer exists, so they are dropped rather than
+    /// reinterpreted — and dropping them must not cost anything else in the
+    /// save.
     #[test]
-    fn a_save_that_still_calls_the_receiver_qrm_loads() {
+    fn saves_from_the_old_receiver_models_still_load() {
         let raw = r#"{"qrmEnabled":false,"qrmLevel":0.75,"qrmProfile":"ringing","charWpmMin":19}"#;
         let settings = recover_settings(raw);
-        assert!(!settings.band.receiver_enabled);
-        assert_eq!(settings.band.receiver_level, 0.75);
+        assert!(!settings.band.noise_enabled);
         assert_eq!(
-            settings.band.receiver_profile,
-            cw_core::ReceiverProfile::Ringing
+            settings.band.noise_level,
+            TrainingSettings::default().band.noise_level
         );
         assert_eq!(settings.playback.char_wpm_min, 19.0);
+
+        let raw = r#"{"receiverEnabled":false,"receiverLevel":0.2,"receiverProfile":"whistle",
+            "receiverBackgroundGain":55,"receiverBackgroundResonance":120,
+            "receiverBackgroundOffsetModDepthHz":45,"filterBandwidthHz":250,"qrnLevel":0.4}"#;
+        let settings = recover_settings(raw);
+        assert!(!settings.band.noise_enabled);
+        assert_eq!(settings.band.filter_bandwidth_hz, 250.0);
+        assert_eq!(settings.band.qrn_level, 0.4);
+        assert_eq!(settings.band.filter_shape, cw_core::FilterShape::Sharp);
+
+        // And the new ones round-trip.
+        let mut fresh = TrainingSettings::default();
+        fresh.band.filter_shape = cw_core::FilterShape::Soft;
+        fresh.band.noise_level = 0.8;
+        let back = recover_settings(&serde_json::to_string(&fresh).expect("serialize"));
+        assert_eq!(back.band.filter_shape, cw_core::FilterShape::Soft);
+        assert_eq!(back.band.noise_level, 0.8);
     }
 
     /// A save written in callsign mode has to come back in callsign mode, tier
@@ -731,28 +782,53 @@ mod tests {
         assert_eq!(store.load_theme(), "dark");
     }
 
+    /// Without touching the process environment: tests run on many threads,
+    /// and changing a variable while another thread — or a C library — reads
+    /// the environment is undefined behaviour.
     #[test]
     fn the_data_directory_can_be_pointed_somewhere_else() {
         let dir = TempDir::new("datadir");
-        let previous = std::env::var_os("DUST_DATA_DIR");
-        // Safety: single-threaded within this test, and the variable is put
-        // back before anything else reads it.
-        unsafe { std::env::set_var("DUST_DATA_DIR", &dir.0) };
-        assert_eq!(data_dir(), dir.0);
-        assert_eq!(DesktopStore::new().root, dir.0);
-        assert_eq!(DesktopStore::default().root, dir.0);
+        assert_eq!(data_dir_from(Some(dir.0.clone().into_os_string())), dir.0);
 
         // An empty value is ignored rather than writing to the current folder.
-        unsafe { std::env::set_var("DUST_DATA_DIR", "") };
-        assert_ne!(data_dir(), std::path::PathBuf::new());
-        assert!(data_dir().ends_with("dust"));
+        let fallback = data_dir_from(Some(std::ffi::OsString::new()));
+        assert_ne!(fallback, std::path::PathBuf::new());
+        assert!(fallback.ends_with("dust"));
+        assert_eq!(fallback, data_dir_from(None));
+        assert_eq!(DesktopStore::new().root, data_dir());
+        assert_eq!(DesktopStore::default().root, data_dir());
+    }
 
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("DUST_DATA_DIR", value),
-                None => std::env::remove_var("DUST_DATA_DIR"),
-            }
-        }
+    /// A history file that cannot be read at all is set aside, not
+    /// overwritten. It used to come back as an empty history, and the next
+    /// finished session was saved over it — every session before it gone.
+    #[test]
+    fn an_unreadable_history_is_kept_rather_than_written_over() {
+        let (dir, store) = store("unreadable");
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let damaged = "{\"this\": \"is not a history\"";
+        std::fs::write(dir.0.join("sessions.json"), damaged).unwrap();
+
+        assert!(store.load_sessions().is_empty());
+        store.save_sessions(&[session("2026-09-02")]);
+        assert_eq!(store.load_sessions().len(), 1);
+
+        let kept: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("sessions.unreadable-")
+            })
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "the damaged history should have been set aside"
+        );
+        assert_eq!(std::fs::read_to_string(kept[0].path()).unwrap(), damaged);
     }
 
     #[test]

@@ -5,8 +5,8 @@
 //! ending: a send is only current while the epoch it was armed with is the
 //! player's own.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use cw_core::TrainingSettings;
 
@@ -86,11 +86,21 @@ impl PlayerState {
 pub struct ToneSignal {
     armed: ArmedSend,
     finished: Arc<AtomicBool>,
+    /// The device's word that the stream itself broke.
+    stream_failed: Arc<AtomicBool>,
 }
 
 impl ToneSignal {
-    pub fn new(armed: ArmedSend, finished: Arc<AtomicBool>) -> Self {
-        Self { armed, finished }
+    pub fn new(
+        armed: ArmedSend,
+        finished: Arc<AtomicBool>,
+        stream_failed: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            armed,
+            finished,
+            stream_failed,
+        }
     }
 }
 
@@ -99,7 +109,9 @@ impl PlaybackSignal for ToneSignal {
         WaitFlags {
             cancelled: self.armed.superseded(),
             finished: self.finished.load(Ordering::SeqCst),
-            failed: false,
+            // A broken stream never calls back again, so the send would never
+            // finish; saying so lets the session rebuild the player.
+            failed: self.stream_failed.load(Ordering::SeqCst),
             // The stream either calls back or it does not; there is nothing
             // here that parks it the way a browser parks a hidden tab.
             suspended: false,
@@ -179,7 +191,8 @@ mod tests {
         let mut state = PlayerState::new();
         let armed = state.arm();
         let finished = Arc::new(AtomicBool::new(false));
-        let signal = ToneSignal::new(armed, Arc::clone(&finished));
+        let broken = Arc::new(AtomicBool::new(false));
+        let signal = ToneSignal::new(armed, Arc::clone(&finished), Arc::clone(&broken));
         assert_eq!(
             signal.poll(),
             WaitFlags {
@@ -193,6 +206,12 @@ mod tests {
 
         finished.store(true, Ordering::SeqCst);
         assert!(signal.poll().finished);
+
+        broken.store(true, Ordering::SeqCst);
+        assert!(
+            signal.poll().failed,
+            "a broken device has to reach the waiter"
+        );
 
         state.stop();
         assert!(signal.poll().cancelled);

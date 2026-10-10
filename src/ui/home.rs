@@ -1,5 +1,5 @@
 use cw_core::{
-    compute_char_pool, compute_streak_status, AutoLevelProgress, SessionResult, TrainingSettings,
+    AutoLevelProgress, SessionResult, TrainingSettings, compute_char_pool, compute_streak_status,
 };
 use dioxus::prelude::*;
 
@@ -8,7 +8,7 @@ use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::listen::newest_index;
 use crate::ui::tips::TipsCarousel;
-use crate::ui::widgets::{control_id, pretty_number, Icon};
+use crate::ui::widgets::{Icon, control_id, pretty_number};
 
 fn level_summary(settings: &TrainingSettings) -> String {
     match settings.curriculum.char_set_mode {

@@ -1,14 +1,23 @@
 //! Minimal RNG trait so sampling and audio planning stay deterministic in tests.
 
 pub trait Rng {
+    /// A uniform draw from `[0, 1)`.
+    ///
+    /// The helpers below stay in range even for an implementation that hands
+    /// back exactly 1.0, as test stubs do: a contract is only as good as what
+    /// happens when it is broken, and here that would be an index past the
+    /// end of a table.
     fn f64(&mut self) -> f64;
 
     fn usize_in(&mut self, min_inclusive: usize, max_inclusive: usize) -> usize {
         if max_inclusive <= min_inclusive {
             return min_inclusive;
         }
-        let span = max_inclusive - min_inclusive + 1;
-        min_inclusive + (self.f64() * span as f64).floor() as usize
+        let range = max_inclusive - min_inclusive;
+        // In floating point, so a range of the whole of usize cannot overflow
+        // the +1.
+        let offset = (self.f64() * (range as f64 + 1.0)).floor() as usize;
+        min_inclusive + offset.min(range)
     }
 
     fn pick_in_range(&mut self, min: f64, max: f64) -> f64 {
@@ -26,11 +35,14 @@ pub trait Rng {
         }
         let lo = min.min(max);
         let hi = min.max(max);
-        (lo + self.f64() * (hi - lo + 1.0)).floor()
+        (lo + self.f64() * (hi - lo + 1.0)).floor().min(hi.floor())
     }
 }
 
-/// Adapter over `fastrand::Rng` used by the web crate. Defined here so tests can use a stub.
+/// A small, fast, seedable generator (SplitMix64). Deterministic for a given
+/// seed, which is what lets every test replay the same session and the same
+/// band.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FastrandRng(pub u64);
 
 impl Default for FastrandRng {
@@ -161,6 +173,22 @@ mod range_tests {
         assert_eq!(weighted_random_pick(&['A', 'B'], &[0.0], &mut rng), 'A');
         let mut rng = Fixed(0.99);
         assert_eq!(weighted_random_pick(&['A', 'B'], &[0.0], &mut rng), 'B');
+    }
+
+    /// A generator that hands back exactly 1.0 breaks the `[0, 1)` contract,
+    /// and test stubs do. The helpers stay in range anyway, rather than
+    /// indexing one past the end of a table.
+    #[test]
+    fn draws_at_the_very_top_stay_in_range() {
+        let mut rng = Fixed(1.0);
+        assert_eq!(rng.usize_in(0, 25), 25);
+        assert_eq!(rng.usize_in(3, 3), 3);
+        assert_eq!(rng.pick_in_range_inclusive_int(400.0, 600.0), 600.0);
+        // The whole of usize, which used to overflow working out the span.
+        assert_eq!(rng.usize_in(0, usize::MAX), usize::MAX);
+        let mut rng = Fixed(0.0);
+        assert_eq!(rng.usize_in(0, usize::MAX), 0);
+        assert_eq!(rng.usize_in(7, 9), 7);
     }
 
     #[test]

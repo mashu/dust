@@ -306,10 +306,10 @@ fn prefix_for(shape: PrefixShape, rng: &mut impl Rng) -> String {
             .map(|prefix| (*prefix).to_string())
             .unwrap_or_else(|| "W".to_string()),
         LetterLetter => {
-            if rng.f64() < US_TWO_LETTER_SHARE {
-                if let Some(prefix) = us_two_letter(rng) {
-                    return prefix;
-                }
+            if rng.f64() < US_TWO_LETTER_SHARE
+                && let Some(prefix) = us_two_letter(rng)
+            {
+                return prefix;
             }
             pick_weighted(DX_TWO_LETTER, rng)
                 .map(|prefix| (*prefix).to_string())
@@ -341,11 +341,12 @@ pub fn generate_callsign(tier: u32, rng: &mut impl Rng) -> String {
     for _ in 0..suffix_len(tier, rng) {
         call.push(LETTERS[rng.usize_in(0, LETTERS.len() - 1)]);
     }
-    if tier.portable && rng.f64() < PORTABLE_SHARE {
-        if let Some(marker) = pick_weighted(PORTABLE_MARKERS, rng) {
-            call.push('/');
-            call.push_str(marker);
-        }
+    if tier.portable
+        && rng.f64() < PORTABLE_SHARE
+        && let Some(marker) = pick_weighted(PORTABLE_MARKERS, rng)
+    {
+        call.push('/');
+        call.push_str(marker);
     }
     call
 }
@@ -386,14 +387,13 @@ pub fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
         Some((base, portable)) => (base, Some(portable)),
         None => (call, None),
     };
-    if let Some(marker) = portable {
-        if marker.is_empty()
+    if let Some(marker) = portable
+        && (marker.is_empty()
             || !marker
                 .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-        {
-            return None;
-        }
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+    {
+        return None;
     }
     let separator = base.rfind(|c: char| c.is_ascii_digit())?;
     let prefix = &base[..separator];

@@ -1,17 +1,17 @@
 use std::rc::Rc;
 
-use cw_core::{fit_settings_to_alphabet, GroupSession, SessionEvent};
+use cw_core::{GroupSession, SessionEvent, fit_settings_to_alphabet};
 use dioxus::prelude::*;
 
 use crate::persist::{load_sessions, load_settings, load_theme, save_settings, save_theme};
 use crate::playback::{loop_preview_text, loop_stream_groups, play_chars, play_sample_text};
-use crate::routes::{app_routes, AppCallbacks, ViewState};
+use crate::routes::{AppCallbacks, ViewState, app_routes};
 use crate::session_runtime::{boot_machine_session, send_command, spawn_effects};
 use crate::state::{AppState, Screen, SessionSignals};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::paddle::use_paddle_keys;
-use crate::ui::widgets::{control_id, Icon};
+use crate::ui::widgets::{Icon, control_id};
 
 // Desktop inlines this in the window head. Web loads it through `asset!` so
 // `dx bundle` copies the file; compiling the sheet into wasm would ship it
@@ -219,7 +219,7 @@ pub fn App() -> Element {
             }
             let settings_now = settings().clamp();
             match app.takeover_audio(&settings_now) {
-                Ok(gen) => Some((gen, settings_now)),
+                Ok(generation) => Some((generation, settings_now)),
                 Err(err) => {
                     toast.set(Some(err));
                     None
@@ -246,30 +246,38 @@ pub fn App() -> Element {
                 settings.set(fitted);
             }
             preview.set(Preview::Idle);
-            let Some((gen, settings_now)) = claim_audio.call(()) else {
+            let Some((generation, settings_now)) = claim_audio.call(()) else {
                 return;
             };
             let history = sessions();
             let Some(effects) =
-                boot_machine_session(settings_now.clone(), &history, &app, gen, signals)
+                boot_machine_session(settings_now.clone(), &history, &app, generation, signals)
             else {
                 return;
             };
-            spawn_effects(effects, settings_now, (*app).clone(), gen, signals);
+            spawn_effects(effects, settings_now, (*app).clone(), generation, signals);
         }
     });
 
     let start_listen = use_callback({
         let app = app.clone();
         move |chars: String| {
-            let Some((gen, settings_now)) = claim_audio.call(()) else {
+            let Some((generation, settings_now)) = claim_audio.call(()) else {
                 return;
             };
             preview.set(Preview::Letters);
             let app_loop = (*app).clone();
             spawn(async move {
-                play_chars(app_loop.clone(), gen, settings_now, chars, 420, toast).await;
-                if app_loop.session_gen.get() == gen {
+                play_chars(
+                    app_loop.clone(),
+                    generation,
+                    settings_now,
+                    chars,
+                    420,
+                    toast,
+                )
+                .await;
+                if app_loop.session_gen.get() == generation {
                     preview.set(Preview::Idle);
                     app_loop.silence_audio();
                 }
@@ -280,15 +288,16 @@ pub fn App() -> Element {
     let start_stream = use_callback({
         let app = app.clone();
         move |(): ()| {
-            let Some((gen, _settings_now)) = claim_audio.call(()) else {
+            let Some((generation, _settings_now)) = claim_audio.call(()) else {
                 return;
             };
             stream_heard.set(Vec::new());
             preview.set(Preview::Stream);
             let app_loop = (*app).clone();
             spawn(async move {
-                loop_stream_groups(app_loop.clone(), gen, settings, stream_heard, toast).await;
-                if app_loop.session_gen.get() == gen {
+                loop_stream_groups(app_loop.clone(), generation, settings, stream_heard, toast)
+                    .await;
+                if app_loop.session_gen.get() == generation {
                     preview.set(Preview::Idle);
                     app_loop.silence_audio();
                 }
@@ -300,14 +309,14 @@ pub fn App() -> Element {
     let play_sample = use_callback({
         let app = app.clone();
         move |text: String| {
-            let Some((gen, settings_now)) = claim_audio.call(()) else {
+            let Some((generation, settings_now)) = claim_audio.call(()) else {
                 return;
             };
             preview.set(Preview::Sample(text.clone()));
             let app_loop = (*app).clone();
             spawn(async move {
-                play_sample_text(app_loop.clone(), gen, settings_now, text, toast).await;
-                if app_loop.session_gen.get() == gen {
+                play_sample_text(app_loop.clone(), generation, settings_now, text, toast).await;
+                if app_loop.session_gen.get() == generation {
                     preview.set(Preview::Idle);
                     app_loop.silence_audio();
                 }
@@ -318,14 +327,14 @@ pub fn App() -> Element {
     let start_band_preview = use_callback({
         let app = app.clone();
         move |(): ()| {
-            let Some((gen, _settings_now)) = claim_audio.call(()) else {
+            let Some((generation, _settings_now)) = claim_audio.call(()) else {
                 return;
             };
             preview.set(Preview::Band);
             let app_loop = (*app).clone();
             spawn(async move {
-                loop_preview_text(app_loop.clone(), gen, settings, "CQ", 280, toast).await;
-                if app_loop.session_gen.get() == gen {
+                loop_preview_text(app_loop.clone(), generation, settings, "CQ", 280, toast).await;
+                if app_loop.session_gen.get() == generation {
                     preview.set(Preview::Idle);
                 }
             });
@@ -567,7 +576,7 @@ mod tests {
 
 #[cfg(test)]
 mod ui_tests {
-    use crate::testing::{run, stored_session, test_settings, Ui};
+    use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
 
     fn short_session() -> TrainingSettings {
@@ -917,10 +926,12 @@ mod ui_tests {
             assert!(!stored.curriculum.sequence_is_custom);
             assert!(stored.progress_alphabet().starts_with(&['E', 'T', 'A']));
             ui.click("pill-lcwo");
-            assert!(crate::persist::load_settings()
-                .curriculum
-                .custom_sequence
-                .is_empty());
+            assert!(
+                crate::persist::load_settings()
+                    .curriculum
+                    .custom_sequence
+                    .is_empty()
+            );
         });
     }
 
@@ -1072,27 +1083,30 @@ mod ui_tests {
             ui.advance(50).await;
             ui.commit("fixed-stations-calling", "4");
             ui.advance(50).await;
-            ui.type_into("slider-model-gain", "55");
+            ui.click("seg-filter-soft");
+            ui.advance(50).await;
+            ui.type_into("slider-rise-time", "23");
             ui.advance(50).await;
 
             let changed = crate::persist::load_settings();
             assert_eq!(changed.band.stations_max, 4);
-            assert!((changed.band.receiver_background_gain - 55.0).abs() < 0.5);
+            assert_eq!(changed.band.filter_shape, cw_core::FilterShape::Soft);
+            assert!((changed.band.steepness - 23.0).abs() < 0.5);
 
-            // Reset the receiver model only.
-            ui.click("reset-receiver-model");
+            // Reset the keying envelope only.
+            ui.click("reset-keying-envelope");
             ui.advance(50).await;
             let after = crate::persist::load_settings();
             let fresh = cw_core::TrainingSettings::default();
             assert!(
-                (after.band.receiver_background_gain - fresh.band.receiver_background_gain).abs()
-                    < 0.001,
-                "the model gain should be back to its default"
+                (after.band.steepness - fresh.band.steepness).abs() < 0.001,
+                "the rise time should be back to its default"
             );
             assert_eq!(
                 after.band.stations_max, 4,
-                "resetting the receiver model must not touch the band conditions"
+                "resetting the keying envelope must not touch the band conditions"
             );
+            assert_eq!(after.band.filter_shape, cw_core::FilterShape::Soft);
 
             // And now the band conditions, which owns the stations.
             ui.click("reset-band-conditions");
@@ -1155,6 +1169,7 @@ mod ui_tests {
             ui.advance(50).await;
             let stored = crate::persist::load_settings();
             assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 1));
+            assert_eq!(stored.band.filter_shape, cw_core::FilterShape::Sharp);
             assert!(!ui.has("Pile-up spread"));
         });
     }
@@ -1162,8 +1177,8 @@ mod ui_tests {
     /// Test settings run a dead-quiet band; these tests need one that is on.
     fn with_receiver() -> TrainingSettings {
         let mut settings = test_settings();
-        settings.band.receiver_enabled = true;
-        settings.band.receiver_level = 0.4;
+        settings.band.noise_enabled = true;
+        settings.band.noise_level = 0.4;
         settings
     }
 

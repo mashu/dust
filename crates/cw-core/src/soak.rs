@@ -9,13 +9,13 @@
 
 use crate::machine::{SessionEffect, SessionEvent, SessionMachine, SessionPhase};
 use crate::{
-    align_group, apply_auto_level, build_session_result, calculate_group_letter_accuracy,
-    calculate_overall_character_accuracy, compute_char_pool, create_initial_sampling_state,
-    evaluate_auto_level, generate_training_group, parse_callsign, plan_morse_playback,
-    plan_transmission, resolve_group_repeats, resolve_pileup, resolve_station, AutoLevelCounters,
-    CharSetMode, FastrandRng, Rng, SessionId, TrainingSettings, Transmission, CALLSIGN_TIER_MAX,
-    CALLSIGN_TIER_MIN, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, LEVEL_MIN, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN,
+    AutoLevelCounters, CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CharSetMode, FILTER_BANDWIDTH_MAX,
+    FILTER_BANDWIDTH_MIN, FastrandRng, LEVEL_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
+    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN, SessionId,
+    TrainingSettings, Transmission, align_group, apply_auto_level, build_session_result,
+    calculate_group_letter_accuracy, calculate_overall_character_accuracy, compute_char_pool,
+    create_initial_sampling_state, evaluate_auto_level, generate_training_group, parse_callsign,
+    plan_morse_playback, plan_transmission, resolve_group_repeats, resolve_pileup, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -63,16 +63,17 @@ fn wild_settings(rng: &mut FastrandRng) -> TrainingSettings {
     s.band.qsb_depth = rng.pick_in_range(-1.0, 4.0);
     s.band.qsb_rate_hz = rng.pick_in_range(-1.0, 40.0);
     s.band.qrn_level = rng.pick_in_range(-1.0, 4.0);
-    s.band.receiver_level = rng.pick_in_range(-1.0, 4.0);
+    s.band.noise_level = rng.pick_in_range(-1.0, 4.0);
+    s.band.filter_shape = if rng.f64() < 0.5 {
+        crate::settings::FilterShape::Soft
+    } else {
+        crate::settings::FilterShape::Sharp
+    };
     s.band.filter_bandwidth_hz = rng.pick_in_range(-500.0, 6_000.0);
     s.band.stations_min = rng.usize_in(0, 12) as u32;
     s.band.stations_max = rng.usize_in(0, 12) as u32;
     s.band.pileup_spread_hz = rng.pick_in_range(-100.0, 2_000.0);
     s.band.pileup_level_db = rng.pick_in_range(-20.0, 90.0);
-    s.band.receiver_background_gain = rng.pick_in_range(-5.0, 200.0);
-    s.band.receiver_background_resonance = rng.pick_in_range(-10.0, 600.0);
-    s.band.receiver_background_offset_mod_depth_hz = rng.pick_in_range(-100.0, 4_000.0);
-    s.band.receiver_background_offset_mod_rate_hz = rng.pick_in_range(-5.0, 80.0);
     s.band.side_tone_min = rng.pick_in_range(-100.0, 4_000.0);
     s.band.side_tone_max = rng.pick_in_range(-100.0, 4_000.0);
     s.band.volume_min = rng.pick_in_range(-1.0, 4.0);
@@ -139,9 +140,10 @@ fn check_clamped(s: &TrainingSettings, seed: u64) {
         b.filter_bandwidth_hz
     );
     assert!(
-        (0.0..=crate::settings::RECEIVER_MODEL_GAIN_MAX).contains(&b.receiver_background_gain),
-        "seed {seed}: the receiver model came out at {}x",
-        b.receiver_background_gain
+        (0.0..=1.0).contains(&b.noise_level) && (0.0..=1.0).contains(&b.qrn_level),
+        "seed {seed}: the band came out at noise {} and static {}",
+        b.noise_level,
+        b.qrn_level
     );
     assert!(
         (STATIONS_MIN..=STATIONS_MAX).contains(&b.stations_min)
@@ -622,7 +624,7 @@ fn no_band_setting_makes_an_unlistenable_receiver() {
         let mut rng = FastrandRng(seed.wrapping_mul(0x27D4_EB2D).wrapping_add(19));
         let mut settings = wild_settings(&mut rng).clamp();
         settings.band.qrn_enabled = true;
-        settings.band.receiver_enabled = true;
+        settings.band.noise_enabled = true;
         let settings = settings.clamp();
 
         let mut mixer = crate::band::BandMixer::new(16_000, &settings, seed | 1);
@@ -647,11 +649,11 @@ fn no_band_setting_makes_an_unlistenable_receiver() {
             out.len()
         );
         let loudest = out.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        // A model at no gain is a model that is off, however the switch above
-        // it is set — so it does not count as something that should be heard.
-        let receiver_sounds =
-            settings.band.receiver_level > 0.05 && settings.band.receiver_background_gain > 0.0;
-        if settings.band.qrn_level > 0.05 || receiver_sounds {
+        // The floor is continuous, so any of it is heard at once. Static is a
+        // Poisson process: at the bottom of its control a quiet second with no
+        // sferic in it is the truth, not a fault, so it only has to be heard
+        // once it is busy enough that a silent second would be absurd.
+        if settings.band.noise_level > 0.05 || settings.band.qrn_level > 0.5 {
             assert!(
                 loudest > 1e-6,
                 "seed {seed}: the band was switched on and made no sound"

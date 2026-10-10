@@ -1,7 +1,7 @@
 use cw_core::{HeatmapColorMode, HeatmapGrid, SessionResult, StreakState, StreakStatus};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, html_bool, Icon, Seg};
+use crate::ui::widgets::{Icon, Seg, control_id, html_bool};
 
 #[component]
 pub fn StreakCard(status: StreakStatus) -> Element {

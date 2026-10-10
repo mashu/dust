@@ -71,7 +71,7 @@ pub fn test_settings() -> TrainingSettings {
     settings.playback.link_group_repeat = true;
     settings.auto_level.auto_adjust_level = false;
     settings.band.qrn_enabled = false;
-    settings.band.receiver_enabled = false;
+    settings.band.noise_enabled = false;
     settings.band.qsb_enabled = false;
     settings
 }
@@ -152,13 +152,15 @@ impl Harness {
         let settings_now = self.settings.peek().clone().clamp();
         let history = self.sessions.peek().clone();
         let (app, signals) = (self.app.clone(), self.signals());
-        let gen = self
+        let generation = self
             .in_app(|| app.takeover_audio(&settings_now))
             .expect("the fake player always opens");
         let effects = self
-            .in_app(|| boot_machine_session(settings_now.clone(), &history, &app, gen, signals))
+            .in_app(|| {
+                boot_machine_session(settings_now.clone(), &history, &app, generation, signals)
+            })
             .expect("a fresh session always boots");
-        self.in_app(|| spawn_effects(effects, settings_now, app.clone(), gen, signals));
+        self.in_app(|| spawn_effects(effects, settings_now, app.clone(), generation, signals));
         self.pump();
     }
 
@@ -233,12 +235,12 @@ impl Harness {
         let mut waited = 0;
         let mut answered = vec![false; self.sent_count()];
         while waited < budget_ms && self.screen() != Screen::Results {
-            if let Some(index) = self.awaiting_answer() {
-                if !answered.get(index).copied().unwrap_or(true) {
-                    answered[index] = true;
-                    let text = self.sent(index);
-                    self.type_answer(index, &text);
-                }
+            if let Some(index) = self.awaiting_answer()
+                && !answered.get(index).copied().unwrap_or(true)
+            {
+                answered[index] = true;
+                let text = self.sent(index);
+                self.type_answer(index, &text);
             }
             self.advance(u64::from(POLL_MS)).await;
             waited += u64::from(POLL_MS);

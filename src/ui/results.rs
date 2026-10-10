@@ -1,7 +1,7 @@
 use cw_core::SessionResult;
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, GroupResultRow, Icon, ScoreRing};
+use crate::ui::widgets::{GroupResultRow, Icon, ScoreRing, control_id};
 
 #[component]
 pub fn ResultsView(

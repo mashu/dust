@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::alignment::{align_group, calculate_group_letter_accuracy, LetterAccuracy};
+use crate::alignment::{LetterAccuracy, align_group, calculate_group_letter_accuracy};
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{

@@ -10,11 +10,7 @@ pub fn unlocked_count_for_level(level: u32) -> usize {
 
 pub const fn max_level_for_len(alphabet_len: usize) -> u32 {
     let n = alphabet_len.saturating_sub(1) as u32;
-    if n < LEVEL_MIN {
-        LEVEL_MIN
-    } else {
-        n
-    }
+    if n < LEVEL_MIN { LEVEL_MIN } else { n }
 }
 
 /// Prefix of `alphabet` unlocked at `level`. Always at least two characters when possible.

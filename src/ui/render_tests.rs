@@ -16,7 +16,7 @@ use super::envelope::EnvelopeCard;
 use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
-use super::paddle::{paddle_down, paddle_up, PaddlePad};
+use super::paddle::{PaddlePad, paddle_down, paddle_up};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
@@ -679,7 +679,7 @@ fn a_confirmed_answer_box_cannot_be_typed_in() {
 /// Components that own state, driven through their own controls.
 mod interactions {
     use super::*;
-    use crate::testing::{stored_session, test_settings, Ui};
+    use crate::testing::{Ui, stored_session, test_settings};
     use crate::ui::band::BandConditionsCard;
     use crate::ui::heatmap::ActivityHeatmap;
     use crate::ui::settings::SettingsView;
@@ -769,34 +769,47 @@ mod interactions {
     }
 
     #[test]
-    fn the_band_card_opens_its_help_and_its_advanced_controls() {
+    fn the_band_card_opens_its_help_and_drives_the_receiver() {
         let mut ui = Ui::new(BandHarness, BandHarnessProps { previewing: false });
         assert!(ui.has("Live preview"));
-        assert!(!ui.has("Model gain"));
         assert!(!ui.has("QSB slowly fades"));
+        // The old resonator model's controls are gone for good.
+        for gone in [
+            "Model gain",
+            "Wobble",
+            "Resonance Q",
+            "Whistle",
+            "Advanced receiver",
+        ] {
+            assert!(!ui.has(gone), "{gone} should no longer be on the card");
+        }
 
         ui.open_disclosures();
         assert!(ui.has("QSB slowly fades"), "the help should have opened");
-        assert!(ui.has("Model gain"), "the tuning should have opened");
 
-        // Every advanced slider is moved, and the readout beside it has to
-        // follow: a tuning control that never reaches the settings is a dead
-        // one, and it would look exactly like this if it were.
-        for (slider, moved_to, reads) in [
-            ("slider-model-gain", "3.5", "3.5×"),
-            ("slider-excitation", "40", "40/s"),
-            ("slider-resonance-q", "120", "120"),
-            ("slider-decay", "0.75", "0.750"),
-            ("slider-filter-offset", "-250", "-250 Hz"),
-            ("slider-wobble-depth", "400", "400 Hz"),
-            ("slider-wobble-rate", "2.5", "2.50 Hz"),
-        ] {
-            ui.type_into(slider, moved_to);
-            assert!(
-                ui.has(&format!("class=\"slider-value\">{reads}<")),
-                "{slider} should read {reads}"
-            );
-        }
+        // The filter shape is a real choice, and it shows which one is in.
+        assert!(ui.has("id=\"seg-filter-sharp\" class=\"seg active\""));
+        ui.click("seg-filter-soft");
+        assert!(ui.has("id=\"seg-filter-soft\" class=\"seg active\""));
+        ui.click("seg-filter-sharp");
+        assert!(ui.has("id=\"seg-filter-sharp\" class=\"seg active\""));
+
+        // The noise reads as a signal-to-noise ratio through the filter you
+        // have set, so the readout follows both controls. The test settings
+        // start with the noise switched off; switch it on first.
+        ui.click("switch-band-noise");
+        ui.type_into("slider-noise-level", "0.5");
+        assert!(
+            ui.has("class=\"slider-value\">S/N 21 dB<"),
+            "500 Hz at half level"
+        );
+        ui.type_into("slider-filter-width", "250");
+        assert!(
+            ui.has("class=\"slider-value\">S/N 24 dB<"),
+            "halving the filter should buy 3 dB"
+        );
+        ui.type_into("slider-noise-level", "0");
+        assert!(ui.has("class=\"slider-value\">Off<"));
 
         // And nothing on the card breaks it, whichever panel is open.
         for control in ui.controls("") {
@@ -894,17 +907,19 @@ mod interactions {
     fn PaddlePadHarness() -> Element {
         let keyer = use_signal(|| PaddleKeyer::with_mode(KeyerMode::IambicA));
         let keying = use_signal(|| false);
-        let gen = use_signal(|| 0u64);
+        let generation = use_signal(|| 0u64);
         let mut heard = use_signal(String::new);
         let on_tone = EventHandler::new(move |_: bool| {});
         let on_letter = EventHandler::new(move |ch: char| {
             heard.write().push(ch);
         });
         let down = EventHandler::new(move |paddle: Paddle| {
-            paddle_down(paddle, 60, true, keyer, keying, gen, on_tone, on_letter);
+            paddle_down(
+                paddle, 60, true, keyer, keying, generation, on_tone, on_letter,
+            );
         });
         let up = EventHandler::new(move |paddle: Paddle| {
-            paddle_up(paddle, 60, keyer, gen, on_tone, on_letter);
+            paddle_up(paddle, 60, keyer, generation, on_tone, on_letter);
         });
         rsx! {
             PaddlePad {

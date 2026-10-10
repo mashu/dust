@@ -33,7 +33,7 @@ pub fn TipsCarousel() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{run, Ui};
+    use crate::testing::{Ui, run};
 
     #[test]
     fn the_carousel_moves_on_by_itself_and_comes_back_round() {

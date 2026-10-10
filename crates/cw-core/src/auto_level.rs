@@ -91,8 +91,7 @@ fn apply_mixed_axis_delta(
 ) -> Option<(u32, u32, MixedAutoLevelAxis)> {
     match axis {
         MixedAutoLevelAxis::Letters => {
-            let candidate =
-                (current_level as i32 + delta).clamp(LEVEL_MIN as i32, max_letters as i32) as u32;
+            let candidate = step_level(current_level, delta, LEVEL_MIN, max_letters);
             if candidate != current_level {
                 Some((candidate, current_digits, MixedAutoLevelAxis::Letters))
             } else {
@@ -100,9 +99,7 @@ fn apply_mixed_axis_delta(
             }
         }
         MixedAutoLevelAxis::Digits => {
-            let candidate = (current_digits as i32 + delta)
-                .clamp(MIN_DIGITS_LEVEL as i32, max_digits as i32)
-                as u32;
+            let candidate = step_level(current_digits, delta, MIN_DIGITS_LEVEL, max_digits);
             if candidate != current_digits {
                 Some((current_level, candidate, MixedAutoLevelAxis::Digits))
             } else {
@@ -188,10 +185,11 @@ pub fn evaluate_auto_level(
     let mode = AutoAdjustMode::from_char_set(settings.curriculum.char_set_mode);
     let threshold = settings.auto_level.auto_adjust_threshold.clamp(0.0, 100.0);
     let accuracy_pct = accuracy_fraction * 100.0;
+    // Counters come back from storage, so they are not trusted to be small.
     if accuracy_pct >= threshold {
-        counters.above += 1;
+        counters.above = counters.above.saturating_add(1);
     } else {
-        counters.below += 1;
+        counters.below = counters.below.saturating_add(1);
     }
 
     let increase_enabled = settings.auto_level.auto_adjust_above_threshold_count > 0;
@@ -226,8 +224,7 @@ pub fn evaluate_auto_level(
             AutoAdjustMode::Callsign => CALLSIGN_TIER_MAX,
             _ => max_letter_level(settings),
         };
-        let next_level =
-            (current_level as i32 + delta).clamp(LEVEL_MIN as i32, max_level as i32) as u32;
+        let next_level = step_level(current_level, delta, LEVEL_MIN, max_level);
         if next_level == current_level {
             if delta > 0 {
                 counters.above = 0;
@@ -363,9 +360,41 @@ pub fn auto_level_progress(
     })
 }
 
+/// Move a level by `delta`, staying within `min..=max`. In unsigned
+/// arithmetic throughout: a stored level is not trusted to fit an `i32`, and
+/// a round trip through one turned a huge level into a negative number.
+///
+/// A step only ever moves the way it points. A level already outside its
+/// range — a save from a longer alphabet — is left where it is rather than
+/// "increased" downwards by the clamp.
+fn step_level(level: u32, delta: i32, min: u32, max: u32) -> u32 {
+    let stepped = level.saturating_add_signed(delta).clamp(min, max.max(min));
+    if (delta > 0 && stepped < level) || (delta < 0 && stepped > level) {
+        level
+    } else {
+        stepped
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_level_steps_only_the_way_it_points() {
+        assert_eq!(step_level(5, 1, 1, 10), 6);
+        assert_eq!(step_level(5, -1, 1, 10), 4);
+        assert_eq!(step_level(10, 1, 1, 10), 10, "already at the top");
+        assert_eq!(step_level(1, -1, 1, 10), 1, "already at the bottom");
+        assert_eq!(
+            step_level(50, 1, 1, 10),
+            50,
+            "an increase never lowers a level"
+        );
+        assert_eq!(step_level(0, -1, 1, 10), 0, "a decrease never raises one");
+        assert_eq!(step_level(u32::MAX, 1, 1, 10), u32::MAX);
+        assert_eq!(step_level(3, i32::MIN, 1, 10), 1);
+    }
 
     #[test]
     fn five_above_increases_koch() {

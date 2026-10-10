@@ -1,7 +1,7 @@
-use cw_core::{compute_char_pool, morse_for, MixedAutoLevelAxis, TrainingSettings};
+use cw_core::{MixedAutoLevelAxis, TrainingSettings, compute_char_pool, morse_for};
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{control_id, html_bool, Icon};
+use crate::ui::widgets::{Icon, control_id, html_bool};
 
 pub fn newest_index(settings: &TrainingSettings, pool: &[char]) -> usize {
     if pool.is_empty() {

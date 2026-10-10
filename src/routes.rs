@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use cw_core::{compute_char_pool, dit_ms_for_wpm, Paddle, SessionEvent};
+use cw_core::{Paddle, SessionEvent, compute_char_pool, dit_ms_for_wpm};
 use dioxus::prelude::*;
 
 use crate::persist::current_auto_progress;
@@ -207,7 +207,7 @@ pub fn app_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{run, test_settings, Ui};
+    use crate::testing::{Ui, run, test_settings};
 
     /// The screens the router draws when the state behind them is not there
     /// yet: the moment between starting a session and its first group, and a

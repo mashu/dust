@@ -1,16 +1,16 @@
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use cw_core::band::{
-    band_standing_level, qsb_path, shaped_level, AtmosphericNoise, AGC_ATTACK_SEC, AGC_RELEASE_SEC,
-    AGC_TRIGGER, QRN_OUTPUT_GAIN, QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_OUTPUT_GAIN,
-    RECEIVER_STAGES, RINGING_OUTPUT_GAIN,
+    AGC_ATTACK_SEC, AGC_RELEASE_SEC, AGC_TRIGGER, BandMixer, BandSource, FilterDesign,
+    QSB_MIN_GAIN, QSB_PATHS, QSB_SPREAD, RECEIVER_SECTIONS, SOFT_LIMIT_HEADROOM,
+    band_standing_level, qsb_path, soft_limit_curve,
 };
-use cw_core::{
-    plan_transmission, PlannedTransmission, ReceiverProfile, TrainingSettings, Transmission,
-};
-use wasm_bindgen::closure::Closure;
+use cw_core::{PlannedTransmission, TrainingSettings, Transmission, plan_transmission};
+use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 use web_sys::{
     AudioBufferSourceNode, AudioContext, AudioContextState, AudioNode, AudioScheduledSourceNode,
     BiquadFilterType, GainNode, OscillatorType,
@@ -18,11 +18,24 @@ use web_sys::{
 
 use super::{MorseBackend, PlaybackSignal, PlaybackWait, WaitFlags};
 
-const NOISE_BUFFER_SECONDS: f32 = 2.0;
-
-/// Static is sparse, so its loop has to be long enough that the same crashes
-/// do not come round in a recognisable pattern.
-const ATMOSPHERIC_BUFFER_SECONDS: f32 = 12.0;
+/// How much of the band each streamed buffer holds.
+const STREAM_CHUNK_SEC: f64 = 0.1;
+/// How far ahead of the audio clock the band is kept scheduled. Enough to
+/// ride over a busy main thread; short enough that a buffer is not wasted
+/// every time a slider moves.
+const STREAM_LEAD_SEC: f64 = 0.5;
+/// A hidden tab's timers fire about once a second at best, so the band is
+/// scheduled further ahead while the page is out of sight.
+const STREAM_LEAD_HIDDEN_SEC: f64 = 2.5;
+/// How often the stream is topped up.
+const STREAM_TICK_MS: u32 = 100;
+/// Points in the soft limiter's lookup table.
+const LIMITER_POINTS: usize = 4_097;
+/// The rate the band's standing level is measured at for the compressor.
+const STANDING_MEASURE_RATE: u32 = 16_000;
+/// Fade between one band and the next when the settings change. Long enough
+/// to hide the seam, short enough that the change is immediate.
+const STREAM_FADE_SEC: f64 = 0.02;
 
 /// How long a stopped send takes to reach silence. The native player's
 /// [`crate::audio::render::RELEASE_MS`] in seconds — the same ramp either side.
@@ -76,17 +89,26 @@ pub struct MorsePlayer {
     cw_gain: GainNode,
     group_gain: Option<GainNode>,
     band: BandGraph,
-    /// The receiver's own filter, as a cascade of band-pass nodes.
+    /// The receiver's own filter, as a cascade of band-pass nodes — the same
+    /// sections the native player runs — and the gain that brings its centre
+    /// back to unity.
     receiver: Vec<web_sys::BiquadFilterNode>,
+    receiver_gain: GainNode,
     agc: web_sys::DynamicsCompressorNode,
-    /// Group gains that are fading out, with the context time their ramp ends.
+    /// Gains that are fading out, with the context time their ramp ends: a
+    /// stopped send's, or the band stream that was just replaced.
     released: Vec<(GainNode, f64)>,
     pending_resume: RefCell<Option<js_sys::Promise>>,
     live_osc: Option<web_sys::OscillatorNode>,
     live_gain: Option<GainNode>,
+    /// Kept so the listener can be taken off again when this player goes.
+    on_visibility: Option<Closure<dyn FnMut()>>,
 }
 
+/// The background layers: the band itself, streamed, and the fading
+/// oscillators on the Morse.
 struct BandGraph {
+    stream: Option<BandStream>,
     sources: Vec<AudioScheduledSourceNode>,
     nodes: Vec<AudioNode>,
     signature: String,
@@ -95,13 +117,18 @@ struct BandGraph {
 impl BandGraph {
     fn new() -> Self {
         Self {
+            stream: None,
             sources: Vec::new(),
             nodes: Vec::new(),
             signature: String::new(),
         }
     }
 
-    fn stop_layers(&mut self, ctx: &AudioContext, cw_gain: &GainNode) {
+    /// Take the band down. The stream fades rather than stopping dead; its
+    /// output gain is handed back so the caller can let it go once the fade
+    /// has run.
+    fn stop_layers(&mut self, ctx: &AudioContext, cw_gain: &GainNode) -> Option<(GainNode, f64)> {
+        let fading = self.stream.take().map(BandStream::fade_out);
         for source in self.sources.drain(..) {
             let _ = source.stop();
             let _ = source.unchecked_ref::<AudioNode>().disconnect();
@@ -113,6 +140,142 @@ impl BandGraph {
         let _ = cw_gain.gain().cancel_scheduled_values(now);
         let _ = cw_gain.gain().set_value_at_time(1.0, now);
         self.signature.clear();
+        fading
+    }
+}
+
+/// The band, streamed into the graph.
+///
+/// Web Audio has nowhere to run a generator sample by sample short of an
+/// AudioWorklet, and a looped buffer is a pattern: the same crash coming
+/// round every few seconds is the one thing real static never does. So the
+/// band is generated here, by the same [`BandSource`] the native player runs,
+/// a tenth of a second at a time, and each buffer is scheduled on the audio
+/// clock to start exactly where the last one ends. Nothing repeats, and the
+/// browser plays the very model the desktop does.
+struct BandStream {
+    state: Rc<RefCell<StreamState>>,
+    _ticker: Interval,
+}
+
+struct StreamState {
+    ctx: AudioContext,
+    output: GainNode,
+    source: BandSource,
+    chunk: Vec<f32>,
+    /// Context time the next buffer starts at.
+    next_start: f64,
+    /// Buffers scheduled and not yet over, with the time each one ends.
+    queued: VecDeque<(AudioBufferSourceNode, f64)>,
+}
+
+impl BandStream {
+    fn start(
+        ctx: &AudioContext,
+        into: &GainNode,
+        settings: &TrainingSettings,
+    ) -> Result<Self, String> {
+        let output = ctx.create_gain().map_err(|e| format!("band gain: {e:?}"))?;
+        let now = ctx.current_time();
+        let gain = output.gain();
+        gain.set_value_at_time(0.0, now)
+            .map_err(|e| format!("band fade: {e:?}"))?;
+        gain.linear_ramp_to_value_at_time(1.0, now + STREAM_FADE_SEC)
+            .map_err(|e| format!("band fade: {e:?}"))?;
+        output
+            .connect_with_audio_node(into)
+            .map_err(|e| format!("band connect: {e:?}"))?;
+        let sample_rate = ctx.sample_rate();
+        let chunk = ((f64::from(sample_rate) * STREAM_CHUNK_SEC).round() as usize).max(128);
+        let state = Rc::new(RefCell::new(StreamState {
+            ctx: ctx.clone(),
+            output,
+            source: BandSource::new(sample_rate as u32, settings, fastrand::u64(..)),
+            chunk: vec![0.0; chunk],
+            next_start: now,
+            queued: VecDeque::new(),
+        }));
+        state.borrow_mut().top_up()?;
+        let ticking = Rc::clone(&state);
+        let ticker = Interval::new(STREAM_TICK_MS, move || {
+            // A tick that finds the state busy has nothing to add: whatever
+            // holds it is topping up already.
+            if let Ok(mut stream) = ticking.try_borrow_mut() {
+                let _ = stream.top_up();
+            }
+        });
+        Ok(Self {
+            state,
+            _ticker: ticker,
+        })
+    }
+
+    /// Fade out and stop. Dropping `self` here stops the ticker; the output
+    /// gain comes back with the time its fade ends.
+    fn fade_out(self) -> (GainNode, f64) {
+        let stream = self.state.borrow();
+        let now = stream.ctx.current_time();
+        let done = now + STREAM_FADE_SEC;
+        let gain = stream.output.gain();
+        let _ = gain.cancel_scheduled_values(now);
+        let _ = gain.set_value_at_time(gain.value(), now);
+        let _ = gain.linear_ramp_to_value_at_time(0.0, done);
+        for (node, _) in &stream.queued {
+            let _ = node
+                .unchecked_ref::<AudioScheduledSourceNode>()
+                .stop_with_when(done);
+        }
+        (stream.output.clone(), done)
+    }
+}
+
+impl StreamState {
+    /// Schedule buffers until the band runs far enough ahead of the clock,
+    /// and let go of the ones that have finished.
+    fn top_up(&mut self) -> Result<(), String> {
+        if self.ctx.state() == AudioContextState::Closed {
+            return Ok(());
+        }
+        let now = self.ctx.current_time();
+        // Fallen behind — a long task, a throttled tab. Pick up just ahead of
+        // the clock rather than scheduling into the past, which would play
+        // everything late at once.
+        if self.next_start < now + 0.005 {
+            self.next_start = now + 0.01;
+        }
+        let lead = if page_is_hidden() {
+            STREAM_LEAD_HIDDEN_SEC
+        } else {
+            STREAM_LEAD_SEC
+        };
+        let sample_rate = self.ctx.sample_rate();
+        while self.next_start < now + lead {
+            self.source.fill(&mut self.chunk);
+            let buffer = self
+                .ctx
+                .create_buffer(1, self.chunk.len() as u32, sample_rate)
+                .map_err(|e| format!("band buffer: {e:?}"))?;
+            buffer
+                .copy_to_channel(&self.chunk, 0)
+                .map_err(|e| format!("band copy: {e:?}"))?;
+            let node = self
+                .ctx
+                .create_buffer_source()
+                .map_err(|e| format!("band source: {e:?}"))?;
+            node.set_buffer(Some(&buffer));
+            node.connect_with_audio_node(&self.output)
+                .map_err(|e| format!("band source connect: {e:?}"))?;
+            node.start_with_when(self.next_start)
+                .map_err(|e| format!("band start: {e:?}"))?;
+            let ends = self.next_start + self.chunk.len() as f64 / f64::from(sample_rate);
+            self.queued.push_back((node, ends));
+            self.next_start = ends;
+        }
+        while let Some((node, _)) = self.queued.front().filter(|(_, ends)| *ends < now) {
+            let _ = node.disconnect();
+            self.queued.pop_front();
+        }
+        Ok(())
     }
 }
 
@@ -136,9 +299,9 @@ impl MorsePlayer {
         // everything already mixed into it. The native player filters the send
         // and the background separately, which comes to the same thing — a
         // band-pass is linear — but here they are already together.
-        let mut receiver = Vec::with_capacity(RECEIVER_STAGES);
+        let mut receiver = Vec::with_capacity(RECEIVER_SECTIONS);
         let mut tail: AudioNode = mix_gain.clone().unchecked_into();
-        for _ in 0..RECEIVER_STAGES {
+        for _ in 0..RECEIVER_SECTIONS {
             let stage = ctx
                 .create_biquad_filter()
                 .map_err(|e| format!("receiver filter: {e:?}"))?;
@@ -148,6 +311,12 @@ impl MorsePlayer {
             tail = stage.clone().unchecked_into();
             receiver.push(stage);
         }
+        let receiver_gain = ctx
+            .create_gain()
+            .map_err(|e| format!("receiver gain: {e:?}"))?;
+        tail.connect_with_audio_node(&receiver_gain)
+            .map_err(|e| format!("receiver gain connect: {e:?}"))?;
+        let tail: AudioNode = receiver_gain.clone().unchecked_into();
         // The receiver's AGC, in the one place the browser can put it: after
         // the filter, with the send and the background already together. The
         // native player works the same gain out in Rust and hands it to both
@@ -171,9 +340,31 @@ impl MorsePlayer {
             .map_err(|e| format!("agc release: {e:?}"))?;
         tail.connect_with_audio_node(&agc)
             .map_err(|e| format!("agc connect: {e:?}"))?;
-        agc.connect_with_audio_node(&ctx.destination())
+        // And the native player's soft limiter, as a shaper. A compressor's
+        // attack lets the first milliseconds of a crash through, and a crash
+        // through a wide-open filter on a noisy band is well past full scale:
+        // without this the browser squared it off where the desktop catches it.
+        let headroom = ctx
+            .create_gain()
+            .map_err(|e| format!("limiter gain: {e:?}"))?;
+        headroom
+            .gain()
+            .set_value_at_time((1.0 / SOFT_LIMIT_HEADROOM) as f32, ctx.current_time())
+            .map_err(|e| format!("limiter set: {e:?}"))?;
+        let limiter = ctx
+            .create_wave_shaper()
+            .map_err(|e| format!("limiter: {e:?}"))?;
+        limiter.set_curve_opt_f32_slice(Some(&mut soft_limit_curve(LIMITER_POINTS)));
+        limiter.set_oversample(web_sys::OverSampleType::N2x);
+        agc.connect_with_audio_node(&headroom)
+            .map_err(|e| format!("limiter connect: {e:?}"))?;
+        headroom
+            .connect_with_audio_node(&limiter)
+            .map_err(|e| format!("limiter connect: {e:?}"))?;
+        limiter
+            .connect_with_audio_node(&ctx.destination())
             .map_err(|e| format!("mix connect: {e:?}"))?;
-        install_resume_on_foreground(&ctx);
+        let on_visibility = install_resume_on_foreground(&ctx);
         Ok(Self {
             ctx,
             stop_flag: Rc::new(Cell::new(false)),
@@ -183,19 +374,21 @@ impl MorsePlayer {
             group_gain: None,
             band: BandGraph::new(),
             receiver,
+            receiver_gain,
             agc,
             released: Vec::new(),
             pending_resume: RefCell::new(None),
             live_osc: None,
             live_gain: None,
+            on_visibility,
         })
     }
 
     pub fn resume_from_gesture(&self) {
-        if self.ctx.state() == AudioContextState::Suspended {
-            if let Ok(promise) = self.ctx.resume() {
-                *self.pending_resume.borrow_mut() = Some(promise);
-            }
+        if self.ctx.state() == AudioContextState::Suspended
+            && let Ok(promise) = self.ctx.resume()
+        {
+            *self.pending_resume.borrow_mut() = Some(promise);
         }
     }
 
@@ -231,16 +424,21 @@ impl MorsePlayer {
         Ok(())
     }
 
-    /// Retune the receiver to the current pitch and width. Cheap, and the
-    /// nodes stay put, so this can run on every send.
+    /// Retune the receiver to the current pitch, width and shape. Cheap, and
+    /// the nodes stay put, so this can run on every send.
     fn tune_receiver(&self, settings: &TrainingSettings) {
         let now = self.ctx.current_time();
-        let center = settings.side_tone_center();
-        let q = cw_core::band::receiver_stage_q(center, settings.band.filter_bandwidth_hz);
-        for stage in &self.receiver {
-            let _ = stage.frequency().set_value_at_time(center as f32, now);
-            let _ = stage.q().set_value_at_time(q as f32, now);
+        let design = FilterDesign::from_settings(settings);
+        for (stage, section) in self.receiver.iter().zip(design.sections()) {
+            let _ = stage
+                .frequency()
+                .set_value_at_time(section.center_hz as f32, now);
+            let _ = stage.q().set_value_at_time(section.q as f32, now);
         }
+        let _ = self
+            .receiver_gain
+            .gain()
+            .set_value_at_time(design.gain() as f32, now);
     }
 
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
@@ -249,16 +447,25 @@ impl MorsePlayer {
         if signature == self.band.signature {
             return Ok(());
         }
-        self.band.stop_layers(&self.ctx, &self.cw_gain);
+        self.retire_band();
         if self.ctx.state() == AudioContextState::Closed {
             return Ok(());
         }
         add_qsb(&self.ctx, &self.cw_gain, settings, &mut self.band)?;
-        add_qrn(&self.ctx, &self.mix_gain, settings, &mut self.band)?;
-        add_receiver(&self.ctx, &self.mix_gain, settings, &mut self.band)?;
+        if BandMixer::needs_background(settings) {
+            self.band.stream = Some(BandStream::start(&self.ctx, &self.mix_gain, settings)?);
+        }
         self.tune_agc(settings);
         self.band.signature = signature;
         Ok(())
+    }
+
+    /// Fade the band out, and let go of whatever earlier fades have finished.
+    fn retire_band(&mut self) {
+        self.drop_released();
+        if let Some(fading) = self.band.stop_layers(&self.ctx, &self.cw_gain) {
+            self.released.push(fading);
+        }
     }
 
     /// Point the compressor at this band's own floor.
@@ -271,7 +478,10 @@ impl MorsePlayer {
     /// floor and a lower threshold to match, so a crash still has to stand the
     /// same distance above the band before anything ducks.
     fn tune_agc(&self, settings: &TrainingSettings) {
-        let standing = band_standing_level(self.ctx.sample_rate() as u32, settings);
+        // Measured at a third of the device rate: the band is calibrated to
+        // sound the same at any rate, and this runs on the main thread every
+        // time a band setting moves.
+        let standing = band_standing_level(STANDING_MEASURE_RATE, settings);
         // A band with nothing on it has no floor to measure. Park the threshold
         // at the top, where the compressor has nothing to do.
         let threshold_db = if standing > 1e-6 {
@@ -443,10 +653,9 @@ impl MorseBackend for MorsePlayer {
 
     fn shutdown(&mut self) {
         MorseBackend::stop(self);
-        self.band.stop_layers(&self.ctx, &self.cw_gain);
-        for (gain, _) in self.released.drain(..) {
-            let _ = gain.disconnect();
-        }
+        // Faded rather than disconnected on the spot: the fades are let go of
+        // on the next send, or when the player itself goes.
+        self.retire_band();
         if let Some(gain) = &self.live_gain {
             let now = self.ctx.current_time();
             let _ = gain.gain().cancel_scheduled_values(now);
@@ -482,7 +691,33 @@ impl MorseBackend for MorsePlayer {
     }
 }
 
-fn install_resume_on_foreground(ctx: &AudioContext) {
+impl Drop for MorsePlayer {
+    /// A player is rebuilt after a failed send. Without this every rebuild
+    /// left its whole audio context running, and its visibility listener
+    /// resuming it, for the life of the page.
+    fn drop(&mut self) {
+        if let Some(stream) = self.band.stream.take() {
+            drop(stream.fade_out());
+        }
+        if let Some(osc) = self.live_osc.take() {
+            let _ = osc.stop();
+        }
+        if let (Some(listener), Some(doc)) = (
+            self.on_visibility.take(),
+            web_sys::window().and_then(|window| window.document()),
+        ) {
+            let _ = doc.remove_event_listener_with_callback(
+                "visibilitychange",
+                listener.as_ref().unchecked_ref(),
+            );
+        }
+        let _ = self.ctx.close();
+    }
+}
+
+/// Resume the context when the page comes back into view, if it was the page
+/// going away that suspended it. Returns the listener so it can be removed.
+fn install_resume_on_foreground(ctx: &AudioContext) -> Option<Closure<dyn FnMut()>> {
     let ctx = ctx.clone();
     let closure = Closure::wrap(Box::new(move || {
         if page_is_hidden() || ctx.state() != AudioContextState::Suspended {
@@ -490,11 +725,10 @@ fn install_resume_on_foreground(ctx: &AudioContext) {
         }
         let _ = ctx.resume();
     }) as Box<dyn FnMut()>);
-    if let Some(doc) = web_sys::window().and_then(|window| window.document()) {
-        let _ = doc
-            .add_event_listener_with_callback("visibilitychange", closure.as_ref().unchecked_ref());
-    }
-    closure.forget();
+    let doc = web_sys::window().and_then(|window| window.document())?;
+    doc.add_event_listener_with_callback("visibilitychange", closure.as_ref().unchecked_ref())
+        .ok()?;
+    Some(closure)
 }
 
 fn push_source(graph: &mut BandGraph, source: impl JsCast) {
@@ -503,121 +737,6 @@ fn push_source(graph: &mut BandGraph, source: impl JsCast) {
 
 fn push_node(graph: &mut BandGraph, node: impl JsCast) {
     graph.nodes.push(node.unchecked_into());
-}
-
-fn add_frequency_modulation(
-    ctx: &AudioContext,
-    target: &web_sys::AudioParam,
-    depth_hz: f64,
-    rate_hz: f64,
-    graph: &mut BandGraph,
-) -> Result<(), String> {
-    let depth = depth_hz.clamp(0.0, 1000.0);
-    let rate = rate_hz.clamp(0.0, 20.0);
-    if depth <= 0.0 || rate <= 0.0 {
-        return Ok(());
-    }
-    let oscillator = ctx
-        .create_oscillator()
-        .map_err(|e| format!("fm osc: {e:?}"))?;
-    let gain = ctx.create_gain().map_err(|e| format!("fm gain: {e:?}"))?;
-    oscillator.set_type(OscillatorType::Sine);
-    oscillator
-        .frequency()
-        .set_value_at_time(rate as f32, ctx.current_time())
-        .map_err(|e| format!("fm freq: {e:?}"))?;
-    gain.gain()
-        .set_value_at_time(depth as f32, ctx.current_time())
-        .map_err(|e| format!("fm depth: {e:?}"))?;
-    oscillator
-        .connect_with_audio_node(&gain)
-        .map_err(|e| format!("fm connect: {e:?}"))?;
-    gain.connect_with_audio_param(target)
-        .map_err(|e| format!("fm param: {e:?}"))?;
-    oscillator.start().map_err(|e| format!("fm start: {e:?}"))?;
-    push_source(graph, oscillator);
-    push_node(graph, gain);
-    Ok(())
-}
-
-fn fill_noise_buffer_seconds(
-    ctx: &AudioContext,
-    seconds: f32,
-    mut fill: impl FnMut(usize) -> f32,
-) -> Result<web_sys::AudioBuffer, String> {
-    let frame_count = (ctx.sample_rate() * seconds).floor().max(1.0) as u32;
-    let buffer = ctx
-        .create_buffer(1, frame_count, ctx.sample_rate())
-        .map_err(|e| format!("buffer: {e:?}"))?;
-    let mut samples = vec![0.0f32; frame_count as usize];
-    for (i, slot) in samples.iter_mut().enumerate() {
-        *slot = fill(i);
-    }
-    buffer
-        .copy_to_channel(&mut samples, 0)
-        .map_err(|e| format!("copy channel: {e:?}"))?;
-    Ok(buffer)
-}
-
-fn looping_source(
-    ctx: &AudioContext,
-    buffer: &web_sys::AudioBuffer,
-) -> Result<AudioBufferSourceNode, String> {
-    let source = ctx
-        .create_buffer_source()
-        .map_err(|e| format!("buffer source: {e:?}"))?;
-    source.set_buffer(Some(buffer));
-    source.set_loop(true);
-    Ok(source)
-}
-
-/// Atmospheric static, from the same model the native player uses — crashes
-/// rather than hiss — rendered into a long loop because Web Audio has no place
-/// to run a per-sample generator.
-fn create_atmospheric_noise(
-    ctx: &AudioContext,
-    level: f64,
-) -> Result<AudioBufferSourceNode, String> {
-    let sample_rate = ctx.sample_rate();
-    let mut model = AtmosphericNoise::new(sample_rate as u32, level, fastrand::u64(..) | 1);
-    let buffer = fill_noise_buffer_seconds(ctx, ATMOSPHERIC_BUFFER_SECONDS, move |_| {
-        model.next_sample() as f32
-    })?;
-    looping_source(ctx, &buffer)
-}
-
-fn create_resonator_source(
-    ctx: &AudioContext,
-    excitation_rate: f64,
-    decay: f64,
-) -> Result<AudioBufferSourceNode, String> {
-    let sample_rate = f64::from(ctx.sample_rate());
-    let impulse_p = excitation_rate.clamp(0.1, 500.0) / sample_rate;
-    let ring_decay = decay.clamp(0.5, 0.9999);
-    let mut ringing_energy = 0.0f32;
-    let mut peak = 0.0f32;
-    let buffer = fill_noise_buffer_seconds(ctx, NOISE_BUFFER_SECONDS, |_| {
-        if fastrand::f64() < impulse_p {
-            ringing_energy += (fastrand::f32() * 2.0 - 1.0) * (0.6 + fastrand::f32() * 0.4);
-        }
-        ringing_energy *= ring_decay as f32;
-        let grain = ringing_energy + (fastrand::f32() * 2.0 - 1.0) * 0.015;
-        peak = peak.max(grain.abs());
-        grain
-    })?;
-    if peak > 0.0 {
-        let mut samples = vec![0.0f32; buffer.length() as usize];
-        buffer
-            .copy_from_channel(&mut samples, 0)
-            .map_err(|e| format!("copy from: {e:?}"))?;
-        for sample in &mut samples {
-            *sample /= peak;
-        }
-        buffer
-            .copy_to_channel(&mut samples, 0)
-            .map_err(|e| format!("copy norm: {e:?}"))?;
-    }
-    looping_source(ctx, &buffer)
 }
 
 fn add_qsb(
@@ -666,240 +785,6 @@ fn add_qsb(
         lfo.start().map_err(|e| format!("qsb start: {e:?}"))?;
         push_source(graph, lfo);
         push_node(graph, lfo_gain);
-    }
-    Ok(())
-}
-
-fn add_qrn(
-    ctx: &AudioContext,
-    mix_gain: &GainNode,
-    settings: &TrainingSettings,
-    graph: &mut BandGraph,
-) -> Result<(), String> {
-    if !settings.band.qrn_enabled || settings.band.qrn_level <= 0.0 {
-        return Ok(());
-    }
-    let level = settings.band.qrn_level.clamp(0.0, 1.0);
-    let source = create_atmospheric_noise(ctx, level)?;
-    let gain = ctx.create_gain().map_err(|e| format!("qrn gain: {e:?}"))?;
-    gain.gain()
-        .set_value_at_time(QRN_OUTPUT_GAIN as f32, ctx.current_time())
-        .map_err(|e| format!("qrn level: {e:?}"))?;
-    source
-        .connect_with_audio_node(&gain)
-        .map_err(|e| format!("qrn bp: {e:?}"))?;
-    gain.connect_with_audio_node(mix_gain)
-        .map_err(|e| format!("qrn mix: {e:?}"))?;
-    source.start().map_err(|e| format!("qrn start: {e:?}"))?;
-    push_source(graph, source);
-    push_node(graph, gain);
-    Ok(())
-}
-
-fn add_passband_receiver(
-    ctx: &AudioContext,
-    mix_gain: &GainNode,
-    settings: &TrainingSettings,
-    graph: &mut BandGraph,
-) -> Result<(), String> {
-    let level = settings.band.receiver_level.clamp(0.0, 1.0);
-    let model_gain = settings.band.receiver_background_gain.clamp(0.0, 20.0);
-    let resonance = settings
-        .band
-        .receiver_background_resonance
-        .clamp(0.5, 240.0);
-    let offset_hz = settings
-        .band
-        .receiver_background_offset_hz
-        .clamp(-1000.0, 1000.0);
-    let center = settings.side_tone_center();
-    let source = create_resonator_source(
-        ctx,
-        settings.band.receiver_background_excitation_rate,
-        settings.band.receiver_background_decay,
-    )?;
-    let primary = ctx
-        .create_biquad_filter()
-        .map_err(|e| format!("receiver p: {e:?}"))?;
-    let secondary = ctx
-        .create_biquad_filter()
-        .map_err(|e| format!("receiver s: {e:?}"))?;
-    let amplitude_lfo = ctx
-        .create_oscillator()
-        .map_err(|e| format!("receiver lfo: {e:?}"))?;
-    let amplitude_gain = ctx
-        .create_gain()
-        .map_err(|e| format!("receiver ag: {e:?}"))?;
-    let gain = ctx
-        .create_gain()
-        .map_err(|e| format!("receiver g: {e:?}"))?;
-    let base_gain = RECEIVER_OUTPUT_GAIN * shaped_level(level) * model_gain;
-
-    primary.set_type(BiquadFilterType::Bandpass);
-    primary
-        .frequency()
-        .set_value_at_time((center + offset_hz) as f32, ctx.current_time())
-        .map_err(|e| format!("receiver pf: {e:?}"))?;
-    primary
-        .q()
-        .set_value_at_time(resonance as f32, ctx.current_time())
-        .map_err(|e| format!("receiver pq: {e:?}"))?;
-    secondary.set_type(BiquadFilterType::Bandpass);
-    secondary
-        .frequency()
-        .set_value_at_time(
-            (center - (offset_hz.abs() + 35.0).max(20.0)) as f32,
-            ctx.current_time(),
-        )
-        .map_err(|e| format!("receiver sf: {e:?}"))?;
-    secondary
-        .q()
-        .set_value_at_time((resonance * 0.65).max(0.5) as f32, ctx.current_time())
-        .map_err(|e| format!("receiver sq: {e:?}"))?;
-    add_frequency_modulation(
-        ctx,
-        &primary.frequency(),
-        settings.band.receiver_background_offset_mod_depth_hz,
-        settings.band.receiver_background_offset_mod_rate_hz,
-        graph,
-    )?;
-    add_frequency_modulation(
-        ctx,
-        &secondary.frequency(),
-        settings.band.receiver_background_offset_mod_depth_hz * 0.65,
-        settings.band.receiver_background_offset_mod_rate_hz * 0.73,
-        graph,
-    )?;
-    amplitude_lfo.set_type(OscillatorType::Sine);
-    amplitude_lfo
-        .frequency()
-        .set_value_at_time(0.11, ctx.current_time())
-        .map_err(|e| format!("receiver lf: {e:?}"))?;
-    amplitude_gain
-        .gain()
-        .set_value_at_time((base_gain * 0.18) as f32, ctx.current_time())
-        .map_err(|e| format!("receiver ad: {e:?}"))?;
-    gain.gain()
-        .set_value_at_time(base_gain as f32, ctx.current_time())
-        .map_err(|e| format!("receiver bg: {e:?}"))?;
-    source
-        .connect_with_audio_node(&primary)
-        .map_err(|e| format!("receiver srcp: {e:?}"))?;
-    source
-        .connect_with_audio_node(&secondary)
-        .map_err(|e| format!("receiver srcs: {e:?}"))?;
-    amplitude_lfo
-        .connect_with_audio_node(&amplitude_gain)
-        .map_err(|e| format!("receiver lfo c: {e:?}"))?;
-    amplitude_gain
-        .connect_with_audio_param(&gain.gain())
-        .map_err(|e| format!("receiver lfo p: {e:?}"))?;
-    primary
-        .connect_with_audio_node(&gain)
-        .map_err(|e| format!("receiver pc: {e:?}"))?;
-    secondary
-        .connect_with_audio_node(&gain)
-        .map_err(|e| format!("receiver sc: {e:?}"))?;
-    gain.connect_with_audio_node(mix_gain)
-        .map_err(|e| format!("receiver mix: {e:?}"))?;
-    source
-        .start()
-        .map_err(|e| format!("receiver start: {e:?}"))?;
-    amplitude_lfo
-        .start()
-        .map_err(|e| format!("receiver lfo start: {e:?}"))?;
-    push_source(graph, source);
-    push_source(graph, amplitude_lfo);
-    push_node(graph, primary);
-    push_node(graph, secondary);
-    push_node(graph, amplitude_gain);
-    push_node(graph, gain);
-    Ok(())
-}
-
-fn add_ringing_receiver(
-    ctx: &AudioContext,
-    mix_gain: &GainNode,
-    settings: &TrainingSettings,
-    graph: &mut BandGraph,
-) -> Result<(), String> {
-    let level = settings.band.receiver_level.clamp(0.0, 1.0);
-    let model_gain = settings.band.receiver_background_gain.clamp(0.0, 20.0);
-    let resonance = settings
-        .band
-        .receiver_background_resonance
-        .clamp(0.5, 240.0);
-    let offset_hz = settings
-        .band
-        .receiver_background_offset_hz
-        .clamp(-1000.0, 1000.0);
-    let center = settings.side_tone_center();
-    let source = create_resonator_source(
-        ctx,
-        settings.band.receiver_background_excitation_rate,
-        settings.band.receiver_background_decay,
-    )?;
-    let filter = ctx
-        .create_biquad_filter()
-        .map_err(|e| format!("ring f: {e:?}"))?;
-    let gain = ctx.create_gain().map_err(|e| format!("ring g: {e:?}"))?;
-    filter.set_type(BiquadFilterType::Bandpass);
-    filter
-        .frequency()
-        .set_value_at_time((center + offset_hz - 35.0) as f32, ctx.current_time())
-        .map_err(|e| format!("ring freq: {e:?}"))?;
-    filter
-        .q()
-        .set_value_at_time((resonance * 1.45).min(320.0) as f32, ctx.current_time())
-        .map_err(|e| format!("ring q: {e:?}"))?;
-    add_frequency_modulation(
-        ctx,
-        &filter.frequency(),
-        settings.band.receiver_background_offset_mod_depth_hz,
-        settings.band.receiver_background_offset_mod_rate_hz,
-        graph,
-    )?;
-    gain.gain()
-        .set_value_at_time(
-            (RINGING_OUTPUT_GAIN * shaped_level(level) * model_gain) as f32,
-            ctx.current_time(),
-        )
-        .map_err(|e| format!("ring level: {e:?}"))?;
-    source
-        .connect_with_audio_node(&filter)
-        .map_err(|e| format!("ring src: {e:?}"))?;
-    filter
-        .connect_with_audio_node(&gain)
-        .map_err(|e| format!("ring fc: {e:?}"))?;
-    gain.connect_with_audio_node(mix_gain)
-        .map_err(|e| format!("ring mix: {e:?}"))?;
-    source.start().map_err(|e| format!("ring start: {e:?}"))?;
-    push_source(graph, source);
-    push_node(graph, filter);
-    push_node(graph, gain);
-    Ok(())
-}
-
-fn add_receiver(
-    ctx: &AudioContext,
-    mix_gain: &GainNode,
-    settings: &TrainingSettings,
-    graph: &mut BandGraph,
-) -> Result<(), String> {
-    if !settings.band.receiver_enabled || settings.band.receiver_level <= 0.0 {
-        return Ok(());
-    }
-    if matches!(
-        settings.band.receiver_profile,
-        ReceiverProfile::Whistle | ReceiverProfile::Mixed
-    ) {
-        add_passband_receiver(ctx, mix_gain, settings, graph)?;
-    }
-    if matches!(
-        settings.band.receiver_profile,
-        ReceiverProfile::Ringing | ReceiverProfile::Mixed
-    ) {
-        add_ringing_receiver(ctx, mix_gain, settings, graph)?;
     }
     Ok(())
 }

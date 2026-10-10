@@ -49,10 +49,22 @@ pub fn parse_ymd(date: &str) -> Option<(i32, u32, u32)> {
     let y = parts.next()?.parse::<i32>().ok()?;
     let m = parts.next()?.parse::<u32>().ok()?;
     let d = parts.next()?.parse::<u32>().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=days_in_month(y, m)).contains(&d) {
         return None;
     }
     Some((y, m, d))
+}
+
+/// Days in a month of the proleptic Gregorian calendar. Without it the 31st
+/// of February parsed, and landed on a different day than the heatmap, which
+/// looks dates up by their text.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 /// Howard Hinnant's days-from-civil (Unix epoch 1970-01-01 = 0).
@@ -307,6 +319,13 @@ mod calendar_tests {
         assert_eq!(parse_ymd("2026-00-01"), None);
         assert_eq!(parse_ymd("2026-01-00"), None);
         assert_eq!(parse_ymd("2026-01-32"), None);
+        assert_eq!(parse_ymd("2026-02-31"), None);
+        assert_eq!(parse_ymd("2026-02-29"), None);
+        assert_eq!(parse_ymd("2028-02-29"), Some((2028, 2, 29)));
+        assert_eq!(parse_ymd("2100-02-29"), None);
+        assert_eq!(parse_ymd("2000-02-29"), Some((2000, 2, 29)));
+        assert_eq!(parse_ymd("2026-04-31"), None);
+        assert_eq!(parse_ymd("2026-12-31"), Some((2026, 12, 31)));
         assert_eq!(parse_ymd("2026-01-01-01"), None);
         assert_eq!(parse_ymd("2026-01"), None);
         assert_eq!(parse_ymd("nonsense"), None);

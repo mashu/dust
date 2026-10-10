@@ -3,6 +3,8 @@
 //! No React, no DOM, no audio backend. The WASM/UI crate consumes [`timing::PlaybackPlan`]
 //! and drives [`session::GroupSession`].
 
+#![forbid(unsafe_code)]
+
 pub mod alignment;
 pub mod auto_level;
 pub mod band;
@@ -26,66 +28,65 @@ pub mod streak;
 pub mod timing;
 
 pub use alignment::{
-    align_group, calculate_group_letter_accuracy, calculate_overall_character_accuracy,
-    AlignmentPair, LetterAccuracy,
+    AlignmentPair, LetterAccuracy, align_group, calculate_group_letter_accuracy,
+    calculate_overall_character_accuracy,
 };
 pub use auto_level::{
-    apply_auto_level, auto_level_progress, evaluate_auto_level, AutoAdjustMode, AutoLevelCounters,
-    AutoLevelProgress, AutoLevelResult,
+    AutoAdjustMode, AutoLevelCounters, AutoLevelProgress, AutoLevelResult, apply_auto_level,
+    auto_level_progress, evaluate_auto_level,
 };
 pub use callsign::{
-    callsign_pool, generate_callsign, parse_callsign, tier_examples, CallsignParts,
-    CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN,
+    CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN, CallsignParts, callsign_pool, generate_callsign,
+    parse_callsign, tier_examples,
 };
-pub use heatmap::{build_heatmap, HeatmapCell, HeatmapColorMode, HeatmapGrid, HEATMAP_WEEKS};
+pub use heatmap::{HEATMAP_WEEKS, HeatmapCell, HeatmapColorMode, HeatmapGrid, build_heatmap};
 pub use keyer::{
-    dit_ms_for_wpm, paddle_from_bracket, KeyerMode, Paddle, PaddleDecoder, PaddleKeyer,
-    LETTER_GAP_DITS, STRAIGHT_DAH_DITS,
+    KeyerMode, LETTER_GAP_DITS, Paddle, PaddleDecoder, PaddleKeyer, STRAIGHT_DAH_DITS,
+    dit_ms_for_wpm, paddle_from_bracket,
 };
-pub use level::{max_level_for_len, unlocked_count_for_level, unlocked_prefix, LEVEL_MIN};
+pub use level::{LEVEL_MIN, max_level_for_len, unlocked_count_for_level, unlocked_prefix};
 pub use machine::{
-    SessionEffect, SessionEvent, SessionMachine, SessionPhase, AUTO_CONFIRM_DELAY_MS,
+    AUTO_CONFIRM_DELAY_MS, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
 };
 pub use morse::{
-    decode_morse_pattern, digits_unlocked_count, is_morse_code_prefix, morse_for,
     DEFAULT_SLIDING_WINDOW_END, DEFAULT_SLIDING_WINDOW_START, KOCH_LEVEL_MAX, KOCH_LEVEL_MIN,
-    LCWO_SEQUENCE, MAX_DIGITS_LEVEL,
+    LCWO_SEQUENCE, MAX_DIGITS_LEVEL, decode_morse_pattern, digits_unlocked_count,
+    is_morse_code_prefix, morse_for,
 };
 pub use pool::{
     apply_practice_window, compute_char_pool, current_practice_window, fit_settings_to_alphabet,
     unlocked_practice_count,
 };
-pub use rng::{weighted_random_pick, FastrandRng, Rng};
+pub use rng::{FastrandRng, Rng, weighted_random_pick};
 pub use sampling::{
-    create_initial_sampling_state, generate_callsign_group, generate_training_group,
-    update_sampling_state_from_answer, CharSamplingState,
+    CharSamplingState, create_initial_sampling_state, generate_callsign_group,
+    generate_training_group, update_sampling_state_from_answer,
 };
 pub use sequences::{
-    apply_custom_sequence, apply_sequence_preset, preset_by_id, preset_id_for, sequence_preset_id,
-    SequencePreset, SEQUENCE_PRESETS,
+    SEQUENCE_PRESETS, SequencePreset, apply_custom_sequence, apply_sequence_preset, preset_by_id,
+    preset_id_for, sequence_preset_id,
 };
 pub use session::{
-    answer_length_matches, build_session_result, Group, GroupResult, GroupSession, RuntimeStatus,
-    SessionId, SessionResult, SessionSummary, SessionTiming, SessionView,
+    Group, GroupResult, GroupSession, RuntimeStatus, SessionId, SessionResult, SessionSummary,
+    SessionTiming, SessionView, answer_length_matches, build_session_result,
 };
 pub use settings::{
-    AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, MixedAutoLevelAxis,
-    PlaybackSettings, PracticeWindow, RangeSetting, RangeValues, ReceiverProfile, SettingsSection,
-    TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, GROUP_REPEAT_MAX,
-    GROUP_REPEAT_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
-    PILEUP_SPREAD_MIN, RECEIVER_MODEL_GAIN_MAX, STATIONS_MAX, STATIONS_MIN,
+    AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, FILTER_BANDWIDTH_MAX,
+    FILTER_BANDWIDTH_MIN, FilterShape, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, MixedAutoLevelAxis,
+    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN,
+    PlaybackSettings, PracticeWindow, RangeSetting, RangeValues, STATIONS_MAX, STATIONS_MIN,
+    SettingsSection, TrainingSettings,
 };
 pub use stats::{
-    accuracy_chart, bigram_heatmap, character_diagnostics, confusion_entries, sampling_rows,
-    session_history, unigram_stats, AccuracyPoint, BigramHeatmap, CharacterDiagnostic,
-    ConfusionEntry, MasteryStatus, SamplingRow, SessionHistoryRow, UnigramStat,
-    GROUP_START_BIGRAM_TOKEN,
+    AccuracyPoint, BigramHeatmap, CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN,
+    MasteryStatus, SamplingRow, SessionHistoryRow, UnigramStat, accuracy_chart, bigram_heatmap,
+    character_diagnostics, confusion_entries, sampling_rows, session_history, unigram_stats,
 };
-pub use streak::{compute_streak_status, StreakState, StreakStatus};
+pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{
-    build_envelope_curve, compute_after_group_gap_ms, compute_group_gap_for_wpm,
-    compute_group_gap_ms, dot_seconds, envelope_shape, plan_morse_playback,
-    plan_morse_playback_for, plan_transmission, resolve_group_repeats, resolve_pileup,
-    resolve_station, EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan,
-    StationVoice, ToneEvent, Transmission,
+    EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan, StationVoice,
+    ToneEvent, Transmission, build_envelope_curve, compute_after_group_gap_ms,
+    compute_group_gap_for_wpm, compute_group_gap_ms, dot_seconds, envelope_shape,
+    plan_morse_playback, plan_morse_playback_for, plan_transmission, resolve_group_repeats,
+    resolve_pileup, resolve_station,
 };

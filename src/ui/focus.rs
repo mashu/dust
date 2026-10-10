@@ -2,8 +2,17 @@
 //! without a Document context is a no-op.
 
 pub fn focus_group_input(index: usize) {
-    // Tests rebuild a VirtualDom with no document, so eval stays off there.
-    #[cfg(all(any(feature = "web", feature = "desktop"), not(test)))]
+    // Every build runs in a webview or a browser, where eval works. Tests
+    // rebuild a VirtualDom with no document, so eval stays off there.
+    #[cfg(all(
+        any(
+            feature = "web",
+            feature = "desktop",
+            feature = "mobile",
+            feature = "mobile-silent"
+        ),
+        not(test)
+    ))]
     {
         let js = format!(
             r#"(() => {{
@@ -45,7 +54,15 @@ pub fn focus_group_input(index: usize) {
         );
         let _ = dioxus::document::eval(&js);
     }
-    #[cfg(not(all(any(feature = "web", feature = "desktop"), not(test))))]
+    #[cfg(not(all(
+        any(
+            feature = "web",
+            feature = "desktop",
+            feature = "mobile",
+            feature = "mobile-silent"
+        ),
+        not(test)
+    )))]
     {
         let _ = index;
     }

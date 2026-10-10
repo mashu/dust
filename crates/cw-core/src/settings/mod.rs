@@ -1,9 +1,8 @@
 //! Training settings for the group trainer.
 //!
-//! The `Default` impls are written out rather than derived: every default is a
-//! decision about how the trainer behaves out of the box, and they read better
-//! spelled out next to the type than as an attribute on one variant.
-#![allow(clippy::derivable_impls)]
+//! Every default is a decision about how the trainer behaves out of the box.
+//! The structs spell theirs out in `Default` impls; the enums mark theirs with
+//! `#[default]` on the variant, where it reads as part of the type.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,20 +15,16 @@ pub const GROUP_REPEAT_MIN: u32 = 1;
 /// Upper bound for "send the group N times before the answer window opens".
 pub const GROUP_REPEAT_MAX: u32 = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MixedAutoLevelAxis {
+    #[default]
     Letters,
     Digits,
 }
 
-impl Default for MixedAutoLevelAxis {
-    fn default() -> Self {
-        Self::Letters
-    }
-}
-
 impl MixedAutoLevelAxis {
+    #[must_use]
     pub fn flip(self) -> Self {
         match self {
             Self::Letters => Self::Digits,
@@ -38,36 +33,32 @@ impl MixedAutoLevelAxis {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The shape of the receiver's CW filter, as a modern rig offers it.
+///
+/// Both are eight poles and the same width between their 3 dB points; what
+/// differs is the shoulders. Sharp is flat across the top with steep skirts,
+/// and rings audibly on noise and on every element when it is narrow. Soft is
+/// rounded, lets more through either side, and barely rings at all. These are
+/// the SHARP and SOFT filter shapes of Icom's DSP receivers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ReceiverProfile {
-    Whistle,
-    Ringing,
-    Mixed,
+pub enum FilterShape {
+    Soft,
+    #[default]
+    Sharp,
 }
 
-impl Default for ReceiverProfile {
-    fn default() -> Self {
-        Self::Mixed
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CharSetMode {
     Koch,
     Digits,
     Custom,
+    #[default]
     Mixed,
     /// Realistic amateur callsigns instead of drawn groups. The characters are
     /// not what progresses here — the shape of the call is.
     Callsign,
-}
-
-impl Default for CharSetMode {
-    fn default() -> Self {
-        Self::Mixed
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,14 +198,6 @@ pub const FILTER_BANDWIDTH_MAX: f64 = 2_000.0;
 /// How many stations can be calling at once. One is just the station you want;
 /// above that the others are QRM, and the count is drawn fresh for each group
 /// so a pile-up never arrives the same way twice.
-/// How far the receiver-character model's gain can be pushed.
-///
-/// This used to be 20, which was also its default — so the slider could only
-/// ever come down from where it started, and anyone wanting more character
-/// found it already against the stop. The model feeds the same soft limiter as
-/// everything else, so the top of the range is loud rather than broken.
-pub const RECEIVER_MODEL_GAIN_MAX: f64 = 80.0;
-
 pub const STATIONS_MIN: u32 = 1;
 pub const STATIONS_MAX: u32 = 5;
 /// How far either side of the wanted station the others can land, in hertz.
@@ -249,24 +232,30 @@ pub struct BandSettings {
     pub qrn_enabled: bool,
     #[serde(default = "defaults::qrn_level")]
     pub qrn_level: f64,
-    // These three were called `qrm*` before the name went to the stations it
-    // belongs to. The aliases are what keep every save written until now.
-    #[serde(default = "defaults::enabled", alias = "qrmEnabled")]
-    pub receiver_enabled: bool,
-    #[serde(default = "defaults::receiver_level", alias = "qrmLevel")]
-    pub receiver_level: f64,
-    #[serde(default, alias = "qrmProfile")]
-    pub receiver_profile: ReceiverProfile,
-    #[serde(default = "defaults::receiver_background_gain")]
-    pub receiver_background_gain: f64,
-    #[serde(default = "defaults::receiver_background_excitation_rate")]
-    pub receiver_background_excitation_rate: f64,
+    /// The band's noise floor: the steady hiss every receiver hears through
+    /// its filter. Saves from before it was a noise floor called the same
+    /// switch the receiver background, and before that `qrm`.
+    #[serde(
+        default = "defaults::enabled",
+        alias = "receiverEnabled",
+        alias = "qrmEnabled"
+    )]
+    pub noise_enabled: bool,
+    /// How loud the noise floor is. Deliberately not read from the old
+    /// receiver-background level: that drove a different sound entirely, and
+    /// its value says nothing about how much hiss someone wants.
+    #[serde(default = "defaults::noise_level")]
+    pub noise_level: f64,
     /// The receiver's selectivity, in hertz. Everything you hear goes through
     /// it — the Morse as much as the noise — so narrowing it does what
     /// narrowing a real filter does: less static gets through, the signal
     /// loses a little of its keying sidebands, and the filter rings longer.
     #[serde(default = "defaults::filter_bandwidth_hz")]
     pub filter_bandwidth_hz: f64,
+    /// Sharp or soft shoulders on that filter, which is what sets how much it
+    /// rings.
+    #[serde(default)]
+    pub filter_shape: FilterShape,
     /// The fewest stations that can call at once, counting the one you want.
     ///
     /// Saves written before the pile-up became a range said only "up to this
@@ -283,16 +272,6 @@ pub struct BandSettings {
     /// How far below the wanted station the others sit.
     #[serde(default = "defaults::pileup_level_db")]
     pub pileup_level_db: f64,
-    #[serde(default = "defaults::receiver_background_resonance")]
-    pub receiver_background_resonance: f64,
-    #[serde(default = "defaults::receiver_background_decay")]
-    pub receiver_background_decay: f64,
-    #[serde(default = "defaults::receiver_background_offset_hz")]
-    pub receiver_background_offset_hz: f64,
-    #[serde(default = "defaults::receiver_background_offset_mod_depth_hz")]
-    pub receiver_background_offset_mod_depth_hz: f64,
-    #[serde(default = "defaults::receiver_background_offset_mod_rate_hz")]
-    pub receiver_background_offset_mod_rate_hz: f64,
 }
 
 impl Default for BandSettings {
@@ -310,21 +289,14 @@ impl Default for BandSettings {
             qsb_rate_hz: 0.12,
             qrn_enabled: true,
             qrn_level: 0.25,
-            receiver_enabled: true,
-            receiver_level: 0.2,
-            receiver_profile: ReceiverProfile::Mixed,
-            receiver_background_gain: 20.0,
-            receiver_background_excitation_rate: 62.0,
+            noise_enabled: true,
+            noise_level: defaults::noise_level(),
             filter_bandwidth_hz: 500.0,
+            filter_shape: FilterShape::Sharp,
             stations_min: STATIONS_MIN,
             stations_max: STATIONS_MIN,
             pileup_spread_hz: 350.0,
             pileup_level_db: 7.0,
-            receiver_background_resonance: 66.0,
-            receiver_background_decay: 0.984,
-            receiver_background_offset_hz: 140.0,
-            receiver_background_offset_mod_depth_hz: 45.0,
-            receiver_background_offset_mod_rate_hz: 0.32,
         }
     }
 }
@@ -359,9 +331,6 @@ impl Default for AutoLevelSettings {
     }
 }
 
-/// The min/max pairs the settings screen edits. Keeping the invariants here —
-/// max never below min, "linked" collapsing the pair, character speed dragging
-/// effective speed along — keeps them testable and out of the UI's callbacks.
 /// A card on the settings screen, as far as "put this back how it was" is
 /// concerned.
 ///
@@ -385,10 +354,8 @@ pub enum SettingsSection {
     CharacterSet,
     /// Pitch and level of the station you are copying.
     ToneAndVolume,
-    /// Fading, static, the filter and who else is calling.
+    /// Fading, static, the noise floor, the filter and who else is calling.
     BandConditions,
-    /// The advanced receiver-character model behind the background.
-    ReceiverModel,
     /// Whether the trainer moves your level for you, and on what evidence.
     AutoLevel,
     /// How the next group is drawn from the characters you know.
@@ -397,19 +364,21 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Every section, for the tests and for anything that wants to sweep them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 8] = [
         Self::SessionShape,
         Self::Speed,
         Self::KeyingEnvelope,
         Self::CharacterSet,
         Self::ToneAndVolume,
         Self::BandConditions,
-        Self::ReceiverModel,
         Self::AutoLevel,
         Self::CharacterSampling,
     ];
 }
 
+/// The min/max pairs the settings screen edits. Keeping the invariants here —
+/// max never below min, "linked" collapsing the pair, character speed dragging
+/// effective speed along — keeps them testable and out of the UI's callbacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeSetting {
     CharWpm,
@@ -430,7 +399,7 @@ pub struct RangeValues {
     pub linked: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default = "TrainingSettings::default")]
 pub struct TrainingSettings {
     #[serde(flatten)]
@@ -441,17 +410,6 @@ pub struct TrainingSettings {
     pub band: BandSettings,
     #[serde(flatten)]
     pub auto_level: AutoLevelSettings,
-}
-
-impl Default for TrainingSettings {
-    fn default() -> Self {
-        Self {
-            curriculum: CurriculumSettings::default(),
-            playback: PlaybackSettings::default(),
-            band: BandSettings::default(),
-            auto_level: AutoLevelSettings::default(),
-        }
-    }
 }
 
 mod alphabet;
@@ -478,17 +436,8 @@ mod defaults {
     pub fn qrn_level() -> f64 {
         0.25
     }
-    pub fn receiver_level() -> f64 {
-        0.2
-    }
-    pub fn receiver_background_gain() -> f64 {
-        20.0
-    }
-    pub fn receiver_background_excitation_rate() -> f64 {
-        62.0
-    }
-    pub fn receiver_background_resonance() -> f64 {
-        66.0
+    pub fn noise_level() -> f64 {
+        0.5
     }
     pub fn filter_bandwidth_hz() -> f64 {
         500.0
@@ -513,18 +462,6 @@ mod defaults {
     }
     pub fn pileup_level_db() -> f64 {
         7.0
-    }
-    pub fn receiver_background_decay() -> f64 {
-        0.984
-    }
-    pub fn receiver_background_offset_hz() -> f64 {
-        140.0
-    }
-    pub fn receiver_background_offset_mod_depth_hz() -> f64 {
-        45.0
-    }
-    pub fn receiver_background_offset_mod_rate_hz() -> f64 {
-        0.32
     }
 }
 
@@ -808,14 +745,8 @@ mod invariant_tests {
         s.band.qsb_depth = 9.0;
         s.band.qsb_rate_hz = 9.0;
         s.band.qrn_level = 9.0;
-        s.band.receiver_level = 9.0;
-        s.band.receiver_background_gain = 900.0;
-        s.band.receiver_background_excitation_rate = 9_000.0;
-        s.band.receiver_background_resonance = 9_000.0;
-        s.band.receiver_background_decay = 9.0;
-        s.band.receiver_background_offset_hz = -9_000.0;
-        s.band.receiver_background_offset_mod_depth_hz = 9_000.0;
-        s.band.receiver_background_offset_mod_rate_hz = 900.0;
+        s.band.noise_level = 9.0;
+        s.band.filter_bandwidth_hz = 90_000.0;
         s.auto_level.auto_adjust_threshold = 900.0;
         s.auto_level.error_weight_strength = -1.0;
         s.auto_level.char_sampling_coverage_strength = -1.0;
@@ -851,6 +782,54 @@ mod invariant_tests {
         }
     }
 
+    /// `clamp` is the sanitiser everything else trusts, so nothing may make
+    /// it panic — and NaN used to: a NaN minimum became the lower bound of the
+    /// maximum's clamp, and `f64::clamp` panics on that.
+    #[test]
+    fn clamping_survives_numbers_that_are_not_numbers() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut s = wild();
+            s.playback.char_wpm_min = bad;
+            s.playback.char_wpm_max = bad;
+            s.playback.effective_wpm_min = bad;
+            s.playback.effective_wpm_max = bad;
+            s.playback.extra_word_space_multiplier = bad;
+            s.playback.group_timeout = bad;
+            s.playback.group_pause_sec = bad;
+            s.playback.keyer_wpm = bad;
+            s.playback.fist_variation = bad;
+            s.band.side_tone_min = bad;
+            s.band.side_tone_max = bad;
+            s.band.volume_min = bad;
+            s.band.volume_max = bad;
+            s.band.steepness = bad;
+            s.band.envelope_smoothing = bad;
+            s.band.qsb_depth = bad;
+            s.band.qsb_rate_hz = bad;
+            s.band.qrn_level = bad;
+            s.band.noise_level = bad;
+            s.band.filter_bandwidth_hz = bad;
+            s.band.pileup_spread_hz = bad;
+            s.band.pileup_level_db = bad;
+            s.auto_level.auto_adjust_threshold = bad;
+            s.auto_level.error_weight_strength = bad;
+            s.auto_level.char_sampling_coverage_strength = bad;
+            let s = s.clamp();
+            let json = serde_json::to_value(&s).expect("serialize");
+            for (key, value) in json.as_object().expect("an object") {
+                if let Some(number) = value.as_f64() {
+                    assert!(number.is_finite(), "{key} came out {number} from {bad}");
+                }
+                // serde_json writes a non-finite float as null.
+                assert!(
+                    !value.is_null() || key == "practiceWindow",
+                    "{key} came out null from {bad}"
+                );
+            }
+            assert_eq!(s.clone().clamp(), s, "and it still settles in one pass");
+        }
+    }
+
     #[test]
     fn clamping_puts_every_range_the_right_way_round() {
         let s = wild().clamp();
@@ -867,10 +846,8 @@ mod invariant_tests {
         assert_eq!(s.playback.group_repeat_max, GROUP_REPEAT_MAX);
         assert_eq!(s.band.steepness, 50.0);
         assert_eq!(s.band.envelope_smoothing, 1.0);
-        assert_eq!(s.band.receiver_background_decay, 0.9999);
-        assert_eq!(s.band.receiver_background_offset_hz, -1000.0);
-        assert_eq!(s.band.receiver_background_offset_mod_rate_hz, 20.0);
-        assert_eq!(s.band.receiver_background_excitation_rate, 500.0);
+        assert_eq!(s.band.noise_level, 1.0);
+        assert_eq!(s.band.filter_bandwidth_hz, FILTER_BANDWIDTH_MAX);
         assert_eq!(s.playback.extra_word_space_multiplier, 0.1);
         assert_eq!(s.auto_level.auto_adjust_threshold, 100.0);
         assert_eq!(s.auto_level.error_weight_strength, 0.0);
@@ -911,7 +888,7 @@ mod invariant_tests {
             crate::keyer::KeyerMode::default(),
             crate::keyer::KeyerMode::IambicA
         );
-        assert_eq!(ReceiverProfile::default(), ReceiverProfile::Mixed);
+        assert_eq!(FilterShape::default(), FilterShape::Sharp);
         assert_eq!(MixedAutoLevelAxis::default(), MixedAutoLevelAxis::Letters);
         assert_eq!(
             MixedAutoLevelAxis::Letters.flip(),
@@ -972,16 +949,10 @@ mod invariant_tests {
             |s| s.band.qsb_rate_hz = 0.9,
             |s| s.band.qrn_enabled = false,
             |s| s.band.qrn_level = 0.9,
-            |s| s.band.receiver_enabled = false,
-            |s| s.band.receiver_level = 0.9,
-            |s| s.band.receiver_profile = ReceiverProfile::Ringing,
-            |s| s.band.receiver_background_gain = 3.0,
-            |s| s.band.receiver_background_excitation_rate = 3.0,
-            |s| s.band.receiver_background_resonance = 3.0,
-            |s| s.band.receiver_background_decay = 0.7,
-            |s| s.band.receiver_background_offset_hz = 3.0,
-            |s| s.band.receiver_background_offset_mod_depth_hz = 3.0,
-            |s| s.band.receiver_background_offset_mod_rate_hz = 3.0,
+            |s| s.band.noise_enabled = false,
+            |s| s.band.noise_level = 0.9,
+            |s| s.band.filter_bandwidth_hz = 250.0,
+            |s| s.band.filter_shape = FilterShape::Soft,
         ];
         for edit in edits {
             let mut changed = base.clone();
@@ -1265,21 +1236,14 @@ mod invariant_tests {
         s.band.qsb_rate_hz = 0.9;
         s.band.qrn_enabled = false;
         s.band.qrn_level = 0.9;
-        s.band.receiver_enabled = false;
-        s.band.receiver_level = 0.9;
-        s.band.receiver_profile = ReceiverProfile::Whistle;
+        s.band.noise_enabled = false;
+        s.band.noise_level = 0.9;
         s.band.filter_bandwidth_hz = 250.0;
+        s.band.filter_shape = FilterShape::Soft;
         s.band.stations_min = 2;
         s.band.stations_max = 4;
         s.band.pileup_spread_hz = 400.0;
         s.band.pileup_level_db = 9.0;
-        s.band.receiver_background_gain = 3.0;
-        s.band.receiver_background_excitation_rate = 22.0;
-        s.band.receiver_background_resonance = 30.0;
-        s.band.receiver_background_decay = 0.9;
-        s.band.receiver_background_offset_hz = 40.0;
-        s.band.receiver_background_offset_mod_depth_hz = 12.0;
-        s.band.receiver_background_offset_mod_rate_hz = 3.0;
         s.auto_level.auto_adjust_level = false;
         s.auto_level.auto_adjust_threshold = 77.0;
         s.auto_level.auto_adjust_below_threshold_count = 4;

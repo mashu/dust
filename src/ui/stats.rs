@@ -1,6 +1,6 @@
 use cw_core::{
-    accuracy_chart, character_diagnostics, AccuracyPoint, MasteryStatus, SessionResult,
-    TrainingSettings,
+    AccuracyPoint, MasteryStatus, SessionResult, TrainingSettings, accuracy_chart,
+    character_diagnostics,
 };
 use dioxus::prelude::*;
 
@@ -256,7 +256,7 @@ fn OverviewTab(sessions: Vec<SessionResult>, threshold: f64) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{chart_floor, chart_geometry, CHART_H, CHART_W};
+    use super::{CHART_H, CHART_W, chart_floor, chart_geometry};
     use cw_core::AccuracyPoint;
 
     fn points(pcts: &[f64]) -> Vec<AccuracyPoint> {

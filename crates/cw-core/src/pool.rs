@@ -1,7 +1,7 @@
 //! Character pool selection from a leveled alphabet (Koch, digits, mixed, custom).
 
-use crate::level::{max_level_for_len, unlocked_prefix, LEVEL_MIN};
-use crate::morse::{is_digit, DIGITS};
+use crate::level::{LEVEL_MIN, max_level_for_len, unlocked_prefix};
+use crate::morse::{DIGITS, is_digit};
 use crate::settings::{CharSetMode, PracticeWindow, TrainingSettings};
 
 pub fn compute_char_pool(settings: &TrainingSettings) -> Vec<char> {
@@ -370,10 +370,11 @@ mod tests {
         assert!(!pool.contains(&'5'));
         assert!(pool.contains(&'0'));
         assert!(pool.contains(&'1'));
-        assert!(pool
-            .iter()
-            .filter(|c| c.is_ascii_digit())
-            .all(|c| *c == '0' || *c == '1'));
+        assert!(
+            pool.iter()
+                .filter(|c| c.is_ascii_digit())
+                .all(|c| *c == '0' || *c == '1')
+        );
     }
 
     #[test]

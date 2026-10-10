@@ -15,10 +15,9 @@ as-is, with cpal routing it to AAudio through
 oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just
 the SDK.
 
-One Android-specific fallback: the receiver background runs as a second,
-continuously open output stream, and some devices refuse to open two at once.
-If that happens the Morse, its envelope and QSB still play — only the
-background hiss drops out — rather than the session refusing to start.
+The Morse, the band noise and static, and the paddle sidetone are mixed into
+one output stream, so there is no second stream for a device to refuse — some
+Android devices will not open two at once.
 
 If a toolchain bring-up ever blocks on oboe, `--features mobile-silent` builds
 the same app with a player that keeps a session's timing but makes no sound,

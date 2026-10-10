@@ -127,7 +127,19 @@ pub fn build_envelope_curve(
     target_gain: f64,
     smoothing: f64,
 ) -> Vec<f32> {
-    let smoothing = smoothing.clamp(0.0, 1.0);
+    // No element is longer than a minute, and none is infinite: an endless
+    // one would overflow the step count below rather than merely be long.
+    const LONGEST_ELEMENT_SEC: f64 = 60.0;
+    let duration_sec = if duration_sec.is_finite() {
+        duration_sec.clamp(0.0, LONGEST_ELEMENT_SEC)
+    } else {
+        0.0
+    };
+    let smoothing = if smoothing.is_finite() {
+        smoothing.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     let rise = rise_time_sec.min(duration_sec / 2.0).max(0.0);
     let attack_steps = ((ENVELOPE_SAMPLE_RATE as f64) * rise).floor().max(2.0) as usize;
     let sustain_steps = ((ENVELOPE_SAMPLE_RATE as f64) * (duration_sec - 2.0 * rise).max(0.0))
@@ -263,14 +275,17 @@ pub fn resolve_pileup(
     // an interferer louder than your own station however far down we set it.
     // Tuning the one you want toward the middle is the other half of the same
     // tactic.
+    //
+    // Both rules are the filter's own geometry, which is geometric: a
+    // band-pass at audio frequencies passes a tone at f exactly as well as one
+    // at centre²/f. "No nearer the middle" therefore means outside the pair
+    // the wanted tone and its mirror make — not the same number of hertz the
+    // other side, which a steep filter treats very differently.
     let centre = settings.side_tone_center();
-    let half = settings.band.filter_bandwidth_hz.clamp(
-        crate::settings::FILTER_BANDWIDTH_MIN,
-        crate::settings::FILTER_BANDWIDTH_MAX,
-    ) / 2.0;
-    let off_centre = (wanted.tone_hz - centre).abs();
-    let (outward_low, outward_high) = (centre - off_centre, centre + off_centre);
-    let (passband_low, passband_high) = (centre - half, centre + half);
+    let mirror = crate::band::mirror_hz(centre, wanted.tone_hz);
+    let (outward_low, outward_high) = (wanted.tone_hz.min(mirror), wanted.tone_hz.max(mirror));
+    let (passband_low, passband_high) =
+        crate::band::passband_edges(centre, settings.band.filter_bandwidth_hz);
 
     let mut others = Vec::new();
     for text in texts.iter().take(calling.saturating_sub(1)) {
@@ -379,11 +394,11 @@ pub struct StationVoice {
     pub dash_ratio: f64,
 }
 
-/// Tune in a station, within whatever range the settings allow.
 /// How far a fist can stray from a keyer's at the top of the setting.
 const WEIGHT_SPREAD: f64 = 0.18;
 const DASH_RATIO_SPREAD: f64 = 0.45;
 
+/// Tune in a station, within whatever range the settings allow.
 pub fn resolve_station(settings: &TrainingSettings, rng: &mut impl Rng) -> StationVoice {
     let char_wpm = resolve_char_wpm(settings, rng);
     // Every station is somebody, and on the air most of them are not keyers.
@@ -445,7 +460,8 @@ pub fn plan_morse_playback_for(
         let Some(morse) = morse_for(ch) else {
             continue;
         };
-        for symbol in morse.chars() {
+        let last_symbol = morse.chars().count().saturating_sub(1);
+        for (k, symbol) in morse.chars().enumerate() {
             let duration = if symbol == '.' {
                 dot_duration
             } else {
@@ -459,10 +475,20 @@ pub fn plan_morse_playback_for(
                 target_gain,
                 envelope,
             });
-            current_time += duration + symbol_space;
+            current_time += duration;
+            // The send ends on its last element. A gap after it would be
+            // added to the word space whoever plays this puts before the
+            // next group, and the groups would sit a dit too far apart.
+            if !(last_morse_idx == Some(i) && k == last_symbol) {
+                current_time += symbol_space;
+            }
         }
         if last_morse_idx != Some(i) {
-            current_time += char_space - symbol_space;
+            // The letter gap is measured from where the element would have
+            // ended at a keyer's weight, so it takes the fist's difference
+            // back just as the gaps inside a letter do — a heavy fist crowds
+            // its spaces rather than sending slower.
+            current_time += char_space - dot_char;
         }
     }
 
@@ -612,10 +638,12 @@ mod tests {
             assert!(shape.points.first().unwrap().gain.abs() < 1e-6);
             assert!(shape.points.last().unwrap().gain.abs() < 1e-6);
             assert!(shape.points.iter().any(|p| p.gain > 0.99));
-            assert!(shape
-                .points
-                .windows(2)
-                .all(|w| w[1].t_sec >= w[0].t_sec - 1e-12));
+            assert!(
+                shape
+                    .points
+                    .windows(2)
+                    .all(|w| w[1].t_sec >= w[0].t_sec - 1e-12)
+            );
             assert!(shape.points.last().unwrap().t_sec <= shape.total_sec + 1e-9);
         }
     }
@@ -785,6 +813,57 @@ mod plan_tests {
         assert_eq!(plan.resolved_effective_wpm, 15.0);
     }
 
+    /// A send ends on its last element. Whoever plays it puts a word space
+    /// before the next group; a gap left at the end of the send was added to
+    /// that, and groups sat eight dits apart instead of seven.
+    #[test]
+    fn a_send_ends_where_its_last_element_ends() {
+        let s = fixed_speed(20.0);
+        let voice = StationVoice {
+            tone_hz: 600.0,
+            char_wpm: 20.0,
+            effective_wpm: 20.0,
+            volume: 1.0,
+            weight: 1.0,
+            dash_ratio: 3.0,
+        };
+        let dot = dot_seconds(20.0);
+        for text in ["E", "T", "K", "PARIS", "W1AW"] {
+            let plan = plan_morse_playback_for(text, &s, &voice);
+            let last = plan.events.last().expect("tones");
+            assert!(
+                (plan.duration_sec - (last.start_sec + last.duration_sec)).abs() < 1e-12,
+                "{text} ran {:.4}s past its last element",
+                plan.duration_sec - (last.start_sec + last.duration_sec)
+            );
+        }
+        // PARIS is fifty dots with its word space, the definition of a word a
+        // minute; without the trailing seven it is forty-three.
+        let paris = plan_morse_playback_for("PARIS", &s, &voice).duration_sec;
+        assert!(
+            (paris / dot - 43.0).abs() < 1e-9,
+            "PARIS took {} dots",
+            paris / dot
+        );
+        assert!(
+            (f64::from(compute_group_gap_for_wpm(20.0, 20.0, 1.0)) / 1000.0 / dot - 7.0).abs()
+                < 0.01
+        );
+    }
+
+    #[test]
+    fn an_envelope_survives_nonsense_lengths() {
+        for duration in [f64::INFINITY, f64::NAN, -1.0, 1e12] {
+            let curve = build_envelope_curve(duration, 0.005, 0.3, f64::NAN);
+            assert!(
+                curve.len() >= 2 && curve.len() <= 80_000,
+                "{duration}: {} steps",
+                curve.len()
+            );
+            assert!(curve.iter().all(|v| v.is_finite()), "{duration}");
+        }
+    }
+
     #[test]
     fn a_nonsense_speed_is_treated_as_one_word_a_minute() {
         let mut settings = TrainingSettings::default();
@@ -867,10 +946,12 @@ mod plan_tests {
         assert_eq!(shape.points.last().map(|p| p.gain), Some(0.0));
         assert!(shape.points.iter().all(|p| (0.0..=1.0).contains(&p.gain)));
         // The dah starts two dits in.
-        assert!(shape
-            .points
-            .iter()
-            .any(|p| (p.t_sec - shape.dot_sec * 2.0).abs() < 1e-9));
+        assert!(
+            shape
+                .points
+                .iter()
+                .any(|p| (p.t_sec - shape.dot_sec * 2.0).abs() < 1e-9)
+        );
     }
 
     #[test]
@@ -895,11 +976,11 @@ mod plan_tests {
 #[cfg(test)]
 mod pileup_tests {
     use super::*;
-    use crate::settings::{
-        TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, PILEUP_LEVEL_MIN_DB,
-        PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN,
-    };
     use crate::FastrandRng;
+    use crate::settings::{
+        FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
+        PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN, TrainingSettings,
+    };
 
     fn settings(max: u32) -> TrainingSettings {
         let mut s = TrainingSettings::default();
@@ -1116,8 +1197,8 @@ mod pileup_tests {
             let mut s = base.clone();
             s.band.filter_bandwidth_hz = bandwidth;
             let s = s.clamp();
-            let centre = s.side_tone_center();
-            let half = s.band.filter_bandwidth_hz / 2.0;
+            let (low, high) =
+                crate::band::passband_edges(s.side_tone_center(), s.band.filter_bandwidth_hz);
             let mut count = 0usize;
             for seed in 0..400u64 {
                 let mut rng = FastrandRng(seed * 2_654_435_761 + 11);
@@ -1125,8 +1206,7 @@ mod pileup_tests {
                 for other in resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng) {
                     // Nobody is ever placed where the filter would bury them.
                     assert!(
-                        other.voice.tone_hz >= centre - half - 0.001
-                            && other.voice.tone_hz <= centre + half + 0.001,
+                        other.voice.tone_hz >= low - 0.001 && other.voice.tone_hz <= high + 0.001,
                         "a station at {:.0} Hz sat outside a {bandwidth:.0} Hz passband",
                         other.voice.tone_hz
                     );
@@ -1272,8 +1352,8 @@ mod pileup_tests {
 #[cfg(test)]
 mod fist_tests {
     use super::*;
-    use crate::settings::TrainingSettings;
     use crate::FastrandRng;
+    use crate::settings::TrainingSettings;
 
     fn settings(variation: f64) -> TrainingSettings {
         let mut s = TrainingSettings::default();

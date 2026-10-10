@@ -1,17 +1,17 @@
 //! Owns the session machine, audio, and effect execution. UI sends events only.
 
 use cw_core::{
-    apply_auto_level, build_session_result, evaluate_auto_level, fit_settings_to_alphabet,
-    generate_training_group, resolve_group_repeats, resolve_pileup, resolve_station,
     CharSamplingState, FastrandRng, SessionEffect, SessionEvent, SessionMachine, SessionPhase,
-    StationVoice, TrainingSettings, Transmission,
+    StationVoice, TrainingSettings, Transmission, apply_auto_level, build_session_result,
+    evaluate_auto_level, fit_settings_to_alphabet, generate_training_group, resolve_group_repeats,
+    resolve_pileup, resolve_station,
 };
 use dioxus::prelude::*;
 
 use crate::persist::{
     clear_auto_counters, load_auto_counters, save_auto_counters, save_sessions, save_settings,
 };
-use crate::playback::{play_text_now, sleep_cancelable, PlayError};
+use crate::playback::{PlayError, play_text_now, sleep_cancelable};
 use crate::state::{AppState, Screen, SessionSignals};
 use crate::time::{local_date_string, now_ms};
 
@@ -35,15 +35,16 @@ pub fn dispatch_event(
     let effects = machine.apply(event, now_ms());
     let after = machine.session().confirmed_flags();
     for (index, (was, now)) in before.iter().zip(after.iter()).enumerate() {
-        if !was && *now {
-            if let Some(group) = machine.session().group(index) {
-                let next = cw_core::update_sampling_state_from_answer(
-                    &app.sampling.borrow(),
-                    group.sent(),
-                    group.input(),
-                );
-                *app.sampling.borrow_mut() = next;
-            }
+        if !was
+            && *now
+            && let Some(group) = machine.session().group(index)
+        {
+            let next = cw_core::update_sampling_state_from_answer(
+                &app.sampling.borrow(),
+                group.sent(),
+                group.input(),
+            );
+            *app.sampling.borrow_mut() = next;
         }
     }
     runtime.set(Some(machine.session().clone()));
@@ -51,29 +52,29 @@ pub fn dispatch_event(
 }
 
 pub fn send_command(app: AppState, signals: SessionSignals, event: SessionEvent) {
-    let gen = app.session_gen.get();
+    let generation = app.session_gen.get();
     let settings = signals
         .runtime
         .read()
         .as_ref()
         .map(|s| s.settings().clone())
         .unwrap_or_else(|| (signals.settings)());
-    let effects = dispatch_event(&app, signals.runtime, event, gen);
-    spawn_effects(effects, settings, app, gen, signals);
+    let effects = dispatch_event(&app, signals.runtime, event, generation);
+    spawn_effects(effects, settings, app, generation, signals);
 }
 
 pub fn spawn_effects(
     effects: Vec<SessionEffect>,
     settings: TrainingSettings,
     app: AppState,
-    gen: u64,
+    generation: u64,
     signals: SessionSignals,
 ) {
     if effects.is_empty() {
         return;
     }
     spawn(async move {
-        drive_effects(effects, settings, app, gen, signals).await;
+        drive_effects(effects, settings, app, generation, signals).await;
     });
 }
 
@@ -83,7 +84,7 @@ pub fn boot_machine_session(
     settings: TrainingSettings,
     history: &[cw_core::SessionResult],
     app: &AppState,
-    gen: u64,
+    generation: u64,
     signals: SessionSignals,
 ) -> Option<Vec<SessionEffect>> {
     let SessionSignals {
@@ -91,7 +92,7 @@ pub fn boot_machine_session(
         mut screen,
         ..
     } = signals;
-    if app.session_gen.get() != gen {
+    if app.session_gen.get() != generation {
         return None;
     }
     let history_refs: Vec<_> = history
@@ -110,18 +111,18 @@ pub fn boot_machine_session(
         (group, repeats)
     };
 
-    if app.session_gen.get() != gen {
+    if app.session_gen.get() != generation {
         return None;
     }
 
     let (machine, effects) = SessionMachine::start(
-        cw_core::SessionId::new(gen),
+        cw_core::SessionId::new(generation),
         now_ms(),
         settings,
         first,
         first_repeats,
     );
-    if app.session_gen.get() != gen {
+    if app.session_gen.get() != generation {
         return None;
     }
     runtime.set(Some(machine.session().clone()));
@@ -134,19 +135,19 @@ async fn drive_effects(
     mut pending: Vec<SessionEffect>,
     settings: TrainingSettings,
     app: AppState,
-    gen: u64,
+    generation: u64,
     signals: SessionSignals,
 ) {
     while !pending.is_empty() {
-        if app.session_gen.get() != gen {
+        if app.session_gen.get() != generation {
             return;
         }
         let batch = std::mem::take(&mut pending);
         for effect in batch {
-            if app.session_gen.get() != gen {
+            if app.session_gen.get() != generation {
                 return;
             }
-            pending.extend(handle_effect(effect, &settings, &app, gen, signals).await);
+            pending.extend(handle_effect(effect, &settings, &app, generation, signals).await);
         }
     }
 }
@@ -159,16 +160,17 @@ async fn drive_effects(
 /// group is somebody else. Deriving it beats remembering it: nothing has to be
 /// carried across the sends, and a retry after a stalled send tunes back in to
 /// the same station rather than a new one.
-fn station_for(settings: &TrainingSettings, gen: u64, index: usize) -> StationVoice {
-    resolve_station(settings, &mut group_rng(gen, index, 0))
+fn station_for(settings: &TrainingSettings, generation: u64, index: usize) -> StationVoice {
+    resolve_station(settings, &mut group_rng(generation, index, 0))
 }
 
 /// A generator that depends only on the session and the group, so every repeat
 /// of a group — and every retry after a stalled send — tunes back in to the
 /// same operators rather than a new set.
-fn group_rng(gen: u64, index: usize, salt: u64) -> FastrandRng {
+fn group_rng(generation: u64, index: usize, salt: u64) -> FastrandRng {
     FastrandRng(
-        gen.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        generation
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
             .wrapping_add((index as u64).wrapping_mul(0x2545_F491))
             .wrapping_add(salt)
             | 1,
@@ -184,16 +186,16 @@ fn group_rng(gen: u64, index: usize, salt: u64) -> FastrandRng {
 /// the station you answer counts.
 fn transmission_for(
     settings: &TrainingSettings,
-    gen: u64,
+    generation: u64,
     index: usize,
     text: String,
 ) -> Transmission {
-    let voice = station_for(settings, gen, index);
+    let voice = station_for(settings, generation, index);
     let most = settings.band.stations_max.max(1) as usize;
     if most <= 1 {
         return Transmission::alone(text, voice);
     }
-    let mut rng = group_rng(gen, index, 0x51ED_2701);
+    let mut rng = group_rng(generation, index, 0x51ED_2701);
     let elsewhere = CharSamplingState::default();
     let texts: Vec<String> = (0..most.saturating_sub(1))
         .map(|_| generate_training_group(settings, &elsewhere, &mut rng).0)
@@ -222,7 +224,7 @@ async fn handle_effect(
     effect: SessionEffect,
     settings: &TrainingSettings,
     app: &AppState,
-    gen: u64,
+    generation: u64,
     signals: SessionSignals,
 ) -> Vec<SessionEffect> {
     let SessionSignals {
@@ -257,7 +259,7 @@ async fn handle_effect(
                         .unwrap_or(true),
                 )
             };
-            if terminal || app.session_gen.get() != gen {
+            if terminal || app.session_gen.get() != generation {
                 return Vec::new();
             }
             if empty {
@@ -268,27 +270,28 @@ async fn handle_effect(
                 let repeats = resolve_group_repeats(&snapshot, &mut *rng);
                 drop(sampling);
                 drop(rng);
-                if let Some(machine) = app.machine.borrow_mut().as_mut() {
-                    if !machine.is_terminal() && machine.session().session_id().raw() == gen {
-                        machine.set_group_text(index, group, repeats);
-                        runtime.set(Some(machine.session().clone()));
-                    }
+                if let Some(machine) = app.machine.borrow_mut().as_mut()
+                    && !machine.is_terminal()
+                    && machine.session().session_id().raw() == generation
+                {
+                    machine.set_group_text(index, group, repeats);
+                    runtime.set(Some(machine.session().clone()));
                 }
             }
             Vec::new()
         }
         SessionEffect::Play { index, text } => {
-            if app.session_gen.get() != gen {
+            if app.session_gen.get() != generation {
                 return Vec::new();
             }
             let snapshot = session_settings(app.machine.borrow().as_ref(), settings);
             let outcome = if text.is_empty() {
                 Ok((0.0, 0.0, 0.0))
             } else {
-                let transmission = transmission_for(&snapshot, gen, index, text.clone());
-                play_text_now(app, gen, &transmission, &snapshot).await
+                let transmission = transmission_for(&snapshot, generation, index, text.clone());
+                play_text_now(app, generation, &transmission, &snapshot).await
             };
-            if app.session_gen.get() != gen {
+            if app.session_gen.get() != generation {
                 return Vec::new();
             }
             match outcome {
@@ -301,19 +304,27 @@ async fn handle_effect(
                         char_wpm,
                         effective_wpm,
                     },
-                    gen,
+                    generation,
                 ),
-                Err(PlayError::Cancelled) => {
-                    dispatch_event(app, runtime, SessionEvent::PlaybackCancelled { index }, gen)
-                }
+                Err(PlayError::Cancelled) => dispatch_event(
+                    app,
+                    runtime,
+                    SessionEvent::PlaybackCancelled { index },
+                    generation,
+                ),
                 Err(PlayError::Failed(message)) => {
                     toast.set(Some(message));
-                    dispatch_event(app, runtime, SessionEvent::PlaybackFailed { index }, gen)
+                    dispatch_event(
+                        app,
+                        runtime,
+                        SessionEvent::PlaybackFailed { index },
+                        generation,
+                    )
                 }
             }
         }
         SessionEffect::Sleep { id, ms } => {
-            if !sleep_cancelable(ms, gen, app.session_gen.clone()).await {
+            if !sleep_cancelable(ms, generation, app.session_gen.clone()).await {
                 return Vec::new();
             }
             let current = app
@@ -327,10 +338,10 @@ async fn handle_effect(
             let phase = app.machine.borrow().as_ref().map(|m| m.phase());
             match phase {
                 Some(SessionPhase::InterGroupGap { .. }) | Some(SessionPhase::RepeatGap { .. }) => {
-                    dispatch_event(app, runtime, SessionEvent::GapElapsed, gen)
+                    dispatch_event(app, runtime, SessionEvent::GapElapsed, generation)
                 }
                 Some(SessionPhase::AwaitingAnswer { .. }) => {
-                    dispatch_event(app, runtime, SessionEvent::Timeout, gen)
+                    dispatch_event(app, runtime, SessionEvent::Timeout, generation)
                 }
                 _ => Vec::new(),
             }
@@ -341,14 +352,14 @@ async fn handle_effect(
             value,
             ms,
         } => {
-            if !sleep_cancelable(ms, gen, app.session_gen.clone()).await {
+            if !sleep_cancelable(ms, generation, app.session_gen.clone()).await {
                 return Vec::new();
             }
             dispatch_event(
                 app,
                 runtime,
                 SessionEvent::AutoConfirmDue { id, index, value },
-                gen,
+                generation,
             )
         }
         SessionEffect::PersistAndShowResults => {
@@ -428,7 +439,7 @@ pub fn finish_session(app: AppState, signals: SessionSignals) {
 mod tests {
     use super::*;
     use crate::audio::fake::{Behaviour, Call};
-    use crate::testing::{run, test_settings, Harness};
+    use crate::testing::{Harness, run, test_settings};
     use cw_core::AutoLevelCounters;
     use cw_core::CharSetMode;
     use cw_core::SessionEffect;
@@ -514,11 +525,12 @@ mod tests {
             let first = h.sent(0);
             h.type_answer(0, &first.to_lowercase());
             // Nothing is confirmed until the auto-confirm delay has passed.
-            assert!(h
-                .runtime
-                .peek()
-                .as_ref()
-                .is_some_and(|s| !s.confirmed_flags()[0]));
+            assert!(
+                h.runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| !s.confirmed_flags()[0])
+            );
             assert!(
                 h.run_until(1_000, |h| h
                     .runtime
@@ -555,11 +567,12 @@ mod tests {
             h.advance(100).await;
             h.type_answer(0, &sent[..1]);
             h.advance(1_000).await;
-            assert!(h
-                .runtime
-                .peek()
-                .as_ref()
-                .is_some_and(|s| !s.confirmed_flags()[0]));
+            assert!(
+                h.runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| !s.confirmed_flags()[0])
+            );
             assert_eq!(h.awaiting_answer(), Some(0));
         });
     }
@@ -572,11 +585,12 @@ mod tests {
             let sent = h.sent(0);
             h.type_answer(0, &sent);
             h.advance(1_000).await;
-            assert!(h
-                .runtime
-                .peek()
-                .as_ref()
-                .is_some_and(|s| !s.confirmed_flags()[0]));
+            assert!(
+                h.runtime
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|s| !s.confirmed_flags()[0])
+            );
         });
     }
 
@@ -1046,12 +1060,12 @@ mod tests {
         run(|| async {
             let h = Harness::new();
             let app = h.app.clone();
-            let gen = app.session_gen.get();
+            let generation = app.session_gen.get();
             // Something else claimed the audio between the two calls.
             app.bump_session();
             let signals = h.signals();
             let effects =
-                h.in_app(|| boot_machine_session(test_settings(), &[], &app, gen, signals));
+                h.in_app(|| boot_machine_session(test_settings(), &[], &app, generation, signals));
             assert!(effects.is_none());
             assert!(app.machine.borrow().is_none());
             assert_eq!(h.screen(), Screen::Home);
@@ -1076,8 +1090,9 @@ mod tests {
         run(|| async {
             let h = Harness::new();
             let app = h.app.clone();
-            let gen = app.session_gen.get();
-            let effects = h.in_app(|| dispatch_event(&app, h.runtime, SessionEvent::Confirm, gen));
+            let generation = app.session_gen.get();
+            let effects =
+                h.in_app(|| dispatch_event(&app, h.runtime, SessionEvent::Confirm, generation));
             assert!(effects.is_empty());
         });
     }
@@ -1124,7 +1139,7 @@ mod tests {
             let mut h = Harness::new();
             h.start_training();
             let app = h.app.clone();
-            let gen = app.session_gen.get();
+            let generation = app.session_gen.get();
             h.recorder.clear();
             // An empty group can only come of a pool that generated nothing;
             // playing it must not stall the session waiting for silence.
@@ -1143,7 +1158,7 @@ mod tests {
                     }],
                     settings_now,
                     app.clone(),
-                    gen,
+                    generation,
                     signals,
                 )
             });
@@ -1159,7 +1174,7 @@ mod tests {
             let mut h = Harness::new();
             h.start_training();
             let app = h.app.clone();
-            let gen = app.session_gen.get();
+            let generation = app.session_gen.get();
             let settings_now = h.settings.peek().clone();
             let signals = h.signals();
             // A sleep the machine has already forgotten about.
@@ -1168,7 +1183,7 @@ mod tests {
                     vec![SessionEffect::Sleep { id: 999, ms: 20 }],
                     settings_now,
                     app.clone(),
-                    gen,
+                    generation,
                     signals,
                 )
             });
@@ -1184,7 +1199,7 @@ mod tests {
             let mut h = Harness::new();
             h.start_training();
             let app = h.app.clone();
-            let gen = app.session_gen.get();
+            let generation = app.session_gen.get();
             let settings_now = h.settings.peek().clone();
             let signals = h.signals();
             h.send(SessionEvent::Abort);
@@ -1200,7 +1215,7 @@ mod tests {
                     ],
                     settings_now,
                     app.clone(),
-                    gen,
+                    generation,
                     signals,
                 )
             });
@@ -1222,7 +1237,7 @@ mod tests {
             assert_eq!(h.screen(), Screen::Results);
             // The machine is gone; an effect that arrives late finds nothing.
             let app = h.app.clone();
-            let gen = app.session_gen.get();
+            let generation = app.session_gen.get();
             let settings_now = h.settings.peek().clone();
             let signals = h.signals();
             h.in_app(|| {
@@ -1230,7 +1245,7 @@ mod tests {
                     vec![SessionEffect::NeedGroup { index: 0 }],
                     settings_now,
                     app.clone(),
-                    gen,
+                    generation,
                     signals,
                 )
             });

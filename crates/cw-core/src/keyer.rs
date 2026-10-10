@@ -78,6 +78,7 @@ impl Paddle {
         }
     }
 
+    #[must_use]
     pub fn flipped(self) -> Self {
         match self {
             Self::Dit => Self::Dah,
@@ -137,6 +138,7 @@ impl PaddleDecoder {
     }
 
     /// Commit a letter once the paddles have been quiet for a letter-space.
+    #[must_use = "a decoded letter that is not used is a letter lost"]
     pub fn poll(&mut self, now_ms: u64, dit_ms: u64) -> Option<char> {
         let last = self.last_at_ms?;
         if self.pattern.is_empty() {
@@ -154,6 +156,7 @@ impl PaddleDecoder {
 
     /// Commit whatever is in the pattern, ignoring the clock. Used after a
     /// letter-space sleep that already waited the right number of dits.
+    #[must_use = "a decoded letter that is not used is a letter lost"]
     pub fn take_letter(&mut self) -> Option<char> {
         if self.pattern.is_empty() {
             return None;
@@ -354,7 +357,11 @@ impl PaddleKeyer {
         } else if self.dah_mem {
             Paddle::Dah
         } else {
+            // Idle. The alternation belongs to one squeeze: the next one
+            // starts from whichever paddle closes first, not from where this
+            // one happened to leave off.
             self.sending = None;
+            self.last_sent = None;
             return None;
         };
         self.set_mem(pick, false);
@@ -451,6 +458,22 @@ mod tests {
         assert_eq!(keyer.next_element(), Some(Paddle::Dah));
         keyer.release(Paddle::Dah);
         assert_eq!(keyer.next_element(), None);
+    }
+
+    #[test]
+    fn a_new_squeeze_starts_with_the_paddle_closed_first() {
+        let mut keyer = PaddleKeyer::new();
+        // One dit, sent and finished; the keyer goes idle.
+        keyer.press(Paddle::Dit);
+        assert_eq!(keyer.next_element(), Some(Paddle::Dit));
+        keyer.release(Paddle::Dit);
+        assert_eq!(keyer.next_element(), None);
+        // A fresh squeeze, dit first. The old element must not decide it: it
+        // used to be flipped into a dah, sending the squeeze backwards.
+        keyer.press(Paddle::Dit);
+        keyer.press(Paddle::Dah);
+        assert_eq!(keyer.next_element(), Some(Paddle::Dit));
+        assert_eq!(keyer.next_element(), Some(Paddle::Dah));
     }
 
     #[test]

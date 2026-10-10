@@ -2,8 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::{
-    resolve_station, CharSamplingState, FastrandRng, GroupSession, SessionMachine, SessionResult,
-    StationVoice, TrainingSettings,
+    CharSamplingState, FastrandRng, GroupSession, SessionMachine, SessionResult, StationVoice,
+    TrainingSettings, resolve_station,
 };
 use dioxus::prelude::*;
 
@@ -92,23 +92,24 @@ impl AppState {
     }
 
     pub(crate) fn rebuild_player(&self, settings: &TrainingSettings) -> Result<(), String> {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
+        {
+            // Scoped so the borrow is over before `ensure_player` takes its own.
+            let Ok(mut slot) = self.player.try_borrow_mut() else {
+                return Err("Audio is busy.".into());
+            };
+            if let Some(player) = slot.take().as_mut() {
                 player.shutdown();
             }
-            *slot = None;
-        } else {
-            return Err("Audio is busy.".into());
         }
         self.ensure_player(settings)
     }
 
-    /// Stop current audio, invalidate waiters, then arm the player for a new gen.
+    /// Stop current audio, invalidate waiters, then arm the player for a new generation.
     pub fn takeover_audio(&self, settings: &TrainingSettings) -> Result<u64, String> {
         self.stop_sending();
-        let gen = self.bump_session();
+        let generation = self.bump_session();
         self.ensure_player(settings)?;
-        Ok(gen)
+        Ok(generation)
     }
 
     /// Tune in a station, drawn from the app's own generator.
@@ -122,10 +123,12 @@ impl AppState {
     }
 
     pub fn apply_band_live(&self, settings: &TrainingSettings) {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                let _ = player.apply_band(settings);
-            }
+        if let Ok(mut slot) = self.player.try_borrow_mut()
+            && let Some(player) = slot.as_mut()
+        {
+            // A slider move has no one to tell. A band that cannot open
+            // is reported by the next send, which rebuilds the player.
+            let _ = player.apply_band(settings);
         }
     }
 
@@ -133,57 +136,60 @@ impl AppState {
     /// groups the background is meant to keep hissing — a real receiver does
     /// not go silent because the other station stopped keying.
     pub fn stop_sending(&self) {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                player.stop();
-            }
+        if let Ok(mut slot) = self.player.try_borrow_mut()
+            && let Some(player) = slot.as_mut()
+        {
+            player.stop();
         }
     }
 
     /// Everything off, receiver included. What "stop" means when the user
     /// pressed it, or walked away from the screen that was making the sound.
     pub fn silence_audio(&self) {
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if let Some(player) = slot.as_mut() {
-                player.shutdown();
-            }
+        if let Ok(mut slot) = self.player.try_borrow_mut()
+            && let Some(player) = slot.as_mut()
+        {
+            player.shutdown();
         }
     }
 
     /// Gate a live sidetone for paddle practice. Opens the player if needed so
     /// a squeeze outside training still has somewhere to go.
     pub fn set_live_tone(&self, on: bool, settings: &TrainingSettings) {
+        // A key that cannot sound has nowhere to report it mid-squeeze;
+        // `ensure_live_sidetone` is where the reason is surfaced.
+        let _ = self.gate_live_tone(on, settings);
+    }
+
+    fn gate_live_tone(&self, on: bool, settings: &TrainingSettings) -> Result<(), String> {
         let hz = settings.side_tone_center();
         let gain = settings.band.volume_min.max(0.15);
-        if let Ok(mut slot) = self.player.try_borrow_mut() {
-            if slot.is_none() {
-                match (self.make_player)() {
-                    Ok(player) => *slot = Some(player),
-                    Err(_) => return,
-                }
-            }
-            if let Some(player) = slot.as_mut() {
-                player.resume_from_gesture();
-                player.set_live_tone(on, hz, gain);
-            }
+        // Busy means a send is being scheduled this instant; the next
+        // squeeze will find it free.
+        let Ok(mut slot) = self.player.try_borrow_mut() else {
+            return Ok(());
+        };
+        if slot.is_none() {
+            *slot = Some((self.make_player)()?);
         }
+        if let Some(player) = slot.as_mut() {
+            player.resume_from_gesture();
+            player.set_live_tone(on, hz, gain);
+        }
+        Ok(())
     }
 
     /// Open the silent sidetone stream so the first paddle squeeze is one
-    /// audio buffer of lag, not a stream start.
+    /// audio buffer of lag, not a stream start. Reports why when it cannot.
     pub fn ensure_live_sidetone(&self, settings: &TrainingSettings) -> Result<(), String> {
-        self.set_live_tone(false, settings);
-        if self.player.borrow().is_none() {
-            return Err("No audio output device found".to_string());
-        }
-        Ok(())
+        self.gate_live_tone(false, settings)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::audio::fake::Call;
-    use crate::testing::{run, test_settings, Harness};
+    use crate::testing::{Harness, run, test_settings};
 
     #[test]
     fn taking_the_audio_over_stops_what_was_playing_and_moves_the_generation_on() {

@@ -1,12 +1,12 @@
-use cw_core::{answer_length_matches, paddle_from_bracket, KeyerMode, Paddle, PaddleKeyer};
+use cw_core::{KeyerMode, Paddle, PaddleKeyer, answer_length_matches, paddle_from_bracket};
 use dioxus::prelude::*;
 
 use crate::time::sleep_ms;
 use crate::ui::focus::focus_group_input;
 use crate::ui::paddle::{
-    bracket_from_key, bump_epoch, capture_dom_paddles, paddle_down, paddle_up, TrainingPaddleSink,
+    TrainingPaddleSink, bracket_from_key, bump_epoch, capture_dom_paddles, paddle_down, paddle_up,
 };
-use crate::ui::widgets::{control_id, html_bool, Icon, ProgressHeader};
+use crate::ui::widgets::{Icon, ProgressHeader, control_id, html_bool};
 
 /// Incomplete answers wait this long before the session sees them. Short
 /// enough that a pause still lands well before auto-confirm would have cared,
@@ -63,10 +63,10 @@ fn commit_draft(
         on_change.call((idx, value));
         return;
     }
-    let gen = bump_epoch(debounce_gen);
+    let generation = bump_epoch(debounce_gen);
     spawn(async move {
         sleep_ms(INPUT_COMMIT_DEBOUNCE_MS).await;
-        if *debounce_gen.peek() != gen {
+        if *debounce_gen.peek() != generation {
             return;
         }
         committed.set(value.clone());
@@ -232,11 +232,10 @@ fn GroupCard(
                         if e.is_auto_repeating() {
                             return;
                         }
-                        if capture_dom_paddles() {
-                            if let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
+                        if capture_dom_paddles()
+                            && let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
                                 on_paddle_down.call(paddle);
                             }
-                        }
                         return;
                     }
                     if closed {
@@ -257,11 +256,10 @@ fn GroupCard(
                 onkeyup: move |e| {
                     if let Some(ch) = bracket_from_key(&e) {
                         e.prevent_default();
-                        if capture_dom_paddles() {
-                            if let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
+                        if capture_dom_paddles()
+                            && let Some(paddle) = paddle_from_bracket(ch, paddle_swap) {
                                 on_paddle_up.call(paddle);
                             }
-                        }
                     }
                 }
             }

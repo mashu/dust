@@ -1,12 +1,17 @@
 use super::{
-    TrainingSettings, FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, GROUP_REPEAT_MAX,
-    GROUP_REPEAT_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
-    PILEUP_SPREAD_MIN, RECEIVER_MODEL_GAIN_MAX, STATIONS_MAX, STATIONS_MIN,
+    FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
+    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, STATIONS_MAX,
+    STATIONS_MIN, TrainingSettings,
 };
-use crate::level::{max_level_for_len, LEVEL_MIN};
+use crate::level::{LEVEL_MIN, max_level_for_len};
 
 impl TrainingSettings {
+    /// Every number put back inside the range the trainer works in, every
+    /// pair the right way round, every link honoured. Settles in one pass, and
+    /// never panics: this is the sanitiser everything else trusts.
+    #[must_use = "clamp returns the clamped settings; it does not change them in place"]
     pub fn clamp(mut self) -> Self {
+        self.replace_non_finite();
         let seq_max = self.max_letter_level();
         self.curriculum.level = self.curriculum.level.clamp(LEVEL_MIN, seq_max);
         self.curriculum.digits_level = self
@@ -81,31 +86,7 @@ impl TrainingSettings {
         self.band.qsb_depth = self.band.qsb_depth.clamp(0.0, 1.0);
         self.band.qsb_rate_hz = self.band.qsb_rate_hz.clamp(0.03, 1.5);
         self.band.qrn_level = self.band.qrn_level.clamp(0.0, 1.0);
-        self.band.receiver_level = self.band.receiver_level.clamp(0.0, 1.0);
-        self.band.receiver_background_gain = self
-            .band
-            .receiver_background_gain
-            .clamp(0.0, RECEIVER_MODEL_GAIN_MAX);
-        self.band.receiver_background_excitation_rate = self
-            .band
-            .receiver_background_excitation_rate
-            .clamp(0.1, 500.0);
-        self.band.receiver_background_resonance =
-            self.band.receiver_background_resonance.clamp(0.5, 240.0);
-        self.band.receiver_background_decay =
-            self.band.receiver_background_decay.clamp(0.5, 0.9999);
-        self.band.receiver_background_offset_hz = self
-            .band
-            .receiver_background_offset_hz
-            .clamp(-1000.0, 1000.0);
-        self.band.receiver_background_offset_mod_depth_hz = self
-            .band
-            .receiver_background_offset_mod_depth_hz
-            .clamp(0.0, 1000.0);
-        self.band.receiver_background_offset_mod_rate_hz = self
-            .band
-            .receiver_background_offset_mod_rate_hz
-            .clamp(0.0, 20.0);
+        self.band.noise_level = self.band.noise_level.clamp(0.0, 1.0);
         self.playback.group_repeat_min = self
             .playback
             .group_repeat_min
@@ -127,5 +108,55 @@ impl TrainingSettings {
         self.auto_level.char_sampling_coverage_strength =
             self.auto_level.char_sampling_coverage_strength.max(0.0);
         self
+    }
+}
+
+impl TrainingSettings {
+    /// NaN and infinity have no place in a setting, and NaN in particular
+    /// breaks every range below it: `f64::clamp` panics when its lower bound
+    /// is NaN, which is exactly what a NaN minimum hands the maximum after it.
+    /// Neither can come out of a JSON save, but this is the function that
+    /// makes settings safe, so it does not get to assume they already are.
+    fn replace_non_finite(&mut self) {
+        let d = Self::default();
+        let fix = |value: &mut f64, fallback: f64| {
+            if !value.is_finite() {
+                *value = fallback;
+            }
+        };
+        let (p, dp) = (&mut self.playback, &d.playback);
+        fix(&mut p.char_wpm_min, dp.char_wpm_min);
+        fix(&mut p.char_wpm_max, dp.char_wpm_max);
+        fix(&mut p.effective_wpm_min, dp.effective_wpm_min);
+        fix(&mut p.effective_wpm_max, dp.effective_wpm_max);
+        fix(
+            &mut p.extra_word_space_multiplier,
+            dp.extra_word_space_multiplier,
+        );
+        fix(&mut p.group_timeout, dp.group_timeout);
+        fix(&mut p.group_pause_sec, dp.group_pause_sec);
+        fix(&mut p.keyer_wpm, dp.keyer_wpm);
+        fix(&mut p.fist_variation, dp.fist_variation);
+        let (b, db) = (&mut self.band, &d.band);
+        fix(&mut b.side_tone_min, db.side_tone_min);
+        fix(&mut b.side_tone_max, db.side_tone_max);
+        fix(&mut b.volume_min, db.volume_min);
+        fix(&mut b.volume_max, db.volume_max);
+        fix(&mut b.steepness, db.steepness);
+        fix(&mut b.envelope_smoothing, db.envelope_smoothing);
+        fix(&mut b.qsb_depth, db.qsb_depth);
+        fix(&mut b.qsb_rate_hz, db.qsb_rate_hz);
+        fix(&mut b.qrn_level, db.qrn_level);
+        fix(&mut b.noise_level, db.noise_level);
+        fix(&mut b.filter_bandwidth_hz, db.filter_bandwidth_hz);
+        fix(&mut b.pileup_spread_hz, db.pileup_spread_hz);
+        fix(&mut b.pileup_level_db, db.pileup_level_db);
+        let (a, da) = (&mut self.auto_level, &d.auto_level);
+        fix(&mut a.auto_adjust_threshold, da.auto_adjust_threshold);
+        fix(&mut a.error_weight_strength, da.error_weight_strength);
+        fix(
+            &mut a.char_sampling_coverage_strength,
+            da.char_sampling_coverage_strength,
+        );
     }
 }

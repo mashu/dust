@@ -1,12 +1,13 @@
+use cw_core::band::heard_snr_db;
 use cw_core::{
-    RangeSetting, ReceiverProfile, SettingsSection, TrainingSettings, FILTER_BANDWIDTH_MAX,
-    FILTER_BANDWIDTH_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
-    PILEUP_SPREAD_MIN, RECEIVER_MODEL_GAIN_MAX, STATIONS_MAX, STATIONS_MIN,
+    FILTER_BANDWIDTH_MAX, FILTER_BANDWIDTH_MIN, FilterShape, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, RangeSetting, STATIONS_MAX,
+    STATIONS_MIN, SettingsSection, TrainingSettings,
 };
 use dioxus::prelude::*;
 
 use crate::ui::widgets::{
-    control_id, Icon, LinkedRange, SectionReset, Seg, SliderField, Switch, DISCLOSURE,
+    DISCLOSURE, Icon, LinkedRange, SectionReset, Seg, SliderField, Switch, control_id,
 };
 
 #[component]
@@ -18,7 +19,16 @@ pub fn BandConditionsCard(
 ) -> Element {
     let s = settings();
     let mut show_help = use_signal(|| false);
-    let mut show_advanced = use_signal(|| false);
+    // As heard through the filter you have set, so narrowing it visibly buys
+    // signal-to-noise — which is the whole reason to reach for it.
+    let noise_reading = if s.band.noise_level > 0.0 {
+        format!(
+            "S/N {:.0} dB",
+            heard_snr_db(s.band.noise_level, s.band.filter_bandwidth_hz)
+        )
+    } else {
+        "Off".to_string()
+    };
     rsx! {
         div { class: "card stack-sm",
             div { class: "card-head",
@@ -26,7 +36,7 @@ pub fn BandConditionsCard(
                     span { class: "card-icon", Icon { name: "waves" } }
                     div {
                         h3 { class: "card-title", "Band conditions" }
-                        p { class: "card-note", "Fading, static and receiver character" }
+                        p { class: "card-note", "Fading, static, noise and the receiver's filter" }
                     }
                 }
                 div { class: "card-tools",
@@ -72,7 +82,7 @@ pub fn BandConditionsCard(
                 div { class: "tips",
                     span { class: "tips-mark", "QRx" }
                     p { class: "muted", style: "margin: 0;",
-                        "QSB slowly fades the signal. QRN is lightning: sharp crashes through the CW passband, not a steady hiss. Receiver background is narrow-filter hiss, ringing and passband breathing. Turn the intensities up and the band reaches the signal."
+                        "Everything you hear passes through one CW filter, the way it does in a real receiver: the band noise is a steady hiss pitched at the filter, and static and every dit ring in it for a moment. QSB slowly fades the signal. QRN is lightning: the crackle of distant storms and the crash of a near one, with the receiver's AGC ducking the band behind it. Turn the noise up and the band reaches the signal."
                     }
                 }
             }
@@ -88,8 +98,25 @@ pub fn BandConditionsCard(
                     onchange: move |v| settings.write().band.filter_bandwidth_hz = v,
                 }
             }
+            div { class: "field",
+                span { class: "field-label", "Filter shape" }
+                div { class: "segmented",
+                    Seg {
+                        label: "Sharp".to_string(),
+                        id: "seg-filter-sharp".to_string(),
+                        active: s.band.filter_shape == FilterShape::Sharp,
+                        onclick: move |_| settings.write().band.filter_shape = FilterShape::Sharp,
+                    }
+                    Seg {
+                        label: "Soft".to_string(),
+                        id: "seg-filter-soft".to_string(),
+                        active: s.band.filter_shape == FilterShape::Soft,
+                        onclick: move |_| settings.write().band.filter_shape = FilterShape::Soft,
+                    }
+                }
+            }
             p { class: "muted", style: "margin: 0;",
-                "Everything you hear comes through this. Narrow it and less static gets in and the filter rings longer, but a station off your pitch fades with it."
+                "Everything you hear comes through this. Narrow it and less noise gets in and the filter rings longer, but a station off your pitch fades with it. Sharp is a crystal filter's steep skirts and ringing; soft rounds them off and barely rings."
             }
             LinkedRange {
                 label: "Stations calling".to_string(),
@@ -162,7 +189,7 @@ pub fn BandConditionsCard(
             }
             Switch {
                 title: "QRN static".to_string(),
-                description: "Crashes of static, the way lightning arrives.".to_string(),
+                description: "Lightning: distant crackle and the crash of a near storm.".to_string(),
                 checked: s.band.qrn_enabled,
                 onchange: move |on| settings.write().band.qrn_enabled = on,
             }
@@ -178,141 +205,21 @@ pub fn BandConditionsCard(
                 onchange: move |v| settings.write().band.qrn_level = v,
             }
             Switch {
-                title: "Receiver background".to_string(),
-                description: "Narrow-filter hiss, ringing and passband breathing.".to_string(),
-                checked: s.band.receiver_enabled,
-                onchange: move |on| settings.write().band.receiver_enabled = on,
+                title: "Band noise".to_string(),
+                description: "The steady hiss of the band, through your filter.".to_string(),
+                checked: s.band.noise_enabled,
+                onchange: move |on| settings.write().band.noise_enabled = on,
             }
             SliderField {
-                label: "Intensity".to_string(),
-                id: "slider-receiver-intensity".to_string(),
-                value_label: format!("{:.0}%", s.band.receiver_level * 100.0),
-                value: s.band.receiver_level,
+                label: "Level".to_string(),
+                id: "slider-noise-level".to_string(),
+                value_label: noise_reading,
+                value: s.band.noise_level,
                 min: 0.0,
                 max: 1.0,
                 step: 0.05,
-                disabled: !s.band.receiver_enabled,
-                onchange: move |v| settings.write().band.receiver_level = v,
-            }
-            div { class: "field",
-                span { class: "field-label", "Filter character" }
-                div { class: "segmented",
-                    Seg {
-                        label: "Whistle".to_string(),
-                        id: "seg-receiver-whistle".to_string(),
-                        active: s.band.receiver_profile == ReceiverProfile::Whistle,
-                        onclick: move |_| settings.write().band.receiver_profile = ReceiverProfile::Whistle,
-                    }
-                    Seg {
-                        label: "Ringing".to_string(),
-                        id: "seg-receiver-ringing".to_string(),
-                        active: s.band.receiver_profile == ReceiverProfile::Ringing,
-                        onclick: move |_| settings.write().band.receiver_profile = ReceiverProfile::Ringing,
-                    }
-                    Seg {
-                        label: "Mixed".to_string(),
-                        id: "seg-receiver-mixed".to_string(),
-                        active: s.band.receiver_profile == ReceiverProfile::Mixed,
-                        onclick: move |_| settings.write().band.receiver_profile = ReceiverProfile::Mixed,
-                    }
-                }
-            }
-            button {
-                id: control_id(DISCLOSURE, "band advanced"),
-                class: if show_advanced() { "advanced-toggle open" } else { "advanced-toggle" },
-                onclick: move |_| show_advanced.set(!show_advanced()),
-                span {
-                    div { class: "tiny", "Advanced receiver tuning" }
-                    div { class: "muted",
-                        "Gain {s.band.receiver_background_gain:.0}× · Q {s.band.receiver_background_resonance:.0} · offset {s.band.receiver_background_offset_hz:.0} Hz"
-                    }
-                }
-                Icon { name: "chevron" }
-            }
-            if show_advanced() {
-                div { class: "row-between",
-                    p { class: "muted", style: "margin: 0;",
-                        "The model behind the receiver's own hiss and ringing."
-                    }
-                    SectionReset {
-                        label: "receiver model".to_string(),
-                        on_reset: move |()| {
-                            settings.write().reset_section(SettingsSection::ReceiverModel);
-                        },
-                    }
-                }
-                div { class: "field-grid",
-                    SliderField {
-                        label: "Model gain".to_string(),
-                        value_label: format!("{:.1}×", s.band.receiver_background_gain),
-                        value: s.band.receiver_background_gain,
-                        min: 0.0,
-                        max: RECEIVER_MODEL_GAIN_MAX,
-                        step: 0.1,
-                        disabled: !s.band.receiver_enabled,
-                        onchange: move |v| settings.write().band.receiver_background_gain = v,
-                    }
-                    SliderField {
-                        label: "Excitation".to_string(),
-                        value_label: format!("{:.0}/s", s.band.receiver_background_excitation_rate),
-                        value: s.band.receiver_background_excitation_rate,
-                        min: 0.1,
-                        max: 500.0,
-                        step: 1.0,
-                        disabled: !s.band.receiver_enabled,
-                        onchange: move |v| settings.write().band.receiver_background_excitation_rate = v,
-                    }
-                    SliderField {
-                        label: "Resonance Q".to_string(),
-                        value_label: format!("{:.0}", s.band.receiver_background_resonance),
-                        value: s.band.receiver_background_resonance,
-                        min: 0.5,
-                        max: 240.0,
-                        step: 0.5,
-                        disabled: !s.band.receiver_enabled,
-                        onchange: move |v| settings.write().band.receiver_background_resonance = v,
-                    }
-                    SliderField {
-                        label: "Decay".to_string(),
-                        value_label: format!("{:.3}", s.band.receiver_background_decay),
-                        value: s.band.receiver_background_decay,
-                        min: 0.5,
-                        max: 0.9999,
-                        step: 0.0001,
-                        disabled: !s.band.receiver_enabled,
-                        onchange: move |v| settings.write().band.receiver_background_decay = v,
-                    }
-                    SliderField {
-                        label: "Filter offset".to_string(),
-                        value_label: format!("{:.0} Hz", s.band.receiver_background_offset_hz),
-                        value: s.band.receiver_background_offset_hz,
-                        min: -1000.0,
-                        max: 1000.0,
-                        step: 5.0,
-                        disabled: !s.band.receiver_enabled,
-                        onchange: move |v| settings.write().band.receiver_background_offset_hz = v,
-                    }
-                    SliderField {
-                        label: "Wobble depth".to_string(),
-                        value_label: format!("{:.0} Hz", s.band.receiver_background_offset_mod_depth_hz),
-                        value: s.band.receiver_background_offset_mod_depth_hz,
-                        min: 0.0,
-                        max: 1000.0,
-                        step: 5.0,
-                        disabled: !s.band.receiver_enabled,
-                        onchange: move |v| settings.write().band.receiver_background_offset_mod_depth_hz = v,
-                    }
-                    SliderField {
-                        label: "Wobble rate".to_string(),
-                        value_label: format!("{:.2} Hz", s.band.receiver_background_offset_mod_rate_hz),
-                        value: s.band.receiver_background_offset_mod_rate_hz,
-                        min: 0.0,
-                        max: 20.0,
-                        step: 0.01,
-                        disabled: !s.band.receiver_enabled,
-                        onchange: move |v| settings.write().band.receiver_background_offset_mod_rate_hz = v,
-                    }
-                }
+                disabled: !s.band.noise_enabled,
+                onchange: move |v| settings.write().band.noise_level = v,
             }
         }
     }

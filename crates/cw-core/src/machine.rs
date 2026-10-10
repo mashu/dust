@@ -1,7 +1,7 @@
 //! Pure session state machine. The UI runtime applies [`SessionEffect`]s; this
 //! module never sleeps, plays audio, or touches Dioxus.
 
-use crate::session::{answer_length_matches, GroupSession, SessionId, SessionView};
+use crate::session::{GroupSession, SessionId, SessionView, answer_length_matches};
 use crate::settings::TrainingSettings;
 use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};
 
@@ -166,6 +166,7 @@ impl SessionMachine {
         self.pending_auto_confirm = None;
     }
 
+    #[must_use = "the effects are the session's instructions to the runtime"]
     pub fn apply(&mut self, event: SessionEvent, now_ms: u64) -> Vec<SessionEffect> {
         if self.is_terminal() {
             return Vec::new();
@@ -552,9 +553,9 @@ mod tests {
             }]
         );
 
-        m.apply(ended(0), 1400);
+        let _ = m.apply(ended(0), 1400);
         assert!(matches!(m.phase(), SessionPhase::RepeatGap { index: 0 }));
-        m.apply(SessionEvent::GapElapsed, 1800);
+        let _ = m.apply(SessionEvent::GapElapsed, 1800);
         let effects = m.apply(ended(0), 2300);
         assert!(matches!(
             m.phase(),
@@ -568,16 +569,16 @@ mod tests {
     #[test]
     fn repeat_count_resets_for_each_group() {
         let mut m = machine_with_repeats(2);
-        m.apply(ended(0), 500);
-        m.apply(SessionEvent::GapElapsed, 900);
-        m.apply(ended(0), 1400);
+        let _ = m.apply(ended(0), 500);
+        let _ = m.apply(SessionEvent::GapElapsed, 900);
+        let _ = m.apply(ended(0), 1400);
         m.set_group_text(1, "UK".into(), 1);
-        m.apply(SessionEvent::Confirm, 1500);
+        let _ = m.apply(SessionEvent::Confirm, 1500);
         assert!(matches!(m.phase(), SessionPhase::InterGroupGap { next: 1 }));
-        m.apply(SessionEvent::GapElapsed, 2000);
+        let _ = m.apply(SessionEvent::GapElapsed, 2000);
         assert!(matches!(m.phase(), SessionPhase::Playing { index: 1 }));
         assert_eq!(m.view().repeat_total, 1);
-        m.apply(ended(1), 2500);
+        let _ = m.apply(ended(1), 2500);
         assert!(matches!(
             m.phase(),
             SessionPhase::AwaitingAnswer { index: 1 }
@@ -617,9 +618,11 @@ mod tests {
             m.phase(),
             SessionPhase::AwaitingAnswer { index: 0 }
         ));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, SessionEffect::Sleep { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, SessionEffect::Sleep { .. }))
+        );
         let after = m.apply(SessionEvent::Timeout, 10_500);
         assert!(m.session().group(0).unwrap().confirmed());
         assert!(
@@ -766,9 +769,11 @@ mod tests {
         assert!(need.is_some());
         assert!(play.is_none(), "play must wait until NeedGroup is applied");
         assert!(effects.contains(&SessionEffect::StopAudio));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, SessionEffect::Sleep { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, SessionEffect::Sleep { .. }))
+        );
     }
 
     #[test]
@@ -922,39 +927,45 @@ mod guard_tests {
     #[test]
     fn a_failure_reported_for_another_group_is_ignored() {
         let mut machine = started(true, 10.0);
-        assert!(machine
-            .apply(SessionEvent::PlaybackFailed { index: 1 }, 0)
-            .is_empty());
+        assert!(
+            machine
+                .apply(SessionEvent::PlaybackFailed { index: 1 }, 0)
+                .is_empty()
+        );
         assert_eq!(machine.phase(), SessionPhase::Playing { index: 0 });
     }
 
     #[test]
     fn typing_is_ignored_while_the_group_is_being_sent() {
         let mut machine = started(true, 10.0);
-        assert!(machine
-            .apply(
-                SessionEvent::Input {
-                    index: 0,
-                    text: "KM".into()
-                },
-                5
-            )
-            .is_empty());
+        assert!(
+            machine
+                .apply(
+                    SessionEvent::Input {
+                        index: 0,
+                        text: "KM".into()
+                    },
+                    5
+                )
+                .is_empty()
+        );
         assert_eq!(machine.session().group(0).map(|g| g.input()), Some(""));
     }
 
     #[test]
     fn typing_into_another_group_is_ignored() {
         let mut machine = started(false, 10.0);
-        assert!(machine
-            .apply(
-                SessionEvent::Input {
-                    index: 1,
-                    text: "XX".into()
-                },
-                5
-            )
-            .is_empty());
+        assert!(
+            machine
+                .apply(
+                    SessionEvent::Input {
+                        index: 1,
+                        text: "XX".into()
+                    },
+                    5
+                )
+                .is_empty()
+        );
         assert_eq!(machine.session().group(1).map(|g| g.input()), Some(""));
     }
 
@@ -962,20 +973,22 @@ mod guard_tests {
     fn typing_during_the_gap_between_groups_is_ignored() {
         let mut machine = started(false, 10.0);
         finished_play(&mut machine, 0);
-        machine.apply(SessionEvent::Confirm, 1_100);
+        let _ = machine.apply(SessionEvent::Confirm, 1_100);
         assert!(matches!(
             machine.phase(),
             SessionPhase::InterGroupGap { .. }
         ));
-        assert!(machine
-            .apply(
-                SessionEvent::Input {
-                    index: 1,
-                    text: "X".into()
-                },
-                1_200
-            )
-            .is_empty());
+        assert!(
+            machine
+                .apply(
+                    SessionEvent::Input {
+                        index: 1,
+                        text: "X".into()
+                    },
+                    1_200
+                )
+                .is_empty()
+        );
     }
 
     #[test]
@@ -993,25 +1006,29 @@ mod guard_tests {
             panic!("expected an auto-confirm, got {effects:?}");
         };
         // A backspace makes the length wrong again and withdraws the confirm.
-        assert!(machine
-            .apply(
-                SessionEvent::Input {
-                    index: 0,
-                    text: "K".into()
-                },
-                1_200
-            )
-            .is_empty());
-        assert!(machine
-            .apply(
-                SessionEvent::AutoConfirmDue {
-                    id,
-                    index: 0,
-                    value: "KM".into()
-                },
-                1_300
-            )
-            .is_empty());
+        assert!(
+            machine
+                .apply(
+                    SessionEvent::Input {
+                        index: 0,
+                        text: "K".into()
+                    },
+                    1_200
+                )
+                .is_empty()
+        );
+        assert!(
+            machine
+                .apply(
+                    SessionEvent::AutoConfirmDue {
+                        id,
+                        index: 0,
+                        value: "KM".into()
+                    },
+                    1_300
+                )
+                .is_empty()
+        );
         assert!(!machine.session().confirmed_flags()[0]);
     }
 
@@ -1029,15 +1046,17 @@ mod guard_tests {
         let SessionEffect::AutoConfirm { id, .. } = first[0].clone() else {
             panic!("expected an auto-confirm, got {first:?}");
         };
-        assert!(machine
-            .apply(
-                SessionEvent::Input {
-                    index: 0,
-                    text: "KM".into(),
-                },
-                1_150,
-            )
-            .is_empty());
+        assert!(
+            machine
+                .apply(
+                    SessionEvent::Input {
+                        index: 0,
+                        text: "KM".into(),
+                    },
+                    1_150,
+                )
+                .is_empty()
+        );
         let done = machine.apply(
             SessionEvent::AutoConfirmDue {
                 id,
@@ -1047,9 +1066,10 @@ mod guard_tests {
             1_400,
         );
         assert!(machine.session().confirmed_flags()[0]);
-        assert!(done
-            .iter()
-            .any(|e| matches!(e, SessionEffect::NeedGroup { index: 1 })));
+        assert!(
+            done.iter()
+                .any(|e| matches!(e, SessionEffect::NeedGroup { index: 1 }))
+        );
     }
 
     #[test]
@@ -1067,23 +1087,25 @@ mod guard_tests {
             panic!("expected an auto-confirm");
         };
         // Same length, different text: the stamped value is stale.
-        machine.apply(
+        let _ = machine.apply(
             SessionEvent::Input {
                 index: 0,
                 text: "MK".into(),
             },
             1_150,
         );
-        assert!(machine
-            .apply(
-                SessionEvent::AutoConfirmDue {
-                    id,
-                    index: 0,
-                    value: "KM".into()
-                },
-                1_200
-            )
-            .is_empty());
+        assert!(
+            machine
+                .apply(
+                    SessionEvent::AutoConfirmDue {
+                        id,
+                        index: 0,
+                        value: "KM".into()
+                    },
+                    1_200
+                )
+                .is_empty()
+        );
         assert!(!machine.session().confirmed_flags()[0]);
     }
 
@@ -1102,19 +1124,21 @@ mod guard_tests {
             panic!("expected an auto-confirm");
         };
         // The answer is confirmed by hand first, so group 0 is no longer current.
-        machine.apply(SessionEvent::Confirm, 1_150);
-        machine.apply(SessionEvent::GapElapsed, 1_200);
+        let _ = machine.apply(SessionEvent::Confirm, 1_150);
+        let _ = machine.apply(SessionEvent::GapElapsed, 1_200);
         assert_eq!(machine.session().current_group(), 1);
-        assert!(machine
-            .apply(
-                SessionEvent::AutoConfirmDue {
-                    id,
-                    index: 0,
-                    value: "KM".into()
-                },
-                1_300
-            )
-            .is_empty());
+        assert!(
+            machine
+                .apply(
+                    SessionEvent::AutoConfirmDue {
+                        id,
+                        index: 0,
+                        value: "KM".into()
+                    },
+                    1_300
+                )
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1149,7 +1173,7 @@ mod guard_tests {
     #[test]
     fn nothing_at_all_happens_once_the_session_is_over() {
         let mut machine = started(true, 10.0);
-        machine.apply(SessionEvent::Abort, 10);
+        let _ = machine.apply(SessionEvent::Abort, 10);
         assert_eq!(machine.phase(), SessionPhase::Aborted);
         assert!(machine.is_terminal());
         for event in [
@@ -1169,7 +1193,7 @@ mod guard_tests {
     fn ending_a_session_with_something_typed_but_unconfirmed_keeps_it() {
         let mut machine = started(true, 10.0);
         finished_play(&mut machine, 0);
-        machine.apply(
+        let _ = machine.apply(
             SessionEvent::Input {
                 index: 0,
                 text: " km ".into(),
@@ -1188,7 +1212,7 @@ mod guard_tests {
     fn ending_a_session_with_nothing_typed_goes_home() {
         let mut machine = started(true, 10.0);
         finished_play(&mut machine, 0);
-        machine.apply(
+        let _ = machine.apply(
             SessionEvent::Input {
                 index: 0,
                 text: "   ".into(),
@@ -1203,11 +1227,13 @@ mod guard_tests {
     #[test]
     fn the_focus_event_only_moves_onto_the_current_group() {
         let mut machine = started(true, 10.0);
-        assert!(machine
-            .apply(SessionEvent::Focus { index: 1 }, 10)
-            .is_empty());
+        assert!(
+            machine
+                .apply(SessionEvent::Focus { index: 1 }, 10)
+                .is_empty()
+        );
         assert_eq!(machine.session().focused_group(), 0);
-        machine.apply(SessionEvent::Focus { index: 0 }, 10);
+        let _ = machine.apply(SessionEvent::Focus { index: 0 }, 10);
         assert_eq!(machine.session().focused_group(), 0);
     }
 

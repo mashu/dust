@@ -1,4 +1,4 @@
-use super::{RangeSetting, RangeValues, TrainingSettings, STATIONS_MAX, STATIONS_MIN};
+use super::{RangeSetting, RangeValues, STATIONS_MAX, STATIONS_MIN, TrainingSettings};
 
 /// How far apart the side tone bounds are pushed when a fixed pitch is opened
 /// back up into a range.
@@ -153,27 +153,24 @@ impl TrainingSettings {
         min + (max - min) / 2.0
     }
 
+    /// Everything the background layers are built from. Two settings with
+    /// the same signature sound the same, so a player only rebuilds its band
+    /// when this changes.
     pub fn band_signature(&self) -> String {
+        let band = &self.band;
         format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
-            self.band.side_tone_min,
-            self.band.side_tone_max,
-            self.band.qsb_enabled,
-            self.band.qsb_depth,
-            self.band.qsb_rate_hz,
-            self.band.qrn_enabled,
-            self.band.qrn_level,
-            self.band.receiver_enabled,
-            self.band.receiver_level,
-            self.band.receiver_profile,
-            self.band.receiver_background_gain,
-            self.band.receiver_background_excitation_rate,
-            self.band.receiver_background_resonance,
-            self.band.receiver_background_decay,
-            self.band.receiver_background_offset_hz,
-            self.band.receiver_background_offset_mod_depth_hz,
-            self.band.receiver_background_offset_mod_rate_hz,
-            self.band.filter_bandwidth_hz,
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}",
+            band.side_tone_min,
+            band.side_tone_max,
+            band.qsb_enabled,
+            band.qsb_depth,
+            band.qsb_rate_hz,
+            band.qrn_enabled,
+            band.qrn_level,
+            band.noise_enabled,
+            band.noise_level,
+            band.filter_bandwidth_hz,
+            band.filter_shape,
         )
     }
 }

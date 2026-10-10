@@ -1,6 +1,6 @@
 use cw_core::{
-    bigram_heatmap, confusion_entries, sampling_rows, session_history, CharacterDiagnostic,
-    MasteryStatus, SessionResult, TrainingSettings, GROUP_START_BIGRAM_TOKEN,
+    CharacterDiagnostic, GROUP_START_BIGRAM_TOKEN, MasteryStatus, SessionResult, TrainingSettings,
+    bigram_heatmap, confusion_entries, sampling_rows, session_history,
 };
 use dioxus::prelude::*;
 

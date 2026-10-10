@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use cw_core::{plan_morse_playback_for, TrainingSettings, Transmission};
+use cw_core::{TrainingSettings, Transmission, plan_morse_playback_for};
 
 use super::{MorseBackend, PlaybackSignal, PlaybackWait, WaitFlags};
 

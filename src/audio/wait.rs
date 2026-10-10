@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use crate::time::{sleep_ms, POLL_MS};
+use crate::time::{POLL_MS, sleep_ms};
 
 /// How long a send may overrun its own duration before it is called stalled.
 /// Long enough to cover a slow device start and a throttled timer, short
@@ -74,10 +74,10 @@ pub fn next_wait_step(
         return WaitStep::Done(PlaybackOutcome::Completed);
     }
     let target = duration_ms.saturating_add(PLAYBACK_TAIL_MS);
-    if let Some(played) = flags.played_ms {
-        if played >= target {
-            return WaitStep::Done(PlaybackOutcome::Completed);
-        }
+    if let Some(played) = flags.played_ms
+        && played >= target
+    {
+        return WaitStep::Done(PlaybackOutcome::Completed);
     }
     // A send whose clock is parked is not stalling, it is waiting for the
     // listener to come back, and the scheduled tone is still there to play
@@ -102,11 +102,7 @@ pub fn next_wait_step(
 /// the budget would run out while the page was hidden and the send would fail
 /// the instant it came back, with the audio running again.
 pub fn stall_charge(flags: WaitFlags, poll_ms: u32) -> u32 {
-    if flags.suspended {
-        0
-    } else {
-        poll_ms
-    }
+    if flags.suspended { 0 } else { poll_ms }
 }
 
 /// A send in flight, as the backend sees it.

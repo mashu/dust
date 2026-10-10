@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::alignment::{
-    calculate_group_letter_accuracy, calculate_overall_character_accuracy, LetterAccuracy,
+    LetterAccuracy, calculate_group_letter_accuracy, calculate_overall_character_accuracy,
 };
 use crate::score::{
-    calculate_alphabet_size, calculate_effective_alphabet_size, calculate_total_chars,
-    compute_average_response_ms, compute_session_score, ScoreConstants,
+    ScoreConstants, calculate_alphabet_size, calculate_effective_alphabet_size,
+    calculate_total_chars, compute_average_response_ms, compute_session_score,
 };
 use crate::settings::{CharSetMode, TrainingSettings};
 
@@ -327,10 +327,10 @@ impl GroupSession {
     }
 
     pub fn record_answer_time_if_empty(&mut self, index: usize, answered_at: u64) {
-        if let Some(group) = self.groups.get_mut(index) {
-            if group.answer_at == 0 {
-                group.answer_at = answered_at;
-            }
+        if let Some(group) = self.groups.get_mut(index)
+            && group.answer_at == 0
+        {
+            group.answer_at = answered_at;
         }
     }
 
@@ -376,10 +376,14 @@ impl GroupSession {
                 } else {
                     answer_at.saturating_sub(end_at) as f64
                 };
+                // Rounded to the millisecond, but never to nothing: an answer
+                // in before the send even ended is the fastest there is, and
+                // a zero would be thrown out of the average as no answer at
+                // all — scoring the quickest copy as a slow one.
                 let per_char = if group.sent.is_empty() {
                     0.0
                 } else {
-                    (delta / group.sent.chars().count() as f64).round()
+                    (delta / group.sent.chars().count() as f64).round().max(1.0)
                 };
                 let wpm = (group.char_wpm > 0.0).then_some(group.char_wpm);
                 SessionTiming {
@@ -726,6 +730,24 @@ mod tests {
         assert_eq!(timings.len(), 1);
         assert!((timings[0].time_to_complete_ms - 1.0).abs() < 1e-9);
         assert!((timings[0].per_char_ms - 1.0).abs() < 1e-9);
+    }
+
+    /// The case the two-character test above cannot see: half a millisecond
+    /// rounds up to one, but a third of one rounds down to zero — and a zero
+    /// is discarded from the average as no answer at all, so the fastest
+    /// possible copy used to score as a slow one.
+    #[test]
+    fn an_early_answer_to_a_long_group_is_still_the_fastest() {
+        for group in ["KMU", "KMURE", "KMUREKMURE"] {
+            let mut session = GroupSession::new(1, 0, 1, TrainingSettings::default());
+            session.set_group(0, group.into());
+            session.force_timing(0, 2000, 18.0, 18.0);
+            session.confirm(0, group.into(), 1500);
+            let timings = session.build_timings(10_000.0);
+            assert_eq!(timings[0].per_char_ms, 1.0, "{group}");
+            let average = crate::score::compute_average_response_ms(&[timings[0].per_char_ms]);
+            assert_eq!(average, 1.0, "{group}: the early answer was thrown away");
+        }
     }
 
     #[test]

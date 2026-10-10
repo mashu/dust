@@ -5,17 +5,17 @@
 
 mod state;
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, Sample, SampleFormat, SizedSample};
 use cw_core::band::{BandMixer, ReceiverFilter};
-use cw_core::{plan_transmission, TrainingSettings, Transmission};
+use cw_core::{TrainingSettings, Transmission, plan_transmission};
 
-use super::render::{mix_plan_into, render_plan, BandPlayback, LiveAgc, LiveQsb, TonePlayback};
+use super::render::{BandPlayback, LiveAgc, LiveQsb, TonePlayback, mix_plan_into, render_plan};
 use super::{MorseBackend, PlaybackWait};
 use state::{PlayerState, ToneSignal};
 
@@ -23,16 +23,54 @@ use state::{PlayerState, ToneSignal};
 /// Pulse/PipeWire underrun: the sidetone stutters, turns to noise, then drops.
 struct MixerSlots {
     band: Mutex<Option<BandPlayback>>,
+    /// The band that was just replaced, still playing out its release so the
+    /// change is a fade rather than a click.
+    retiring: Mutex<Option<BandPlayback>>,
     tone: Mutex<Option<Arc<TonePlayback>>>,
+}
+
+/// The UI thread's way into a slot. A panic while the lock was held cannot
+/// leave the slot half-written — every write is one assignment — so a
+/// poisoned lock is still a good one.
+fn lock_slot<T>(slot: &Mutex<T>) -> MutexGuard<'_, T> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The audio thread's way in: never waits. A buffer that finds the UI mid-way
+/// through swapping a layer simply goes without that layer once.
+fn try_slot<T>(slot: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match slot.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => None,
+    }
+}
+
+/// Play one layer of the mix. A layer that panics is dropped rather than left
+/// in place to panic again on every buffer that follows; the rest of the mix
+/// carries on without it.
+fn play_layer<T>(slot: &Mutex<Option<T>>, play: impl FnOnce(&mut T)) {
+    let Some(mut guard) = try_slot(slot) else {
+        return;
+    };
+    let Some(layer) = guard.as_mut() else {
+        return;
+    };
+    if catch_unwind(AssertUnwindSafe(|| play(layer))).is_err() {
+        *guard = None;
+    }
 }
 
 pub struct MorsePlayer {
     state: PlayerState,
-    band_stop: Arc<AtomicBool>,
     slots: Arc<MixerSlots>,
     /// The one output stream. Morse, receiver hiss and paddle sidetone are
     /// mixed here so the device is not asked for three concurrent writers.
     stream: Option<cpal::Stream>,
+    /// Set by the device when the stream breaks: unplugged headphones, a
+    /// sound server restart. The next use reopens it, and a send in flight
+    /// reports the failure so the session can recover rather than stall.
+    stream_failed: Arc<AtomicBool>,
     sample_rate: u32,
     qsb: Arc<LiveQsb>,
     /// What the background's AGC is holding everything down to.
@@ -68,79 +106,107 @@ impl MorsePlayer {
         #[cfg(target_os = "ios")]
         claim_audio_session();
         let (_, supported) = default_output()?;
-        let sample_rate = supported.sample_rate().0;
-        let live = LiveSidetone::new();
-        let slots = Arc::new(MixerSlots {
-            band: Mutex::new(None),
-            tone: Mutex::new(None),
-        });
-        let stream = start_mixer(Arc::clone(&live), Arc::clone(&slots)).ok();
-        Ok(Self {
+        let mut player = Self {
             state: PlayerState::new(),
-            band_stop: Arc::new(AtomicBool::new(false)),
-            slots,
-            stream,
-            sample_rate,
+            slots: Arc::new(MixerSlots {
+                band: Mutex::new(None),
+                retiring: Mutex::new(None),
+                tone: Mutex::new(None),
+            }),
+            stream: None,
+            stream_failed: Arc::new(AtomicBool::new(false)),
+            sample_rate: supported.sample_rate().0,
             qsb: LiveQsb::new(),
             agc: LiveAgc::new(),
             opened_at: Instant::now(),
-            live,
-        })
+            live: LiveSidetone::new(),
+        };
+        // Opened now so the first squeeze of the paddle is not a stream start,
+        // but a device that refuses here gets another chance on first use.
+        if let Err(err) = player.ensure_mixer() {
+            eprintln!("audio mixer: {err}");
+        }
+        Ok(player)
     }
 
-    /// Tell the background to fade. The mixer keeps playing it until a new
-    /// band replaces it, so the release is heard rather than a click.
-    fn stop_band(&mut self) {
-        self.band_stop.store(true, Ordering::SeqCst);
-        self.band_stop = Arc::new(AtomicBool::new(false));
-        self.state.forget_band();
-    }
-
-    fn set_band(&self, band: Option<BandPlayback>) {
-        if let Ok(mut slot) = self.slots.band.lock() {
-            *slot = band;
+    /// Put a new band in, or take the band away. The one going out is not cut
+    /// off: it is moved aside to play out its release, and dropped here on
+    /// the UI thread next time round rather than on the audio thread.
+    fn replace_band(&mut self, band: Option<BandPlayback>) {
+        if band.is_none() {
+            // Nothing will be ducking the send any more.
+            self.agc.store(1.0);
+        }
+        let outgoing = std::mem::replace(&mut *lock_slot(&self.slots.band), band);
+        if let Some(mut outgoing) = outgoing {
+            outgoing.release();
+            let finished = lock_slot(&self.slots.retiring).replace(outgoing);
+            drop(finished);
         }
     }
 
     fn set_tone(&self, tone: Option<Arc<TonePlayback>>) {
-        if let Ok(mut slot) = self.slots.tone.lock() {
-            *slot = tone;
-        }
+        let previous = std::mem::replace(&mut *lock_slot(&self.slots.tone), tone);
+        // A send's samples can run to megabytes; let them go here, not inside
+        // the audio callback.
+        drop(previous);
     }
 
-    fn ensure_mixer(&mut self) {
+    /// Bring the band in line with the settings, opening the stream first so
+    /// a device that changed rate is known about before the band is built at
+    /// the old one. Says whether the stream is up.
+    fn band_and_mixer(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        self.qsb.store(settings);
+        let mixer = self.ensure_mixer();
+        if let Err(err) = &mixer {
+            eprintln!("audio mixer: {err}");
+        }
+        if self.state.band_needs_rebuild(settings) {
+            let band = BandMixer::needs_background(settings).then(|| {
+                BandPlayback::new(
+                    BandMixer::new(self.sample_rate, settings, u64::from(self.sample_rate)),
+                    self.sample_rate,
+                    Arc::clone(&self.agc),
+                )
+            });
+            self.replace_band(band);
+            self.state.note_band(settings);
+        }
+        mixer
+    }
+
+    /// Make sure the output stream is up, reopening it if the device broke.
+    fn ensure_mixer(&mut self) -> Result<(), String> {
+        if self.stream_failed.swap(false, Ordering::SeqCst) {
+            self.stream = None;
+        }
         if self.stream.is_some() {
-            return;
+            return Ok(());
         }
-        match start_mixer(Arc::clone(&self.live), Arc::clone(&self.slots)) {
-            Ok(stream) => self.stream = Some(stream),
-            Err(err) => eprintln!("audio mixer: {err}"),
+        let (stream, sample_rate) = start_mixer(
+            Arc::clone(&self.live),
+            Arc::clone(&self.slots),
+            Arc::clone(&self.stream_failed),
+        )?;
+        if sample_rate != self.sample_rate {
+            // A different device, or the same one reconfigured. Everything is
+            // rendered at the stream's rate, so the band has to be rebuilt at
+            // the new one before it plays at the wrong pitch.
+            self.sample_rate = sample_rate;
+            self.replace_band(None);
+            self.state.forget_band();
         }
+        self.stream = Some(stream);
+        Ok(())
     }
 }
 
 impl MorseBackend for MorsePlayer {
     fn apply_band(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.qsb.store(settings);
-        if !self.state.band_needs_rebuild(settings) {
-            return Ok(());
-        }
-        self.stop_band();
-        if !BandMixer::needs_background(settings) {
-            self.set_band(None);
-            self.state.note_band(settings);
-            self.ensure_mixer();
-            return Ok(());
-        }
-        let mixer = BandMixer::new(self.sample_rate, settings, u64::from(self.sample_rate));
-        self.set_band(Some(BandPlayback::new(
-            mixer,
-            Arc::clone(&self.band_stop),
-            self.sample_rate,
-            Arc::clone(&self.agc),
-        )));
-        self.state.note_band(settings);
-        self.ensure_mixer();
+        let _ = self.band_and_mixer(settings);
+        // A stream that will not open is not the band's failure: the band is
+        // in place for when it does, and the next send reports the device —
+        // which is what sends the session round its rebuild-and-retry.
         Ok(())
     }
 
@@ -149,11 +215,20 @@ impl MorseBackend for MorsePlayer {
         transmission: &Transmission,
         settings: &TrainingSettings,
     ) -> Result<PlaybackWait, String> {
-        self.apply_band(settings)?;
+        let mixer = self.band_and_mixer(settings);
         self.live.set_on(false);
-        let planned = plan_transmission(transmission, settings);
-        let plan = planned.wanted.clone();
         self.set_tone(None);
+        if let Err(err) = mixer {
+            self.state.note_start_failed();
+            return Err(format!("Audio mixer failed to open: {err}"));
+        }
+
+        let planned = plan_transmission(transmission, settings);
+        let (duration_sec, char_wpm, effective_wpm) = (
+            planned.wanted.duration_sec,
+            planned.wanted.resolved_char_wpm,
+            planned.wanted.resolved_effective_wpm,
+        );
         let armed = self.state.arm();
         let samples = render_send(&planned, settings, self.sample_rate);
         let playback = Arc::new(TonePlayback::new(
@@ -165,35 +240,36 @@ impl MorseBackend for MorsePlayer {
             Arc::clone(&self.agc),
         ));
         let finished = playback.finished_flag();
-        self.set_tone(Some(Arc::clone(&playback)));
-        self.ensure_mixer();
-        if self.stream.is_none() {
-            self.state.note_start_failed();
-            return Err("Audio mixer failed to open".to_string());
-        }
+        self.set_tone(Some(playback));
         Ok(PlaybackWait::new(
-            plan.duration_sec,
-            plan.resolved_char_wpm,
-            plan.resolved_effective_wpm,
-            std::rc::Rc::new(ToneSignal::new(armed, finished)),
+            duration_sec,
+            char_wpm,
+            effective_wpm,
+            std::rc::Rc::new(ToneSignal::new(
+                armed,
+                finished,
+                Arc::clone(&self.stream_failed),
+            )),
         ))
     }
 
     fn stop(&mut self) {
+        // The send keeps its slot and rides its own release down to silence.
         self.state.stop();
     }
 
     fn shutdown(&mut self) {
         self.stop();
-        self.stop_band();
+        self.replace_band(None);
+        self.state.forget_band();
         self.live.set_on(false);
-        self.set_band(None);
-        self.set_tone(None);
     }
 
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
         self.live.set(on, frequency_hz, gain);
-        self.ensure_mixer();
+        if let Err(err) = self.ensure_mixer() {
+            eprintln!("audio mixer: {err}");
+        }
     }
 }
 
@@ -202,6 +278,7 @@ fn build_stream<T, F>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     channels: usize,
+    failed: Arc<AtomicBool>,
     mut source: F,
 ) -> Result<cpal::Stream, String>
 where
@@ -233,7 +310,10 @@ where
                     *slot = T::from_sample(sample);
                 }
             },
-            |err| eprintln!("audio stream error: {err}"),
+            move |err| {
+                eprintln!("audio stream error: {err}");
+                failed.store(true, Ordering::SeqCst);
+            },
             None,
         )
         .map_err(|e| format!("Audio stream: {e}"))
@@ -245,21 +325,22 @@ fn build_for_format<F>(
     supported: &cpal::SupportedStreamConfig,
     stream_config: &cpal::StreamConfig,
     channels: usize,
+    failed: Arc<AtomicBool>,
     source: F,
 ) -> Result<cpal::Stream, String>
 where
     F: FnMut(&mut [f32], usize) + Send + 'static,
 {
-    let format = supported.sample_format();
-    match format {
-        SampleFormat::F32 => build_stream::<f32, F>(device, stream_config, channels, source),
-        SampleFormat::F64 => build_stream::<f64, F>(device, stream_config, channels, source),
-        SampleFormat::I16 => build_stream::<i16, F>(device, stream_config, channels, source),
-        SampleFormat::I32 => build_stream::<i32, F>(device, stream_config, channels, source),
-        SampleFormat::U16 => build_stream::<u16, F>(device, stream_config, channels, source),
-        SampleFormat::U32 => build_stream::<u32, F>(device, stream_config, channels, source),
-        SampleFormat::I8 => build_stream::<i8, F>(device, stream_config, channels, source),
-        SampleFormat::U8 => build_stream::<u8, F>(device, stream_config, channels, source),
+    let (config, n) = (stream_config, channels);
+    match supported.sample_format() {
+        SampleFormat::F32 => build_stream::<f32, F>(device, config, n, failed, source),
+        SampleFormat::F64 => build_stream::<f64, F>(device, config, n, failed, source),
+        SampleFormat::I16 => build_stream::<i16, F>(device, config, n, failed, source),
+        SampleFormat::I32 => build_stream::<i32, F>(device, config, n, failed, source),
+        SampleFormat::U16 => build_stream::<u16, F>(device, config, n, failed, source),
+        SampleFormat::U32 => build_stream::<u32, F>(device, config, n, failed, source),
+        SampleFormat::I8 => build_stream::<i8, F>(device, config, n, failed, source),
+        SampleFormat::U8 => build_stream::<u8, F>(device, config, n, failed, source),
         other => Err(format!("Unsupported sample format: {other}")),
     }
 }
@@ -331,9 +412,14 @@ impl LiveSidetone {
     }
 }
 
-fn start_mixer(live: Arc<LiveSidetone>, slots: Arc<MixerSlots>) -> Result<cpal::Stream, String> {
+/// Open the mixer on the default output, and say what rate it runs at.
+fn start_mixer(
+    live: Arc<LiveSidetone>,
+    slots: Arc<MixerSlots>,
+    failed: Arc<AtomicBool>,
+) -> Result<(cpal::Stream, u32), String> {
     let (device, supported) = default_output()?;
-    let channels = supported.channels() as usize;
+    let channels = usize::from(supported.channels());
     let mut last_err = None;
     for config in mixer_configs(&supported) {
         match start_mixer_on(
@@ -343,8 +429,9 @@ fn start_mixer(live: Arc<LiveSidetone>, slots: Arc<MixerSlots>) -> Result<cpal::
             channels,
             Arc::clone(&live),
             Arc::clone(&slots),
+            Arc::clone(&failed),
         ) {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => return Ok((stream, supported.sample_rate().0)),
             Err(err) => last_err = Some(err),
         }
     }
@@ -358,6 +445,7 @@ fn start_mixer_on(
     channels: usize,
     live: Arc<LiveSidetone>,
     slots: Arc<MixerSlots>,
+    failed: Arc<AtomicBool>,
 ) -> Result<cpal::Stream, String> {
     let sample_rate = supported.sample_rate().0 as f32;
     let mut phase = 0.0f32;
@@ -369,16 +457,17 @@ fn start_mixer_on(
         supported,
         stream_config,
         channels,
+        failed,
         move |out, channels| {
-            if let Ok(mut band) = slots.band.try_lock() {
-                if let Some(playback) = band.as_mut() {
-                    playback.fill(out, channels);
+            // The outgoing band first, so the live one has the last word on
+            // the AGC both of them publish.
+            play_layer(&slots.retiring, |band| {
+                if !band.is_released() {
+                    band.mix_into(out, channels);
                 }
-            }
-            let tone = slots.tone.try_lock().ok().and_then(|slot| slot.clone());
-            if let Some(playback) = tone {
-                playback.mix_into(out, channels);
-            }
+            });
+            play_layer(&slots.band, |band| band.mix_into(out, channels));
+            play_layer(&slots.tone, |tone| tone.mix_into(out, channels));
             let hz = live.hz.load(Ordering::Relaxed) as f32;
             let gain = f32::from_bits(live.gain_bits.load(Ordering::Relaxed));
             let incr = two_pi * hz / sample_rate.max(1.0);
@@ -413,6 +502,59 @@ fn start_mixer_on(
     Ok(stream)
 }
 
+/// The mixer's slot handling, which needs no device to test.
+#[cfg(test)]
+mod mixer_tests {
+    use super::*;
+
+    /// A layer that panics is dropped, so it cannot panic again on every
+    /// buffer that follows, and the lock it was behind is not poisoned for
+    /// the UI thread.
+    #[test]
+    fn a_layer_that_panics_is_dropped_and_the_lock_survives() {
+        let slot = Mutex::new(Some(1u32));
+        play_layer(&slot, |_| panic!("a layer went wrong"));
+        assert!(!slot.is_poisoned(), "the panic was caught inside the lock");
+        assert!(
+            lock_slot(&slot).is_none(),
+            "the layer that panicked was dropped"
+        );
+
+        let mut played = 0;
+        play_layer(&slot, |_| played += 1);
+        assert_eq!(played, 0, "an empty slot plays nothing");
+    }
+
+    /// A lock poisoned elsewhere is still a good one: every write to a slot is
+    /// a single assignment, so there is no half-written state to protect.
+    #[test]
+    fn a_poisoned_slot_still_plays() {
+        let slot = Arc::new(Mutex::new(Some(2u32)));
+        let poisoner = Arc::clone(&slot);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(slot.is_poisoned());
+
+        let mut seen = 0;
+        play_layer(&slot, |value| seen = *value);
+        assert_eq!(seen, 2);
+        *lock_slot(&slot) = Some(3);
+        assert_eq!(*lock_slot(&slot), Some(3));
+    }
+
+    /// The audio thread never waits: a slot the UI is holding is skipped for
+    /// one buffer.
+    #[test]
+    fn a_busy_slot_is_skipped_rather_than_waited_for() {
+        let slot = Mutex::new(Some(4u32));
+        let _held = lock_slot(&slot);
+        assert!(try_slot(&slot).is_none());
+    }
+}
+
 #[cfg(test)]
 mod device_tests {
     use super::*;
@@ -433,8 +575,8 @@ mod device_tests {
         settings.band.volume_min = 0.1;
         settings.band.qrn_enabled = true;
         settings.band.qrn_level = 0.3;
-        settings.band.receiver_enabled = true;
-        settings.band.receiver_level = 0.2;
+        settings.band.noise_enabled = true;
+        settings.band.noise_level = 0.2;
         settings
     }
 
@@ -473,8 +615,35 @@ mod device_tests {
         player.apply_band(&settings).expect("changed band");
         // A silent band tears the stream down without complaining.
         settings.band.qrn_enabled = false;
-        settings.band.receiver_enabled = false;
+        settings.band.noise_enabled = false;
         player.apply_band(&settings).expect("silent band");
+        player.shutdown();
+    }
+
+    /// Changing the band does not cut the old one off mid-sample — that is a
+    /// click — and a band taken away stops ducking the send.
+    #[test]
+    fn a_replaced_band_retires_and_lets_go_of_the_agc() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        let mut settings = settings();
+        player.apply_band(&settings).expect("band");
+        assert!(lock_slot(&player.slots.band).is_some());
+
+        player.agc.store(0.3);
+        settings.band.qrn_enabled = false;
+        settings.band.noise_enabled = false;
+        player.apply_band(&settings).expect("silent band");
+        assert!(lock_slot(&player.slots.band).is_none());
+        assert!(
+            lock_slot(&player.slots.retiring).is_some(),
+            "the old band should be fading out, not dropped"
+        );
+        assert!(
+            (player.agc.gain() - 1.0).abs() < 1e-6,
+            "nothing is ducking any more"
+        );
         player.shutdown();
     }
 
