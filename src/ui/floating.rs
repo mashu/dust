@@ -228,7 +228,13 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: transparent;
 /// The floating window's own app.
 #[component]
 fn Floating(feed: FeedRef) -> Element {
-    let mut view = use_signal(FeedView::default);
+    // What there is already, so it opens on the stream rather than blank.
+    let mut view = use_signal(|| {
+        feed.0
+            .upgrade()
+            .map(|shared| shared.view.borrow().clone())
+            .unwrap_or_default()
+    });
     use_future(move || {
         let feed = feed.clone();
         async move {
@@ -300,5 +306,95 @@ fn Floating(feed: FeedRef) -> Element {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(text: &str) -> HeardGroup {
+        HeardGroup {
+            text: text.into(),
+            char_wpm: 25.0,
+            effective_wpm: 18.0,
+        }
+    }
+
+    /// The floating window as it first draws, over `view`.
+    fn render(view: FeedView) -> String {
+        let feed = Rc::new(Feed::default());
+        *feed.view.borrow_mut() = view;
+        let props = FloatingProps {
+            feed: FeedRef(Rc::downgrade(&feed)),
+        };
+        let mut dom = VirtualDom::new_with_props(Floating, props);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn it_shows_the_newest_group_its_speed_and_a_few_before_it() {
+        let heard = ["K1", "M2", "KM", "MK", "1M"].map(group).to_vec();
+        let html = render(FeedView {
+            heard,
+            streaming: true,
+            locked: false,
+        });
+        assert!(
+            html.contains(r#"<div class="floating-group">1M</div>"#),
+            "{html}"
+        );
+        assert!(html.contains("25 WPM · 18 eff."));
+        // The three before the newest, newest first; the oldest has gone.
+        assert!(html.contains("MK  KM  M2"), "{html}");
+        assert!(!html.contains("K1"));
+        assert!(html.contains("floating-close"));
+    }
+
+    #[test]
+    fn it_says_when_the_stream_has_stopped_or_not_begun() {
+        let stopped = render(FeedView {
+            heard: vec![group("KM")],
+            streaming: false,
+            locked: false,
+        });
+        assert!(stopped.contains("Stopped · 25 WPM"), "{stopped}");
+        let waiting = render(FeedView {
+            heard: Vec::new(),
+            streaming: true,
+            locked: false,
+        });
+        assert!(waiting.contains("Listening"), "{waiting}");
+        let idle = render(FeedView::default());
+        assert!(idle.contains("Start a stream on Listen"), "{idle}");
+    }
+
+    /// Locked, it cannot be clicked, so it offers nothing to click.
+    #[test]
+    fn a_locked_window_says_so_in_place_of_its_close_button() {
+        let html = render(FeedView {
+            heard: vec![group("KM")],
+            streaming: true,
+            locked: true,
+        });
+        assert!(html.contains("floating locked"), "{html}");
+        assert!(html.contains("LOCKED"));
+        assert!(!html.contains("floating-close"));
+    }
+
+    #[test]
+    fn its_page_does_not_wait_on_frames_and_lets_the_desktop_through() {
+        let head = floating_head();
+        assert!(head.contains("window.requestAnimationFrame ="));
+        assert!(head.contains("background: transparent"));
+    }
+
+    #[test]
+    fn a_feed_is_its_own_and_no_other() {
+        let one = Rc::new(Feed::default());
+        let other = Rc::new(Feed::default());
+        assert!(FeedRef(Rc::downgrade(&one)) == FeedRef(Rc::downgrade(&one)));
+        assert!(FeedRef(Rc::downgrade(&one)) != FeedRef(Rc::downgrade(&other)));
     }
 }

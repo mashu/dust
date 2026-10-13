@@ -558,6 +558,46 @@ fn listen_renders_the_selected_character() {
     assert!(html.contains("Stream groups"));
 }
 
+/// The floating window's buttons are offered only where it can open, and
+/// the lock only once it is open.
+#[test]
+fn listen_offers_the_floating_window_and_its_lock_where_there_is_one() {
+    let shown = |can_float: bool, floating: bool, float_locked: bool| {
+        render_props(
+            |props: (bool, bool, bool)| {
+                let (can_float, floating, float_locked) = props;
+                rsx! {
+                    ListenView {
+                        settings: TrainingSettings::default(),
+                        playing: false,
+                        on_play: move |_: String| {},
+                        on_stop: move |_| {},
+                        on_back: move |_| {},
+                        can_float,
+                        floating,
+                        float_locked,
+                    }
+                }
+            },
+            (can_float, floating, float_locked),
+        )
+    };
+    let none = shown(false, false, false);
+    assert!(!none.contains("btn-floating-window"));
+    let closed = shown(true, false, false);
+    assert!(closed.contains(">Floating window<"), "{closed}");
+    assert!(!closed.contains("btn-lock-floating-window"));
+    let open = shown(true, true, false);
+    assert!(open.contains("Close floating window"));
+    assert!(
+        open.contains("Lock floating window (click-through)"),
+        "{open}"
+    );
+    let locked = shown(true, true, true);
+    assert!(locked.contains("Unlock floating window"), "{locked}");
+    assert!(locked.contains(r#"aria-pressed="true""#));
+}
+
 /// Punctuation used to slug to a bare `chip`, so five chips shared an id.
 #[test]
 fn every_listen_chip_has_an_id_of_its_own() {
