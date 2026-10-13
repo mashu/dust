@@ -64,16 +64,6 @@ mod tests {
         assert!(head.contains("media=\"print\""));
     }
 
-    /// X11 comes first, so the floating window can stay above the others,
-    /// but a backend the user picked is theirs.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_desktop_asks_for_x11_unless_a_backend_was_chosen() {
-        assert_eq!(super::gdk_backend(None), Some("x11,wayland"));
-        assert_eq!(super::gdk_backend(Some("".into())), Some("x11,wayland"));
-        assert_eq!(super::gdk_backend(Some("wayland".into())), None);
-    }
-
     /// A window out of sight must not stop the app: renders cannot wait on
     /// animation frames a hidden webview never gets.
     #[test]
@@ -81,16 +71,6 @@ mod tests {
         let head = super::themed_document_head();
         assert!(head.contains("window.requestAnimationFrame ="));
         assert!(head.contains("document.hidden"));
-    }
-}
-
-/// The GDK backend to ask for, given what the environment already asks for:
-/// X11 first, unless the user has chosen.
-#[cfg(all(feature = "desktop", target_os = "linux"))]
-fn gdk_backend(chosen: Option<std::ffi::OsString>) -> Option<&'static str> {
-    match chosen {
-        Some(chosen) if !chosen.is_empty() => None,
-        _ => Some("x11,wayland"),
     }
 }
 
@@ -103,18 +83,6 @@ fn launch_desktop() {
         // Safety: process start, before other threads exist.
         unsafe {
             std::env::set_var("GTK_CSD", "0");
-        }
-        // Run through X11 — XWayland on a Wayland desktop — unless told
-        // otherwise. A Wayland client cannot keep a window above the others,
-        // so the floating window fell behind whatever was used next. Dioxus
-        // means to do the same, but asks only once GTK has already chosen
-        // its backend, which is too late. Wayland stays the fallback for a
-        // desktop with no XWayland.
-        if let Some(backend) = gdk_backend(std::env::var_os("GDK_BACKEND")) {
-            // Safety: process start, before other threads exist.
-            unsafe {
-                std::env::set_var("GDK_BACKEND", backend);
-            }
         }
     }
     use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
