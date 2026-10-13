@@ -15,6 +15,8 @@ pub mod stats_detail;
 pub mod tips;
 pub mod training;
 pub mod widgets;
+#[cfg(feature = "desktop")]
+mod window_menu;
 
 #[cfg(test)]
 mod render_tests;

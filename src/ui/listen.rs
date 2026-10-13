@@ -211,7 +211,7 @@ pub fn ListenView(
                         }
                         if !float_locked {
                             p { id: "floating-hint", class: "muted", style: "margin: 0; font-size: 0.85rem;",
-                                "To keep it above other windows, right-click its title bar and choose Always on Top, then lock it."
+                                "Drag it where you want it. To keep it above other windows, right-click it and choose Always on Top, then lock it."
                             }
                         }
                     }

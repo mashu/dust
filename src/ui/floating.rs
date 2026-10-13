@@ -5,12 +5,13 @@
 //! only: a browser tab and a phone app cannot put anything over other
 //! programs.
 //!
-//! It is an ordinary window with a title bar, and it does not try to keep
-//! itself on top: a Wayland client cannot, and a window that asked would be
-//! at the mercy of whichever window had focus. The desktop already has the
-//! control for it — Always on Top in the title bar's menu on GNOME, Keep
-//! Above Others on KDE — and a window put there by the user stays there
-//! whatever happens to the main one.
+//! It has no title bar, and it does not try to keep itself on top: a Wayland
+//! client cannot, and a window that asked would be at the mercy of whichever
+//! window had focus. The desktop already has the control for it — Always on
+//! Top on GNOME, Keep Above Others on KDE — in the window's menu, and a
+//! right-click opens that menu without a title bar to hold it. A window put
+//! there by the user stays there whatever happens to the main one. Dragging
+//! it moves it.
 //!
 //! The two windows are separate virtual DOMs, and a signal of one does not
 //! wake the other. So the main window writes what is to be shown into a
@@ -27,6 +28,7 @@ use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 use dioxus::desktop::{Config, DesktopService, LogicalSize, WindowBuilder, window};
+use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 
 use crate::playback::HeardGroup;
@@ -179,13 +181,14 @@ fn floating_config() -> Config {
         .with_window(floating_builder())
 }
 
-/// A title bar, so the desktop's own window menu can keep it on top.
+/// No title bar: the window's menu is a right-click away instead.
 fn floating_builder() -> WindowBuilder {
     WindowBuilder::new()
         .with_title("Dust — groups")
+        .with_decorations(false)
         .with_transparent(true)
-        .with_inner_size(LogicalSize::new(340.0, 150.0))
-        .with_min_inner_size(LogicalSize::new(220.0, 100.0))
+        .with_resizable(false)
+        .with_inner_size(LogicalSize::new(340.0, 132.0))
 }
 
 fn floating_head() -> String {
@@ -207,12 +210,24 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: transparent;
   align-items: center;
   justify-content: center;
   position: relative;
+  border-radius: 14px;
   background: rgba(30, 24, 18, 0.74);
   color: #f6efe3;
   font-family: "IBM Plex Mono", "DejaVu Sans Mono", ui-monospace, monospace;
+  cursor: move;
   user-select: none;
   -webkit-user-select: none;
 }
+.floating.locked { cursor: default; }
+.floating-close {
+  position: absolute; top: 4px; right: 6px;
+  border: 0; background: none; color: inherit;
+  font: inherit; font-size: 1rem; line-height: 1;
+  padding: 4px 6px; opacity: 0; cursor: pointer;
+  transition: opacity 0.15s;
+}
+.floating:hover .floating-close { opacity: 0.45; }
+.floating-close:hover { opacity: 1 !important; }
 .floating-group { font-size: 2.5rem; line-height: 1.1; letter-spacing: 0.14em; white-space: nowrap; }
 .floating-speed { margin-top: 0.3rem; font-size: 0.8rem; letter-spacing: 0.08em; opacity: 0.75; }
 .floating-earlier { margin-top: 0.3rem; font-size: 0.85rem; letter-spacing: 0.1em; opacity: 0.5; white-space: nowrap; }
@@ -264,8 +279,38 @@ fn Floating(feed: FeedRef) -> Element {
     rsx! {
         div {
             class: if locked { "floating locked" } else { "floating" },
+            title: if locked { "" } else { "Drag to move · right-click for Always on Top" },
+            onmousedown: move |event| {
+                if !locked && event.trigger_button() == Some(MouseButton::Primary) {
+                    window().drag();
+                }
+            },
+            oncontextmenu: move |event| {
+                event.prevent_default();
+                if !locked {
+                    let client = event.client_coordinates();
+                    let screen = event.screen_coordinates();
+                    super::window_menu::show(
+                        &window(),
+                        super::window_menu::Press {
+                            x: client.x,
+                            y: client.y,
+                            x_root: screen.x,
+                            y_root: screen.y,
+                        },
+                    );
+                }
+            },
             if locked {
                 span { class: "floating-lock", title: "Locked: unlock it from the main window", "LOCKED" }
+            } else {
+                button {
+                    class: "floating-close",
+                    title: "Close",
+                    onmousedown: move |event| event.stop_propagation(),
+                    onclick: move |_| window().close(),
+                    "×"
+                }
             }
             match (latest, streaming) {
                 (Some(group), _) => rsx! {
@@ -331,6 +376,8 @@ mod tests {
         assert!(html.contains("MK  KM  M2"), "{html}");
         assert!(!html.contains("K1"));
         assert!(!html.contains("LOCKED"));
+        assert!(html.contains("floating-close"));
+        assert!(html.contains("right-click for Always on Top"));
     }
 
     #[test]
@@ -362,18 +409,19 @@ mod tests {
         assert!(html.contains("floating locked"), "{html}");
         assert!(html.contains("LOCKED"));
         assert!(html.contains("unlock it from the main window"));
+        assert!(!html.contains("floating-close"));
     }
 
-    /// Keeping it on top is the desktop's job, done from its title bar.
+    /// Keeping it on top is the desktop's job, done from the window's menu,
+    /// which a right-click opens: there is no title bar to hold it.
     #[test]
-    fn it_is_a_window_the_desktop_can_keep_on_top() {
+    fn it_has_no_title_bar_and_leaves_on_top_to_the_user() {
         let window = floating_builder().window;
-        assert!(window.decorations, "no title bar, no window menu");
+        assert!(!window.decorations);
         assert!(
             !window.always_on_top,
             "the user puts it on top, not the app"
         );
-        assert!(window.resizable);
     }
 
     #[test]

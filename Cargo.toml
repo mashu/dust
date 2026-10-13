@@ -64,6 +64,11 @@ cpal = { version = "0.15", optional = true }
 dirs = { version = "6", optional = true }
 tokio = { version = "1", optional = true, default-features = false, features = ["time", "rt"] }
 
+# Linux desktop: the window menu is asked for through GTK, which the webview
+# runs on already.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", optional = true }
+
 # iOS: claiming an audio session is what makes the app audible at all, and cpal
 # does not do it for us.
 [target.'cfg(target_os = "ios")'.dependencies]
@@ -118,7 +123,7 @@ web = [
 ]
 # Desktop is the system webview (wry). `dx serve --platform desktop` and the
 # shipped installers use this.
-desktop = ["dioxus/desktop", "native-runtime", "native-audio"]
+desktop = ["dioxus/desktop", "native-runtime", "native-audio", "dep:gtk"]
 # Android/iOS still use a system webview. `dx` enables this feature
 # automatically for `--platform android`.
 mobile = ["dioxus/mobile", "native-runtime", "native-audio"]

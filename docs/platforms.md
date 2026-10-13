@@ -125,13 +125,14 @@ behind others. **Floating window** opens a small window that shows each group
 after it is sent, with its speed and the few before it. Closing the main
 window closes it too.
 
-It is an ordinary window, and keeping it on top is left to the desktop, the
-way it is for any other window: on GNOME right-click its title bar (or press
-Alt+Space) and choose **Always on Top**; on KDE, **More Actions → Keep Above
-Others**. Placed there, it stays above everything wherever the main window
-goes. Then **Lock floating window** makes it click-through: every click goes
-to the program underneath, so it can sit over your work. A locked window
-cannot be clicked, so unlock or close it from the main window.
+It has no title bar. Drag it to move it, and right-click it for the
+desktop's own window menu, the one a title bar would open: on GNOME choose
+**Always on Top**, on KDE **Keep Above Others**. Placed there, it stays above
+everything wherever the main window goes. On Windows and macOS, which have no
+such menu, the right-click puts it on top or takes it off. Then **Lock
+floating window** makes it click-through: every click goes to the program
+underneath, so it can sit over your work. A locked window cannot be clicked,
+so unlock or close it from the main window.
 
 The see-through background needs a compositor, which every Wayland desktop
 has; without one it is drawn solid.
