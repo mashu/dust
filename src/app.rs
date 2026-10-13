@@ -111,6 +111,8 @@ pub fn App() -> Element {
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
+    #[cfg(feature = "desktop")]
+    crate::ui::floating::use_floating_window(ctx);
 
     use_effect(move || {
         if let Some(shown) = toasts.current() {
@@ -769,6 +771,10 @@ mod ui_tests {
             assert!(ui.run_until(20_000, |_| recorder.texts().len() >= 2).await);
             assert!(recorder.texts().iter().all(|text| text.len() == 2));
             assert!(ui.run_until(20_000, |ui| ui.has("listen-heard")).await);
+            // Every group says how fast it was sent.
+            assert!(ui.has("listen-speed") && ui.has("40 WPM"), "{}", ui.html());
+            // Only the desktop can float the groups over other programs.
+            assert_eq!(ui.has("btn-floating-window"), cfg!(feature = "desktop"));
             ui.click("btn-stop");
             assert!(ui.has("Play all"));
             assert!(ui.has("Stream groups"));

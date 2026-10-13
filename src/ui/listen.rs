@@ -1,6 +1,7 @@
 use cw_core::{TrainingSettings, compute_char_pool, morse_for, newest_unlocked};
 use dioxus::prelude::*;
 
+use crate::playback::HeardGroup;
 use crate::ui::widgets::{Icon, IconName, control_id, html_bool};
 
 /// A character chip's id. Most characters slug to themselves; `?`, `/`, `.`
@@ -34,8 +35,14 @@ pub fn ListenView(
     on_stop: EventHandler<()>,
     on_back: EventHandler<()>,
     #[props(default)] streaming: bool,
-    #[props(default)] heard: Vec<String>,
+    #[props(default)] heard: Vec<HeardGroup>,
     #[props(default)] on_stream: EventHandler<()>,
+    /// The groups in a window of their own, over other programs: offered
+    /// where there is one to open, the desktop.
+    #[props(default)]
+    can_float: bool,
+    #[props(default)] floating: bool,
+    #[props(default)] on_float: EventHandler<()>,
 ) -> Element {
     let pool = compute_char_pool(&settings);
     let newest = newest_unlocked(&settings);
@@ -104,10 +111,13 @@ pub fn ListenView(
                 if streaming {
                     p { class: "listen-glyph",
                         if let Some(last) = heard.last() {
-                            "{last}"
+                            "{last.text}"
                         } else {
                             "·−"
                         }
+                    }
+                    if let Some(last) = heard.last() {
+                        p { id: "listen-speed", class: "mono listen-speed", "{last.speed_label()}" }
                     }
                     p { class: "muted", style: "margin: 0.5rem 0 0;",
                         if heard.is_empty() {
@@ -121,7 +131,8 @@ pub fn ListenView(
                             for (i, group) in heard.iter().enumerate() {
                                 span {
                                     class: if i + 1 == heard.len() { "listen-heard-item latest" } else { "listen-heard-item" },
-                                    "{group}"
+                                    title: group.speed_label(),
+                                    "{group.text}"
                                 }
                             }
                         }
@@ -173,6 +184,17 @@ pub fn ListenView(
                         onclick: move |_| on_stream.call(()),
                         Icon { name: IconName::Repeat }
                         "Stream groups"
+                    }
+                }
+                if can_float {
+                    button {
+                        id: control_id("btn", "floating window"),
+                        class: "btn btn-secondary",
+                        title: "Show the groups in a small window kept above your other programs",
+                        "aria-pressed": if floating { "true" } else { "false" },
+                        onclick: move |_| on_float.call(()),
+                        Icon { name: IconName::Sparkle }
+                        if floating { "Close floating window" } else { "Floating window" }
                     }
                 }
             }

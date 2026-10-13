@@ -118,6 +118,19 @@ and covers the audio-session code and cpal's CoreAudio backend.
 are unsigned (right-click → Open the first time). Windows needs WebView2,
 already present on typical Windows 10/11.
 
+### Copying while you work in other programs
+
+Listen → **Stream groups** keeps sending groups with the window minimised or
+behind others. **Floating window** opens a small frameless window, kept above
+every other window, that shows each group after it is sent, with its speed
+and the few before it. Drag it anywhere; × closes it, and closing the main
+window closes it too.
+
+On Linux the app runs through X11 (XWayland on a Wayland desktop), where
+"always on top" and the see-through background are honoured by GNOME, KDE and
+the other common window managers. Without a compositor the background is
+drawn solid.
+
 ## Where your progress lives
 
 Nothing syncs. Each install keeps its own history, in the place that platform

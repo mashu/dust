@@ -3,8 +3,8 @@
 
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, Sampler, SplitMix64, TrainingSettings,
-    Transmission, compute_after_group_gap_ms, generate_callsign, generate_training_group,
-    resolve_station,
+    Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -15,6 +15,29 @@ use crate::time::seed_rng;
 
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
+
+/// A group the stream has sent, and how fast it was sent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeardGroup {
+    pub text: String,
+    /// The speed of the characters themselves.
+    pub char_wpm: f64,
+    /// The overall speed, spacing included; below `char_wpm` under Farnsworth.
+    pub effective_wpm: f64,
+}
+
+impl HeardGroup {
+    /// "24 WPM", or "24 WPM · 18 eff." when the gaps are stretched.
+    pub fn speed_label(&self) -> String {
+        let char_wpm = self.char_wpm.round();
+        let effective_wpm = self.effective_wpm.round();
+        if effective_wpm < char_wpm {
+            format!("{char_wpm:.0} WPM · {effective_wpm:.0} eff.")
+        } else {
+            format!("{char_wpm:.0} WPM")
+        }
+    }
+}
 
 /// The pause between letters on the Listen screen.
 const LETTER_GAP_MS: u32 = 420;
@@ -219,26 +242,44 @@ async fn loop_band_preview(
 /// This is not a training session. Its sampler is one of its own — built
 /// from the history as a session's is, so it leans on the same weak
 /// characters — and nothing it sends is answered, so nothing is learned and
-/// nothing is stored.
+/// nothing is stored. Each group is sent the way a session sends it, though:
+/// by a station of its own, drawn from the speed, tone and strength ranges
+/// in the settings as they are when it starts.
 async fn loop_stream(
     lease: Lease,
     settings: Signal<TrainingSettings>,
     mut sampler: Sampler,
-    mut heard: Signal<Vec<String>>,
+    mut heard: Signal<Vec<HeardGroup>>,
 ) -> Result<(), AudioError> {
-    let (voice, mut rng) = new_station(&settings.peek().clone().clamp());
+    let mut rng = SplitMix64::new(seed_rng());
     loop {
         let settings_now = settings.peek().clone().clamp();
-        let (group, _) = sampler.next_group(&settings_now);
+        let voice = resolve_station(&settings_now, &mut rng);
+        let (group, repeats) = sampler.next_group(&settings_now);
         // Across it, whoever else the settings have calling, sending groups
         // of their own as a session's callers do: from the same curriculum,
         // off a blank slate, so they never teach the sampler anything.
         let call = Transmission::calling(&settings_now, group.clone(), voice, &mut rng, |rng| {
             generate_training_group(&settings_now, &mut CharSamplingState::default(), rng)
         });
-        let sent = lease.send(&call, &settings_now).await?;
+        // Sent as often as a session would send it, a word space apart.
+        let mut sent = lease.send(&call, &settings_now).await?;
+        for _ in 1..repeats.max(1) {
+            lease
+                .sleep(compute_group_gap_for_wpm(
+                    sent.char_wpm,
+                    sent.effective_wpm,
+                    settings_now.playback.extra_word_space_multiplier,
+                ))
+                .await?;
+            sent = lease.send(&call, &settings_now).await?;
+        }
         heard.with_mut(|list| {
-            list.push(group);
+            list.push(HeardGroup {
+                text: group,
+                char_wpm: sent.char_wpm,
+                effective_wpm: sent.effective_wpm,
+            });
             let extra = list.len().saturating_sub(STREAM_HEARD_KEEP);
             list.drain(..extra);
         });
@@ -485,7 +526,7 @@ mod tests {
         run(|| async {
             let mut h = Harness::new();
             let lease = claim(&h);
-            let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
+            let heard = h.in_app(|| Signal::new(Vec::<HeardGroup>::new()));
             let _outcome = spawn_into(
                 &h,
                 loop_stream(lease, h.ctx.settings, sampler(&h, &[]), heard),
@@ -505,6 +546,92 @@ mod tests {
             h.advance(5_000).await;
             assert_eq!(h.texts().len(), played, "the stream stopped");
         });
+    }
+
+    /// Each group comes from a station of its own, drawn from the ranges in
+    /// the settings, as in a session. The stream used to draw one station as
+    /// it started and send everything at its speed and pitch.
+    #[test]
+    fn a_group_stream_draws_each_group_from_the_ranges_in_the_settings() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.char_wpm_min = 15.0;
+            settings.playback.char_wpm_max = 40.0;
+            settings.playback.link_char_to_effective = true;
+            settings.band.side_tone_min = 400.0;
+            settings.band.side_tone_max = 900.0;
+            let mut h = Harness::with_settings(settings);
+            let lease = claim(&h);
+            let heard = h.in_app(|| Signal::new(Vec::<HeardGroup>::new()));
+            let _outcome = spawn_into(
+                &h,
+                loop_stream(lease, h.ctx.settings, sampler(&h, &[]), heard),
+            );
+            h.pump();
+            assert!(h.run_until(120_000, |h| h.texts().len() >= 6).await);
+            h.app.player.release();
+            let voices = h.recorder.voices();
+            assert!(
+                voices
+                    .iter()
+                    .all(|v| (15.0..=40.0).contains(&v.char_wpm)
+                        && (400.0..=900.0).contains(&v.tone_hz)),
+                "{voices:?}"
+            );
+            assert!(
+                voices.windows(2).any(|w| w[0].char_wpm != w[1].char_wpm),
+                "every group was sent at one speed: {voices:?}"
+            );
+            assert!(
+                voices.windows(2).any(|w| w[0].tone_hz != w[1].tone_hz),
+                "every group was sent at one pitch: {voices:?}"
+            );
+            // What is shown is the speed each one was sent at.
+            let shown = heard.peek().clone();
+            assert!(!shown.is_empty());
+            for (group, voice) in shown.iter().zip(&voices) {
+                assert_eq!(group.char_wpm, voice.char_wpm);
+            }
+        });
+    }
+
+    /// Repeats are sent as a session sends them: the same group, from the
+    /// same station, the set number of times, and shown once.
+    #[test]
+    fn a_group_stream_sends_each_group_as_often_as_the_settings_say() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_repeat_min = 3;
+            settings.playback.group_repeat_max = 3;
+            let mut h = Harness::with_settings(settings);
+            let lease = claim(&h);
+            let heard = h.in_app(|| Signal::new(Vec::<HeardGroup>::new()));
+            let _outcome = spawn_into(
+                &h,
+                loop_stream(lease, h.ctx.settings, sampler(&h, &[]), heard),
+            );
+            h.pump();
+            assert!(h.run_until(120_000, |h| h.texts().len() >= 6).await);
+            h.app.player.release();
+            let texts = h.texts();
+            let voices = h.recorder.voices();
+            for (group_texts, group_voices) in texts.chunks(3).zip(voices.chunks(3)).take(2) {
+                assert!(group_texts.windows(2).all(|w| w[0] == w[1]), "{texts:?}");
+                assert!(group_voices.windows(2).all(|w| w[0] == w[1]), "{voices:?}");
+            }
+            assert!(heard.peek().len() <= texts.len().div_ceil(3));
+        });
+    }
+
+    #[test]
+    fn a_heard_group_says_how_fast_it_was_sent() {
+        let group = |char_wpm, effective_wpm| HeardGroup {
+            text: "KM".into(),
+            char_wpm,
+            effective_wpm,
+        };
+        assert_eq!(group(24.2, 24.2).speed_label(), "24 WPM");
+        assert_eq!(group(25.0, 18.4).speed_label(), "25 WPM · 18 eff.");
     }
 
     /// The stream leans on what the history says is hard, as a session does.
@@ -530,7 +657,7 @@ mod tests {
                 .collect();
             assert!(sessions[0].usable_for_sampling(&h.ctx.settings.peek()));
             let lease = claim(&h);
-            let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
+            let heard = h.in_app(|| Signal::new(Vec::<HeardGroup>::new()));
             let _outcome = spawn_into(
                 &h,
                 loop_stream(lease, h.ctx.settings, sampler(&h, &sessions), heard),
@@ -551,7 +678,7 @@ mod tests {
             let mut h = Harness::new();
             let lease = claim(&h);
             h.set_behaviour(Behaviour::RefuseToStart);
-            let heard = h.in_app(|| Signal::new(Vec::<String>::new()));
+            let heard = h.in_app(|| Signal::new(Vec::<HeardGroup>::new()));
             let outcome = spawn_into(
                 &h,
                 loop_stream(lease, h.ctx.settings, sampler(&h, &[]), heard),

@@ -126,8 +126,21 @@ fn ListenRoute() -> Element {
     let on_stop = use_callback(move |()| ctx.stop_audio());
     let on_back = use_callback(move |()| ctx.go_to(Screen::Home));
     let preview = ctx.preview.read();
+    #[cfg(feature = "desktop")]
+    let floating = use_context::<crate::ui::floating::FloatingWindow>();
+    #[cfg(feature = "desktop")]
+    let (can_float, is_floating, on_float) = (
+        true,
+        floating.is_open(),
+        EventHandler::new(move |()| floating.toggle()),
+    );
+    #[cfg(not(feature = "desktop"))]
+    let (can_float, is_floating, on_float) = (false, false, EventHandler::new(|()| {}));
     rsx! {
         ListenView {
+            can_float,
+            floating: is_floating,
+            on_float,
             settings: ctx.settings.read().clone(),
             playing: preview.is_letters(),
             streaming: preview.is_stream(),

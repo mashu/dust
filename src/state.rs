@@ -96,7 +96,7 @@ pub struct AppCtx {
     /// Whatever is playing outside a session.
     pub preview: Signal<Preview>,
     /// The groups the stream has sent, newest last.
-    pub stream_heard: Signal<Vec<String>>,
+    pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
     app: CopyValue<AppState>,

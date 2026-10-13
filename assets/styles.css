@@ -1272,6 +1272,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value {
     var(--surface);
 }
 .listen-glyph { font-size: 4.4rem; line-height: 1; margin: 0; letter-spacing: -0.03em; }
+.listen-speed { margin: 0.45rem 0 0; font-size: 0.85rem; letter-spacing: 0.08em; color: var(--copper-deep); }
 .listen-morse {
   display: flex;
   justify-content: center;
