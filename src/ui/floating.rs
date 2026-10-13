@@ -1,9 +1,16 @@
 //! The floating window: the stream's groups over whatever else is on screen.
 //!
-//! A small window of its own, without a frame, kept above every other window
-//! and see-through where the desktop allows it, so the groups can be checked
-//! while you work in another program. It is desktop only: a browser tab and a
-//! phone app cannot put anything over other programs.
+//! A small window of its own, see-through where the desktop allows it, so the
+//! groups can be checked while you work in another program. It is desktop
+//! only: a browser tab and a phone app cannot put anything over other
+//! programs.
+//!
+//! It is an ordinary window with a title bar, and it does not try to keep
+//! itself on top: a Wayland client cannot, and a window that asked would be
+//! at the mercy of whichever window had focus. The desktop already has the
+//! control for it — Always on Top in the title bar's menu on GNOME, Keep
+//! Above Others on KDE — and a window put there by the user stays there
+//! whatever happens to the main one.
 //!
 //! The two windows are separate virtual DOMs, and a signal of one does not
 //! wake the other. So the main window writes what is to be shown into a
@@ -165,23 +172,20 @@ pub fn use_floating_window(ctx: AppCtx) -> FloatingWindow {
 }
 
 fn floating_config() -> Config {
-    let builder = WindowBuilder::new()
-        .with_title("Dust — groups")
-        .with_decorations(false)
-        .with_transparent(true)
-        .with_always_on_top(true)
-        .with_resizable(false)
-        .with_inner_size(LogicalSize::new(340.0, 132.0));
-    #[cfg(target_os = "linux")]
-    let builder = {
-        use dioxus::desktop::tao::platform::unix::WindowBuilderExtUnix;
-        builder.with_skip_taskbar(true)
-    };
     Config::new()
         .with_menu(None)
         .with_background_color((0, 0, 0, 0))
         .with_custom_head(floating_head())
-        .with_window(builder)
+        .with_window(floating_builder())
+}
+
+/// A title bar, so the desktop's own window menu can keep it on top.
+fn floating_builder() -> WindowBuilder {
+    WindowBuilder::new()
+        .with_title("Dust — groups")
+        .with_transparent(true)
+        .with_inner_size(LogicalSize::new(340.0, 150.0))
+        .with_min_inner_size(LogicalSize::new(220.0, 100.0))
 }
 
 fn floating_head() -> String {
@@ -203,25 +207,15 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: transparent;
   align-items: center;
   justify-content: center;
   position: relative;
-  border-radius: 14px;
   background: rgba(30, 24, 18, 0.74);
   color: #f6efe3;
   font-family: "IBM Plex Mono", "DejaVu Sans Mono", ui-monospace, monospace;
-  cursor: move;
   user-select: none;
   -webkit-user-select: none;
 }
 .floating-group { font-size: 2.5rem; line-height: 1.1; letter-spacing: 0.14em; white-space: nowrap; }
 .floating-speed { margin-top: 0.3rem; font-size: 0.8rem; letter-spacing: 0.08em; opacity: 0.75; }
 .floating-earlier { margin-top: 0.3rem; font-size: 0.85rem; letter-spacing: 0.1em; opacity: 0.5; white-space: nowrap; }
-.floating-close {
-  position: absolute; top: 4px; right: 6px;
-  border: 0; background: none; color: inherit;
-  font: inherit; font-size: 1rem; line-height: 1;
-  padding: 4px 6px; opacity: 0.45; cursor: pointer;
-}
-.floating-close:hover { opacity: 1; }
-.floating.locked { cursor: default; }
 .floating-lock { position: absolute; top: 6px; right: 10px; font-size: 0.7rem; letter-spacing: 0.08em; opacity: 0.4; }
 "#;
 
@@ -270,21 +264,8 @@ fn Floating(feed: FeedRef) -> Element {
     rsx! {
         div {
             class: if locked { "floating locked" } else { "floating" },
-            onmousedown: move |_| {
-                if !locked {
-                    window().drag();
-                }
-            },
             if locked {
                 span { class: "floating-lock", title: "Locked: unlock it from the main window", "LOCKED" }
-            } else {
-                button {
-                    class: "floating-close",
-                    title: "Close",
-                    onmousedown: move |event| event.stop_propagation(),
-                    onclick: move |_| window().close(),
-                    "×"
-                }
             }
             match (latest, streaming) {
                 (Some(group), _) => rsx! {
@@ -349,7 +330,7 @@ mod tests {
         // The three before the newest, newest first; the oldest has gone.
         assert!(html.contains("MK  KM  M2"), "{html}");
         assert!(!html.contains("K1"));
-        assert!(html.contains("floating-close"));
+        assert!(!html.contains("LOCKED"));
     }
 
     #[test]
@@ -370,9 +351,9 @@ mod tests {
         assert!(idle.contains("Start a stream on Listen"), "{idle}");
     }
 
-    /// Locked, it cannot be clicked, so it offers nothing to click.
+    /// Locked, it cannot be clicked, so it says where it is unlocked.
     #[test]
-    fn a_locked_window_says_so_in_place_of_its_close_button() {
+    fn a_locked_window_says_so() {
         let html = render(FeedView {
             heard: vec![group("KM")],
             streaming: true,
@@ -380,7 +361,19 @@ mod tests {
         });
         assert!(html.contains("floating locked"), "{html}");
         assert!(html.contains("LOCKED"));
-        assert!(!html.contains("floating-close"));
+        assert!(html.contains("unlock it from the main window"));
+    }
+
+    /// Keeping it on top is the desktop's job, done from its title bar.
+    #[test]
+    fn it_is_a_window_the_desktop_can_keep_on_top() {
+        let window = floating_builder().window;
+        assert!(window.decorations, "no title bar, no window menu");
+        assert!(
+            !window.always_on_top,
+            "the user puts it on top, not the app"
+        );
+        assert!(window.resizable);
     }
 
     #[test]

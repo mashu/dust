@@ -121,17 +121,20 @@ already present on typical Windows 10/11.
 ### Copying while you work in other programs
 
 Listen → **Stream groups** keeps sending groups with the window minimised or
-behind others. **Floating window** opens a small frameless window, kept above
-every other window, that shows each group after it is sent, with its speed
-and the few before it. Drag it anywhere; × closes it, and closing the main
-window closes it too. **Lock floating window** makes it click-through: every
-click goes to the program underneath, so it can sit over your work. A locked
-window cannot be clicked, so unlock or close it from the main window.
+behind others. **Floating window** opens a small window that shows each group
+after it is sent, with its speed and the few before it. Closing the main
+window closes it too.
 
-On Linux the app runs through X11 (XWayland on a Wayland desktop), where
-"always on top" and the see-through background are honoured by GNOME, KDE and
-the other common window managers. Without a compositor the background is
-drawn solid.
+It is an ordinary window, and keeping it on top is left to the desktop, the
+way it is for any other window: on GNOME right-click its title bar (or press
+Alt+Space) and choose **Always on Top**; on KDE, **More Actions → Keep Above
+Others**. Placed there, it stays above everything wherever the main window
+goes. Then **Lock floating window** makes it click-through: every click goes
+to the program underneath, so it can sit over your work. A locked window
+cannot be clicked, so unlock or close it from the main window.
+
+The see-through background needs a compositor, which every Wayland desktop
+has; without one it is drawn solid.
 
 ## Where your progress lives
 

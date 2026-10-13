@@ -593,8 +593,14 @@ fn listen_offers_the_floating_window_and_its_lock_where_there_is_one() {
         open.contains("Lock floating window (click-through)"),
         "{open}"
     );
+    // Keeping it on top is done from its title bar, before it is locked.
+    assert!(
+        open.contains("choose Always on Top, then lock it"),
+        "{open}"
+    );
     let locked = shown(true, true, true);
     assert!(locked.contains("Unlock floating window"), "{locked}");
+    assert!(!locked.contains("floating-hint"));
     assert!(locked.contains(r#"aria-pressed="true""#));
 }
 
