@@ -31,9 +31,15 @@ mod ui;
 
 use crate::app::App;
 
+/// Keeps the app's tasks running while the window is minimised or covered.
+#[cfg(feature = "desktop")]
+pub(crate) const KEEP_RUNNING_JS: &str = include_str!("keep_running.js");
+
 #[cfg(feature = "desktop")]
 fn themed_document_head() -> String {
-    let mut head = String::from("<style>");
+    let mut head = String::from("<script>");
+    head.push_str(KEEP_RUNNING_JS);
+    head.push_str("</script><style>");
     head.push_str(crate::app::STYLESHEET);
     head.push_str("</style>");
     // The font sheet must not hold up the first paint: it loads as print
@@ -50,11 +56,21 @@ mod tests {
     #[test]
     fn the_desktop_head_carries_the_stylesheet_and_the_fonts() {
         let head = super::themed_document_head();
-        assert!(head.starts_with("<style>"));
+        assert!(head.starts_with("<script>"));
+        assert!(head.contains("<style>"));
         assert!(head.contains(".app-root"), "the app stylesheet is inlined");
         assert!(head.contains("fonts.googleapis.com"));
         // The font sheet must not block the first paint.
         assert!(head.contains("media=\"print\""));
+    }
+
+    /// A window out of sight must not stop the app: renders cannot wait on
+    /// animation frames a hidden webview never gets.
+    #[test]
+    fn the_desktop_head_does_not_wait_on_frames_a_hidden_window_never_gets() {
+        let head = super::themed_document_head();
+        assert!(head.contains("window.requestAnimationFrame ="));
+        assert!(head.contains("document.hidden"));
     }
 }
 
