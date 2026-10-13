@@ -124,7 +124,9 @@ Listen → **Stream groups** keeps sending groups with the window minimised or
 behind others. **Floating window** opens a small frameless window, kept above
 every other window, that shows each group after it is sent, with its speed
 and the few before it. Drag it anywhere; × closes it, and closing the main
-window closes it too.
+window closes it too. **Lock floating window** makes it click-through: every
+click goes to the program underneath, so it can sit over your work. A locked
+window cannot be clicked, so unlock or close it from the main window.
 
 On Linux the app runs through X11 (XWayland on a Wayland desktop), where
 "always on top" and the see-through background are honoured by GNOME, KDE and

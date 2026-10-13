@@ -43,6 +43,10 @@ pub fn ListenView(
     can_float: bool,
     #[props(default)] floating: bool,
     #[props(default)] on_float: EventHandler<()>,
+    /// Whether clicks go through the floating window to what is under it.
+    #[props(default)]
+    float_locked: bool,
+    #[props(default)] on_float_lock: EventHandler<()>,
 ) -> Element {
     let pool = compute_char_pool(&settings);
     let newest = newest_unlocked(&settings);
@@ -195,6 +199,16 @@ pub fn ListenView(
                         onclick: move |_| on_float.call(()),
                         Icon { name: IconName::Sparkle }
                         if floating { "Close floating window" } else { "Floating window" }
+                    }
+                    if floating {
+                        button {
+                            id: control_id("btn", "lock floating window"),
+                            class: "btn btn-secondary",
+                            title: "Locked, clicks go through the floating window to the program underneath",
+                            "aria-pressed": if float_locked { "true" } else { "false" },
+                            onclick: move |_| on_float_lock.call(()),
+                            if float_locked { "Unlock floating window" } else { "Lock floating window (click-through)" }
+                        }
                     }
                 }
             }

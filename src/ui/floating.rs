@@ -11,6 +11,10 @@
 //! second. It holds the feed weakly: once the main window is gone, so is the
 //! feed, and the floating window closes itself rather than keep the app
 //! running with nothing behind it.
+//!
+//! Locked, the window lets every click through to whatever is under it, so
+//! it can sit over the program you are working in. It cannot be clicked
+//! then, so it is unlocked from the main window.
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
@@ -36,6 +40,8 @@ struct FeedView {
     /// Newest last.
     heard: Vec<HeardGroup>,
     streaming: bool,
+    /// Clicks go through it.
+    locked: bool,
 }
 
 #[derive(Default)]
@@ -60,6 +66,8 @@ pub struct FloatingWindow {
     window: CopyValue<Option<Weak<DesktopService>>>,
     /// Whether it is open, or on its way.
     open: Signal<bool>,
+    /// Whether clicks go through it.
+    locked: Signal<bool>,
 }
 
 impl FloatingWindow {
@@ -67,14 +75,35 @@ impl FloatingWindow {
         (self.open)()
     }
 
+    pub fn is_locked(self) -> bool {
+        (self.locked)()
+    }
+
+    /// Let clicks through it, or take them again.
+    pub fn toggle_lock(mut self) {
+        let locked = !*self.locked.peek();
+        if let Some(shown) = self.shown() {
+            // Ignoring the pointer is all the window manager needs to know:
+            // a window with no input area cannot be clicked, dragged or
+            // focused, and everything goes to the window underneath.
+            let _ = shown.window.set_ignore_cursor_events(locked);
+            self.locked.set(locked);
+        }
+    }
+
+    fn shown(self) -> Option<Rc<DesktopService>> {
+        self.window.peek().as_ref().and_then(Weak::upgrade)
+    }
+
     /// Open it, or close it if it is open.
     pub fn toggle(mut self) {
         if *self.open.peek() {
-            if let Some(shown) = self.window.peek().as_ref().and_then(Weak::upgrade) {
+            if let Some(shown) = self.shown() {
                 shown.close();
             }
             self.window.set(None);
             self.open.set(false);
+            self.locked.set(false);
             return;
         }
         let feed = FeedRef(Rc::downgrade(&self.feed.peek()));
@@ -103,11 +132,13 @@ pub fn use_floating_window(ctx: AppCtx) -> FloatingWindow {
         feed: CopyValue::new(Rc::new(Feed::default())),
         window: CopyValue::new(None),
         open: Signal::new(false),
+        locked: Signal::new(false),
     });
     use_effect(move || {
         let view = FeedView {
             heard: ctx.stream_heard.read().clone(),
             streaming: ctx.preview.read().is_stream(),
+            locked: (floating.locked)(),
         };
         *floating.feed.peek().view.borrow_mut() = view;
     });
@@ -125,6 +156,7 @@ pub fn use_floating_window(ctx: AppCtx) -> FloatingWindow {
                 if gone {
                     floating.window.set(None);
                     floating.open.set(false);
+                    floating.locked.set(false);
                 }
             }
         }
@@ -189,6 +221,8 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: transparent;
   padding: 4px 6px; opacity: 0.45; cursor: pointer;
 }
 .floating-close:hover { opacity: 1; }
+.floating.locked { cursor: default; }
+.floating-lock { position: absolute; top: 6px; right: 10px; font-size: 0.7rem; letter-spacing: 0.08em; opacity: 0.4; }
 "#;
 
 /// The floating window's own app.
@@ -213,7 +247,11 @@ fn Floating(feed: FeedRef) -> Element {
             }
         }
     });
-    let FeedView { heard, streaming } = view();
+    let FeedView {
+        heard,
+        streaming,
+        locked,
+    } = view();
     let latest = heard.last();
     let earlier: Vec<&str> = heard
         .iter()
@@ -225,14 +263,22 @@ fn Floating(feed: FeedRef) -> Element {
     let earlier = earlier.join("  ");
     rsx! {
         div {
-            class: "floating",
-            onmousedown: move |_| window().drag(),
-            button {
-                class: "floating-close",
-                title: "Close",
-                onmousedown: move |event| event.stop_propagation(),
-                onclick: move |_| window().close(),
-                "×"
+            class: if locked { "floating locked" } else { "floating" },
+            onmousedown: move |_| {
+                if !locked {
+                    window().drag();
+                }
+            },
+            if locked {
+                span { class: "floating-lock", title: "Locked: unlock it from the main window", "LOCKED" }
+            } else {
+                button {
+                    class: "floating-close",
+                    title: "Close",
+                    onmousedown: move |event| event.stop_propagation(),
+                    onclick: move |_| window().close(),
+                    "×"
+                }
             }
             match (latest, streaming) {
                 (Some(group), _) => rsx! {
