@@ -131,7 +131,8 @@ window cannot be clicked, so unlock or close it from the main window.
 On Linux the app runs through X11 (XWayland on a Wayland desktop), where
 "always on top" and the see-through background are honoured by GNOME, KDE and
 the other common window managers. Without a compositor the background is
-drawn solid.
+drawn solid. To run it as a native Wayland window instead, start it with
+`GDK_BACKEND=wayland`; the floating window then cannot keep itself on top.
 
 ## Where your progress lives
 
