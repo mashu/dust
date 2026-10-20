@@ -74,6 +74,11 @@ impl RunClock {
     pub fn paused_ms(&self, now: MonoMs) -> u64 {
         self.paused_ms + self.paused_since.map_or(0, |since| now.since(since))
     }
+
+    /// Time spent in pauses already over, the one going on left out.
+    pub fn paused_before_ms(&self) -> u64 {
+        self.paused_ms
+    }
 }
 
 #[cfg(test)]
@@ -90,9 +95,15 @@ mod tests {
         assert!(clock.is_paused());
         assert_eq!(clock.elapsed_ms(MonoMs(9_000)), 4_000, "it stands still");
         assert_eq!(clock.paused_ms(MonoMs(9_000)), 4_000);
+        assert_eq!(
+            clock.paused_before_ms(),
+            0,
+            "the pause going on is not over"
+        );
         clock.resume(MonoMs(8_000));
         assert!(!clock.is_paused());
         assert_eq!(clock.paused_ms(MonoMs(10_000)), 3_000);
+        assert_eq!(clock.paused_before_ms(), 3_000);
         assert_eq!(clock.elapsed_ms(MonoMs(10_000)), 6_000);
     }
 

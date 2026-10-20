@@ -50,12 +50,13 @@ pub use callsign::{
     generate_call, generate_callsign, parse_callsign, tier_examples, wpx_prefix,
 };
 pub use contest::{
-    CallSource, CallerHabits, ContestKind, ContestLog, ContestRules, ContestRun, ContestScore,
-    EntryField, Esm, ExchangeState, Field, Fields, MessagePart, Multiplier, PerSide, QsoCheck,
-    QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField, Reading, RunClock, RunStyle,
-    ScoredQso, Scoring, SerialFit, SerialModel, Side, Tally, WPX_SERIALS, check_qso, contest_score,
-    cut_serial, esm, keyed_token, message_text, normalize_call, parse_exchange, rate_at,
-    read_number, send_serial,
+    AirView, CallSource, CallerHabits, ContestEffect, ContestEvent, ContestKind, ContestLog,
+    ContestMachine, ContestPhase, ContestRules, ContestRun, ContestScore, ContestView, EntryField,
+    Esm, ExchangeState, Field, Fields, LogRow, MessagePart, Multiplier, OpKey, PauseWhy, PerSide,
+    QsoCheck, QsoError, QsoRecord, QsoState, QsoText, QsoView, Rates, ReadField, Reading,
+    RowStatus, RunClock, RunStyle, ScoredQso, Scoring, Segment, Sender, SerialFit, SerialModel,
+    Side, Tally, Turn, WPX_SERIALS, check_qso, contest_score, cut_serial, esm, keyed_token,
+    message_text, normalize_call, parse_exchange, plan_turn, rate_at, read_number, send_serial,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,

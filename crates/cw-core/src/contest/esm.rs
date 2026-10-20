@@ -16,6 +16,7 @@ use super::exchange::Field;
 use super::parse::{ExchangeState, normalize_call, parse_exchange};
 use super::rules::{ContestRules, Side};
 use crate::callsign::parse_callsign;
+use crate::session::MonoMs;
 
 /// What Enter needs to know of the QSO in progress.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -27,11 +28,17 @@ pub struct QsoState {
     pub exchange_sent: bool,
 }
 
-/// The two fields as typed.
+/// The two fields as typed, with when they were typed: a copy is timed from
+/// the end of what it copies to the edit that finished it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Fields {
     pub call: String,
     pub exch: String,
+    /// When the Call field was last edited.
+    pub call_edited: MonoMs,
+    /// When the Exchange field first read complete, if it has since it was
+    /// last cleared.
+    pub exch_complete: Option<MonoMs>,
 }
 
 /// The field that has the cursor.
@@ -53,6 +60,14 @@ pub enum MessagePart {
     Again,
     /// TU, which ends the QSO.
     Tu,
+    /// Your call alone.
+    MyCall,
+    /// `QSO B4`: worked before.
+    B4,
+    /// `NIL`: not in your log.
+    Nil,
+    /// `NR?`: send your exchange again.
+    NrQuery,
 }
 
 /// What Enter does now.
@@ -143,6 +158,10 @@ fn label(message: &[MessagePart]) -> String {
         MessagePart::Exchange => "exch".to_string(),
         MessagePart::Again => "?".to_string(),
         MessagePart::Tu => "TU & log".to_string(),
+        MessagePart::MyCall => "my call".to_string(),
+        MessagePart::B4 => "B4".to_string(),
+        MessagePart::Nil => "NIL".to_string(),
+        MessagePart::NrQuery => "NR?".to_string(),
     };
     match message {
         [] => "Fix exchange".to_string(),
@@ -219,6 +238,10 @@ pub fn message_text(
             MessagePart::Exchange => rules.exchange_text(side, my_call, serial),
             MessagePart::Again => "?".to_string(),
             MessagePart::Tu => rules.tu_text(my_call),
+            MessagePart::MyCall => my_call.to_string(),
+            MessagePart::B4 => "QSO B4".to_string(),
+            MessagePart::Nil => "NIL".to_string(),
+            MessagePart::NrQuery => "NR?".to_string(),
         })
         .collect();
     parts.join(" ")
@@ -244,6 +267,7 @@ mod tests {
         let fields = Fields {
             call: call.to_string(),
             exch: exch.to_string(),
+            ..Fields::default()
         };
         esm(&qso, &fields, rules(), Side::Dx)
     }
@@ -387,6 +411,22 @@ mod tests {
     fn the_call_field_is_read_as_a_call() {
         let esm = enter("K5XYZ", true, " k5xyz ", "214");
         assert_eq!(esm.message, [Tu]);
+    }
+
+    /// The messages only the keys send go out as operators send them.
+    #[test]
+    fn the_other_messages_go_out_as_operators_send_them() {
+        use MessagePart::{B4, MyCall, Nil, NrQuery};
+        for (part, text, key) in [
+            (MyCall, "DL1ABC", "Send my call"),
+            (B4, "QSO B4", "Send B4"),
+            (Nil, "NIL", "Send NIL"),
+            (NrQuery, "NR?", "Send NR?"),
+        ] {
+            let message = [part];
+            assert_eq!(message_text(&message, rules(), Side::Dx, "DL1ABC", 7), text);
+            assert_eq!(label(&message), key);
+        }
     }
 
     #[test]

@@ -9,17 +9,20 @@
 
 use crate::auto_level::apply_auto_level;
 use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
+use crate::contest::bot::{Copied, copy_of};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
 use crate::session::MIN_RESPONSE_MS_PER_CHAR;
 use crate::timing::resolve_pileup;
 use crate::{
-    Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
-    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, MonoMs, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
-    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN, Sampler, SessionId,
-    SessionPhase, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
+    Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode,
+    ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Fields, MonoMs, OpKey, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError, Rng, RowStatus,
+    STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso, Sender, SessionId, SessionPhase, SessionResult,
+    SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool, contest_score,
     evaluate_auto_level, generate_training_group, plan_morse_playback_for, plan_transmission,
-    resolve_station,
+    plan_turn, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -773,5 +776,476 @@ fn a_pile_up_is_always_something_you_could_copy() {
                 assert!(event.target_gain.is_finite() && event.target_gain >= 0.0);
             }
         }
+    }
+}
+
+/// Settings from anywhere, in Contest mode: a call from a few that read in
+/// different ways, none among them, and runs short enough to reach their
+/// end.
+fn contest_settings(rng: &mut SplitMix64) -> TrainingSettings {
+    const CALLS: [&str; 6] = ["DL1ABC", "K1ABC", "VP2E/DL1ABC", "JA1XYZ", "W1AW/4", ""];
+    let mut s = wild_settings(rng);
+    s.curriculum.char_set_mode = CharSetMode::Contest;
+    s.contest.my_call = CALLS[rng.usize_in(0, CALLS.len() - 1)].to_string();
+    s.contest.contest_minutes = [1, 2, 3, 4, 0][rng.usize_in(0, 4)];
+    s.clamp()
+}
+
+/// `text` one edit off: a character changed, dropped or added.
+fn one_edit_off(text: &str, rng: &mut SplitMix64) -> String {
+    let mut chars: Vec<char> = text.chars().collect();
+    let at = rng.usize_in(0, chars.len());
+    match rng.usize_in(0, 2) {
+        0 if at < chars.len() => chars[at] = if chars[at] == 'X' { 'Y' } else { 'X' },
+        1 if at < chars.len() => {
+            chars.remove(at);
+        }
+        _ => chars.insert(at, '7'),
+    }
+    chars.into_iter().collect()
+}
+
+/// A key and its fields: 40% as heard, 20% one edit off, 10% empty, 10% a
+/// partial, 20% junk.
+fn contest_key(rng: &mut SplitMix64, now: u64, call: &str, serial: &str) -> ContestEvent {
+    use OpKey::*;
+    const KEYS: [OpKey; 15] = [
+        Esm,
+        Cq,
+        Exchange,
+        Tu,
+        MyCall,
+        HisCall,
+        HisCallAndExchange,
+        B4,
+        Again,
+        Nil,
+        NrQuery,
+        TuAndLog,
+        LogOnly,
+        Wipe,
+        StopTx,
+    ];
+    const JUNK: [char; 14] = [
+        'K', '5', 'X', 'Y', 'Z', '?', '/', ' ', 'é', '中', 't', '1', 'N', '\u{200b}',
+    ];
+    let key = if rng.f64() < 0.6 {
+        Esm
+    } else {
+        KEYS[rng.usize_in(0, KEYS.len() - 1)]
+    };
+    let junk = |rng: &mut SplitMix64| -> String {
+        (0..rng.usize_in(0, 9))
+            .map(|_| JUNK[rng.usize_in(0, JUNK.len() - 1)])
+            .collect()
+    };
+    let draw = rng.f64();
+    let (call, exch) = if draw < 0.4 {
+        (call.to_string(), serial.to_string())
+    } else if draw < 0.6 {
+        (one_edit_off(call, rng), one_edit_off(serial, rng))
+    } else if draw < 0.7 {
+        (String::new(), String::new())
+    } else if draw < 0.8 {
+        (call.chars().take(2).chain(['?']).collect(), String::new())
+    } else {
+        (junk(rng), junk(rng))
+    };
+    let stamp = |rng: &mut SplitMix64| MonoMs(now.saturating_sub(rng.usize_in(0, 3_000) as u64));
+    let fields = Fields {
+        call,
+        exch,
+        call_edited: stamp(rng),
+        exch_complete: (rng.f64() < 0.7).then(|| stamp(rng)),
+    };
+    ContestEvent::Key { key, fields }
+}
+
+/// What came of every contest run across the seeds, to show the soak
+/// reached every kind of QSO.
+#[derive(Debug, Default)]
+struct Outcomes {
+    clean: u32,
+    busted: u32,
+    field: u32,
+    nil: u32,
+    lost: u32,
+}
+
+/// What a contest soak run has seen of the machine's effects: every id
+/// handed out, the turns and timers among them, and the last call and
+/// serial a listener would have copied from the callers.
+#[derive(Debug, Default)]
+struct Seen {
+    ids: std::collections::BTreeSet<u64>,
+    turns: Vec<u64>,
+    timers: Vec<u64>,
+    call: String,
+    serial: String,
+}
+
+/// Every effect a contest run hands back has to be one the runtime can act
+/// on: an id never handed out before, a timer that runs, a turn with
+/// something in it and no reply past your message.
+fn check_contest_effects(
+    effects: &[ContestEffect],
+    settings: &TrainingSettings,
+    seed: u64,
+    step: usize,
+    seen: &mut Seen,
+) {
+    for effect in effects {
+        match effect {
+            ContestEffect::PlayTurn(turn) => {
+                assert!(
+                    seen.ids.insert(turn.id),
+                    "seed {seed} step {step}: id {} again",
+                    turn.id
+                );
+                seen.turns.push(turn.id);
+                assert!(!turn.segments.is_empty(), "seed {seed}: an empty turn");
+                let planned = plan_turn(turn, settings);
+                for other in &planned.others {
+                    assert!(
+                        other.duration_sec <= planned.wanted.duration_sec + 1e-9,
+                        "seed {seed} step {step}: a reply ends after your message"
+                    );
+                }
+                for segment in &turn.segments {
+                    if segment.who == Sender::You {
+                        continue;
+                    }
+                    match copy_of(&segment.text) {
+                        Some(Copied::Call(call) | Copied::Correction(call)) => {
+                            seen.call = call.to_string();
+                        }
+                        Some(Copied::Serial(serial)) => seen.serial = serial.to_string(),
+                        None => {}
+                    }
+                }
+            }
+            ContestEffect::StartTimer { id, ms } => {
+                assert!(
+                    seen.ids.insert(*id),
+                    "seed {seed} step {step}: id {id} again"
+                );
+                assert!(*ms > 0, "seed {seed} step {step}: a zero-length timer");
+                seen.timers.push(*id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One of everything the runtime and a careless operator can send a run at
+/// `now`: keys, news of the turn on the air or of a stale one, timers by
+/// any id, pauses stamped no earlier than `shown_at`, when the run was
+/// last shown, resumes, speed changes and early ends.
+fn random_contest_event(
+    rng: &mut SplitMix64,
+    now: u64,
+    shown_at: u64,
+    seen: &Seen,
+) -> ContestEvent {
+    // Mostly the latest id, sometimes an older one, now and then one never
+    // handed out.
+    let pick = |rng: &mut SplitMix64, ids: &[u64]| {
+        if ids.is_empty() || rng.f64() < 0.1 {
+            rng.usize_in(0, 60) as u64
+        } else if rng.f64() < 0.7 {
+            ids[ids.len() - 1]
+        } else {
+            ids[rng.usize_in(0, ids.len() - 1)]
+        }
+    };
+    let draw = rng.f64();
+    if draw < 0.36 {
+        contest_key(rng, now, &seen.call, &seen.serial)
+    } else if draw < 0.46 {
+        ContestEvent::TurnStarted {
+            id: pick(rng, &seen.turns),
+            heard_from: MonoMs(now + rng.usize_in(0, 200) as u64),
+        }
+    } else if draw < 0.62 {
+        ContestEvent::TurnEnded {
+            id: pick(rng, &seen.turns),
+        }
+    } else if draw < 0.65 {
+        ContestEvent::TurnCancelled {
+            id: pick(rng, &seen.turns),
+        }
+    } else if draw < 0.67 {
+        ContestEvent::TurnFailed {
+            id: pick(rng, &seen.turns),
+        }
+    } else if draw < 0.87 {
+        ContestEvent::TimerFired {
+            id: pick(rng, &seen.timers),
+        }
+    } else if draw < 0.91 {
+        // Stamped as late as the heartbeat stamps one: never before the run
+        // was last shown, at the event before.
+        ContestEvent::Pause {
+            why: [PauseWhy::You, PauseWhy::Hidden, PauseWhy::Sound][rng.usize_in(0, 2)],
+            at: MonoMs(
+                now.saturating_sub(rng.usize_in(0, 2_500) as u64)
+                    .max(shown_at),
+            ),
+        }
+    } else if draw < 0.97 {
+        ContestEvent::Resume
+    } else if draw < 0.995 {
+        ContestEvent::Speed {
+            delta: [2, -2, 9, -40][rng.usize_in(0, 3)],
+        }
+    } else {
+        ContestEvent::FinishNow
+    }
+}
+
+/// One contest soak run: every event applied, with when, what each gave,
+/// the machine as it ended, and when the run started and ended.
+struct SoakRun {
+    events: Vec<(ContestEvent, MonoMs)>,
+    effects: Vec<Vec<ContestEffect>>,
+    machine: ContestMachine<Sampler>,
+    started: Option<u64>,
+    ended: Option<u64>,
+}
+
+/// Soak a run of seed `seed`, on events of its own or those of `replay`.
+fn contest_run(
+    seed: u64,
+    settings: &TrainingSettings,
+    replay: Option<&[(ContestEvent, MonoMs)]>,
+) -> SoakRun {
+    let mut rng = SplitMix64::new(seed.wrapping_mul(0x4F1B_BCDD).wrapping_add(31));
+    let sampler = Sampler::new(&[], settings, seed);
+    let (mut machine, first) = ContestMachine::start(seed, MonoMs(0), settings.clone(), sampler);
+    let mut applied = Vec::new();
+    let mut all_effects = vec![first.clone()];
+    let mut seen = Seen::default();
+    let mut now = 0u64;
+    let mut shown = 0u64;
+    let mut shown_at = 0u64;
+    let mut started = (machine.phase() == ContestPhase::Running).then_some(0);
+    let mut ended = None;
+    let mut effects = first;
+    let steps = replay.map_or(400, <[_]>::len);
+    for step in 0..steps {
+        check_contest_effects(&effects, settings, seed, step, &mut seen);
+        let (event, at) = match replay {
+            Some(events) => events[step].clone(),
+            None => {
+                now += match rng.usize_in(0, 9) {
+                    0 => 0,
+                    1..=6 => rng.usize_in(0, 1_500) as u64,
+                    _ => rng.usize_in(0, 6_000) as u64,
+                };
+                let event = random_contest_event(&mut rng, now, shown_at, &seen);
+                (event, MonoMs(now))
+            }
+        };
+        let was_terminal = machine.is_terminal();
+        effects = machine.apply(event.clone(), at);
+        if was_terminal {
+            assert!(
+                effects.is_empty(),
+                "seed {seed} step {step}: {event:?} after the end"
+            );
+        }
+        if started.is_none() && machine.phase() == ContestPhase::Running {
+            started = Some(at.0);
+        }
+        if !was_terminal && machine.is_terminal() {
+            ended = Some(at.0);
+        }
+        let view = machine.view(at);
+        if let Some(mut clock) = view.clock {
+            let reading = clock.elapsed_ms(at);
+            // The one step back by design: a send whose every retry failed
+            // gives its retries back as time paused.
+            let failed = matches!(event, ContestEvent::TurnFailed { .. })
+                && view.phase
+                    == (ContestPhase::Paused {
+                        why: PauseWhy::Sound,
+                    });
+            assert!(
+                reading >= shown || failed,
+                "seed {seed} step {step}: the clock went back"
+            );
+            shown = reading;
+        }
+        shown_at = at.0;
+        applied.push((event, at));
+        all_effects.push(effects.clone());
+    }
+    SoakRun {
+        events: applied,
+        effects: all_effects,
+        machine,
+        started,
+        ended,
+    }
+}
+
+/// Contest runs driven by a stream of anything the runtime and a careless
+/// operator can send (§13 of the design): keys with fields as heard, a slip
+/// off, empty, partial or junk; turn news for the turn on the air and for
+/// stale ones; timers by any id; pauses, resumes, hidden pages and early
+/// ends. Whatever happens, the run stays whole and keeps what it should.
+#[test]
+fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
+    let mut outcomes = Outcomes::default();
+    for seed in 0..SEEDS {
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x2F7A_9C35).wrapping_add(37));
+        let settings = contest_settings(&mut rng);
+        let SoakRun {
+            mut events,
+            mut machine,
+            started,
+            ended,
+            ..
+        } = contest_run(seed, &settings, None);
+        let finished_at = ended.unwrap_or_else(|| {
+            let end = events.last().map_or(0, |(_, at)| at.0) + 1;
+            let _ = machine.apply(ContestEvent::FinishNow, MonoMs(end));
+            events.push((ContestEvent::FinishNow, MonoMs(end)));
+            end
+        });
+        let view = machine.view(MonoMs(finished_at));
+        let result = machine.result(finished_at, "2026-10-20".into());
+        assert!(
+            view.log
+                .iter()
+                .all(|row| matches!(row.status, RowStatus::Checked(_))),
+            "seed {seed}: a row is still waiting at the end"
+        );
+        assert!(
+            result.score.is_finite() && result.score >= 0.0,
+            "seed {seed}"
+        );
+        assert!((0.0..=1.0).contains(&result.accuracy), "seed {seed}");
+        assert!(
+            result
+                .group_timings
+                .iter()
+                .zip(&result.groups)
+                .all(|(t, g)| t.time_to_complete_ms
+                    >= MIN_RESPONSE_MS_PER_CHAR * g.sent.chars().count() as f64),
+            "seed {seed}: a copy quicker than anyone types"
+        );
+        let json = serde_json::to_string(&result).expect("a run serializes");
+        let back: SessionResult = serde_json::from_str(&json).expect("a run reads back");
+        assert_eq!(back, result, "seed {seed}: the round trip changed the run");
+        let Some(log) = &result.contest else {
+            assert!(result.groups.is_empty(), "seed {seed}: groups with no log");
+            continue;
+        };
+        let run = log
+            .run(result.groups.len())
+            .unwrap_or_else(|| panic!("seed {seed}: the log does not read back"));
+        let owned: u32 = run.qsos.iter().map(|qso| qso.g).sum();
+        assert_eq!(owned as usize, result.groups.len(), "seed {seed}");
+        let limit_ms = u64::from(run.limit_s) * 1_000;
+        assert!(run.run_ms <= limit_ms, "seed {seed}: ran past the limit");
+        let span = started.map_or(0, |started| finished_at - started);
+        if run.run_ms < limit_ms {
+            assert_eq!(run.run_ms + run.paused_ms, span, "seed {seed}");
+        } else {
+            assert!(run.run_ms + run.paused_ms <= span, "seed {seed}");
+        }
+        let mut last = 0;
+        let mut logged = 0;
+        for qso in &run.qsos {
+            assert!(qso.t >= last, "seed {seed}: QSO times went back");
+            assert!(
+                qso.t <= run.run_ms && qso.h <= qso.t,
+                "seed {seed}: {qso:?}"
+            );
+            last = qso.t;
+            if qso.k == "lost" {
+                assert_eq!(qso.nr, logged + 1, "seed {seed}: a lost QSO's serial");
+                outcomes.lost += 1;
+            } else {
+                logged += 1;
+                assert_eq!(qso.nr, logged, "seed {seed}: serials run 1, 2, 3…");
+            }
+        }
+        assert_eq!(logged, view.qsos, "seed {seed}");
+        let checks: Vec<ScoredQso<'_>> = view
+            .log
+            .iter()
+            .filter_map(|row| match &row.status {
+                RowStatus::Checked(check) => Some(ScoredQso {
+                    at_ms: row.at_ms,
+                    call: &row.call,
+                    check,
+                }),
+                RowStatus::Pending => None,
+            })
+            .collect();
+        for scored in &checks {
+            let errors = &scored.check.errors;
+            if errors.contains(&QsoError::Nil) {
+                outcomes.nil += 1;
+            } else if scored.check.is_clean() {
+                outcomes.clean += 1;
+            }
+            if errors
+                .iter()
+                .any(|error| matches!(error, QsoError::Call { .. }))
+            {
+                outcomes.busted += 1;
+            }
+            if errors
+                .iter()
+                .any(|error| matches!(error, QsoError::Field(_)))
+            {
+                outcomes.field += 1;
+            }
+        }
+        let scoring = ContestKind::Wpx
+            .rules()
+            .and_then(|rules| rules.scoring)
+            .expect("WPX scores");
+        let live = contest_score(&scoring, &checks, run.run_ms);
+        let stored = run.score(&result.groups).expect("a stored WPX run scores");
+        assert_eq!(
+            stored, live,
+            "seed {seed}: the stored run scores differently"
+        );
+        assert!(stored.verified.score <= stored.raw.score, "seed {seed}");
+
+        // The same events, replayed, make the same run.
+        let replays: Vec<_> = (0..2)
+            .map(|_| {
+                let replay = contest_run(seed, &settings, Some(&events));
+                let result = replay.machine.result(finished_at, "2026-10-20".into());
+                (replay.effects, result)
+            })
+            .collect();
+        assert_eq!(replays[0], replays[1], "seed {seed}: a replay differed");
+        assert_eq!(
+            replays[0].1, result,
+            "seed {seed}: the replay is another run"
+        );
+    }
+    // Every kind of QSO came up, many times over.
+    let Outcomes {
+        clean,
+        busted,
+        field,
+        nil,
+        lost,
+    } = outcomes;
+    for (kind, count) in [
+        ("clean", clean),
+        ("busted", busted),
+        ("field error", field),
+        ("NIL", nil),
+        ("lost", lost),
+    ] {
+        assert!(count >= 100, "only {count} {kind} QSOs across the seeds");
     }
 }

@@ -3,6 +3,7 @@
 
 use super::ContestKind;
 use super::exchange::{Field, cut_serial};
+use super::serial::{SerialFit, WPX_SERIALS};
 use crate::callsign::{CallSpec, Countries, country_of};
 
 /// Your side of the ARRL DX contest, from your call: W/VE works only DX, and
@@ -76,7 +77,7 @@ pub struct Scoring {
 
 /// One contest. In the texts, `{my}` stands for your call, `{rst}` for your
 /// report and `{nr}` for your serial.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContestRules {
     pub kind: ContestKind,
     /// Your CQ.
@@ -94,6 +95,9 @@ pub struct ContestRules {
     pub copied: PerSide<&'static [Field]>,
     /// Who calls.
     pub callers: PerSide<CallSpec>,
+    /// How big callers' logs are, and so the serials they send, in a
+    /// contest whose callers send one.
+    pub serials: Option<SerialFit>,
     /// How it scores; none for a contest that does not.
     pub scoring: Option<Scoring>,
 }
@@ -113,6 +117,7 @@ pub(super) const RULES: &[ContestRules] = &[
         serial: true,
         copied: PerSide::both(&[Field::Nr]),
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
+        serials: Some(WPX_SERIALS),
         scoring: Some(Scoring {
             points: 1,
             multiplier: Multiplier::WpxPrefix,
@@ -120,8 +125,8 @@ pub(super) const RULES: &[ContestRules] = &[
     },
 ];
 
-/// The report every exchange sends.
-const REPORT: &str = "5NN";
+/// The report every exchange sends, yours and the callers'.
+pub(super) const REPORT: &str = "5NN";
 
 impl ContestRules {
     /// What you copy from each caller, on your side.
@@ -203,6 +208,12 @@ mod tests {
                 assert_eq!(exchange.contains("{rst}"), rules.rst, "{:?}", rules.kind);
                 assert_eq!(exchange.contains("{nr}"), rules.serial, "{:?}", rules.kind);
                 assert!(!rules.copied(side).is_empty(), "{:?}", rules.kind);
+                assert_eq!(
+                    rules.copied(side).contains(&Field::Nr),
+                    rules.serials.is_some(),
+                    "{:?}: callers send a serial exactly when one is copied",
+                    rules.kind
+                );
             }
             assert!(rules.cq.contains("{my}"), "{:?}", rules.kind);
         }

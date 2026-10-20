@@ -5,7 +5,10 @@ landed: Contest exists as a mode no one can pick yet, runs written by later
 builds are read and kept, and History names every session's mode. Phase 1's
 cw-core foundations are in: the WPX rules row, contest calls and their
 parsing, exchanges and cut numbers, ESM, the run clock, callers' serials,
-checks, both scores, the run's log layout, and the contest settings.
+checks, both scores, the run's log layout, and the contest settings. So is
+its engine, which the app does not run yet: single callers, turns and
+`plan_turn`, the run machine and what a run stores, with operator tests
+and a soak.
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -289,23 +292,23 @@ The machine needs the fields only at a key press. The runtime maps
 | Countdown n | TimerFired | 1 s → n−1. At 0 the clock and run-end timer start and your first CQ goes out → Running |
 | Countdown | Pause | timers forgotten, `ReleaseAudio` → Paused; Resume restarts the countdown |
 | Running, Silent | Key | ESM (4.4) or the key picks the message; a logging key logs (4.8); replies are decided → `PlayTurn` (new id) |
-| Running, Turn | Key but StopTx | a continuation (5.2) → `PlayTurn` (new id) |
-| Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange not fully sent (`Main.pas:884-891`) → Silent |
+| Running, Turn | Key but StopTx | a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing |
+| Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange not fully sent (`Main.pas:884-891`); the callers hear only what of the message keyed last went out whole (5.2) → Silent |
 | Turn(id) | TurnStarted{id} | `heard_from` re-stamped; no effects, no limit check |
 | Turn(id) | TurnEnded{id} | all segments count; the patience timer starts if anyone waits → Silent |
-| Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused; timers forgotten; `ReleaseAudio` → Paused{Sound} |
+| Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused, but not time the clock was read at since (6.3), so the run bar steps back by the retries; timers forgotten; `ReleaseAudio` → Paused{Sound} |
 | any | TurnCancelled, or another id | ignored |
 | Silent | TimerFired (patience) | waiting callers call again (4.3) → a turn of replies |
 | Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count; timers forgotten; clock paused from `at` → Paused |
 | Paused | Resume | clock resumes; run end re-armed with the time left; a 1 s resume timer → Running |
-| Running | the resume timer | callers call again; the station you work re-sends what it owed, at no send. A key first forgets the timer |
+| Running | the resume timer | callers call again; the station you work re-sends what it owed, at no send. A key that sends forgets the timer; one that sends nothing (Wipe, Shift+Enter, Esc with nothing on the air) leaves it to bring the callers back |
 | Running | run-end timer, or the limit passed on any event but TurnStarted | → Finished |
 | live | Speed{±2} | the offset moves for your next message and later callers |
 | live | FinishNow | → Finished |
 | any | Abort | `StopAudio`, `AbortToHome` → Aborted |
 
-**Finished** emits `StopAudio`. A QSO whose TU has started is final and
-checked; any other open QSO becomes a lost copy (9.1). With no groups,
+**Finished** emits `StopAudio`. A logged QSO is final and checked, its TU
+cut or not; any other open QSO becomes a lost copy (9.1). With no groups,
 nothing is stored and `ShowNothingKept` shows "No stations worked — nothing
 kept" with Run again; otherwise `PersistAndShowResults`.
 
@@ -346,6 +349,15 @@ From phase 2, in pile-ups only:
   sends `NR?` or `AGN` (`DxOper.pas:762-770, 844-849`).
 
 A single caller you talk over stops and hears you, kinder to a learner.
+
+A caller hears each of your messages whole, in order, when you key it, and
+its reply is decided then (5.1); Esc takes back what had not gone out whole
+(5.2). A key during a turn sends the rest of your message again, which the
+callers heard when it was keyed, so they hear only the new message: an
+exchange keyed then, after someone else's call, goes to the station you
+work. A station that hears its call alone (F5) waits for your exchange and
+asks for it with `NR?` or `AGN`, as MRCE's `NeedNr` does. The patience timer
+runs to the first waiting caller's timeout; each caller draws its own.
 
 ### 4.4 Enter Sends Message
 
@@ -445,10 +457,14 @@ before you picked the station, re-sends after Resume) cost only time (9.1).
 A QSO is logged on ESM's TU row, on `.` `,` `+`, or on Shift+Enter (V and
 E Complete). The machine records the times, the logged and true values, the
 caller's speed and sends, and your serial; the fields clear and the serial
-goes up. The check runs when the station is done (`Contest.pas:855-895`);
-until then the row shows `…`. A TU that has started finishes its QSO even if
-Esc, Pause or the end cuts it, and a QSO logged without sending is checked
-at once, so nothing is `…` at the end. The checks follow MRCE's
+goes up. A logged QSO is final. Its check is shown when the station is done
+(`Contest.pas:855-895`): once the turn carrying your TU is off the air,
+however it leaves, ended, cut by Esc or Pause, replaced by your next key, or
+at the run's end. A key while the TU still sounds sends it again (5.2), and
+the check waits for that turn. Until then the row shows `…`. A QSO logged
+without sending is checked at once, so nothing is `…` at the end. It is
+checked against the station you work when the call logged is its own or
+close to it (4.7); otherwise it is a NIL. The checks follow MRCE's
 `Log.pas:1030-1100`:
 
 - **NIL:** nobody matching was worked. It counts raw, not verified.
@@ -495,14 +511,24 @@ detection and retries (§12).
 - **A key during a turn** does not cut your message, as MRCE queues a
   message keyed while you send (`MyStn.pas:119-136, 177-187`). The machine
   plans a continuation, a new turn: the rest of your message from the
-  character sounding when the new send can start (now plus the player's
-  start lead), sent again whole; then the new message; then replies decided
-  from the whole. Starting it releases the old send. In a pile-up, callers
-  still sounding carry on from their character at that moment, re-based, so
-  collisions stay audible; a single caller stops and hears you.
+  character sounding at the key, sent again whole; then the new message;
+  then the replies to it, which the callers decide on the new message alone,
+  having heard the rest when it was keyed (4.3). Starting it releases the
+  old send at once, while the new one starts a player's lead later, so the
+  rest starts from the key, not from when the new send can start; and
+  `heard_from` includes the lead and latency, so a character is sent again
+  rather than lost. In a pile-up, callers still sounding carry on from their
+  character at that moment, re-based, so collisions stay audible; a single
+  caller stops and hears you.
 - **Only Esc cuts.** StopTx emits `StopAudio` (an 8 ms release,
   `audio/shape.rs:13`); a call or exchange not fully sent counts as not
-  sent, as MRCE's Esc resets CallSent and NrSent (`Main.pas:884-891`).
+  sent, as MRCE's Esc resets CallSent and NrSent (`Main.pas:884-891`). The
+  callers heard the message when you keyed it (4.3), so Esc takes back what
+  had not gone out whole: they are as they were before the message keyed
+  last, then hear only its parts sent whole. A reply it cut never sounded,
+  and what they owe comes on their timeouts. A QSO logged or lost since that
+  key is final, so then nothing is taken back; nor is a continuation's
+  carried rest, heard at its own key.
 - **Stale sends.** A stopped or replaced send returns `Cancelled`
   (`player.rs:325-349`): `TurnCancelled`, ignored. Arming cancels the send,
   not the lease (`audio/epoch.rs:6-9, 21-27`; `player.rs:236-238`).
@@ -630,7 +656,8 @@ open run.
 - **Pause** (button or Alt+P) stops the turn, forgets every timer, holds the
   clock and releases the audio (`player.rs:111-117`), so the band falls
   silent and the screen may sleep. Callers and the open QSO wait; the fields
-  lock, so a pause gives no free thinking time.
+  lock, so a pause gives no free thinking time, and a copy typed before it
+  and sent after it is timed in run time, the pause left out (9.1).
 - **Resume** claims a new lease inside the tap, as Start does
   (`session_runtime.rs:204`), so the player opens, or after a sound failure
   is rebuilt, within the browser's gesture. Every contest key and button
@@ -652,10 +679,11 @@ open run.
 
 ### 6.5 Time up
 
-At the limit the run ends at once. A QSO whose TU has started is logged and
-checked; any other open QSO is not logged, as in a real log, and counts as a
-lost copy (9.1). MRCE's 15 s drain (`Contest.pas:184-220`) exists only to
-finish a TU in flight, which Dust's "a started TU is final" rule covers.
+At the limit the run ends at once. A QSO is logged when its TU is keyed,
+so one whose TU was still going out is in the log and checked; any other
+open QSO is not logged, as in a real log, and counts as a lost copy (9.1).
+MRCE's 15 s drain (`Contest.pas:184-220`) exists only to finish a TU in
+flight, which Dust's "a logged QSO is final" rule covers.
 
 ### 6.6 Counters and speed
 
@@ -969,6 +997,8 @@ pub struct QsoRecord {
     pub c: String,      // the station's country key, for multipliers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub l: Vec<String>, // NIL only: the exchange you logged
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lc: String,     // the call logged, where the call group does not hold it
 }
 ```
 
@@ -977,19 +1007,26 @@ Checks, dupes, points, multipliers and rates are worked out on read, as
 `score` is. `v` rises only for a change an older reader would misread; a
 key that later phases add with a default does not raise it.
 
-**How a run fills the groups** (`ContestRun::result()`). QSO *i* owns the
-next `g` groups.
+**How a run fills the groups** (`ContestRun::result()`, which takes the
+groups the machine kept, as the stored layout holds none;
+`ContestMachine::result()` builds both). QSO *i* owns the next `g` groups.
+`ContestRun::score(groups)` works the contest score out again from them,
+exactly as it was while the run went on.
 
 - **A logged QSO:** one group for the call, then one per copied field
   (RST only in Simple QSO), so no false bigram crosses a call and its
   exchange in Mistakes.
 - **A lost QSO** (`k: "lost"`): a station whose call you sent, or that
   answered your partial, whose QSO ended unlogged (wiped, gone, failed by your CQ, open at the end). One call
-  group; received = the Call field then, without `?`; empty is a full miss.
-- **A NIL** (`k: "nil"`): one call group against the single caller, or the
-  best match among the stations heard; received = the logged call.
+  group; received = the Call field as last read while you worked it (a
+  wipe reads it before clearing), without `?`; empty is a full miss.
+- **A NIL** (`k: "nil"`): one call group against the station you work, or
+  else the single caller, or the best match among the stations heard;
+  received = the logged call. That station then has no lost group as well.
+  With no station heard at all there is no group, and `lc` holds the call.
 - **Calls.** received = the call as first sent with your exchange, so a slip
-  the station corrected still counts; the log keeps the corrected call.
+  the station corrected still counts; the log keeps the corrected call, in
+  `lc`, written only when it differs.
 - **Fields hold what was keyed.** sent = the token transmitted (`1N5`,
   `TT7`, `5NN`). If the canonical values match (11.6), received = sent, so a
   logger-style `7` for `TT7` is clean. Otherwise received is the typed
@@ -999,15 +1036,18 @@ next `g` groups.
   match even beside a digit added or dropped. Empty is a miss.
 - **`sends`** is 1 plus the repeats you asked for while the item was owed
   (`?`, a partial, `AGN`, `NR?`), counted from when you first sent that
-  station's call or `?`. An exchange re-send counts only for fields empty,
-  or read differently, after it.
+  station's call or `?`. A repeat counts once it has begun to reach you,
+  even if you key over the rest of it; one Esc stops before it begins was
+  never heard. An exchange re-send counts only for fields empty, or read
+  differently, after it.
 - **`time_to_complete_ms`.** A call: from the end of its first send heard
   after your last message asking for it (CQ, TU, `?`, a partial), to the
   Call field's last edit before the key that sent it with your exchange.
   Fields: from the end of the first exchange heard after your exchange or
   `?`, to when the field first read complete, shared by length. `Fields`
   carries both stamps; the 100 ms a character floor applies (`session.rs:26, 177`).
-  Waiting costs time, not sends.
+  Both ends are in run time, so a pause between the edit and the key
+  neither shortens nor lengthens a copy. Waiting costs time, not sends.
 - **Speeds.** Each group carries the caller's speeds to 0.1 WPM; the
   session's are their mean, as `GroupSession::result` does
   (`session.rs:478-491`), never `my_wpm`. `digits_level` comes from the
@@ -1333,14 +1373,15 @@ pub struct Turn { pub id: u64, pub at_run_ms: u64, pub segments: Vec<Segment> }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment { pub who: Sender /* You | Caller(u32) */, pub text: String,
                      pub voice: StationVoice, pub start_sec: f64, pub end_sec: f64,
-                     pub fade: Option<FadeKey> }
+                     pub fade: Option<FadeKey> /* from phase 2 (5.5) */ }
 pub struct Fields { pub call: String, pub exch: String,
                     pub call_edited: MonoMs, pub exch_complete: Option<MonoMs> }
 pub struct ContestView {
-    pub phase: Phase, pub clock: RunClock, pub limit_ms: u64, pub my_wpm: f64,
+    pub phase: ContestPhase, pub clock: Option<RunClock> /* None in the countdown */,
+    pub limit_ms: u64, pub my_wpm: f64,
     pub qso: QsoView,          // last call sent, exchange sent, corrected
     pub air: Option<AirView>,  // started, your text, segment spans
-    pub log: Vec<LogRow>,      // n, time, call, fields, wpm, asked, Pending | Clean | Errors
+    pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked
     pub qsos: u32, pub clean: u32, pub rate: Option<f64>,
 }
 ```
@@ -1449,15 +1490,21 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
 - Esc, Pause and Wipe never give `Paused{Sound}`; only a current-id
   `TurnFailed` does, near the limit too, with retry time left out;
   `TurnStarted` emits nothing;
-- pause in the countdown; resume re-arms the run end; a key forgets the
-  resume timer; `Hidden` never resumes by itself;
+- pause in the countdown; resume re-arms the run end; a key that sends
+  forgets the resume timer; `Hidden` never resumes by itself;
 - Again ×3, Wipe, CQ brings a new caller; a wipe after hearing a call adds
-  a lost group; a NIL adds one call group; an empty run stores nothing.
+  a lost group; a NIL adds one call group; an empty run stores nothing;
+- a continuation keeps every character wherever it is keyed; an exchange
+  sent with a logging TU carries that QSO's serial; a row's check shows once
+  its TU is out; a repeat costs its send once it begins; Esc takes back what
+  had not gone out; a key that sends nothing keeps the resume timer; a
+  pause between typing and the key leaves the copy time alone.
 
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
 verified, at 3600·n / Σ(planned turns and drawn delays) an hour within 5%,
-about 230 at 25 WPM for WPX. Human-paced (1.5 s per key): 60–150 an hour.
+about 230 at 25 WPM for WPX. Human-paced (1.5 s per character typed, and
+per key pressed): 60–150 an hour.
 One digit off: verified 0. Unsure: asks `K5?` first, its call points
 halve. Pauser: the clock equals the unpaused time. Dupe worker: 0 points,
 no error.
@@ -1466,11 +1513,13 @@ no error.
 20% one edit off, 10% empty, 10% partial and 20% junk, among stale and
 current turn events, timers by any id, pause, resume, hide and finish.
 
-- Every step: no panic, fresh ids, a clock that never goes back.
+- Every step: no panic, fresh ids, a clock that never goes back, but for
+  the retries a failed send gives back as paused (4.2).
 - The end: serial = QSOs logged + 1; QSO times rise and stay within
-  `run_ms` ≤ the limit; `run_ms + paused_ms` is the wall-clock span; no
-  reply ends after `wanted`; no row is `…`; `g` sums to the groups; points
-  finite; verified ≤ raw; `result()` round-trips.
+  `run_ms` ≤ the limit; `run_ms + paused_ms` is the wall-clock span, or at
+  most that when time ran out, as a run noticed past its limit ends at the
+  limit (6.5); no reply ends after `wanted`; no row is `…`; `g` sums to the
+  groups; points finite; verified ≤ raw; `result()` round-trips.
 - Across seeds, a floor of clean, busted, field-error, NIL and lost QSOs.
 - Each seed's (event, now) list replayed twice gives the same run.
 

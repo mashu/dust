@@ -11,16 +11,24 @@
 //!   log's contest score and rates.
 //! - [`record`]: how a run is kept in the history, so that every build, older
 //!   or newer, reads it back as practice and keeps what it does not know.
+//! - [`caller`]: the stations that answer, as MorseRunner's callers behave.
+//! - [`turn`]: each thing you send and every reply to it, as one send.
+//! - [`machine`]: the run itself, as a pure state machine.
 
+#[cfg(test)]
+pub(crate) mod bot;
+mod caller;
 mod check;
 mod clock;
 mod esm;
 mod exchange;
+mod machine;
 mod parse;
 mod record;
 mod rules;
 mod score;
 mod serial;
+mod turn;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -32,12 +40,17 @@ pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
 pub use esm::{EntryField, Esm, Fields, MessagePart, QsoState, esm, message_text};
 pub use exchange::{Field, cut_serial, keyed_token, read_number, send_serial};
+pub use machine::{
+    AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
+    PauseWhy, QsoView, RowStatus,
+};
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub(crate) use record::CONTEST_MARK;
 pub use record::{ContestLog, ContestRun, QsoRecord};
 pub use rules::{ContestRules, Multiplier, PerSide, Scoring, Side};
 pub use score::{ContestScore, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SerialFit, SerialModel, WPX_SERIALS};
+pub use turn::{Segment, Sender, Turn, plan_turn};
 
 /// Run time is kept in milliseconds; rates and contests are told in minutes
 /// and hours.

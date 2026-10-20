@@ -8,8 +8,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::check::{QsoText, check_qso};
 use super::exchange::Field;
+use super::score::{ContestScore, ScoredQso, contest_score};
 use super::{ContestKind, RunStyle};
+use crate::alignment::CopyTally;
+use crate::score::{calculate_total_chars, compute_average_response_ms};
+use crate::session::{GroupResult, SessionResult, SessionTiming};
+use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
 
 /// What a run's alphabet fingerprint starts with: `contest:wpx`. A build
 /// older than contest mode drops the log on its next save but keeps the
@@ -19,7 +25,11 @@ pub(crate) const CONTEST_MARK: &str = "contest:";
 /// The log layout this build writes and reads. It rises only for a change
 /// an older reader would misread; a key added with a default does not
 /// raise it.
-const LAYOUT: u32 = 1;
+pub(super) const LAYOUT: u32 = 1;
+
+/// A QSO's kind, as `k` keeps it: logged is empty.
+pub(super) const LOST: &str = "lost";
+pub(super) const NIL: &str = "nil";
 
 /// A run's log, exactly as it was read.
 ///
@@ -89,6 +99,11 @@ pub struct QsoRecord {
     /// A NIL only: the exchange you logged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub l: Vec<String>,
+    /// The call you logged, where its call group does not hold it: the
+    /// group keeps the call as first sent with your exchange, and the log
+    /// the call corrected since. Empty when they are the same.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lc: String,
 }
 
 impl ContestLog {
@@ -110,6 +125,141 @@ impl ContestLog {
     }
 }
 
+impl ContestRun {
+    /// The session a run is kept as: `groups` are its QSOs' groups in order,
+    /// each with its timing, `settings` those it ran with. Scored, tallied
+    /// and timed as a group session is, its speeds the callers' and its
+    /// level the callsign tier, with its log beside the groups.
+    pub(crate) fn result(
+        &self,
+        groups: Vec<(GroupResult, SessionTiming)>,
+        settings: &TrainingSettings,
+        finished_at: u64,
+        date: String,
+    ) -> SessionResult {
+        let (groups, timings): (Vec<GroupResult>, Vec<SessionTiming>) = groups.into_iter().unzip();
+        let mut tally = CopyTally::default();
+        for group in &groups {
+            tally.add(&group.sent, &group.received);
+        }
+        let sent: Vec<&str> = groups.iter().map(|group| group.sent.as_str()).collect();
+        let per_char: Vec<f64> = groups
+            .iter()
+            .zip(&timings)
+            .map(|(group, timing)| {
+                timing.time_to_complete_ms / group.sent.chars().count().max(1) as f64
+            })
+            .collect();
+        let mean = |speeds: Vec<f64>| {
+            (!speeds.is_empty()).then(|| speeds.iter().sum::<f64>() / speeds.len() as f64)
+        };
+        let char_wpm = mean(timings.iter().filter_map(|t| t.char_wpm).collect());
+        let effective_wpm = mean(timings.iter().filter_map(|t| t.effective_wpm).collect());
+        let mut result = SessionResult {
+            date,
+            timestamp: finished_at,
+            accuracy: tally.accuracy(),
+            tally,
+            avg_response_ms: compute_average_response_ms(&per_char),
+            total_chars: calculate_total_chars(&sent),
+            score: 0.0,
+            level: settings.level(LevelAxis::Callsign),
+            digits_level: settings.level(LevelAxis::Digits),
+            char_set_mode: CharSetMode::Contest,
+            char_wpm: char_wpm.unwrap_or(self.my_wpm),
+            effective_wpm: effective_wpm.unwrap_or(self.my_wpm),
+            alphabet_fingerprint: format!("{CONTEST_MARK}{}", self.kind),
+            contest: Some(ContestLog::from(self)),
+            groups: groups
+                .into_iter()
+                .map(|group| GroupResult {
+                    correct: group.sent == group.received,
+                    ..group
+                })
+                .collect(),
+            group_timings: timings,
+        };
+        result.score = result.points();
+        result
+    }
+
+    /// The run's contest score, worked out again from its log and its
+    /// session's `groups`, as it was while it ran: every logged QSO checked
+    /// against what its station sent, which its groups hold. None for a
+    /// contest without a score, or groups that are not this run's.
+    pub fn score(&self, groups: &[GroupResult]) -> Option<ContestScore> {
+        let rules = ContestKind::from_name(&self.kind)?.rules()?;
+        let scoring = rules.scoring?;
+        let fields: Vec<Field> = self
+            .fields
+            .iter()
+            .map(|name| Field::from_name(name))
+            .collect::<Option<_>>()?;
+        let mut logged = Vec::new();
+        let mut clean: Vec<&str> = Vec::new();
+        let mut at = 0;
+        for qso in &self.qsos {
+            let owned = groups.get(at..at + qso.g as usize)?;
+            at += qso.g as usize;
+            if qso.k == LOST {
+                continue;
+            }
+            let call_group = owned.first();
+            let call = if qso.lc.is_empty() {
+                call_group?.received.clone()
+            } else {
+                qso.lc.clone()
+            };
+            let check = match qso.k.as_str() {
+                NIL => check_qso(
+                    &QsoText {
+                        call: call.clone(),
+                        fields: Vec::new(),
+                    },
+                    None,
+                    |_| false,
+                ),
+                _ => {
+                    let station = call_group?;
+                    let copied = |held: fn(&GroupResult) -> &String| {
+                        fields
+                            .iter()
+                            .zip(&owned[1..])
+                            .map(|(field, group)| (*field, held(group).clone()))
+                            .collect()
+                    };
+                    let sent = QsoText {
+                        call: station.sent.clone(),
+                        fields: copied(|group| &group.sent),
+                    };
+                    let check = check_qso(
+                        &QsoText {
+                            call: call.clone(),
+                            fields: copied(|group| &group.received),
+                        },
+                        Some(&sent),
+                        |call| clean.contains(&call),
+                    );
+                    if check.is_clean() {
+                        clean.push(&station.sent);
+                    }
+                    check
+                }
+            };
+            logged.push((qso.t, call, check));
+        }
+        let scored: Vec<ScoredQso<'_>> = logged
+            .iter()
+            .map(|(at_ms, call, check)| ScoredQso {
+                at_ms: *at_ms,
+                call,
+                check,
+            })
+            .collect();
+        Some(contest_score(&scoring, &scored, self.run_ms))
+    }
+}
+
 impl From<&ContestRun> for ContestLog {
     /// The log a run is written as. Plain data always makes a value, so the
     /// fallback is never reached.
@@ -121,6 +271,7 @@ impl From<&ContestRun> for ContestLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contest::Tally;
     use serde_json::json;
 
     fn qso(t: u64, g: u32, nr: u32) -> QsoRecord {
@@ -132,6 +283,7 @@ mod tests {
             k: String::new(),
             c: String::new(),
             l: Vec::new(),
+            lc: String::new(),
         }
     }
 
@@ -239,6 +391,120 @@ mod tests {
         log["laterKey"] = json!([1, 2.5, "x"]);
         log["qsos"][0]["z"] = json!(3);
         assert_eq!(ContestLog(log).run(5), Some(run()));
+    }
+
+    /// The call logged is written only where the call group does not hold
+    /// it, and a log written before the key reads as if it held it.
+    #[test]
+    fn a_logged_call_is_kept_only_where_it_differs() {
+        let mut corrected = run();
+        corrected.qsos[1].lc = "K5XYZ".into();
+        let log = ContestLog::from(&corrected);
+        assert_eq!(log.0["qsos"][1]["lc"], "K5XYZ");
+        assert!(log.0["qsos"][0].get("lc").is_none());
+        assert_eq!(log.run(5), Some(corrected));
+        assert_eq!(ContestLog::from(&run()).run(5), Some(run()));
+    }
+
+    /// A run's groups, as its session keeps them.
+    fn group(sent: &str, received: &str) -> GroupResult {
+        GroupResult {
+            sent: sent.into(),
+            received: received.into(),
+            correct: sent == received,
+        }
+    }
+
+    /// A short log worked by hand: a clean QSO, one whose call the station
+    /// corrected, one with a wrong number, a NIL, a lost call and a dupe.
+    #[test]
+    fn a_stored_run_scores_as_its_log_says() {
+        let mut stored = run();
+        stored.qsos = vec![
+            qso(30_000, 2, 1),
+            QsoRecord {
+                lc: "DL2XYZ".into(),
+                ..qso(60_000, 2, 2)
+            },
+            qso(90_000, 2, 3),
+            QsoRecord {
+                k: NIL.into(),
+                l: vec!["12".into()],
+                ..qso(120_000, 1, 4)
+            },
+            QsoRecord {
+                k: LOST.into(),
+                ..qso(150_000, 1, 5)
+            },
+            qso(180_000, 2, 5),
+        ];
+        let groups = [
+            group("K5XYZ", "K5XYZ"),
+            group("214", "214"),
+            // First sent as DL2XYW, then put right: the log is clean.
+            group("DL2XYZ", "DL2XYW"),
+            group("TT7", "7"),
+            group("9A1AA", "9A1AA"),
+            group("13", "31"),
+            group("W1AW", "W1AQ"),
+            group("G4ABC", "G4AB"),
+            group("K5XYZ", "K5XYZ"),
+            group("215", "215"),
+        ];
+        assert!(ContestLog::from(&stored).run(groups.len()).is_some());
+        let score = stored.score(&groups).expect("WPX scores");
+        // Raw: K5XYZ, DL2XYZ, 9A1AA and the NIL's W1AQ (the dupe dropped):
+        // prefixes K5, DL2, 9A1 and W1.
+        assert_eq!(
+            score.raw,
+            Tally {
+                qso_points: 4,
+                mults: 4,
+                score: 16
+            }
+        );
+        // Verified: K5XYZ and DL2XYZ; the dupe of K5XYZ scores nothing.
+        assert_eq!(
+            score.verified,
+            Tally {
+                qso_points: 2,
+                mults: 2,
+                score: 4
+            }
+        );
+        // Groups that are not this run's are not scored.
+        assert_eq!(stored.score(&groups[1..]), None);
+    }
+
+    /// The session a run is kept as: its groups scored and tallied as a
+    /// group session's are, marked as a run, its log beside them.
+    #[test]
+    fn a_run_is_kept_as_a_session_of_its_groups() {
+        let settings = TrainingSettings::default();
+        let timing = |sends| SessionTiming {
+            time_to_complete_ms: 900.0,
+            char_wpm: Some(24.0),
+            effective_wpm: Some(22.0),
+            sends,
+        };
+        let groups = vec![
+            (group("K5XYZ", "K5XYZ"), timing(1)),
+            (group("214", "215"), timing(2)),
+            (group("DL2XYZ", "DL2XYZ"), timing(1)),
+            (group("TT7", "TT7"), timing(1)),
+            (group("W1AW", ""), timing(1)),
+        ];
+        let result = run().result(groups, &settings, 9_000, "2026-10-20".into());
+        assert_eq!(result.char_set_mode, CharSetMode::Contest);
+        assert_eq!(result.alphabet_fingerprint, "contest:wpx");
+        assert_eq!(result.level, settings.level(LevelAxis::Callsign));
+        assert_eq!((result.char_wpm, result.effective_wpm), (24.0, 22.0));
+        assert_eq!(result.groups.len(), 5);
+        assert!(!result.groups[1].correct && !result.groups[4].correct);
+        assert_eq!(result.score, result.points());
+        assert!(result.score > 0.0);
+        assert!(result.accuracy > 0.5 && result.accuracy < 1.0);
+        assert_eq!(result.contest.and_then(|log| log.run(5)), Some(run()));
     }
 
     #[test]
