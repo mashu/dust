@@ -234,7 +234,10 @@ impl MorseBackend for MorsePlayer {
         // the end of that statement, and the voice would be built — its
         // allocations and all — with the audio callback locked out of the
         // mixer.
-        let rate = self.mixer().sample_rate();
+        let (rate, latency_sec) = {
+            let mixer = self.mixer();
+            (mixer.sample_rate(), mixer.latency_sec())
+        };
         let voice = SendVoice::new(
             plan,
             &FilterDesign::from_settings(settings),
@@ -245,7 +248,12 @@ impl MorseBackend for MorsePlayer {
         let finished = voice.finished_flag();
         let armed = self.state.arm();
         self.with_mixer(|mixer, swept| mixer.start(voice, swept));
-        Ok(Rc::new(ToneSignal::new(armed, finished, failed)))
+        Ok(Rc::new(ToneSignal::new(
+            armed,
+            finished,
+            failed,
+            latency_sec,
+        )))
     }
 
     fn stop(&mut self) {

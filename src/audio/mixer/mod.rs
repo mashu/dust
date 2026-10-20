@@ -42,6 +42,9 @@ pub struct Mixer {
     send: Option<SendVoice>,
     /// Sends a newer one replaced, riding out their release.
     retiring: Vec<SendVoice>,
+    /// How far behind the last callback the speaker was, in frames: how
+    /// long a send started now waits to be heard.
+    latency: usize,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -73,11 +76,18 @@ impl Mixer {
             fading: Vec::with_capacity(FADING_BANDS + 1),
             send: None,
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
+            latency: 0,
         }
     }
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// How long after it starts a send is heard, in seconds, as the last
+    /// callback found the speaker behind it.
+    pub fn latency_sec(&self) -> f64 {
+        self.latency as f64 / f64::from(self.sample_rate)
     }
 
     /// Put a new band in, or take the band away. The one going out is not
@@ -147,6 +157,7 @@ impl Mixer {
     /// speaker is `latency` frames behind: a send is over once its last
     /// sample has been heard, not when it was played.
     pub fn render(&mut self, out: &mut [f32], latency: usize) {
+        self.latency = latency;
         // The band's own traffic makes room for a pile-up while it calls.
         let callers = self.send.as_ref().map_or(0, SendVoice::callers_now);
         if let Some(band) = self.band.as_mut() {

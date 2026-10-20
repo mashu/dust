@@ -8,7 +8,10 @@
 
 use crate::morse::morse_for;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
-use crate::timing::{PlannedTransmission, PlaybackPlan, StationVoice, plan_morse_playback_for};
+use crate::timing::{
+    Interferer, PlannedTransmission, PlaybackPlan, StationVoice, Transmission,
+    plan_morse_playback_for,
+};
 
 /// Who sends a segment of a turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +48,36 @@ impl Turn {
             .iter()
             .map(|segment| segment.end_sec)
             .fold(0.0, f64::max)
+    }
+
+    /// What the turn says, as a send is written down: your message from your
+    /// voice, and each reply as a station calling across it after its delay.
+    /// A turn of callers alone is written from the first caller's voice, with
+    /// no text of yours. The players play [`plan_turn`]'s plan; this is the
+    /// words, for a player that keeps them. None for a turn with nothing in
+    /// it, which is never sent.
+    pub fn transcript(&self) -> Option<Transmission> {
+        let yours = self
+            .segments
+            .iter()
+            .find(|segment| segment.who == Sender::You);
+        let first = yours.or(self.segments.first())?;
+        Some(Transmission {
+            text: yours
+                .map(|segment| segment.text.clone())
+                .unwrap_or_default(),
+            voice: first.voice,
+            others: self
+                .segments
+                .iter()
+                .filter(|segment| segment.who != Sender::You)
+                .map(|segment| Interferer {
+                    text: segment.text.clone(),
+                    voice: segment.voice,
+                    delay_sec: segment.start_sec,
+                })
+                .collect(),
+        })
     }
 }
 
@@ -242,6 +275,31 @@ mod tests {
             .map(|tone| tone.duration_sec)
             .fold(f64::MAX, f64::min);
         assert!((shortest - 1.2 / 30.0).abs() < 1e-9);
+    }
+
+    /// Written down, a turn is your message and each reply after its delay;
+    /// one of callers alone has no text of yours, and an empty one nothing.
+    #[test]
+    fn a_turns_transcript_holds_every_segment() {
+        let turn = turn();
+        let transcript = turn.transcript().expect("a transcript");
+        assert_eq!(transcript.text, "K5XYZ 5NN TT7");
+        assert_eq!(transcript.voice, turn.segments[0].voice);
+        assert_eq!(transcript.others.len(), 1);
+        let reply = &transcript.others[0];
+        assert_eq!(reply.text, "TU 5NN 214");
+        assert_eq!(reply.voice, turn.segments[1].voice);
+        assert_eq!(reply.delay_sec, turn.segments[1].start_sec);
+
+        let mut callers = turn.clone();
+        callers.segments.remove(0);
+        let alone = callers.transcript().expect("a transcript");
+        assert_eq!(alone.text, "");
+        assert_eq!(alone.voice, turn.segments[1].voice);
+        assert_eq!(alone.others.len(), 1);
+
+        callers.segments.clear();
+        assert_eq!(callers.transcript(), None);
     }
 
     #[test]

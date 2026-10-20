@@ -6,9 +6,15 @@ builds are read and kept, and History names every session's mode. Phase 1's
 cw-core foundations are in: the WPX rules row, contest calls and their
 parsing, exchanges and cut numbers, ESM, the run clock, callers' serials,
 checks, both scores, the run's log layout, and the contest settings. So is
-its engine, which the app does not run yet: single callers, turns and
-`plan_turn`, the run machine and what a run stores, with operator tests
-and a soak.
+its engine: single callers, turns and `plan_turn`, the run machine and what
+a run stores, with operator tests and a soak. The app runs it from start to
+results (`src/contest_runtime.rs`) on a plain run screen
+(`src/ui/contest.rs`), with pause, the hidden-page pause and the sound
+failure pause; the screen's full layout, the keypad, the contest results
+and the settings cards come next. Until then a run that worked nobody goes
+back Home with its message, not to a panel with Run again (4.2), and what
+the run announces shows at once, not held till the air is silent (§7).
+Nobody can pick Contest yet (§14).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -529,7 +535,10 @@ patience, the countdown, the resume timer and the run end use UI timers,
 all seconds long. The app gains `start_planned` beside `start_send`
 (`audio/mod.rs:81-90`) and `Lease::send_planned` beside `Lease::send`
 (`player.rs:289-314`), keeping leases, stall
-detection and retries (§12).
+detection and retries (§12). What the turn says goes to the player as
+`Turn::transcript()`, a `Transmission` of your message with each reply as a
+station calling across it after its delay: the real players play only the
+plan, and the test recorder keeps both, with the `Qsb` the send was given.
 
 ### 5.2 Continuations, stops, failures, heard time
 
@@ -561,7 +570,12 @@ detection and retries (§12).
   and N stay reset.
 - **Stale sends.** A stopped or replaced send returns `Cancelled`
   (`player.rs:325-349`): `TurnCancelled`, ignored. Arming cancels the send,
-  not the lease (`audio/epoch.rs:6-9, 21-27`; `player.rs:236-238`).
+  not the lease (`audio/epoch.rs:6-9, 21-27`; `player.rs:236-238`). Each
+  turn's send is asked for as the turn goes on the air
+  (`Lease::ask_to_send`), not when its task first runs: that ends every
+  send asked for before it, so an older turn waiting out a retry gives up
+  rather than start over the new one, and an Esc handled before the task
+  runs still stops it.
 - **A failure.** After every retry fails, `TurnFailed` with the current id
   pauses the run ("Sound stopped — Resume to carry on"). The retries are not
   run time: each attempt waits the turn plus 2 s (`wait.rs:18, 95-96`;
@@ -578,7 +592,10 @@ detection and retries (§12).
   `wait.rs:124-132`, `web/mod.rs:114`; native `latency_frames`,
   `audio/native.rs:272-280`). A
   caller's segment counts as heard once it has reached the ear; your own
-  count from the start, which is lenient.
+  count from the start, which is lenient. Each player's send says it as
+  `PlaybackSignal::heard_after_sec`: the browser's lead and believed
+  latency, read as the send is scheduled; natively, the latency the mixer's
+  last callback found; nothing for the silent player and the recorder.
 
 ### 5.3 Your own transmission
 
@@ -702,9 +719,10 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
   it began goes again a moment after Resume (4.2).
 - **Resume** claims a new lease inside the tap, as Start does
   (`session_runtime.rs:204`), so the player opens, or after a sound failure
-  is rebuilt, within the browser's gesture. Every contest key and button
-  first calls `Lease::wake()`, which resumes a suspended context and opens a
-  missing player (`player.rs:142-148`).
+  is rebuilt, within the browser's gesture: a player that failed every
+  attempt is thrown away, so that claim opens a fresh one. Every contest
+  key and button first calls `Lease::wake()`, which resumes a suspended
+  context and opens a missing player (`player.rs:142-148`).
 - **A hidden page or a locked phone** pauses the run, because `mono_ms`
   keeps running while hidden (`src/time.rs:29-50`). Three signals feed it:
   - a `visibilitychange` listener that talks back through `dioxus.send` and
@@ -714,7 +732,9 @@ elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
     `window.is_minimized()` on Resized and Focused;
   - a heartbeat: the run bar's ticker stamps `last_tick`; before any event,
     a gap over 2 s first dispatches `Pause{Hidden, at: last_tick}`, so a
-    process frozen before any message arrived is still credited.
+    process frozen before any message arrived is still credited. The check
+    starts with the ticker's first tick, so nothing is read into the moment
+    before the run screen is up.
 - **Never resumes by itself:** "Paused while Dust was in the background".
   The panel offers Resume, End run and Discard, which asks once more
   ("Discard this run? Its QSOs are not kept").
@@ -749,11 +769,11 @@ keypad and action row in one column (`.shell`, max 760 px,
 `styles.css:328-333`). It reads "a bit different" because of what is in it:
 a running clock where "n / total" was, two labelled fields where the answer
 box was, an air line and message buttons, and a log where the previous
-group was. `ProgressHeader` (`widgets.rs:327-354`) gains `figure` and `pct`
+group was. `ProgressHeader` (`widgets.rs:341-368`) gains `figure` and `pct`
 in place of `current/total`.
 
 **Desktop, running.** No keypad without a touch screen
-(`training.rs:392-396`).
+(`training.rs:393-397`).
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -781,7 +801,7 @@ in place of `current/total`.
 ```
 
 - **The hint line** is `esm()`'s `hint` ("Type the call you hear, then
-  Enter"), one line, as group training's (`training.rs:579-598`).
+  Enter"), one line, as group training's (`training.rs:566-585`).
 - **The air line** shows only your own message, the part still being sent.
   RX counts the stations sending but never shows what they send (Show copy,
   phase 4, is the exception).
@@ -789,7 +809,7 @@ in place of `current/total`.
   fix the call, then Enter."
 - **The log** is newest first, six rows tall. A row shows `…` until its
   station is done, then a word ("clean", "busted call, was K5ABC"), since
-  icons are `aria-hidden` (`widgets.rs:263`). `?×1` counts asked repeats.
+  icons are `aria-hidden` (`widgets.rs:277`). `?×1` counts asked repeats.
 
 **Phone, running** (keypad always shown). From header to keypad it fits one
 screen (`styles.css:2139-2175`); below 760 px height the keys shrink. Every
@@ -823,7 +843,7 @@ line is a fixed one-line slot with an ellipsis (as `.train-hint`,
 ```
 
 The keypad takes its rows as props, not the constants at
-`training.rs:352-356`: the character
+`training.rs:353-357`: the character
 rows stay as in group training, only `,` and `.` leave row four, and the
 last row is `␣ Field` (Call to Exchange; a space in Exchange) and the ESM
 key, whose label and `aria-label` name what it sends. Fields keep
@@ -948,9 +968,7 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   Mixed (`settings/save.rs:44-57`, `persist/mod.rs:183-207`). Its next save
   drops Your station: settings, which a backup holds, not training data.
   Nothing writes `"contest"` as the mode; a save edited by hand that names
-  it opens in Contest. Until the Contest arm of `start_session` lands (1a),
-  settings that open in Contest start Callsigns practice at the same tier,
-  so no group session is recorded as a run (`session_runtime.rs`).
+  it opens in Contest, and `start_session` starts a run from it.
 - **Clamping and tests.** `clamp()` settles the strings in one pass
   (`clamp.rs:15-115`); every new number is an integer. `wild()` and
   `wildly_different()` (`settings/mod.rs:826, 1382-1441`) set every new
@@ -958,7 +976,9 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   `every_setting_belongs_to_exactly_one_section` respectively. Nothing joins
   `PROGRESS`.
 - **Starting** needs a `myCall` that `parse_callsign` reads and valid
-  contest fields; Home and the card say what is missing.
+  contest fields; Home and the card say what is missing, in the words of
+  `ContestSettings::missing()`. Until they do, a start refused says it in a
+  message.
 
 ## 9. Data model and storage
 
@@ -1469,27 +1489,35 @@ pub struct ContestView {
 Effects carry `Turn`, which derives `PartialEq` (as `StationVoice` does,
 `station.rs:12`), so machine tests compare effects as the group tests do
 (`machine.rs:622-628`). The runtime calls `plan_turn(&turn, &settings)`,
-then `lease.send_planned(&plan, &transcript, &settings, on_start)` with
-`on_start: impl FnMut(f64)` taking lead plus latency in seconds. The view
-holds no caller truth until a row's check resolves, and is published only
-when it changes (`session_runtime.rs:297-303`).
+then `lease.send_planned(asked, &plan, &transcript, &settings, on_start)`
+with `on_start: impl FnMut(f64)` taking lead plus latency in seconds, and
+`asked` from `lease.ask_to_send()` as the turn goes on the air (5.2). The
+view holds no caller truth until a row's check resolves, and is published
+only when it changes (`session_runtime.rs:297-303`).
 
-`ContestEntry`, in `AppCtx` beside `answer: AnswerOutbox`, holds `call`,
-`exch` and `focus` as `CopyValue`s with their edit stamps; `typed:
-Signal<u64>`, bumped on every edit and read only by the hint, label and
-"Reads as"; and `repaint: Signal<u64>`, read only by the inputs and bumped
-only by keypad or paddle letters, Wipe and `clear()`. A key handler calls
-`paddle.finish_letter()`, `lease.wake()` and `entry.snapshot()`, then
-dispatches `Key`. `run_effects` handles `ClearFields` and `Focus` through
-`ctx.entry` and the focus script (`training.rs:456`). One `use_answer_box`
-registration routes paddle letters to the focused field.
+`ContestEntry`, in `AppCtx` beside `answer: AnswerOutbox`, holds `call`
+and `exch` with their edit stamps (one `CopyValue<Fields>`, stamped by
+`Fields::edit`) and `focus` as `CopyValue`s; `typed: Signal<u64>`, bumped
+on every edit and read only by the hint, label and "Reads as"; and
+`repaint: Signal<u64>`, read only by the inputs and bumped only by keypad
+or paddle letters, Wipe and `clear()`. Every key and message button goes
+through one entry point, `press_key`, which calls `paddle.finish_letter()`
+(lent by the run screen through `ContestEntry::use_letters`, as
+`AnswerOutbox::use_entry` lends it), `lease.wake()` and
+`entry.snapshot()`, then dispatches `Key`. `run_effects` handles
+`ClearFields` and `Focus` through `ctx.entry` and the focus script
+(`widgets.rs:67`, shared with the group boxes); `Announce` sets
+`ctx.announced`, which the screen reads. One `use_answer_box` registration
+routes paddle letters to the focused field. `app.session` holds
+`Live::{Groups, Contest}`, each boxed; `finish_run` and `abort_run` reach
+whichever is live.
 
 **New in cw-core, `crates/cw-core/src/contest/`:**
 
 | File | Holds |
 |---|---|
 | `mod.rs` | `ContestKind`, `RunStyle`, `CallerHabits` (forgiving serde), `CallSource` |
-| `rules.rs`, `esm.rs`, `clock.rs` | the `ContestRules` table; `esm()`; `RunClock` |
+| `rules.rs`, `esm.rs`, `clock.rs` | the `ContestRules` table; `esm()`, `Fields::edit`; `RunClock` |
 | `machine.rs` | `ContestMachine`, events, effects, `ContestView` |
 | `caller.rs` | caller states, patience, matching, replies, collisions, QRS |
 | `turn.rs` | `Turn`, segments, continuations, `plan_turn`, per-caller fades |
@@ -1505,7 +1533,7 @@ registration routes paddle letters to the focused field.
 `draws_characters`, `sends_callsigns`, `ContestSettings`, `contestActive` on
 disk, `Station`, `wild`); `settings/curriculum.rs` (Contest → `LevelAxis::Callsign`,
 `:49-56`); `session.rs` (`StoredSession`, `mode_on_disk`, `recorded_mode`,
-`contest`, a test constructor); `callsign.rs` (`generate_call`, `CallSpec`, public
+`contest`, a test constructor, `MonoMs::plus_sec`); `callsign.rs` (`generate_call`, `CallSpec`, public
 `parse_callsign`, `wpx_prefix`, `country_of`); `sampling.rs`, `pool.rs`,
 `auto_level.rs` (Contest arms; `impl CallSource for Sampler`); `stats.rs`,
 `board.rs`, `speed.rs` (history rows, kinds, assisted runs, contest speed
@@ -1513,9 +1541,9 @@ evidence, no adaptive path); `timing/pileup.rs` (reach helpers
 `pub(crate)`); `soak.rs`, `lib.rs` (the contest soak; exports).
 
 **New in the app:** `src/contest_runtime.rs` (`LiveContest`, start,
-dispatch, effects, `play_turn`, finish, the hidden-page signals);
+dispatch, effects, `play_turn`, finish, the heartbeat check);
 `src/ui/contest.rs` (run bar, hint, air line, fields, key bar, log, paused
-panel); `src/ui/contest_keys.rs`; `src/ui/contest_results.rs`;
+panel, the visibility listener and the minimise handler); `src/ui/contest_keys.rs`; `src/ui/contest_results.rs`;
 `src/ui/settings_station.rs`; `src/ui/scores/runs.rs` (phase 4);
 `scripts/contest-data.py` (counted shares).
 
@@ -1654,8 +1682,9 @@ Results; Exit with one QSO shows Results; the recorder sees QSB `None`,
 `keep_awake(false)`; `Paused{Sound}` then Resume opens a player before the
 1 s timer; a key typed between two renders survives; `Pause{Hidden}` and a
 heartbeat gap both credit the gap as paused; a bad own call refuses to
-start. A unit test drives `audio::silent::MorsePlayer` through a stretched
-turn and a cancel.
+start; a turn waiting out a retry never starts over a newer one, and an
+Esc before a turn's task runs stops it. A unit test drives
+`audio::silent::MorsePlayer` through a stretched turn and a cancel.
 
 **Render tests:** Home in Contest with and without a call; no alphabet,
 group, Experience or Auto level controls; Your station's fields and
@@ -1705,15 +1734,16 @@ ships a release before phase 1.
   time, QSOs, the live log; results with both WPX scores, reopened from
   History; `ContestLog` storage with lost copies, keyed tokens and asked
   sends; "Points"; the merge; the Home hero; Exit and Discard routing; the
-  privacy texts. Your message goes through the receiver, QSB off. A sound
-  failure ends the run and keeps the log, as group sessions do
-  (`machine.rs:252-258`). Its cw-core foundations land first, with the
-  settings, which then read `contestActive` back as Contest; until the
-  Contest arm of `start_session` follows, `start_session` runs such
-  settings as Callsigns at the same tier, and that arm removes the shim.
-- **1b Honest clock and sound.** `TurnFailed` → `Paused{Sound}`;
-  `Lease::wake`; hidden-page pause by visibility, minimise and heartbeat;
-  heard time with latency; the dry path for your message; rate; − / +.
+  privacy texts. Your message goes through the receiver, QSB off. The
+  engine came with `TurnFailed` → `Paused{Sound}`, so the runtime brought
+  `Lease::wake`, the hidden-page pause by visibility, minimise and
+  heartbeat, and heard time with latency into 1a as well. Its cw-core
+  foundations land first, with the settings, which then read
+  `contestActive` back as Contest; until the Contest arm of
+  `start_session` followed, `start_session` ran such settings as Callsigns
+  at the same tier, and that arm removed the shim.
+- **1b Honest clock and sound.** The dry path for your message; rate;
+  − / +.
 - **1c Simple QSO.** Names data, the RST and NAME exchange, `myName`.
 - **1d Contester keys.** F2, F3, F5, `;`, `.`, `,`, `+`, Shift+Enter; the key
   bar; browser defaults suppressed; Esc lock in fullscreen.

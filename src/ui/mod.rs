@@ -2,6 +2,7 @@ pub mod auto_level;
 pub mod backup;
 pub mod band;
 pub mod chart;
+pub mod contest;
 pub mod credits;
 pub mod envelope;
 pub mod file_pick;

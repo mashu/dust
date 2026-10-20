@@ -138,18 +138,45 @@ pub fn schedule_lead_sec(base_latency_sec: f64) -> f64 {
 /// and the answer window would open on top of the tone.
 #[cfg(any(feature = "web", test))]
 pub fn heard_ms(now_sec: f64, started_at_sec: f64, latency_sec: f64) -> u32 {
-    let latency = if latency_sec.is_finite() {
-        latency_sec.clamp(0.0, MAX_HEARD_LATENCY_SEC)
+    let latency = believed_latency(latency_sec);
+    let ms = ((now_sec - started_at_sec - latency) * 1000.0).max(0.0);
+    ms.min(f64::from(u32::MAX / 4)) as u32
+}
+
+/// How long after a send is started its first sound reaches the ear, in
+/// seconds: scheduled `lead_sec` past the browser's clock, then `latency_sec`
+/// from rendering to the ear, as much of it as is believed.
+#[cfg(any(feature = "web", test))]
+pub fn heard_after_sec(lead_sec: f64, latency_sec: f64) -> f64 {
+    let lead = if lead_sec.is_finite() {
+        lead_sec.max(0.0)
     } else {
         0.0
     };
-    let ms = ((now_sec - started_at_sec - latency) * 1000.0).max(0.0);
-    ms.min(f64::from(u32::MAX / 4)) as u32
+    lead + believed_latency(latency_sec)
+}
+
+/// As much of a latency the browser reports as is worth believing.
+#[cfg(any(feature = "web", test))]
+fn believed_latency(latency_sec: f64) -> f64 {
+    if latency_sec.is_finite() {
+        latency_sec.clamp(0.0, MAX_HEARD_LATENCY_SEC)
+    } else {
+        0.0
+    }
 }
 
 /// A send in flight, as the backend sees it.
 pub trait PlaybackSignal {
     fn poll(&self) -> WaitFlags;
+
+    /// How long after it was started the send's first sound reaches the ear,
+    /// in seconds, as the player reckons it: how far ahead it was scheduled,
+    /// and the delay from the player's output to the ear. Nothing, for a
+    /// player with no sound to be late.
+    fn heard_after_sec(&self) -> f64 {
+        0.0
+    }
 }
 
 /// Morse already scheduled; wait without holding the player borrow.
@@ -157,6 +184,9 @@ pub struct PlaybackWait {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
+    /// How long after it was started the send reaches the ear
+    /// ([`PlaybackSignal::heard_after_sec`]).
+    pub heard_after_sec: f64,
     signal: Rc<dyn PlaybackSignal>,
 }
 
@@ -168,6 +198,7 @@ impl PlaybackWait {
             duration_sec: plan.duration_sec,
             char_wpm: plan.resolved_char_wpm,
             effective_wpm: plan.resolved_effective_wpm,
+            heard_after_sec: signal.heard_after_sec(),
             signal,
         }
     }
@@ -231,6 +262,13 @@ mod tests {
         // A latency the browser does not know, or gets wrong, is no help.
         assert_eq!(heard_ms(11.0, 10.0, f64::NAN), 1_000);
         assert_eq!(heard_ms(11.0, 10.0, 30.0), 500);
+
+        // A send reaches the ear its lead and the believed latency after it
+        // was started.
+        assert!((heard_after_sec(0.02, 0.25) - 0.27).abs() < 1e-12);
+        assert_eq!(heard_after_sec(0.02, f64::NAN), 0.02);
+        assert_eq!(heard_after_sec(0.02, 30.0), 0.52);
+        assert_eq!(heard_after_sec(f64::NAN, -1.0), 0.0);
     }
 
     #[test]

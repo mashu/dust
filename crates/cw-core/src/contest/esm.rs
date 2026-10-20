@@ -52,6 +52,46 @@ pub struct Fields {
     pub exch_complete: Option<MonoMs>,
 }
 
+impl Fields {
+    /// Both fields cleared at `now`, which counts as an edit of the call.
+    pub fn cleared(now: MonoMs) -> Self {
+        Self {
+            call_edited: now,
+            ..Self::default()
+        }
+    }
+
+    /// `field` now holds `text`, typed at `now`. The call is stamped at
+    /// every edit. The exchange, read by `rules` from `side`, is stamped
+    /// the first time it reads complete since it was last empty: a copy is
+    /// timed to there, however much is typed after it.
+    pub fn edit(
+        &mut self,
+        field: EntryField,
+        text: String,
+        now: MonoMs,
+        rules: &ContestRules,
+        side: Side,
+    ) {
+        match field {
+            EntryField::Call => {
+                self.call = text;
+                self.call_edited = now;
+            }
+            EntryField::Exchange => {
+                if text.trim().is_empty() {
+                    self.exch_complete = None;
+                } else if self.exch_complete.is_none()
+                    && parse_exchange(rules, side, &text).state == ExchangeState::Complete
+                {
+                    self.exch_complete = Some(now);
+                }
+                self.exch = text;
+            }
+        }
+    }
+}
+
 /// The field that has the cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryField {
@@ -305,6 +345,44 @@ mod tests {
 
     fn sent(esm: &Esm) -> String {
         message_text(&esm.message, rules(), Side::Dx, "DL1ABC", 7)
+    }
+
+    /// The call is stamped at every edit, the exchange the first time it
+    /// reads complete since it was last empty.
+    #[test]
+    fn the_fields_keep_when_they_were_typed() {
+        let edit = |fields: &mut Fields, field, text: &str, at| {
+            fields.edit(field, text.to_string(), MonoMs(at), rules(), Side::Dx);
+        };
+        let mut fields = Fields::cleared(MonoMs(100));
+        assert_eq!(fields.call_edited, MonoMs(100));
+        edit(&mut fields, EntryField::Call, "K5", 200);
+        edit(&mut fields, EntryField::Call, "K5XYZ", 300);
+        assert_eq!(
+            (fields.call.as_str(), fields.call_edited),
+            ("K5XYZ", MonoMs(300))
+        );
+
+        edit(&mut fields, EntryField::Exchange, "BOB", 400);
+        assert_eq!(fields.exch_complete, None, "an exchange it cannot read");
+        edit(&mut fields, EntryField::Exchange, "21", 500);
+        edit(&mut fields, EntryField::Exchange, "214", 600);
+        assert_eq!(fields.exch, "214");
+        assert_eq!(
+            fields.exch_complete,
+            Some(MonoMs(500)),
+            "stamped when first complete"
+        );
+        assert_eq!(
+            fields.call_edited,
+            MonoMs(300),
+            "the exchange moved the call"
+        );
+
+        edit(&mut fields, EntryField::Exchange, " ", 700);
+        assert_eq!(fields.exch_complete, None);
+        edit(&mut fields, EntryField::Exchange, "7", 800);
+        assert_eq!(fields.exch_complete, Some(MonoMs(800)));
     }
 
     #[test]

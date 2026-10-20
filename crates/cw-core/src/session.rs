@@ -65,6 +65,19 @@ impl MonoMs {
     pub fn plus(self, ms: u64) -> Self {
         Self(self.0.saturating_add(ms))
     }
+
+    /// `seconds` later, to the nearest millisecond: how far off a player
+    /// says a send is heard, where a segment of a turn starts. A negative
+    /// span moves it nowhere.
+    #[must_use]
+    pub fn plus_sec(self, seconds: f64) -> Self {
+        self.plus(whole_ms(seconds))
+    }
+}
+
+/// Seconds as whole milliseconds; none for a negative span.
+pub(crate) fn whole_ms(seconds: f64) -> u64 {
+    (seconds.max(0.0) * 1_000.0).round() as u64
 }
 
 /// Where a session is. Every phase that is about a group names it.
@@ -797,6 +810,14 @@ mod tests {
 
     fn result(session: &GroupSession) -> SessionResult {
         session.result(3_000, "2026-09-01".into())
+    }
+
+    #[test]
+    fn a_span_in_seconds_moves_a_moment_to_the_millisecond() {
+        assert_eq!(MonoMs(1_000).plus_sec(0.3), MonoMs(1_300));
+        assert_eq!(MonoMs(1_000).plus_sec(0.000_4), MonoMs(1_000));
+        assert_eq!(MonoMs(1_000).plus_sec(-2.0), MonoMs(1_000));
+        assert_eq!(MonoMs(1_000).plus_sec(f64::NAN), MonoMs(1_000));
     }
 
     #[test]

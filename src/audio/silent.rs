@@ -2,15 +2,16 @@
 //!
 //! A send is waited on for the length of its plan, as on the real backends,
 //! so a session keeps its Farnsworth pacing, timing and scoring — it just
-//! never makes a sound.
+//! never makes a sound. A contest's turn is waited on to its last reply, as
+//! its plan stretches it.
 
 use std::rc::Rc;
-use std::time::Instant;
 
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::epoch::{Epoch, Ticket};
 use super::{MorseBackend, PlaybackSignal, WaitFlags};
+use crate::time::mono_ms;
 
 pub struct MorsePlayer {
     epoch: Epoch,
@@ -18,20 +19,22 @@ pub struct MorsePlayer {
 
 struct SilentSignal {
     ticket: Ticket,
-    started: Instant,
+    /// When the send started, on the app's monotonic clock.
+    started: u64,
 }
 
 impl PlaybackSignal for SilentSignal {
     fn poll(&self) -> WaitFlags {
-        let elapsed = self.started.elapsed().as_millis();
+        let elapsed = mono_ms().saturating_sub(self.started);
         WaitFlags {
             cancelled: self.ticket.is_cancelled(),
             finished: false,
             failed: false,
             // There is no audio to park, so a send always runs to its length.
             suspended: false,
-            // Nothing is playing, so the wall clock is the only clock there is.
-            played_ms: Some(elapsed.min(u128::from(u32::MAX)) as u32),
+            // Nothing is playing, so the app's own clock is the only clock
+            // there is.
+            played_ms: Some(u32::try_from(elapsed).unwrap_or(u32::MAX)),
         }
     }
 }
@@ -57,7 +60,7 @@ impl MorseBackend for MorsePlayer {
         // is all there is to a send.
         Ok(Rc::new(SilentSignal {
             ticket: self.epoch.arm(),
-            started: Instant::now(),
+            started: mono_ms(),
         }))
     }
 
@@ -67,5 +70,75 @@ impl MorseBackend for MorsePlayer {
 
     fn shutdown(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::{PlaybackOutcome, start_planned};
+    use crate::testing::{run, test_settings};
+    use cw_core::{Segment, Sender, Turn, plan_morse_playback_for, plan_turn, resolve_station};
+
+    /// Your message, then a reply that runs on well past it.
+    fn stretched_turn(settings: &TrainingSettings) -> Turn {
+        let mut rng = cw_core::SplitMix64::new(5);
+        let you = resolve_station(settings, &mut rng);
+        let mut slow = resolve_station(settings, &mut rng);
+        slow.char_wpm = 15.0;
+        slow.effective_wpm = 15.0;
+        let segment = |who, text: &str, voice, start_sec: f64| Segment {
+            who,
+            text: text.to_string(),
+            voice,
+            start_sec,
+            end_sec: start_sec + plan_morse_playback_for(text, settings, &voice).duration_sec,
+        };
+        let mine = segment(Sender::You, "CQ TEST", you, 0.0);
+        let reply = segment(Sender::Caller(0), "K5XYZ", slow, mine.end_sec + 0.3);
+        Turn {
+            id: 1,
+            at_run_ms: 0,
+            segments: vec![mine, reply],
+        }
+    }
+
+    /// A turn is waited on until its last reply has been sent, not just your
+    /// message, and a stop cancels it wherever it is.
+    #[test]
+    fn a_stretched_turn_plays_to_its_planned_length_and_a_stop_cancels_it() {
+        run(|| async {
+            let settings = test_settings();
+            let turn = stretched_turn(&settings);
+            let plan = plan_turn(&turn, &settings);
+            let transcript = turn.transcript().expect("a turn with something in it");
+            let mine_ms = (turn.segments[0].end_sec * 1_000.0) as u64;
+            let planned_ms = (plan.wanted.duration_sec * 1_000.0).ceil() as u64;
+            assert!(
+                planned_ms > mine_ms + 300,
+                "the reply runs past your message"
+            );
+
+            let mut player = MorsePlayer::new().expect("a player");
+            let started = mono_ms();
+            let wait = start_planned(&mut player, &plan, &transcript, &settings).expect("sent");
+            assert_eq!(wait.heard_after_sec, 0.0);
+            assert_eq!(wait.wait().await, PlaybackOutcome::Completed);
+            let took = mono_ms() - started;
+            assert!(
+                (planned_ms..planned_ms + 100).contains(&took),
+                "a {planned_ms} ms turn took {took} ms"
+            );
+
+            // Part way through, it is stopped.
+            let wait = start_planned(&mut player, &plan, &transcript, &settings).expect("sent");
+            let mut waiting = std::pin::pin!(wait.wait());
+            let first =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(waiting.as_mut().poll(cx))).await;
+            assert!(first.is_pending());
+            crate::time::sleep_ms(200).await;
+            player.stop();
+            assert_eq!(waiting.await, PlaybackOutcome::Cancelled);
+        });
     }
 }

@@ -1,6 +1,8 @@
 //! Keeps the screen on while a session runs: through the count down, every
 //! send and every answer. A phone that dims and locks part way through a
-//! group loses the group, and the screen is where the answer goes.
+//! group loses the group, and the screen is where the answer goes. A contest
+//! run holds it while it is live, counting down or running; paused, it lets
+//! the screen sleep, and a run is never lost to that.
 //!
 //! Android sets its window's own keep-screen-on flag, which the system holds
 //! for as long as the window is in front and lets go of with it. Everywhere
@@ -9,17 +11,25 @@
 //! later. A page loses its lock whenever it is hidden, so it asks again each
 //! time it comes back into view.
 
+use cw_core::{ContestPhase, ContestView};
 use dioxus::prelude::*;
 
 use crate::state::Screen;
 
-/// Hold the screen on for exactly as long as the training screen is up.
-pub fn use_keep_awake(screen: Signal<Screen>) {
-    let training = use_memo(move || screen() == Screen::Training);
+/// Hold the screen on for exactly as long as the training screen is up with
+/// a session on it, or a contest run on it is live.
+pub fn use_keep_awake(screen: Signal<Screen>, contest: Signal<Option<ContestView>>) {
+    let wanted = use_memo(move || match contest.read().as_ref() {
+        Some(run) => matches!(
+            run.phase,
+            ContestPhase::Countdown { .. } | ContestPhase::Running
+        ),
+        None => screen() == Screen::Training,
+    });
     // What was last asked for, so starting up off asks for nothing.
     let mut held = use_hook(|| CopyValue::new(false));
     use_effect(move || {
-        let on = training();
+        let on = wanted();
         if *held.peek() != on {
             held.set(on);
             keep_awake(on);
@@ -133,7 +143,8 @@ pub(crate) mod tests {
     use std::cell::RefCell;
 
     use super::wake_lock_script;
-    use crate::testing::{Ui, run, test_settings};
+    use crate::audio::fake::Call;
+    use crate::testing::{Ui, contest_settings, run, test_settings};
 
     thread_local! {
         /// Every change asked for, in order: on is true.
@@ -159,6 +170,28 @@ pub(crate) mod tests {
             ui.click("btn-discard");
             assert_eq!(ui.screen(), "home");
             assert_eq!(asked(), vec![true, false]);
+        });
+    }
+
+    /// A contest run holds the screen on while it is live, and lets it go
+    /// while paused, the audio given back with it.
+    #[test]
+    fn a_paused_run_lets_the_screen_sleep() {
+        run(|| async {
+            ASKED.with(|asked| asked.borrow_mut().clear());
+            let (mut ui, recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            assert_eq!(asked(), vec![true]);
+            ui.advance(500).await;
+            ui.click("btn-pause");
+            assert_eq!(asked(), vec![true, false]);
+            assert_eq!(recorder.calls().last(), Some(&Call::Shutdown));
+            ui.click("btn-resume");
+            assert_eq!(asked(), vec![true, false, true]);
+            ui.click("btn-end-run");
+            assert_eq!(ui.screen(), "home", "nobody was worked");
+            assert_eq!(asked(), vec![true, false, true, false]);
         });
     }
 

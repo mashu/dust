@@ -202,6 +202,9 @@ fn a_send_finishes_when_it_has_been_heard() {
         played >= unheard + latency && played <= unheard + latency + 64,
         "finished after {played} frames, {unheard} with no latency"
     );
+    // And the next send is reckoned heard as far behind as the speaker was.
+    assert!((mixer.latency_sec() - 0.1).abs() < 1e-9);
+    assert_eq!(alone.latency_sec(), 0.0);
 }
 
 /// The output stage catches what is too loud rather than squaring it off:

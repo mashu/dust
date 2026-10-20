@@ -50,6 +50,23 @@ impl QsoCheck {
     pub fn is_clean(&self) -> bool {
         self.errors.is_empty()
     }
+
+    /// The check as the log says it: "clean", "busted call, was K5XYZ".
+    pub fn words(&self) -> String {
+        if self.is_clean() {
+            return if self.dupe { "dupe" } else { "clean" }.to_string();
+        }
+        let words: Vec<String> = self
+            .errors
+            .iter()
+            .map(|error| match error {
+                QsoError::Nil => "not in their log".to_string(),
+                QsoError::Call { correct } => format!("busted call, was {correct}"),
+                QsoError::Field(field) => format!("wrong {}", field.label()),
+            })
+            .collect();
+        words.join(", ")
+    }
 }
 
 /// Check `logged` against `sent`, what the station worked really sent, or
@@ -117,6 +134,25 @@ mod tests {
             nothing_logged,
         );
         assert!(cut.is_clean());
+    }
+
+    /// The log says a check in words: clean, a dupe, or each thing wrong.
+    #[test]
+    fn a_check_reads_as_the_log_says_it() {
+        assert_eq!(QsoCheck::default().words(), "clean");
+        let dupe = QsoCheck {
+            errors: Vec::new(),
+            dupe: true,
+        };
+        assert_eq!(dupe.words(), "dupe");
+        let both = check_qso(
+            &qso("K5XYW", "13"),
+            Some(&qso("K5XYZ", "31")),
+            nothing_logged,
+        );
+        assert_eq!(both.words(), "busted call, was K5XYZ, wrong NR");
+        let nil = check_qso(&qso("K5XYZ", "214"), None, |_| true);
+        assert_eq!(nil.words(), "not in their log");
     }
 
     #[test]

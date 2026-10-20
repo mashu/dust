@@ -8,6 +8,8 @@
 //! and lands on exactly the same instants every time.
 
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use cw_core::{
@@ -121,6 +123,21 @@ pub fn test_settings() -> TrainingSettings {
     settings
 }
 
+/// Settings that run a contest at once: WPX as DL1ABC, every speed 30 WPM,
+/// a quiet band with the fading on, which the run's turns leave off.
+pub fn contest_settings() -> TrainingSettings {
+    let mut settings = test_settings();
+    settings.curriculum.char_set_mode = cw_core::CharSetMode::Contest;
+    settings.contest.my_call = "DL1ABC".to_string();
+    settings.playback.char_wpm_min = 30.0;
+    settings.playback.char_wpm_max = 30.0;
+    settings.playback.effective_wpm_min = 30.0;
+    settings.playback.effective_wpm_max = 30.0;
+    settings.band.qsb_enabled = true;
+    settings.band.qsb_depth = 0.6;
+    settings
+}
+
 impl Harness {
     pub fn new() -> Self {
         Self::with_settings(test_settings())
@@ -163,6 +180,26 @@ impl Harness {
             tokio::task::yield_now().await;
             self.pump();
         }
+    }
+
+    /// Count each time `signal` is written from here on, waking whatever
+    /// reads it: a screen that shows it would be drawn again.
+    pub fn count_writes<T: 'static>(&self, signal: Signal<T>) -> Arc<AtomicUsize> {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let counted = writes.clone();
+        self.in_app(|| {
+            let watcher = dioxus::core::ReactiveContext::new_with_callback(
+                move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                },
+                ScopeId::ROOT,
+                std::panic::Location::caller(),
+            );
+            watcher.run_in(|| {
+                let _ = signal.read();
+            });
+        });
+        writes
     }
 
     /// Start a session the way the Practice screen's button does: through
@@ -505,6 +542,16 @@ impl Ui {
             waited += u64::from(POLL_MS);
         }
         done(self)
+    }
+
+    /// Run `f` on the app's state, the way one of its own callbacks does,
+    /// then settle what it set off.
+    pub fn with_app<T>(&mut self, f: impl FnOnce(AppCtx) -> T) -> T {
+        let out = self
+            .dom
+            .in_scope(ScopeId::APP, || f(consume_context::<AppCtx>()));
+        self.settle();
+        out
     }
 
     /// How much the renderer has been asked to do since this was last called.

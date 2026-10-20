@@ -60,6 +60,20 @@ pub fn control_id(prefix: &str, label: &str) -> String {
     }
 }
 
+/// The script that gives the input called `id` the focus, unless it has it.
+///
+/// Every build runs what it is given to eval as the body of a function, so the
+/// script may return early.
+pub fn focus_script(id: &str) -> String {
+    format!(
+        r#"const input = document.getElementById("{id}");
+if (!input || document.activeElement === input) {{
+    return;
+}}
+input.focus({{ preventScroll: true }});"#
+    )
+}
+
 /// Emit a boolean HTML attribute only when it should apply.
 ///
 /// HTML treats the *presence* of `disabled` / `readonly` / `autofocus` as
@@ -808,9 +822,28 @@ mod tests {
     use dioxus::prelude::*;
 
     use super::{
-        NumberField, control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number,
+        NumberField, control_id, focus_script, html_bool, nudge, parse_number_input, pct_between,
+        pretty_number,
     };
     use crate::testing::Ui;
+
+    /// The harness never mounts anything on a page, so the script is the one
+    /// part of an input taking the focus a test can see.
+    #[test]
+    fn an_input_takes_the_focus_unless_it_has_it() {
+        let script = focus_script("group-input-7");
+        assert!(
+            script.contains(r#"getElementById("group-input-7")"#),
+            "{script}"
+        );
+        let has = script
+            .find("document.activeElement === input")
+            .expect("an input with the focus is left alone");
+        let focus = script
+            .find("input.focus({ preventScroll: true })")
+            .expect("the input takes the focus where it is");
+        assert!(has < focus, "{script}");
+    }
 
     /// A number field whose unit can be changed under it, which redraws it
     /// without moving its value.

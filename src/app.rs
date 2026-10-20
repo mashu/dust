@@ -4,12 +4,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use cw_core::SessionEvent;
 use dioxus::prelude::*;
 
 use crate::keep_awake::use_keep_awake;
 use crate::routes::Route;
-use crate::session_runtime::send_event;
+use crate::session_runtime::finish_run;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
@@ -113,7 +112,7 @@ pub fn App() -> Element {
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
-    use_keep_awake(screen);
+    use_keep_awake(screen, ctx.contest);
     #[cfg(feature = "desktop")]
     crate::ui::floating::use_floating_window(ctx);
 
@@ -178,10 +177,11 @@ pub fn App() -> Element {
                             button {
                                 id: control_id("btn", "exit"),
                                 class: "btn btn-secondary btn-sm",
-                                // End session, from the header: the session
-                                // decides what is worth keeping, the same way
-                                // whichever button asked.
-                                onclick: move |_| send_event(ctx, SessionEvent::FinishNow),
+                                // End session, or End run, from the header:
+                                // the machine that is live decides what is
+                                // worth keeping, the same way whichever
+                                // button asked.
+                                onclick: move |_| finish_run(ctx),
                                 "Exit"
                             }
                         }

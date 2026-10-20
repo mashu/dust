@@ -228,7 +228,8 @@ fn OpenCard(
         #[cfg(not(test))]
         if live {
             spawn(async move {
-                let _ = document::eval(&focus_script(idx)).await;
+                let script = crate::ui::widgets::focus_script(&format!("group-input-{idx}"));
+                let _ = document::eval(&script).await;
             });
         }
         #[cfg(test)]
@@ -447,20 +448,6 @@ fn Keypad(open: bool, on_key: Callback<PadKey>) -> Element {
             }
         }
     }
-}
-
-/// The script that gives the box for `idx` the focus, unless it has it.
-///
-/// Every build runs what it is given to eval as the body of a function, so the
-/// script may return early.
-fn focus_script(idx: usize) -> String {
-    format!(
-        r#"const input = document.getElementById("group-input-{idx}");
-if (!input || document.activeElement === input) {{
-    return;
-}}
-input.focus({{ preventScroll: true }});"#
-    )
 }
 
 /// The open group, the one before it, the keypad, and the way out of the
@@ -688,26 +675,8 @@ mod speed_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{PAD_LAST, PAD_ROWS, focus_script, pad_name};
+    use super::{PAD_LAST, PAD_ROWS, pad_name};
     use crate::testing::{Ui, run, test_settings};
-
-    /// The harness never mounts anything on a page, so the script is the one
-    /// part of the box taking the focus a test can see.
-    #[test]
-    fn the_opened_box_takes_the_focus_unless_it_has_it() {
-        let script = focus_script(7);
-        assert!(
-            script.contains(r#"getElementById("group-input-7")"#),
-            "{script}"
-        );
-        let has = script
-            .find("document.activeElement === input")
-            .expect("a box with the focus is left alone");
-        let focus = script
-            .find("input.focus({ preventScroll: true })")
-            .expect("the box takes the focus where it is");
-        assert!(has < focus, "{script}");
-    }
 
     /// Every character a group can be sent in has a key, once, and every key
     /// a name of its own.

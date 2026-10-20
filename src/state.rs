@@ -5,14 +5,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cw_core::{GroupSession, SessionResult, TrainingSettings};
+use cw_core::{ContestView, GroupSession, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
+use crate::contest_runtime::ContestEntry;
 use crate::persist::backup::{Backup, backup_name, merge_sessions, write_backup};
 use crate::persist::{HistorySaved, Store};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
-use crate::session_runtime::{AnswerOutbox, LiveSession};
+use crate::session_runtime::{AnswerOutbox, Live};
 use crate::ui::format::{counted, day_of, short_date};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,13 +56,13 @@ pub struct Tour {
 }
 
 /// What the app holds outside the reactive tree: the audio player, the
-/// session being run on it, and where what it learns is kept. Cheap to
+/// session or run going on it, and where what it learns is kept. Cheap to
 /// clone; every clone is the same app.
 #[derive(Clone)]
 pub struct AppState {
     pub player: Player,
     pub store: Rc<dyn Store>,
-    pub session: Rc<RefCell<Option<LiveSession>>>,
+    pub session: Rc<RefCell<Option<Live>>>,
 }
 
 impl AppState {
@@ -113,6 +114,10 @@ pub struct AppCtx {
     pub sessions: Signal<Vec<SessionResult>>,
     /// The session in flight, as its screen shows it.
     pub runtime: Signal<Option<GroupSession>>,
+    /// The contest run in flight, as its screen shows it.
+    pub contest: Signal<Option<ContestView>>,
+    /// What the run last said for a screen reader: logged, paused, time up.
+    pub announced: Signal<Option<String>>,
     /// The session just finished, for the results screen.
     pub result: Signal<Option<SessionResult>>,
     /// What the session just finished did to the level, if anything.
@@ -124,6 +129,8 @@ pub struct AppCtx {
     pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
+    /// The run's Call and Exchange fields, as typed.
+    pub entry: ContestEntry,
     /// The guided setup, while it is open.
     pub tour: Signal<Option<Tour>>,
     /// When the last backup was saved, if ever.
@@ -147,12 +154,15 @@ impl AppCtx {
             settings: Signal::new(settings),
             sessions: Signal::new(sessions),
             runtime: Signal::new(None),
+            contest: Signal::new(None),
+            announced: Signal::new(None),
             result: Signal::new(None),
             auto_message: Signal::new(None),
             toasts: Toasts::new(),
             preview: Signal::new(Preview::Idle),
             stream_heard: Signal::new(Vec::new()),
             answer: AnswerOutbox::new(),
+            entry: ContestEntry::new(),
             tour: Signal::new(None),
             last_backup: Signal::new(last_backup),
             trash: Signal::new(Vec::new()),
@@ -165,9 +175,12 @@ impl AppCtx {
         self.app.cloned()
     }
 
-    /// Whether a session has the app: on its screen, or about to be.
+    /// Whether a session or a run has the app: on its screen, or about to
+    /// be.
     pub fn session_running(self) -> bool {
-        matches!(*self.screen.peek(), Screen::Training) || self.runtime.peek().is_some()
+        matches!(*self.screen.peek(), Screen::Training)
+            || self.runtime.peek().is_some()
+            || self.contest.peek().is_some()
     }
 
     /// Stop whatever is playing outside a session.

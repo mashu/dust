@@ -17,6 +17,7 @@ use crate::session_runtime::{send_event, start_session};
 use crate::state::{AppCtx, Screen, SessionPick};
 use crate::time::{local_date_string, sleep_ms};
 use crate::ui::backup::Backups;
+use crate::ui::contest::ContestRunView;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
@@ -256,12 +257,17 @@ fn ListenRoute() -> Element {
 #[component]
 fn TrainingRoute() -> Element {
     let ctx = use_context::<AppCtx>();
+    // A contest run has a screen of its own, which reads the run itself.
+    let contest = use_memo(move || ctx.contest.read().is_some());
     let on_change = use_callback(move |(index, text): (usize, String)| {
         send_event(ctx, SessionEvent::Input { index, text });
     });
     let on_confirm = use_callback(move |()| send_event(ctx, SessionEvent::Confirm));
     let on_submit = use_callback(move |()| send_event(ctx, SessionEvent::FinishNow));
     let on_stop = use_callback(move |()| send_event(ctx, SessionEvent::Abort));
+    if contest() {
+        return rsx! { ContestRunView {} };
+    }
     let runtime = ctx.runtime.read();
     let Some(session) = runtime.as_ref() else {
         return rsx! { p { class: "muted", "Starting…" } };

@@ -19,13 +19,13 @@
 //! style rule of its own, and needs nothing from the screens.
 
 use cw_core::{
-    CharSetMode, GroupSession, PresetId, RangeSetting, SequenceChoice, SessionEvent, SessionPhase,
+    CharSetMode, GroupSession, PresetId, RangeSetting, SequenceChoice, SessionPhase,
     TrainingSettings,
 };
 use dioxus::core::Task;
 use dioxus::prelude::*;
 
-use crate::session_runtime::{send_event, start_session};
+use crate::session_runtime::{abort_run, start_session};
 use crate::state::{AppCtx, Screen, Tour};
 use crate::time::{POLL_MS, sleep_ms};
 use crate::ui::paddle::PaddleKeys;
@@ -219,7 +219,7 @@ impl Move {
     fn take_there(self, ctx: AppCtx) {
         match self {
             Self::Start => start_session(ctx),
-            Self::Discard => send_event(ctx, SessionEvent::Abort),
+            Self::Discard => abort_run(ctx),
             Self::OpenSettings => ctx.go_to(Screen::Settings),
             _ => {}
         }
@@ -564,7 +564,14 @@ fn go_to_step(mut tour: Signal<Option<Tour>>, at: usize) {
 #[component]
 pub fn TourButton() -> Element {
     let ctx = use_context::<AppCtx>();
+    // The guide's steps point at a session's group boxes, which a contest
+    // run has none of: in Contest it waits for steps of its own (phase 5).
+    let contest =
+        use_memo(move || ctx.settings.read().curriculum.char_set_mode == CharSetMode::Contest);
     let open = ctx.tour.read().is_some();
+    if contest() && !open {
+        return rsx! {};
+    }
     rsx! {
         button {
             id: control_id("btn", "guided setup"),

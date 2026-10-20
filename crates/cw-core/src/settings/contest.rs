@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::callsign::parse_callsign;
 use crate::contest::ContestKind;
 
 /// The longest run, in minutes, and where a run left open ends.
@@ -45,6 +46,23 @@ impl ContestSettings {
             minutes => minutes.min(CONTEST_MINUTES_MAX),
         }
     }
+
+    /// What a run of these settings still needs before it can start, said
+    /// for the screen; None once it has everything: a contest whose phase has
+    /// shipped, and a callsign Dust can read.
+    pub fn missing(&self) -> Option<String> {
+        let kind = self.contest_kind;
+        if kind.rules().is_none() {
+            return Some(format!("{} is not ready yet", kind.label()));
+        }
+        if self.my_call.is_empty() {
+            return Some("Add your callsign to start a contest".to_string());
+        }
+        if parse_callsign(&self.my_call).is_none() {
+            return Some(format!("{} is not a callsign Dust can read", self.my_call));
+        }
+        None
+    }
 }
 
 /// `text` as a callsign can be written: upper case, letters, digits and
@@ -84,6 +102,30 @@ mod tests {
             let once = clean_call(text);
             assert_eq!(clean_call(&once), once, "{text:?} settles in one pass");
         }
+    }
+
+    /// A run starts only with a contest that has shipped and a call that
+    /// reads as one, and otherwise says what it is missing.
+    #[test]
+    fn a_run_says_what_it_needs_before_it_can_start() {
+        let mut settings = ContestSettings::default();
+        assert_eq!(
+            settings.missing().as_deref(),
+            Some("Add your callsign to start a contest")
+        );
+        settings.my_call = "DL1ABC".to_string();
+        assert_eq!(settings.missing(), None);
+        settings.my_call = "ABC".to_string();
+        assert_eq!(
+            settings.missing().as_deref(),
+            Some("ABC is not a callsign Dust can read")
+        );
+        settings.my_call = "DL1ABC".to_string();
+        settings.contest_kind = ContestKind::Sprint;
+        assert_eq!(
+            settings.missing().as_deref(),
+            Some("NA Sprint is not ready yet")
+        );
     }
 
     #[test]

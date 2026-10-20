@@ -29,7 +29,7 @@ use web_sys::{AudioContext, AudioContextState, GainNode};
 use super::band_queue::Reservation;
 use super::epoch::{Epoch, Ticket};
 use super::shape::ToneRequest;
-use super::wait::{heard_ms, schedule_lead_sec};
+use super::wait::{heard_after_sec, heard_ms, schedule_lead_sec};
 use super::{MorseBackend, PlaybackSignal, WaitFlags};
 use chain::Chain;
 use param::Retiring;
@@ -78,9 +78,16 @@ struct WebSignal {
     ctx: AudioContext,
     ticket: Ticket,
     started_at: f64,
+    /// How long after it was started the send reaches the ear: its lead on
+    /// the clock, and the latency the browser reports, read as it started.
+    heard_after_sec: f64,
 }
 
 impl PlaybackSignal for WebSignal {
+    fn heard_after_sec(&self) -> f64 {
+        self.heard_after_sec
+    }
+
     fn poll(&self) -> WaitFlags {
         WaitFlags {
             cancelled: self.ticket.is_cancelled(),
@@ -231,8 +238,8 @@ impl MorseBackend for MorsePlayer {
         let ticket = self.epoch.arm();
         // One reading of the clock, for the tones, the fading, the pile-up
         // and the waiter alike.
-        let start =
-            self.ctx.current_time() + schedule_lead_sec(reported_latency(&self.ctx, "baseLatency"));
+        let lead = schedule_lead_sec(reported_latency(&self.ctx, "baseLatency"));
+        let start = self.ctx.current_time() + lead;
         let send = ScheduledSend::schedule(
             &self.ctx,
             &self.chain.mix,
@@ -251,6 +258,7 @@ impl MorseBackend for MorsePlayer {
             ctx: self.ctx.clone(),
             ticket,
             started_at: start,
+            heard_after_sec: heard_after_sec(lead, heard_latency(&self.ctx)),
         }))
     }
 

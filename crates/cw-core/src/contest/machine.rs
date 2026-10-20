@@ -17,7 +17,7 @@
 //! exchange, each field as typed, and how often you asked for either.
 
 use super::caller::{CallMatch, Caller, CallerState, Says, match_call};
-use super::check::{QsoCheck, QsoError, QsoText, check_qso};
+use super::check::{QsoCheck, QsoText, check_qso};
 use super::clock::RunClock;
 use super::esm::{EntryField, Fields, MessagePart, QsoState, esm, message_text};
 use super::exchange::{Field, keyed_token};
@@ -32,7 +32,7 @@ use crate::callsign::{country_of, parse_callsign};
 use crate::machine::COUNTDOWN_STEP_MS;
 use crate::rng::SplitMix64;
 use crate::session::{
-    Answered, GroupResult, MIN_RESPONSE_MS_PER_CHAR, MonoMs, SessionResult, SessionTiming,
+    Answered, GroupResult, MIN_RESPONSE_MS_PER_CHAR, MonoMs, SessionResult, SessionTiming, whole_ms,
 };
 use crate::settings::{TrainingSettings, WPM_MAX, WPM_MIN};
 use crate::timing::StationVoice;
@@ -2031,7 +2031,7 @@ impl<S: CallSource> ContestMachine<S> {
             effects.push(ContestEffect::Announce(format!(
                 "{} logged, {}",
                 row.call,
-                check_words(&row.check)
+                row.check.words()
             )));
         }
     }
@@ -2246,28 +2246,6 @@ fn learn(source: &mut impl CallSource, group: &GroupResult, timing: &SessionTimi
     });
 }
 
-/// A check as the log says it: "clean", "busted call, was K5XYZ".
-fn check_words(check: &QsoCheck) -> String {
-    if check.is_clean() {
-        return if check.dupe { "dupe" } else { "clean" }.to_string();
-    }
-    let words: Vec<String> = check
-        .errors
-        .iter()
-        .map(|error| match error {
-            QsoError::Nil => "not in their log".to_string(),
-            QsoError::Call { correct } => format!("busted call, was {correct}"),
-            QsoError::Field(field) => format!("wrong {}", field.label()),
-        })
-        .collect();
-    words.join(", ")
-}
-
-/// Seconds as whole milliseconds.
-fn whole_ms(seconds: f64) -> u64 {
-    (seconds.max(0.0) * 1_000.0).round() as u64
-}
-
 /// To a tenth.
 fn tenth(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
@@ -2276,6 +2254,7 @@ fn tenth(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contest::QsoError;
     use crate::contest::bot::{Runtime, ScriptCalls, run_settings};
     use crate::contest::turn::sending_sec;
 

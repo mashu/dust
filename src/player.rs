@@ -13,9 +13,9 @@ use std::cell::{Cell, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
-use cw_core::{TrainingSettings, Transmission};
+use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
-use crate::audio::{MorseBackend, PlaybackOutcome};
+use crate::audio::{MorseBackend, PlaybackOutcome, PlaybackWait};
 use crate::time::{POLL_MS, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
@@ -73,8 +73,9 @@ struct Shared {
     /// Moves on every claim and every release. A lease is current while the
     /// turn is still the one it was handed.
     turn: Cell<u64>,
-    /// Moves whenever the send in flight is stopped, so a send that has not
-    /// started yet — one waiting out a retry — can tell it is no longer wanted.
+    /// Moves whenever the send in flight is stopped, or a newer one is asked
+    /// for, so a send that has not started yet — one waiting out a retry —
+    /// can tell it is no longer wanted.
     sends: Cell<u64>,
 }
 
@@ -183,12 +184,19 @@ impl Player {
 
     /// Throw the player away and open a fresh one.
     fn rebuild(&self, settings: &TrainingSettings) -> Result<(), AudioError> {
-        // Taken out first, so the borrow is over before `open` takes its own.
+        self.discard();
+        self.open(settings)
+    }
+
+    /// Throw the player away, silenced: the next claim or send opens a
+    /// fresh one.
+    fn discard(&self) {
+        // Taken out first, so the borrow is over before anything else takes
+        // its own.
         let old = self.0.backend.borrow_mut().take();
         if let Some(mut old) = old {
             old.shutdown();
         }
-        self.open(settings)
     }
 
     /// The way in to the backend, when there is one. Every borrow is
@@ -200,18 +208,17 @@ impl Player {
         }
     }
 
-    /// Start one send on the player as it is.
-    fn start(
-        &self,
-        transmission: &Transmission,
-        settings: &TrainingSettings,
-    ) -> Result<crate::audio::PlaybackWait, AudioError> {
+    /// Start one send on the player as it is, the way `begin` starts it.
+    fn start(&self, begin: &Begin<'_>) -> Result<PlaybackWait, AudioError> {
         let mut slot = self.0.backend.borrow_mut();
         let backend = slot.as_mut().ok_or_else(unavailable)?;
-        crate::audio::start_send(backend.as_mut(), transmission, settings)
-            .map_err(AudioError::Device)
+        begin(backend.as_mut()).map_err(AudioError::Device)
     }
 }
+
+/// How one attempt at a send is started on a backend: planned there, or
+/// planned already.
+type Begin<'a> = dyn Fn(&mut dyn MorseBackend) -> Result<PlaybackWait, String> + 'a;
 
 fn unavailable() -> AudioError {
     AudioError::Device("Audio is unavailable.".into())
@@ -265,6 +272,36 @@ impl Lease {
         }
     }
 
+    /// Have the player ready to sound, from inside a key or a tap: a
+    /// context the browser suspended is resumed, and a player that is gone
+    /// is opened again. Nothing, once this lease has ended. A player that
+    /// will not open says so on the next send, which tries again.
+    pub fn wake(&self) {
+        if !self.is_current() {
+            return;
+        }
+        if let Ok(mut backend) = self.player.opened() {
+            backend.resume_from_gesture();
+        }
+    }
+
+    /// Ask for a send that a task will start later, ending every send asked
+    /// for before it: one waiting out a retry gives up rather than start
+    /// over the new one. What is sounding plays on until the new send
+    /// starts in its place.
+    ///
+    /// The send is this one from now, not from when its task first runs,
+    /// so a stop handled in between ends it too.
+    pub fn ask_to_send(&self) -> Asked {
+        let sends = &self.player.0.sends;
+        // A lease that has ended leaves the holder's sends alone; its own
+        // never start.
+        if self.is_current() {
+            sends.set(sends.get() + 1);
+        }
+        Asked(sends.get())
+    }
+
     /// Wait `ms`, in one go, and say whether the lease outlived it.
     pub async fn sleep(&self, ms: u32) -> Result<(), AudioError> {
         sleep_ms(ms).await;
@@ -291,28 +328,87 @@ impl Lease {
         transmission: &Transmission,
         settings: &TrainingSettings,
     ) -> Result<Sent, AudioError> {
+        let begin = |backend: &mut dyn MorseBackend| {
+            crate::audio::start_send(backend, transmission, settings)
+        };
+        // A session sends a group only once the one before is over or
+        // stopped, so this is the send from when it starts.
+        let asked = Asked(self.player.0.sends.get());
+        self.send_with(asked, &begin, settings, &mut |_| {}).await
+    }
+
+    /// Send a contest's turn, planned already, and wait for it to be heard:
+    /// as [`Lease::send`] does, retries and all, as the send `asked` for
+    /// ([`Lease::ask_to_send`]). `transcript` is what the turn says, for a
+    /// player that keeps it.
+    ///
+    /// Each attempt, once started, calls `on_start` with how long after now
+    /// its sound reaches the ear, in seconds: the player's lead in starting
+    /// it, and its latency to the ear. No borrow of the player is held then,
+    /// so `on_start` may use it.
+    pub async fn send_planned(
+        &self,
+        asked: Asked,
+        plan: &PlannedTransmission,
+        transcript: &Transmission,
+        settings: &TrainingSettings,
+        mut on_start: impl FnMut(f64),
+    ) -> Result<Sent, AudioError> {
+        let begin = |backend: &mut dyn MorseBackend| {
+            crate::audio::start_planned(backend, plan, transcript, settings)
+        };
+        self.send_with(asked, &begin, settings, &mut on_start).await
+    }
+
+    /// A send, each attempt started by `begin`: tried again on a freshly
+    /// built player, up to [`SEND_ATTEMPTS`] in all. A player that failed
+    /// every attempt is thrown away, so whatever claims the audio next — a
+    /// tap on Resume, a new session — opens a fresh one, and opens it inside
+    /// the tap, where a browser lets it start.
+    async fn send_with(
+        &self,
+        asked: Asked,
+        begin: &Begin<'_>,
+        settings: &TrainingSettings,
+        on_start: &mut dyn FnMut(f64),
+    ) -> Result<Sent, AudioError> {
         let ticket = Ticket {
             lease: self,
-            sends: self.player.0.sends.get(),
+            sends: asked.0,
         };
-        let mut outcome = ticket.attempt(transmission, settings).await;
+        let mut outcome = ticket.attempt(begin, on_start).await;
         for _ in 1..SEND_ATTEMPTS {
             if matches!(outcome, Ok(_) | Err(AudioError::Cancelled)) {
                 break;
             }
+            // A send stopped or replaced meanwhile is not tried again, and
+            // leaves the player to the send that has it now.
+            ticket.check()?;
             let rebuilt = self.player.rebuild(settings);
             sleep_ms(POLL_MS).await;
             ticket.check()?;
             outcome = match rebuilt {
-                Ok(()) => ticket.attempt(transmission, settings).await,
+                Ok(()) => ticket.attempt(begin, on_start).await,
                 // There is no player to send through, and the reason it could
                 // not be opened is the one worth showing.
                 Err(err) => Err(err),
             };
         }
+        if matches!(outcome, Err(AudioError::Device(_) | AudioError::Stalled)) {
+            // A send stopped or replaced meanwhile has failed no one, and
+            // the player is the newer send's now.
+            ticket.check()?;
+            self.player.discard();
+        }
         outcome
     }
 }
+
+/// A send asked for ([`Lease::ask_to_send`]): which one it is, so a stop,
+/// a claim, or a newer send asked for after it can tell it it is no longer
+/// wanted.
+#[derive(Clone, Copy, Debug)]
+pub struct Asked(u64);
 
 /// One send's right to the player: the lease it was made under, and which
 /// send it is.
@@ -333,12 +429,15 @@ impl Ticket<'_> {
 
     async fn attempt(
         &self,
-        transmission: &Transmission,
-        settings: &TrainingSettings,
+        begin: &Begin<'_>,
+        on_start: &mut dyn FnMut(f64),
     ) -> Result<Sent, AudioError> {
         let player = &self.lease.player;
         self.check()?;
-        let wait = player.start(transmission, settings)?;
+        // In a statement of its own: the player is borrowed only while the
+        // send starts, never while `on_start` runs.
+        let wait = player.start(begin)?;
+        on_start(wait.heard_after_sec);
         let sent = Sent {
             duration_sec: wait.duration_sec,
             char_wpm: wait.char_wpm,
@@ -500,6 +599,142 @@ mod tests {
             player.0.backend.borrow_mut().take();
             assert!(lease.send(&cq(), &test_settings()).await.is_ok());
             assert_eq!(recorder.players_built.get(), 2);
+        });
+    }
+
+    /// A turn planned already plays as planned, and each attempt says when
+    /// it started and how long its sound takes to reach the ear, retries
+    /// too.
+    #[test]
+    fn a_planned_send_says_when_each_attempt_starts() {
+        run(|| async {
+            let (player, recorder) = player();
+            let settings = test_settings();
+            let lease = player.claim(&settings).expect("a player");
+            recorder.latency_sec.set(0.25);
+            let transmission = cq();
+            let plan = cw_core::plan_transmission(&transmission, &settings);
+            let mut starts = Vec::new();
+            recorder.fail_next(1);
+            let asked = lease.ask_to_send();
+            let sent = lease
+                .send_planned(asked, &plan, &transmission, &settings, |heard_after| {
+                    starts.push(heard_after);
+                })
+                .await;
+            assert_eq!(
+                sent.map(|sent| sent.duration_sec),
+                Ok(plan.wanted.duration_sec)
+            );
+            assert_eq!(starts, [0.25, 0.25], "one call for each attempt");
+            let kept = recorder.starts();
+            assert_eq!(kept.len(), 2);
+            assert_eq!(kept[0].transcript, transmission);
+            assert_eq!(kept[0].plan.wanted.duration_sec, plan.wanted.duration_sec);
+        });
+    }
+
+    /// `on_start` may stop the send it is told about: nothing of the player
+    /// is borrowed while it runs, and the send comes back cancelled.
+    #[test]
+    fn a_planned_send_can_be_stopped_as_it_starts() {
+        run(|| async {
+            let (player, _recorder) = player();
+            let settings = test_settings();
+            let lease = player.claim(&settings).expect("a player");
+            let transmission = cq();
+            let plan = cw_core::plan_transmission(&transmission, &settings);
+            let asked = lease.ask_to_send();
+            let outcome = lease
+                .send_planned(asked, &plan, &transmission, &settings, |_| {
+                    lease.stop_sending()
+                })
+                .await;
+            assert_eq!(outcome, Err(AudioError::Cancelled));
+        });
+    }
+
+    /// A send is the one asked for from when it was asked: a stop before
+    /// it starts ends it, and so does a newer send asked for while it waits
+    /// out a retry, which it never starts over.
+    #[test]
+    fn a_send_asked_for_is_ended_by_a_stop_or_a_newer_one() {
+        run(|| async {
+            let (player, recorder) = player();
+            let settings = test_settings();
+            let lease = player.claim(&settings).expect("a player");
+            let transmission = cq();
+            let plan = cw_core::plan_transmission(&transmission, &settings);
+            let send = |asked| lease.send_planned(asked, &plan, &transmission, &settings, |_| {});
+
+            let asked = lease.ask_to_send();
+            lease.stop_sending();
+            assert_eq!(send(asked).await, Err(AudioError::Cancelled));
+            assert!(recorder.texts().is_empty(), "a stopped send started");
+
+            // The first attempt breaks at once, and the newer send is asked
+            // for halfway through the gap before its retry.
+            recorder.fail_next(1);
+            let first = send(lease.ask_to_send());
+            let newer = async {
+                sleep_ms(POLL_MS / 2).await;
+                send(lease.ask_to_send()).await
+            };
+            let (first, newer) = tokio::join!(first, newer);
+            assert_eq!(first, Err(AudioError::Cancelled));
+            assert!(newer.is_ok(), "{newer:?}");
+            assert_eq!(recorder.texts().len(), 2, "the first started again");
+            assert!(
+                player.0.backend.borrow().is_some(),
+                "the newer lost its player"
+            );
+
+            // A lease that has ended cannot end the holder's send.
+            let holder = player.claim(&settings).expect("a player");
+            let asked = holder.ask_to_send();
+            let _ = lease.ask_to_send();
+            let sent = holder
+                .send_planned(asked, &plan, &transmission, &settings, |_| {})
+                .await;
+            assert!(sent.is_ok(), "{sent:?}");
+        });
+    }
+
+    /// A player that failed every attempt is thrown away, so the next claim
+    /// opens a fresh one.
+    #[test]
+    fn a_player_that_failed_every_attempt_is_opened_afresh() {
+        run(|| async {
+            let (player, recorder) = player();
+            let lease = player.claim(&test_settings()).expect("a player");
+            recorder.set(Behaviour::FailMidSend);
+            assert_eq!(
+                lease.send(&cq(), &test_settings()).await,
+                Err(AudioError::Stalled)
+            );
+            assert!(player.0.backend.borrow().is_none());
+            recorder.set(Behaviour::Play);
+            let built = recorder.players_built.get();
+            let lease = player.claim(&test_settings()).expect("a player");
+            assert_eq!(recorder.players_built.get(), built + 1);
+            assert!(lease.send(&cq(), &test_settings()).await.is_ok());
+        });
+    }
+
+    /// Waking opens a player that is gone and resumes it, for the lease that
+    /// holds the audio only.
+    #[test]
+    fn waking_opens_a_missing_player_for_the_lease_that_holds_it() {
+        run(|| async {
+            let (player, recorder) = player();
+            let lease = player.claim(&test_settings()).expect("a player");
+            player.0.backend.borrow_mut().take();
+            lease.wake();
+            assert_eq!(recorder.players_built.get(), 2);
+            player.0.backend.borrow_mut().take();
+            player.release();
+            lease.wake();
+            assert_eq!(recorder.players_built.get(), 2, "an ended lease woke it");
         });
     }
 

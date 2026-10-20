@@ -17,6 +17,7 @@ compile_error!(
 
 mod app;
 mod audio;
+mod contest_runtime;
 mod keep_awake;
 mod persist;
 mod playback;

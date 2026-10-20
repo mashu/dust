@@ -71,6 +71,12 @@ pub fn counted<N: Display + PartialEq + From<u8>>(n: N, noun: &str) -> String {
     }
 }
 
+/// A stretch of run time as a clock reads it: "07:42", "60:00".
+pub fn minutes_seconds(ms: u64) -> String {
+    let seconds = ms / 1_000;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
 /// "1st", "2nd", "3rd", "4th", "11th", "21st".
 pub fn ordinal(place: usize) -> String {
     let suffix = match (place % 10, place % 100) {
@@ -133,6 +139,13 @@ mod tests {
         assert_eq!(counted(1_u32, "session"), "1 session");
         assert_eq!(counted(2_usize, "session"), "2 sessions");
         assert_eq!(counted(0_u32, "character"), "0 characters");
+    }
+
+    #[test]
+    fn run_time_reads_as_a_clock() {
+        assert_eq!(minutes_seconds(0), "00:00");
+        assert_eq!(minutes_seconds(462_999), "07:42");
+        assert_eq!(minutes_seconds(3_600_000), "60:00");
     }
 
     #[test]
