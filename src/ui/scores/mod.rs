@@ -38,6 +38,7 @@ pub fn mode_noun(mode: CharSetMode) -> &'static str {
         CharSetMode::Mixed => "mixed",
         CharSetMode::Callsign => "callsign",
         CharSetMode::Words => "word",
+        CharSetMode::Contest => "contest",
     }
 }
 
@@ -143,8 +144,14 @@ mod tests {
     fn every_mode_has_a_name() {
         for (mode, label) in CHAR_SET_MODES {
             assert_eq!(mode_label(mode), label);
-            assert!(!mode_noun(mode).is_empty());
         }
+        // Contest too, though the control does not offer it yet: History
+        // names the runs a later version kept.
+        for mode in CharSetMode::ALL {
+            assert!(!mode_label(mode).is_empty(), "{mode:?}");
+            assert!(!mode_noun(mode).is_empty(), "{mode:?}");
+        }
+        assert_eq!(mode_label(CharSetMode::Contest), "Contest");
     }
 
     #[test]

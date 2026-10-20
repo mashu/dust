@@ -216,7 +216,7 @@ impl SessionShape {
     fn of(settings: &TrainingSettings) -> Self {
         let p = &settings.playback;
         Self {
-            callsigns: settings.curriculum.char_set_mode == CharSetMode::Callsign,
+            callsigns: settings.curriculum.char_set_mode.sends_callsigns(),
             words: settings.curriculum.char_set_mode == CharSetMode::Words,
             one_size: settings.curriculum.min_group_size >= settings.curriculum.max_group_size,
             adaptive: settings.curriculum.adaptive_group_size,

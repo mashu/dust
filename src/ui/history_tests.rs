@@ -4,7 +4,7 @@
 //! What the store holds is read alongside the page, since a deletion that
 //! only reached the screen would come back at the next launch.
 
-use cw_core::{SessionResult, TrainingSettings};
+use cw_core::{CharSetMode, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
 use crate::persist::Store;
@@ -254,6 +254,27 @@ fn a_long_history_is_listed_a_page_at_a_time() {
         ui.click("history-select");
         ui.click("history-choose-all");
         assert!(ui.has("45 selected"));
+    });
+}
+
+/// Every row says what it practised, whatever is chosen now. A contest run
+/// a later version kept reads Contest, known by its mark even once an older
+/// build has dropped its log.
+#[test]
+fn every_row_names_its_mode() {
+    run(|| async {
+        let koch = stored_session("2026-10-01", &[("KM", "KM")]);
+        let mut calls = stored_session("2026-10-02", &[("K1ABC", "K1ABC")]);
+        calls.char_set_mode = CharSetMode::Callsign;
+        let mut written = serde_json::to_value(stored_session("2026-10-03", &[("K5XYZ", "K5XY")]))
+            .expect("a session writes");
+        written["charSetMode"] = serde_json::json!("callsign");
+        written["alphabetFingerprint"] = serde_json::json!("contest:wpx");
+        let contest: SessionResult = serde_json::from_value(written).expect("a run reads");
+        let (ui, _recorder) = open_history(&[koch, calls, contest]);
+        assert!(ui.has("Koch · 1/1 groups"));
+        assert!(ui.has("Callsigns · 1/1 groups"));
+        assert!(ui.has("Contest · 0/1 groups"));
     });
 }
 

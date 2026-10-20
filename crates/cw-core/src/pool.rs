@@ -106,7 +106,7 @@ pub fn current_practice_window(settings: &TrainingSettings) -> PracticeWindow {
 pub fn newest_unlocked(settings: &TrainingSettings) -> Option<char> {
     let newest = |axis: LevelAxis| unlocked(settings, axis).last().copied();
     match settings.curriculum.char_set_mode {
-        CharSetMode::Callsign | CharSetMode::Words => None,
+        CharSetMode::Callsign | CharSetMode::Words | CharSetMode::Contest => None,
         CharSetMode::Mixed => {
             let moved_last = settings.auto_level.mixed_auto_level_next_axis.flip();
             [moved_last, moved_last.flip()]

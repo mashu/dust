@@ -501,7 +501,9 @@ fn generate_group(
     // only built differently. This is the single place the modes part company.
     let config = config_from_settings(settings);
     match settings.curriculum.char_set_mode {
-        CharSetMode::Callsign => return generate_callsign_group(settings, state, &config, rng),
+        CharSetMode::Callsign | CharSetMode::Contest => {
+            return generate_callsign_group(settings, state, &config, rng);
+        }
         CharSetMode::Words => return generate_word_group(settings, state, &config, rng),
         CharSetMode::Koch | CharSetMode::Digits | CharSetMode::Mixed => {}
     }

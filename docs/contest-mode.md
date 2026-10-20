@@ -1,6 +1,8 @@
 # Contest mode
 
-Status: design. Nothing here is built yet.
+Status: being built phase by phase (§14). Phase 0, history that lasts, has
+landed: Contest exists as a mode no one can pick yet, runs written by later
+builds are read and kept, and History names every session's mode.
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -1334,10 +1336,10 @@ registration routes paddle letters to the focused field.
 
 **Changed in cw-core:** `Cargo.toml` (`serde_json`); `settings/mod.rs`,
 `contest.rs` (new), `save.rs`, `reset.rs`, `clamp.rs` (`Contest`, `ALL` of 6,
-`draws_characters`, `ContestSettings`, `contestActive` on disk, `Station`,
-`wild`); `settings/curriculum.rs` (Contest → `LevelAxis::Callsign`,
-`:49-56`); `session.rs` (`StoredSession`, `mode_on_disk`, `contest`, a test
-constructor); `callsign.rs` (`generate_call`, `CallSpec`, public
+`draws_characters`, `sends_callsigns`, `ContestSettings`, `contestActive` on
+disk, `Station`, `wild`); `settings/curriculum.rs` (Contest → `LevelAxis::Callsign`,
+`:49-56`); `session.rs` (`StoredSession`, `mode_on_disk`, `recorded_mode`,
+`contest`, a test constructor); `callsign.rs` (`generate_call`, `CallSpec`, public
 `parse_callsign`, `wpx_prefix`, `country_of`); `sampling.rs`, `pool.rs`,
 `auto_level.rs` (Contest arms; `impl CallSource for Sampler`); `stats.rs`,
 `board.rs`, `speed.rs` (history rows, kinds, assisted runs, contest speed
@@ -1478,8 +1480,9 @@ runtime, then screens.
 with arms that behave as Callsign (`settings_charset.rs:123-142` has an
 exhaustive match); the `StoredSession` mirror, `mode_on_disk`, the mark and
 the opaque `contest` value; `GroupSession::result` mapping Contest to
-Callsign; a mode label on every History row; and a `SessionResult` test
-constructor the app can reach (cw-core's `empty_for_test`,
+Callsign; settings that name Contest read as Callsigns until phase 1
+writes `contestActive`; a mode label on every History row; and a
+`SessionResult` test constructor the app can reach (cw-core's `empty_for_test`,
 `session.rs:667-687`, is `#[cfg(test)]`), so the two app literals that
 name every field (`render_tests.rs:155`, `persist/mod.rs:256`) stop doing so. The user sees each
 session's mode, and no newer history loses anything on this build. It
@@ -1544,9 +1547,9 @@ copy-speed series; the paddles' field space.
 **Later, not planned:** Search & Pounce with the Sprint QSY rule, QSK, RIT,
 keying with the paddles, a contest level, and more contests.
 
-## 15. Decisions and open questions
+## 15. Decisions
 
-### 15.1 Decisions
+### 15.1 Design decisions
 
 | Decision | Chosen | Over | Why |
 |---|---|---|---|
@@ -1578,24 +1581,25 @@ keying with the paddles, a contest level, and more contests.
 | Your call in a run | not stored; side, country, continent, zone are | stored | no score needs it |
 | Numbers | yours cut (Sprint plain); callers' by habits | always cut | what operators send; learners start plain |
 
-### 15.2 Questions only the user can answer
+### 15.2 Decisions taken with the user
 
-1. **When do users first see Contest?** Recommended: at the end of phase 2,
-   with pile-ups and Sprint; any earlier slice could ship instead.
-2. **"Repeat their call": on the air, or a free replay?** Recommended: `?`
-   on the air, costing half the points of what is re-sent.
-3. **Which contests are "DX" and "Sprint"?** Recommended: ARRL DX with your
-   side from your call, and the NA Sprint exchange without QSY.
-4. **May runs teach the sampler and count in Letters and Mistakes?**
-   Recommended: yes, a letter is a letter.
-5. **Should the All board rank by points per character, so contest runs
-   compete evenly with groups?** Recommended: no; rank contests within their
-   kind.
-6. **Keep the speed offset between runs?** Recommended: no, until asked.
-7. **May builds older than phase 0 drop logs but keep runs?** Recommended:
-   yes; the mark and backups recover them.
-8. **Data licences.** Recommended: ask AD1C about cty.dat facts and W7SST
-   about the counted files; every table has an estimate to fall back on.
+The user approved every recommended default on 2026-10-20:
+
+1. Contest is first offered at the end of phase 2, with pile-ups and Sprint.
+2. "Repeat their call" is `?` on the air, halving the points of what is
+   re-sent.
+3. "DX" is ARRL DX, your side from your call; "Sprint" is the NA Sprint
+   exchange without QSY.
+4. Runs teach the sampler and count in Letters and Mistakes: a letter is a
+   letter.
+5. Contest runs rank within their kind, not by points per character on the
+   All board.
+6. The speed offset lasts one run.
+7. Builds older than phase 0 may drop logs but keep runs; the mark and
+   backups recover them.
+8. Data licences: asking AD1C about cty.dat facts and W7SST about the
+   counted files is for the maintainer to do. Until they answer, the tables
+   use facts and rounded counted shares only, as designed (11.8).
 
 ## 16. Risks
 

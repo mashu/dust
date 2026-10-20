@@ -67,6 +67,12 @@ impl From<SettingsSave> for TrainingSettings {
             auto_level: save.auto_level,
         };
         match save.char_set.char_set_mode {
+            // Contest cannot be picked yet. A save that names it, edited by
+            // hand, opens in Callsigns, whose tier it shares, rather than in
+            // a mode no control shows and no group session may record.
+            Some(ModeSave::Today(CharSetMode::Contest)) => {
+                settings.curriculum.char_set_mode = CharSetMode::Callsign;
+            }
             Some(ModeSave::Today(mode)) => settings.curriculum.char_set_mode = mode,
             Some(ModeSave::Custom) => {
                 settings.curriculum.char_set_mode = CharSetMode::Koch;
@@ -269,6 +275,17 @@ mod tests {
                 json["charSetMode"]
             );
         }
+    }
+
+    /// Until Contest can be picked, a save that names it opens in Callsigns
+    /// at the same tier.
+    #[test]
+    fn a_save_on_contest_opens_in_callsigns() {
+        let settings = load(serde_json::json!({ "charSetMode": "contest", "callsignLevel": 4 }));
+        assert_eq!(settings.curriculum.char_set_mode, CharSetMode::Callsign);
+        assert_eq!(settings.curriculum.callsign_level, 4);
+        let json = serde_json::to_value(&settings).expect("settings serialize");
+        assert_eq!(json["charSetMode"], "callsign");
     }
 
     /// The first versions named two settings after the Koch method. Their

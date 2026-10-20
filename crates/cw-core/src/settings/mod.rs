@@ -131,24 +131,39 @@ pub enum CharSetMode {
     /// Whole words from a list of the learner's own, each sent as a group.
     /// There is no level to climb: the list is the curriculum.
     Words,
+    /// Contest runs: callers answer your CQ and you copy their calls and
+    /// exchanges. Not offered in the settings yet; until it is, everything
+    /// that asks a mode what to do treats it as Callsign, whose tier shapes
+    /// the callers' calls. On disk a run is written as a callsign session
+    /// with a mark, so a build that knows no contests still reads it.
+    Contest,
 }
 
 impl CharSetMode {
     /// Every character set, in the order the settings list them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Koch,
         Self::Digits,
         Self::Mixed,
         Self::Callsign,
         Self::Words,
+        Self::Contest,
     ];
 }
 
 impl CharSetMode {
     /// Whether a group is drawn a character at a time, at a length the group
-    /// size gives it. Callsigns and words are not: each is as long as it is.
+    /// size gives it. Callsigns, words and contest calls are not: each is as
+    /// long as it is.
     pub fn draws_characters(self) -> bool {
-        !matches!(self, Self::Callsign | Self::Words)
+        !matches!(self, Self::Callsign | Self::Words | Self::Contest)
+    }
+
+    /// Whether what is sent is callsigns, shaped by the callsign tier: in
+    /// Callsigns, and from a contest's callers. Until Contest has screens of
+    /// its own, they show it as Callsigns wherever they ask this.
+    pub fn sends_callsigns(self) -> bool {
+        matches!(self, Self::Callsign | Self::Contest)
     }
 }
 
@@ -868,13 +883,7 @@ mod tests {
     /// make that effect loop forever.
     #[test]
     fn clamping_reaches_a_fixed_point_in_one_pass() {
-        for mode in [
-            CharSetMode::Koch,
-            CharSetMode::Digits,
-            CharSetMode::Mixed,
-            CharSetMode::Callsign,
-            CharSetMode::Words,
-        ] {
+        for mode in CharSetMode::ALL {
             for linked in [false, true] {
                 let mut first = wild();
                 first.curriculum.char_set_mode = mode;
@@ -1075,6 +1084,19 @@ mod tests {
         assert_eq!(s.alphabet(LevelAxis::Letters), s.progress_alphabet());
         s.set_active_level(7);
         assert_eq!(s.curriculum.level, 7);
+    }
+
+    /// The modes that send callsigns are the ones the callsign tier shapes.
+    #[test]
+    fn callsigns_are_sent_where_the_callsign_tier_shapes_them() {
+        for mode in CharSetMode::ALL {
+            assert_eq!(
+                mode.sends_callsigns(),
+                mode.axis() == LevelAxis::Callsign,
+                "{mode:?}"
+            );
+        }
+        assert!(CharSetMode::Contest.sends_callsigns());
     }
 
     #[test]

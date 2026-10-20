@@ -8,8 +8,8 @@ description = "Pure Morse group-training domain logic"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
+# A contest run's log is kept as plain JSON, so a layout this version does not
+# know is written back as it was read.
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [lints]

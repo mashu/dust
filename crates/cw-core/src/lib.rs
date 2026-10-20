@@ -13,6 +13,7 @@ pub mod band;
 mod belief;
 mod board;
 mod callsign;
+mod contest;
 mod heatmap;
 mod keyer;
 mod level;
@@ -45,6 +46,7 @@ pub use board::{
     per_group, score_board, score_timeline,
 };
 pub use callsign::{CALLSIGN_TIER_MAX, generate_callsign, tier_examples};
+pub use contest::ContestLog;
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
 };

@@ -174,16 +174,13 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
             sends: 1,
         }],
         accuracy,
-        tally: Default::default(),
         avg_response_ms: 450.0,
         total_chars: 40,
         score: 820.0,
         level: 3,
-        digits_level: 1,
         char_set_mode: CharSetMode::Mixed,
         char_wpm: 20.0,
-        effective_wpm: 18.0,
-        alphabet_fingerprint: String::new(),
+        ..SessionResult::empty_for_test()
     }
 }
 

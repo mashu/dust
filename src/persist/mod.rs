@@ -256,19 +256,12 @@ mod tests {
         SessionResult {
             date: date.to_string(),
             timestamp: 1,
-            groups: Vec::new(),
-            group_timings: Vec::new(),
             accuracy: 1.0,
-            tally: Default::default(),
             avg_response_ms: 1.0,
-            total_chars: 1,
             score: 1.0,
-            level: 1,
-            digits_level: 1,
             char_set_mode: CharSetMode::Mixed,
             char_wpm: 20.0,
-            effective_wpm: 18.0,
-            alphabet_fingerprint: String::new(),
+            ..SessionResult::empty_for_test()
         }
     }
 
@@ -328,6 +321,26 @@ mod tests {
         let back = parse_sessions(&raw).expect("a list");
         assert_eq!(back[0].score, stored.points());
         assert!(back[0].score > 1.0, "{}", back[0].score);
+    }
+
+    /// A contest run a later version wrote reads as a run, and goes back to
+    /// the store as it was written: a callsign session with its mark, and
+    /// the log this version cannot read yet.
+    #[test]
+    fn a_contest_run_from_a_later_version_is_kept_whole() {
+        let mut written = serde_json::to_value(session("2026-10-20")).unwrap();
+        written["charSetMode"] = serde_json::json!("callsign");
+        written["alphabetFingerprint"] = serde_json::json!("contest:wpx");
+        written["contest"] = serde_json::json!({ "v": 9, "laterKey": [1, 2.5, "x"] });
+        let raw = serde_json::to_string(&[written.clone()]).unwrap();
+        let back = parse_sessions(&raw).expect("a list");
+        assert_eq!(back[0].char_set_mode, CharSetMode::Contest);
+        let (saved, kept) = newest_that_fit(&back, usize::MAX);
+        assert_eq!(kept, 1);
+        let saved: Vec<serde_json::Value> = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved[0]["charSetMode"], "callsign");
+        assert_eq!(saved[0]["alphabetFingerprint"], "contest:wpx");
+        assert_eq!(saved[0]["contest"], written["contest"]);
     }
 
     #[test]

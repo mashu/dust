@@ -26,7 +26,8 @@ fn level_reading(settings: &TrainingSettings) -> LevelReading {
     let letters = settings.level(LevelAxis::Letters);
     let digits = settings.level(LevelAxis::Digits);
     let (label, value, summary) = match settings.curriculum.char_set_mode {
-        CharSetMode::Callsign => {
+        // A contest's callers are shaped by the callsign tier.
+        CharSetMode::Callsign | CharSetMode::Contest => {
             let tier = settings.level(LevelAxis::Callsign);
             (
                 "Callsign tier",
@@ -93,7 +94,7 @@ pub fn Home(
 
     let chars = compute_char_pool(&settings);
     let newest = newest_unlocked(&settings);
-    let callsigns = settings.curriculum.char_set_mode == CharSetMode::Callsign;
+    let callsigns = settings.curriculum.char_set_mode.sends_callsigns();
     let words = settings.curriculum.char_set_mode == CharSetMode::Words;
     let speed = range_label(
         settings.playback.char_wpm_min,
@@ -260,6 +261,10 @@ mod tests {
         assert_eq!(
             reading(&settings, CharSetMode::Callsign).summary,
             "Callsign tier 2"
+        );
+        assert_eq!(
+            reading(&settings, CharSetMode::Contest),
+            reading(&settings, CharSetMode::Callsign)
         );
     }
 

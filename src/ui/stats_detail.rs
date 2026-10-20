@@ -11,6 +11,7 @@ use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
 use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::format::counted;
+use crate::ui::settings_charset::mode_label;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
@@ -363,7 +364,7 @@ pub fn HistoryTab(
                             let when = rsx! {
                                 div { class: "history-when",
                                     div { class: "mono", "{row.date}" }
-                                    div { class: "history-sub", "{row.correct_groups}/{row.groups} groups · {row.total_chars} chars" }
+                                    div { class: "history-sub", "{mode_label(row.mode)} · {row.correct_groups}/{row.groups} groups · {row.total_chars} chars" }
                                 }
                                 div { class: "history-acc",
                                     span { class: "value", "{row.accuracy_pct.round()}%" }

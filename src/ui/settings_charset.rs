@@ -57,13 +57,17 @@ pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
     (CharSetMode::Words, "Words"),
 ];
 
-/// What a character set is called on screen: "Callsigns".
+/// What a character set is called on screen: "Callsigns". Contest has its
+/// name before the control offers it, for the runs a later version kept.
 pub(crate) fn mode_label(mode: CharSetMode) -> &'static str {
-    CHAR_SET_MODES
-        .iter()
-        .find(|(each, _)| *each == mode)
-        .map(|(_, label)| *label)
-        .unwrap_or_default()
+    match mode {
+        CharSetMode::Contest => "Contest",
+        offered => CHAR_SET_MODES
+            .iter()
+            .find(|(each, _)| *each == offered)
+            .map(|(_, label)| *label)
+            .unwrap_or_default(),
+    }
 }
 
 /// The practice windows, and how many characters each needs unlocked before
@@ -80,6 +84,7 @@ const PRACTICE_WINDOWS: [(PracticeWindow, &str, usize); 3] = [
 #[derive(Clone, PartialEq)]
 struct Charset {
     mode: CharSetMode,
+    callsigns: bool,
     sequence: String,
     choice: SequenceChoice,
     level: u32,
@@ -98,9 +103,10 @@ struct Charset {
 impl Charset {
     fn of(settings: &TrainingSettings) -> Self {
         let c = &settings.curriculum;
-        let callsigns = c.char_set_mode == CharSetMode::Callsign;
+        let callsigns = c.char_set_mode.sends_callsigns();
         Self {
             mode: c.char_set_mode,
+            callsigns,
             sequence: settings.sequence().iter().collect(),
             choice: settings.sequence_choice(),
             level: settings.active_level(),
@@ -128,11 +134,15 @@ impl Charset {
             },
             CharSetMode::Digits => "Digits only".to_string(),
             CharSetMode::Mixed => "Letters and digits together".to_string(),
-            CharSetMode::Callsign => "Real callsigns, off the air".to_string(),
+            // Contest is not offered yet; until it has a card of its own, its
+            // callers' calls are what it shares with Callsigns.
+            CharSetMode::Callsign | CharSetMode::Contest => {
+                "Real callsigns, off the air".to_string()
+            }
             CharSetMode::Words if self.own_words => "Your own words, sent whole".to_string(),
             CharSetMode::Words => "Starter words, sent whole".to_string(),
         };
-        if self.mode == CharSetMode::Callsign {
+        if self.callsigns {
             format!("{what} · tier {} of {CALLSIGN_TIER_MAX}", self.level)
         } else if self.mode == CharSetMode::Words {
             format!("{what} · {}", count_words(self.words.len()))
@@ -146,7 +156,7 @@ impl Charset {
 pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
     let charset = use_memo(move || Charset::of(&settings.read()));
     let c = charset.read();
-    let callsigns = c.mode == CharSetMode::Callsign;
+    let callsigns = c.callsigns;
     let words = c.mode == CharSetMode::Words;
     let has_unlock_order = matches!(c.mode, CharSetMode::Koch | CharSetMode::Mixed);
     rsx! {

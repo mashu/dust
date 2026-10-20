@@ -25,7 +25,9 @@ impl CountersKey {
                 settings.level(LevelAxis::Digits)
             ),
             CharSetMode::Digits => format!("digits_{level}_{fingerprint}"),
-            CharSetMode::Callsign => format!("callsign_{level}"),
+            // A contest run never reaches auto level; its tier is the
+            // callsign one, so its key is too.
+            CharSetMode::Callsign | CharSetMode::Contest => format!("callsign_{level}"),
             CharSetMode::Words => format!("words_{level}"),
             CharSetMode::Koch => format!("koch_{level}_{fingerprint}"),
         })
