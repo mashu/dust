@@ -262,9 +262,11 @@ pub fn send_serial(serial: u32, habits: CallerHabits, rng: &mut impl Rng) -> Str
 /// A field as a session's group keeps it, so Letters and Mistakes see what
 /// was heard: `sent` is the token that went out (`1N5`, `TT7`). When what
 /// was typed holds the same value, it is `sent`, so a logger's `7` for `TT7`
-/// is clean. Otherwise it is what was typed, with a typed digit written as
-/// the cut letter where the sent token had one: a heard `N` typed as 0 is
-/// `N`→`T`. Nothing typed is nothing kept, a miss.
+/// is clean. Otherwise it is what was typed, read as values (a typed cut
+/// letter is its digit, and leading zeros beyond the sent token's padding
+/// go), each digit that matches the sent one written as sent and each that
+/// does not as the cut letter where the sent token had one: a heard `N`
+/// typed as 0 is `N`→`T`. Nothing typed is nothing kept, a miss.
 pub fn keyed_token(field: Field, sent: &str, typed: &str) -> String {
     if typed.is_empty() {
         return String::new();
@@ -278,25 +280,34 @@ pub fn keyed_token(field: Field, sent: &str, typed: &str) -> String {
     // Lined up by value, so a heard `N` typed as 9 is a match: matched by
     // character, an added or dropped digit could pair it with something else
     // and keep a confusion that never happened.
+    let value = |c: char| {
+        cut_digit(c)
+            .and_then(|digit| char::from_digit(digit, 10))
+            .unwrap_or(c)
+    };
+    let padding = |values: &str| values.len() - values.trim_start_matches('0').len();
     let heard: Vec<char> = sent.chars().collect();
-    let values: String = heard
-        .iter()
-        .map(|&c| {
-            cut_digit(c)
-                .and_then(|digit| char::from_digit(digit, 10))
-                .unwrap_or(c)
-        })
-        .collect();
+    let values: String = heard.iter().map(|&c| value(c)).collect();
+    let typed: String = typed.chars().map(value).collect();
+    // Zeros that change no value are no copy: only as many lead as the
+    // sent token's, and a lone zero stays.
+    let extra = padding(&typed).saturating_sub(padding(&values));
+    let typed = &typed[extra.min(typed.len().saturating_sub(1))..];
     let mut next_heard = heard.iter();
     align_group(&values, typed)
         .into_iter()
         .filter_map(|pair| {
             let heard = pair.sent_char.and_then(|_| next_heard.next().copied());
             let typed = pair.received_char?;
-            let as_cut = heard
-                .filter(|heard| cut_digit(*heard).is_some())
-                .and_then(|heard| cut_letter(typed.to_digit(10)?, heard));
-            Some(as_cut.unwrap_or(typed))
+            Some(match heard {
+                Some(heard) if value(heard) == typed => heard,
+                Some(heard) => typed
+                    .to_digit(10)
+                    .filter(|_| cut_digit(heard).is_some())
+                    .and_then(|digit| cut_letter(digit, heard))
+                    .unwrap_or(typed),
+                None => typed,
+            })
         })
         .collect()
 }
@@ -501,5 +512,27 @@ mod tests {
             assert!(!field.noun().is_empty());
         }
         assert_eq!(Field::from_name("NR"), None);
+    }
+
+    /// A typed cut letter is its digit, and typed padding is no copy: `A5`
+    /// for `14` is 1 copied and 4 taken for 5, `008` for `7` is 7 taken for
+    /// 8, each one error and no false confusion.
+    #[test]
+    fn a_typed_cut_letter_or_padding_is_read_by_value() {
+        assert_eq!(keyed_token(Field::Nr, "14", "A5"), "15");
+        assert_eq!(keyed_token(Field::Nr, "7", "008"), "8");
+        assert_eq!(keyed_token(Field::Nr, "195", "1N4"), "194");
+        assert_eq!(keyed_token(Field::Nr, "7", "TT8"), "8");
+        // Padding the sent token has stays, as sent.
+        assert_eq!(keyed_token(Field::Nr, "TT7", "0008"), "TT8");
+        assert_eq!(keyed_token(Field::Nr, "TT7", "8"), "8");
+        // A lone zero is a value.
+        assert_eq!(keyed_token(Field::Nr, "7", "0"), "0");
+        assert_eq!(keyed_token(Field::Nr, "1N5", "A0"), "10");
+        for (sent, typed) in [("14", "A5"), ("7", "008"), ("195", "1N4"), ("7", "TT8")] {
+            let kept = keyed_token(Field::Nr, sent, typed);
+            let copy = crate::score::GroupCopy::of(sent, &kept, 25.0, 100.0, 1);
+            assert_eq!(copy.errors, 1, "{sent} {typed} kept {kept}");
+        }
     }
 }

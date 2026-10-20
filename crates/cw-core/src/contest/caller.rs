@@ -15,7 +15,7 @@ use super::exchange::{Field, send_serial};
 use super::rules::{ContestRules, REPORT, Side};
 use super::serial::SerialModel;
 use crate::alignment::edit_distance;
-use crate::callsign::GeneratedCall;
+use crate::callsign::{GeneratedCall, parse_callsign};
 use crate::rng::{Rng, SplitMix64};
 use crate::settings::{SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, TrainingSettings};
 use crate::timing::{StationVoice, resolve_station};
@@ -136,7 +136,7 @@ pub(super) struct Reaction {
     /// sent again is one whatever key drew it.
     pub(super) asked: bool,
     /// It took a call you sent for its own, exactly or close, or answered
-    /// your partial: you are working it now.
+    /// your partial or a piece of its call: you are working it now.
     pub(super) matched: bool,
     /// It took your exchange as sent to it, while you work it.
     pub(super) took_exchange: bool,
@@ -190,8 +190,13 @@ pub(super) struct Caller {
     patience: u32,
     /// It heard you work someone else since it last called, so a bare `?`
     /// is not for it, as MorseRunner's `osNeedPrevEnd` (`DxOper.pas:744-748,
-    /// 793`). Your CQ or TU, its own call, or its next call clears it.
+    /// 793`). Your CQ or TU, its own call, its next call, or a `?` with the
+    /// Call field empty clears it.
     other_qso: bool,
+    /// It answered your partial while it called, so your exchange now is
+    /// for it, as MorseRunner's near match makes it `osNeedCallNr`
+    /// (`DxOper.pas:734-742`). Your CQ or TU, or another call, clears it.
+    answered_partial: bool,
     /// Its timeouts in a row with nothing from you, while you work it.
     silent: u32,
     serial: SerialModel,
@@ -233,6 +238,7 @@ impl Caller {
             skill,
             patience,
             other_qso: false,
+            answered_partial: false,
             silent: 0,
             serial,
             exchange: None,
@@ -256,9 +262,20 @@ impl Caller {
         // a `?` after someone else's call is not for it.
         let mut addressed = None;
         for part in message {
+            let part = match part {
+                // A call with no character in it, `?` or `??`, asks as the
+                // `?` of F7 does: nobody's call.
+                MessagePart::HisCall(sent)
+                    if !sent.is_empty() && sent.chars().all(|c| c == '?') =>
+                {
+                    &MessagePart::Again
+                }
+                part => part,
+            };
             match part {
                 MessagePart::Cq => {
                     self.other_qso = false;
+                    self.answered_partial = false;
                     match self.state {
                         NeedQso => replies = Some(true),
                         // Its exchange is out: as far as it knows the QSO is
@@ -270,6 +287,7 @@ impl Caller {
                 }
                 MessagePart::Tu => {
                     self.other_qso = false;
+                    self.answered_partial = false;
                     match self.state {
                         NeedQso => replies = Some(true),
                         state if state.worked() => self.state = Done,
@@ -277,10 +295,21 @@ impl Caller {
                     }
                 }
                 MessagePart::HisCall(sent) if self.state.active() => {
-                    let found = match_call(sent, &self.call.text);
+                    let found = match match_call(sent, &self.call.text) {
+                        // A piece of its call that is no call itself asks
+                        // for the rest, as a partial does: nothing to put
+                        // right.
+                        CallMatch::Close if parse_callsign(sent).is_none() => CallMatch::Partial {
+                            fits: sent.chars().count(),
+                        },
+                        found => found,
+                    };
                     addressed = Some(found != CallMatch::No);
                     reaction.matched |= found != CallMatch::No;
                     self.other_qso = found == CallMatch::No;
+                    if found == CallMatch::No {
+                        self.answered_partial = false;
+                    }
                     match (found, self.state) {
                         // A partial while you work it asks for its call: it
                         // puts the call right, as MorseRunner's `mcAlmost`
@@ -297,9 +326,10 @@ impl Caller {
                         }
                         // The single caller answers any partial: it is the
                         // only one there to ask.
-                        (CallMatch::Partial { .. }, _) => {
+                        (CallMatch::Partial { .. }, state) => {
                             replies = Some(true);
                             reaction.asked = true;
+                            self.answered_partial |= state == NeedQso;
                         }
                         (CallMatch::Exact, NeedQso | NeedCallNr) => self.state = NeedNr,
                         (CallMatch::Exact, NeedCall) => self.state = NeedEnd,
@@ -316,6 +346,15 @@ impl Caller {
                     match self.state {
                         NeedNr => self.state = NeedEnd,
                         NeedCallNr => self.state = NeedCall,
+                        // Sent after a partial it answered, your exchange is
+                        // for it: it has your exchange, and puts its call
+                        // right, as MorseRunner's `osNeedCallNr` hearing
+                        // your number (`DxOper.pas:768-776`).
+                        NeedQso if addressed == Some(true) || self.answered_partial => {
+                            self.state = NeedCall;
+                            reaction.took_exchange = true;
+                            replies = Some(true);
+                        }
                         // Your exchange went to someone: it falls silent.
                         NeedQso => {
                             replies = Some(false);
@@ -352,6 +391,13 @@ impl Caller {
         };
         reaction.asked &= reaction.replies;
         reaction
+    }
+
+    /// A `?` is coming with the Call field empty: whoever you worked, it is
+    /// for anyone still calling, as MorseRunner's `osNeedPrevEnd` comes back
+    /// when the Call field is empty (`DxOper.pas:793`).
+    pub(super) fn forget_other_qso(&mut self) {
+        self.other_qso = false;
     }
 
     /// One try spent while it calls; the last sends it away.
@@ -805,5 +851,71 @@ mod tests {
         assert!(caller.time_out());
         assert!(!caller.time_out(), "the third in a row");
         assert_eq!(caller.state, CallerState::Gone);
+    }
+
+    /// Your exchange after a partial it answered, in the same message or
+    /// the next, is for the caller: it has your exchange and puts its call
+    /// right, as MorseRunner's `osNeedCallNr` does. After another call
+    /// since, your exchange is someone else's.
+    #[test]
+    fn an_exchange_after_an_answered_partial_is_for_the_caller() {
+        let mut together = caller(1);
+        let reaction = together.hear(&[call("K5?"), Exchange]);
+        assert!(reaction.replies && reaction.matched && reaction.took_exchange);
+        assert_eq!(together.state, CallerState::NeedCall);
+        assert!(!together.other_qso);
+        let mut after = caller(1);
+        after.hear(&[call("K5?")]);
+        let reaction = after.hear(&[Exchange]);
+        assert!(reaction.replies && reaction.took_exchange);
+        assert_eq!(after.state, CallerState::NeedCall);
+        assert_eq!(
+            after.reply(rules(), Side::Dx, 0).map(|r| r.1),
+            Some(Says::Correction)
+        );
+        let mut moved = caller(1);
+        moved.hear(&[call("K5?")]);
+        moved.hear(&[call("W1AW")]);
+        assert!(!moved.hear(&[Exchange]).replies);
+        assert_eq!(moved.state, CallerState::NeedQso);
+    }
+
+    /// A piece of its call that is no call itself asks for the rest, as a
+    /// partial does: answered with its call, a try spent, nothing put
+    /// right. A bare `?` in its place is the `?` of F7: nobody's call.
+    #[test]
+    fn a_piece_of_the_call_asks_and_a_bare_question_is_nobodys_call() {
+        let mut piece = caller(2);
+        let tries = piece.patience;
+        let reaction = piece.hear(&[call("K5")]);
+        assert!(reaction.replies && reaction.asked && reaction.matched);
+        assert_eq!(piece.state, CallerState::NeedQso);
+        assert_eq!(piece.patience, tries - 1);
+        assert_eq!(
+            piece.reply(rules(), Side::Dx, 0).map(|r| r.1),
+            Some(Says::Call)
+        );
+        // A slip that is a whole call is still put right.
+        let mut slip = caller(2);
+        slip.hear(&[call("K5XYW")]);
+        assert_eq!(slip.state, CallerState::NeedCallNr);
+        let mut bare = caller(2);
+        let reaction = bare.hear(&[call("?")]);
+        assert!(reaction.replies && reaction.asked && !reaction.matched);
+        let mut worked = caller(2);
+        worked.hear(&[call("K5XYZ")]);
+        worked.hear(&[call("??")]);
+        assert_eq!(worked.state, CallerState::NeedNr, "nothing to put right");
+    }
+
+    /// With the Call field empty, a `?` is for a caller that heard you work
+    /// someone else.
+    #[test]
+    fn a_question_with_the_field_empty_is_for_anyone_calling() {
+        let mut caller = caller(3);
+        caller.hear(&[call("W1AW")]);
+        assert!(!caller.hear(&[Again]).replies);
+        caller.forget_other_qso();
+        assert!(caller.hear(&[Again]).replies);
     }
 }

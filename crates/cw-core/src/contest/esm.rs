@@ -32,6 +32,11 @@ pub struct QsoState {
     /// The station corrected the call last sent, and no call has gone out
     /// since.
     pub corrected: bool,
+    /// The call your TU without logging (F3) went to, while that QSO waits
+    /// to be logged: Enter on it, with the exchange copied, sends TU and
+    /// logs it, as MorseRunner's C and N still hold after F3. Empty
+    /// otherwise.
+    pub thanked: String,
 }
 
 /// The two fields as typed, with when they were typed: a copy is timed from
@@ -116,6 +121,16 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
     let c = call == qso.call_sent;
     let n = qso.exchange_sent;
     let v = parse_callsign(&call).is_some();
+    // Your TU went out without logging: Enter logs that QSO, with a TU.
+    if !qso.thanked.is_empty() && call == qso.thanked && v && e == ExchangeState::Complete {
+        let message = vec![MessagePart::Tu];
+        return Esm {
+            label: label(&message),
+            hint: hint(&message, &call, e, &[]),
+            message,
+            focus: Some(EntryField::Call),
+        };
+    }
     // Sent again as it stands, the call would only be corrected again.
     if qso.corrected && c && v {
         return Esm {
@@ -278,7 +293,7 @@ mod tests {
         let qso = QsoState {
             call_sent: call_sent.to_string(),
             exchange_sent,
-            corrected: false,
+            ..QsoState::default()
         };
         let fields = Fields {
             call: call.to_string(),
@@ -407,6 +422,7 @@ mod tests {
             call_sent: "K5XYW".to_string(),
             exchange_sent: true,
             corrected: true,
+            ..QsoState::default()
         };
         let fields = |call: &str, exch: &str| Fields {
             call: call.to_string(),
@@ -448,6 +464,34 @@ mod tests {
             "your exchange is owed whatever you typed"
         );
         assert_eq!(unreadable.label, "Send exch");
+    }
+
+    /// After your TU without logging, Enter on the call it went to, with
+    /// the exchange copied, sends TU and logs; any other call, or an
+    /// exchange not yet copied, starts afresh.
+    #[test]
+    fn after_a_tu_without_logging_enter_logs_that_qso() {
+        let qso = QsoState {
+            thanked: "K5XYZ".to_string(),
+            ..QsoState::default()
+        };
+        let fields = |call: &str, exch: &str| Fields {
+            call: call.to_string(),
+            exch: exch.to_string(),
+            ..Fields::default()
+        };
+        let enter = esm(&qso, &fields("K5XYZ", "214"), rules(), Side::Dx);
+        assert_eq!(enter.message, [Tu]);
+        assert_eq!(enter.label, "TU & log");
+        assert!(enter.logs());
+        assert_eq!(
+            sent(&esm(&qso, &fields("W2AW", "214"), rules(), Side::Dx)),
+            "W2AW 5NN TT7"
+        );
+        assert_eq!(
+            sent(&esm(&qso, &fields("K5XYZ", ""), rules(), Side::Dx)),
+            "K5XYZ 5NN TT7"
+        );
     }
 
     /// The fields are read as the Call field keeps them: lower case and

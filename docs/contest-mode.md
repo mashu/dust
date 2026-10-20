@@ -293,17 +293,17 @@ The machine needs the fields only at a key press. The runtime maps
 | Countdown n | TimerFired | 1 s → n−1. At 0 the clock and run-end timer start and your first CQ goes out → Running |
 | Countdown | Pause | timers forgotten, `ReleaseAudio` → Paused; Resume restarts the countdown |
 | Running, Silent | Key | ESM (4.4) or the key picks the message; a logging key logs (4.8); replies are decided → `PlayTurn` (new id) |
-| Running, Turn | Key but StopTx | a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing |
-| Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange not fully sent (`Main.pas:884-891`); the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it (5.2) → Silent |
+| Running, Turn | Key but StopTx | a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing, and Shift+Enter first counts what of it has reached you, as a key that sends does |
+| Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange of the message keyed last not fully sent (`Main.pas:884-891`), not for one carried from an earlier key, heard then; the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it (5.2) → Silent |
 | Turn(id) | TurnStarted{id} | `heard_from` re-stamped; no effects, no limit check |
 | Turn(id) | TurnEnded{id} | all segments count; the patience timer starts if anyone waits → Silent |
-| Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused, but not time the clock was read at since (6.3), so the run bar steps back by the retries; every caller in the turn sends again after Resume; timers forgotten; `ReleaseAudio` → Paused{Sound} |
+| Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused, but not time the clock was read at since (6.3), so the run bar steps back by the retries; every caller in the turn sends again after Resume, as it was keyed, so a repeat you asked for is charged once heard; timers forgotten; `ReleaseAudio` → Paused{Sound} |
 | any | TurnCancelled, or another id | ignored |
-| Silent | TimerFired (patience) | waiting callers call again (4.3) → a turn of replies |
-| Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count, and the callers whose send it cut short send again after Resume; timers forgotten; clock paused from `at` → Paused |
+| Silent | TimerFired (patience) | waiting callers call again (4.3); if the station you work has left, "K5XYZ has gone" is announced and Enter starts afresh, as after a CQ → a turn of replies |
+| Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count. A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
 | Paused | Resume | clock resumes; run end re-armed with the time left; a 1 s resume timer → Running |
-| Running | the resume timer | callers the pause or failure cut short send again, at no send; the others wait for you afresh, as after a turn, so what was heard whole comes again only on a timeout or at your asking: a pause is no free `?`. A key that sends forgets the timer; one that sends nothing (Wipe, Shift+Enter, Esc with nothing on the air) leaves it to bring the callers back |
-| Running | run-end timer, or the limit passed on any event but TurnStarted (a look at the clock, which stamps nothing, 6.3) | → Finished |
+| Running | the resume timer | callers the pause or failure cut short send again, as the rows above say; the others wait for you afresh, as after a turn, so what was heard whole comes again only on a timeout or at your asking: a pause is no free `?`. A key that sends forgets the timer; one that sends nothing (Wipe, Shift+Enter, Esc with nothing on the air) leaves it to bring the callers back |
+| Running | run-end timer, or the limit passed on any event but TurnStarted (a look at the clock, which stamps nothing, 6.3) | → Finished. While the turn on the air may be retrying its sound (an attempt after the first has started, or the one playing is past its length and 2 s), only what keeps its reading ends the run (its end, a key, End run): its failure gives the retries back (5.2), and the run end waits until its last attempt would have failed |
 | live | Speed{±2} | the offset moves for your next message and later callers |
 | live | FinishNow | → Finished |
 | any | Abort | `StopAudio`, `AbortToHome` → Aborted |
@@ -337,12 +337,12 @@ The callers follow MRCE's model, re-written from its behaviour, credited.
 
 | You send | A caller still calling | The station you work |
 |---|---|---|
-| CQ or TU | calls | after TU: `Done`. After CQ: `Done` if it has already sent its exchange (`NeedEnd`); before that the QSO fails and it leaves (`DxOper.pas:705-711`) |
+| CQ or TU | calls; once its call has begun to reach you, that is a call you asked for again (9.1) | after TU: `Done`. After CQ: `Done` if it has already sent its exchange (`NeedEnd`); before that the QSO fails and it leaves (`DxOper.pas:705-711`) |
 | `<call> <exch>`, exact | falls silent | sends its exchange |
 | `<call> <exch>`, close (4.7) | falls silent | corrects you: `DE K5XYZ` or `K5XYZ K5XYZ` |
 | `<call> <exch>`, no match | calls again after its timeout | — |
-| `?`, `AGN`, `NR?` | repeats its call, unless it heard you work someone else since it last called, as MRCE's `osNeedPrevEnd` (`DxOper.pas:744-748, 793`) | re-sends what it owes: call or exchange. After someone else's call, neither answers |
-| partial `K5?` | only the best matches answer | sends its call, as MRCE's `mcAlmost` (`DxOper.pas:734-742`): `NeedNr` → `NeedCallNr`, `NeedEnd` → `NeedCall` |
+| `?`, `AGN`, `NR?` | repeats its call, unless it heard you work someone else since it last called and the Call field is not empty, as MRCE's `osNeedPrevEnd` (`DxOper.pas:744-748, 793`) | re-sends what it owes: call or exchange. After someone else's call, neither answers |
+| partial `K5?` | only the best matches answer; your exchange after a partial it answered, in that message or a later one, is for it: it takes it and puts its call right (`NeedCall`), as MRCE's `osNeedCallNr` (`DxOper.pas:734-742, 768-776`) | sends its call, as MRCE's `mcAlmost` (`DxOper.pas:734-742`): `NeedNr` → `NeedCallNr`, `NeedEnd` → `NeedCall` |
 | B4, NIL (phase 2) | NIL costs a patience | leaves |
 
 From phase 2, in pile-ups only:
@@ -378,6 +378,7 @@ is part of E.
 | Situation | Enter sends | Key label |
 |---|---|---|
 | Call empty | CQ | `CQ` |
+| your TU without logging (F3) went to this call, V, E Complete | TU, and logs that QSO, as MRCE's C and N still hold after F3 | `TU & log` |
 | C, V, and the station corrected that call | nothing; focus to Call, as a `?` would only bring the correction again | `Fix call` |
 | not C, or not V, or (not N and E Empty) | his call as typed, then… | `Send K5XYZ`, or `Ask K5?` |
 | …not N and V | …your exchange | `Send K5XYZ + exch` |
@@ -389,7 +390,9 @@ The rows that fire go out as one message: `K5XYZ` typed sends
 `K5XYZ 5NN TT7`; then `?` while the exchange is empty; then `TU`, logging.
 A CQ or a TU ends the QSO for Enter as logging does, and so does a key
 pressed with the Call field empty, as MRCE's `Edit1Change` resets C and N
-when the field empties (`Main.pas:2063-2068`).
+when the field empties (`Main.pas:2063-2068`), and the station you work
+leaving. F3 keeps only the call it went to, so Enter on that call logs the
+QSO it closed, and any other call starts afresh.
 A call corrected after your exchange sends `K5XYZ TU` and logs. A partial
 always goes out again as typed, alone. Where MRCE refuses an invalid
 exchange (`Main.pas:1210-1216`), Dust also sends nothing: the fault is your
@@ -442,18 +445,23 @@ repeat factor, `0.5^(sends − 1)` (`score.rs:111-112`), halves their points,
 as group repeats already score (RufzXP's F6 penalty); its air time also
 lowers the rate. A free local replay would teach the wrong reflex. An
 exchange the station you work sends again costs its send whatever key drew
-it: `?`, `NR?`, your exchange again (F2) or its call again (F5). Re-sends
-you did not ask for (timeouts, calling twice, corrections, pile-up calls
-before you picked the station, a send a pause cut short and sent again
-after Resume) cost only time (9.1).
+it: `?`, `NR?`, your exchange again (F2) or its call again (F5). A single
+caller's call brought again by CQ or TU, once it had begun to reach you,
+is a `?` by another key. Re-sends you did not ask for (timeouts, calling
+twice, corrections, pile-up calls before you picked the station, a send a
+hidden page or a failed sound cut short and sent again after Resume) cost
+only time (9.1).
 
 ### 4.7 Partials, AGN, wrong calls, dupes
 
 - **Partial calls.** `?` stands for one character, a trailing `?` for any
   tail, matched unanchored as MRCE's regex (`DxOper.pas:546-590`). Without
   `?`, edit distance decides: 0 is exact; up to (length − 1)/2, or the
-  pattern inside the call, is close (`DxOper.pas:597-631`). Only the best
-  share of matched characters answers; the single caller always does.
+  pattern inside the call, is close (`DxOper.pas:597-631`). A close piece
+  that is no call itself (`K5`, `5XYZ`) asks for the rest as a partial
+  does, and is not put right as a slip is; a call with no character but
+  `?` is the `?` of F7, nobody's call. Only the best share of matched
+  characters answers; the single caller always does.
 - **AGN, NR?** ask for the exchange while working someone, and for calls
   otherwise. Typed in the Call field, `AGN` is just text.
 - **Giving up.** CQ while working a station ends that QSO (4.3), and Enter
@@ -476,10 +484,13 @@ goes up. A logged QSO is final. Its check is shown when the station is done
 however it leaves, ended, cut by Esc or Pause, replaced by your next key, or
 at the run's end. A key while the TU still sounds sends it again (5.2), and
 the check waits for that turn. Until then the row shows `…`. A QSO logged
-without sending is checked at once, so nothing is `…` at the end. It is
-checked against the station you work when the call logged is its own or
-close to it (4.7); otherwise it is a NIL. The checks follow MRCE's
-`Log.pas:1030-1100`:
+without sending is checked at once, so nothing is `…` at the end, after
+what of the turn on the air has reached you counts. It is checked against
+the station you work when the call logged is its own or close to it (4.7),
+or else against the station your TU without logging (F3) closed, as MRCE's
+log looks for a station done with you (`Log.pas:745-755`); otherwise it is
+a NIL. That QSO waits to be logged until another is, or you work another
+station, and is lost then. The checks follow MRCE's `Log.pas:1030-1100`:
 
 - **NIL:** nobody matching was worked. It counts raw, not verified.
 - **CALL:** a busted call, with the correct one shown.
@@ -554,7 +565,12 @@ detection and retries (§12).
 - **A failure.** After every retry fails, `TurnFailed` with the current id
   pauses the run ("Sound stopped — Resume to carry on"). The retries are not
   run time: each attempt waits the turn plus 2 s (`wait.rs:18, 95-96`;
-  `SEND_ATTEMPTS` 3, `player.rs:28`).
+  `SEND_ATTEMPTS` 3, `player.rs:28`). So the limit does not end the run
+  while the turn on the air may be retrying, once an attempt after the
+  first has started or the one playing is past the turn plus 2 s: its end,
+  a key or End run still end it, its failure pauses it with the retries
+  given back, and the run end waits till its last attempt would have
+  failed.
 - **Heard time.** `send_planned` calls `on_start` after each attempt starts,
   with no `Player` borrow held (`player.rs:194-212`). The runtime dispatches
   `TurnStarted{id, heard_from}`: the start plus the player's lead and
@@ -667,11 +683,12 @@ takes back run time a QSO was stamped with; a stale reading shows the
 latest. Only a reading whose run time is kept (a key, a turn's end, a QSO,
 the run's end) counts; checking the limit on any other event is a look
 (`peek_ms`), so a forgotten timer waking mid-turn cannot keep a failed
-send's retries as run time. Pausing twice or resuming a running clock
-changes nothing. The machine has no tick; the run bar redraws every 250 ms
-from `mono_ms()`, kept apart from the view as `TrainingProgress` is
-(`training.rs:19-45`). It always shows elapsed time: "07:42 / 10:00", or
-"07:42 · up to 60:00" for an open run.
+send's retries as run time, nor can the run end, a stale send's news or a
+forgotten timer end the run while the send may be retrying (5.2). Pausing
+twice or resuming a running clock changes nothing. The machine has no
+tick; the run bar redraws every 250 ms from `mono_ms()`, kept apart from
+the view as `TrainingProgress` is (`training.rs:19-45`). It always shows
+elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
 
 ### 6.4 Pause, hidden page, locked phone
 
@@ -679,7 +696,10 @@ from `mono_ms()`, kept apart from the view as `TrainingProgress` is
   clock and releases the audio (`player.rs:111-117`), so the band falls
   silent and the screen may sleep. Callers and the open QSO wait; the fields
   lock, so a pause gives no free thinking time, and a copy typed before it
-  and sent after it is timed in run time, the pause left out (9.1).
+  and sent after it is timed in run time, the pause left out (9.1). A send
+  the pause cut after it began to reach you is owed on its caller's
+  timeout, as one heard whole, so a pause is no free `?`; one cut before
+  it began goes again a moment after Resume (4.2).
 - **Resume** claims a new lease inside the tap, as Start does
   (`session_runtime.rs:204`), so the player opens, or after a sound failure
   is rebuilt, within the browser's gesture. Every contest key and button
@@ -1042,45 +1062,60 @@ exactly as it was while the run went on.
 - **A logged QSO:** one group for the call, then one per copied field
   (RST only in Simple QSO), so no false bigram crosses a call and its
   exchange in Mistakes. A field is a copy only once the station's exchange
-  has begun to reach you: logged before that, the QSO owns no field
-  groups, and `l` and `s` hold what you logged and what was sent, for the
-  check.
+  has begun to reach you: logged before that, each field group is a miss
+  (received empty, 1 send), as a guess is no copy, so logging early neither
+  raises accuracy nor shrinks the groups a run is ranked over; `l` and `s`
+  hold what you logged and what was sent, for the check.
 - **One station, one copy.** A station logged again (a dupe, or a log
   after a NIL charged to it) owns no groups: `sc` holds its call, `lc` the
   call logged, and `l` and `s` both exchanges. The soak checks that no
   station's groups are owned twice.
 - **A lost QSO** (`k: "lost"`): a station whose call you sent, or that
-  answered your partial, whose QSO ended unlogged (wiped, gone, failed by your CQ, open at the end). One call
-  group; received = the Call field as last read while you worked it (a
-  wipe reads it before clearing), without `?`; empty is a full miss. It is
-  timed as the call was when you last sent it.
+  answered your partial, whose QSO ended unlogged (wiped, gone, failed by
+  your CQ, closed by your F3 and never logged, open at the end). One call
+  group; received = the call as first sent with your exchange, as a logged
+  QSO keeps it, so walking away pays no better than finishing; never sent
+  so, the Call field as last read while you worked it (a wipe reads it
+  before clearing), without `?`; empty is a full miss. It is timed as the
+  call was when you last sent it.
 - **A NIL** (`k: "nil"`): one call group against the station you work, or
   else the station heard whose call the logged one is or is close to, or
-  else the single caller, the newest heard; received = the logged call.
-  That station then has no lost group as well. When that station already
-  owns its groups (lost, logged, or charged a NIL before), or no station
-  was heard at all, there is no group, and `lc` holds the call; no other
-  station is charged.
+  else the single caller, the newest heard, and never an older one;
+  received = the logged call. That station then has no lost group as well.
+  When that station already owns its groups (lost, logged, or charged a NIL
+  before), or no station was heard at all, there is no group, and `lc`
+  holds the call; no other station is charged.
 - **Calls.** received = the call as first sent with your exchange, so a slip
-  the station corrected still counts; the log keeps the corrected call, in
-  `lc`, written only when it differs.
+  the station corrected still counts; your exchange sent with no call in
+  the message (F2) goes with the call last sent to that station, whatever
+  an empty Call field or Wipe did to C. The log keeps the corrected call,
+  in `lc`, written only when it differs.
 - **Fields hold what was keyed.** sent = the token transmitted (`1N5`,
   `TT7`, `5NN`). If the canonical values match (11.6), received = sent, so a
   logger-style `7` for `TT7` is clean. Otherwise received is the typed
-  token, a typed digit written as the cut letter where the sent token had
-  one (0↔T/O, 1↔A, 5↔E, 9↔N): a heard N typed as 0 is N→T. Digits are
-  lined up against the sent token by value, so a heard N typed as 9 is a
-  match even beside a digit added or dropped. Empty is a miss.
+  token read as values, a typed cut letter as its digit and leading zeros
+  beyond the sent token's padding dropped, so `A5` for `14` is one error,
+  not two, and `008` for `7` is one, not three. Each typed digit is
+  written as the sent character where it matches and, where it does not,
+  as the cut letter where the sent token had one (0↔T/O, 1↔A, 5↔E, 9↔N): a
+  heard N typed as 0 is N→T. Digits are lined up against the sent token by
+  value, so a heard N typed as 9 is a match even beside a digit added or
+  dropped. Empty is a miss.
 - **`sends`** is 1 plus the repeats you drew while the item was owed: a
-  call you asked for again (`?`, a partial, `AGN`, `NR?`) before you sent
-  it with your exchange; an exchange the station you work sent again at
-  any key of yours (4.6). A repeat counts once it has begun to reach you,
-  even if you key over the rest of it, and only once an earlier send of the
-  same had begun to reach you: a `?` keyed before anything of the station
-  reached you asks for nothing again, and one keyed while its first
-  exchange still sounds is a repeat. One Esc stops before it begins was
-  never heard. An exchange re-send counts only for fields empty, or read
-  differently, after it.
+  call you asked for again (`?`, a partial or a piece of the call, `AGN`,
+  `NR?`, or a CQ or TU that brings a single caller's call again), alone or
+  as its answer putting yours right, before you sent it with your
+  exchange; an exchange the station you work sent again at any key of
+  yours (4.6). A repeat counts once it has begun to reach you, even if you
+  key over the rest of it, and only once an earlier send of the same had
+  begun to reach you: a `?` keyed before anything of the station reached
+  you asks for nothing again, and one keyed while its first exchange still
+  sounds is a repeat. One Esc stops before it begins was never heard; one
+  a pause or failed sound cuts before it begins is charged when it comes
+  after Resume. A repeat counts only for what it could teach: a field's
+  for fields empty, or read differently, after it; a call's when the Call
+  field, without `?`, read otherwise at the key than the call finally
+  copied.
 - **`time_to_complete_ms`.** A call: from the end of its last send heard
   whole before the Call field's last edit, among the first and those a key
   of yours drew (CQ, TU, `?`, a partial), to that edit, at the key that
@@ -1424,7 +1459,7 @@ pub struct Fields { pub call: String, pub exch: String,
 pub struct ContestView {
     pub phase: ContestPhase, pub clock: Option<RunClock> /* None in the countdown */,
     pub limit_ms: u64, pub my_wpm: f64,
-    pub qso: QsoState,         // last call sent, exchange taken, corrected
+    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call
     pub air: Option<AirView>,  // started, your text, segment spans
     pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked
     pub qsos: u32, pub clean: u32, pub rate: Option<f64>,
@@ -1516,7 +1551,9 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   within ±50%; nothing sent after `Done` or `Gone`; CQ fails the worked QSO;
   a worked station leaves after 3 silent timeouts; each message answered
   while calling costs a try; a `?` after someone else's call is not for a
-  caller; a partial while worked brings the call.
+  caller, unless the Call field is empty; a partial while worked brings the
+  call; an exchange after an answered partial is for the caller; a piece of
+  the call asks, and a bare `?` is nobody's call.
 - **Calls:** a golden list keeps `generate_callsign` unchanged;
   `parse_callsign` reads 10,000 generated calls per tier; each `CallSpec`
   gives only its countries; every WPX prefix case in 11.1.
@@ -1552,14 +1589,30 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   work a station brings its call; CQ after CQ moves the frequency on;
 - one station has one copy (a call logged again, lost then logged, logged
   with nobody heard, a dupe); a NIL is never charged to the next caller; a
-  number never sent is no copy; a lost call keeps its copy time;
+  number logged before it was heard is a miss; a lost call keeps its copy
+  time;
 - asking during their first exchange costs its send; a call heard once
   costs one send; a repeat costs its send whatever key draws it; a
   question after the exchange is copied leaves its copy alone;
 - a CQ stopped before it went out brings no caller; Esc takes back an
   accidental CQ; Wipe then Esc brings nothing back; a forgotten timer
   waking mid-turn leaves the retries out of run time; pause and Resume is
-  no free `?`.
+  no free `?`;
+- the run end waits for a sound being retried; logging without sending
+  counts what has reached you first; a pause just after Resume keeps who
+  was cut short; a repeat cut before it began is charged once heard; a
+  pause you choose mid-send brings no quick repeat; a message without a
+  call goes with the call last sent to the station; a NIL matching nobody
+  goes only to the newest station heard; a partial while the station waits
+  is charged and timed;
+- a TU without logging then a log is checked against that station, and Esc
+  after it leaves that QSO to log; your exchange after an answered partial
+  is answered; a question with the Call field empty brings the caller back;
+  a piece of a call sent alone asks as a partial; a lost QSO keeps the call
+  first sent with your exchange; Esc takes back nothing heard at an earlier
+  key; a CQ that brings a call again costs its send; the station you work
+  leaving is said, and Enter starts afresh; asking again for a call already
+  typed costs it nothing; a bare `?` in the Call field is a question.
 
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
@@ -1731,6 +1784,9 @@ keying with the paddles, a contest level, and more contests.
 | Sends | repeats you drew: calls asked for, exchanges any key drew | every re-send | pile-ups and slow typists would pay for waiting; time charges waiting |
 | A correction | no added send; the first call is the copy | an added send | one error is not punished twice |
 | Lost copies | a call group per station engaged | logged copies only | wiping a hard call must not raise accuracy |
+| Fields logged before they were heard | a missed group each | no group | logging early with a guess must not raise accuracy, nor the board's points per group |
+| A send a pause you chose cut | owed on the caller's timeout | sent again a moment after Resume | a pause is no free `?`; a hidden page or failed sound is no choice, and does send it again |
+| F3, then log | checked against the station F3 closed | a NIL | MRCE's log finds a station done with you (`Log.pas:745-755`) |
 | Stored tokens | as keyed | canonical | Letters and Mistakes see what was heard |
 | Copy speed | calls and numbers only | every group | closed lists are guessed, not copied |
 | Board | per group within a kind; full runs ≥ 5 min | one Contest pill; 10 groups | exchange length would order it; 3 QSOs could top it |

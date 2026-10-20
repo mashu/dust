@@ -442,4 +442,56 @@ mod tests {
         assert_eq!(median(&[9.0, 1.0, 5.0]), Some(5.0));
         assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
     }
+
+    /// Logging each QSO before its exchange reached you, with a guessed
+    /// number, is no way up the board: each guess is a missed field, not a
+    /// group the run never had.
+    #[test]
+    fn logging_before_the_exchange_is_no_way_up_the_board() {
+        use crate::contest::bot::{Runtime, ScriptCalls, run_settings};
+        use crate::contest::{ContestEvent, OpKey, Sender};
+        let calls: Vec<String> = (0..40)
+            .map(|n| format!("K{}X{}Z", n % 10, (b'A' + n / 10) as char))
+            .collect();
+        let calls: Vec<&str> = calls.iter().map(String::as_str).collect();
+        let worked = |guess: bool, timestamp: u64| {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_minutes = 5;
+            let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&calls));
+            let last = |runtime: &Runtime<ScriptCalls>| {
+                let segments = &runtime.last_turn().segments;
+                segments
+                    .iter()
+                    .rfind(|segment| segment.who != Sender::You)
+                    .map(|segment| segment.text.clone())
+                    .expect("a caller sent")
+            };
+            let mut worked = 0;
+            while runtime.now < 270_000 {
+                runtime.finish_turn();
+                let call = last(&runtime);
+                runtime.key(OpKey::Esm, &call, "");
+                if guess && worked > 0 {
+                    // TU and log while your exchange still goes out.
+                    runtime.key(OpKey::TuAndLog, &call, "1");
+                } else {
+                    let exchange = last(&runtime);
+                    runtime.finish_turn();
+                    let nr = exchange.split_whitespace().last().unwrap_or_default();
+                    runtime.key(OpKey::Esm, &call, nr);
+                }
+                worked += 1;
+            }
+            runtime.run_to(300_001);
+            if !runtime.over {
+                runtime.apply(ContestEvent::FinishNow);
+            }
+            runtime.machine.result(timestamp, "2026-10-20".into())
+        };
+        let (copied, guessed) = (worked(false, 1), worked(true, 2));
+        assert!(per_group(&guessed).is_some(), "a whole run, one QSO clean");
+        assert!(guessed.accuracy < copied.accuracy);
+        let board = score_board(&[copied, guessed], Some(CharSetMode::Contest));
+        assert_eq!(board[0].timestamp, 1);
+    }
 }
