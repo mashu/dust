@@ -12,16 +12,26 @@
 //! sessions' ([`FORM_SESSIONS`]): one bad day does not drag it down the way it
 //! would an average.
 //!
+//! A contest run is ranked among runs of its own contest, and only one that
+//! says something of a whole run goes on: a log this build reads, five
+//! minutes or more of a limit of five or more, a QSO logged clean, and Show
+//! copy off.
+//!
 //! There is one player, so a place on the board is a session's, not a
 //! person's. It is read off the stored history, so a deleted session leaves
 //! the board with it. Two equal scores are placed in the order they were set:
 //! the first to reach a score holds the higher place, as on any record list.
 
+use crate::contest::CONTEST_MARK;
 use crate::session::SessionResult;
 use crate::settings::CharSetMode;
 
 /// The fewest groups a session needs to go on the board.
 pub const BOARD_MIN_GROUPS: usize = 10;
+
+/// The shortest contest run that goes on the board, and the shortest limit
+/// it ran to, in seconds: a handful of quick QSOs could top a longer one.
+const RUN_MIN_S: u64 = 300;
 
 /// How many of the latest sessions the form is the median of.
 pub const FORM_SESSIONS: usize = 10;
@@ -47,11 +57,43 @@ pub struct BoardEntry {
 }
 
 /// What a session earned a group, if it can go on the board: a score that
-/// could be read and earned something, over enough groups.
+/// could be read and earned something, over enough groups, and for a
+/// contest run, a whole run.
 pub fn per_group(session: &SessionResult) -> Option<f64> {
     let groups = session.groups.len();
-    (session.score.is_finite() && session.score > 0.0 && groups >= BOARD_MIN_GROUPS)
-        .then(|| session.score / groups as f64)
+    (session.score.is_finite()
+        && session.score > 0.0
+        && groups >= BOARD_MIN_GROUPS
+        && (session.char_set_mode != CharSetMode::Contest || a_whole_run(session)))
+    .then(|| session.score / groups as f64)
+}
+
+/// Whether a contest run says something of a whole run: its log reads, it
+/// ran five minutes or more to a limit of five or more, it logged a QSO
+/// clean, and Show copy was off. A run whose log an older build dropped is
+/// left off.
+fn a_whole_run(session: &SessionResult) -> bool {
+    let groups = &session.groups;
+    let run = session
+        .contest
+        .as_ref()
+        .and_then(|log| log.run(groups.len()));
+    run.is_some_and(|run| {
+        !run.assisted
+            && u64::from(run.limit_s) >= RUN_MIN_S
+            && run.run_ms >= RUN_MIN_S * 1_000
+            && run.clean_qsos(groups).is_some_and(|clean| clean > 0)
+    })
+}
+
+/// The contest a run was of, by its mark: `wpx` of `contest:wpx`. None for
+/// any other session.
+fn contest_kind(session: &SessionResult) -> Option<&str> {
+    if session.char_set_mode != CharSetMode::Contest {
+        return None;
+    }
+    let marked = session.alphabet_fingerprint.strip_prefix(CONTEST_MARK)?;
+    marked.split(':').next()
 }
 
 fn of_mode(session: &SessionResult, mode: Option<CharSetMode>) -> bool {
@@ -101,19 +143,22 @@ pub fn score_board(sessions: &[SessionResult], mode: Option<CharSetMode>) -> Vec
 }
 
 /// Where the session finished at `timestamp` stands among the sessions of
-/// its own mode on the board: its place, and how many there are. Nothing for
-/// a session that is not on it.
+/// its own mode on the board, and a contest run among runs of its own
+/// contest: its place, and how many there are. Nothing for a session that
+/// is not on it.
 pub fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize, usize)> {
-    let mode = sessions
+    let session = sessions
         .iter()
-        .find(|session| session.timestamp == timestamp)?
-        .char_set_mode;
-    let board = score_board(sessions, Some(mode));
+        .find(|session| session.timestamp == timestamp)?;
+    let kind = contest_kind(session);
+    let board: Vec<BoardEntry> = score_board(sessions, Some(session.char_set_mode))
+        .into_iter()
+        .filter(|entry| contest_kind(&sessions[entry.index]) == kind)
+        .collect();
     let place = board
         .iter()
-        .find(|entry| entry.timestamp == timestamp)?
-        .place;
-    Some((place, board.len()))
+        .position(|entry| entry.timestamp == timestamp)?;
+    Some((place + 1, board.len()))
 }
 
 /// The modes the board has sessions of, in the order the trainer offers
@@ -248,6 +293,52 @@ mod tests {
         let board = score_board(&sessions, None);
         assert_eq!(board[0].timestamp, 10);
         assert_eq!(board[1].timestamp, 20);
+    }
+
+    /// A contest run goes on the board only as a whole run: five minutes or
+    /// more, of a limit of five or more, with a QSO logged clean and a log
+    /// this build reads. It is placed among runs of its own contest.
+    #[test]
+    fn a_contest_run_is_placed_only_as_a_whole_run() {
+        use crate::contest::bot::{Habit, Operator, Runtime, run_settings, work};
+        let worked = |minutes: u32, habit: Habit, timestamp: u64| {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_minutes = minutes;
+            let sampler = crate::Sampler::new(&[], &settings, 3);
+            let mut runtime = Runtime::start(3, settings, sampler);
+            work(&mut runtime, &mut Operator::new(habit), &[]);
+            runtime.machine.result(timestamp, "2026-10-20".into())
+        };
+        let short = worked(2, Habit::Perfect, 1);
+        assert!(short.groups.len() >= BOARD_MIN_GROUPS && short.score > 0.0);
+        assert_eq!(per_group(&short), None, "a two-minute run");
+        let whole = worked(5, Habit::Perfect, 2);
+        assert!(per_group(&whole).is_some());
+        let busted = worked(5, Habit::DigitOff, 3);
+        assert!(busted.groups.len() >= BOARD_MIN_GROUPS && busted.score > 0.0);
+        assert_eq!(per_group(&busted), None, "no QSO logged clean");
+        let stripped = SessionResult {
+            contest: None,
+            timestamp: 4,
+            ..whole.clone()
+        };
+        assert_eq!(per_group(&stripped), None, "its log dropped");
+        let sessions = [short, whole.clone(), busted, stripped];
+        let board = score_board(&sessions, Some(CharSetMode::Contest));
+        assert_eq!(board.len(), 1);
+        assert_eq!(board_place(&sessions, 2), Some((1, 1)));
+        // A better run of another contest, as its mark says, is not above
+        // it on its contest's board.
+        let other = SessionResult {
+            alphabet_fingerprint: "contest:simpleQso".into(),
+            score: whole.score * 2.0,
+            timestamp: 5,
+            ..whole
+        };
+        let sessions = [sessions[1].clone(), other];
+        assert_eq!(score_board(&sessions, Some(CharSetMode::Contest)).len(), 2);
+        assert_eq!(board_place(&sessions, 2), Some((1, 1)));
+        assert_eq!(board_place(&sessions, 5), Some((1, 1)));
     }
 
     /// A broken or empty score is not a place on the board.

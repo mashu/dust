@@ -165,10 +165,15 @@ pub fn adapts_speed(settings: &TrainingSettings) -> bool {
 }
 
 /// The line adaptive speed moves along, when it has one: it is switched on,
-/// and the speed settings leave more than one speed to choose from.
+/// the speed settings leave more than one speed to choose from, and the
+/// mode draws its speeds by it. A contest's callers come at speeds drawn
+/// evenly from the range, until adaptive caller speed comes (phase 5).
 pub(crate) fn adaptive_speed_path(settings: &TrainingSettings) -> Option<SpeedPath> {
     let path = SpeedPath::of(settings);
-    (settings.playback.adaptive_speed && path.has_room()).then_some(path)
+    (settings.playback.adaptive_speed
+        && path.has_room()
+        && settings.curriculum.char_set_mode != CharSetMode::Contest)
+        .then_some(path)
 }
 
 /// The shortest and longest group `settings` asks for. At least one
@@ -605,6 +610,28 @@ mod tests {
                 "{call:?}"
             );
         }
+    }
+
+    /// Contest mode never says it adapts speed: its callers' speeds are
+    /// drawn evenly from the range, whatever the switch carried over from
+    /// Callsigns says.
+    #[test]
+    fn contest_has_no_adaptive_speed_path() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.char_wpm_max = 35.0;
+        settings.playback.effective_wpm_min = 20.0;
+        settings.playback.effective_wpm_max = 35.0;
+        settings.playback.adaptive_speed = true;
+        let settings = settings.clamp();
+        assert!(adapts_speed(&settings));
+        let mut contest = settings;
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        let contest = contest.clamp();
+        assert!(contest.playback.adaptive_speed, "the switch is kept");
+        assert!(!adapts_speed(&contest));
+        assert!(adaptive_speed_path(&contest).is_none());
     }
 
     /// A call to avoid is drawn again, a few times at most, and every call

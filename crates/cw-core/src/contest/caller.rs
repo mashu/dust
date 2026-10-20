@@ -132,7 +132,8 @@ pub(super) struct Reaction {
     /// It sends, after its reply delay.
     pub(super) replies: bool,
     /// What it sends answers your asking for it again: `?`, `NR?`, a
-    /// partial. Only those are sends you pay for.
+    /// partial. A call sent again so is a send you pay for; an exchange
+    /// sent again is one whatever key drew it.
     pub(super) asked: bool,
     /// It took a call you sent for its own, exactly or close, or answered
     /// your partial: you are working it now.
@@ -187,6 +188,10 @@ pub(super) struct Caller {
     skill: u32,
     /// Tries left while it calls.
     patience: u32,
+    /// It heard you work someone else since it last called, so a bare `?`
+    /// is not for it, as MorseRunner's `osNeedPrevEnd` (`DxOper.pas:744-748,
+    /// 793`). Your CQ or TU, its own call, or its next call clears it.
+    other_qso: bool,
     /// Its timeouts in a row with nothing from you, while you work it.
     silent: u32,
     serial: SerialModel,
@@ -227,6 +232,7 @@ impl Caller {
             deadline: None,
             skill,
             patience,
+            other_qso: false,
             silent: 0,
             serial,
             exchange: None,
@@ -246,29 +252,49 @@ impl Caller {
         let mut reaction = Reaction::default();
         // Whether it replies, where a part decides; otherwise its state does.
         let mut replies = None;
-        // Whether the last call in the message was its own: an exchange
-        // after someone else's call is not for it.
+        // Whether the last call in the message was its own: an exchange or
+        // a `?` after someone else's call is not for it.
         let mut addressed = None;
         for part in message {
             match part {
-                MessagePart::Cq => match self.state {
-                    NeedQso => replies = Some(true),
-                    // Its exchange is out: as far as it knows the QSO is
-                    // complete. Before that, a CQ fails it.
-                    NeedEnd => self.state = Done,
-                    NeedNr | NeedCall | NeedCallNr => self.state = Gone,
-                    Done | Gone => {}
-                },
-                MessagePart::Tu => match self.state {
-                    NeedQso => replies = Some(true),
-                    state if state.worked() => self.state = Done,
-                    _ => {}
-                },
+                MessagePart::Cq => {
+                    self.other_qso = false;
+                    match self.state {
+                        NeedQso => replies = Some(true),
+                        // Its exchange is out: as far as it knows the QSO is
+                        // complete. Before that, a CQ fails it.
+                        NeedEnd => self.state = Done,
+                        NeedNr | NeedCall | NeedCallNr => self.state = Gone,
+                        Done | Gone => {}
+                    }
+                }
+                MessagePart::Tu => {
+                    self.other_qso = false;
+                    match self.state {
+                        NeedQso => replies = Some(true),
+                        state if state.worked() => self.state = Done,
+                        _ => {}
+                    }
+                }
                 MessagePart::HisCall(sent) if self.state.active() => {
                     let found = match_call(sent, &self.call.text);
                     addressed = Some(found != CallMatch::No);
                     reaction.matched |= found != CallMatch::No;
+                    self.other_qso = found == CallMatch::No;
                     match (found, self.state) {
+                        // A partial while you work it asks for its call: it
+                        // puts the call right, as MorseRunner's `mcAlmost`
+                        // (`DxOper.pas:734-742`).
+                        (CallMatch::Partial { .. }, NeedNr) => {
+                            self.state = NeedCallNr;
+                            replies = Some(true);
+                            reaction.asked = true;
+                        }
+                        (CallMatch::Partial { .. }, NeedEnd) => {
+                            self.state = NeedCall;
+                            replies = Some(true);
+                            reaction.asked = true;
+                        }
                         // The single caller answers any partial: it is the
                         // only one there to ask.
                         (CallMatch::Partial { .. }, _) => {
@@ -291,23 +317,31 @@ impl Caller {
                         NeedNr => self.state = NeedEnd,
                         NeedCallNr => self.state = NeedCall,
                         // Your exchange went to someone: it falls silent.
-                        NeedQso => replies = Some(false),
+                        NeedQso => {
+                            replies = Some(false);
+                            self.other_qso = true;
+                        }
                         _ => {}
                     }
                 }
-                MessagePart::Again | MessagePart::NrQuery if self.state.active() => {
+                MessagePart::Again | MessagePart::NrQuery
+                    if self.state.active()
+                        && addressed != Some(false)
+                        && !(self.state == NeedQso && self.other_qso) =>
+                {
                     replies = Some(true);
                     reaction.asked = true;
                 }
-                MessagePart::Nil if self.state == NeedQso => {
-                    self.patience = self.patience.saturating_sub(1);
-                    if self.patience == 0 {
-                        self.state = Gone;
-                    }
-                }
+                MessagePart::Nil if self.state == NeedQso => self.spend_try(),
                 MessagePart::B4 | MessagePart::Nil if self.state.worked() => self.state = Gone,
                 _ => {}
             }
+        }
+        // A caller still calling spends a try on each message it answers,
+        // as on each timeout (`DxOper.pas:709, 825`): CQ after CQ moves the
+        // frequency on to someone else.
+        if self.state == NeedQso && replies == Some(true) {
+            self.spend_try();
         }
         reaction.replies = match self.state {
             NeedQso => replies.unwrap_or(false),
@@ -320,6 +354,14 @@ impl Caller {
         reaction
     }
 
+    /// One try spent while it calls; the last sends it away.
+    fn spend_try(&mut self) {
+        self.patience = self.patience.saturating_sub(1);
+        if self.patience == 0 {
+            self.state = CallerState::Gone;
+        }
+    }
+
     /// Its reply timeout ran out with nothing from you. Whether it sends
     /// again: a caller tries while its patience lasts, and the station you
     /// work leaves after [`SILENT_TIMEOUTS`] in a row.
@@ -327,10 +369,9 @@ impl Caller {
         self.deadline = None;
         match self.state {
             CallerState::NeedQso => {
-                self.patience = self.patience.saturating_sub(1);
-                if self.patience == 0 {
-                    self.state = CallerState::Gone;
-                }
+                self.spend_try();
+                // It calls again: a `?` now is for it.
+                self.other_qso = false;
             }
             state if state.worked() => {
                 self.silent += 1;
@@ -657,6 +698,83 @@ mod tests {
         assert_eq!(caller.state, CallerState::NeedQso);
         let reaction = caller.hear(&[Again]);
         assert!(reaction.replies && reaction.asked && !reaction.matched);
+    }
+
+    /// A partial while you work it asks for its call: it puts the call
+    /// right, as MorseRunner's callers answer `mcAlmost`, whether it waits
+    /// for your exchange or for your TU.
+    #[test]
+    fn a_partial_while_worked_is_answered_with_the_call() {
+        for (message, before, after) in [
+            (
+                vec![call("K5XYZ")],
+                CallerState::NeedNr,
+                CallerState::NeedCallNr,
+            ),
+            (
+                vec![call("K5XYZ"), Exchange],
+                CallerState::NeedEnd,
+                CallerState::NeedCall,
+            ),
+        ] {
+            let mut caller = caller(9);
+            caller.hear(&message);
+            assert_eq!(caller.state, before);
+            let reaction = caller.hear(&[call("K5X?")]);
+            assert!(reaction.replies && reaction.asked && reaction.matched);
+            assert_eq!(caller.state, after);
+            let (text, says) = caller.reply(rules(), Side::Dx, 0).expect("a reply");
+            assert_eq!(says, Says::Correction);
+            assert!(text.contains("K5XYZ"), "{text}");
+        }
+    }
+
+    /// A `?` after someone else's call, or once it heard your exchange go
+    /// to someone else, is not for a caller still calling; it calls again
+    /// on its timeout, and a `?` then is for it.
+    #[test]
+    fn a_question_after_someone_elses_call_is_not_for_it() {
+        let mut caller = caller(1);
+        assert!(!caller.hear(&[call("W1AW"), Again]).replies);
+        assert!(!caller.hear(&[Again]).replies, "it heard you work W1AW");
+        let mut other = self::caller(2);
+        other.hear(&[call("W1AW"), Exchange]);
+        assert!(!other.hear(&[Again]).replies);
+        assert!(other.time_out(), "it calls again");
+        assert!(other.hear(&[Again]).replies);
+        // After your CQ, a `?` is for it again.
+        let mut cq = self::caller(3);
+        cq.hear(&[call("W1AW")]);
+        cq.hear(&[Cq]);
+        assert!(cq.hear(&[Again]).replies);
+        // The station you work answers a `?`, but not one after another
+        // call.
+        let mut worked = self::caller(4);
+        worked.hear(&[call("K5XYZ"), Exchange]);
+        assert!(!worked.hear(&[call("W1AW"), Again]).replies);
+        assert!(worked.hear(&[Again]).replies);
+    }
+
+    /// Each message a caller still calling answers costs it a try, as each
+    /// timeout does: CQ after CQ, or `?` after `?`, sends it away in the
+    /// end.
+    #[test]
+    fn each_message_a_caller_answers_costs_a_try() {
+        let mut caller = caller(3);
+        let tries = caller.patience;
+        assert!(caller.hear(&[Cq]).replies);
+        assert!(caller.hear(&[Again]).replies);
+        assert_eq!(caller.patience, tries - 2);
+        let mut answered = 2;
+        while caller.hear(&[Cq]).replies {
+            answered += 1;
+        }
+        assert_eq!(answered, tries - 1);
+        assert_eq!(caller.state, CallerState::Gone);
+        // A message it does not answer costs nothing.
+        let mut silent = self::caller(3);
+        silent.hear(&[call("W1AW"), Exchange]);
+        assert_eq!(silent.patience, tries);
     }
 
     /// Each timeout costs a try; the last one sends it away.

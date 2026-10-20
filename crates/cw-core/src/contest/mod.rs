@@ -42,7 +42,7 @@ pub use esm::{EntryField, Esm, Fields, MessagePart, QsoState, esm, message_text}
 pub use exchange::{Field, cut_serial, keyed_token, read_number, send_serial};
 pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
-    PauseWhy, QsoView, RowStatus,
+    PauseWhy, RowStatus,
 };
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub(crate) use record::CONTEST_MARK;

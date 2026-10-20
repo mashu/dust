@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    GROUP_START_BIGRAM_TOKEN, MasteryStatus, SamplingRow, SessionResult, SpeedPath,
-    TrainingSettings, character_diagnostics, group_length_forecast, mistake_stats, sampling_rows,
-    session_history, speed_forecast,
+    CONTEST_TIMES_NOTE, CharSetMode, GROUP_START_BIGRAM_TOKEN, MasteryStatus, SamplingRow,
+    SessionResult, SpeedPath, TrainingSettings, character_diagnostics, group_length_forecast,
+    mistake_stats, sampling_rows, session_history, speed_forecast,
 };
 use dioxus::prelude::*;
 
@@ -22,9 +22,15 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
             div { class: "card", p { class: "muted", "No letter data yet." } }
         };
     }
+    let contest = sessions
+        .iter()
+        .any(|session| session.char_set_mode == CharSetMode::Contest);
     rsx! {
         div { class: "card stack",
             div { class: "tiny", "Letter accuracy" }
+            if contest {
+                p { class: "muted", "{CONTEST_TIMES_NOTE}" }
+            }
             for row in letters.iter() {
                 {
                     let status = match row.status {

@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::check::{QsoText, check_qso};
+use super::check::{QsoCheck, QsoText, check_qso};
 use super::exchange::Field;
 use super::score::{ContestScore, ScoredQso, contest_score};
 use super::{ContestKind, RunStyle};
@@ -96,7 +96,9 @@ pub struct QsoRecord {
     /// The station's country, for multipliers.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub c: String,
-    /// A NIL only: the exchange you logged.
+    /// The exchange you logged, a token for each of the run's fields,
+    /// where no group holds it: a NIL's, or a QSO's whose exchange never
+    /// reached you, or whose station's copy an earlier QSO holds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub l: Vec<String>,
     /// The call you logged, where its call group does not hold it: the
@@ -104,6 +106,15 @@ pub struct QsoRecord {
     /// the call corrected since. Empty when they are the same.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lc: String,
+    /// What the station sent of its exchange, beside `l`, where no group
+    /// holds it, so the check can be worked out again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub s: Vec<String>,
+    /// The station's call, where no group of this QSO holds it: a station
+    /// logged again, whose copy an earlier QSO holds. `lc` holds the call
+    /// logged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sc: String,
 }
 
 impl ContestLog {
@@ -190,6 +201,34 @@ impl ContestRun {
     pub fn score(&self, groups: &[GroupResult]) -> Option<ContestScore> {
         let rules = ContestKind::from_name(&self.kind)?.rules()?;
         let scoring = rules.scoring?;
+        let logged = self.checks(groups)?;
+        let scored: Vec<ScoredQso<'_>> = logged
+            .iter()
+            .map(|(at_ms, call, check)| ScoredQso {
+                at_ms: *at_ms,
+                call,
+                check,
+            })
+            .collect();
+        Some(contest_score(&scoring, &scored, self.run_ms))
+    }
+
+    /// How many of the run's QSOs were logged clean, a dupe copied right
+    /// among them; none for groups that are not this run's.
+    pub fn clean_qsos(&self, groups: &[GroupResult]) -> Option<usize> {
+        let logged = self.checks(groups)?;
+        Some(
+            logged
+                .iter()
+                .filter(|(_, _, check)| check.is_clean())
+                .count(),
+        )
+    }
+
+    /// Each logged QSO, checked as it was while the run went on against
+    /// what its station sent, which its groups or its record hold: when it
+    /// was logged, the call as logged, and the check.
+    fn checks(&self, groups: &[GroupResult]) -> Option<Vec<(u64, String, QsoCheck)>> {
         let fields: Vec<Field> = self
             .fields
             .iter()
@@ -204,7 +243,10 @@ impl ContestRun {
             if qso.k == LOST {
                 continue;
             }
-            let call_group = owned.first();
+            // A logged QSO's call group comes first, unless an earlier QSO
+            // holds the station's copy; its field groups follow, unless the
+            // record holds the exchange.
+            let call_group = owned.first().filter(|_| qso.sc.is_empty());
             let call = if qso.lc.is_empty() {
                 call_group?.received.clone()
             } else {
@@ -220,43 +262,53 @@ impl ContestRun {
                     |_| false,
                 ),
                 _ => {
-                    let station = call_group?;
+                    let station: &str = match call_group {
+                        Some(group) => &group.sent,
+                        None if !qso.sc.is_empty() => &qso.sc,
+                        None => return None,
+                    };
+                    let field_groups = &owned[usize::from(call_group.is_some())..];
+                    let tokens = |held: &[String]| -> Vec<(Field, String)> {
+                        fields
+                            .iter()
+                            .zip(held)
+                            .filter(|(_, token)| !token.is_empty())
+                            .map(|(field, token)| (*field, token.clone()))
+                            .collect()
+                    };
                     let copied = |held: fn(&GroupResult) -> &String| {
                         fields
                             .iter()
-                            .zip(&owned[1..])
+                            .zip(field_groups)
                             .map(|(field, group)| (*field, held(group).clone()))
                             .collect()
                     };
+                    let (typed, sent) = if qso.s.is_empty() {
+                        (copied(|group| &group.received), copied(|group| &group.sent))
+                    } else {
+                        (tokens(&qso.l), tokens(&qso.s))
+                    };
                     let sent = QsoText {
-                        call: station.sent.clone(),
-                        fields: copied(|group| &group.sent),
+                        call: station.to_string(),
+                        fields: sent,
                     };
                     let check = check_qso(
                         &QsoText {
                             call: call.clone(),
-                            fields: copied(|group| &group.received),
+                            fields: typed,
                         },
                         Some(&sent),
                         |call| clean.contains(&call),
                     );
                     if check.is_clean() {
-                        clean.push(&station.sent);
+                        clean.push(station);
                     }
                     check
                 }
             };
             logged.push((qso.t, call, check));
         }
-        let scored: Vec<ScoredQso<'_>> = logged
-            .iter()
-            .map(|(at_ms, call, check)| ScoredQso {
-                at_ms: *at_ms,
-                call,
-                check,
-            })
-            .collect();
-        Some(contest_score(&scoring, &scored, self.run_ms))
+        Some(logged)
     }
 }
 
@@ -284,6 +336,8 @@ mod tests {
             c: String::new(),
             l: Vec::new(),
             lc: String::new(),
+            s: Vec::new(),
+            sc: String::new(),
         }
     }
 
@@ -474,6 +528,61 @@ mod tests {
         );
         // Groups that are not this run's are not scored.
         assert_eq!(stored.score(&groups[1..]), None);
+    }
+
+    /// Where no group holds what a QSO logged or what its station sent,
+    /// the record does, and the check is worked out from that: a QSO
+    /// logged before the exchange came, and a station logged again.
+    #[test]
+    fn a_qso_the_record_holds_scores_as_it_ran() {
+        let mut stored = run();
+        stored.qsos = vec![
+            qso(30_000, 2, 1),
+            // Logged before its exchange came: a number guessed.
+            QsoRecord {
+                l: vec!["12".into()],
+                s: vec!["9".into()],
+                ..qso(60_000, 1, 2)
+            },
+            // Logged before its exchange came, and guessed right.
+            QsoRecord {
+                l: vec!["7".into()],
+                s: vec!["TT7".into()],
+                ..qso(70_000, 1, 3)
+            },
+            // K5XYZ logged again: a dupe, whose copy QSO 1 holds.
+            QsoRecord {
+                lc: "K5XYZ".into(),
+                sc: "K5XYZ".into(),
+                l: vec!["214".into()],
+                s: vec!["214".into()],
+                ..qso(90_000, 0, 4)
+            },
+        ];
+        let groups = [
+            group("K5XYZ", "K5XYZ"),
+            group("214", "214"),
+            group("DL2XYZ", "DL2XYZ"),
+            group("9A1AA", "9A1AA"),
+        ];
+        let log = ContestLog::from(&stored);
+        assert_eq!(log.0["qsos"][3]["sc"], "K5XYZ");
+        assert!(log.0["qsos"][0].get("s").is_none());
+        assert_eq!(log.run(groups.len()), Some(stored.clone()));
+        let score = stored.score(&groups).expect("WPX scores");
+        // Raw: K5XYZ, DL2XYZ and 9A1AA, the call typed twice dropped.
+        assert_eq!(score.raw.qso_points, 3);
+        // Verified: K5XYZ and 9A1AA; DL2XYZ's number was wrong, and the
+        // dupe scores nothing.
+        assert_eq!(
+            score.verified,
+            Tally {
+                qso_points: 2,
+                mults: 2,
+                score: 4
+            }
+        );
+        assert_eq!(stored.clean_qsos(&groups), Some(3), "the dupe is clean");
     }
 
     /// The session a run is kept as: its groups scored and tallied as a

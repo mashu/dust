@@ -2,12 +2,14 @@
 //! the two fields, as MorseRunner's Enter does it.
 //!
 //! Four things decide it. **C**: the Call field still reads the call last
-//! sent. **N**: your exchange went out. **V**: the call is whole, with no
-//! `?`. **E**: how much of the exchange the Exchange field holds. Each of
-//! MorseRunner's rows that holds adds its part, and the parts go out as one
-//! message: `K5XYZ` typed sends `K5XYZ 5NN TT7`; then `?` while the exchange
-//! is empty; then `TU`, which logs. Where MorseRunner refuses an exchange it
-//! cannot read, Dust sends nothing at all: the fault is in the typing.
+//! sent. **N**: the station you work took your exchange. **V**: the call is
+//! whole, with no `?`. **E**: how much of the exchange the Exchange field
+//! holds. Each of MorseRunner's rows that holds adds its part, and the parts
+//! go out as one message: `K5XYZ` typed sends `K5XYZ 5NN TT7`; then `?`
+//! while the exchange is empty; then `TU`, which logs. Where MorseRunner
+//! refuses an exchange it cannot read, Dust sends nothing at all: the fault
+//! is in the typing. So too once the station has corrected the call still
+//! in the Call field: sent again, it would only be corrected again.
 //!
 //! It is pure, so the machine runs it on a key and the screen on its own
 //! field text, for the key's label and the hint.
@@ -24,8 +26,12 @@ pub struct QsoState {
     /// The call last sent, as it went out: C holds while the Call field
     /// still reads it. Empty before any.
     pub call_sent: String,
-    /// Whether your exchange went out: N.
+    /// Whether the station you work took your exchange: N. An exchange
+    /// nobody took is owed still.
     pub exchange_sent: bool,
+    /// The station corrected the call last sent, and no call has gone out
+    /// since.
+    pub corrected: bool,
 }
 
 /// The two fields as typed, with when they were typed: a copy is timed from
@@ -110,6 +116,15 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
     let c = call == qso.call_sent;
     let n = qso.exchange_sent;
     let v = parse_callsign(&call).is_some();
+    // Sent again as it stands, the call would only be corrected again.
+    if qso.corrected && c && v {
+        return Esm {
+            message: Vec::new(),
+            label: "Fix call".to_string(),
+            hint: "They corrected you: fix the call, then Enter".to_string(),
+            focus: Some(EntryField::Call),
+        };
+    }
     if n && v && e == ExchangeState::Invalid {
         return Esm {
             message: Vec::new(),
@@ -263,6 +278,7 @@ mod tests {
         let qso = QsoState {
             call_sent: call_sent.to_string(),
             exchange_sent,
+            corrected: false,
         };
         let fields = Fields {
             call: call.to_string(),
@@ -380,6 +396,35 @@ mod tests {
         let asks = enter("K5XYW", true, "K5XYZ", "");
         assert_eq!(sent(&asks), "K5XYZ ?");
         assert_eq!(asks.label, "Send K5XYZ + ?");
+    }
+
+    /// The station corrected the call: while the Call field still reads the
+    /// call sent, Enter sends nothing and the cursor goes back to it, since
+    /// a `?` would only bring the correction again.
+    #[test]
+    fn after_a_correction_enter_waits_for_the_call_to_be_fixed() {
+        let qso = QsoState {
+            call_sent: "K5XYW".to_string(),
+            exchange_sent: true,
+            corrected: true,
+        };
+        let fields = |call: &str, exch: &str| Fields {
+            call: call.to_string(),
+            exch: exch.to_string(),
+            ..Fields::default()
+        };
+        for exch in ["", "214"] {
+            let esm = esm(&qso, &fields("K5XYW", exch), rules(), Side::Dx);
+            assert!(esm.message.is_empty(), "{exch:?}");
+            assert_eq!(esm.label, "Fix call");
+            assert_eq!(esm.hint, "They corrected you: fix the call, then Enter");
+            assert_eq!(esm.focus, Some(EntryField::Call));
+        }
+        // Fixed, it goes out with what the QSO needs.
+        let fixed = esm(&qso, &fields("K5XYZ", ""), rules(), Side::Dx);
+        assert_eq!(sent(&fixed), "K5XYZ ?");
+        let fixed = esm(&qso, &fields("K5XYZ", "214"), rules(), Side::Dx);
+        assert_eq!(sent(&fixed), "K5XYZ TU");
     }
 
     /// The call went out without your exchange (an Esc cut it short): Enter

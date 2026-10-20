@@ -1115,6 +1115,14 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
         });
         let view = machine.view(MonoMs(finished_at));
         let result = machine.result(finished_at, "2026-10-20".into());
+        // One station, one copy: however often it was logged or lost, at
+        // most one of its QSOs owns its groups.
+        for (station, copies) in machine.copies_by_station() {
+            assert_eq!(
+                copies, 1,
+                "seed {seed}: station {station} copied {copies} times"
+            );
+        }
         assert!(
             view.log
                 .iter()

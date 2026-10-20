@@ -53,10 +53,10 @@ pub use contest::{
     AirView, CallSource, CallerHabits, ContestEffect, ContestEvent, ContestKind, ContestLog,
     ContestMachine, ContestPhase, ContestRules, ContestRun, ContestScore, ContestView, EntryField,
     Esm, ExchangeState, Field, Fields, LogRow, MessagePart, Multiplier, OpKey, PauseWhy, PerSide,
-    QsoCheck, QsoError, QsoRecord, QsoState, QsoText, QsoView, Rates, ReadField, Reading,
-    RowStatus, RunClock, RunStyle, ScoredQso, Scoring, Segment, Sender, SerialFit, SerialModel,
-    Side, Tally, Turn, WPX_SERIALS, check_qso, contest_score, cut_serial, esm, keyed_token,
-    message_text, normalize_call, parse_exchange, plan_turn, rate_at, read_number, send_serial,
+    QsoCheck, QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField, Reading, RowStatus,
+    RunClock, RunStyle, ScoredQso, Scoring, Segment, Sender, SerialFit, SerialModel, Side, Tally,
+    Turn, WPX_SERIALS, check_qso, contest_score, cut_serial, esm, keyed_token, message_text,
+    normalize_call, parse_exchange, plan_turn, rate_at, read_number, send_serial,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
@@ -95,10 +95,10 @@ pub use settings::{
 pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};
 pub use stats::{
-    AccuracyPoint, BigramHeatmap, CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN,
-    MasteryStatus, MistakeStats, SamplingRow, SessionHistoryRow, accuracy_chart,
-    character_diagnostics, group_length_forecast, mistake_stats, practised_modes, sampling_rows,
-    session_history, span_history, speed_forecast, speed_history,
+    AccuracyPoint, BigramHeatmap, CONTEST_TIMES_NOTE, CharacterDiagnostic, ConfusionEntry,
+    GROUP_START_BIGRAM_TOKEN, MasteryStatus, MistakeStats, SamplingRow, SessionHistoryRow,
+    accuracy_chart, character_diagnostics, group_length_forecast, mistake_stats, practised_modes,
+    sampling_rows, session_history, span_history, speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

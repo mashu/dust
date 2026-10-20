@@ -60,12 +60,19 @@ impl RunClock {
     /// was read at, so a stale `now` reads as that, and a pause stamped
     /// earlier begins there.
     pub fn elapsed_ms(&mut self, now: MonoMs) -> u64 {
+        if self.paused_since.is_none() {
+            self.seen = now.max(self.seen);
+        }
+        self.peek_ms(now)
+    }
+
+    /// Run time at `now`, read as [`Self::elapsed_ms`] reads it but not
+    /// remembered: a reading that stamps nothing, so a pause stamped before
+    /// `now` may still begin before it.
+    pub fn peek_ms(&self, now: MonoMs) -> u64 {
         let end = match self.paused_since {
             Some(since) => since,
-            None => {
-                self.seen = now.max(self.seen);
-                self.seen
-            }
+            None => now.max(self.seen),
         };
         end.since(self.started).saturating_sub(self.paused_ms)
     }
@@ -149,6 +156,19 @@ mod tests {
         clock.resume(MonoMs(11_000));
         assert_eq!(clock.elapsed_ms(MonoMs(12_000)), 11_000);
         assert_eq!(clock.paused_ms(MonoMs(12_000)), 1_000);
+    }
+
+    /// A reading that is only a look leaves a later pause free to begin
+    /// before it.
+    #[test]
+    fn a_peek_is_not_remembered() {
+        let mut clock = RunClock::start(MonoMs(0));
+        assert_eq!(clock.elapsed_ms(MonoMs(1_000)), 1_000);
+        assert_eq!(clock.peek_ms(MonoMs(6_000)), 6_000);
+        assert_eq!(clock.peek_ms(MonoMs(500)), 1_000, "never less than read");
+        clock.pause(MonoMs(2_000));
+        assert_eq!(clock.elapsed_ms(MonoMs(9_000)), 2_000);
+        assert_eq!(clock.peek_ms(MonoMs(9_000)), 2_000);
     }
 
     /// Whatever happens, pauses stamped up to a heartbeat tick late

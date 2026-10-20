@@ -20,6 +20,11 @@ pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;
 pub const BUILDING_MIN_ACCURACY: f64 = 0.7;
 pub const SLOW_AVG_MS: f64 = 800.0;
+
+/// What the Letters card says once the history holds a contest run: its
+/// letters count, but not its times.
+pub const CONTEST_TIMES_NOTE: &str = "Contest runs count towards accuracy here, but not towards \
+     the times: theirs include waiting and typing, not only copying.";
 pub const GROUP_START_BIGRAM_TOKEN: char = '▸';
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +149,11 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
             let entry = totals.entry(*letter).or_insert((0, 0));
             entry.0 += stats.correct;
             entry.1 += stats.total;
+        }
+        // A contest's times run from a station's send to an edit, waiting
+        // and typing included: not answers after a send (§10 of the design).
+        if session.char_set_mode == CharSetMode::Contest {
+            continue;
         }
         for (group, timing) in session.groups.iter().zip(session.group_timings.iter()) {
             if timing.time_to_complete_ms <= 0.0 {
@@ -519,6 +529,59 @@ mod tests {
             score: 1.0,
             ..SessionResult::empty_for_test()
         }
+    }
+
+    /// A contest run's letters count for accuracy, but its times, which
+    /// include waiting and typing, leave the average time alone.
+    #[test]
+    fn contest_times_stay_out_of_the_letters_times() {
+        use crate::contest::bot::{Habit, Operator, Runtime, run_settings, work};
+        let mut calls = SessionResult::empty_for_test();
+        calls.char_set_mode = CharSetMode::Callsign;
+        for _ in 0..10 {
+            calls.groups.push(GroupResult {
+                sent: "K5XYZ".into(),
+                received: "K5XYZ".into(),
+                correct: true,
+            });
+            calls.group_timings.push(SessionTiming {
+                time_to_complete_ms: 1_500.0,
+                char_wpm: Some(25.0),
+                effective_wpm: Some(25.0),
+                sends: 1,
+            });
+            calls.tally.add("K5XYZ", "K5XYZ");
+        }
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_minutes = 2;
+        let sampler = crate::Sampler::new(&[], &settings, 4);
+        let mut runtime = Runtime::start(4, settings, sampler);
+        work(&mut runtime, &mut Operator::new(Habit::HumanPaced), &[]);
+        let run = runtime.machine.result(2, "2026-10-20".into());
+        assert!(
+            run.group_timings
+                .iter()
+                .any(|t| t.time_to_complete_ms > 1_500.0)
+        );
+        let letter = |history: &[SessionResult], ch: char| {
+            character_diagnostics(history)
+                .into_iter()
+                .find(|diag| diag.letter == ch)
+        };
+        let alone = letter(std::slice::from_ref(&calls), 'K').expect("K");
+        let both = [calls.clone(), run.clone()];
+        let with_run = letter(&both, 'K').expect("K");
+        assert_eq!(with_run.avg_ms, alone.avg_ms);
+        let counted = run.letter_accuracy().get(&'K').map_or(0, |k| k.total);
+        assert_eq!(with_run.total, alone.total + counted);
+        // A letter only the run has shows no time at all.
+        let only = run
+            .groups
+            .iter()
+            .flat_map(|group| group.sent.chars())
+            .find(|ch| !"K5XYZ".contains(*ch))
+            .expect("a letter K5XYZ lacks");
+        assert_eq!(letter(&both, only).map(|diag| diag.avg_ms), Some(0.0));
     }
 
     #[test]

@@ -270,6 +270,28 @@ fn home_without_history_invites_a_first_session() {
     assert!(!html.contains("Last accuracy"));
 }
 
+/// Once the history holds a contest run, the Letters tab says its times
+/// are left out of the letters' times.
+#[test]
+fn the_letters_tab_says_when_contest_times_are_left_out() {
+    let says = |sessions: Vec<SessionResult>| {
+        let props = StatsViewProps {
+            settings: TrainingSettings::default(),
+            sessions,
+            on_delete: None,
+            backups: None,
+        };
+        let mut ui = crate::testing::Ui::new(StatsView, props);
+        ui.click("seg-letters");
+        assert!(ui.has("Letter accuracy"));
+        ui.has(cw_core::CONTEST_TIMES_NOTE)
+    };
+    assert!(!says(vec![session("2026-09-01", 0.9)]));
+    let mut contest = session("2026-09-02", 0.9);
+    contest.char_set_mode = CharSetMode::Contest;
+    assert!(says(vec![session("2026-09-01", 0.9), contest]));
+}
+
 #[test]
 fn stats_count_sessions_from_every_character_set() {
     // A history recorded in Digits mode, read while the app is set to Mixed.
