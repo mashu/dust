@@ -805,9 +805,10 @@ fn one_edit_off(text: &str, rng: &mut SplitMix64) -> String {
     chars.into_iter().collect()
 }
 
-/// A key and its fields: 40% as heard, 20% one edit off, 10% empty, 10% a
-/// partial, 20% junk.
-fn contest_key(rng: &mut SplitMix64, now: u64, call: &str, serial: &str) -> ContestEvent {
+/// A key and its fields: 40% as heard, a quarter of those with the call
+/// heard before the last, as an operator logging a QSO it forgot types it;
+/// 20% one edit off, 10% empty, 10% a partial, 20% junk.
+fn contest_key(rng: &mut SplitMix64, now: u64, seen: &Seen) -> ContestEvent {
     use OpKey::*;
     const KEYS: [OpKey; 15] = [
         Esm,
@@ -839,8 +840,11 @@ fn contest_key(rng: &mut SplitMix64, now: u64, call: &str, serial: &str) -> Cont
             .map(|_| JUNK[rng.usize_in(0, JUNK.len() - 1)])
             .collect()
     };
+    let (call, serial) = (seen.call.as_str(), seen.serial.as_str());
     let draw = rng.f64();
-    let (call, exch) = if draw < 0.4 {
+    let (call, exch) = if draw < 0.1 {
+        (seen.previous.clone(), serial.to_string())
+    } else if draw < 0.4 {
         (call.to_string(), serial.to_string())
     } else if draw < 0.6 {
         (one_edit_off(call, rng), one_edit_off(serial, rng))
@@ -873,8 +877,8 @@ struct Outcomes {
 }
 
 /// What a contest soak run has seen of the machine's effects: every id
-/// handed out, the turns and timers among them, and the last call and
-/// serial a listener would have copied from the callers.
+/// handed out, the turns and timers among them, the last call and serial
+/// a listener would have copied from the callers, and the call before it.
 #[derive(Debug, Default)]
 struct Seen {
     ids: std::collections::BTreeSet<u64>,
@@ -882,6 +886,7 @@ struct Seen {
     timers: Vec<u64>,
     call: String,
     serial: String,
+    previous: String,
 }
 
 /// Every effect a contest run hands back has to be one the runtime can act
@@ -917,7 +922,9 @@ fn check_contest_effects(
                     }
                     match copy_of(&segment.text) {
                         Some(Copied::Call(call) | Copied::Correction(call)) => {
-                            seen.call = call.to_string();
+                            if seen.call != call {
+                                seen.previous = std::mem::replace(&mut seen.call, call.to_string());
+                            }
                         }
                         Some(Copied::Serial(serial)) => seen.serial = serial.to_string(),
                         None => {}
@@ -960,7 +967,7 @@ fn random_contest_event(
     };
     let draw = rng.f64();
     if draw < 0.36 {
-        contest_key(rng, now, &seen.call, &seen.serial)
+        contest_key(rng, now, seen)
     } else if draw < 0.46 {
         ContestEvent::TurnStarted {
             id: pick(rng, &seen.turns),
@@ -1115,8 +1122,9 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
         });
         let view = machine.view(MonoMs(finished_at));
         let result = machine.result(finished_at, "2026-10-20".into());
-        // One station, one copy: however often it was logged or lost, at
-        // most one of its QSOs owns its groups.
+        // One station, one copy: every station worked, logged or lost has
+        // its groups in exactly one of its QSOs, however often it was
+        // logged or lost.
         for (station, copies) in machine.copies_by_station() {
             assert_eq!(
                 copies, 1,

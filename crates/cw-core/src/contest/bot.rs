@@ -521,7 +521,21 @@ mod tests {
                 (180.0..=280.0).contains(&rate),
                 "seed {seed}: {rate:.0} an hour"
             );
-            assert!(result.groups.iter().all(|group| group.correct));
+            // Every copy is right, but the number of a QSO the run's end cut
+            // short, which was never logged.
+            let mut at = 0;
+            for qso in &run.qsos {
+                let owned = &result.groups[at..at + qso.g as usize];
+                at += qso.g as usize;
+                let copied = if qso.k.is_empty() { owned } else { &owned[..1] };
+                assert!(copied.iter().all(|group| group.correct), "seed {seed}");
+            }
+            assert!(
+                run.qsos[..run.qsos.len() - 1]
+                    .iter()
+                    .all(|qso| qso.k.is_empty()),
+                "seed {seed}: only the last QSO may be cut short"
+            );
             assert!(result.group_timings.iter().all(|timing| timing.sends == 1));
         }
     }

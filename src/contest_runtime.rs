@@ -646,7 +646,15 @@ mod tests {
             // The QSO open as time ran out, if one was, is a lost copy.
             assert!(stored.qsos.len() <= logged + 1, "{:?}", stored.qsos);
             assert_eq!(stored.run_ms, 60_000);
-            assert!(result.groups.iter().all(|group| group.correct));
+            // Every copy is right, but the number of that QSO, which was
+            // never logged.
+            let mut at = 0;
+            for qso in &stored.qsos {
+                let owned = &result.groups[at..at + qso.g as usize];
+                at += qso.g as usize;
+                let copied = if qso.k.is_empty() { owned } else { &owned[..1] };
+                assert!(copied.iter().all(|group| group.correct), "{qso:?}");
+            }
             assert_eq!(h.ctx.sessions.peek().len(), 1);
             assert_eq!(h.store.load_sessions(), vec![result.clone()]);
             assert_eq!(h.store.keep_asks.get(), 1);

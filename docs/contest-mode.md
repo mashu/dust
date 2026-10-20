@@ -39,9 +39,10 @@ mistake; the results, also opened from History, give a raw and a verified
 contest score.
 
 Each copied call and exchange field is stored as an ordinary group of a
-`SessionResult`, and so is each call you worked but lost, so every stat
-counts contest practice with no special code. A compact log rides beside
-the groups. Older builds keep the run as callsign practice.
+`SessionResult`, and so is each station you worked but lost, its fields as
+misses, so every stat counts contest practice with no special code. A
+compact log rides beside the groups. Older builds keep the run as callsign
+practice.
 
 The first release offers WPX, Simple QSO and Sprint, with single callers
 and pile-ups (end of phase 2, §14).
@@ -328,8 +329,12 @@ The callers follow MRCE's model, re-written from its behaviour, credited.
 - **Reply timeout** `(6 − skill)` s, Gaussian, within ±50%
   (`DxOper.pas:282-287`). Each timeout costs a unit of patience and the
   caller sends again.
-- **Patience** while calling is `3 + Rayleigh(3)` tries, 4–14 with a mean
-  near 6 (`DxOper.pas:496-498`). Each message a caller answers while it
+- **Patience** while calling is `3 + RndRayleigh(3)` tries, rounded
+  (`DxOper.pas:496-498`). MRCE's `RndRayleigh(m)` is `m·√(−ln u₁ − ln u₂)`
+  (`RndFunc.pas:55-58`), not a Rayleigh draw of mean `m`, so it gives
+  4–14 tries with a mean near 7, and only 2.6% of callers give up after 4,
+  which keeps callers from vanishing just after they call (MRCE issue
+  #200, `DxOper.pas:486-493`). Each message a caller answers while it
   calls (CQ, TU, `?`, a partial) costs a try too, as MRCE's `DecPatience`
   (`DxOper.pas:709, 825`), so CQ after CQ moves the frequency on to
   someone else.
@@ -349,7 +354,7 @@ The callers follow MRCE's model, re-written from its behaviour, credited.
 | `<call> <exch>`, no match | calls again after its timeout | — |
 | `?`, `AGN`, `NR?` | repeats its call, unless it heard you work someone else since it last called and the Call field is not empty, as MRCE's `osNeedPrevEnd` (`DxOper.pas:744-748, 793`) | re-sends what it owes: call or exchange. After someone else's call, neither answers |
 | partial `K5?` | only the best matches answer; your exchange after a partial it answered, in that message or a later one, is for it: it takes it and puts its call right (`NeedCall`), as MRCE's `osNeedCallNr` (`DxOper.pas:734-742, 768-776`) | sends its call, as MRCE's `mcAlmost` (`DxOper.pas:734-742`): `NeedNr` → `NeedCallNr`, `NeedEnd` → `NeedCall` |
-| B4, NIL (phase 2) | NIL costs a patience | leaves |
+| B4, NIL (phase 2) | NIL costs a patience | leaves, and Enter starts afresh (4.4) |
 
 From phase 2, in pile-ups only:
 
@@ -385,7 +390,7 @@ is part of E.
 |---|---|---|
 | Call empty | CQ | `CQ` |
 | your TU without logging (F3) went to this call, V, E Complete | TU, and logs that QSO, as MRCE's C and N still hold after F3 | `TU & log` |
-| C, V, and the station corrected that call | nothing; focus to Call, as a `?` would only bring the correction again | `Fix call` |
+| C, V, and the station corrected that call, unasked or in answer to `?` | nothing; focus to Call, as a `?` would only bring the correction again | `Fix call` |
 | not C, or not V, or (not N and E Empty) | his call as typed, then… | `Send K5XYZ`, or `Ask K5?` |
 | …not N and V | …your exchange | `Send K5XYZ + exch` |
 | N, V, E Empty or Missing | `?` | `? Again` |
@@ -397,8 +402,11 @@ The rows that fire go out as one message: `K5XYZ` typed sends
 A CQ or a TU ends the QSO for Enter as logging does, and so does a key
 pressed with the Call field empty, as MRCE's `Edit1Change` resets C and N
 when the field empties (`Main.pas:2063-2068`), and the station you work
-leaving. F3 keeps only the call it went to, so Enter on that call logs the
-QSO it closed, and any other call starts afresh.
+leaving, on its timeouts or sent away by what you send (B4, NIL, or its
+last try spent). F3 keeps only the call it went to, so Enter on that call
+logs the QSO it closed, and any other call starts afresh. Its call sent in
+answer to your partial, or to a piece of its call, is no correction: you
+asked for it.
 A call corrected after your exchange sends `K5XYZ TU` and logs. A partial
 always goes out again as typed, alone. Where MRCE refuses an invalid
 exchange (`Main.pas:1210-1216`), Dust also sends nothing: the fault is your
@@ -561,8 +569,9 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   had not gone out whole: they are as they were before the message keyed
   last, then hear only its parts sent whole. A reply it cut never sounded,
   and what they owe comes on their timeouts. A QSO the message itself lost
-  (a CQ or TU keyed by mistake) is taken back with it, and so is a caller
-  it brought, as MRCE's callers hear nothing of an aborted send
+  (a CQ or TU keyed by mistake, or the next station's call while the QSO
+  your TU without logging closed waits) is taken back with it, and so is a
+  caller it brought, as MRCE's callers hear nothing of an aborted send
   (`AbortSend`); the groups of such a QSO reach the sampler only once it
   is final. A QSO logged since that key, or lost by a later key, is final,
   so then nothing is taken back; nor is a continuation's carried rest,
@@ -1058,7 +1067,7 @@ pub struct QsoRecord {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub c: String,      // the station's country key, for multipliers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub l: Vec<String>, // the exchange you logged, a token a field, where no group holds it
+    pub l: Vec<String>, // the exchange you logged, a token a field: a NIL's, or where no group holds it
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lc: String,     // the call logged, where the call group does not hold it
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1088,20 +1097,32 @@ exactly as it was while the run went on.
   hold what you logged and what was sent, for the check.
 - **One station, one copy.** A station logged again (a dupe, or a log
   after a NIL charged to it) owns no groups: `sc` holds its call, `lc` the
-  call logged, and `l` and `s` both exchanges. The soak checks that no
-  station's groups are owned twice.
+  call logged, and `l` and `s` both exchanges. The soak checks that every
+  station worked, logged or lost owns its groups in exactly one QSO.
 - **A lost QSO** (`k: "lost"`): a station whose call you sent, or that
   answered your partial, whose QSO ended unlogged (wiped, gone, failed by
   your CQ, closed by your F3 and never logged, open at the end). One call
-  group; received = the call as first sent with your exchange, as a logged
-  QSO keeps it, so walking away pays no better than finishing; never sent
-  so, the Call field as last read while you worked it (a wipe reads it
-  before clearing), without `?`; empty is a full miss. It is timed as the
-  call was when you last sent it.
-- **A NIL** (`k: "nil"`): one call group against the station you work, or
-  else the station heard whose call the logged one is or is close to, or
-  else the single caller, the newest heard, and never an older one;
-  received = the logged call. That station then has no lost group as well.
+  group, then one per copied field, each a miss (received empty, 1 send,
+  the token the station sent or would have sent), whether its exchange had
+  reached you or not, as a QSO logged before its exchange came has. So a
+  station costs the same groups however its QSO ends, and walking away
+  once the exchanges are out, or the moment yours is, never raises
+  accuracy or the board's points per group above finishing. The call's
+  received = the call as first sent with your exchange, as a logged QSO
+  keeps it; never sent so, the Call field as last read while you worked it
+  (a wipe reads it before clearing), without `?`; empty is a full miss. It
+  is timed as the call was when you last sent it.
+- **A NIL** (`k: "nil"`): a call group, and a group for each field as a
+  logged QSO has them (as keyed once the station's exchange has begun to
+  reach you, a miss before that), against the station you work, or else
+  the station heard whose call the logged one is or is close to, or else
+  the single caller, the newest heard, and never an older one; received =
+  the logged call. So a NIL owns the groups a QSO logged with that station
+  would, copied no better, and never pays better than finishing: one
+  logged on a caller before you work it copies none of its exchange, and
+  one logged with a busted call once the exchange is in keeps the fields
+  as you copied them. That station then has no lost copy as well, and a
+  QSO logged with it later owns no groups.
   When that station already owns its groups (lost, logged, or charged a NIL
   before), or no station was heard at all, there is no group, and `lc`
   holds the call; no other station is charged.
@@ -1233,7 +1254,7 @@ out of the Callsign series (`belief.rs:134-145`, `stats.rs:420-429`,
 
 | Stat | Contest runs |
 |---|---|
-| Calendar, streak, accuracy | Count; character accuracy covers calls and fields, lost calls included. A day's best reads "Best points" (`heatmap.rs:231`). |
+| Calendar, streak, accuracy | Count; character accuracy covers calls and fields, lost copies included. A day's best reads "Best points" (`heatmap.rs:231`). |
 | Letters (`stats.rs:136-198`) | Accuracy counts every keyed character. Contest timings stay out of `avg_ms` and the slow flag, which measure answers after a send; the note says so. |
 | Mistakes, sampler beliefs | Count, on keyed tokens: K5XYC for K5XYZ is Z→C, `1T5` for `1N5` is N→T. |
 | Sampling snapshot (`stats.rs:317-397`) | A Contest arm runs the contest's `CallSource` and `CallSpec`, for calls only. |
@@ -1575,7 +1596,8 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   correction.
 - **Matching:** exact, close, none; `?` inside and at the end; best
   confidence only.
-- **Callers:** patience over 10,000 draws in 4–14, mean near 6; timeouts
+- **Callers:** patience over 10,000 draws in 4–14, mean near 7, four
+  tries under 5% of the time and five or fewer under 25%; timeouts
   within ±50%; nothing sent after `Done` or `Gone`; CQ fails the worked QSO;
   a worked station leaves after 3 silent timeouts; each message answered
   while calling costs a try; a `?` after someone else's call is not for a
@@ -1606,7 +1628,9 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
 - pause in the countdown; resume re-arms the run end; a key that sends
   forgets the resume timer; `Hidden` never resumes by itself;
 - Again ×3, Wipe, CQ brings a new caller; a wipe after hearing a call adds
-  a lost group; a NIL adds one call group; an empty run stores nothing;
+  a lost copy; a NIL adds a call group and a miss for each field; an empty
+  run stores nothing; a NIL after the exchange was heard copies its fields
+  as logged;
 - a continuation keeps every character wherever it is keyed; an exchange
   sent with a logging TU carries that QSO's serial; a row's check shows once
   its TU is out; a repeat costs its send once it begins; Esc takes back what
@@ -1640,7 +1664,14 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   first sent with your exchange; Esc takes back nothing heard at an earlier
   key; a CQ that brings a call again costs its send; the station you work
   leaving is said, and Enter starts afresh; asking again for a call already
-  typed costs it nothing; a bare `?` in the Call field is a question.
+  typed costs it nothing; a bare `?` in the Call field is a question;
+- Esc of the next call after a TU without logging keeps that QSO's copy,
+  and that QSO is still lost if never logged; a correction drawn by a `?`
+  reads Fix call; B4 or NIL sending the station away, or spending the last
+  try of one that answered your partial, starts Enter afresh;
+  a lost QSO owns a missed group for each field; a NIL before working the
+  station costs its fields too; walking away once the exchanges are out is
+  no way up the board.
 
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
@@ -1651,9 +1682,11 @@ One digit off: verified 0. Unsure: asks `K5?` first, its call points
 halve. Pauser: the clock equals the unpaused time. Dupe worker: 0 points,
 no error.
 
-**Soak** (`soak.rs`, its own 2,000 seeds). Keys carry fields 40% as heard,
-20% one edit off, 10% empty, 10% partial and 20% junk, among stale and
-current turn events, timers by any id, pause, resume, hide and finish.
+**Soak** (`soak.rs`, its own 2,000 seeds). Keys carry fields 40% as heard
+(a quarter of them with the call heard before the last, as when logging a
+QSO left after F3), 20% one edit off, 10% empty, 10% partial and 20% junk,
+among stale and current turn events, timers by any id, pause, resume, hide
+and finish.
 
 - Every step: no panic, fresh ids, a clock that never goes back, but for
   the retries a failed send gives back as paused (4.2).
@@ -1661,7 +1694,8 @@ current turn events, timers by any id, pause, resume, hide and finish.
   `run_ms` ≤ the limit; `run_ms + paused_ms` is the wall-clock span, or at
   most that when time ran out, as a run noticed past its limit ends at the
   limit (6.5); no reply ends after `wanted`; no row is `…`; `g` sums to the
-  groups; no station's groups are owned by two QSOs; points finite;
+  groups; every station worked, logged or lost owns its groups in exactly
+  one QSO; points finite;
   verified ≤ raw; `result()` round-trips.
 - Across seeds, a floor of clean, busted, field-error, NIL and lost QSOs.
 - Each seed's (event, now) list replayed twice gives the same run.
@@ -1813,7 +1847,7 @@ keying with the paddles, a contest level, and more contests.
 | Again | `?`, as MRCE's F7 | `K5X?` | partials go through Enter |
 | Sends | repeats you drew: calls asked for, exchanges any key drew | every re-send | pile-ups and slow typists would pay for waiting; time charges waiting |
 | A correction | no added send; the first call is the copy | an added send | one error is not punished twice |
-| Lost copies | a call group per station engaged | logged copies only | wiping a hard call must not raise accuracy |
+| Lost copies | a call group and a missed group per field for each station engaged, as for a QSO logged before its exchange came | logged copies only; a call group alone | wiping a hard call, or walking away once the exchanges are out, must not raise accuracy, nor the board's points per group |
 | Fields logged before they were heard | a missed group each | no group | logging early with a guess must not raise accuracy, nor the board's points per group |
 | A send a pause you chose cut | owed on the caller's timeout | sent again a moment after Resume | a pause is no free `?`; a hidden page or failed sound is no choice, and does send it again |
 | F3, then log | checked against the station F3 closed | a NIL | MRCE's log finds a station done with you (`Log.pas:745-755`) |

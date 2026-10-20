@@ -233,6 +233,8 @@ pub fn score_timeline(sessions: &[SessionResult], mode: Option<CharSetMode>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contest::bot::{Runtime, ScriptCalls, run_settings};
+    use crate::contest::{ContestEvent, OpKey, Sender};
     use crate::session::GroupResult;
 
     /// A session of `groups` groups that earned `score` in all.
@@ -300,7 +302,7 @@ mod tests {
     /// this build reads. It is placed among runs of its own contest.
     #[test]
     fn a_contest_run_is_placed_only_as_a_whole_run() {
-        use crate::contest::bot::{Habit, Operator, Runtime, run_settings, work};
+        use crate::contest::bot::{Habit, Operator, work};
         let worked = |minutes: u32, habit: Habit, timestamp: u64| {
             let mut settings = run_settings(25.0);
             settings.contest.contest_minutes = minutes;
@@ -443,55 +445,107 @@ mod tests {
         assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
     }
 
+    /// The callers' last send in the turn just played.
+    fn last_heard(runtime: &Runtime<ScriptCalls>) -> String {
+        runtime
+            .last_turn()
+            .segments
+            .iter()
+            .rfind(|segment| segment.who != Sender::You)
+            .map(|segment| segment.text.clone())
+            .expect("a caller sent")
+    }
+
+    /// A five-minute run at 25 WPM, kept at `timestamp`: each caller's call
+    /// heard and sent back with your exchange by Enter, then what `each`
+    /// does with that QSO, given its call and how many came before it.
+    fn five_minute_run(
+        timestamp: u64,
+        each: impl Fn(&mut Runtime<ScriptCalls>, &str, usize),
+    ) -> SessionResult {
+        let calls: Vec<String> = (0..60)
+            .map(|n| format!("K{}X{}Z", n % 10, (b'A' + n / 10) as char))
+            .collect();
+        let calls: Vec<&str> = calls.iter().map(String::as_str).collect();
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_minutes = 5;
+        let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&calls));
+        let mut worked = 0;
+        while runtime.now < 270_000 {
+            runtime.finish_turn();
+            let call = last_heard(&runtime);
+            runtime.key(OpKey::Esm, &call, "");
+            each(&mut runtime, &call, worked);
+            worked += 1;
+        }
+        runtime.run_to(300_001);
+        if !runtime.over {
+            runtime.apply(ContestEvent::FinishNow);
+        }
+        runtime.machine.result(timestamp, "2026-10-20".into())
+    }
+
+    /// Its exchange heard whole, then logged as heard.
+    fn log_as_heard(runtime: &mut Runtime<ScriptCalls>, call: &str) {
+        let exchange = last_heard(runtime);
+        runtime.finish_turn();
+        let nr = exchange.split_whitespace().last().unwrap_or_default();
+        runtime.key(OpKey::Esm, call, nr);
+    }
+
     /// Logging each QSO before its exchange reached you, with a guessed
     /// number, is no way up the board: each guess is a missed field, not a
     /// group the run never had.
     #[test]
     fn logging_before_the_exchange_is_no_way_up_the_board() {
-        use crate::contest::bot::{Runtime, ScriptCalls, run_settings};
-        use crate::contest::{ContestEvent, OpKey, Sender};
-        let calls: Vec<String> = (0..40)
-            .map(|n| format!("K{}X{}Z", n % 10, (b'A' + n / 10) as char))
-            .collect();
-        let calls: Vec<&str> = calls.iter().map(String::as_str).collect();
         let worked = |guess: bool, timestamp: u64| {
-            let mut settings = run_settings(25.0);
-            settings.contest.contest_minutes = 5;
-            let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&calls));
-            let last = |runtime: &Runtime<ScriptCalls>| {
-                let segments = &runtime.last_turn().segments;
-                segments
-                    .iter()
-                    .rfind(|segment| segment.who != Sender::You)
-                    .map(|segment| segment.text.clone())
-                    .expect("a caller sent")
-            };
-            let mut worked = 0;
-            while runtime.now < 270_000 {
-                runtime.finish_turn();
-                let call = last(&runtime);
-                runtime.key(OpKey::Esm, &call, "");
+            five_minute_run(timestamp, |runtime, call, worked| {
                 if guess && worked > 0 {
                     // TU and log while your exchange still goes out.
-                    runtime.key(OpKey::TuAndLog, &call, "1");
+                    runtime.key(OpKey::TuAndLog, call, "1");
                 } else {
-                    let exchange = last(&runtime);
-                    runtime.finish_turn();
-                    let nr = exchange.split_whitespace().last().unwrap_or_default();
-                    runtime.key(OpKey::Esm, &call, nr);
+                    log_as_heard(runtime, call);
                 }
-                worked += 1;
-            }
-            runtime.run_to(300_001);
-            if !runtime.over {
-                runtime.apply(ContestEvent::FinishNow);
-            }
-            runtime.machine.result(timestamp, "2026-10-20".into())
+            })
         };
         let (copied, guessed) = (worked(false, 1), worked(true, 2));
         assert!(per_group(&guessed).is_some(), "a whole run, one QSO clean");
         assert!(guessed.accuracy < copied.accuracy);
         let board = score_board(&[copied, guessed], Some(CharSetMode::Contest));
         assert_eq!(board[0].timestamp, 1);
+    }
+
+    /// Walking away from each QSO once the exchanges are out, with CQ, is no
+    /// way up the board: each field never logged is a miss, so it pays no
+    /// better than finishing, and hides no copy from accuracy.
+    #[test]
+    fn walking_away_is_no_way_up_the_board() {
+        let worked = |walk_away: bool, timestamp: u64| {
+            five_minute_run(timestamp, |runtime, call, worked| {
+                if walk_away && worked > 0 {
+                    // Its exchange heard whole, then CQ: the next caller
+                    // comes.
+                    runtime.finish_turn();
+                    runtime.key(OpKey::Cq, call, "");
+                } else {
+                    log_as_heard(runtime, call);
+                }
+            })
+        };
+        // Every QSO finished, copied perfectly; and one QSO finished, every
+        // other walked away from once its exchange was heard.
+        let (finished, walked) = (worked(false, 1), worked(true, 2));
+        assert!(per_group(&finished).is_some() && per_group(&walked).is_some());
+        assert_eq!(finished.accuracy, 1.0);
+        assert!(walked.accuracy < finished.accuracy);
+        let board = score_board(&[finished, walked], Some(CharSetMode::Contest));
+        let ranked: Vec<(u64, f64)> = board
+            .iter()
+            .map(|entry| (entry.timestamp, entry.per_group))
+            .collect();
+        assert_eq!(
+            board[0].timestamp, 1,
+            "the run that walked away ranks first: {ranked:?}"
+        );
     }
 }

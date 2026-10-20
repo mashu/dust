@@ -7,8 +7,6 @@
 //! of MorseRunner's states; what it sends next follows from the state. Which
 //! of your calls it takes for its own is [`match_call`].
 
-use std::f64::consts::FRAC_PI_2;
-
 use super::CallerHabits;
 use super::esm::MessagePart;
 use super::exchange::{Field, send_serial};
@@ -142,10 +140,11 @@ pub(super) struct Reaction {
     pub(super) took_exchange: bool,
 }
 
-/// How many tries a caller makes before it gives up: `3 + Rayleigh(3)`,
-/// four to fourteen with a mean near six (`DxOper.pas:496-498`).
+/// How many tries a caller makes before it gives up: `3 + RndRayleigh(3)`,
+/// rounded, as MorseRunner draws it (`DxOper.pas:496-498`), four to
+/// fourteen with a mean near seven.
 const PATIENCE_BASE: u32 = 3;
-const PATIENCE_RAYLEIGH_MEAN: f64 = 3.0;
+const PATIENCE_RAYLEIGH_SCALE: f64 = 3.0;
 const PATIENCE_MIN: u32 = 4;
 const PATIENCE_MAX: u32 = 14;
 
@@ -535,12 +534,13 @@ impl Caller {
 
 /// How many tries a caller makes, from `rng`.
 fn draw_patience(rng: &mut impl Rng) -> u32 {
-    // A Rayleigh draw of the mean asked for: its scale is the mean over
-    // √(π/2).
-    let scale = PATIENCE_RAYLEIGH_MEAN / FRAC_PI_2.sqrt();
-    let u = (1.0 - rng.f64()).clamp(f64::EPSILON, 1.0);
-    let rayleigh = scale * (-2.0 * u.ln()).sqrt();
-    (PATIENCE_BASE + rayleigh.round() as u32).clamp(PATIENCE_MIN, PATIENCE_MAX)
+    // MorseRunner's `RndRayleigh(m)` is `m·√(−ln u₁ − ln u₂)`
+    // (`RndFunc.pas:55-58`), not a Rayleigh draw of mean `m`: its mean is
+    // near 4, so few callers give up after the fewest tries. Delphi's
+    // `Round` takes a half to the even side.
+    let mut uniform = || (1.0 - rng.f64()).clamp(f64::EPSILON, 1.0);
+    let draw = PATIENCE_RAYLEIGH_SCALE * (-uniform().ln() - uniform().ln()).sqrt();
+    (PATIENCE_BASE + draw.round_ties_even() as u32).clamp(PATIENCE_MIN, PATIENCE_MAX)
 }
 
 #[cfg(test)]
@@ -606,18 +606,32 @@ mod tests {
         assert!(fits("K5X?Z") > fits("K5?"));
     }
 
-    /// Four to fourteen tries, a mean near six.
+    /// Four to fourteen tries, a mean near seven.
     #[test]
-    fn patience_is_four_to_fourteen_tries_with_a_mean_near_six() {
+    fn patience_is_four_to_fourteen_tries_with_a_mean_near_seven() {
         let mut rng = SplitMix64::new(42);
         let draws: Vec<u32> = (0..10_000).map(|_| draw_patience(&mut rng)).collect();
         assert!(draws.iter().all(|p| (4..=14).contains(p)));
         let mean = draws.iter().sum::<u32>() as f64 / draws.len() as f64;
-        assert!((mean - 6.0).abs() < 0.3, "mean {mean:.2}");
+        assert!((mean - 7.0).abs() < 0.3, "mean {mean:.2}");
         assert!(
             draws.iter().any(|p| *p >= 10),
             "a patient caller now and then"
         );
+    }
+
+    /// Patience is drawn as MorseRunner draws it, `3 + Round(RndRayleigh(3))`
+    /// with `RndRayleigh(m) = m·√(−ln u₁ − ln u₂)` (`RndFunc.pas:55-58`):
+    /// four tries only 2.6% of the time, as `DxOper.pas:493` says, and five
+    /// or fewer about 15%.
+    #[test]
+    fn few_callers_give_up_after_four_tries() {
+        let mut rng = SplitMix64::new(42);
+        let draws: Vec<u32> = (0..20_000).map(|_| draw_patience(&mut rng)).collect();
+        let share =
+            |most: u32| draws.iter().filter(|p| **p <= most).count() as f64 / draws.len() as f64;
+        assert!(share(4) < 0.05, "four tries {:.1}%", share(4) * 100.0);
+        assert!(share(5) < 0.25, "five or fewer {:.1}%", share(5) * 100.0);
     }
 
     /// `(6 − skill)` seconds, never more than half of that either way.
