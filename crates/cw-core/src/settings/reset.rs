@@ -32,6 +32,7 @@ impl TrainingSettings {
                 self.playback.paddle_swap = d.playback.paddle_swap;
                 self.playback.keyer_mode = d.playback.keyer_mode;
                 self.playback.keyer_wpm = d.playback.keyer_wpm;
+                self.contest.contest_minutes = d.contest.contest_minutes;
             }
             SettingsSection::Speed => {
                 self.playback.char_wpm_min = d.playback.char_wpm_min;
@@ -55,6 +56,7 @@ impl TrainingSettings {
                 self.curriculum.custom_sequence = d.curriculum.custom_sequence.clone();
                 self.curriculum.sequence_is_custom = d.curriculum.sequence_is_custom;
                 self.curriculum.practice_window = d.curriculum.practice_window;
+                self.contest.contest_kind = d.contest.contest_kind;
             }
             SettingsSection::ToneAndVolume => {
                 self.band.side_tone_min = d.band.side_tone_min;
@@ -94,6 +96,9 @@ impl TrainingSettings {
                 self.auto_level.char_sampling_coverage_strength =
                     d.auto_level.char_sampling_coverage_strength;
                 self.auto_level.char_sampling_thompson = d.auto_level.char_sampling_thompson;
+            }
+            SettingsSection::Station => {
+                self.contest.my_call = d.contest.my_call;
             }
         }
         *self = std::mem::take(self).clamp();

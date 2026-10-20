@@ -8,9 +8,9 @@
 //! how long they live.
 
 use cw_core::{
-    AnswerClose, CharSamplingState, CountersKey, CountersUpdate, MonoMs, Sampler, SessionEffect,
-    SessionEvent, SessionId, SessionMachine, SplitMix64, Transmission, complete_session,
-    generate_training_group, resolve_station,
+    AnswerClose, CharSamplingState, CharSetMode, CountersKey, CountersUpdate, MonoMs, Sampler,
+    SessionEffect, SessionEvent, SessionId, SessionMachine, SplitMix64, Transmission,
+    complete_session, generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -193,9 +193,15 @@ pub fn start_session(ctx: AppCtx) {
         mut preview,
         ..
     } = ctx;
-    let fitted = settings.peek().clone().clamp();
+    let mut fitted = settings.peek().clone().clamp();
     if *settings.peek() != fitted {
         settings.set(fitted.clone());
+    }
+    // Contest has no machine of its own yet. Settings that open in it, a
+    // later version's save or one edited by hand, practise Callsigns at the
+    // same tier until it has, so no group session is recorded as a run.
+    if fitted.curriculum.char_set_mode == CharSetMode::Contest {
+        fitted.curriculum.char_set_mode = CharSetMode::Callsign;
     }
     // The session has the audio now, whether or not it can open it: any
     // preview that had it has stopped.
@@ -435,7 +441,6 @@ mod tests {
     use crate::persist::Store;
     use crate::testing::{Harness, run, test_settings};
     use cw_core::AutoLevelCounters;
-    use cw_core::CharSetMode;
     use cw_core::SessionEffect;
     use cw_core::SessionPhase;
     use std::cell::Cell;
@@ -469,6 +474,28 @@ mod tests {
             assert!(h.calls().contains(&Call::Shutdown));
             // Two groups, one send each.
             assert_eq!(h.texts().len(), 2);
+        });
+    }
+
+    /// Until Contest has a machine of its own, settings that open in it run
+    /// Callsigns practice, recorded as such, and stay as they were.
+    #[test]
+    fn settings_in_contest_practise_callsigns_until_runs_arrive() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.char_set_mode = CharSetMode::Contest;
+            settings.curriculum.callsign_level = 1;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let result = h.ctx.result.peek().clone().expect("a result");
+            assert_eq!(result.char_set_mode, CharSetMode::Callsign);
+            assert!(result.groups.iter().all(|g| g.correct));
+            assert_eq!(
+                h.ctx.settings.peek().curriculum.char_set_mode,
+                CharSetMode::Contest
+            );
         });
     }
 

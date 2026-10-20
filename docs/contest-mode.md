@@ -2,7 +2,10 @@
 
 Status: being built phase by phase (§14). Phase 0, history that lasts, has
 landed: Contest exists as a mode no one can pick yet, runs written by later
-builds are read and kept, and History names every session's mode.
+builds are read and kept, and History names every session's mode. Phase 1's
+cw-core foundations are in: the WPX rules row, contest calls and their
+parsing, exchanges and cut numbers, ESM, the run clock, callers' serials,
+checks, both scores, the run's log layout, and the contest settings.
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -370,8 +373,11 @@ always goes out again as typed, alone. Where MRCE refuses an invalid
 exchange (`Main.pas:1210-1216`), Dust also sends nothing: the fault is your
 typing. When Enter does not log and V holds, focus moves to Exchange, as
 MRCE's `MustAdvance` (`Main.pas:1222-1223`); after logging it returns to
-Call. `esm(&qso, &fields, &rules) -> Esm { message, label, hint }` is pure:
-the machine runs it on the key, the screen on its own field text.
+Call. `esm(&qso, &fields, &rules, side) -> Esm { message, label, hint, focus }`
+is pure: the machine runs it on the key, the screen on its own field text.
+It takes your side because ARRL DX's exchange depends on it, as
+`parse_exchange` does. When rows combine, the label names each part:
+`Send K5XYZ + ?`, `Send K5XYZ, TU & log`, `Send exch, TU & log`.
 
 ### 4.5 Keys and buttons
 
@@ -449,6 +455,11 @@ at once, so nothing is `…` at the end. The checks follow MRCE's
 - **CALL:** a busted call, with the correct one shown.
 - **DUPE:** already logged clean.
 - **Field errors:** NR, ZN, ST, PWR, CL, SEC, NAME, and RST in Simple QSO.
+
+`QsoCheck` holds the errors found, a NIL alone or a busted call and field
+errors together, and whether the QSO is a dupe, which is no error: a dupe
+copied right is clean. Raw drops a call already in the log as typed, as a
+logger marks a dupe; verified counts each clean, non-dupe station once.
 
 Logged QSOs cannot be edited, as in MRCE.
 
@@ -604,10 +615,15 @@ out by itself.
 ### 6.3 The clock
 
 `RunClock` (cw-core) holds `started`, `paused_ms` and `paused_since` in
-`MonoMs` (`session.rs:54-67`), never wall time. The machine has no tick; the
-run bar redraws every 250 ms from `mono_ms()`, kept apart from the view as
-`TrainingProgress` is (`training.rs:19-45`). It always shows elapsed
-time: "07:42 / 10:00", or "07:42 · up to 60:00" for an open run.
+`MonoMs` (`session.rs:54-67`), never wall time, and the latest time it was
+read, paused or resumed at. A pause stamped in the past (the heartbeat's)
+begins no earlier than that, so it never counts a stretch of time twice nor
+takes back run time a QSO was stamped with; a stale reading shows the
+latest. Pausing twice or resuming a running clock changes nothing. The
+machine has no tick; the run bar redraws every 250 ms from `mono_ms()`,
+kept apart from the view as `TrainingProgress` is (`training.rs:19-45`). It
+always shows elapsed time: "07:42 / 10:00", or "07:42 · up to 60:00" for an
+open run.
 
 ### 6.4 Pause, hidden page, locked phone
 
@@ -861,6 +877,10 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   in Callsigns at the same tier instead of failing the strict parse into
   Mixed (`settings/save.rs:44-57`, `persist/mod.rs:183-207`). Its next save
   drops Your station: settings, which a backup holds, not training data.
+  Nothing writes `"contest"` as the mode; a save edited by hand that names
+  it opens in Contest. Until the Contest arm of `start_session` lands (1a),
+  settings that open in Contest start Callsigns practice at the same tier,
+  so no group session is recorded as a run (`session_runtime.rs`).
 - **Clamping and tests.** `clamp()` settles the strings in one pass
   (`clamp.rs:15-115`); every new number is an integer. `wild()` and
   `wildly_different()` (`settings/mod.rs:826, 1382-1441`) set every new
@@ -974,7 +994,9 @@ next `g` groups.
   `TT7`, `5NN`). If the canonical values match (11.6), received = sent, so a
   logger-style `7` for `TT7` is clean. Otherwise received is the typed
   token, a typed digit written as the cut letter where the sent token had
-  one (0↔T/O, 9↔N, 1↔A): a heard N typed as 0 is N→T. Empty is a miss.
+  one (0↔T/O, 1↔A, 5↔E, 9↔N): a heard N typed as 0 is N→T. Digits are
+  lined up against the sent token by value, so a heard N typed as 9 is a
+  match even beside a digit added or dropped. Empty is a miss.
 - **`sends`** is 1 plus the repeats you asked for while the item was owed
   (`?`, a partial, `AGN`, `NR?`), counted from when you first sent that
   station's call or `?`. An exchange re-send counts only for fields empty,
@@ -1113,15 +1135,33 @@ files written by scripts, each naming its source and year.
   shared `callsignLevel`.
 - **The generator.** `generate_call(tier, spec, rng) -> GeneratedCall
   { text, country, digit, host, marker }` in `callsign.rs`. A `CallSpec`
-  filters countries (`Any`, `WVe` = K and VE, `NotWVe`, `NorthAmerica`). It
-  uses contest shares for portables (4%) and abroad calls (3%) in place of
-  the tiers' 25% and 12% (`callsign.rs:44-47`). With the default spec it
-  draws exactly as `generate_callsign` does.
+  filters countries (`Any`, `WVe` = K and VE, `NotWVe`, `NorthAmerica` = W/VE
+  plus Alaska, Hawaii, Puerto Rico and the US Virgin Islands, who call in
+  Sprint and Field Day). A station abroad is in its host's country. A
+  contest spec uses contest shares for portables (4%) and abroad calls (3%)
+  in place of the tiers' 25% and 12% (`callsign.rs:44-47`). With the default
+  spec it draws exactly as `generate_callsign` does, which a golden list
+  pins.
 - **Parsing.** `parse_callsign` (`callsign.rs:376-377`), with `CallsignParts`
-  (`:358`) and `parse_base` (`:393`), loses `#[cfg(test)]`. It reads a call's country (longest match, host first) and WPX prefix: up
-  to the last digit (`9A1AA` → `9A1`); a digit marker replaces the digit
-  (`W1XYZ/4` → `W4`); a host is the prefix, with 0 added if it has no digit
-  (`PA/N8XYZ` → `PA0`); `/P /M /QRP` are ignored.
+  (`:358`) and `parse_base` (`:393`), loses `#[cfg(test)]`; `parse_base`
+  stays a private helper. When both sides of a slash read as a call (hosts
+  such as `VP2M`, `VK9X`, `3D2R` do), the shorter is the host or marker, as
+  `ExtractPrefix` takes it, and at equal lengths the side with the longer
+  suffix is the call. `country_of` reads a call's country, host first (cut
+  as for WPX below): a table entry whose prefix and a digit it issues spell
+  the call's whole prefix and digit, or whose prefix alone spells a host,
+  ties going to the country with more calls (`R9` is Asiatic Russia). A digit
+  the table has not seen still places a prefix only one country has (`KG3`
+  is K); a prefix the table lacks, or a shared one with such a digit, is
+  `None` (`C31`, `NL7`, `VP8`), never a country that only shares a letter.
+  The generator labels each call with the country `country_of` reads off it,
+  so the two agree. `wpx_prefix` reads its WPX prefix: up to the last digit
+  (`9A1AA` → `9A1`); a digit marker replaces the digit (`W1XYZ/4` → `W4`);
+  a host is the prefix, with 0 added if it has no digit (`PA/N8XYZ` →
+  `PA0`), cut as MRCE's `ExtractPrefix` cuts one, to its last digit but
+  never under two characters (`9A/DL1ABC` → `9A0`, `VP2M/G3XYZ` → `VP2`); a
+  country after the slash counts as a host (`W1XYZ/KH6` → `KH6`); `/P /M
+  /QRP`, and `/A /MM /AM`, are ignored.
 
 ### 11.2 Places and the ARRL DX side
 
@@ -1194,14 +1234,16 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
 
 ### 11.6 Serials, cut numbers, 5NN
 
-- **Callers' serials** are `1 + floor(final × (T0 + t) / L)`: `L` is the
-  contest's length (48 h, 4 h), `T0` uniform in [0, L − contestMinutes],
-  `t` run time. `final` is log-normal: WPX median 190, σ 1.45, fitted to
-  F6FVY's histogram of last serials in MRCE (`CqWpx.pas:127-196`); Sprint
-  median 80, σ 0.9, Dust's estimate. Those bins count logs, and a station
-  you hear tends to have a big log, so `final` is drawn with weight ∝
-  final^0.5, Dust's estimate between logs and QSOs. A dupe sends its
-  previous serial + 1 + Poisson(final × Δt / L).
+- **Callers' serials** are `1 + floor(final × (T0 + t) / L)`, never past
+  `final`: `L` is the contest's length (48 h, 4 h), `T0` uniform in
+  [0, L − the run's limit] (60 minutes for an open run), `t` run time,
+  `final` capped at 9,999 so a serial stays within four digits. `final` is
+  log-normal: WPX median 190, σ 1.45, fitted to F6FVY's histogram of last
+  serials in MRCE (`CqWpx.pas:127-196`); Sprint median 80, σ 0.9, Dust's
+  estimate. Those bins count logs, and a station you hear tends to have a
+  big log, so `final` is drawn with weight ∝ final^0.5, Dust's estimate
+  between logs and QSOs. A dupe sends its previous serial + 1 +
+  Poisson(final × Δt / L).
 - **Habits `easy`:** plain digits, no padding (`7`). **`real`,** as MRCE:
   padded to three with the leading zeros as `TT` (`Station.pas:493-494,
   536-537`), 98% of other zeros as T, 9 as N 97% of the time (`:538-539,
@@ -1219,15 +1261,18 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
 | CL | number and letter | `03A` = `3A` |
 | NAME | A–Z | equal |
 
-No cut letter is read outside a numeric field. The check and the log use
-canonical values; the groups keep keyed tokens (9.1).
+The cut letters read are T and O for 0, A for 1, E for 5 and N for 9. No
+cut letter is read outside a numeric field (NR, ZN, RST, PWR). The check
+and the log use canonical values; the groups keep keyed tokens (9.1).
 
 ### 11.7 Parsing what you type
 
 - **Call:** `A–Z 0–9 / ?`, upper case, no spaces. `?` asks and is never
   logged.
 - **Exchange:** `parse_exchange(rules, side, text) -> Reading` runs on every
-  edit and returns the fields, the unused tokens and E (4.4). Phase 1 uses
+  edit and returns the fields, the unused tokens, the unreadable ones (what
+  "Reads as" shows as the fault) and E (4.4). A token no copied field can
+  read, and not a report, is unreadable and makes E Invalid. Phase 1 uses
   one rule per field: WPX NR is the last token that reads as a number and is
   not exactly `5NN`, `ENN` or `599` (with only those, 599); Simple QSO RST is
   the last report-shaped token, NAME the last all-letter one. From Sprint,
@@ -1498,7 +1543,10 @@ ships a release before phase 1.
   sends; "Points"; the merge; the Home hero; Exit and Discard routing; the
   privacy texts. Your message goes through the receiver, QSB off. A sound
   failure ends the run and keeps the log, as group sessions do
-  (`machine.rs:252-258`).
+  (`machine.rs:252-258`). Its cw-core foundations land first, with the
+  settings, which then read `contestActive` back as Contest; until the
+  Contest arm of `start_session` follows, `start_session` runs such
+  settings as Callsigns at the same tier, and that arm removes the shim.
 - **1b Honest clock and sound.** `TurnFailed` → `Paused{Sound}`;
   `Lease::wake`; hidden-page pause by visibility, minimise and heartbeat;
   heard time with latency; the dry path for your message; rate; − / +.

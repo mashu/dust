@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::alignment::{CopyTally, LetterAccuracy};
 use crate::contest::{CONTEST_MARK, ContestLog};
@@ -14,7 +14,7 @@ use crate::score::{
     GroupCopy, calculate_effective_alphabet_size, calculate_total_chars,
     compute_average_response_ms, copy_speed, session_points,
 };
-use crate::settings::{CharSetMode, LevelAxis, PlaybackSettings, TrainingSettings};
+use crate::settings::{CharSetMode, LevelAxis, PlaybackSettings, TrainingSettings, mode_on_disk};
 
 /// The quickest a listener can be said to answer, per character.
 ///
@@ -602,17 +602,6 @@ fn session_mode_legacy() -> CharSetMode {
 /// Sessions saved before the speed was recorded were sent at the default.
 fn session_wpm_default() -> f64 {
     PlaybackSettings::default().char_wpm_min
-}
-
-/// A contest run is written as a callsign session: a build that knows no
-/// contests then reads it as the callsign practice it is, where a mode name
-/// it did not know would have cost the whole session. The run's mark and log
-/// say it is a run.
-fn mode_on_disk<S: Serializer>(mode: &CharSetMode, serializer: S) -> Result<S::Ok, S::Error> {
-    match mode {
-        CharSetMode::Contest => CharSetMode::Callsign.serialize(serializer),
-        mode => mode.serialize(serializer),
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

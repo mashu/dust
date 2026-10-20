@@ -4,7 +4,7 @@
 //! The structs spell theirs out in `Default` impls; the enums mark theirs with
 //! `#[default]` on the variant, where it reads as part of the type.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::keyer::KeyerMode;
 use crate::level::LEVEL_MIN;
@@ -134,9 +134,25 @@ pub enum CharSetMode {
     /// Contest runs: callers answer your CQ and you copy their calls and
     /// exchanges. Not offered in the settings yet; until it is, everything
     /// that asks a mode what to do treats it as Callsign, whose tier shapes
-    /// the callers' calls. On disk a run is written as a callsign session
-    /// with a mark, so a build that knows no contests still reads it.
+    /// the callers' calls. On disk it is written as Callsign with a mark
+    /// beside it ([`mode_on_disk`]), so a build that knows no contests still
+    /// reads a run, and the settings.
     Contest,
+}
+
+/// A mode as it is written to disk: Contest as Callsign, so a build that
+/// knows no contests reads a run as the callsign practice it is, and opens
+/// the settings in Callsigns at the same tier, where a mode name it did not
+/// know would have cost the whole session or every setting. A mark beside it
+/// says it was Contest: a run's fingerprint, the settings' `contestActive`.
+pub(crate) fn mode_on_disk<S: Serializer>(
+    mode: &CharSetMode,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match mode {
+        CharSetMode::Contest => CharSetMode::Callsign.serialize(serializer),
+        mode => mode.serialize(serializer),
+    }
 }
 
 impl CharSetMode {
@@ -226,6 +242,7 @@ pub struct CurriculumSettings {
     /// Saves from the first versions called it the Koch level.
     #[serde(alias = "kochLevel")]
     pub level: u32,
+    #[serde(serialize_with = "mode_on_disk")]
     pub char_set_mode: CharSetMode,
     pub digits_level: u32,
     /// When mixed: 0–100 percent of characters that are letters (rest digits).
@@ -523,12 +540,14 @@ pub enum SettingsSection {
     AutoLevel,
     /// How the next group is drawn from the characters you know.
     CharacterSampling,
+    /// Your callsign, and the exchange you send in a contest.
+    Station,
 }
 
 impl SettingsSection {
     /// Every section, for the tests that sweep them.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::SessionShape,
         Self::Speed,
         Self::KeyingEnvelope,
@@ -537,6 +556,7 @@ impl SettingsSection {
         Self::BandConditions,
         Self::AutoLevel,
         Self::CharacterSampling,
+        Self::Station,
     ];
 }
 
@@ -563,28 +583,26 @@ pub struct RangeValues {
     pub linked: bool,
 }
 
-/// Everything the trainer can be set to. Read back from a save through
-/// [`save`], which also reads the older ones.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Everything the trainer can be set to. Written to a save and read back
+/// from one through [`save`], which also reads the older ones.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrainingSettings {
-    #[serde(flatten)]
     pub curriculum: CurriculumSettings,
-    #[serde(flatten)]
     pub playback: PlaybackSettings,
-    #[serde(flatten)]
     pub band: BandSettings,
-    #[serde(flatten)]
     pub auto_level: AutoLevelSettings,
+    pub contest: ContestSettings,
 }
 
 mod clamp;
+mod contest;
 mod curriculum;
 mod experience;
 mod ranges;
 mod reset;
 mod save;
 
+pub use contest::{CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX};
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
 pub use curriculum::LevelAxis;
 pub use experience::Experience;
@@ -875,6 +893,9 @@ mod tests {
         s.auto_level.char_sampling_coverage_strength = -1.0;
         s.auto_level.auto_adjust_above_threshold_count = 900;
         s.auto_level.auto_adjust_below_threshold_count = 900;
+        s.contest.contest_kind = crate::contest::ContestKind::Sprint;
+        s.contest.contest_minutes = 9_000;
+        s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
         s
     }
 
@@ -976,6 +997,8 @@ mod tests {
             s.curriculum.callsign_level,
             crate::callsign::CALLSIGN_TIER_MAX
         );
+        assert_eq!(s.contest.contest_minutes, CONTEST_MINUTES_MAX);
+        assert_eq!(s.contest.my_call, "DL1/ABC/QRP");
 
         // The strengths have tops as well as bottoms, the ones the settings
         // screen offers.
@@ -1460,6 +1483,42 @@ mod tests {
         s.auto_level.error_weight_strength = 0.9;
         s.auto_level.char_sampling_coverage_strength = 0.9;
         s.auto_level.char_sampling_thompson = false;
+        s.contest.contest_kind = crate::contest::ContestKind::Sprint;
+        s.contest.contest_minutes = 25;
+        s.contest.my_call = "DL1ABC".to_string();
         s
+    }
+
+    /// Your callsign is kept the way a callsign can be written, and a run
+    /// is never longer than the longest.
+    #[test]
+    fn clamping_keeps_your_call_a_call_and_a_run_inside_its_hour() {
+        let mut s = TrainingSettings::default();
+        s.contest.my_call = " k1abc/ ".to_string();
+        s.contest.contest_minutes = 61;
+        let s = s.clamp();
+        assert_eq!(s.contest.my_call, "K1ABC");
+        assert_eq!(s.contest.contest_minutes, CONTEST_MINUTES_MAX);
+        let mut open = TrainingSettings::default();
+        open.contest.contest_minutes = 0;
+        assert_eq!(
+            open.clamp().contest.contest_minutes,
+            0,
+            "0 is a run left open"
+        );
+        assert!(s.contest.my_call.len() <= MY_CALL_MAX);
+    }
+
+    #[test]
+    fn contest_settings_default_to_ten_minutes_of_wpx_with_no_call() {
+        let s = TrainingSettings::default();
+        assert_eq!(s.contest.contest_kind, crate::contest::ContestKind::Wpx);
+        assert_eq!(s.contest.contest_minutes, 10);
+        assert!(s.contest.my_call.is_empty());
+        let json = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(json["contestKind"], "wpx");
+        assert_eq!(json["contestMinutes"], 10);
+        assert_eq!(json["myCall"], "");
+        assert!(json.get("contest").is_none(), "flattened");
     }
 }

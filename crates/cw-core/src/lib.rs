@@ -45,8 +45,18 @@ pub use board::{
     BOARD_MIN_GROUPS, BoardEntry, FORM_SESSIONS, TimelinePoint, board_modes, board_place,
     per_group, score_board, score_timeline,
 };
-pub use callsign::{CALLSIGN_TIER_MAX, generate_callsign, tier_examples};
-pub use contest::ContestLog;
+pub use callsign::{
+    CALLSIGN_TIER_MAX, CallSpec, CallsignParts, Countries, GeneratedCall, country_of,
+    generate_call, generate_callsign, parse_callsign, tier_examples, wpx_prefix,
+};
+pub use contest::{
+    CallSource, CallerHabits, ContestKind, ContestLog, ContestRules, ContestRun, ContestScore,
+    EntryField, Esm, ExchangeState, Field, Fields, MessagePart, Multiplier, PerSide, QsoCheck,
+    QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField, Reading, RunClock, RunStyle,
+    ScoredQso, Scoring, SerialFit, SerialModel, Side, Tally, WPX_SERIALS, check_qso, contest_score,
+    cut_serial, esm, keyed_token, message_text, normalize_call, parse_exchange, rate_at,
+    read_number, send_serial,
+};
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
 };
@@ -70,15 +80,16 @@ pub use session::{
 };
 pub use settings::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, Aim, AutoLevelSettings,
-    BandSettings, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, CurriculumSettings,
-    DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN,
-    Experience, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, GROUP_PAUSE_MAX_SEC,
-    GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    LevelAxis, MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow,
-    QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
-    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
-    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    BandSettings, CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode,
+    ContestSettings, CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX,
+    EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN,
+    FilterShape, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX,
+    GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, LevelAxis, MY_CALL_MAX, MixedAutoLevelAxis,
+    NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
+    PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
+    RangeSetting, RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN,
+    STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN,
+    WPM_MAX, WPM_MIN,
 };
 pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};
