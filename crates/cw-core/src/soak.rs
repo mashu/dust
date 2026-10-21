@@ -779,14 +779,17 @@ fn a_pile_up_is_always_something_you_could_copy() {
     }
 }
 
-/// Settings from anywhere, in Contest mode: a call from a few that read in
-/// different ways, none among them, and runs short enough to reach their
-/// end.
+/// Settings from anywhere, in Contest mode: any contest that has shipped, a
+/// call from a few that read in different ways, none among them, a name or
+/// none, and runs short enough to reach their end.
 fn contest_settings(rng: &mut SplitMix64) -> TrainingSettings {
     const CALLS: [&str; 6] = ["DL1ABC", "K1ABC", "VP2E/DL1ABC", "JA1XYZ", "W1AW/4", ""];
     let mut s = wild_settings(rng);
     s.curriculum.char_set_mode = CharSetMode::Contest;
+    let shipped: Vec<ContestKind> = ContestKind::shipped().collect();
+    s.contest.contest_kind = shipped[rng.usize_in(0, shipped.len() - 1)];
     s.contest.my_call = CALLS[rng.usize_in(0, CALLS.len() - 1)].to_string();
+    s.contest.my_name = ["MAT", ""][rng.usize_in(0, 1)].to_string();
     s.contest.contest_minutes = [1, 2, 3, 4, 0][rng.usize_in(0, 4)];
     s.clamp()
 }
@@ -840,14 +843,14 @@ fn contest_key(rng: &mut SplitMix64, now: u64, seen: &Seen) -> ContestEvent {
             .map(|_| JUNK[rng.usize_in(0, JUNK.len() - 1)])
             .collect()
     };
-    let (call, serial) = (seen.call.as_str(), seen.serial.as_str());
+    let (call, heard) = (seen.call.as_str(), seen.exch.as_str());
     let draw = rng.f64();
     let (call, exch) = if draw < 0.1 {
-        (seen.previous.clone(), serial.to_string())
+        (seen.previous.clone(), heard.to_string())
     } else if draw < 0.4 {
-        (call.to_string(), serial.to_string())
+        (call.to_string(), heard.to_string())
     } else if draw < 0.6 {
-        (one_edit_off(call, rng), one_edit_off(serial, rng))
+        (one_edit_off(call, rng), one_edit_off(heard, rng))
     } else if draw < 0.7 {
         (String::new(), String::new())
     } else if draw < 0.8 {
@@ -877,7 +880,7 @@ struct Outcomes {
 }
 
 /// What a contest soak run has seen of the machine's effects: every id
-/// handed out, the turns and timers among them, the last call and serial
+/// handed out, the turns and timers among them, the last call and exchange
 /// a listener would have copied from the callers, and the call before it.
 #[derive(Debug, Default)]
 struct Seen {
@@ -885,7 +888,7 @@ struct Seen {
     turns: Vec<u64>,
     timers: Vec<u64>,
     call: String,
-    serial: String,
+    exch: String,
     previous: String,
 }
 
@@ -926,7 +929,7 @@ fn check_contest_effects(
                                 seen.previous = std::mem::replace(&mut seen.call, call.to_string());
                             }
                         }
-                        Some(Copied::Serial(serial)) => seen.serial = serial.to_string(),
+                        Some(Copied::Exchange(exch)) => seen.exch = exch,
                         None => {}
                     }
                 }
@@ -1161,6 +1164,8 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
         let run = log
             .run(result.groups.len())
             .unwrap_or_else(|| panic!("seed {seed}: the log does not read back"));
+        let rules = settings.contest.contest_kind.rules().expect("shipped");
+        assert_eq!(run.kind, rules.kind.name(), "seed {seed}");
         let owned: u32 = run.qsos.iter().map(|qso| qso.g).sum();
         assert_eq!(owned as usize, result.groups.len(), "seed {seed}");
         let limit_ms = u64::from(run.limit_s) * 1_000;
@@ -1180,12 +1185,18 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
                 "seed {seed}: {qso:?}"
             );
             last = qso.t;
+            // A contest without serials sends none.
+            let serial = |n: u32| if rules.serial { n } else { 0 };
             if qso.k == "lost" {
-                assert_eq!(qso.nr, logged + 1, "seed {seed}: a lost QSO's serial");
+                assert_eq!(
+                    qso.nr,
+                    serial(logged + 1),
+                    "seed {seed}: a lost QSO's serial"
+                );
                 outcomes.lost += 1;
             } else {
                 logged += 1;
-                assert_eq!(qso.nr, logged, "seed {seed}: serials run 1, 2, 3…");
+                assert_eq!(qso.nr, serial(logged), "seed {seed}: serials run 1, 2, 3…");
             }
         }
         assert_eq!(logged, view.qsos, "seed {seed}");
@@ -1221,17 +1232,18 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
                 outcomes.field += 1;
             }
         }
-        let scoring = ContestKind::Wpx
-            .rules()
-            .and_then(|rules| rules.scoring)
-            .expect("WPX scores");
-        let live = contest_score(&scoring, &checks, run.run_ms);
-        let stored = run.score(&result.groups).expect("a stored WPX run scores");
-        assert_eq!(
-            stored, live,
-            "seed {seed}: the stored run scores differently"
-        );
-        assert!(stored.verified.score <= stored.raw.score, "seed {seed}");
+        match rules.scoring {
+            Some(scoring) => {
+                let live = contest_score(&scoring, &checks, run.run_ms);
+                let stored = run.score(&result.groups).expect("a stored run scores");
+                assert_eq!(
+                    stored, live,
+                    "seed {seed}: the stored run scores differently"
+                );
+                assert!(stored.verified.score <= stored.raw.score, "seed {seed}");
+            }
+            None => assert_eq!(run.score(&result.groups), None, "seed {seed}"),
+        }
         // Its results list each QSO logged as the run's own log did.
         let listed = run
             .log(&result.groups, &result.group_timings)

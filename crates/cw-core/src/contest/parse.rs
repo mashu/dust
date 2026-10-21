@@ -73,9 +73,10 @@ const REPORTS: [&str; 3] = ["5NN", "ENN", "599"];
 /// earlier one, so a correction typed last wins. Each field takes a token by
 /// its own rule: a serial is the last token that reads as a number and is
 /// not exactly a report (`5NN`, `ENN`, `599`), or the report when nothing
-/// else is there; any other field takes the last token it can read that no
-/// field before it took. Simple QSO's report and name and Sprint's parser
-/// come with those contests.
+/// else is there; a copied report is the last token shaped as one (`57N` is
+/// 579); a name the last all-letter token that is not a report; any other
+/// field takes the last token it can read that no field before it took.
+/// Sprint's parser comes with that contest.
 pub fn parse_exchange(rules: &ContestRules, side: Side, text: &str) -> Reading {
     let tokens: Vec<String> = text
         .split_whitespace()
@@ -97,7 +98,7 @@ pub fn parse_exchange(rules: &ContestRules, side: Side, text: &str) -> Reading {
     let mut unused = Vec::new();
     let mut unreadable = Vec::new();
     for (token, _) in tokens.iter().zip(&taken).filter(|(_, taken)| !**taken) {
-        if rules.rst && REPORTS.contains(&token.as_str()) {
+        if rules.prefills_report(side) && REPORTS.contains(&token.as_str()) {
             // The report typed out of habit: read, and never checked.
             continue;
         }
@@ -138,6 +139,8 @@ fn take(field: Field, tokens: &[String], taken: &[bool]) -> Option<(usize, Strin
         // A report reads as a number too, but is a serial only when it is
         // all there is.
         Field::Nr => last(|token| !REPORTS.contains(&token)).or_else(|| last(|_| true)),
+        // `ENN` is all letters, but a report.
+        Field::Name => last(|token| Field::Rst.canonical(token).is_none()),
         _ => last(|_| true),
     }
 }
@@ -169,6 +172,49 @@ mod tests {
             assert_eq!(reading.value(Field::Nr), Some(nr), "{typed}");
             assert_eq!(reading.state, ExchangeState::Complete, "{typed}");
             assert!(reading.unreadable.is_empty(), "{typed}");
+        }
+    }
+
+    fn simple_qso(text: &str) -> Reading {
+        let rules = ContestKind::SimpleQso
+            .rules()
+            .expect("Simple QSO has shipped");
+        parse_exchange(rules, Side::Dx, text)
+    }
+
+    /// The Simple QSO rows of the design's table, and more like them: the
+    /// report is the last token shaped as one, the name the last all-letter
+    /// token that is not a report, in either order.
+    #[test]
+    fn a_simple_qso_reads_as_the_table_says() {
+        for (typed, rst, name) in [
+            ("57N BOB", "579", "BOB"),
+            ("579 BOB", "579", "BOB"),
+            ("BOB 579", "579", "BOB"),
+            ("5NN AL", "599", "AL"),
+            ("ENN hans", "599", "HANS"),
+            ("599 579 BOB", "579", "BOB"),
+            ("BOB TOM 449", "449", "TOM"),
+        ] {
+            let reading = simple_qso(typed);
+            assert_eq!(reading.value(Field::Rst), Some(rst), "{typed}");
+            assert_eq!(reading.value(Field::Name), Some(name), "{typed}");
+            assert_eq!(reading.state, ExchangeState::Complete, "{typed}");
+            assert!(reading.unreadable.is_empty(), "{typed}");
+        }
+        // The report is copied, so one typed before the last is unused, not
+        // read as the prefilled one.
+        assert_eq!(simple_qso("599 579 BOB").unused, ["599"]);
+        assert_eq!(simple_qso("BOB TOM 449").unused, ["BOB"]);
+        // `ENN` is a report, never a name.
+        let reading = simple_qso("ENN");
+        assert_eq!(reading.value(Field::Rst), Some("599"));
+        assert_eq!(reading.value(Field::Name), None);
+        assert_eq!(reading.state, ExchangeState::Missing);
+        assert_eq!(simple_qso("BOB").state, ExchangeState::Missing);
+        assert_eq!(simple_qso("").state, ExchangeState::Empty);
+        for typed in ["57 BOB", "579 B0B", "699 BOB", "579 BOB?"] {
+            assert_eq!(simple_qso(typed).state, ExchangeState::Invalid, "{typed}");
         }
     }
 
@@ -222,9 +268,10 @@ mod tests {
             '1', '2', '5', '9', '0', 'T', 'N', 'E', 'A', 'O', 'B', 'X', '?', '/', ' ', ' ', 'é',
             'n', '\t',
         ];
-        let rules = ContestKind::Wpx.rules().expect("WPX has shipped");
         let mut rng = SplitMix64::new(11);
-        for _ in 0..5_000 {
+        for round in 0..10_000 {
+            let kind = [ContestKind::Wpx, ContestKind::SimpleQso][round % 2];
+            let rules = kind.rules().expect("shipped");
             let len = rng.usize_in(0, 16);
             let text: String = (0..len)
                 .map(|_| TYPED[rng.usize_in(0, TYPED.len() - 1)])

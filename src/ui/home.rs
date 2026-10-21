@@ -7,7 +7,9 @@ use dioxus::prelude::*;
 use crate::audio::AUDIO_IS_SILENT;
 use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
-use crate::ui::settings_station::{CallField, CallReading, focus_call_field};
+use crate::ui::settings_station::{
+    CallField, CallReading, NameField, focus_call_field, focus_name_field,
+};
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, pretty_number};
 
@@ -81,6 +83,9 @@ struct ContestHero {
     /// Your call is missing, or not one a contest can read: the hero asks
     /// for it.
     needs_call: bool,
+    /// The call reads, but the contest sends your name and you have given
+    /// none: the hero asks for it.
+    needs_name: bool,
     /// A call is typed that a contest cannot read, so the line under the
     /// field already says what is wrong with it.
     call_flagged: bool,
@@ -110,11 +115,13 @@ impl ContestHero {
             _ => (limit.to_string(), "Minutes".to_string()),
         };
         let needs_call = parse_callsign(&contest.my_call).is_none();
+        let sends_name = rules.is_some_and(|rules| rules.sends_name());
         Self {
             fields,
             sends,
             length,
             needs_call,
+            needs_name: !needs_call && sends_name && contest.my_name.is_empty(),
             call_flagged: needs_call && !contest.my_call.is_empty(),
             missing: contest.missing(),
         }
@@ -145,6 +152,10 @@ pub fn Home(
     /// read.
     #[props(default)]
     on_call: EventHandler<String>,
+    /// Your name, typed into the hero while a contest that sends it has
+    /// none.
+    #[props(default)]
+    on_name: EventHandler<String>,
 ) -> Element {
     let level = level_reading(&settings);
     let contest = (settings.curriculum.char_set_mode == CharSetMode::Contest)
@@ -155,6 +166,7 @@ pub fn Home(
     let mut refused = use_signal(|| false);
     let missing = contest.as_ref().and_then(|hero| hero.missing.clone());
     let needs_call = contest.as_ref().is_some_and(|hero| hero.needs_call);
+    let needs_name = contest.as_ref().is_some_and(|hero| hero.needs_name);
     let call_flagged = contest.as_ref().is_some_and(|hero| hero.call_flagged);
     let refusal = missing.clone().filter(|_| refused() && !call_flagged);
     let acc = last_accuracy
@@ -220,6 +232,16 @@ pub fn Home(
                                 },
                             }
                             CallReading { call: settings.contest.my_call.clone() }
+                        }
+                    } else if hero.needs_name {
+                        div { class: "hero-call",
+                            NameField {
+                                value: settings.contest.my_name.clone(),
+                                on_commit: move |typed| {
+                                    refused.set(false);
+                                    on_name.call(typed);
+                                },
+                            }
                         }
                     } else {
                         div { class: "pool-chips",
@@ -290,6 +312,8 @@ pub fn Home(
                             refused.set(true);
                             if needs_call {
                                 focus_call_field();
+                            } else if needs_name {
+                                focus_name_field();
                             }
                         },
                         Icon { name: IconName::Play }
@@ -329,6 +353,8 @@ pub fn Home(
                     p { class: "muted", style: "margin: 0;",
                         if hero.needs_call {
                             "Add your call, press Start contest; Enter sends what the QSO needs next."
+                        } else if hero.needs_name {
+                            "Add your name, press Start contest; Enter sends what the QSO needs next."
                         } else {
                             "Press Start contest; Enter sends what the QSO needs next."
                         }
@@ -435,6 +461,31 @@ mod tests {
             hero.length,
             ("Open".to_string(), "Up to 60 min".to_string())
         );
+        assert!(!hero.needs_name, "WPX sends no name");
+    }
+
+    /// A Simple QSO copies a report and a name, sends yours, and asks for
+    /// your name once the call reads, saying why a start is refused.
+    #[test]
+    fn a_simple_qso_hero_asks_for_your_name() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+        let hero = ContestHero::of(&settings);
+        assert!(hero.needs_call && !hero.needs_name, "the call first");
+        settings.contest.my_call = "DL1ABC".to_string();
+        let hero = ContestHero::of(&settings);
+        assert!(!hero.needs_call && hero.needs_name);
+        assert_eq!(hero.fields, ["CALL", "RST", "NAME"]);
+        assert_eq!(
+            hero.missing.as_deref(),
+            Some("Add your name to start a Simple QSO")
+        );
+        settings.contest.my_name = "MAT".to_string();
+        let hero = ContestHero::of(&settings);
+        assert!(!hero.needs_name);
+        assert_eq!(hero.missing, None);
+        assert_eq!(hero.sends, "You send 599 + name, as DL1ABC");
     }
 
     /// A level stored for a longer alphabet is kept for it, but not shown as

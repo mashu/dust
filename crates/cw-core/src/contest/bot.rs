@@ -63,12 +63,13 @@ impl CallSource for ScriptCalls {
     }
 }
 
-/// Settings for a run: WPX as DL1ABC, ten minutes, no countdown, the
-/// speed ranges as they come.
+/// Settings for a run: WPX as DL1ABC, called MAT, ten minutes, no
+/// countdown, the speed ranges as they come.
 pub(crate) fn default_run_settings() -> TrainingSettings {
     let mut settings = TrainingSettings::default();
     settings.curriculum.char_set_mode = CharSetMode::Contest;
     settings.contest.my_call = "DL1ABC".to_string();
+    settings.contest.my_name = "MAT".to_string();
     settings.playback.countdown_sec = 0;
     settings.clamp()
 }
@@ -264,26 +265,37 @@ fn callers_text(turn: &Turn, into: f64) -> Vec<String> {
 }
 
 /// What a listener copies from a caller's text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Copied<'a> {
-    /// A call sent alone: a caller calling.
+    /// A caller calling: its call alone, or `DL1ABC DE K5XYZ K5XYZ K`.
     Call(&'a str),
     /// A call put right: `DE K5XYZ`, or `K5XYZ K5XYZ`.
     Correction(&'a str),
-    /// The serial of an exchange, its last word.
-    Serial(&'a str),
+    /// An exchange, as it goes in the Exchange field: a contest's serial,
+    /// its last word; an everyday QSO's report and name, `579 BOB`.
+    Exchange(String),
 }
 
 /// What a caller's `text` gives a listener to type, if anything: how the
 /// operators and the soak copy what they hear.
 pub(crate) fn copy_of(text: &str) -> Option<Copied<'_>> {
     let words: Vec<&str> = text.split_whitespace().collect();
+    let after = |word: &str| {
+        let at = words.iter().position(|said| *said == word)?;
+        words.get(at + 1).copied()
+    };
     match words.as_slice() {
         ["DE", call] => Some(Copied::Correction(call)),
         [one, two] if one == two && parse_callsign(one).is_some() => Some(Copied::Correction(one)),
         [call] if parse_callsign(call).is_some() => Some(Copied::Call(call)),
-        _ if words.contains(&"5NN") => words.last().map(|serial| Copied::Serial(serial)),
-        _ => None,
+        [_, "DE", call, again, "K"] if call == again => Some(Copied::Call(call)),
+        _ => match (after("UR"), after("NAME")) {
+            (Some(rst), Some(name)) => Some(Copied::Exchange(format!("{rst} {name}"))),
+            _ if words.contains(&"5NN") => words
+                .last()
+                .map(|serial| Copied::Exchange((*serial).to_string())),
+            _ => None,
+        },
     }
 }
 
@@ -349,15 +361,15 @@ impl Operator {
                 self.type_call(&partial);
             }
             Some(Copied::Call(call) | Copied::Correction(call)) => self.type_call(call),
-            Some(Copied::Serial(serial)) => {
-                let serial = if self.habit == Habit::DigitOff {
-                    one_digit_off(serial)
+            Some(Copied::Exchange(exch)) => {
+                let exch = if self.habit == Habit::DigitOff {
+                    one_digit_off(&exch)
                 } else {
-                    serial.to_string()
+                    exch
                 };
-                if self.exch != serial {
-                    self.typing += serial.len();
-                    self.exch = serial;
+                if self.exch != exch {
+                    self.typing += exch.len();
+                    self.exch = exch;
                 }
             }
             None => {}
@@ -394,9 +406,9 @@ impl Operator {
     }
 }
 
-/// `serial` with its last digit one more.
-fn one_digit_off(serial: &str) -> String {
-    let mut digits: Vec<char> = serial.chars().collect();
+/// `exch` with its last digit one more.
+fn one_digit_off(exch: &str) -> String {
+    let mut digits: Vec<char> = exch.chars().collect();
     if let Some(last) = digits.iter_mut().rev().find(|c| c.is_ascii_digit()) {
         let digit = last.to_digit(10).unwrap_or(0);
         *last = char::from_digit((digit + 1) % 10, 10).unwrap_or('0');
@@ -537,6 +549,92 @@ mod tests {
                 "seed {seed}: only the last QSO may be cut short"
             );
             assert!(result.group_timings.iter().all(|timing| timing.sends == 1));
+        }
+    }
+
+    /// A Simple QSO run worked perfectly: every QSO logged clean, each with
+    /// its call, report and name copied right, and nobody calling after a
+    /// TU until the operator calls CQ again. Nothing scores it but the copy.
+    #[test]
+    fn a_perfect_operator_works_simple_qsos_clean() {
+        for seed in [1, 2] {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_kind = super::super::ContestKind::SimpleQso;
+            let sampler = Sampler::new(&[], &settings, seed);
+            let mut runtime = Runtime::start(seed, settings, sampler);
+            work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+            let view = runtime.machine.view();
+            assert!(view.qsos >= 8, "seed {seed}: {} QSOs", view.qsos);
+            assert_eq!(view.clean, view.qsos, "seed {seed}");
+            let result = runtime.machine.result(0, "2026-10-20".into());
+            let run = result
+                .contest
+                .as_ref()
+                .and_then(|log| log.run(result.groups.len()))
+                .expect("the log reads back");
+            assert_eq!(run.kind, "simpleQso");
+            assert_eq!(run.score(&result.groups), None);
+            let summary = run.summary(&result.groups).expect("its figures");
+            let pace = summary.minutes_per_qso().expect("a pace");
+            assert!(
+                (0.3..=1.2).contains(&pace),
+                "seed {seed}: {pace:.2} minutes a QSO"
+            );
+            let mut at = 0;
+            for qso in &run.qsos {
+                let owned = &result.groups[at..at + qso.g as usize];
+                at += qso.g as usize;
+                assert_eq!(qso.g, 3, "seed {seed}: a call, a report and a name");
+                let copied = if qso.k.is_empty() { owned } else { &owned[..1] };
+                assert!(copied.iter().all(|group| group.correct), "seed {seed}");
+            }
+            // Each TU was answered by its station's 73 alone.
+            for turn in &runtime.turns {
+                let mine = turn.segments.iter().find(|s| s.who == Sender::You);
+                if mine.is_some_and(|mine| mine.text.starts_with("TU ")) {
+                    let theirs: Vec<&str> = turn
+                        .segments
+                        .iter()
+                        .filter(|s| s.who != Sender::You)
+                        .map(|s| s.text.as_str())
+                        .collect();
+                    assert_eq!(theirs, ["73 EE"], "seed {seed}");
+                }
+            }
+        }
+    }
+
+    /// What a listener copies from each thing a caller sends, in either
+    /// contest.
+    #[test]
+    fn a_listener_copies_calls_and_exchanges() {
+        assert_eq!(copy_of("K5XYZ"), Some(Copied::Call("K5XYZ")));
+        assert_eq!(
+            copy_of("DL1ABC DE K5XYZ K5XYZ K"),
+            Some(Copied::Call("K5XYZ"))
+        );
+        assert_eq!(copy_of("DE K5XYZ"), Some(Copied::Correction("K5XYZ")));
+        assert_eq!(copy_of("K5XYZ K5XYZ"), Some(Copied::Correction("K5XYZ")));
+        assert_eq!(
+            copy_of("TU 5NN 214"),
+            Some(Copied::Exchange("214".to_string()))
+        );
+        for exchange in [
+            "R TNX UR 579 579 NAME BOB BOB BK",
+            "UR 579 579 NAME BOB BOB BK",
+        ] {
+            assert_eq!(
+                copy_of(exchange),
+                Some(Copied::Exchange("579 BOB".to_string()))
+            );
+        }
+        // A report cut to 5NN is still an everyday QSO's.
+        assert_eq!(
+            copy_of("UR 5NN 5NN NAME BOB BOB BK"),
+            Some(Copied::Exchange("5NN BOB".to_string()))
+        );
+        for nothing in ["73 EE", "AGN", "NR?", ""] {
+            assert_eq!(copy_of(nothing), None, "{nothing:?}");
         }
     }
 

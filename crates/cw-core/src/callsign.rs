@@ -335,7 +335,7 @@ fn tier_at(tier: u32) -> &'static Tier {
 /// Draw from a weighted table. Weights are the point of these tables, so a
 /// table that somehow sums to nothing still yields its first entry rather than
 /// nothing at all.
-fn pick_weighted<'t, T>(table: &'t [(T, f64)], rng: &mut impl Rng) -> Option<&'t T> {
+pub(crate) fn pick_weighted<'t, T>(table: &'t [(T, f64)], rng: &mut impl Rng) -> Option<&'t T> {
     let total: f64 = table.iter().map(|(_, weight)| weight.max(0.0)).sum();
     if total <= 0.0 {
         return table.first().map(|(item, _)| item);

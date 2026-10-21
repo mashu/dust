@@ -1592,6 +1592,42 @@ mod ui_tests {
         });
     }
 
+    /// A Simple QSO sends your name: with the call given and no name, Home
+    /// asks for it in the hero, a start says it is missing, and once it is
+    /// given the run starts, sending it.
+    #[test]
+    fn home_asks_for_your_name_before_a_simple_qso() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            assert!(ui.shows("field-your-name"));
+            assert!(!ui.shows("field-your-callsign"));
+            assert!(ui.has("Add your name, press Start contest"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your name to start a Simple QSO"));
+            assert!(!ui.has("class=\"toast\""), "said on Home, not in a toast");
+
+            ui.commit("field-your-name", "mat");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_name, "MAT");
+            assert!(!ui.shows("field-your-name"));
+            assert!(!ui.shows("home-missing"));
+            assert!(ui.has("You send 599 + name, as DL1ABC"));
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            ui.advance(10_000).await;
+            let first = &recorder.starts()[0].transcript;
+            assert!(
+                first.text.starts_with("CQ CQ DE DL1ABC DL1ABC K"),
+                "{}",
+                first.text
+            );
+        });
+    }
+
     /// Every control on a screen, pressed and typed into in turn: none may
     /// panic, and none may leave settings the trainer would refuse to start
     /// from. Each one starts from a fresh app, so the sweep cannot walk itself

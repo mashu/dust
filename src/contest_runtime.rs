@@ -12,7 +12,7 @@
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestRules, EntryField, Esm,
     Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, Side, TrainingSettings,
-    Turn, esm, parse_exchange, plan_turn,
+    Turn, esm, loggable, parse_exchange, plan_turn,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -176,6 +176,16 @@ impl ContestEntry {
         let _ = self.typed.read();
         let (rules, side) = (*self.reads.peek())?;
         Some(parse_exchange(rules, side, &self.fields.peek().exch))
+    }
+
+    /// Whether the fields hold a QSO a key can log without Enter, for the
+    /// keys that do. Reading it subscribes the caller to every edit.
+    /// Nothing before a run has started.
+    pub fn loggable(self) -> bool {
+        let _ = self.typed.read();
+        self.reads
+            .peek()
+            .is_some_and(|(rules, side)| loggable(&self.fields.peek(), rules, side))
     }
 
     /// What the run copies from each caller, for the Exchange field's label.

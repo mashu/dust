@@ -19,7 +19,7 @@ use crate::session_runtime::{abort_run, finish_run};
 use crate::state::AppCtx;
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
-use crate::ui::format::minutes_seconds;
+use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow};
 use crate::ui::widgets::{Icon, IconName, ProgressHeader, control_id, html_bool};
@@ -126,21 +126,24 @@ fn use_ticks(ctx: AppCtx) -> Signal<MonoMs> {
 }
 
 /// The run bar: what the run is, its clock against its length, the QSOs and
-/// the rate, and your speed with − and +.
+/// the rate, or the minutes a QSO in a contest without a score, and your
+/// speed with − and +.
 #[component]
 fn RunBar(now: Signal<MonoMs>, phase: ContestPhase, qsos: u32, clean: u32, my_wpm: f64) -> Element {
     let ctx = use_context::<AppCtx>();
     // Worked out on every tick, and drawn only when it changes: the clock
     // and its bar once a second, the rate when it moves.
     let figures = use_memo(move || {
-        let open = ctx.settings.peek().contest.contest_minutes == 0;
+        let contest = &ctx.settings.peek().contest;
+        let open = contest.contest_minutes == 0;
+        let scored = contest.contest_kind.scored();
         ctx.contest
             .read()
             .as_ref()
-            .map(|view| bar_figures(view, open, now()))
+            .map(|view| bar_figures(view, open, scored, now()))
             .unwrap_or_default()
     });
-    let (figure, figure_note, pct, rate) = figures();
+    let (figure, figure_note, pct, pace) = figures();
     let run = {
         let contest = &ctx.settings.peek().contest;
         format!("{} as {}", contest.contest_kind.label(), contest.my_call)
@@ -164,12 +167,14 @@ fn RunBar(now: Signal<MonoMs>, phase: ContestPhase, qsos: u32, clean: u32, my_wp
             pct,
             timer: true,
             div { class: "run-counts",
-                span { class: "run-line run-qsos",
-                    "QSOs {qsos} · {clean} clean"
-                    if let Some(rate) = rate {
-                        span { class: "run-rate",
-                            span { class: "run-rate-word", "Rate " }
-                            "{rate}"
+                span { class: "run-line run-qsos", "QSOs {qsos} · {clean} clean" }
+                // Never cut short: the counts before it give way first.
+                if let Some((word, figure, unit)) = pace {
+                    span { class: "run-rate",
+                        span { class: "run-rate-word", "{word} " }
+                        "{figure}"
+                        if !unit.is_empty() {
+                            span { class: "run-rate-unit", "{unit}" }
                         }
                     }
                 }
@@ -202,23 +207,36 @@ fn RunBar(now: Signal<MonoMs>, phase: ContestPhase, qsos: u32, clean: u32, my_wp
     }
 }
 
+/// The run bar's pace: the word before it and the unit after it, which a
+/// phone leaves out, and its figure: "Rate" and "70/h"; "Pace", "2.6 min"
+/// and "/QSO".
+type Pace = Option<(&'static str, String, &'static str)>;
+
 /// What the run bar shows at `now`: the clock and what follows it, how much
-/// of the run's length has gone, in whole seconds, and the rate once the run
-/// is a minute old.
+/// of the run's length has gone, in whole seconds, and the pace: in a
+/// contest that is `scored`, the rate once the run is a minute old; in one
+/// that is not, the minutes a QSO once one is logged.
 fn bar_figures(
     view: &ContestView,
     open: bool,
+    scored: bool,
     now: MonoMs,
-) -> (String, String, f64, Option<String>) {
+) -> (String, String, f64, Pace) {
     let whole_ms = view.run_ms(now) / 1_000 * 1_000;
     let pct = if view.limit_ms == 0 {
         0.0
     } else {
         whole_ms as f64 / view.limit_ms as f64 * 100.0
     };
-    let rate = view.rate(now).map(|rate| format!("{rate:.0}/h"));
+    let pace = if scored {
+        view.rate(now)
+            .map(|rate| ("Rate", format!("{rate:.0}/h"), ""))
+    } else {
+        view.minutes_per_qso(now)
+            .map(|minutes| ("Pace", format!("{minutes:.1} min"), "/QSO"))
+    };
     let (clock, note) = clock_text(view, open, now);
-    (clock, note, pct, rate)
+    (clock, note, pct, pace)
 }
 
 /// "07:42 / 10:00"; or for a run left `open`, "07:42" and " · up to 60:00",
@@ -395,7 +413,11 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
             oninput: move |e| entry.edit(field, e.value()),
             onfocus: move |_| entry.set_focus(field),
             onkeydown: move |e| {
-                if e.key() == Key::Enter {
+                // Enter, or Enter with the Command key, which the run's keys
+                // pass by; held with Shift, Ctrl or Alt it logs without
+                // sending, which the run's keys hear on the page.
+                let held = Modifiers::SHIFT | Modifiers::CONTROL | Modifiers::ALT;
+                if e.key() == Key::Enter && !e.modifiers().intersects(held) {
                     e.prevent_default();
                     press_key(ctx, OpKey::Esm);
                 } else if field == EntryField::Call && e.code() == Code::Space {
@@ -449,35 +471,69 @@ fn ReadsAs() -> Element {
     }
 }
 
+/// The key bar's buttons after Enter's, in order: what each sends, its key
+/// on a keyboard, what it says, and whether a finger has it too. The keypad
+/// stands in for the rest where touch is how you type.
+const KEY_BAR: [(OpKey, &str, &str, bool); 10] = [
+    (OpKey::Cq, "F1", "CQ", true),
+    (OpKey::Exchange, "F2", "Exch", false),
+    (OpKey::Tu, "F3", "TU (no log)", false),
+    (OpKey::HisCall, "F5", "His", false),
+    (OpKey::Again, "F7", "? Again", true),
+    (OpKey::HisCallAndExchange, ";", "His + exch", false),
+    (OpKey::TuAndLog, ".", "TU & log", false),
+    (OpKey::LogOnly, "Shift+Enter", "Log", false),
+    (OpKey::Wipe, "Alt+W", "Wipe", true),
+    (OpKey::StopTx, "Esc", "Stop", false),
+];
+
 /// The message keys, each with its key on a keyboard, and Enter named for
-/// what it sends. Where touch is how you type, the keypad's own Enter takes
-/// the chip's place, and Stop, which a finger never needs, goes.
+/// what it sends. The keys Enter would press now are lit, as MorseRunner
+/// lights them. Where touch is how you type, the keypad's own Enter takes
+/// the chip's place, and only CQ, Again and Wipe stay.
 #[component]
 fn KeyBar(qso: QsoState, live: bool) -> Element {
     let ctx = use_context::<AppCtx>();
-    let message =
-        move |key: OpKey, keyboard: &'static str, label: &'static str, class: &'static str| {
-            rsx! {
-                button {
-                    id: control_id("btn", label),
-                    class,
-                    r#type: "button",
-                    disabled: html_bool(!live),
-                    onmousedown: keep_focus,
-                    onclick: move |_| from_button(ctx, || press_key(ctx, key)),
-                    kbd { "{keyboard}" }
-                    "{label}"
-                }
-            }
-        };
+    let enter = ctx.entry.enter(&qso);
+    let pressed: Vec<OpKey> = enter
+        .iter()
+        .flat_map(|enter| enter.message.iter().map(OpKey::sending))
+        .collect();
+    let loggable = ctx.entry.loggable();
     rsx! {
         div { class: "run-keys", role: "group", aria_label: "Messages",
             EnterChip { qso, live }
-            {message(OpKey::Cq, "F1", "CQ", "btn btn-secondary btn-sm run-key")}
-            {message(OpKey::Again, "F7", "? Again", "btn btn-secondary btn-sm run-key")}
-            {message(OpKey::Wipe, "Alt+W", "Wipe", "btn btn-secondary btn-sm run-key")}
-            {message(OpKey::StopTx, "Esc", "Stop", "btn btn-secondary btn-sm run-key run-key-desk")}
+            for (key, keyboard, label, touch) in KEY_BAR {
+                {
+                    // Logging without Enter needs a QSO to log.
+                    let logs = matches!(key, OpKey::TuAndLog | OpKey::LogOnly);
+                    let class = key_class(touch, pressed.contains(&key));
+                    rsx! {
+                        button {
+                            id: control_id("btn", label),
+                            class,
+                            r#type: "button",
+                            disabled: html_bool(!live || (logs && !loggable)),
+                            onmousedown: keep_focus,
+                            onclick: move |_| from_button(ctx, || press_key(ctx, key)),
+                            kbd { "{keyboard}" }
+                            "{label}"
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+/// A key bar button's classes: kept from a finger unless `touch`, and lit
+/// when Enter would press it `next`.
+fn key_class(touch: bool, next: bool) -> &'static str {
+    match (touch, next) {
+        (true, false) => "btn btn-secondary btn-sm run-key",
+        (true, true) => "btn btn-secondary btn-sm run-key run-key-next",
+        (false, false) => "btn btn-secondary btn-sm run-key run-key-desk",
+        (false, true) => "btn btn-secondary btn-sm run-key run-key-desk run-key-next",
     }
 }
 
@@ -651,11 +707,12 @@ fn RunActions(paused: bool) -> Element {
 /// in its place.
 #[component]
 fn RunLog(rows: Vec<LogRow>, countdown: Option<u32>, qsos: u32, clean: u32) -> Element {
+    let head = format!("{} · {clean} clean", counted(qsos, "QSO"));
     rsx! {
         div { class: "card run-log",
             div { class: "row-between run-log-head",
                 h3 { class: "card-title", "Log" }
-                span { class: "muted mono", "{qsos} QSOs · {clean} clean" }
+                span { class: "muted mono", "{head}" }
             }
             // Six rows tall whatever it holds, so what comes under it stays
             // put as the log fills.
@@ -1009,6 +1066,72 @@ mod tests {
         });
     }
 
+    /// A Simple QSO worked on the screen: the caller's call heard in its
+    /// call to you, its report and name copied, a TU that greets it by name
+    /// and brings nobody, and the run bar's pace in minutes a QSO.
+    #[test]
+    fn a_simple_qso_is_worked_on_the_screen() {
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            settings.contest.my_name = "MAT".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            // Your CQ and its answer, each a dozen seconds at 30 WPM.
+            ui.advance(30_000).await;
+            let answer = recorder.starts()[0].transcript.others[0].text.clone();
+            let call = answer
+                .split_whitespace()
+                .nth(2)
+                .unwrap_or_default()
+                .to_string();
+            assert_eq!(answer, format!("DL1ABC DE {call} {call} K"));
+            assert!(ui.has("Exchange · RST NAME"));
+            ui.type_into("field-call", &call);
+            ui.press_enter("field-call");
+            assert!(ui.run_until(60_000, |ui| enter(ui).1 == "? Again").await);
+            assert_eq!(enter(&ui).0, "Copy their report and name, then TU & log");
+            // Its exchange heard whole.
+            ui.advance(30_000).await;
+            let mine = format!("{call} DE DL1ABC UR 599 599 NAME MAT MAT BK");
+            let starts = recorder.starts();
+            let sent = starts
+                .iter()
+                .find(|start| start.transcript.text == mine)
+                .expect("your call and exchange, with your name");
+            let exchange = sent.transcript.others[0].text.clone();
+            let words: Vec<&str> = exchange.split_whitespace().collect();
+            let (rst, name) = (words[3], words[6]);
+            ui.type_into("field-exchange", rst);
+            assert_eq!(enter(&ui).0, "Still to copy: their name. Enter asks again");
+            ui.type_into("field-exchange", &format!("{rst} {name}"));
+            assert_eq!(
+                text_of(&ui, "run-line run-reads"),
+                format!("Reads as: RST {rst} · NAME {name}")
+            );
+            ui.press_enter("field-exchange");
+            let tu = recorder.starts().last().expect("TU").transcript.clone();
+            assert_eq!(tu.text, format!("TU {name} 73 EE"));
+            assert_eq!(tu.others.len(), 1, "its 73 alone: nobody else calls");
+            assert!(
+                ui.run_until(15_000, |ui| text_of(ui, "log-check") == "clean")
+                    .await
+            );
+            assert_eq!(text_of(&ui, "log-fields"), format!("{rst} {name}"));
+            let pace = text_of(&ui, "run-rate");
+            assert!(
+                pace.starts_with("Pace ") && pace.ends_with(" min/QSO"),
+                "{pace}"
+            );
+            assert!(!ui.has("Rate "));
+            // Nobody is calling: you call CQ again, and the hint says so.
+            assert_eq!(
+                enter(&ui),
+                ("Enter calls CQ for the next station".into(), "CQ".into())
+            );
+        });
+    }
+
     /// Enter's chip and the hint say what Enter does in each row of the
     /// design's table (§4.4), and "Reads as" what the exchange reads as.
     #[test]
@@ -1075,6 +1198,68 @@ mod tests {
                 text_of(&ui, "run-line run-reads"),
                 format!("Reads as: NR {number} · 12 unused")
             );
+        });
+    }
+
+    /// The key bar has a button for every key, named by its key on a
+    /// keyboard, and lights those Enter would press; the keys that log
+    /// without Enter wait for a QSO to log. A finger keeps CQ, Again and
+    /// Wipe only.
+    #[test]
+    fn the_key_bar_names_every_key_and_lights_what_enter_presses() {
+        run(|| async {
+            let (mut ui, _recorder, call) = first_caller().await;
+            for (id, label) in [
+                ("btn-cq", "F1CQ"),
+                ("btn-exch", "F2Exch"),
+                ("btn-tu-no-log", "F3TU (no log)"),
+                ("btn-his", "F5His"),
+                ("btn-again", "F7? Again"),
+                ("btn-his-exch", ";His + exch"),
+                ("btn-tu-log", ".TU & log"),
+                ("btn-log", "Shift+EnterLog"),
+                ("btn-wipe", "Alt+WWipe"),
+                ("btn-stop", "EscStop"),
+            ] {
+                assert!(ui.shows(id), "{id}");
+                let tag = ui.input_tag(id);
+                let at = ui.html().find(&tag).expect("drawn") + tag.len();
+                let inside = &ui.html()[at..];
+                let text = inside[..inside.find("</button>").expect("closed")]
+                    .replace("<kbd>", "")
+                    .replace("</kbd>", "")
+                    .replace("&amp;", "&")
+                    .replace("&#38;", "&");
+                assert_eq!(text, label, "{id}");
+                // Only CQ, Again and Wipe stay where a finger types.
+                let finger = ["btn-cq", "btn-again", "btn-wipe"].contains(&id);
+                assert_eq!(!tag.contains("run-key-desk"), finger, "{id}");
+            }
+            let lit = |ui: &Ui| -> Vec<String> {
+                ["btn-cq", "btn-exch", "btn-his", "btn-again", "btn-tu-log"]
+                    .iter()
+                    .filter(|id| ui.input_tag(id).contains("run-key-next"))
+                    .map(|id| id.to_string())
+                    .collect()
+            };
+            assert_eq!(lit(&ui), ["btn-cq"], "Enter calls CQ");
+            assert!(ui.input_tag("btn-tu-log").contains("disabled"));
+            assert!(ui.input_tag("btn-log").contains("disabled"));
+            ui.type_into("field-call", &call);
+            assert_eq!(
+                lit(&ui),
+                ["btn-exch", "btn-his"],
+                "their call and your exchange"
+            );
+            ui.press_enter("field-call");
+            assert!(ui.run_until(15_000, |ui| enter(ui).1 == "? Again").await);
+            assert_eq!(lit(&ui), ["btn-again"]);
+            ui.type_into("field-exchange", "214");
+            assert_eq!(lit(&ui), ["btn-tu-log"], "TU, and it logs");
+            assert!(!ui.input_tag("btn-tu-log").contains("disabled"));
+            assert!(!ui.input_tag("btn-log").contains("disabled"));
+            ui.tap("btn-log");
+            assert!(ui.has("QSOs 1 · "), "logged without sending");
         });
     }
 
@@ -1394,10 +1579,20 @@ mod tests {
             ("07:42".to_string(), " · up to 10:00".to_string())
         );
         assert_eq!(clock_at(&running, false, 9_000_000), "10:00 / 10:00");
-        let (_, _, half, rate) = bar_figures(&running, false, MonoMs(301_400));
-        assert_eq!((half, rate), (50.0, Some("0/h".to_string())));
-        let (_, _, early, rate) = bar_figures(&running, false, MonoMs(31_999));
+        let (_, _, half, rate) = bar_figures(&running, false, true, MonoMs(301_400));
+        assert_eq!((half, rate), (50.0, Some(("Rate", "0/h".to_string(), ""))));
+        let (_, _, early, rate) = bar_figures(&running, false, true, MonoMs(31_999));
         assert_eq!((early, rate), (5.0, None), "no rate in the first minute");
+        // Without a score, the minutes a QSO, once one is logged.
+        assert_eq!(bar_figures(&running, false, false, MonoMs(301_400)).3, None);
+        let logged = ContestView {
+            qsos: 4,
+            ..running.clone()
+        };
+        assert_eq!(
+            bar_figures(&logged, false, false, MonoMs(361_000)).3,
+            Some(("Pace", "1.5 min".to_string(), "/QSO"))
+        );
         clock.pause(MonoMs(61_000));
         let paused = view(ContestPhase::Paused { why: PauseWhy::You }, Some(clock));
         assert_eq!(clock_at(&paused, false, 400_000), "01:00 / 10:00");
@@ -1512,6 +1707,40 @@ mod tests {
                     assert!(rule.contains(needed), "{needed} in {selector}{rule}");
                 }
             }
+
+            // A Simple QSO's exchange on the air is longer than a phone's
+            // line, and its pace than WPX's rate.
+            let mut settings = contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            settings.contest.my_name = "MAXIMILIAN".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.advance(30_000).await;
+            let answer = recorder.starts()[0].transcript.others[0].text.clone();
+            let call = answer.split_whitespace().nth(2).unwrap_or_default();
+            ui.type_into("field-call", call);
+            ui.press_enter("field-call");
+            ui.advance(300).await;
+            let tx = text_of(&ui, "run-line run-tx");
+            assert!(tx.contains("UR 599 599 NAME MAXIMILIAN"), "{tx}");
+            assert!(tx.chars().count() > 47, "longer than a phone's line: {tx}");
+            let rule = |selector: &str| {
+                css.split(selector)
+                    .nth(1)
+                    .and_then(|rest| rest.split('}').next())
+                    .unwrap_or_else(|| panic!("a rule for {selector}"))
+                    .to_string()
+            };
+            // The card's one column is no wider than the card, so the TX
+            // slot, not the card, gives way: the fields and keys stay put.
+            assert!(
+                rule(".run-entry {").contains("grid-template-columns: minmax(0, 1fr)"),
+                "{}",
+                rule(".run-entry {")
+            );
+            // The pace is never cut; on a phone it drops its word and unit.
+            assert!(rule(".run-rate {").contains("flex: none"));
+            assert!(css.contains(".run-rate-word, .run-rate-unit { display: none; }"));
         });
     }
 }

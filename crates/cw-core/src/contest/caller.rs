@@ -8,9 +8,10 @@
 //! of your calls it takes for its own is [`match_call`].
 
 use super::CallerHabits;
+use super::data::{names::draw_name, reports::draw_report};
 use super::esm::MessagePart;
-use super::exchange::{Field, send_serial};
-use super::rules::{ContestRules, REPORT, Side};
+use super::exchange::{Field, send_report, send_serial};
+use super::rules::{ContestRules, Side};
 use super::serial::SerialModel;
 use crate::alignment::edit_distance;
 use crate::callsign::{GeneratedCall, parse_callsign};
@@ -122,6 +123,9 @@ pub(super) enum Says {
     Correction,
     /// Its exchange.
     Exchange,
+    /// What it sends after your TU, where the contest has it sign off:
+    /// heard, and never logged.
+    Signoff,
 }
 
 /// What a caller does after one of your messages.
@@ -166,13 +170,15 @@ const TIMEOUT_SPREAD: f64 = 0.5;
 /// (`DxStn.pas:102-105`).
 const SINGLE_PITCH_SPREAD_HZ: f64 = 50.0;
 
-/// How often the first exchange a caller sends starts with `TU` rather
-/// than `R`, as `TU 5NN 214` and `R 5NN 214`.
-const TU_FIRST: f64 = 0.9;
+/// How often the first exchange a caller sends starts with the first of
+/// the contest's words for it rather than the second: `TU 5NN 214` rather
+/// than `R 5NN 214`.
+const FIRST_LEAD: f64 = 0.9;
 
-/// How often a caller waiting for your exchange asks with `NR?` rather than
-/// `AGN` (`DxOper.pas`, `GetReply`).
-const ASKS_NR: f64 = 0.3;
+/// How often a caller waiting for your exchange asks with the first of the
+/// contest's queries rather than the second: `NR?` rather than `AGN`
+/// (`DxOper.pas`, `GetReply`).
+const FIRST_QUERY: f64 = 0.3;
 
 /// One station calling you.
 #[derive(Clone, Debug, PartialEq)]
@@ -203,6 +209,13 @@ pub(super) struct Caller {
     exchange: Option<Vec<(Field, String)>>,
     /// How many times it has sent its exchange.
     exchanges_sent: u32,
+    /// Whether your TU works as a CQ for it, as in a contest; in an
+    /// everyday QSO it does not.
+    tu_calls: bool,
+    /// What it sends after the TU that closes its QSO, if anything.
+    signoff: Option<&'static str>,
+    /// Your TU closed its QSO, and it signs off next.
+    signs_off: bool,
     rng: SplitMix64,
 }
 
@@ -242,6 +255,9 @@ impl Caller {
             serial,
             exchange: None,
             exchanges_sent: 0,
+            tu_calls: rules.tu_calls,
+            signoff: rules.signoff,
+            signs_off: false,
             rng,
         }
     }
@@ -288,8 +304,11 @@ impl Caller {
                     self.other_qso = false;
                     self.answered_partial = false;
                     match self.state {
-                        NeedQso => replies = Some(true),
-                        state if state.worked() => self.state = Done,
+                        NeedQso if self.tu_calls => replies = Some(true),
+                        state if state.worked() => {
+                            self.state = Done;
+                            self.signs_off = self.signoff.is_some();
+                        }
                         _ => {}
                     }
                 }
@@ -386,6 +405,8 @@ impl Caller {
             // The station you work answers whatever you send it with what it
             // still owes, unless you sent someone else's call.
             state if state.worked() => replies.unwrap_or(true),
+            // The TU that closed its QSO, answered where it signs off.
+            Done => self.signs_off,
             _ => false,
         };
         reaction.asked &= reaction.replies;
@@ -429,22 +450,24 @@ impl Caller {
         self.state.active()
     }
 
-    /// What it sends now, as its state has it, at `run_ms` into the run;
-    /// nothing once it is done or gone.
+    /// What it sends now to you, `my_call`, as its state has it, at
+    /// `run_ms` into the run; nothing once it is done or gone, but its sign
+    /// off after the TU that closed its QSO, where the contest has one.
     pub(super) fn reply(
         &mut self,
         rules: &ContestRules,
         side: Side,
+        my_call: &str,
         run_ms: u64,
     ) -> Option<(String, Says)> {
         let call = self.call.text.clone();
         let said = match self.state {
-            CallerState::NeedQso => (call, Says::Call),
+            CallerState::NeedQso => (rules.answer_text(my_call, &call), Says::Call),
             CallerState::NeedNr => {
-                let query = if self.rng.f64() < ASKS_NR {
-                    "NR?"
+                let query = if self.rng.f64() < FIRST_QUERY {
+                    rules.their_query[0]
                 } else {
-                    "AGN"
+                    rules.their_query[1]
                 };
                 (query.to_string(), Says::Query)
             }
@@ -457,18 +480,22 @@ impl Caller {
                 (correction, Says::Correction)
             }
             CallerState::NeedEnd => {
-                let body = self.exchange_text(rules, side, run_ms);
+                let body = self.exchange_text(rules, side, my_call, run_ms);
                 // The first time with a word in front of it, as operators
                 // send it; a repeat is the exchange alone.
                 let text = if self.exchanges_sent > 0 {
                     body
-                } else if self.rng.f64() < TU_FIRST {
-                    format!("TU {body}")
+                } else if self.rng.f64() < FIRST_LEAD {
+                    format!("{} {body}", rules.their_lead[0])
                 } else {
-                    format!("R {body}")
+                    format!("{} {body}", rules.their_lead[1])
                 };
                 self.exchanges_sent += 1;
                 (text, Says::Exchange)
+            }
+            CallerState::Done if self.signs_off => {
+                self.signs_off = false;
+                (self.signoff?.to_string(), Says::Signoff)
             }
             CallerState::Done | CallerState::Gone => return None,
         };
@@ -485,34 +512,45 @@ impl Caller {
         run_ms: u64,
     ) -> &[(Field, String)] {
         if self.exchange.is_none() {
-            let serial = self.serial.serial_at(run_ms);
             // Plain digits until the Caller habits setting comes (phase 4).
-            let sent = send_serial(serial, CallerHabits::Easy, &mut self.rng);
+            let habits = CallerHabits::Easy;
             // A field this build has no values for is not sent; only those
             // of the contests that have shipped are copied.
             let fields = rules
                 .copied(side)
                 .iter()
-                .filter(|field| **field == Field::Nr)
-                .map(|field| (*field, sent.clone()))
+                .filter_map(|field| {
+                    let token = match field {
+                        Field::Nr => {
+                            send_serial(self.serial.serial_at(run_ms), habits, &mut self.rng)
+                        }
+                        Field::Rst => {
+                            send_report(draw_report(&mut self.rng), habits, &mut self.rng)
+                        }
+                        // The operator's own, whatever the call: a call comes
+                        // back with another name.
+                        Field::Name => draw_name(self.call.country, &mut self.rng).to_string(),
+                        _ => return None,
+                    };
+                    Some((*field, token))
+                })
                 .collect();
             self.exchange = Some(fields);
         }
         self.exchange.as_deref().unwrap_or_default()
     }
 
-    /// Its exchange as it goes out: the report, then each field.
-    fn exchange_text(&mut self, rules: &ContestRules, side: Side, run_ms: u64) -> String {
-        let report = rules.rst.then(|| REPORT.to_string());
-        let tokens: Vec<String> = report
-            .into_iter()
-            .chain(
-                self.exchange(rules, side, run_ms)
-                    .iter()
-                    .map(|(_, token)| token.clone()),
-            )
-            .collect();
-        tokens.join(" ")
+    /// Its exchange as it goes out to you, `my_call`: as the contest sends
+    /// one, each field its token.
+    fn exchange_text(
+        &mut self,
+        rules: &ContestRules,
+        side: Side,
+        my_call: &str,
+        run_ms: u64,
+    ) -> String {
+        let fields = self.exchange(rules, side, run_ms).to_vec();
+        rules.their_exchange_text(my_call, &self.call.text, &fields)
     }
 
     /// How long it waits for you before it tries again, in milliseconds,
@@ -658,23 +696,92 @@ mod tests {
         let reaction = caller.hear(&[Cq]);
         assert!(reaction.replies && !reaction.asked && !reaction.matched);
         assert_eq!(
-            caller.reply(rules(), Side::Dx, 0).map(|r| r.1),
+            caller.reply(rules(), Side::Dx, "DL1ABC", 0).map(|r| r.1),
             Some(Says::Call)
         );
         let reaction = caller.hear(&[call("K5XYZ"), Exchange]);
         assert_eq!(caller.state, CallerState::NeedEnd);
         assert!(reaction.replies && reaction.matched);
-        let (text, says) = caller.reply(rules(), Side::Dx, 60_000).expect("a reply");
+        let (text, says) = caller
+            .reply(rules(), Side::Dx, "DL1ABC", 60_000)
+            .expect("a reply");
         assert_eq!(says, Says::Exchange);
         let serial = caller.exchange(rules(), Side::Dx, 0)[0].1.clone();
         assert!(text == format!("TU 5NN {serial}") || text == format!("R 5NN {serial}"));
         // Asked again, it sends the same serial, alone.
         let reaction = caller.hear(&[Again]);
         assert!(reaction.replies && reaction.asked);
-        let again = caller.reply(rules(), Side::Dx, 120_000).expect("a reply");
+        let again = caller
+            .reply(rules(), Side::Dx, "DL1ABC", 120_000)
+            .expect("a reply");
         assert_eq!(again.0, format!("5NN {serial}"));
         assert!(!caller.hear(&[Tu]).replies);
         assert_eq!(caller.state, CallerState::Done);
+    }
+
+    /// In an everyday QSO a caller calls you by your call and its own
+    /// twice, sends a report and a name of its own, signs off once after
+    /// your TU, and takes no TU for a CQ.
+    #[test]
+    fn a_simple_qso_caller_sends_an_everyday_qsos_lines() {
+        let rules = ContestKind::SimpleQso
+            .rules()
+            .expect("Simple QSO has shipped");
+        let mut rng = SplitMix64::new(4);
+        let mut generated = generate_call(3, CallSpec::default(), &mut rng);
+        generated.text = "K5XYZ".to_string();
+        generated.country = "K";
+        let settings = TrainingSettings::default().clamp();
+        let mut caller = Caller::arrive(generated, &settings, rules, 10, rng.fork(1));
+        assert!(!caller.hear(&[Tu]).replies, "a TU is no CQ here");
+        assert!(caller.hear(&[Cq]).replies);
+        assert_eq!(
+            caller.reply(rules, Side::Dx, "DL1ABC", 0),
+            Some(("DL1ABC DE K5XYZ K5XYZ K".to_string(), Says::Call))
+        );
+        caller.hear(&[call("K5XYZ"), Exchange]);
+        let (text, says) = caller.reply(rules, Side::Dx, "DL1ABC", 0).expect("a reply");
+        assert_eq!(says, Says::Exchange);
+        let fields = caller.exchange(rules, Side::Dx, 0).to_vec();
+        let (rst, name) = (&fields[0], &fields[1]);
+        assert_eq!((rst.0, name.0), (Field::Rst, Field::Name));
+        assert!(Field::Rst.canonical(&rst.1).is_some(), "{}", rst.1);
+        assert_eq!(
+            text,
+            format!("R TNX UR {} {} NAME {} {} BK", rst.1, rst.1, name.1, name.1)
+        );
+        // Sent again, the exchange goes without its first words.
+        caller.hear(&[Again]);
+        let again = caller.reply(rules, Side::Dx, "DL1ABC", 0).expect("a reply");
+        assert_eq!(
+            again.0,
+            format!("UR {} {} NAME {} {} BK", rst.1, rst.1, name.1, name.1)
+        );
+        let reaction = caller.hear(&[Tu]);
+        assert!(reaction.replies && !reaction.asked);
+        assert_eq!(caller.state, CallerState::Done);
+        assert_eq!(
+            caller.reply(rules, Side::Dx, "DL1ABC", 0),
+            Some(("73 EE".to_string(), Says::Signoff))
+        );
+        assert_eq!(caller.reply(rules, Side::Dx, "DL1ABC", 0), None, "once");
+        assert!(!caller.hear(&[Tu]).replies);
+        // Its call alone, it asks for your exchange, and never for a serial
+        // the QSO has none of.
+        for seed in 0..40 {
+            let mut rng = SplitMix64::new(seed);
+            let mut generated = generate_call(3, CallSpec::default(), &mut rng);
+            generated.text = "K5XYZ".to_string();
+            let mut caller = Caller::arrive(generated, &settings, rules, 10, rng.fork(1));
+            caller.hear(&[Cq]);
+            assert!(caller.hear(&[call("K5XYZ")]).replies);
+            assert_eq!(caller.state, CallerState::NeedNr);
+            assert_eq!(
+                caller.reply(rules, Side::Dx, "DL1ABC", 0),
+                Some(("AGN".to_string(), Says::Query)),
+                "seed {seed}"
+            );
+        }
     }
 
     /// Nothing more comes from a station that is done or gone.
@@ -693,7 +800,7 @@ mod tests {
                 assert!(!caller.hear(&message).replies, "{state:?} {message:?}");
                 assert_eq!(caller.state, state);
             }
-            assert!(caller.reply(rules(), Side::Dx, 0).is_none());
+            assert!(caller.reply(rules(), Side::Dx, "DL1ABC", 0).is_none());
             assert!(!caller.time_out());
         }
     }
@@ -724,7 +831,9 @@ mod tests {
         let mut caller = caller(4);
         let reaction = caller.hear(&[call("K5XYW"), Exchange]);
         assert!(reaction.replies && reaction.matched && !reaction.asked);
-        let (text, says) = caller.reply(rules(), Side::Dx, 0).expect("a reply");
+        let (text, says) = caller
+            .reply(rules(), Side::Dx, "DL1ABC", 0)
+            .expect("a reply");
         assert_eq!(says, Says::Correction);
         assert!(text == "DE K5XYZ" || text == "K5XYZ K5XYZ", "{text}");
         caller.hear(&[call("K5XYZ"), Tu]);
@@ -783,7 +892,9 @@ mod tests {
             let reaction = caller.hear(&[call("K5X?")]);
             assert!(reaction.replies && reaction.asked && reaction.matched);
             assert_eq!(caller.state, after);
-            let (text, says) = caller.reply(rules(), Side::Dx, 0).expect("a reply");
+            let (text, says) = caller
+                .reply(rules(), Side::Dx, "DL1ABC", 0)
+                .expect("a reply");
             assert_eq!(says, Says::Correction);
             assert!(text.contains("K5XYZ"), "{text}");
         }
@@ -884,7 +995,7 @@ mod tests {
         assert!(reaction.replies && reaction.took_exchange);
         assert_eq!(after.state, CallerState::NeedCall);
         assert_eq!(
-            after.reply(rules(), Side::Dx, 0).map(|r| r.1),
+            after.reply(rules(), Side::Dx, "DL1ABC", 0).map(|r| r.1),
             Some(Says::Correction)
         );
         let mut moved = caller(1);
@@ -906,7 +1017,7 @@ mod tests {
         assert_eq!(piece.state, CallerState::NeedQso);
         assert_eq!(piece.patience, tries - 1);
         assert_eq!(
-            piece.reply(rules(), Side::Dx, 0).map(|r| r.1),
+            piece.reply(rules(), Side::Dx, "DL1ABC", 0).map(|r| r.1),
             Some(Says::Call)
         );
         // A slip that is a whole call is still put right.

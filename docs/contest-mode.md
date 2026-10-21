@@ -15,7 +15,9 @@ the contest results (`src/ui/contest_results.rs`), also from History. So do
 the settings in Contest (the Character set card's contest, Your station in
 `src/ui/settings_station.rs`, and the controls a contest hides), the Home
 hero, the stats pills and notes, the privacy texts, the credits and the
-backup merge. Nobody can pick Contest yet (§14).
+backup merge. Slices 1c and 1d have landed too: Simple QSO, with its names
+and reports (`contest/data/`) and `myName`, and the contester's keys with
+their buttons on the key bar. Nobody can pick Contest yet (§14).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -197,6 +199,17 @@ kind replacing an earlier one (11.7).
 - **Rules.** TU does not bring the next caller; you call CQ again. No contest
   score: QSOs, minutes per QSO and accuracy per field. Your fields:
   callsign, name.
+- **As built.** Your report goes out as `599`, as the template writes it,
+  not cut. The caller's report is drawn from §11.5's shares and copied, and
+  goes out in plain digits until Caller habits come (phase 4). Asked again,
+  the caller sends its exchange without `R TNX`; a correction is `DE K5XYZ`
+  or `K5XYZ K5XYZ`, as in WPX. Your TU greets it by the name the Exchange
+  field reads (`TU 73 EE` with none). Its `73 EE` comes in the TU's turn and
+  brings nobody, and the hint then says "Enter calls CQ for the next
+  station". A caller that has its call and not your exchange asks `AGN`,
+  never `NR?`: there is no serial to ask for. The row holds the callers'
+  texts as well (`answer`, `their_exchange`, `their_lead`, `their_query`,
+  `signoff`, `tu_calls`), so a later contest is a row too.
 
 ### Sprint: NA Sprint (`sprint`)
 
@@ -393,7 +406,8 @@ its reply is decided then (5.1); Esc takes back what had not gone out whole
 callers heard when it was keyed, so they hear only the new message: an
 exchange keyed then, after someone else's call, goes to the station you
 work. A station that hears its call alone (F5) waits for your exchange and
-asks for it with `NR?` or `AGN`, as MRCE's `NeedNr` does. The patience timer
+asks for it with `NR?` or `AGN`, as MRCE's `NeedNr` does (in Simple QSO,
+`AGN` alone: the contest's row says what its callers ask with). The patience timer
 runs to the first waiting caller's timeout; each caller draws its own.
 
 ### 4.4 Enter Sends Message
@@ -424,8 +438,10 @@ A CQ or a TU ends the QSO for Enter as logging does, and so does a key
 pressed with the Call field empty, as MRCE's `Edit1Change` resets C and N
 when the field empties (`Main.pas:2063-2068`), and the station you work
 leaving, on its timeouts or sent away by what you send (B4, NIL, or its
-last try spent). F3 keeps only the call it went to, so Enter on that call
-logs the QSO it closed, and any other call starts afresh. Its call sent in
+last try spent). F3 keeps only the call it went to, so Enter or `.` on that
+call sends the TU alone and logs the QSO it closed, as MRCE's TU and log
+does while that call still counts as sent, and any other call starts
+afresh. Its call sent in
 answer to your partial, or to a piece of its call, is no correction: you
 asked for it.
 A call corrected after your exchange sends `K5XYZ TU` and logs. A partial
@@ -465,11 +481,27 @@ It takes your side because ARRL DX's exchange depends on it, as
   visibility listener is (6.4), which keeps each key from the browser and
   tells the run through `dioxus.send` (`src/ui/contest_keys.rs`). A key is
   known by where it sits (`KeyS`, as Alt+S types ß on a Mac); a key held
-  down is told once; Ctrl, Shift and the Command key make any key a
-  shortcut, passed by. F1–F10 and F12 join the list as their keys ship.
+  down is told once; Ctrl and the Command key make a shortcut of any other
+  key, and Shift of any key but a typed character (below), so those are
+  passed by, Enter held with Shift, Ctrl or Alt aside. F1–F10 and F12 join
+  the list as their keys ship.
   Alt+P pauses, and on a paused run carries on.
 - Every key has a button. The key bar's "Enter · TU & log" chip names what
-  Enter sends, and F3 reads "F3 TU (no log)".
+  Enter sends, and F3 reads "F3 TU (no log)". After Enter come F1 CQ, F2
+  Exch, F3 TU (no log), F5 His, F7 ? Again, `;` His + exch, `.` TU & log,
+  Shift+Enter Log, Alt+W Wipe and Esc Stop. The buttons Enter would press
+  now are lit (its CQ is F1's, their call F5's, your exchange F2's, `?`
+  F7's, its TU `.`'s), and `.` and Shift+Enter wait, disabled, until the
+  call is whole and the exchange complete (`loggable`). On a desktop
+  window 760 px wide or more the bar takes two rows, Enter to F5 and F7 to
+  Esc; narrower, more. Where a finger types, only CQ, ? Again and Wipe stay
+  beside the keypad.
+- `;` `.` `,` `+` are known by the character they type, Shift held or not
+  (`+` takes Shift on many a keyboard, `;` on others), and never typed into
+  a field, as in MorseRunner; one typed by a paddle key (`+` sits on `]` in
+  German layouts) stays the paddle's. Enter held with Shift, Ctrl or Alt
+  is no Enter in the fields; the listener hears it as log without sending.
+  With the Command key, which the listener passes by, it is Enter still.
 - Paddles key into the focused field (`paddle.rs:287-299`) and never
   transmit; phase 5 adds a field space after a 7-dit gap.
 
@@ -827,7 +859,8 @@ in place of `current/total`.
 │ └──────────────────────────┘  └───────────────────────────────┘  │
 │ Reads as: NR 214                                                 │
 │ [Enter · TU & log] [F1 CQ] [F2 Exch] [F3 TU (no log)] [F5 His]   │
-│ [F7 ?] [Esc Stop]                                                │
+│ [F7 ? Again] [; His + exch] [. TU & log] [Shift+Enter Log]       │
+│ [Alt+W Wipe] [Esc Stop]                                          │
 ├──────────────────────────────────────────────────────────────────┤
 │ Log                                              9 QSOs · 8 clean│
 │  9  07:31  W6XYZ     214        24 WPM          clean            │
@@ -838,8 +871,10 @@ in place of `current/total`.
 ```
 
 - **The hint line** is `esm()`'s `hint` ("Type the call you hear, then
-  Enter"), one line, as group training's (`training.rs:566-585`), and in
-  its type. The hints are short enough for a phone's line ("Copy their
+  Enter"; with nobody calling, after a Simple QSO's TU or once the station
+  has gone, "Enter calls CQ for the next station", from `QsoState`'s
+  `nobody_calling`), one line, as group training's (`training.rs:566-585`),
+  and in its type. The hints are short enough for a phone's line ("Copy their
   number, then TU & log"). Before the first CQ it says the seconds to it
   ("Your first CQ goes out in 3 s"), as a phone shows the log's place, where
   the countdown stands, only below the keypad.
@@ -891,8 +926,10 @@ line is a fixed one-line slot with an ellipsis (as `.train-hint`,
 ```
 
 At a phone's width the run bar keeps the desktop's three lines: the status
-and the clock, the bar, then the QSOs, the rate (without its word) and
-− / +, whose targets are larger than the keys they show; a status too long
+and the clock, the bar, then the QSOs, the rate (without its word, and a
+Simple QSO's pace without its word and "/QSO": "2.6 min") and − / +, whose
+targets are larger than the keys they show; the rate or pace keeps whole,
+the counts before it giving way first; a status too long
 for its line is cut short, and an open run's clock drops its " · up to
 60:00". Where the keypad shows, Pause, End run and Discard come under it in
 one row and the log below them, its rows two lines each; the key bar drops
@@ -964,8 +1001,16 @@ points (10); the banner ranks within the contest kind. Where what you
 logged differs from what was sent, the log reads logged→sent (`13→31` is
 13 logged, 31 sent; `K5ABD→K5ABC`), and a QSO never logged says so.
 Simple QSO shows QSOs, minutes per QSO and accuracy per field, with no
-contest score. A History row reads "2026-10-20 · Contest · CQ WPX · 11/12 QSOs · 72/h · 97% ·
-496 pts".
+contest score: the second tile reads "Per QSO 1.2 min", the sentence "8
+QSOs, 1.2 minutes each.", and in the score's place an "Accuracy per field"
+card gives the character accuracy of the calls and of each field over the
+run, lost copies included (`ContestRun::accuracy_by_field`), with the
+checks' line under it. Its run bar reads "Pace 1.2 min/QSO" once a QSO is
+logged (`ContestView::minutes_per_qso`); which contests score is
+`ContestKind::scored`. In the results' log nothing is cut short: the call,
+the exchange and the check wrap within their tracks, and on a phone the
+exchange and the check each take a line under the call. A History row reads "2026-10-20 · Contest · CQ WPX · 11/12 QSOs · 72/h · 97% ·
+496 pts", and a Simple QSO's "… · Simple QSO · 8/9 QSOs · 1.2 min/QSO · …".
 
 **Settings, Contest chosen.** The Character set card (§2) shows the six
 segments in a 3 + 3 grid, the contest pills under a "Contest" eyebrow, "You
@@ -1051,7 +1096,10 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   `every_setting_belongs_to_exactly_one_section` respectively. Nothing joins
   `PROGRESS`.
 - **Starting** needs a `myCall` that `parse_callsign` reads and valid
-  contest fields. Under the call, Home and Your station say why a call
+  contest fields: from 1c, a `myName` where the contest sends one ("Add
+  your name to start a Simple QSO"). Your station shows the name field only
+  then, and Home, once the call reads, holds an inline name field as it
+  holds the call's, and Start moves the focus to it. Under the call, Home and Your station say why a call
   typed does not read, in `call_fault`'s words (§2), and Your station, while
   the call is empty, what a run is missing, in the words of
   `ContestSettings::missing()`. Home says `missing()` above Start once a
@@ -1462,7 +1510,16 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
   baby-name data (public domain), weighted to births 1935–1975 and folded
   to the forms operators send (ROBERT → BOB); short lists per region written
   for Dust elsewhere. A name is kept per caller, never tied to a call. The
-  16 names at `band/activity.rs:1152-1155` move here.
+  16 names at `band/activity.rs:1152-1155` move here. As built
+  (`contest/data/names.rs`), the network refused the SSA download, so the
+  North American list is written by hand from common short given names of
+  those years, each weighted by Dust's estimate of the births that go by
+  it, and its header says so; a script counting the SSA's files can replace
+  it. About twenty regional lists, drawn evenly, are chosen by the caller's
+  country, and any country they do not list, the English-speaking ones
+  among them, takes a British and Commonwealth list. No name reads as a
+  report (`ANN` would be 199). The band's ragchews draw from the same lists
+  by their station's country.
 - **Field Day class,** from 13,709 rows of `FDGOTA.txt`: 1D 41.9%, 1E 14.0%,
   1B 13.1%, 2A 6.7%, 3A 6.7%, 4A 3.5%, 1A 2.9%, 5A 1.8%; 1C, 2D, 2F, 2B, 2E
   about 1% each; the rest 4%.
@@ -1488,7 +1545,8 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
   536-537`), 98% of other zeros as T, 9 as N 97% of the time (`:538-539,
   564-565`), zones and power cut to T, A, N for 70% of callers
   (`:555-562`), and `ENN` in 5% of messages (`:527-528`).
-- **Your numbers** are always cut, except your Sprint serial.
+- **Your numbers** are always cut, except your Sprint serial and Simple
+  QSO's `599`, as its template writes it.
 
 | Field | Canonical | Equal when |
 |---|---|---|
@@ -1514,7 +1572,8 @@ and the log use canonical values; the groups keep keyed tokens (9.1).
   read, and not a report, is unreadable and makes E Invalid. Phase 1 uses
   one rule per field: WPX NR is the last token that reads as a number and is
   not exactly `5NN`, `ENN` or `599` (with only those, 599); Simple QSO RST is
-  the last report-shaped token, NAME the last all-letter one. From Sprint,
+  the last report-shaped token, NAME the last all-letter token that is not
+  a report (`ENN` is a report). From Sprint,
   one deterministic parser serves all: each closed-list field (state,
   section, class, power) takes the last token from its list; each numeric
   field the last remaining number; free-text fields fill from what is left,
@@ -1547,7 +1606,7 @@ The repository is GPL-3.0-or-later (`Cargo.toml:9`).
 | State by call area | FCC ULS | US Government work, counts only |
 | FD class, power, section shares | MRCE's `FDGOTA.txt` (W1MI, SM7IUN, W7SST), `ARRLDXCW_USDX.txt` (VE2FK, SM7IUN, K3CT, WV4P) | in an MPL-2.0 repository, compiled from contest logs; rounded shares only; credited; ask W7SST |
 | WPX serial fit | F6FVY's data in MRCE `CqWpx.pas` | two derived numbers |
-| Names | SSA baby names | public domain |
+| Names | SSA baby names; written by hand for Dust until they can be fetched (§11.5) | public domain; GPL-3.0-or-later |
 | DX names, reports, Sprint fit | written for Dust | GPL-3.0-or-later |
 | Caller behaviour | MRCE (MPL-2.0) | re-implemented, credited |
 
@@ -1557,7 +1616,9 @@ would be allowed (MPL-2.0 §3.3); Dust re-implements it by choice. Credits
 compilers of the counted files, Morse Walker, AD1C, the SSA, the FCC and
 F6FVY, each in a "Built on" list (`SOURCES`) from the phase that first uses
 its work: phase 1 credits MorseRunner and MorseRunner CE for the callers,
-Enter Sends Message and cut numbers, and F6FVY for the WPX serial data.
+Enter Sends Message and cut numbers, F6FVY for the WPX serial data, and
+Morse Walker for Simple QSO's `BK` and `73 EE`. The SSA joins once its
+counts replace the hand-written names (§11.5).
 
 ## 12. Code structure
 
@@ -1580,7 +1641,7 @@ pub struct Fields { pub call: String, pub exch: String,
 pub struct ContestView {
     pub phase: ContestPhase, pub clock: Option<RunClock> /* None in the countdown */,
     pub limit_ms: u64, pub my_wpm: f64,
-    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call
+    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling
     pub air: Option<AirView>,  // heard from, your text and where each character ends, segment spans
     pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked
     pub qsos: u32, pub clean: u32,
@@ -1636,7 +1697,7 @@ whichever is live.
 | `serial.rs`, `check.rs`, `score.rs` | serials; `QsoCheck`; `contest_score`, rates |
 | `record.rs` | `ContestLog`, `ContestRun`, `QsoRecord`, `result()` |
 | `bot.rs` | operators that hear the turns; Hear a QSO uses the perfect one |
-| `data/` | `names`, `places`, `zones`, `sections`, `fd`, `power` |
+| `data/` | `names`, `reports` (1c); `places`, `zones`, `sections`, `fd`, `power` |
 
 **Changed in cw-core:** `Cargo.toml` (`serde_json`); `settings/mod.rs`,
 `contest.rs` (new), `save.rs`, `reset.rs`, `clamp.rs` (`Contest`, `ALL` of 6,
@@ -1868,9 +1929,11 @@ ships a release before phase 1.
 - **1b Honest clock and sound.** The dry path for your message. The rate
   and − / + came with 1a's run screen.
 - **1c Simple QSO.** Names data, the RST and NAME exchange, `myName`.
+  Landed, with Morse Walker credited for `BK` and `73 EE`.
 - **1d Contester keys.** F2, F3, F5, `;`, `.`, `,`, `+`, Shift+Enter, and
   their buttons on the key bar. The key bar, browser defaults kept from
   the run's keys and Esc locked in fullscreen came with 1a's run screen.
+  Landed.
 
 **Phase 2: pile-ups and Sprint,** the first release.
 
@@ -1948,7 +2011,7 @@ keying with the paddles, a contest level, and more contests.
 | Keys | Tab as on any page; `;`; Alt+S, Alt+E | MRCE's Tab cycle, Insert | no trapped focus; screen readers keep Insert |
 | Difficulty | presets writing shared fields | a contest level | a level would own stations and tier |
 | Your call in a run | not stored; side, country, continent, zone are | stored | no score needs it |
-| Numbers | yours cut (Sprint plain); callers' by habits | always cut | what operators send; learners start plain |
+| Numbers | yours cut (Sprint's serial and Simple QSO's 599 plain); callers' by habits | always cut | what operators send; learners start plain |
 
 ### 15.2 Decisions taken with the user
 

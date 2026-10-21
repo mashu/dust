@@ -1,15 +1,19 @@
 //! A run's keys on a keyboard (§4.5 of `docs/contest-mode.md`), as
-//! MorseRunner has them wherever a browser lets it: F1 calls CQ, F7 sends
-//! `?`, Esc or Alt+S stops sending, Alt+W wipes the fields, PgUp and PgDn
-//! move your speed, Alt+P pauses and carries on, Alt+E ends the run. Enter,
-//! and Space in the Call field, are the fields' own; Tab moves on as on any
-//! page. F11 stays the app's fullscreen and `[` `]` the paddles.
+//! MorseRunner has them wherever a browser lets it: F1 calls CQ, F2 sends
+//! your exchange, F3 TU without logging, F5 their call, `;` (or Insert)
+//! their call and your exchange, F7 `?`; `.`, `,` or `+` send TU and log,
+//! and Enter held with Shift, Ctrl or Alt logs without sending. Esc or Alt+S
+//! stops sending, Alt+W wipes the fields, PgUp and PgDn move your speed,
+//! Alt+P pauses and carries on, Alt+E ends the run. Enter alone, and Space
+//! in the Call field, are the fields' own; Tab moves on as on any page. F11
+//! stays the app's fullscreen and `[` `]` the paddles.
 //!
 //! While the run screen is up, a listener on the document hears these keys
 //! wherever the focus is, nowhere at all included, and keeps the browser
-//! from doing what it would with them: help on F1, caret browsing on F7, a
-//! scroll on PgUp, a menu on Alt. In fullscreen it asks for Esc as well,
-//! which a browser otherwise keeps to leave fullscreen with.
+//! from doing what it would with them: help on F1, find on F3, a reload on
+//! F5, caret browsing on F7, a scroll on PgUp, a menu on Alt, `.` typed into
+//! a field. In fullscreen it asks for Esc as well, which a browser otherwise
+//! keeps to leave fullscreen with.
 
 use cw_core::{ContestPhase, OpKey, PauseWhy};
 use dioxus::prelude::*;
@@ -31,33 +35,74 @@ enum RunAction {
     EndRun,
 }
 
-/// Each key, by where it sits on the keyboard, whether Alt is held, and what
-/// it does. A letter is known by its place, not what it types: Alt+S types
-/// ß on a Mac.
-const KEYS: [(&str, bool, RunAction); 9] = [
-    ("F1", false, RunAction::Key(OpKey::Cq)),
-    ("F7", false, RunAction::Key(OpKey::Again)),
-    ("Escape", false, RunAction::Key(OpKey::StopTx)),
-    ("KeyS", true, RunAction::Key(OpKey::StopTx)),
-    ("KeyW", true, RunAction::Key(OpKey::Wipe)),
-    ("PageUp", false, RunAction::Speed(SPEED_STEP_WPM)),
-    ("PageDown", false, RunAction::Speed(-SPEED_STEP_WPM)),
-    ("KeyP", true, RunAction::Pause),
-    ("KeyE", true, RunAction::EndRun),
-];
-
-/// What the key at `code` does, with Alt held or not. Ctrl, Shift and the
-/// Command key make a shortcut of any key, so the listener passes those by.
-fn action_for(code: &str, alt: bool) -> Option<RunAction> {
-    KEYS.iter()
-        .find(|(key, with_alt, _)| *key == code && *with_alt == alt)
-        .map(|(_, _, action)| *action)
+/// How the listener knows a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Known {
+    /// By where it sits, pressed alone: `F1`.
+    Alone(&'static str),
+    /// By where it sits, with Alt held: `KeyS`. A letter is known by its
+    /// place, not what it types: Alt+S types ß on a Mac.
+    Alt(&'static str),
+    /// By the character it types, Shift held or not: `+` takes Shift on
+    /// many a keyboard, `;` on others. A key the paddles sit on, `[` or
+    /// `]`, stays theirs whatever it types.
+    Typed(&'static str),
+    /// Enter, with Shift, Ctrl or Alt held.
+    HeldEnter,
 }
 
-/// A key the listener heard, by the place it sits and whether Alt was held:
-/// do what it does in the run.
-fn pressed(ctx: AppCtx, code: &str, alt: bool) {
-    let Some(action) = action_for(code, alt) else {
+impl Known {
+    /// The name the listener tells the run the key by.
+    fn name(self) -> String {
+        match self {
+            Self::Alone(code) | Self::Typed(code) => code.to_string(),
+            Self::Alt(code) => format!("Alt+{code}"),
+            Self::HeldEnter => HELD_ENTER.to_string(),
+        }
+    }
+}
+
+/// What the listener calls Enter held with Shift, Ctrl or Alt.
+const HELD_ENTER: &str = "Shift+Enter";
+
+/// Each key, and what it does.
+const KEYS: [(Known, RunAction); 18] = [
+    (Known::Alone("F1"), RunAction::Key(OpKey::Cq)),
+    (Known::Alone("F2"), RunAction::Key(OpKey::Exchange)),
+    (Known::Alone("F3"), RunAction::Key(OpKey::Tu)),
+    (Known::Alone("F5"), RunAction::Key(OpKey::HisCall)),
+    (Known::Alone("F7"), RunAction::Key(OpKey::Again)),
+    (Known::Typed(";"), RunAction::Key(OpKey::HisCallAndExchange)),
+    // Insert as well, as MorseRunner has it; `;` is the one the screen
+    // names, as a screen reader keeps Insert for itself.
+    (
+        Known::Alone("Insert"),
+        RunAction::Key(OpKey::HisCallAndExchange),
+    ),
+    (Known::Typed("."), RunAction::Key(OpKey::TuAndLog)),
+    (Known::Typed(","), RunAction::Key(OpKey::TuAndLog)),
+    (Known::Typed("+"), RunAction::Key(OpKey::TuAndLog)),
+    (Known::HeldEnter, RunAction::Key(OpKey::LogOnly)),
+    (Known::Alone("Escape"), RunAction::Key(OpKey::StopTx)),
+    (Known::Alt("KeyS"), RunAction::Key(OpKey::StopTx)),
+    (Known::Alt("KeyW"), RunAction::Key(OpKey::Wipe)),
+    (Known::Alone("PageUp"), RunAction::Speed(SPEED_STEP_WPM)),
+    (Known::Alone("PageDown"), RunAction::Speed(-SPEED_STEP_WPM)),
+    (Known::Alt("KeyP"), RunAction::Pause),
+    (Known::Alt("KeyE"), RunAction::EndRun),
+];
+
+/// What the key the listener names `name` does.
+fn action_for(name: &str) -> Option<RunAction> {
+    KEYS.iter()
+        .find(|(known, _)| known.name() == name)
+        .map(|(_, action)| *action)
+}
+
+/// A key the listener heard, by the name it tells it by: do what it does
+/// in the run.
+fn pressed(ctx: AppCtx, name: &str) {
+    let Some(action) = action_for(name) else {
         return;
     };
     let phase = ctx.contest.peek().as_ref().map(|view| view.phase);
@@ -83,36 +128,55 @@ fn pressed(ctx: AppCtx, code: &str, alt: bool) {
     }
 }
 
-/// The codes of the run's keys pressed alone, or with Alt, as a script
-/// writes a list.
-fn codes(alt: bool) -> String {
-    let codes: Vec<String> = KEYS
+/// The keys known by `kind`, as a script writes a list of what it matches
+/// them by.
+fn listed(kind: fn(Known) -> Option<&'static str>) -> String {
+    let listed: Vec<String> = KEYS
         .iter()
-        .filter(|(_, with_alt, _)| *with_alt == alt)
-        .map(|(code, _, _)| format!("\"{code}\""))
+        .filter_map(|(known, _)| kind(*known))
+        .map(|key| format!("\"{key}\""))
         .collect();
-    format!("[{}]", codes.join(", "))
+    format!("[{}]", listed.join(", "))
 }
 
 /// The script that hears the run's keys on the document, keeps them from
 /// the browser and tells the run, and locks Esc in fullscreen where the
 /// browser can. A key held down is kept from the browser too, but told
-/// once. A listener left by a run before is taken off first.
+/// once. Ctrl and the Command key make a shortcut of any other key, and
+/// Shift of any but a character, so those are passed by. A listener left by
+/// a run before is taken off first.
 fn keys_script() -> String {
     format!(
         r#"{STOP_LISTENING}
-const plain = new Set({plain});
+const alone = new Set({alone});
 const withAlt = new Set({alt});
+const typed = new Set({typed});
+const name = (e) => {{
+    if (e.code === "Enter" || e.code === "NumpadEnter") {{
+        return e.shiftKey || e.ctrlKey || e.altKey ? "{HELD_ENTER}" : null;
+    }}
+    if (e.ctrlKey) {{
+        return null;
+    }}
+    if (e.altKey) {{
+        return withAlt.has(e.code) ? "Alt+" + e.code : null;
+    }}
+    if (typed.has(e.key) && !e.code.startsWith("Bracket")) {{
+        return e.key;
+    }}
+    return !e.shiftKey && alone.has(e.code) ? e.code : null;
+}};
 const heard = (e) => {{
-    if (e.ctrlKey || e.metaKey || e.shiftKey || e.isComposing) {{
+    if (e.metaKey || e.isComposing) {{
         return;
     }}
-    if (!(e.altKey ? withAlt : plain).has(e.code)) {{
+    const key = name(e);
+    if (key === null) {{
         return;
     }}
     e.preventDefault();
     if (!e.repeat) {{
-        dioxus.send([e.code, e.altKey]);
+        dioxus.send(key);
     }}
 }};
 const lock = () => {{
@@ -130,8 +194,18 @@ window.__dustRunKeys = () => {{
         navigator.keyboard.unlock();
     }}
 }};"#,
-        plain = codes(false),
-        alt = codes(true),
+        alone = listed(|known| match known {
+            Known::Alone(code) => Some(code),
+            _ => None,
+        }),
+        alt = listed(|known| match known {
+            Known::Alt(code) => Some(code),
+            _ => None,
+        }),
+        typed = listed(|known| match known {
+            Known::Typed(key) => Some(key),
+            _ => None,
+        }),
     )
 }
 
@@ -151,8 +225,8 @@ pub fn use_run_keys(ctx: AppCtx) {
         use_hook(move || {
             spawn(async move {
                 let mut page = document::eval(&keys_script());
-                while let Ok((code, alt)) = page.recv::<(String, bool)>().await {
-                    pressed(ctx, &code, alt);
+                while let Ok(name) = page.recv::<String>().await {
+                    pressed(ctx, &name);
                 }
             })
         });
@@ -172,36 +246,49 @@ mod tests {
     use crate::state::Screen;
     use crate::testing::{Ui, contest_settings, run};
 
+    /// Each key does what MorseRunner has it do, told by the name the
+    /// listener gives it.
     #[test]
     fn each_key_does_what_morserunner_has_it_do() {
-        assert_eq!(action_for("F1", false), Some(RunAction::Key(OpKey::Cq)));
-        assert_eq!(action_for("F7", false), Some(RunAction::Key(OpKey::Again)));
-        assert_eq!(
-            action_for("Escape", false),
-            Some(RunAction::Key(OpKey::StopTx))
-        );
-        assert_eq!(
-            action_for("KeyS", true),
-            Some(RunAction::Key(OpKey::StopTx))
-        );
-        assert_eq!(action_for("KeyW", true), Some(RunAction::Key(OpKey::Wipe)));
-        assert_eq!(action_for("PageUp", false), Some(RunAction::Speed(2)));
-        assert_eq!(action_for("PageDown", false), Some(RunAction::Speed(-2)));
-        assert_eq!(action_for("KeyP", true), Some(RunAction::Pause));
-        assert_eq!(action_for("KeyE", true), Some(RunAction::EndRun));
-        // A letter alone is typing, and F11 and the paddles are the app's.
-        for (code, alt) in [
-            ("KeyS", false),
-            ("KeyP", false),
-            ("F1", true),
-            ("F11", false),
-            ("BracketLeft", false),
-            ("BracketRight", false),
-            ("Enter", false),
-            ("Space", false),
-            ("Tab", false),
+        for (name, action) in [
+            ("F1", RunAction::Key(OpKey::Cq)),
+            ("F2", RunAction::Key(OpKey::Exchange)),
+            ("F3", RunAction::Key(OpKey::Tu)),
+            ("F5", RunAction::Key(OpKey::HisCall)),
+            ("F7", RunAction::Key(OpKey::Again)),
+            (";", RunAction::Key(OpKey::HisCallAndExchange)),
+            ("Insert", RunAction::Key(OpKey::HisCallAndExchange)),
+            (".", RunAction::Key(OpKey::TuAndLog)),
+            (",", RunAction::Key(OpKey::TuAndLog)),
+            ("+", RunAction::Key(OpKey::TuAndLog)),
+            ("Shift+Enter", RunAction::Key(OpKey::LogOnly)),
+            ("Escape", RunAction::Key(OpKey::StopTx)),
+            ("Alt+KeyS", RunAction::Key(OpKey::StopTx)),
+            ("Alt+KeyW", RunAction::Key(OpKey::Wipe)),
+            ("PageUp", RunAction::Speed(2)),
+            ("PageDown", RunAction::Speed(-2)),
+            ("Alt+KeyP", RunAction::Pause),
+            ("Alt+KeyE", RunAction::EndRun),
         ] {
-            assert_eq!(action_for(code, alt), None, "{code} {alt}");
+            assert_eq!(action_for(name), Some(action), "{name}");
+        }
+        // A letter alone is typing, and F11 and the paddles are the app's.
+        for name in [
+            "KeyS",
+            "KeyP",
+            "Alt+F1",
+            "F11",
+            "BracketLeft",
+            "BracketRight",
+            "Enter",
+            "Space",
+            "Tab",
+            "F4",
+            "F6",
+            "F8",
+            "F12",
+        ] {
+            assert_eq!(action_for(name), None, "{name}");
         }
     }
 
@@ -213,18 +300,31 @@ mod tests {
     fn the_page_keeps_the_runs_keys_from_the_browser() {
         let script = keys_script();
         assert!(
-            script.contains(r#"new Set(["F1", "F7", "Escape", "PageUp", "PageDown"])"#),
+            script.contains(
+                r#"new Set(["F1", "F2", "F3", "F5", "F7", "Insert", "Escape", "PageUp", "PageDown"])"#
+            ),
             "{script}"
         );
         assert!(
             script.contains(r#"new Set(["KeyS", "KeyW", "KeyP", "KeyE"])"#),
             "{script}"
         );
-        assert!(!script.contains("F11") && !script.contains("Bracket"));
+        assert!(
+            script.contains(r#"new Set([";", ".", ",", "+"])"#),
+            "{script}"
+        );
+        // Enter alone stays the fields'; held with Shift, Ctrl or Alt, it
+        // logs without sending.
+        assert!(
+            script
+                .contains(r#"return e.shiftKey || e.ctrlKey || e.altKey ? "Shift+Enter" : null;"#),
+            "{script}"
+        );
+        // A character the paddles' keys type is still the paddles'.
+        assert!(script.contains(r#"!e.code.startsWith("Bracket")"#));
+        assert!(!script.contains("F11"));
         let prevent = script.find("e.preventDefault()").expect("kept");
-        let send = script
-            .find("dioxus.send([e.code, e.altKey])")
-            .expect("told");
+        let send = script.find("dioxus.send(key)").expect("told");
         assert!(prevent < send, "{script}");
         assert!(script.contains("if (!e.repeat)"), "{script}");
         assert!(
@@ -242,6 +342,118 @@ mod tests {
         assert!(STOP_LISTENING.contains("window.__dustRunKeys = null;"));
     }
 
+    /// The contester's keys do what MorseRunner has them do: F5 sends their
+    /// call alone, F2 your exchange, `.` TU and logs; `;` their call and
+    /// your exchange; Shift+Enter logs without sending, checked at once; F3
+    /// sends TU and logs nothing, and Enter then logs that QSO. Enter held
+    /// with Shift in a field is no Enter.
+    #[test]
+    fn the_contesters_keys_work_the_run() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-start-training");
+            ui.advance(8_000).await;
+            let sent = |recorder: &crate::audio::fake::Recorder| {
+                recorder
+                    .starts()
+                    .last()
+                    .map(|start| start.transcript.clone())
+            };
+            let call = recorder.starts()[0].transcript.others[0].text.clone();
+            ui.type_into("field-call", &call);
+            ui.with_app(|ctx| pressed(ctx, "F5"));
+            assert_eq!(sent(&recorder).map(|turn| turn.text), Some(call.clone()));
+            ui.advance(8_000).await;
+            ui.with_app(|ctx| pressed(ctx, "F2"));
+            let exchange = sent(&recorder).expect("your exchange");
+            assert_eq!(exchange.text, "5NN TT1");
+            ui.advance(8_000).await;
+            let serial = exchange.others[0]
+                .text
+                .split_whitespace()
+                .last()
+                .unwrap_or_default()
+                .to_string();
+            ui.type_into("field-exchange", &serial);
+            ui.with_app(|ctx| pressed(ctx, "."));
+            let tu = sent(&recorder).expect("TU");
+            assert_eq!(tu.text, "TU");
+            assert_eq!(
+                ui.with_app(|ctx| ctx.contest.peek().as_ref().map(|view| view.qsos)),
+                Some(1)
+            );
+
+            // The next caller, answering the TU: its call and your exchange
+            // at once, and its exchange logged without sending.
+            ui.advance(8_000).await;
+            let next = tu.others[0].text.clone();
+            ui.type_into("field-call", &next);
+            ui.with_app(|ctx| pressed(ctx, ";"));
+            let both = sent(&recorder).expect("call and exchange");
+            assert_eq!(both.text, format!("{next} 5NN TT2"));
+            ui.advance(8_000).await;
+            let serial = both.others[0]
+                .text
+                .split_whitespace()
+                .last()
+                .unwrap_or_default()
+                .to_string();
+            ui.type_into("field-exchange", &serial);
+            let starts = recorder.starts().len();
+            // Shift+Enter in the field is not Enter: the page's keys hear it.
+            ui.press_key_held("field-exchange", Key::Enter, Code::Enter, Modifiers::SHIFT);
+            assert_eq!(recorder.starts().len(), starts, "nothing sent");
+            ui.with_app(|ctx| pressed(ctx, "Shift+Enter"));
+            assert_eq!(recorder.starts().len(), starts, "logged without sending");
+            assert_eq!(
+                ui.with_app(|ctx| ctx.contest.peek().as_ref().map(|view| view.qsos)),
+                Some(2)
+            );
+            let view = ui
+                .with_app(|ctx| ctx.contest.peek().clone())
+                .expect("a run");
+            assert!(
+                matches!(view.log[1].status, cw_core::RowStatus::Checked(_)),
+                "checked at once"
+            );
+
+            // A third, closed with TU and nothing logged; Enter logs it.
+            ui.with_app(|ctx| pressed(ctx, "F1"));
+            ui.advance(8_000).await;
+            let third = sent(&recorder).expect("CQ").others[0].text.clone();
+            ui.type_into("field-call", &third);
+            ui.with_app(|ctx| pressed(ctx, "Insert"));
+            let both = sent(&recorder).expect("call and exchange");
+            assert_eq!(both.text, format!("{third} 5NN TT3"));
+            ui.advance(8_000).await;
+            let serial = both.others[0]
+                .text
+                .split_whitespace()
+                .last()
+                .unwrap_or_default()
+                .to_string();
+            ui.type_into("field-exchange", &serial);
+            ui.with_app(|ctx| pressed(ctx, "F3"));
+            assert_eq!(
+                sent(&recorder).map(|turn| turn.text),
+                Some("TU".to_string())
+            );
+            assert_eq!(
+                ui.with_app(|ctx| ctx.contest.peek().as_ref().map(|view| view.qsos)),
+                Some(2)
+            );
+            assert!(
+                ui.has("TU &amp; log</span>") || ui.has("TU &#38; log</span>"),
+                "Enter logs it now"
+            );
+            ui.press_enter("field-exchange");
+            assert_eq!(
+                ui.with_app(|ctx| ctx.contest.peek().as_ref().map(|view| view.qsos)),
+                Some(3)
+            );
+        });
+    }
+
     /// The keys work the run as its buttons do: F1 calls CQ, PgUp and PgDn
     /// move your speed while − / + can, Alt+P pauses and carries on, Alt+E
     /// ends the run.
@@ -252,7 +464,7 @@ mod tests {
             ui.click("btn-start-training");
             ui.advance(8_000).await;
             let sent = recorder.starts().len();
-            ui.with_app(|ctx| pressed(ctx, "F1", false));
+            ui.with_app(|ctx| pressed(ctx, "F1"));
             let cq = recorder
                 .starts()
                 .last()
@@ -262,23 +474,23 @@ mod tests {
 
             let wpm = |ui: &Ui, wpm: u32| ui.has(&format!("run-wpm-value\">{wpm}<"));
             assert!(wpm(&ui, 30), "{}", ui.html());
-            ui.with_app(|ctx| pressed(ctx, "PageUp", false));
+            ui.with_app(|ctx| pressed(ctx, "PageUp"));
             assert!(wpm(&ui, 32));
-            ui.with_app(|ctx| pressed(ctx, "PageDown", false));
-            ui.with_app(|ctx| pressed(ctx, "PageDown", false));
+            ui.with_app(|ctx| pressed(ctx, "PageDown"));
+            ui.with_app(|ctx| pressed(ctx, "PageDown"));
             assert!(wpm(&ui, 28));
 
-            ui.with_app(|ctx| pressed(ctx, "KeyP", true));
+            ui.with_app(|ctx| pressed(ctx, "Alt+KeyP"));
             assert!(ui.shows("btn-resume"), "Alt+P pauses");
             // Paused, your speed stays as it is, as − / + are disabled.
-            ui.with_app(|ctx| pressed(ctx, "PageUp", false));
+            ui.with_app(|ctx| pressed(ctx, "PageUp"));
             assert!(wpm(&ui, 28));
             assert!(ui.input_tag("more-wpm").contains("disabled"));
-            ui.with_app(|ctx| pressed(ctx, "KeyP", true));
+            ui.with_app(|ctx| pressed(ctx, "Alt+KeyP"));
             assert!(!ui.shows("btn-resume"), "and carries on");
             assert!(ui.shows("btn-pause"));
 
-            ui.with_app(|ctx| pressed(ctx, "KeyE", true));
+            ui.with_app(|ctx| pressed(ctx, "Alt+KeyE"));
             assert_eq!(ui.screen(), Screen::Results.key());
         });
     }

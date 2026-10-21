@@ -66,6 +66,10 @@ fn HomeRoute() -> Element {
         let mut settings = ctx.settings;
         settings.write().contest.set_my_call(&typed);
     });
+    let on_name = use_callback(move |typed: String| {
+        let mut settings = ctx.settings;
+        settings.write().contest.set_my_name(&typed);
+    });
     let settings = ctx.settings.read();
     // Every session counts, whatever character set it was recorded with.
     let sessions = ctx.sessions.read();
@@ -81,6 +85,7 @@ fn HomeRoute() -> Element {
             on_start,
             on_listen,
             on_call,
+            on_name,
         }
     }
 }

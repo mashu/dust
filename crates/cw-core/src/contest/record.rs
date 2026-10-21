@@ -189,6 +189,14 @@ pub struct RunSummary {
     pub lost: usize,
 }
 
+impl RunSummary {
+    /// Minutes a QSO over the whole run, the pace a contest without a score
+    /// is told by; none before a QSO is logged.
+    pub fn minutes_per_qso(&self) -> Option<f64> {
+        self.rate.filter(|rate| *rate > 0.0).map(|rate| 60.0 / rate)
+    }
+}
+
 /// What became of a contest run's log, as the history says it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoredLog {
@@ -411,6 +419,38 @@ impl ContestRun {
             });
         }
         Some(out)
+    }
+
+    /// How well each part of a QSO was copied over the run: the calls,
+    /// none, then each field it copies, as the share of their characters
+    /// copied right, lost copies included. A part with no group is left
+    /// out. None for groups that are not this run's.
+    pub fn accuracy_by_field(&self, groups: &[GroupResult]) -> Option<Vec<(Option<Field>, f64)>> {
+        let copies = self.group_copies();
+        if copies.len() != groups.len() {
+            return None;
+        }
+        let parts = std::iter::once(None).chain(self.copied()?.into_iter().map(Some));
+        Some(
+            parts
+                .filter_map(|part| {
+                    let mut tally = CopyTally::default();
+                    let mut any = false;
+                    for (copy, group) in copies.iter().zip(groups) {
+                        let held = match copy {
+                            GroupCopy::Call => None,
+                            GroupCopy::Field(field) => Some(*field),
+                            GroupCopy::Other => continue,
+                        };
+                        if held == part {
+                            tally.add(&group.sent, &group.received);
+                            any = true;
+                        }
+                    }
+                    any.then(|| (part, tally.accuracy()))
+                })
+                .collect(),
+        )
     }
 
     /// What the checks of the run's logged QSOs found, counted; none for
@@ -751,6 +791,60 @@ mod tests {
         assert!(log.0["qsos"][0].get("lc").is_none());
         assert_eq!(log.run(5), Some(corrected));
         assert_eq!(ContestLog::from(&run()).run(5), Some(run()));
+    }
+
+    /// A Simple QSO run reads back as one, with no contest score: its pace
+    /// is minutes a QSO, and how well it went each part's accuracy.
+    #[test]
+    fn a_simple_qso_run_reads_back_with_no_score() {
+        let stored = ContestRun {
+            kind: "simpleQso".into(),
+            fields: vec!["rst".into(), "name".into()],
+            qsos: vec![
+                qso(60_000, 3, 0),
+                qso(150_000, 3, 0),
+                QsoRecord {
+                    k: LOST.into(),
+                    ..qso(200_000, 3, 0)
+                },
+            ],
+            ..run()
+        };
+        let groups = [
+            group("K5XYZ", "K5XYZ"),
+            group("579", "579"),
+            group("BOB", "BOB"),
+            group("DL2XYZ", "DL2XYZ"),
+            group("599", "599"),
+            group("HANS", "HANZ"),
+            group("W1AW", "W1AW"),
+            group("559", ""),
+            group("JIM", ""),
+        ];
+        let read = ContestLog::from(&stored).run(groups.len());
+        assert_eq!(read.as_ref(), Some(&stored));
+        assert_eq!(
+            stored.score(&groups),
+            None,
+            "nothing scores an everyday QSO"
+        );
+        let summary = stored.summary(&groups).expect("its figures");
+        assert_eq!((summary.qsos, summary.clean, summary.lost), (2, 1, 1));
+        // Two QSOs in ten minutes: five minutes each.
+        assert_eq!(summary.minutes_per_qso(), Some(5.0));
+        assert_eq!(RunSummary::default().minutes_per_qso(), None);
+        let errors = stored.errors(&groups).expect("its checks");
+        assert_eq!(errors.wrong, [(Field::Rst, 0), (Field::Name, 1)]);
+        let accuracy = stored.accuracy_by_field(&groups).expect("each part");
+        assert_eq!(
+            accuracy,
+            [
+                (None, 1.0),
+                (Some(Field::Rst), 6.0 / 9.0),
+                (Some(Field::Name), 6.0 / 10.0),
+            ]
+        );
+        assert_eq!(stored.accuracy_by_field(&groups[1..]), None);
     }
 
     /// A run's groups, as its session keeps them.

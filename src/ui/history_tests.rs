@@ -279,6 +279,30 @@ fn every_row_names_its_mode() {
     });
 }
 
+/// A Simple QSO run's row gives the minutes a QSO took in place of a rate,
+/// as a contest without a score is told, and opens its results.
+#[test]
+fn a_simple_qso_row_reads_its_pace() {
+    run(|| async {
+        let contest = crate::testing::stored_simple_qso_run(
+            "2026-10-20",
+            &[
+                [("K5XYZ", "K5XYZ"), ("579", "579"), ("BOB", "BOB")],
+                [("DL2XYZ", "DL2XYZ"), ("599", "599"), ("HANS", "HANZ")],
+            ],
+        );
+        let (mut ui, _recorder) = open_history(&[contest]);
+        assert!(
+            ui.has("Contest · Simple\u{a0}QSO · 1/2\u{a0}QSOs · 5.0\u{a0}min/QSO"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("/h<"));
+        ui.click("history-open-0");
+        assert!(ui.has("Accuracy per field"));
+    });
+}
+
 /// A contest run's row reads as a run — its contest, its QSOs clean of
 /// those logged, its rate — and its points say so; it opens the run's
 /// results, to be read and left again, with no run started from them.

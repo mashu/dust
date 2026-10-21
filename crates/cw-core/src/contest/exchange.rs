@@ -274,6 +274,21 @@ pub fn send_serial(serial: u32, habits: CallerHabits, rng: &mut impl Rng) -> Str
         .collect()
 }
 
+/// A caller's report as it sends it, where the report is copied: plain
+/// digits under easy habits (`579`), and under real ones each nine as `N`
+/// nearly always, as they cut a serial's (`57N`, `5NN`).
+pub fn send_report(report: u32, habits: CallerHabits, rng: &mut impl Rng) -> String {
+    let plain = report.to_string();
+    if habits == CallerHabits::Easy {
+        return plain;
+    }
+    let cut_nine = rng.f64() < REAL_CUT_NINE;
+    plain
+        .chars()
+        .map(|c| if c == '9' && cut_nine { 'N' } else { c })
+        .collect()
+}
+
 /// A field as a session's group keeps it, so Letters and Mistakes see what
 /// was heard: `sent` is the token that went out (`1N5`, `TT7`). When what
 /// was typed holds the same value, it is `sent`, so a logger's `7` for `TT7`
@@ -472,6 +487,24 @@ mod tests {
                 assert!(sent.len() >= 3, "{sent} is padded");
             }
         }
+    }
+
+    /// A copied report goes out plain under easy habits, and with its nines
+    /// cut under real ones, read back as the report it is.
+    #[test]
+    fn callers_send_their_report_as_their_habits_have_it() {
+        let mut rng = SplitMix64::new(6);
+        assert_eq!(send_report(579, CallerHabits::Easy, &mut rng), "579");
+        assert_eq!(send_report(599, CallerHabits::Easy, &mut rng), "599");
+        assert_eq!(send_report(449, CallerHabits::Easy, &mut rng), "449");
+        let mut cut = 0;
+        for _ in 0..1_000 {
+            let sent = send_report(599, CallerHabits::Real, &mut rng);
+            assert!(Field::Rst.same(&sent, "599"), "{sent}");
+            cut += usize::from(sent == "5NN");
+        }
+        assert!(cut > 930 && cut < 1_000, "{cut} cut");
+        assert!(Field::Rst.same(&send_report(579, CallerHabits::Rough, &mut rng), "579"));
     }
 
     /// What a group keeps of a field: the sent token when the values match,

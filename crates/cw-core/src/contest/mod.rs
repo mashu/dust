@@ -14,12 +14,14 @@
 //! - [`caller`]: the stations that answer, as MorseRunner's callers behave.
 //! - [`turn`]: each thing you send and every reply to it, as one send.
 //! - [`machine`]: the run itself, as a pure state machine.
+//! - [`data`]: the values callers' exchanges are drawn from.
 
 #[cfg(test)]
 pub(crate) mod bot;
 mod caller;
 mod check;
 mod clock;
+pub(crate) mod data;
 mod esm;
 mod exchange;
 mod machine;
@@ -38,8 +40,8 @@ use crate::settings::TrainingSettings;
 
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
-pub use esm::{EntryField, Esm, Fields, MessagePart, QsoState, esm, message_text};
-pub use exchange::{Field, cut_serial, keyed_token, read_number, send_serial};
+pub use esm::{EntryField, Esm, Fields, MessagePart, QsoState, esm, loggable, message_text};
+pub use exchange::{Field, cut_serial, keyed_token, read_number, send_report, send_serial};
 pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
     PauseWhy, RowStatus,
@@ -47,7 +49,7 @@ pub use machine::{
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
-pub use rules::{ContestRules, Multiplier, PerSide, Scoring, Side};
+pub use rules::{ContestRules, Fill, Multiplier, PerSide, Scoring, Side};
 pub use score::{ContestScore, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SerialFit, SerialModel, WPX_SERIALS};
 pub use turn::{Segment, Sender, Turn, plan_turn};
@@ -118,6 +120,13 @@ impl ContestKind {
     /// Its rules, once its phase has shipped.
     pub fn rules(self) -> Option<&'static ContestRules> {
         rules::RULES.iter().find(|rules| rules.kind == self)
+    }
+
+    /// Whether a run of it has a contest score, as every contest but Simple
+    /// QSO does, which is told by its pace and its copy instead. One still
+    /// to ship counts as scored: each of them is.
+    pub fn scored(self) -> bool {
+        self.rules().is_none_or(|rules| rules.scoring.is_some())
     }
 
     /// The contests that can be run: those with a row of rules.
@@ -272,6 +281,14 @@ mod tests {
         );
     }
 
+    /// Every contest scores but Simple QSO, those still to ship among them.
+    #[test]
+    fn every_contest_but_simple_qso_is_scored() {
+        for kind in ContestKind::ALL {
+            assert_eq!(kind.scored(), kind != ContestKind::SimpleQso, "{kind:?}");
+        }
+    }
+
     /// A name this build does not know is the default, not a failed save.
     #[test]
     fn an_unknown_name_reads_as_the_default() {
@@ -287,9 +304,9 @@ mod tests {
     }
 
     #[test]
-    fn only_wpx_has_shipped_so_far() {
+    fn wpx_and_simple_qso_have_shipped_so_far() {
         let shipped: Vec<ContestKind> = ContestKind::shipped().collect();
-        assert_eq!(shipped, [ContestKind::Wpx]);
+        assert_eq!(shipped, [ContestKind::Wpx, ContestKind::SimpleQso]);
         for kind in ContestKind::ALL {
             assert_eq!(kind.rules().is_some(), shipped.contains(&kind), "{kind:?}");
             assert!(!kind.label().is_empty());

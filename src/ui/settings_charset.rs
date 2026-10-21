@@ -1,5 +1,5 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL,
+    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, Fill, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL,
     PracticeWindow, SEQUENCE_PRESETS, STARTER_WORDS, Sender, SequenceChoice, SettingsSection, Side,
     TrainingSettings, WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window,
     parse_callsign, tier_examples, unlocked_practice_count,
@@ -88,6 +88,16 @@ fn call_or_stand_in(my_call: &str) -> &str {
     }
 }
 
+/// Your name where an example of a QSO sends it, or a stand-in until you
+/// give one.
+fn name_or_stand_in(my_name: &str) -> &str {
+    if my_name.is_empty() {
+        "<your name>"
+    } else {
+        my_name
+    }
+}
+
 /// What the card shows in Contest mode: which contest, what its exchange
 /// is, and a QSO of it as it goes, with your call in it.
 #[derive(Clone, PartialEq)]
@@ -124,8 +134,15 @@ impl ContestCard {
         Self {
             kind,
             sends: rules.sends(),
-            copies: copies.join(" "),
-            qso: rules.example_qso(side, call_or_stand_in(&contest.my_call)),
+            copies: copies.join("\u{a0}"),
+            qso: rules.example_qso(
+                side,
+                &Fill {
+                    my_call: call_or_stand_in(&contest.my_call),
+                    my_name: name_or_stand_in(&contest.my_name),
+                    ..Fill::default()
+                },
+            ),
         }
     }
 }
@@ -370,8 +387,10 @@ fn ContestBody(settings: Signal<TrainingSettings>, contest: ContestCard) -> Elem
         if contest.qso.is_empty() {
             p { class: "muted", style: "margin: 0;", "{contest.kind.label()} is not ready yet." }
         } else {
+            // What you copy keeps to one piece, after the dot where a narrow
+            // line breaks.
             p { class: "muted", style: "margin: 0;",
-                "You send {contest.sends} · You copy {contest.copies}"
+                "You send {contest.sends}\u{a0}· You\u{a0}copy\u{a0}{contest.copies}"
             }
             div { class: "eyebrow", "A QSO" }
             ol { class: "qso",

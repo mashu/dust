@@ -1,7 +1,8 @@
 //! Your station: the callsign you sign in a contest, and the fields of the
-//! exchange you send, given once. The card shows in Contest mode only,
-//! under the character set whose contest it serves, and Home asks for the
-//! call in the same words while it has none.
+//! exchange you send, given once: your name, for a contest that sends it.
+//! The card shows in Contest mode only, under the character set whose
+//! contest it serves, and Home asks for the call, and then the name, in the
+//! same words while it has none.
 
 use cw_core::{
     SettingsSection, TrainingSettings, call_fault, country_of, parse_callsign, wpx_prefix,
@@ -10,20 +11,33 @@ use dioxus::prelude::*;
 
 use crate::ui::widgets::{CardHead, IconName, SectionReset, control_id};
 
-/// The callsign field's id, wherever it is drawn.
-fn call_field_id() -> String {
-    control_id("field", "your callsign")
+/// What the callsign field and the name field are called, and so their ids.
+const CALL_LABEL: &str = "Your callsign";
+const NAME_LABEL: &str = "Your name";
+
+/// Give the field called `label` the focus, as a start refused for want of
+/// what it holds does.
+fn focus_field(label: &'static str) {
+    // Tests have no page to run it on.
+    #[cfg(not(test))]
+    spawn(async move {
+        let script = crate::ui::widgets::focus_script(&control_id("field", label));
+        let _ = document::eval(&script).await;
+    });
+    #[cfg(test)]
+    let _ = label;
 }
 
 /// Give the callsign field the focus, as a start refused for want of a
 /// call does.
 pub(crate) fn focus_call_field() {
-    // Tests have no page to run it on.
-    #[cfg(not(test))]
-    spawn(async move {
-        let script = crate::ui::widgets::focus_script(&call_field_id());
-        let _ = document::eval(&script).await;
-    });
+    focus_field(CALL_LABEL);
+}
+
+/// Give the name field the focus, as a start refused for want of a name
+/// does.
+pub(crate) fn focus_name_field() {
+    focus_field(NAME_LABEL);
 }
 
 /// What a callsign reads as, in a line under it: where a contest places the
@@ -49,29 +63,50 @@ fn call_reading(call: &str) -> Option<(String, bool)> {
     })
 }
 
-/// Your callsign, typed in.
-///
-/// What is typed stays as typed until it is committed, on Enter or on
-/// leaving the box, and only then is it kept as a call can be written: upper
-/// case, letters, digits and single slashes. A key does not redraw the box,
-/// which on the desktop and phone builds would reach it a frame late, over
-/// what was typed since; each commit does, so the box shows the call as
-/// kept even when that is what it held already.
+/// Your callsign, typed in, kept as a call can be written: upper case,
+/// letters, digits and single slashes.
 #[component]
 pub(crate) fn CallField(value: String, on_commit: EventHandler<String>) -> Element {
+    rsx! {
+        StationText { label: CALL_LABEL, placeholder: "e.g. DL1ABC", value, on_commit }
+    }
+}
+
+/// Your name, typed in, kept as a name is sent: letters only, upper case.
+#[component]
+pub(crate) fn NameField(value: String, on_commit: EventHandler<String>) -> Element {
+    rsx! {
+        StationText { label: NAME_LABEL, placeholder: "e.g. MAT", value, on_commit }
+    }
+}
+
+/// One of your station's fields, typed in.
+///
+/// What is typed stays as typed until it is committed, on Enter or on
+/// leaving the box, and only then is it kept as the setting keeps it. A key
+/// does not redraw the box, which on the desktop and phone builds would
+/// reach it a frame late, over what was typed since; each commit does, so
+/// the box shows what was kept even when that is what it held already.
+#[component]
+fn StationText(
+    label: &'static str,
+    placeholder: &'static str,
+    value: String,
+    on_commit: EventHandler<String>,
+) -> Element {
     let mut typed = use_hook(|| CopyValue::new(None::<String>));
     let mut repaint = use_signal(|| 0u64);
     let _ = repaint.read();
     let shown = typed.peek().clone().unwrap_or(value);
-    let id = call_field_id();
+    let id = control_id("field", label);
     rsx! {
         div { class: "field call-field",
-            label { r#for: "{id}", "Your callsign" }
+            label { r#for: "{id}", "{label}" }
             input {
                 id,
                 class: "group-text",
                 value: "{shown}",
-                placeholder: "e.g. DL1ABC",
+                placeholder,
                 autocapitalize: "characters",
                 autocomplete: "off",
                 spellcheck: false,
@@ -103,12 +138,31 @@ pub(crate) fn CallReading(call: String, #[props(default)] unset: Option<String>)
     }
 }
 
-/// What Your station shows: the call, whether a contest can read it, and
-/// what a run is missing.
+/// What a name still missing says, under the name field: what a run is
+/// missing, in the words Home says it in, once the call is not.
+#[component]
+fn NameReading(missing: Option<String>) -> Element {
+    let Some(line) = missing else {
+        return rsx! {};
+    };
+    rsx! {
+        p {
+            id: control_id("reading", "your name"),
+            class: "call-reading",
+            aria_live: "polite",
+            "{line}"
+        }
+    }
+}
+
+/// What Your station shows: the call, whether a contest can read it, your
+/// name where the contest sends it, and what a run is missing.
 #[derive(Clone, PartialEq)]
 struct Station {
     my_call: String,
     readable: bool,
+    /// Your name, where the contest sends one; none where it does not.
+    my_name: Option<String>,
     missing: Option<String>,
 }
 
@@ -116,18 +170,31 @@ struct Station {
 pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
     let station = use_memo(move || {
         let contest = &settings.read().contest;
+        let sends_name = contest
+            .contest_kind
+            .rules()
+            .is_some_and(|rules| rules.sends_name());
         Station {
             readable: parse_callsign(&contest.my_call).is_some(),
             my_call: contest.my_call.clone(),
+            my_name: sends_name.then(|| contest.my_name.clone()),
             missing: contest.missing(),
         }
     });
     let s = station.read();
-    let note = if s.readable {
-        format!("Signing {}", s.my_call)
-    } else {
-        "Your callsign, for the contests you run".to_string()
+    let note = match (&s.my_name, s.readable) {
+        (Some(name), true) if !name.is_empty() => format!("Signing {} · {name}", s.my_call),
+        (_, true) => format!("Signing {}", s.my_call),
+        (Some(_), false) => "Your callsign and name, for the contests you run".to_string(),
+        (None, false) => "Your callsign, for the contests you run".to_string(),
     };
+    // Said under the call while it is missing, and under the name once only
+    // the name is.
+    let name_missing = s
+        .my_name
+        .as_ref()
+        .filter(|name| name.is_empty() && s.readable)
+        .and(s.missing.clone());
     rsx! {
         div { class: "card stack-sm",
             CardHead { icon: IconName::Flag, title: "Your station", note,
@@ -147,6 +214,13 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
             CallReading { call: s.my_call.clone(), unset: s.missing.clone() }
             p { class: "muted", style: "margin: 0;",
                 "No licence yet? Make up a call from your country's prefix, a digit and two or three letters. Stored on this device only."
+            }
+            if let Some(name) = s.my_name.clone() {
+                NameField {
+                    value: name,
+                    on_commit: move |typed: String| settings.write().contest.set_my_name(&typed),
+                }
+                NameReading { missing: name_missing }
             }
         }
     }

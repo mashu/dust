@@ -52,12 +52,12 @@ pub use callsign::{
 pub use contest::{
     AirView, CallSource, CallerHabits, ContestEffect, ContestEvent, ContestKind, ContestLog,
     ContestMachine, ContestPhase, ContestRules, ContestRun, ContestScore, ContestView, EntryField,
-    Esm, ExchangeState, Field, Fields, LogRow, MessagePart, Multiplier, OpKey, PauseWhy, PerSide,
-    QsoCheck, QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField, Reading, RowStatus,
-    RunClock, RunErrors, RunQso, RunStyle, RunSummary, ScoredQso, Scoring, Segment, Sender,
-    SerialFit, SerialModel, Side, StoredLog, Tally, Turn, WPX_SERIALS, check_qso, contest_score,
-    cut_serial, esm, keyed_token, message_text, normalize_call, parse_exchange, plan_turn, rate_at,
-    read_number, send_serial,
+    Esm, ExchangeState, Field, Fields, Fill, LogRow, MessagePart, Multiplier, OpKey, PauseWhy,
+    PerSide, QsoCheck, QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField, Reading,
+    RowStatus, RunClock, RunErrors, RunQso, RunStyle, RunSummary, ScoredQso, Scoring, Segment,
+    Sender, SerialFit, SerialModel, Side, StoredLog, Tally, Turn, WPX_SERIALS, check_qso,
+    contest_score, cut_serial, esm, keyed_token, loggable, message_text, normalize_call,
+    parse_exchange, plan_turn, rate_at, read_number, send_report, send_serial,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
@@ -86,7 +86,7 @@ pub use settings::{
     ContestSettings, CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX,
     EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN,
     FilterShape, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX,
-    GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, LevelAxis, MY_CALL_MAX, MixedAutoLevelAxis,
+    GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, LevelAxis, MY_CALL_MAX, MY_NAME_MAX, MixedAutoLevelAxis,
     NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
     PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
     RangeSetting, RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN,

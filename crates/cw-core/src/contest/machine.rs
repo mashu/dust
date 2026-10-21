@@ -19,11 +19,11 @@
 use super::caller::{CallMatch, Caller, CallerState, Says, match_call};
 use super::check::{QsoCheck, QsoText, check_qso};
 use super::clock::RunClock;
-use super::esm::{EntryField, Fields, MessagePart, QsoState, esm, message_text};
+use super::esm::{EntryField, Fields, MessagePart, QsoState, esm, loggable, message_text};
 use super::exchange::{Field, keyed_token};
-use super::parse::{ExchangeState, Reading, normalize_call, parse_exchange};
+use super::parse::{Reading, normalize_call, parse_exchange};
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
-use super::rules::{ContestRules, RULES, Side};
+use super::rules::{ContestRules, Fill, RULES, Side};
 use super::score::rate_at;
 use super::turn::{Segment, Sender, Turn, char_spans, sending_sec, sounding_at, your_voice};
 use super::{CallSource, MS_PER_MINUTE, RunStyle};
@@ -91,6 +91,25 @@ pub enum OpKey {
     Wipe,
     /// Esc: stop sending.
     StopTx,
+}
+
+impl OpKey {
+    /// The key that sends `part` on its own: what Enter presses, part by
+    /// part, as MorseRunner lights the keys Enter sends. Enter's TU logs, as
+    /// TU and log does.
+    pub fn sending(part: &MessagePart) -> Self {
+        match part {
+            MessagePart::Cq => Self::Cq,
+            MessagePart::HisCall(_) => Self::HisCall,
+            MessagePart::Exchange => Self::Exchange,
+            MessagePart::Again => Self::Again,
+            MessagePart::Tu => Self::TuAndLog,
+            MessagePart::MyCall => Self::MyCall,
+            MessagePart::B4 => Self::B4,
+            MessagePart::Nil => Self::Nil,
+            MessagePart::NrQuery => Self::NrQuery,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -256,6 +275,13 @@ impl ContestView {
         self.clock
             .map_or(0, |clock| clock.peek_ms(now))
             .min(self.limit_ms)
+    }
+
+    /// Minutes a QSO at `now`, over the run so far, the pace a contest
+    /// without a score is told by; none before a QSO is logged.
+    pub fn minutes_per_qso(&self, now: MonoMs) -> Option<f64> {
+        (self.qsos > 0)
+            .then(|| self.run_ms(now) as f64 / MS_PER_MINUTE as f64 / f64::from(self.qsos))
     }
 
     /// QSOs an hour at `now`, over the last five minutes of run time, once
@@ -604,6 +630,8 @@ pub struct ContestMachine<S> {
     rules: &'static ContestRules,
     side: Side,
     my_call: String,
+    /// Your name, for a contest whose exchange sends it.
+    my_name: String,
     source: S,
     /// Each caller draws from a generator forked off this one by its number.
     rng: SplitMix64,
@@ -654,6 +682,7 @@ impl<S: CallSource> ContestMachine<S> {
         // no screen starts one.
         let rules = settings.contest.contest_kind.rules().unwrap_or(&RULES[0]);
         let my_call = settings.contest.my_call.clone();
+        let my_name = settings.contest.my_name.clone();
         let countdown = settings.playback.countdown_sec;
         let mut machine = Self {
             side: Side::of_call(&my_call),
@@ -661,6 +690,7 @@ impl<S: CallSource> ContestMachine<S> {
             settings,
             rules,
             my_call,
+            my_name,
             source,
             rng: SplitMix64::new(seed),
             phase: ContestPhase::Countdown { left: countdown },
@@ -686,6 +716,7 @@ impl<S: CallSource> ContestMachine<S> {
         } else {
             vec![machine.countdown_step()]
         };
+        machine.note_callers();
         (machine, effects)
     }
 
@@ -704,7 +735,13 @@ impl<S: CallSource> ContestMachine<S> {
         }
         let effects = self.handle(event, now);
         self.teach();
+        self.note_callers();
         effects
+    }
+
+    /// Note for Enter whether anyone is calling you or working with you.
+    fn note_callers(&mut self) {
+        self.qso.nobody_calling = !self.stations.iter().any(|s| s.caller.state.active());
     }
 
     fn handle(&mut self, event: ContestEvent, now: MonoMs) -> Vec<ContestEffect> {
@@ -1071,8 +1108,7 @@ impl<S: CallSource> ContestMachine<S> {
     fn action(&self, key: OpKey, fields: &Fields) -> Action {
         let call = normalize_call(&fields.call);
         let whole = parse_callsign(&call).is_some();
-        let loggable = whole
-            && parse_exchange(self.rules, self.side, &fields.exch).state == ExchangeState::Complete;
+        let loggable = loggable(fields, self.rules, self.side);
         let only = |part: MessagePart| Action {
             message: vec![part],
             ..Action::default()
@@ -1110,10 +1146,11 @@ impl<S: CallSource> ContestMachine<S> {
                 }
             }
             // TU and log sends the call again first when it has changed
-            // since it went out, as Enter does.
+            // since it went out, as Enter does; after F3 its TU went to this
+            // call, which MorseRunner still counts as sent.
             OpKey::TuAndLog if loggable => {
                 let mut message = Vec::new();
-                if call != self.qso.call_sent {
+                if call != self.qso.call_sent && call != self.qso.thanked {
                     message.push(MessagePart::HisCall(call));
                 }
                 message.push(MessagePart::Tu);
@@ -1212,11 +1249,8 @@ impl<S: CallSource> ContestMachine<S> {
         if logs {
             pending.push(self.log(fields, run_ms, now));
         }
-        // One station answers each CQ, and each TU, which works as one.
-        let calls = message
-            .iter()
-            .any(|part| matches!(part, MessagePart::Cq | MessagePart::Tu));
-        if calls && !self.stations.iter().any(|s| s.caller.state.active()) {
+        // One station answers each CQ, and each TU where it works as one.
+        if self.calls(&message) && !self.stations.iter().any(|s| s.caller.state.active()) {
             // Its first call: nothing to time it from, nothing asked.
             replying.push(Replying {
                 station: self.arrive(),
@@ -1228,14 +1262,19 @@ impl<S: CallSource> ContestMachine<S> {
         self.close_finished(run_ms);
         before.entries = self.entries.len();
         let (mut text, mut parts) = (carried.text, carried.parts);
+        // A TU that greets the station by name greets it as you copied it.
+        let his_name = parse_exchange(self.rules, self.side, &fields.exch)
+            .value(Field::Name)
+            .unwrap_or_default()
+            .to_string();
+        let me = Fill {
+            my_call: &self.my_call,
+            my_name: &self.my_name,
+            serial,
+            his_name: &his_name,
+        };
         for part in message {
-            let said = message_text(
-                std::slice::from_ref(&part),
-                self.rules,
-                self.side,
-                &self.my_call,
-                serial,
-            );
+            let said = message_text(std::slice::from_ref(&part), self.rules, self.side, &me);
             if said.is_empty() {
                 continue;
             }
@@ -1252,6 +1291,16 @@ impl<S: CallSource> ContestMachine<S> {
         };
         effects.extend(self.play(mine, (!logs).then_some(before), replying, run_ms, now));
         effects
+    }
+
+    /// Whether `message` calls for the next caller: a CQ, or a TU in a
+    /// contest, where it works as one.
+    fn calls(&self, message: &[MessagePart]) -> bool {
+        message.iter().any(|part| match part {
+            MessagePart::Cq => true,
+            MessagePart::Tu => self.rules.tu_calls,
+            _ => false,
+        })
     }
 
     /// What Enter reads after `message`: a CQ or TU ends the QSO, as
@@ -1292,9 +1341,7 @@ impl<S: CallSource> ContestMachine<S> {
         // A single caller still calling that answers your CQ or TU brings
         // its call again, as a `?` would; pile-up callers, calling anyway,
         // will not (phase 2).
-        let calls = message
-            .iter()
-            .any(|part| matches!(part, MessagePart::Cq | MessagePart::Tu));
+        let calls = self.calls(message);
         let mut replying = Vec::new();
         let mut took = false;
         for index in 0..self.stations.len() {
@@ -1405,7 +1452,8 @@ impl<S: CallSource> ContestMachine<S> {
         let mut replies = Vec::new();
         for replying in replying {
             let caller = &mut self.stations[replying.station].caller;
-            let Some((said, says)) = caller.reply(self.rules, self.side, run_ms) else {
+            let Some((said, says)) = caller.reply(self.rules, self.side, &self.my_call, run_ms)
+            else {
                 continue;
             };
             let start_sec = your_end + caller.draw_delay_sec();
@@ -1543,7 +1591,7 @@ impl<S: CallSource> ContestMachine<S> {
                 match says {
                     Says::Call | Says::Correction => heard.call_begun = true,
                     Says::Exchange => heard.exch_begun = true,
-                    Says::Query => {}
+                    Says::Query | Says::Signoff => {}
                 }
             }
             if *counted == Counted::Whole || upto.is_some_and(|upto| end > upto) {
@@ -2536,6 +2584,157 @@ mod tests {
         );
     }
 
+    /// A Simple QSO, line by line as the design has it: your CQ, the
+    /// caller's call to you, its call and your exchange with your name, its
+    /// report and name, your TU by its name, and its 73, which brings
+    /// nobody: you call CQ again. Its groups are the call, the report and
+    /// the name, and nothing scores it but the copy.
+    #[test]
+    fn a_simple_qso_goes_as_an_everyday_qso_does() {
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_kind = crate::contest::ContestKind::SimpleQso;
+        let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
+        let cq = runtime.last_turn().clone();
+        assert_eq!(yours(&cq), "CQ CQ DE DL1ABC DL1ABC K");
+        assert_eq!(replies(&cq), ["DL1ABC DE K5XYZ K5XYZ K"]);
+        runtime.finish_turn();
+        let effects = runtime.key(OpKey::Esm, "K5XYZ", "");
+        assert!(effects.contains(&ContestEffect::Focus(EntryField::Exchange)));
+        assert_eq!(
+            yours(runtime.last_turn()),
+            "K5XYZ DE DL1ABC UR 599 599 NAME MAT MAT BK"
+        );
+        let exchange = replies(runtime.last_turn())[0].to_string();
+        let words: Vec<&str> = exchange.split_whitespace().collect();
+        let (rst, name) = (words[3], words[6]);
+        assert_eq!(
+            exchange,
+            format!("R TNX UR {rst} {rst} NAME {name} {name} BK")
+        );
+        // Plain digits, as callers with easy habits send them.
+        assert!(rst.chars().all(|c| c.is_ascii_digit()), "{rst}");
+        assert!(Field::Rst.canonical(rst).is_some() && Field::Name.canonical(name).is_some());
+        runtime.finish_turn();
+        // The report is part of the copy: the name alone asks again.
+        assert_eq!(
+            esm(
+                &view(&runtime).qso,
+                &Fields {
+                    call: "K5XYZ".into(),
+                    exch: name.into(),
+                    ..Fields::default()
+                },
+                runtime.machine.rules,
+                Side::Dx
+            )
+            .message,
+            [MessagePart::Again]
+        );
+        let effects = runtime.key(OpKey::Esm, "K5XYZ", &format!("{rst} {name}"));
+        let tu = played(&effects).expect("TU goes out").clone();
+        assert_eq!(yours(&tu), format!("TU {name} 73 EE"));
+        assert_eq!(replies(&tu), ["73 EE"], "it signs off, and nobody calls");
+        runtime.finish_turn();
+        let done = view(&runtime);
+        assert_eq!(done.log[0].status, RowStatus::Checked(QsoCheck::default()));
+        assert_eq!(
+            done.log[0].fields,
+            [
+                (Field::Rst, rst.to_string()),
+                (Field::Name, name.to_string())
+            ]
+        );
+        assert_eq!(done.serial, 0, "no serial to send");
+        // Nobody is left waiting: only the run's end is due, and Enter's CQ
+        // is for the next station.
+        assert_eq!(runtime.next_due(), Some(600_000));
+        assert!(done.qso.nobody_calling);
+        assert_eq!(
+            esm(
+                &done.qso,
+                &Fields::default(),
+                runtime.machine.rules,
+                Side::Dx
+            )
+            .hint,
+            "Enter calls CQ for the next station"
+        );
+        runtime.key(OpKey::Esm, "", "");
+        let next = runtime.last_turn().clone();
+        assert_eq!(yours(&next), "CQ CQ DE DL1ABC DL1ABC K");
+        assert_eq!(replies(&next), ["DL1ABC DE W2AW W2AW K"]);
+        assert!(!view(&runtime).qso.nobody_calling, "the CQ brings one");
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, run) = result(&runtime);
+        assert_eq!(result.alphabet_fingerprint, "contest:simpleQso");
+        let copies: Vec<(&str, &str)> = result
+            .groups
+            .iter()
+            .map(|group| (group.sent.as_str(), group.received.as_str()))
+            .collect();
+        assert_eq!(copies, [("K5XYZ", "K5XYZ"), (rst, rst), (name, name)]);
+        assert_eq!(run.fields, ["rst", "name"]);
+        assert_eq!((run.qsos.len(), run.qsos[0].nr), (1, 0));
+        assert_eq!(run.score(&result.groups), None);
+        assert!(result.score > 0.0, "the copy still earns its points");
+    }
+
+    /// In a Simple QSO, Enter or TU and log after F3 sends that TU again,
+    /// by the name you copied, without the call, and logs the QSO.
+    #[test]
+    fn a_simple_qso_tu_without_logging_is_logged_with_its_tu_alone() {
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_kind = crate::contest::ContestKind::SimpleQso;
+        for key in [OpKey::Esm, OpKey::TuAndLog] {
+            let mut runtime = Runtime::start(1, settings.clone(), ScriptCalls::new(&["K5XYZ"]));
+            let exchange = to_its_exchange(&mut runtime);
+            let words: Vec<&str> = exchange.split_whitespace().collect();
+            let copy = format!("{} {}", words[3], words[6]);
+            runtime.key(OpKey::Tu, "K5XYZ", &copy);
+            runtime.finish_turn();
+            assert_eq!(view(&runtime).qsos, 0, "F3 logs nothing");
+            runtime.key(key, "K5XYZ", &copy);
+            assert_eq!(
+                yours(runtime.last_turn()),
+                format!("TU {} 73 EE", words[6]),
+                "{key:?}"
+            );
+            runtime.finish_turn();
+            assert_eq!(view(&runtime).qsos, 1, "{key:?}");
+        }
+    }
+
+    /// Each part Enter sends has its key, which sends that part alone, so
+    /// the key bar can light what Enter presses; Enter's TU is TU and log,
+    /// which logs as Enter's does.
+    #[test]
+    fn each_part_enter_sends_has_a_key_that_sends_it() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let exchange = to_its_exchange(&mut runtime);
+        let fields = Fields {
+            call: "K5XYZ".to_string(),
+            exch: serial(&exchange),
+            ..Fields::default()
+        };
+        for part in [
+            MessagePart::Cq,
+            MessagePart::HisCall("K5XYZ".to_string()),
+            MessagePart::Exchange,
+            MessagePart::Again,
+            MessagePart::Tu,
+            MessagePart::MyCall,
+            MessagePart::B4,
+            MessagePart::Nil,
+            MessagePart::NrQuery,
+        ] {
+            let key = OpKey::sending(&part);
+            let action = runtime.machine.action(key, &fields);
+            assert_eq!(action.logs, part == MessagePart::Tu, "{key:?}");
+            assert_eq!(action.message, [part], "{key:?}");
+        }
+    }
+
     /// Your exchange went and theirs is not copied: Enter asks with `?`,
     /// and the station sends its exchange again.
     #[test]
@@ -3356,19 +3555,26 @@ mod tests {
         assert!(runtime.machine.result(0, "x".into()).groups.is_empty());
     }
 
-    /// The rate shows once the run is a minute old, and the clock the run
-    /// bar reads stops at the limit.
+    /// The rate shows once the run is a minute old, the pace from the first
+    /// QSO, and the clock the run bar reads stops at the limit.
     #[test]
     fn the_rate_shows_after_the_first_minute() {
         let mut runtime = runtime(&["K5XYZ"]);
+        assert_eq!(view(&runtime).minutes_per_qso(MonoMs(60_000)), None);
         let exchange = to_its_exchange(&mut runtime);
         runtime.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
         runtime.finish_turn();
         let shown = view(&runtime);
         assert_eq!(shown.rate(MonoMs(runtime.now)), None);
         assert_eq!(shown.rate(MonoMs(60_000)), Some(60.0));
+        assert_eq!(shown.minutes_per_qso(MonoMs(90_000)), Some(1.5));
         assert_eq!(shown.run_ms(MonoMs(60_000)), 60_000);
         assert_eq!(shown.run_ms(MonoMs(9_000_000)), shown.limit_ms);
+        assert_eq!(
+            shown.minutes_per_qso(MonoMs(9_000_000)),
+            Some(shown.limit_ms as f64 / 60_000.0),
+            "the pace stops with the clock"
+        );
         assert_eq!(shown.serial, 2, "the next QSO's serial");
     }
 
@@ -4301,11 +4507,12 @@ mod tests {
 
     /// TU without logging (F3), then a log of that call, is checked against
     /// the station the TU closed, as MorseRunner's log finds a station done
-    /// with you, a CQ between them or not; Enter on its call then sends TU
-    /// and logs. Work another station instead, and that QSO is lost.
+    /// with you, a CQ between them or not; Enter or TU and log on its call
+    /// then sends the TU alone and logs. Work another station instead, and
+    /// that QSO is lost.
     #[test]
     fn a_tu_without_logging_then_a_log_is_checked_against_that_station() {
-        for key in [OpKey::LogOnly, OpKey::Esm, OpKey::Cq] {
+        for key in [OpKey::LogOnly, OpKey::Esm, OpKey::TuAndLog, OpKey::Cq] {
             let mut runtime = runtime(&["K5XYZ"]);
             let exchange = to_its_exchange(&mut runtime);
             let nr = serial(&exchange);
@@ -4315,14 +4522,15 @@ mod tests {
                 runtime.key(OpKey::Cq, "", "");
                 runtime.finish_turn();
             }
-            let key = if key == OpKey::Esm {
-                key
-            } else {
+            let key = if key == OpKey::Cq {
                 OpKey::LogOnly
+            } else {
+                key
             };
             runtime.key(key, "K5XYZ", &nr);
-            if key == OpKey::Esm {
-                assert_eq!(yours(runtime.last_turn()), "TU");
+            if key != OpKey::LogOnly {
+                // Its call still counts as sent, as MorseRunner's does.
+                assert_eq!(yours(runtime.last_turn()), "TU", "{key:?}");
             }
             runtime.finish_turn();
             assert_eq!(
@@ -4592,7 +4800,12 @@ mod tests {
         assert!(
             runtime.effects[from..].contains(&ContestEffect::Announce("K5XYZ has gone".into()))
         );
-        assert_eq!(view(&runtime).qso, QsoState::default());
+        // Nobody calls now: Enter's CQ is for the next station.
+        let afresh = QsoState {
+            nobody_calling: true,
+            ..QsoState::default()
+        };
+        assert_eq!(view(&runtime).qso, afresh);
         let fields = Fields {
             call: "K5XYZ".into(),
             exch: nr,
@@ -4783,6 +4996,11 @@ mod tests {
     /// after any station you work leaves, rather than thanking nobody.
     #[test]
     fn b4_or_nil_sending_the_station_away_starts_enter_afresh() {
+        // Nobody calls then: Enter's CQ is for the next station.
+        let afresh = QsoState {
+            nobody_calling: true,
+            ..QsoState::default()
+        };
         for key in [OpKey::B4, OpKey::Nil] {
             let mut runtime = runtime(&["K5XYZ", "G4ABC"]);
             let exchange = to_its_exchange(&mut runtime);
@@ -4793,7 +5011,7 @@ mod tests {
                 CallerState::Gone,
                 "{key:?}"
             );
-            assert_eq!(view(&runtime).qso, QsoState::default(), "{key:?}");
+            assert_eq!(view(&runtime).qso, afresh, "{key:?}");
             let fields = Fields {
                 call: "K5XYZ".into(),
                 exch: serial(&exchange),
@@ -4818,7 +5036,7 @@ mod tests {
             runtime.finish_turn();
         }
         assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Gone);
-        assert_eq!(view(&runtime).qso, QsoState::default(), "a partial");
+        assert_eq!(view(&runtime).qso, afresh, "a partial");
     }
 
     /// A QSO given up once both exchanges are out owns a missed group for

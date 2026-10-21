@@ -601,7 +601,7 @@ mod ranges;
 mod reset;
 mod save;
 
-pub use contest::{CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX};
+pub use contest::{CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX, MY_NAME_MAX};
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
 pub use curriculum::LevelAxis;
 pub use experience::Experience;
@@ -895,6 +895,7 @@ mod tests {
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_minutes = 9_000;
         s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
+        s.contest.my_name = " jean-luc maximilian ".to_string();
         s
     }
 
@@ -998,6 +999,7 @@ mod tests {
         );
         assert_eq!(s.contest.contest_minutes, CONTEST_MINUTES_MAX);
         assert_eq!(s.contest.my_call, "DL1/ABC/QRP");
+        assert_eq!(s.contest.my_name, "JEANLUCMAX");
 
         // The strengths have tops as well as bottoms, the ones the settings
         // screen offers.
@@ -1485,6 +1487,7 @@ mod tests {
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_minutes = 25;
         s.contest.my_call = "DL1ABC".to_string();
+        s.contest.my_name = "MAT".to_string();
         s
     }
 
@@ -1518,6 +1521,8 @@ mod tests {
         assert_eq!(json["contestKind"], "wpx");
         assert_eq!(json["contestMinutes"], 10);
         assert_eq!(json["myCall"], "");
+        assert_eq!(json["myName"], "");
+        assert!(s.contest.my_name.is_empty());
         assert!(json.get("contest").is_none(), "flattened");
     }
 }

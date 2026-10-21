@@ -610,7 +610,7 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
         "Contest · CQ WPX",
         r#"<div class="eyebrow">Contest</div><div class="mode-pills">"#,
         r#"id="contest-cq-wpx" class="pill active""#,
-        "You send 5NN + serial · You copy NR",
+        "You send 5NN + serial\u{a0}· You\u{a0}copy\u{a0}NR",
         r#"<li class="qso-line you"><span class="qso-who tiny">You</span><span class="call">CQ DL1ABC TEST</span>"#,
         r#"<li class="qso-line they"><span class="qso-who tiny">They</span><span class="call">K5XYZ</span>"#,
         ">K5XYZ 5NN TT1<",
@@ -653,6 +653,77 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
     let station = html.find(">Your station<").expect("the station");
     let shape = html.find(">Session shape<").expect("session shape");
     assert!(charset < station && station < shape);
+}
+
+/// Settings in Contest mode for a Simple QSO as DL1ABC, called `my_name`.
+fn simple_qso_settings(my_name: &'static str) -> String {
+    #[component]
+    fn SimpleQsoSettings(my_name: &'static str) -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            settings.contest.my_name = my_name.to_string();
+            settings
+        });
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    }
+    render_props(SimpleQsoSettings, SimpleQsoSettingsProps { my_name })
+}
+
+/// Simple QSO has its pill, its own dialogue from its row, and on Your
+/// station a name field, which a start needs and the card says so.
+#[test]
+fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
+    let html = simple_qso_settings("");
+    for shown in [
+        "Contest · Simple QSO",
+        r#"id="contest-simple-qso" class="pill active""#,
+        r#"id="contest-cq-wpx" class="pill""#,
+        "You send 599 + name\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}NAME",
+        ">CQ CQ DE DL1ABC DL1ABC K<",
+        ">DL1ABC DE K5XYZ K5XYZ K<",
+        ">K5XYZ DE DL1ABC UR 599 599 NAME &#60;your name&#62; &#60;your name&#62; BK<",
+        ">R TNX UR 579 579 NAME BOB BOB BK<",
+        ">TU BOB 73 EE<",
+        ">73 EE<",
+        r#"for="field-your-name""#,
+        "Add your name to start a Simple QSO",
+        "Signing DL1ABC<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    let html = simple_qso_settings("MAT");
+    assert!(html.contains("Signing DL1ABC · MAT"), "{html}");
+    assert!(html.contains(">K5XYZ DE DL1ABC UR 599 599 NAME MAT MAT BK<"));
+    assert!(!html.contains("Add your name"));
+    // WPX sends no name, so Your station has no field for one.
+    let wpx = render(|| {
+        let settings = use_signal(crate::testing::contest_settings);
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    });
+    assert!(!wpx.contains("field-your-name"));
 }
 
 #[test]
@@ -765,7 +836,7 @@ fn a_contest_run_has_results_of_its_own() {
         ">Score<",
         ">Raw<",
         ">Verified<",
-        "0 busted calls · 1 wrong NR · 0 NIL · 0 dupes",
+        "0\u{a0}busted\u{a0}calls\u{a0}· 1\u{a0}wrong\u{a0}NR\u{a0}· 0\u{a0}NIL\u{a0}· 0\u{a0}dupes",
         "Log, with what was really sent",
         "31→13",
         "wrong NR",
@@ -779,6 +850,48 @@ fn a_contest_run_has_results_of_its_own() {
         !html.contains("btn-history"),
         "fresh from the run: no History"
     );
+}
+
+/// A Simple QSO run has no contest score: its pace is minutes a QSO, and in
+/// place of the score, how well each part of a QSO was copied.
+#[test]
+fn a_simple_qso_run_has_results_without_a_score() {
+    let html = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_simple_qso_run(
+                    "2026-10-20",
+                    &[
+                        [("K5XYZ", "K5XYZ"), ("579", "579"), ("BOB", "BOB")],
+                        [("DL2XYZ", "DL2XYZ"), ("599", "599"), ("HANS", "HANZ")],
+                    ],
+                ),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    for shown in [
+        "Run complete",
+        "Simple QSO · 10:00",
+        "2 QSOs, 5.0 minutes each. One NAME was wrong.",
+        ">Per QSO<",
+        ">5.0 min<",
+        ">Accuracy<",
+        ">Points<",
+        "Accuracy per field",
+        r#"<th scope="row">CALL</th><td>100%</td>"#,
+        r#"<th scope="row">RST</th><td>100%</td>"#,
+        r#"<th scope="row">NAME</th><td>86%</td>"#,
+        "0\u{a0}busted\u{a0}calls\u{a0}· 0\u{a0}wrong\u{a0}RST\u{a0}· 1\u{a0}wrong\u{a0}NAME\u{a0}· 0\u{a0}NIL\u{a0}· 0\u{a0}dupes",
+        "HANZ→HANS",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in ["Contest score", ">Rate<", ">QSO pts<", ">Mults<"] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
 }
 
 /// A run long enough for the board says where it stands among runs of its

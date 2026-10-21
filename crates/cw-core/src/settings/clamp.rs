@@ -115,6 +115,7 @@ impl TrainingSettings {
         let k = &mut self.contest;
         k.contest_minutes = k.contest_minutes.min(CONTEST_MINUTES_MAX);
         k.my_call = super::contest::clean_call(&k.my_call);
+        k.my_name = super::contest::clean_name(&k.my_name);
         self
     }
 

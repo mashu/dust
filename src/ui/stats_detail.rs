@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    CONTEST_TIMES_NOTE, CharSetMode, GROUP_START_BIGRAM_TOKEN, MasteryStatus, SamplingRow,
-    SessionHistoryRow, SessionResult, SpeedPath, StoredLog, TrainingSettings, board_place,
-    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
-    speed_forecast,
+    CONTEST_TIMES_NOTE, CharSetMode, ContestKind, GROUP_START_BIGRAM_TOKEN, MasteryStatus,
+    SamplingRow, SessionHistoryRow, SessionResult, SpeedPath, StoredLog, TrainingSettings,
+    board_place, character_diagnostics, group_length_forecast, mistake_stats, sampling_rows,
+    session_history, speed_forecast,
 };
 use dioxus::prelude::*;
 
@@ -291,7 +291,8 @@ fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Elemen
 const HISTORY_PAGE: usize = 40;
 
 /// What a row says under its date: "Koch · 18/20 groups · 96 chars", or for
-/// a contest run "Contest · CQ WPX · 11/12 QSOs · 72/h", whose parts each
+/// a contest run "Contest · CQ WPX · 11/12 QSOs · 72/h", and for one without
+/// a score "Contest · Simple QSO · 8/9 QSOs · 1.2 min/QSO", whose parts each
 /// keep to one piece, so a narrow line breaks only between them.
 fn history_sub(row: &SessionHistoryRow) -> String {
     let Some(log) = &row.log else {
@@ -310,8 +311,12 @@ fn history_sub(row: &SessionHistoryRow) -> String {
     match log {
         StoredLog::Read(run) => {
             parts.push(format!("{}/{}\u{a0}QSOs", run.clean, run.qsos));
-            if let Some(rate) = run.rate {
-                parts.push(format!("{rate:.0}/h"));
+            // A contest without a score is told by the minutes a QSO took.
+            if row.contest.is_none_or(ContestKind::scored) {
+                parts.extend(run.rate.map(|rate| format!("{rate:.0}/h")));
+            } else {
+                let minutes = run.minutes_per_qso();
+                parts.extend(minutes.map(|minutes| format!("{minutes:.1}\u{a0}min/QSO")));
             }
         }
         StoredLog::Dropped => parts.push("log not kept by an older version".to_string()),

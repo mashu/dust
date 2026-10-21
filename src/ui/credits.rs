@@ -160,6 +160,11 @@ pub const SOURCES: &[Source] = &[
         callsign: Some("F6FVY"),
         used: "The serials WPX callers send are fitted to F6FVY's counts of contest logs, as MorseRunner Community Edition quotes them.",
     },
+    Source {
+        name: "Morse Walker",
+        callsign: None,
+        used: "Simple QSO's BK and 73 EE are borrowed from its POTA mode.",
+    },
 ];
 
 /// The people in `credits`, by role, in the card's order, leaving out the
@@ -442,6 +447,7 @@ mod tests {
             "F6FVY",
             "Enter Sends Message",
             "written again for Dust",
+            "Morse Walker",
         ] {
             assert!(html.contains(credited), "{credited} is missing: {html}");
         }

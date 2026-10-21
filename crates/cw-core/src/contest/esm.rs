@@ -16,7 +16,7 @@
 
 use super::exchange::Field;
 use super::parse::{ExchangeState, normalize_call, parse_exchange};
-use super::rules::{ContestRules, Side};
+use super::rules::{ContestRules, Fill, Side};
 use crate::callsign::parse_callsign;
 use crate::session::MonoMs;
 
@@ -37,6 +37,9 @@ pub struct QsoState {
     /// logs it, as MorseRunner's C and N still hold after F3. Empty
     /// otherwise.
     pub thanked: String,
+    /// Nobody is calling you or working with you, as after a TU that
+    /// brings nobody, or a station gone: Enter's CQ is for the next one.
+    pub nobody_calling: bool,
 }
 
 /// The two fields as typed, with when they were typed: a copy is timed from
@@ -147,15 +150,28 @@ impl Esm {
     }
 }
 
+/// Whether the fields hold a QSO that a key can log without Enter, as TU
+/// and log, or logging without sending, does: a whole call (V) and a
+/// complete exchange (E).
+pub fn loggable(fields: &Fields, rules: &ContestRules, side: Side) -> bool {
+    parse_callsign(&normalize_call(&fields.call)).is_some()
+        && parse_exchange(rules, side, &fields.exch).state == ExchangeState::Complete
+}
+
 /// What Enter does with the QSO at `qso` and the fields as `fields` hold
 /// them, in the contest `rules` describe, from your `side`.
 pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) -> Esm {
     let call = normalize_call(&fields.call);
     if call.is_empty() {
+        let hint = if qso.nobody_calling {
+            "Enter calls CQ for the next station"
+        } else {
+            "Type the call you hear, then Enter"
+        };
         return Esm {
             message: vec![MessagePart::Cq],
             label: "CQ".to_string(),
-            hint: "Type the call you hear, then Enter".to_string(),
+            hint: hint.to_string(),
             focus: None,
             corrected: false,
         };
@@ -300,23 +316,22 @@ fn hint(message: &[MessagePart], call: &str, e: ExchangeState, missing: &[Field]
     }
 }
 
-/// `message` as it goes out on the air, with `serial` as your serial.
+/// `message` as it goes out on the air, filled in with `me`.
 pub fn message_text(
     message: &[MessagePart],
     rules: &ContestRules,
     side: Side,
-    my_call: &str,
-    serial: u32,
+    me: &Fill<'_>,
 ) -> String {
     let parts: Vec<String> = message
         .iter()
         .map(|part| match part {
-            MessagePart::Cq => rules.cq_text(my_call),
+            MessagePart::Cq => rules.cq_text(me),
             MessagePart::HisCall(call) => call.clone(),
-            MessagePart::Exchange => rules.exchange_text(side, my_call, serial),
+            MessagePart::Exchange => rules.exchange_text(side, me),
             MessagePart::Again => "?".to_string(),
-            MessagePart::Tu => rules.tu_text(my_call),
-            MessagePart::MyCall => my_call.to_string(),
+            MessagePart::Tu => rules.tu_text(me),
+            MessagePart::MyCall => me.my_call.to_string(),
             MessagePart::B4 => "QSO B4".to_string(),
             MessagePart::Nil => "NIL".to_string(),
             MessagePart::NrQuery => "NR?".to_string(),
@@ -351,8 +366,17 @@ mod tests {
         esm(&qso, &fields, rules(), Side::Dx)
     }
 
+    /// You, as DL1ABC, sending serial 7.
+    fn me() -> Fill<'static> {
+        Fill {
+            my_call: "DL1ABC",
+            serial: 7,
+            ..Fill::default()
+        }
+    }
+
     fn sent(esm: &Esm) -> String {
-        message_text(&esm.message, rules(), Side::Dx, "DL1ABC", 7)
+        message_text(&esm.message, rules(), Side::Dx, &me())
     }
 
     /// The call is stamped at every edit, the exchange the first time it
@@ -431,15 +455,77 @@ mod tests {
         }
     }
 
+    /// In a Simple QSO the report is part of what you copy: Enter asks
+    /// again until both report and name read, says which is still to
+    /// come, and every hint keeps to a phone's line.
+    #[test]
+    fn a_simple_qso_copies_its_report_and_name() {
+        let rules = ContestKind::SimpleQso
+            .rules()
+            .expect("Simple QSO has shipped");
+        let enter = |exch: &str| {
+            let qso = QsoState {
+                call_sent: "K5XYZ".to_string(),
+                exchange_sent: true,
+                ..QsoState::default()
+            };
+            let fields = Fields {
+                call: "K5XYZ".to_string(),
+                exch: exch.to_string(),
+                ..Fields::default()
+            };
+            esm(&qso, &fields, rules, Side::Dx)
+        };
+        let empty = enter("");
+        assert_eq!(empty.message, [Again]);
+        assert_eq!(empty.hint, "Copy their report and name, then TU & log");
+        assert_eq!(
+            enter("579").hint,
+            "Still to copy: their name. Enter asks again"
+        );
+        assert_eq!(
+            enter("BOB").hint,
+            "Still to copy: their report. Enter asks again"
+        );
+        let done = enter("579 BOB");
+        assert_eq!(done.message, [Tu]);
+        assert_eq!(done.label, "TU & log");
+        let me = Fill {
+            my_call: "DL1ABC",
+            my_name: "MAT",
+            his_name: "BOB",
+            ..Fill::default()
+        };
+        assert_eq!(
+            message_text(&done.message, rules, Side::Dx, &me),
+            "TU BOB 73 EE"
+        );
+        assert_eq!(enter("579 B0B").label, "Fix exchange");
+        for exch in ["", "5", "579", "BOB", "579 BOB", "57?"] {
+            let hint = enter(exch).hint;
+            assert!(hint.chars().count() <= 47, "{hint:?}");
+        }
+    }
+
     #[test]
     fn an_empty_call_field_calls_cq() {
         let esm = enter("", false, "", "");
         assert_eq!(esm.message, [Cq]);
         assert_eq!(esm.label, "CQ");
+        assert_eq!(esm.hint, "Type the call you hear, then Enter");
         assert_eq!(sent(&esm), "CQ DL1ABC TEST");
         assert_eq!(esm.focus, None);
         // Whatever else is going on.
         assert_eq!(enter("K5XYZ", true, " ", "214").message, [Cq]);
+        // With nobody calling, there is no call to hear: the CQ is for the
+        // next station.
+        let quiet = QsoState {
+            nobody_calling: true,
+            ..QsoState::default()
+        };
+        let next = super::esm(&quiet, &Fields::default(), rules(), Side::Dx);
+        assert_eq!(next.message, [Cq]);
+        assert_eq!(next.hint, "Enter calls CQ for the next station");
     }
 
     /// Not C: a call typed and not yet sent goes out with your exchange,
@@ -621,6 +707,29 @@ mod tests {
         );
     }
 
+    /// A QSO can be logged without Enter once the call is whole and the
+    /// exchange complete.
+    #[test]
+    fn a_whole_call_and_a_complete_exchange_can_be_logged() {
+        let fields = |call: &str, exch: &str| Fields {
+            call: call.to_string(),
+            exch: exch.to_string(),
+            ..Fields::default()
+        };
+        assert!(loggable(&fields("k5xyz", "214"), rules(), Side::Dx));
+        for (call, exch) in [
+            ("K5?", "214"),
+            ("K5", "214"),
+            ("K5XYZ", ""),
+            ("K5XYZ", "BOB"),
+        ] {
+            assert!(
+                !loggable(&fields(call, exch), rules(), Side::Dx),
+                "{call} {exch}"
+            );
+        }
+    }
+
     /// The fields are read as the Call field keeps them: lower case and
     /// spaces make no difference.
     #[test]
@@ -640,7 +749,7 @@ mod tests {
             (NrQuery, "NR?", "Send NR?"),
         ] {
             let message = [part];
-            assert_eq!(message_text(&message, rules(), Side::Dx, "DL1ABC", 7), text);
+            assert_eq!(message_text(&message, rules(), Side::Dx, &me()), text);
             assert_eq!(label(&message), key);
         }
     }

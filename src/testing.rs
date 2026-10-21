@@ -101,6 +101,29 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
 /// call and number as the station sent them and as you logged them, one a
 /// minute.
 pub fn stored_run(date: &str, qsos: &[(&str, &str, &str, &str)]) -> SessionResult {
+    let copies: Vec<Vec<(&str, &str)>> = qsos
+        .iter()
+        .map(|(call, nr, logged_call, logged_nr)| vec![(*call, *logged_call), (*nr, *logged_nr)])
+        .collect();
+    stored_contest_run(date, "wpx", &["nr"], &copies)
+}
+
+/// A finished ten-minute Simple QSO run, the way the app stores it: each
+/// QSO's call, report and name as the station sent them, each beside what
+/// you logged, one a minute.
+pub fn stored_simple_qso_run(date: &str, qsos: &[[(&str, &str); 3]]) -> SessionResult {
+    let copies: Vec<Vec<(&str, &str)>> = qsos.iter().map(|qso| qso.to_vec()).collect();
+    stored_contest_run(date, "simpleQso", &["rst", "name"], &copies)
+}
+
+/// A finished ten-minute run of the contest `kind`, copying `fields`: each
+/// QSO its groups, sent beside received, one a minute.
+fn stored_contest_run(
+    date: &str,
+    kind: &str,
+    fields: &[&str],
+    qsos: &[Vec<(&str, &str)>],
+) -> SessionResult {
     let group = |sent: &str, received: &str| cw_core::GroupResult {
         sent: sent.to_string(),
         received: received.to_string(),
@@ -108,27 +131,30 @@ pub fn stored_run(date: &str, qsos: &[(&str, &str, &str, &str)]) -> SessionResul
     };
     let groups: Vec<cw_core::GroupResult> = qsos
         .iter()
-        .flat_map(|(call, nr, logged_call, logged_nr)| {
-            [group(call, logged_call), group(nr, logged_nr)]
-        })
+        .flat_map(|qso| qso.iter().map(|(sent, received)| group(sent, received)))
         .collect();
     let mut tally = cw_core::CopyTally::default();
     for group in &groups {
         tally.add(&group.sent, &group.received);
     }
+    let serials = fields.contains(&"nr");
     let records: Vec<serde_json::Value> = (1..=qsos.len() as u64)
-        .map(|n| serde_json::json!({ "t": n * 60_000, "h": n * 60_000 - 20_000, "g": 2, "nr": n }))
+        .zip(qsos)
+        .map(|(n, qso)| {
+            let nr = if serials { n } else { 0 };
+            serde_json::json!({ "t": n * 60_000, "h": n * 60_000 - 20_000, "g": qso.len(), "nr": nr })
+        })
         .collect();
     let log = serde_json::json!({
         "v": 1,
-        "kind": "wpx",
+        "kind": kind,
         "style": "single",
         "callers": [1, 1],
         "side": "",
         "myCountry": "DL",
         "myContinent": "",
         "myZone": 0,
-        "fields": ["nr"],
+        "fields": fields,
         "limitS": 600,
         "runMs": 600_000,
         "pausedMs": 0,
@@ -151,7 +177,7 @@ pub fn stored_run(date: &str, qsos: &[(&str, &str, &str, &str)]) -> SessionResul
         accuracy: tally.accuracy(),
         tally,
         char_set_mode: cw_core::CharSetMode::Contest,
-        alphabet_fingerprint: "contest:wpx".to_string(),
+        alphabet_fingerprint: format!("contest:{kind}"),
         contest: Some(cw_core::ContestLog(log)),
         char_wpm: 26.0,
         effective_wpm: 26.0,
@@ -895,6 +921,17 @@ impl Ui {
     }
 
     pub fn press_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) {
+        self.press_key_held(id, key, code, dioxus::prelude::Modifiers::empty());
+    }
+
+    /// Press `key` with `held`, Shift or Ctrl and the like, held down.
+    pub fn press_key_held(
+        &mut self,
+        id: &str,
+        key: Key,
+        code: dioxus::prelude::Code,
+        held: dioxus::prelude::Modifiers,
+    ) {
         self.fire(
             "keydown",
             id,
@@ -903,7 +940,7 @@ impl Ui {
                 code,
                 dioxus::prelude::Location::Standard,
                 false,
-                dioxus::prelude::Modifiers::empty(),
+                held,
                 false,
             )),
         );
