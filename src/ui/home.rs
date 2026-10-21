@@ -1,13 +1,14 @@
 use cw_core::{
-    AutoLevelProgress, CharSetMode, LevelAxis, SessionResult, TrainingSettings, compute_char_pool,
-    compute_streak_status, newest_unlocked,
+    AutoLevelProgress, CharSetMode, LevelAxis, SessionResult, Side, TrainingSettings,
+    compute_char_pool, compute_streak_status, newest_unlocked, parse_callsign,
 };
 use dioxus::prelude::*;
 
 use crate::audio::AUDIO_IS_SILENT;
 use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
-use crate::ui::tips::TipsCarousel;
+use crate::ui::settings_station::{CallField, CallReading, focus_call_field};
+use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, pretty_number};
 
 /// Where the learner is, as Home says it: in the hero, and on the tile.
@@ -25,16 +26,20 @@ struct LevelReading {
 fn level_reading(settings: &TrainingSettings) -> LevelReading {
     let letters = settings.level(LevelAxis::Letters);
     let digits = settings.level(LevelAxis::Digits);
+    let tier = settings.level(LevelAxis::Callsign);
     let (label, value, summary) = match settings.curriculum.char_set_mode {
-        // A contest's callers are shaped by the callsign tier.
-        CharSetMode::Callsign | CharSetMode::Contest => {
-            let tier = settings.level(LevelAxis::Callsign);
-            (
-                "Callsign tier",
-                tier.to_string(),
-                format!("Callsign tier {tier}"),
-            )
-        }
+        CharSetMode::Callsign => (
+            "Callsign tier",
+            tier.to_string(),
+            format!("Callsign tier {tier}"),
+        ),
+        // A contest is told by its name; its callers are shaped by the
+        // callsign tier, which the tile shows.
+        CharSetMode::Contest => (
+            "Callsign tier",
+            tier.to_string(),
+            settings.contest.contest_kind.label().to_string(),
+        ),
         CharSetMode::Digits => (
             "Digits level",
             digits.to_string(),
@@ -64,6 +69,58 @@ fn level_reading(settings: &TrainingSettings) -> LevelReading {
     }
 }
 
+/// What the hero shows in Contest mode.
+#[derive(Debug, PartialEq)]
+struct ContestHero {
+    /// What you copy of each station, as a log heads it: `CALL NR`.
+    fields: Vec<&'static str>,
+    /// What you send, and as whom: "You send 5NN + serial, as DL1ABC".
+    sends: String,
+    /// How long a run is, as the specs give it: its figure and caption.
+    length: (String, String),
+    /// Your call is missing, or not one a contest can read: the hero asks
+    /// for it.
+    needs_call: bool,
+    /// A call is typed that a contest cannot read, so the line under the
+    /// field already says what is wrong with it.
+    call_flagged: bool,
+    /// What a run still needs before it can start, said as the settings say
+    /// it.
+    missing: Option<String>,
+}
+
+impl ContestHero {
+    fn of(settings: &TrainingSettings) -> Self {
+        let contest = &settings.contest;
+        let rules = contest.contest_kind.rules();
+        let side = Side::of_call(&contest.my_call);
+        let fields = std::iter::once("CALL")
+            .chain(
+                rules
+                    .into_iter()
+                    .flat_map(|rules| rules.copied(side).iter().map(|field| field.label())),
+            )
+            .collect();
+        let sends = rules.map_or_else(String::new, |rules| {
+            format!("You send {}, as {}", rules.sends(), contest.my_call)
+        });
+        let limit = contest.limit_minutes();
+        let length = match contest.contest_minutes {
+            0 => ("Open".to_string(), format!("Up to {limit} min")),
+            _ => (limit.to_string(), "Minutes".to_string()),
+        };
+        let needs_call = parse_callsign(&contest.my_call).is_none();
+        Self {
+            fields,
+            sends,
+            length,
+            needs_call,
+            call_flagged: needs_call && !contest.my_call.is_empty(),
+            missing: contest.missing(),
+        }
+    }
+}
+
 /// A range as it reads: one number when its ends meet.
 pub(crate) fn range_label(min: f64, max: f64) -> String {
     if (min - max).abs() < f64::EPSILON {
@@ -84,8 +141,22 @@ pub fn Home(
     auto_progress: Option<AutoLevelProgress>,
     on_start: EventHandler<()>,
     on_listen: EventHandler<()>,
+    /// Your callsign, typed into the hero while a contest has none it can
+    /// read.
+    #[props(default)]
+    on_call: EventHandler<String>,
 ) -> Element {
     let level = level_reading(&settings);
+    let contest = (settings.curriculum.char_set_mode == CharSetMode::Contest)
+        .then(|| ContestHero::of(&settings));
+    // A start the run would refuse says why here, rather than in a toast,
+    // unless the line under the call field says it already; and when the
+    // call is what is missing, Start takes you to its field.
+    let mut refused = use_signal(|| false);
+    let missing = contest.as_ref().and_then(|hero| hero.missing.clone());
+    let needs_call = contest.as_ref().is_some_and(|hero| hero.needs_call);
+    let call_flagged = contest.as_ref().is_some_and(|hero| hero.call_flagged);
+    let refusal = missing.clone().filter(|_| refused() && !call_flagged);
     let acc = last_accuracy
         .map(|a| format!("{}%", (a * 100.0).round()))
         .unwrap_or_else(|| "—".into());
@@ -113,7 +184,11 @@ pub fn Home(
         div { class: "stack",
             header { class: "page-head",
                 h2 { class: "page-title", "Practice" }
+                if contest.is_some() {
+                    p { class: "page-sub", "Call CQ and work the stations that answer — or just listen." }
+                } else {
                     p { class: "page-sub", "Hear a group and type it back — or just listen." }
+                }
             }
             if AUDIO_IS_SILENT {
                 div { class: "notice",
@@ -128,13 +203,33 @@ pub fn Home(
             }
             section { class: "hero",
                 div { class: "hero-top",
-                    span { class: "eyebrow", "Current alphabet" }
+                    span { class: "eyebrow", if contest.is_some() { "Contest" } else { "Current alphabet" } }
                     span { class: "hero-level",
                         Icon { name: IconName::Flag }
                         "{level.summary}"
                     }
                 }
-                if chars.is_empty() {
+                if let Some(hero) = &contest {
+                    if hero.needs_call {
+                        div { class: "hero-call",
+                            CallField {
+                                value: settings.contest.my_call.clone(),
+                                on_commit: move |typed| {
+                                    refused.set(false);
+                                    on_call.call(typed);
+                                },
+                            }
+                            CallReading { call: settings.contest.my_call.clone() }
+                        }
+                    } else {
+                        div { class: "pool-chips",
+                            for field in hero.fields.iter() {
+                                span { class: "pool-chip field-chip", "{field}" }
+                            }
+                        }
+                        p { class: "hero-sends", "{hero.sends}" }
+                    }
+                } else if chars.is_empty() {
                     p { class: "muted", style: "color: var(--hero-ink-soft);", "No characters unlocked yet." }
                 } else {
                     div { class: "pool-chips",
@@ -152,8 +247,17 @@ pub fn Home(
                         span { class: "spec-value", "{speed}" }
                         span { class: "spec-label", "WPM" }
                     }
-                    // A callsign is as long as it is: there is no size to give.
-                    if callsigns || words {
+                    if let Some(hero) = &contest {
+                        div {
+                            span { class: "spec-value", "{hero.length.0}" }
+                            span { class: "spec-label", "{hero.length.1}" }
+                        }
+                        // One station answers each CQ until pile-ups come.
+                        div {
+                            span { class: "spec-value", "Single" }
+                            span { class: "spec-label", "Caller" }
+                        }
+                    } else if callsigns || words {
                         div {
                             span { class: "spec-value", "{settings.curriculum.num_groups}" }
                             span { class: "spec-label", if callsigns { "Calls" } else { "Words" } }
@@ -164,18 +268,32 @@ pub fn Home(
                             span { class: "spec-label", "Groups" }
                         }
                     }
-                    div {
-                        span { class: "spec-value", "{repeats}×" }
-                        span { class: "spec-label", "Sent" }
+                    if contest.is_none() {
+                        div {
+                            span { class: "spec-value", "{repeats}×" }
+                            span { class: "spec-label", "Sent" }
+                        }
                     }
+                }
+                if let Some(refusal) = refusal {
+                    p { id: "home-missing", class: "hero-missing", role: "alert", "{refusal}" }
                 }
                 div { class: "hero-actions",
                     button {
                         id: control_id("btn", "start training"),
                         class: "btn btn-primary",
-                        onclick: move |_| on_start.call(()),
+                        onclick: move |_| {
+                            if missing.is_none() {
+                                on_start.call(());
+                                return;
+                            }
+                            refused.set(true);
+                            if needs_call {
+                                focus_call_field();
+                            }
+                        },
                         Icon { name: IconName::Play }
-                        "Start training"
+                        if contest.is_some() { "Start contest" } else { "Start training" }
                     }
                     button {
                         id: control_id("btn", "listen to letters"),
@@ -201,6 +319,21 @@ pub fn Home(
                         div { class: "value", "{level.value}" }
                     }
                 }
+            } else if let Some(hero) = &contest {
+                div { class: "card",
+                    CardHead {
+                        icon: IconName::Sparkle,
+                        title: "First contest",
+                        note: format!("{} · single caller", level.summary),
+                    }
+                    p { class: "muted", style: "margin: 0;",
+                        if hero.needs_call {
+                            "Add your call, press Start contest; Enter sends what the QSO needs next."
+                        } else {
+                            "Press Start contest; Enter sends what the QSO needs next."
+                        }
+                    }
+                }
             } else {
                 div { class: "card",
                     CardHead {
@@ -224,14 +357,14 @@ pub fn Home(
             if let Some(progress) = auto_progress {
                 AutoLevelCard { progress }
             }
-            TipsCarousel {}
+            TipsCarousel { tips: if contest.is_some() { CONTEST_TIPS } else { TIPS } }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LevelReading, level_reading, range_label};
+    use super::{ContestHero, LevelReading, level_reading, range_label};
     use cw_core::{CharSetMode, TrainingSettings};
 
     #[test]
@@ -262,9 +395,45 @@ mod tests {
             reading(&settings, CharSetMode::Callsign).summary,
             "Callsign tier 2"
         );
+        // A contest is told by its name, and its tile shows the tier that
+        // shapes its callers.
         assert_eq!(
             reading(&settings, CharSetMode::Contest),
-            reading(&settings, CharSetMode::Callsign)
+            LevelReading {
+                summary: "CQ WPX".to_string(),
+                label: "Callsign tier",
+                value: "2".to_string(),
+            }
+        );
+    }
+
+    /// The hero says what a run copies and sends, and asks for your call
+    /// until it has one a contest can read.
+    #[test]
+    fn a_contest_hero_says_what_a_run_is() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        let hero = ContestHero::of(&settings);
+        assert!(hero.needs_call);
+        assert_eq!(hero.fields, ["CALL", "NR"]);
+        assert_eq!(hero.length, ("10".to_string(), "Minutes".to_string()));
+        assert_eq!(
+            hero.missing.as_deref(),
+            Some("Add your callsign to start a contest")
+        );
+        assert!(!hero.call_flagged, "nothing typed for the line to flag");
+        settings.contest.my_call = "ABC".to_string();
+        let hero = ContestHero::of(&settings);
+        assert!(hero.needs_call && hero.call_flagged, "not a call yet");
+        settings.contest.my_call = "DL1ABC".to_string();
+        settings.contest.contest_minutes = 0;
+        let hero = ContestHero::of(&settings);
+        assert!(!hero.needs_call);
+        assert_eq!(hero.missing, None);
+        assert_eq!(hero.sends, "You send 5NN + serial, as DL1ABC");
+        assert_eq!(
+            hero.length,
+            ("Open".to_string(), "Up to 60 min".to_string())
         );
     }
 

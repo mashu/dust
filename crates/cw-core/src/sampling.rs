@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::CopyTally;
-use crate::callsign::{CallSpec, GeneratedCall, generate_call};
-use crate::contest::CallSource;
+use crate::callsign::{CallSpec, Countries, GeneratedCall, generate_call};
+use crate::contest::{CallSource, Side};
 use crate::machine::GroupSource;
 use crate::pool::compute_char_pool;
 use crate::rng::{Rng, SplitMix64, weighted_random_pick};
@@ -440,6 +440,28 @@ pub(crate) fn generate_callsign_group(
     let best = wanted_call(settings, state, config, rng, CallSpec::default()).text;
     state.count_sent(&best);
     best
+}
+
+/// The call a contest's next caller would have, as [`Sampler`] draws it for
+/// a run of `settings`: from the countries the contest's rules have call
+/// you, with a contest's few portables and stations abroad. Counted as sent.
+pub(crate) fn generate_contest_call(
+    settings: &TrainingSettings,
+    state: &mut CharSamplingState,
+    config: &CharSamplingConfig,
+    rng: &mut impl Rng,
+) -> String {
+    let side = Side::of_call(&settings.contest.my_call);
+    let spec = settings
+        .contest
+        .contest_kind
+        .rules()
+        .map_or(CallSpec::contest(Countries::Any), |rules| {
+            rules.callers(side)
+        });
+    let call = wanted_call(settings, state, config, rng, spec).text;
+    state.count_sent(&call);
+    call
 }
 
 /// The call Callsigns mode would send, from the countries `spec` admits, at

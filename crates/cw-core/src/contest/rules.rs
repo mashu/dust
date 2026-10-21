@@ -4,6 +4,7 @@
 use super::ContestKind;
 use super::exchange::{Field, cut_serial};
 use super::serial::{SerialFit, WPX_SERIALS};
+use super::turn::Sender;
 use crate::callsign::{CallSpec, Countries, country_of};
 
 /// Your side of the ARRL DX contest, from your call: W/VE works only DX, and
@@ -160,6 +161,43 @@ impl ContestRules {
     pub fn exchange_text(&self, side: Side, my_call: &str, serial: u32) -> String {
         fill(self.exchange.on(side), my_call, serial)
     }
+
+    /// What your exchange holds, in a few words: `5NN + serial`.
+    pub fn sends(&self) -> String {
+        let report = self.rst.then_some(REPORT);
+        let serial = self.serial.then_some("serial");
+        report
+            .into_iter()
+            .chain(serial)
+            .collect::<Vec<_>>()
+            .join(" + ")
+    }
+
+    /// A first QSO of this contest as it goes out, with `my_call` as your
+    /// call: who sends each line, and what. A caller answers your CQ, you
+    /// send its call and your exchange, it sends its own, and your TU ends
+    /// it. The caller is a placeholder from the countries that call you, its
+    /// exchange each copied field's example, as callers send them.
+    pub fn example_qso(&self, side: Side, my_call: &str) -> Vec<(Sender, String)> {
+        let caller = match self.callers(side).countries {
+            Countries::NotWVe => "G4XYZ",
+            _ => "K5XYZ",
+        };
+        let report = self.rst.then_some(REPORT);
+        let fields = self.copied(side).iter().map(|field| field.example());
+        let theirs: Vec<&str> = report.into_iter().chain(fields).collect();
+        let them = Sender::Caller(0);
+        vec![
+            (Sender::You, self.cq_text(my_call)),
+            (them, caller.to_string()),
+            (
+                Sender::You,
+                format!("{caller} {}", self.exchange_text(side, my_call, 1)),
+            ),
+            (them, format!("TU {}", theirs.join(" "))),
+            (Sender::You, self.tu_text(my_call)),
+        ]
+    }
 }
 
 /// `template` with your call, report and serial in it.
@@ -186,6 +224,7 @@ mod tests {
         assert_eq!(rules.exchange_text(Side::Dx, "DL1ABC", 7), "5NN TT7");
         assert_eq!(rules.exchange_text(Side::WVe, "K1ABC", 195), "5NN 1N5");
         assert_eq!(rules.tu_text("DL1ABC"), "TU");
+        assert_eq!(rules.sends(), "5NN + serial");
         assert_eq!(rules.copied(Side::Dx), [Field::Nr]);
         assert_eq!(rules.callers(Side::WVe), CallSpec::contest(Countries::Any));
         assert!(!rules.sided());
@@ -196,6 +235,35 @@ mod tests {
                 multiplier: Multiplier::WpxPrefix
             })
         );
+    }
+
+    /// The card's QSO is the row's: its CQ, your exchange and TU, and the
+    /// caller's exchange as callers send it.
+    #[test]
+    fn a_first_qso_is_shown_as_the_contest_goes() {
+        let you = Sender::You;
+        let they = Sender::Caller(0);
+        assert_eq!(
+            wpx().example_qso(Side::Dx, "DL1ABC"),
+            [
+                (you, "CQ DL1ABC TEST".to_string()),
+                (they, "K5XYZ".to_string()),
+                (you, "K5XYZ 5NN TT1".to_string()),
+                (they, "TU 5NN 214".to_string()),
+                (you, "TU".to_string()),
+            ]
+        );
+        for rules in RULES {
+            for side in [Side::WVe, Side::Dx] {
+                let qso = rules.example_qso(side, "K1ABC");
+                assert_eq!(qso[0].1, rules.cq_text("K1ABC"), "{:?}", rules.kind);
+                assert_eq!(qso.last().map(|(who, _)| *who), Some(you));
+                // What they send reads as what you copy.
+                let reading = crate::contest::parse_exchange(rules, side, &qso[3].1);
+                let copied: Vec<Field> = reading.fields.iter().map(|read| read.field).collect();
+                assert_eq!(copied, rules.copied(side), "{:?}", rules.kind);
+            }
+        }
     }
 
     /// The flags say what the templates send, so neither can drift from the

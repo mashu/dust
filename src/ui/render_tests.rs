@@ -249,6 +249,84 @@ fn home_in_callsign_mode_points_at_no_character_and_counts_calls() {
     assert!(html.contains("Callsign tier 1"));
 }
 
+/// Home in Contest mode with `my_call` as your call, and no history.
+fn contest_home(my_call: &'static str) -> String {
+    #[component]
+    fn ContestHome(my_call: &'static str) -> Element {
+        let mut settings = crate::testing::contest_settings();
+        settings.contest.my_call = my_call.to_string();
+        rsx! {
+            Home {
+                settings,
+                last_accuracy: None,
+                session_count: 0,
+                pool: String::new(),
+                sessions: Vec::new(),
+                today: "2026-10-21".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    }
+    render_props(ContestHome, ContestHomeProps { my_call })
+}
+
+/// Without a call, the hero asks for one where the fields will show, and
+/// the first-run card says what to do.
+#[test]
+fn home_in_contest_mode_asks_for_your_call() {
+    let html = contest_home("");
+    for shown in [
+        ">Contest<",
+        "CQ WPX",
+        r#"id="field-your-callsign""#,
+        "Your callsign",
+        "Start contest",
+        r#"id="btn-start-training""#,
+        "First contest",
+        "Add your call, press Start contest; Enter sends what the QSO needs next.",
+        ">Minutes<",
+        ">Single<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in [
+        "Current alphabet",
+        "field-chip",
+        "Start training",
+        ">Sent<",
+        "Calls",
+        "First session",
+    ] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+}
+
+/// With a call, the hero shows what a run copies and what you send, as
+/// whom, and how long and how busy a run is.
+#[test]
+fn home_in_contest_mode_says_what_a_run_is() {
+    let html = contest_home("DL1ABC");
+    for shown in [
+        r#"class="pool-chip field-chip">CALL<"#,
+        r#"class="pool-chip field-chip">NR<"#,
+        "You send 5NN + serial, as DL1ABC",
+        ">30<",
+        ">WPM<",
+        ">10<",
+        ">Minutes<",
+        ">Single<",
+        ">Caller<",
+        "Start contest",
+        "Press Start contest; Enter sends what the QSO needs next.",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("field-your-callsign"), "{html}");
+    assert!(!html.contains("home-missing"), "nothing refused yet");
+}
+
 #[test]
 fn home_without_history_invites_a_first_session() {
     let html = render(|| {
@@ -503,6 +581,78 @@ fn settings_renders_every_card() {
     assert!(html.contains("aria-label=\"Increase Rise time\""));
     assert!(html.contains("for=\"field-sequence-order\""));
     assert!(html.contains("aria-label=\"Rise time\""));
+}
+
+/// In Contest mode the Character set card shows the contest in place of an
+/// alphabet: a pill for each that has shipped, what you send and copy, a
+/// QSO with your call in it, and the tier its callers' calls come from.
+/// Your station follows, and no alphabet, group, preset or level control
+/// is drawn.
+#[test]
+fn settings_in_contest_mode_show_the_contest_and_your_station() {
+    let html = render(|| {
+        let settings = use_signal(crate::testing::contest_settings);
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    });
+    for shown in [
+        ">Character set<",
+        "Contest · CQ WPX",
+        r#"<div class="eyebrow">Contest</div><div class="mode-pills">"#,
+        r#"id="contest-cq-wpx" class="pill active""#,
+        "You send 5NN + serial · You copy NR",
+        r#"<li class="qso-line you"><span class="qso-who tiny">You</span><span class="call">CQ DL1ABC TEST</span>"#,
+        r#"<li class="qso-line they"><span class="qso-who tiny">They</span><span class="call">K5XYZ</span>"#,
+        ">K5XYZ 5NN TT1<",
+        ">TU 5NN 214<",
+        ">TU<",
+        "Callsign tier (1–6)",
+        ">Your station<",
+        "Signing DL1ABC",
+        "Reads as DL · WPX prefix DL1",
+        "Stored on this device only.",
+        "Minutes per run",
+        "Band activity",
+        crate::ui::privacy::CONTEST_PRIVACY,
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in [
+        "Unlock order",
+        "Practice window",
+        "What this tier sends",
+        "Digits level",
+        "select-experience",
+        "Groups per session",
+        "Sends per group",
+        "Adapt speed to me",
+        "Adjust the level for me",
+    ] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // No alphabet's segment is the one chosen.
+    for (_, label) in crate::ui::settings_charset::CHAR_SET_MODES {
+        let id = crate::ui::widgets::control_id("seg", label);
+        assert!(
+            html.contains(&format!(r#"id="{id}" class="seg">"#)),
+            "{id} {html}"
+        );
+    }
+    // Your station sits under the card whose contest it serves.
+    let charset = html.find(">Character set<").expect("the card");
+    let station = html.find(">Your station<").expect("the station");
+    let shape = html.find(">Session shape<").expect("session shape");
+    assert!(charset < station && station < shape);
 }
 
 #[test]
@@ -1116,6 +1266,97 @@ mod interactions {
             },
         );
         assert!(on.has("Adapting · Balanced"));
+    }
+
+    /// Ten contest runs of five QSOs, a day apart from 2 October 2026,
+    /// each copied clean, after `koch` days of Koch.
+    fn contest_history(koch: u32) -> Vec<SessionResult> {
+        let calls = ["K5XYZ", "DL2ABC", "JA1XYZ", "G4ABC", "VE3XYZ"];
+        let mut sessions: Vec<SessionResult> = (1..=koch)
+            .map(|day| {
+                let mut s = stored_session(&format!("2026-09-{day:02}"), &[("KM", "KM"); 10]);
+                s.timestamp = 1_759_000_000_000 + u64::from(day) * 86_400_000;
+                s.char_set_mode = CharSetMode::Koch;
+                s
+            })
+            .collect();
+        for day in 1..=10u32 {
+            let rows: Vec<(&str, &str, &str, &str)> = calls
+                .iter()
+                .map(|call| (*call, "214", *call, "214"))
+                .collect();
+            let mut run = crate::testing::stored_run(&format!("2026-10-{day:02}"), &rows);
+            run.timestamp = 1_760_000_000_000 + u64::from(day) * 86_400_000;
+            sessions.push(run);
+        }
+        sessions
+    }
+
+    #[component]
+    fn ContestStatsHarness(mode: CharSetMode) -> Element {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = mode;
+        rsx! {
+            StatsView { settings, sessions: contest_history(3) }
+        }
+    }
+
+    /// Copy speed has a Contest pill once there are runs, and in Contest it
+    /// says how the callers' speeds come.
+    #[test]
+    fn copy_speed_has_a_contest_pill_that_says_how_callers_are_drawn() {
+        let mut ui = Ui::new(
+            ContestStatsHarness,
+            ContestStatsHarnessProps {
+                mode: CharSetMode::Koch,
+            },
+        );
+        assert!(
+            ui.shows("speed-koch") && ui.shows("speed-contest"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("drawn evenly from your range"));
+        ui.click("speed-contest");
+        assert!(ui.has("drawn evenly from your range, shifted by − / + during a run"));
+        assert!(ui.has("Not the set practised now"));
+
+        let contest = Ui::new(
+            ContestStatsHarness,
+            ContestStatsHarnessProps {
+                mode: CharSetMode::Contest,
+            },
+        );
+        assert!(contest.has("drawn evenly from your range"));
+        assert!(contest.has(">Not adaptive<"));
+        assert!(!contest.has("Adaptive speed off"));
+    }
+
+    /// Under All, the board says where contest runs sit; under Contest, a
+    /// chip for each contest ranks runs within it.
+    #[test]
+    fn the_board_ranks_contest_runs_within_their_contest() {
+        use crate::ui::scores::{ScoresTab, ScoresTabProps};
+        let mut ui = Ui::new(
+            ScoresTab,
+            ScoresTabProps {
+                sessions: contest_history(3),
+            },
+        );
+        assert!(ui.shows("pill-all-modes") && ui.shows("pill-contest"));
+        assert!(ui.has("A WPX run earns about 30% less a group"));
+        assert!(!ui.shows("kind-cq-wpx"), "no contest chosen yet");
+        ui.click("pill-contest");
+        assert!(
+            ui.has(r#"id="kind-cq-wpx" class="pill active""#),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("A WPX run earns about 30% less a group"));
+        assert!(ui.has("over runs of 5 minutes or more that hold 10 groups or more"));
+        assert_eq!(ui.controls("board-").len(), 10, "every run, ranked");
+        ui.click("pill-koch");
+        assert!(!ui.shows("kind-cq-wpx"));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! of mode, and what an empty board says.
 
 use super::*;
-use crate::testing::{Ui, stored_session};
+use crate::testing::{Ui, stored_run, stored_session};
 
 /// A session of ten groups on the `day`th of October 2026, that earned
 /// `per_group` each.
@@ -146,4 +146,52 @@ fn no_score_no_board() {
     assert!(ui.has("No scores yet"));
     assert!(ui.controls("board-").is_empty());
     assert!(board(Vec::new()).has("No scores yet"));
+}
+
+/// A ten-minute WPX run on the `day`th of October 2026 of `qsos` QSOs, each
+/// logged clean.
+fn wpx_run(day: u32, qsos: usize) -> SessionResult {
+    let mut run = stored_run(
+        &format!("2026-10-{day:02}"),
+        &vec![("K5XYZ", "214", "K5XYZ", "214"); qsos],
+    );
+    run.timestamp = 1_790_000_000_000 + u64::from(day) * 86_400_000;
+    run
+}
+
+/// A board of runs alone names the rule they went on by, with no pill to
+/// choose and no word of group sessions that are not there; one that mixes
+/// them with group sessions says where the runs sit.
+#[test]
+fn a_board_of_runs_alone_names_the_run_rule() {
+    let ui = board((1..=3).map(|day| wpx_run(day, 5)).collect());
+    assert_eq!(ui.controls("board-").len(), 3);
+    assert!(!ui.shows("pill-all-modes") && !ui.shows("pill-contest"));
+    assert!(
+        ui.has("over runs of 5 minutes or more that hold 10 groups or more"),
+        "{}",
+        ui.html()
+    );
+    assert!(!ui.has("over sessions of"));
+    assert!(!ui.has("A WPX run earns about 30% less"));
+
+    let ui = board(vec![wpx_run(1, 5), koch(2, 40.0)]);
+    assert!(ui.has("A WPX run earns about 30% less"));
+    assert!(ui.has("over sessions of 10 groups or more"));
+}
+
+/// Four WPX QSOs are eight groups: the run is kept but not placed, and the
+/// empty board gives the run rule and the setting that meets it, not a
+/// count of groups a run has no field for.
+#[test]
+fn a_run_too_short_for_the_board_says_the_run_rule() {
+    let ui = board(vec![wpx_run(1, 4)]);
+    assert!(ui.has("No run long enough yet"), "{}", ui.html());
+    assert!(ui.has("hold 10 groups or more"));
+    assert!(ui.has("Set Minutes per run to 5 or more"));
+    assert!(!ui.has("Set a longer session"));
+    // A group session among them is the board that a longer session fills.
+    let mut short = koch(2, 50.0);
+    short.groups.truncate(BOARD_MIN_GROUPS - 1);
+    assert!(board(vec![wpx_run(1, 4), short]).has("No session long enough yet"));
 }

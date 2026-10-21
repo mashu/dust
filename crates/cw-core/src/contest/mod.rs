@@ -45,7 +45,7 @@ pub use machine::{
     PauseWhy, RowStatus,
 };
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
-pub(crate) use record::CONTEST_MARK;
+pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use rules::{ContestRules, Multiplier, PerSide, Scoring, Side};
 pub use score::{ContestScore, Rates, ScoredQso, Tally, contest_score, rate_at};

@@ -306,7 +306,7 @@ impl AppCtx {
         let mut sessions = self.sessions;
         let mut settings = self.settings;
         let before = (sessions.peek().clone(), settings.peek().clone());
-        let (merged, added) = merge_sessions(&before.0, backup.sessions);
+        let (merged, added, filled) = merge_sessions(&before.0, backup.sessions);
         sessions.set(merged);
         let saved = self.store_history();
         if let Some(why) = why_not_stored(&saved) {
@@ -330,13 +330,22 @@ impl AppCtx {
             .filter(|_| backup.saved_at > 0)
             .map(|day| format!(" from {}", short_date(&day)))
             .unwrap_or_default();
-        let mut text = if added > 0 {
-            format!(
+        let mut text = match (added, filled) {
+            (0, 0) => {
+                format!("Restored your settings{from}. Every session in it was already here.")
+            }
+            (0, _) => format!(
+                "Filled in {} and restored your settings{from}.",
+                counted(filled, "session")
+            ),
+            (_, 0) => format!(
                 "Restored {} and your settings{from}.",
                 counted(added, "session")
-            )
-        } else {
-            format!("Restored your settings{from}. Every session in it was already here.")
+            ),
+            _ => format!(
+                "Restored {} and filled in {filled}, with your settings{from}.",
+                counted(added, "session")
+            ),
         };
         if let Some(problem) = saved.problem() {
             text = format!("{text} {problem}");

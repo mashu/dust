@@ -1,8 +1,8 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSetMode, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow,
-    SEQUENCE_PRESETS, STARTER_WORDS, SequenceChoice, SettingsSection, TrainingSettings,
-    WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window, tier_examples,
-    unlocked_practice_count,
+    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL,
+    PracticeWindow, SEQUENCE_PRESETS, STARTER_WORDS, Sender, SequenceChoice, SettingsSection, Side,
+    TrainingSettings, WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window,
+    parse_callsign, tier_examples, unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
@@ -78,12 +78,66 @@ const PRACTICE_WINDOWS: [(PracticeWindow, &str, usize); 3] = [
     (PracticeWindow::Last5, "Newest 5", 5),
 ];
 
+/// Your call where an example of a QSO has it, or a stand-in until you
+/// give one a contest can read.
+fn call_or_stand_in(my_call: &str) -> &str {
+    if parse_callsign(my_call).is_some() {
+        my_call
+    } else {
+        "<your call>"
+    }
+}
+
+/// What the card shows in Contest mode: which contest, what its exchange
+/// is, and a QSO of it as it goes, with your call in it.
+#[derive(Clone, PartialEq)]
+struct ContestCard {
+    kind: ContestKind,
+    /// What you send: `5NN + serial`.
+    sends: String,
+    /// What you copy, as the log heads it: `NR`.
+    copies: String,
+    /// Who sends each line of the QSO, and what.
+    qso: Vec<(Sender, String)>,
+}
+
+impl ContestCard {
+    /// The card for the contest `settings` choose. One that has not shipped,
+    /// which only a save edited by hand can name, has no exchange to show.
+    fn of(settings: &TrainingSettings) -> Self {
+        let contest = &settings.contest;
+        let kind = contest.contest_kind;
+        let side = Side::of_call(&contest.my_call);
+        let Some(rules) = kind.rules() else {
+            return Self {
+                kind,
+                sends: String::new(),
+                copies: String::new(),
+                qso: Vec::new(),
+            };
+        };
+        let copies: Vec<&str> = rules
+            .copied(side)
+            .iter()
+            .map(|field| field.label())
+            .collect();
+        Self {
+            kind,
+            sends: rules.sends(),
+            copies: copies.join(" "),
+            qso: rules.example_qso(side, call_or_stand_in(&contest.my_call)),
+        }
+    }
+}
+
 /// What the character-set card shows, worked out from the settings. A memo
 /// of this is what the card reads, so it redraws when one of these moves and
 /// not for a slider on another card.
 #[derive(Clone, PartialEq)]
 struct Charset {
     mode: CharSetMode,
+    /// In Contest mode, the contest; none in any other.
+    contest: Option<ContestCard>,
     callsigns: bool,
     sequence: String,
     choice: SequenceChoice,
@@ -94,6 +148,8 @@ struct Charset {
     unlocked: usize,
     window: PracticeWindow,
     pool: Vec<char>,
+    /// A few calls of the tier, as Callsigns shows them; none in Contest,
+    /// whose QSO shows a call.
     tier_examples: Vec<String>,
     /// The words Words sends, and whether they are the learner's own.
     words: Vec<String>,
@@ -104,8 +160,15 @@ impl Charset {
     fn of(settings: &TrainingSettings) -> Self {
         let c = &settings.curriculum;
         let callsigns = c.char_set_mode.sends_callsigns();
+        let contest = (c.char_set_mode == CharSetMode::Contest).then(|| ContestCard::of(settings));
+        let tier_examples = if callsigns && contest.is_none() {
+            tier_examples(settings.active_level())
+        } else {
+            Vec::new()
+        };
         Self {
             mode: c.char_set_mode,
+            contest,
             callsigns,
             sequence: settings.sequence().iter().collect(),
             choice: settings.sequence_choice(),
@@ -116,11 +179,7 @@ impl Charset {
             unlocked: unlocked_practice_count(settings),
             window: current_practice_window(settings),
             pool: compute_char_pool(settings),
-            tier_examples: if callsigns {
-                tier_examples(settings.active_level())
-            } else {
-                Vec::new()
-            },
+            tier_examples,
             words: settings.words().into_iter().map(str::to_string).collect(),
             own_words: settings.has_own_words(),
         }
@@ -134,10 +193,11 @@ impl Charset {
             },
             CharSetMode::Digits => "Digits only".to_string(),
             CharSetMode::Mixed => "Letters and digits together".to_string(),
-            // Contest is not offered yet; until it has a card of its own, its
-            // callers' calls are what it shares with Callsigns.
-            CharSetMode::Callsign | CharSetMode::Contest => {
-                "Real callsigns, off the air".to_string()
+            CharSetMode::Callsign => "Real callsigns, off the air".to_string(),
+            // A contest is told by its name; its tier is the stepper's.
+            CharSetMode::Contest => {
+                let kind = self.contest.as_ref().map(|card| card.kind);
+                return format!("Contest · {}", kind.unwrap_or_default().label());
             }
             CharSetMode::Words if self.own_words => "Your own words, sent whole".to_string(),
             CharSetMode::Words => "Starter words, sent whole".to_string(),
@@ -177,6 +237,9 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                         onclick: move |_| settings.write().set_char_set_mode(mode),
                     }
                 }
+            }
+            if let Some(contest) = c.contest.clone() {
+                ContestBody { settings, contest }
             }
             if has_unlock_order {
                 div { class: "eyebrow", "Unlock order" }
@@ -246,7 +309,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     words: c.words.clone(),
                     own: c.own_words,
                 }
-            } else if callsigns {
+            } else if !c.tier_examples.is_empty() {
                 div { class: "eyebrow", "What this tier sends" }
                 div { class: "calls",
                     for call in c.tier_examples.iter() {
@@ -258,7 +321,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 p { class: "muted", style: "margin: 0;",
                     "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations, weighted the way you hear them."
                 }
-            } else {
+            } else if !callsigns {
                 div { class: "eyebrow", "Practice window" }
                 div { class: "mode-pills",
                     for (window, label, needs) in PRACTICE_WINDOWS {
@@ -280,6 +343,50 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 div { class: "chars", style: "gap: 4px;",
                     for ch in c.pool.iter() {
                         span { class: "ch sent-row", "{ch}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A contest in place of an alphabet: a pill for each that has shipped,
+/// what you send and copy, and a first QSO of it, line by line.
+#[component]
+fn ContestBody(settings: Signal<TrainingSettings>, contest: ContestCard) -> Element {
+    rsx! {
+        div { class: "eyebrow", "Contest" }
+        div { class: "mode-pills",
+            for kind in ContestKind::shipped() {
+                Seg {
+                    label: kind.label(),
+                    id: control_id("contest", kind.label()),
+                    pill: true,
+                    active: contest.kind == kind,
+                    onclick: move |_| settings.write().contest.contest_kind = kind,
+                }
+            }
+        }
+        if contest.qso.is_empty() {
+            p { class: "muted", style: "margin: 0;", "{contest.kind.label()} is not ready yet." }
+        } else {
+            p { class: "muted", style: "margin: 0;",
+                "You send {contest.sends} · You copy {contest.copies}"
+            }
+            div { class: "eyebrow", "A QSO" }
+            ol { class: "qso",
+                for (who, text) in contest.qso.iter() {
+                    {
+                        let (class, said) = match who {
+                            Sender::You => ("qso-line you", "You"),
+                            Sender::Caller(_) => ("qso-line they", "They"),
+                        };
+                        rsx! {
+                            li { class,
+                                span { class: "qso-who tiny", "{said}" }
+                                span { class: "call", "{text}" }
+                            }
+                        }
                     }
                 }
             }

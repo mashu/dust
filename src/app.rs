@@ -817,6 +817,28 @@ mod ui_tests {
         });
     }
 
+    /// Listen treats a contest as Callsigns: its pool is the calls'
+    /// characters, and it streams calls, never storing a run.
+    #[test]
+    fn the_listen_screen_streams_calls_in_contest_mode() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("btn-listen-to-letters");
+            assert!(!ui.has("Newest unlocked character"));
+            assert!(ui.shows("chip-k") && ui.shows("chip-1"), "{}", ui.html());
+            ui.click("btn-stream-groups");
+            assert!(ui.run_until(20_000, |_| recorder.texts().len() >= 2).await);
+            for text in recorder.texts() {
+                assert!(
+                    cw_core::parse_callsign(&text).is_some(),
+                    "{text} is no call"
+                );
+            }
+            ui.click("btn-stop");
+            assert!(ui.store.load_sessions().is_empty());
+        });
+    }
+
     #[test]
     fn a_character_chip_changes_what_is_shown() {
         run(|| async {
@@ -1528,6 +1550,48 @@ mod ui_tests {
         });
     }
 
+    /// Without a call, Home asks for one in the hero, and a start says what
+    /// is missing there rather than in a toast; with one, it starts the run.
+    #[test]
+    fn home_asks_for_your_call_before_a_contest() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            assert!(ui.has("Start contest"));
+            assert!(ui.shows("field-your-callsign"));
+            assert!(!ui.shows("home-missing"));
+
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.shows("home-missing"));
+            assert!(ui.has("Add your callsign to start a contest"));
+            assert!(!ui.has("class=\"toast\""), "said on Home, not in a toast");
+
+            // A call that does not read is flagged under the field, and a
+            // start does not say it again above Start.
+            ui.commit("field-your-callsign", "abc");
+            ui.advance(50).await;
+            assert!(ui.has("Not a callsign yet: needs a digit"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(!ui.shows("home-missing"), "{}", ui.html());
+            assert!(!ui.has("ABC is not a callsign Dust can read"));
+
+            ui.commit("field-your-callsign", "k1abc");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_call, "K1ABC");
+            assert!(!ui.shows("field-your-callsign"));
+            assert!(!ui.shows("home-missing"));
+            assert!(ui.has("You send 5NN + serial, as K1ABC"));
+
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+        });
+    }
+
     /// Every control on a screen, pressed and typed into in turn: none may
     /// panic, and none may leave settings the trainer would refuse to start
     /// from. Each one starts from a fresh app, so the sweep cannot walk itself
@@ -1633,6 +1697,138 @@ mod ui_tests {
             ui.advance(50).await;
             assert_ne!(before, ui.html(), "the preview should follow the tier");
             assert_eq!(ui.stored_settings().await.curriculum.callsign_level, 6);
+        });
+    }
+
+    #[test]
+    fn nothing_on_the_settings_screen_can_break_contest_mode() {
+        run(|| async {
+            sweep("nav-settings", crate::testing::contest_settings()).await;
+        });
+    }
+
+    /// In Contest mode what a group has means nothing, and nor does a
+    /// preset that sets it, a level that never moves, or a pile-up's spread
+    /// and level around a wanted station that is not there: they go.
+    #[test]
+    fn the_settings_screen_only_offers_what_a_contest_has() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.band.stations_min = 3;
+            settings.band.stations_max = 3;
+            settings.playback.adaptive_speed = true;
+            settings.curriculum.adaptive_group_size = true;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.open_disclosures();
+            for shown in [
+                "Contest · CQ WPX",
+                "Your station",
+                "Minutes per run",
+                "Callsign tier (1–6)",
+                "Band activity",
+                "Countdown before the first CQ",
+                "Key speed",
+                "Character sampling",
+            ] {
+                assert!(ui.has(shown), "{shown} should show");
+            }
+            for gone in [
+                "select-experience",
+                "number-groups-per-session",
+                "number-callsigns-per-session",
+                "number-answer-timeout",
+                "number-pause-after-each-group",
+                "switch-adapt-group-size-to-me",
+                "switch-lock-typing-while-sending",
+                "switch-adapt-speed-to-me",
+                "switch-adjust-the-level-for-me",
+                "slider-pile-up-spread",
+                "slider-pile-up-is-weaker-by",
+                "fixed-stations-calling",
+                "field-sequence-order",
+                "field-digits-level",
+            ] {
+                assert!(!ui.shows(gone), "{gone} has no meaning in a contest");
+            }
+            for gone in [
+                "Experience",
+                "Sends per group",
+                "Group size",
+                "Aim for",
+                "Practice window",
+                "What this tier sends",
+                "Auto level",
+                "Stations calling",
+            ] {
+                assert!(!ui.has(gone), "{gone} has no meaning in a contest");
+            }
+
+            // A run's length is a setting of its own.
+            ui.commit("number-minutes-per-run", "25");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.contest_minutes, 25);
+
+            // Callsigns is a group mode again: its controls come back, and
+            // the station goes.
+            ui.click("seg-callsigns");
+            ui.advance(50).await;
+            assert!(ui.has("Callsigns per session"));
+            assert!(ui.has("Stations calling"));
+            assert!(!ui.shows("field-your-callsign"));
+            assert!(!ui.has("Minutes per run"));
+        });
+    }
+
+    /// Your call is typed once, kept as a call is written, and read back:
+    /// where a contest places it, or why it is no call yet.
+    #[test]
+    fn your_station_keeps_your_call_and_reads_it() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            assert!(ui.has("No licence yet? Make up a call"));
+            assert!(
+                ui.has("CQ &#60;your call&#62; TEST"),
+                "the QSO waits for your call"
+            );
+            assert!(
+                ui.has("Add your callsign to start a contest"),
+                "the card says what a run is missing, as Home does"
+            );
+
+            ui.commit("field-your-callsign", "abc");
+            ui.advance(50).await;
+            assert!(ui.has("Not a callsign yet: needs a digit"));
+            assert!(!ui.has("Add your callsign to start a contest"));
+            assert!(
+                ui.has("CQ &#60;your call&#62; TEST"),
+                "a call that does not read is not put in the QSO"
+            );
+
+            ui.commit("field-your-callsign", " dl1abc ");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_call, "DL1ABC");
+            assert!(ui.has("Reads as DL · WPX prefix DL1"));
+            assert!(
+                ui.input_tag("field-your-callsign")
+                    .contains("value=\"DL1ABC\"")
+            );
+            for line in ["CQ DL1ABC TEST", "K5XYZ 5NN TT1", "TU 5NN 214"] {
+                assert!(ui.has(line), "the QSO should read {line}");
+            }
+
+            // Its own reset clears it, and nothing else.
+            ui.commit("number-minutes-per-run", "15");
+            ui.advance(50).await;
+            ui.click("reset-your-station");
+            ui.advance(50).await;
+            let stored = ui.stored_settings().await;
+            assert!(stored.contest.my_call.is_empty());
+            assert_eq!(stored.contest.contest_minutes, 15);
+            assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Contest);
         });
     }
 

@@ -1,12 +1,19 @@
-use cw_core::{BOARD_MIN_GROUPS, BoardEntry};
+use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode};
 use dioxus::prelude::*;
 
-use super::{Medal, mode_label, per_group_label, speed};
+use super::{Medal, mode_label, per_group_label, run_rule, speed};
 use crate::ui::format::{clock, short_date};
 use crate::ui::widgets::{CardHead, IconName, control_id};
 
 /// The rows the board shows before it is asked for all of them.
 const BOARD_TOP: usize = 10;
+
+/// What a board says when it holds contest runs among sessions of other
+/// modes: runs earn less a group, so they sit lower than their copy
+/// deserves there.
+const CONTEST_RUNS_NOTE: &str = "A WPX run earns about 30% less a group than a \
+     Callsigns session, since half its groups are short serials. Under Contest, each run is \
+     ranked within its own contest.";
 
 /// The board itself, best first: the top ten until asked for every row.
 /// Pointing at a row with a mouse marks it on the timeline for as long as
@@ -26,6 +33,22 @@ pub(super) fn BoardList(
     let (mut hovered, mut pinned) = (hovered, pinned);
     let mut show_all = use_signal(|| false);
     let total = board.len();
+    // The rule the card names is the one its rows went on by: a board of
+    // runs alone names the run rule, whichever pill is chosen, and one that
+    // mixes runs with group sessions says where the runs sit among them.
+    let is_run = |entry: &BoardEntry| entry.mode == CharSetMode::Contest;
+    let runs_only = board.iter().all(is_run);
+    let runs_among_others = !runs_only && board.iter().any(is_run);
+    let note = if runs_only {
+        format!(
+            "Ranked by points a group, over {}. Deleting a run takes it off.",
+            run_rule()
+        )
+    } else {
+        format!(
+            "Ranked by points a group, over sessions of {BOARD_MIN_GROUPS} groups or more. Deleting a session takes it off."
+        )
+    };
     let mut rows = board;
     if !show_all() {
         rows.truncate(BOARD_TOP);
@@ -35,9 +58,10 @@ pub(super) fn BoardList(
             CardHead {
                 icon: IconName::Medal,
                 title: "Best sessions",
-                note: format!(
-                    "Ranked by points a group, over sessions of {BOARD_MIN_GROUPS} groups or more. Deleting a session takes it off."
-                ),
+                note,
+            }
+            if runs_among_others {
+                p { class: "muted", style: "margin: 0; font-size: 0.85rem;", "{CONTEST_RUNS_NOTE}" }
             }
             div { class: "board-list",
                 for entry in rows {

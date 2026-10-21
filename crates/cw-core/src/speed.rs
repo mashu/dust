@@ -39,10 +39,12 @@ use std::sync::OnceLock;
 use crate::aim::{self, Leaning, Spread};
 use crate::alignment::align_holding;
 use crate::belief::{Estimate, EstimatePoint, GridBelief, Tally, pick_index, sessions_in_order};
+use crate::callsign::parse_callsign;
+use crate::contest::{Field, GroupCopy};
 use crate::rng::Rng;
 use crate::score::copy_speed;
 use crate::session::SessionResult;
-use crate::settings::TrainingSettings;
+use crate::settings::{CharSetMode, TrainingSettings};
 use crate::timing::station_speed_grid;
 
 /// The chance of fumbling a character however slowly it was sent.
@@ -154,6 +156,34 @@ pub fn speed_evidence(sent: &str, received: &str) -> Option<(u32, u32)> {
     let right = held.iter().filter(|pair| pair.matched).count() as u32;
     let counted = held.len() as u32;
     (counted > 0).then_some((right, counted))
+}
+
+/// Which of `session`'s groups say how fast you copy: every one of a group
+/// session; of a contest run, the calls and the numbers (NR, ZN), as its
+/// log lays its groups out, since a field from a short list is half guessed.
+/// A run whose log an older version dropped, or this one cannot read, keeps
+/// the groups that read as calls.
+fn speed_groups(session: &SessionResult) -> Vec<bool> {
+    if session.char_set_mode != CharSetMode::Contest {
+        return vec![true; session.groups.len()];
+    }
+    match session.contest_run() {
+        Some(run) => run
+            .group_copies()
+            .into_iter()
+            .map(|copy| {
+                matches!(
+                    copy,
+                    GroupCopy::Call | GroupCopy::Field(Field::Nr | Field::Zn)
+                )
+            })
+            .collect(),
+        None => session
+            .groups
+            .iter()
+            .map(|group| parse_callsign(&group.sent).is_some())
+            .collect(),
+    }
 }
 
 /// The speed settings, seen as one line from the slowest corner to the
@@ -296,7 +326,11 @@ impl SpeedBelief {
         for session in sessions_in_order(history, settings.curriculum.char_set_mode) {
             speed.belief.fade();
             let mut tally = Tally::new();
-            for (index, group) in session.groups.iter().enumerate() {
+            let counted = session.groups.iter().zip(speed_groups(session));
+            for (index, (group, counts)) in counted.enumerate() {
+                if !counts {
+                    continue;
+                }
                 let timing = session.group_timings.get(index);
                 let char_wpm = timing
                     .and_then(|timing| timing.char_wpm)
@@ -477,9 +511,9 @@ fn candidates(low: f64, high: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contest::ContestLog;
     use crate::rng::SplitMix64;
     use crate::session::{GroupResult, SessionTiming};
-    use crate::settings::CharSetMode;
 
     /// A learner whose copy speed is `copy` WPM with slope `slope`: copies
     /// each character with the model's own chance.
@@ -714,6 +748,78 @@ mod tests {
         calls.char_set_mode = CharSetMode::Callsign;
         let belief = SpeedBelief::from_history(&[calls], &settings);
         assert_eq!(belief, SpeedBelief::from_history(&[], &settings));
+    }
+
+    /// A contest run of QSOs that each copied `(call, nr, name)` as typed,
+    /// at 30 WPM, with a dupe that owns no groups between them; with `log`
+    /// off, as an older version keeps it.
+    fn contest_run(copies: &[(&str, &str, &str)], log: bool) -> SessionResult {
+        let sent = ["K5XYZ", "214", "BOB"];
+        let groups: Vec<GroupResult> = copies
+            .iter()
+            .flat_map(|(call, nr, name)| [*call, *nr, *name])
+            .zip(sent.iter().cycle())
+            .map(|(received, sent)| GroupResult {
+                sent: (*sent).into(),
+                received: received.into(),
+                correct: received == *sent,
+            })
+            .collect();
+        let mut qsos: Vec<serde_json::Value> = copies
+            .iter()
+            .map(|_| serde_json::json!({ "t": 1, "h": 0, "g": 3, "nr": 1 }))
+            .collect();
+        qsos.insert(
+            1,
+            serde_json::json!({ "t": 1, "h": 0, "g": 0, "nr": 2, "sc": "K5XYZ" }),
+        );
+        let layout = serde_json::json!({
+            "v": 1, "kind": "wpx", "style": "single", "callers": [1, 1], "side": "",
+            "myCountry": "DL", "myContinent": "", "myZone": 0, "fields": ["nr", "name"],
+            "limitS": 600, "runMs": 600_000, "pausedMs": 0, "myWpm": 30.0, "qsos": qsos,
+        });
+        SessionResult {
+            timestamp: 1,
+            char_set_mode: CharSetMode::Contest,
+            alphabet_fingerprint: "contest:wpx".into(),
+            contest: log.then_some(ContestLog(layout)),
+            group_timings: groups
+                .iter()
+                .map(|_| SessionTiming {
+                    time_to_complete_ms: 900.0,
+                    char_wpm: Some(30.0),
+                    effective_wpm: Some(30.0),
+                    sends: 1,
+                })
+                .collect(),
+            groups,
+            ..SessionResult::empty_for_test()
+        }
+    }
+
+    /// A contest's copy speed is read from its calls and numbers alone: a
+    /// field from a short list is half guessed. Its log says which group is
+    /// which; without one, the groups that read as calls are the calls.
+    #[test]
+    fn a_contest_run_teaches_the_speed_by_its_calls_and_numbers() {
+        let run = contest_run(&[("K5XYZ", "214", "BOB"), ("K5XYZ", "214", "BOB")], true);
+        assert!(run.contest_run().is_some(), "the log reads");
+        assert_eq!(speed_groups(&run), [true, true, false, true, true, false]);
+        let dropped = contest_run(&[("K5XYZ", "214", "BOB")], false);
+        assert_eq!(speed_groups(&dropped), [true, false, false]);
+        assert_eq!(speed_groups(&stored(1, 30.0, "KMRSU")), [true]);
+
+        let mut contest = settings(15.0, 40.0);
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        let belief = |copies: &[(&str, &str, &str)]| {
+            SpeedBelief::from_history(&[contest_run(copies, true)], &contest)
+                .estimate(REFERENCE_RATE)
+        };
+        let names_right = belief(&[("K5XYZ", "214", "BOB"); 3]);
+        let names_wrong = belief(&[("K5XYZ", "214", "XX"); 3]);
+        let numbers_wrong = belief(&[("K5XYZ", "819", "BOB"); 3]);
+        assert_eq!(names_right, names_wrong, "the names say nothing of speed");
+        assert!(numbers_wrong.mean < names_right.mean, "the numbers do");
     }
 
     /// A higher accuracy is copied at a lower speed.

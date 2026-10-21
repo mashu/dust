@@ -70,7 +70,10 @@ impl Store for MemoryStore {
             &newest[newest.len() - self.room.get().unwrap_or(usize::MAX).min(newest.len())..];
         *self.sessions.borrow_mut() = kept.to_vec();
         if kept.len() < newest.len() {
-            HistorySaved::Squeezed { kept: kept.len() }
+            HistorySaved::Squeezed {
+                kept: kept.len(),
+                runs: newest.iter().any(|session| session.contest.is_some()),
+            }
         } else {
             HistorySaved::Stored { kept: kept.len() }
         }

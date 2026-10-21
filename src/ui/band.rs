@@ -1,8 +1,9 @@
 use cw_core::band::{FilterDesign, heard_snr_db};
 use cw_core::{
-    BandSettings, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
-    RangeSetting, STATIONS_MAX, STATIONS_MIN, SettingsSection, TrainingSettings,
+    BandSettings, CharSetMode, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape,
+    PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN,
+    QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, STATIONS_MAX, STATIONS_MIN, SettingsSection,
+    TrainingSettings,
 };
 use dioxus::prelude::*;
 
@@ -26,6 +27,10 @@ struct Band {
     /// past the slider, and its shape decides how much noise it lets in.
     receiver_width_hz: f64,
     noise_bandwidth_hz: f64,
+    /// A contest run of single callers, the only run style until pile-ups
+    /// come: the stations are the band around it, and there is no wanted
+    /// station for a pile-up to spread around or sit under.
+    single_callers: bool,
 }
 
 impl Band {
@@ -35,6 +40,7 @@ impl Band {
             band: settings.band.clone(),
             receiver_width_hz: receiver.width_hz(),
             noise_bandwidth_hz: receiver.noise_bandwidth_hz(),
+            single_callers: settings.curriculum.char_set_mode == CharSetMode::Contest,
         }
     }
 }
@@ -66,6 +72,18 @@ pub fn BandConditionsCard(
             b.filter_width_hz, view.receiver_width_hz
         )
     });
+    // A run of single callers has the band around it, and no pile-up.
+    let (stations, stations_hint) = if view.single_callers {
+        (
+            "Band activity",
+            "How busy the band is around your run, your caller counted. At 1 there is nobody on it but your caller; above that other stations work each other at their own pitches and speeds, never more of them keying at once than the rest of the count.",
+        )
+    } else {
+        (
+            "Stations calling",
+            "How many call at once, yours included, drawn afresh for each group. At 1 the band is just your station; above that the others call across it, and the band has its own traffic around it — never more than the rest of the count keying at once. Hold both ends together for the same number every time, or open them up so you never know what you are walking into.",
+        )
+    };
     rsx! {
         div { class: "card stack-sm",
             CardHead {
@@ -152,14 +170,14 @@ pub fn BandConditionsCard(
             SettingsRange {
                 settings,
                 which: RangeSetting::Stations,
-                label: "Stations calling",
+                label: stations,
                 unit: "at once",
                 min_bound: f64::from(STATIONS_MIN),
                 max_bound: f64::from(STATIONS_MAX),
                 step: 1.0,
-                hint: "How many call at once, yours included, drawn afresh for each group. At 1 the band is just your station; above that the others call across it, and the band has its own traffic around it — never more than the rest of the count keying at once. Hold both ends together for the same number every time, or open them up so you never know what you are walking into.",
+                hint: stations_hint,
             }
-            if b.stations_max > STATIONS_MIN {
+            if !view.single_callers && b.stations_max > STATIONS_MIN {
                 p { class: "muted", style: "margin: 0;",
                     "The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them, out onto its skirts — copy the strongest, and narrow the filter until the rest drop away. A narrow filter leaves them little room, so it thins the pile-up: not everyone who calls gets through. Between groups the band carries on: other stations working each other at their own pitches and speeds, coming and going."
                 }

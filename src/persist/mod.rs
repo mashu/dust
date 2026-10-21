@@ -80,9 +80,11 @@ pub enum HistorySaved {
     /// [`MAX_SESSIONS`].
     Stored { kept: usize },
     /// Stored, but the store had room for only the newest `kept`. Only a
-    /// browser runs out of room: files are kept to the count alone.
+    /// browser runs out of room: files are kept to the count alone. `runs`
+    /// says the history held a contest run, whose log takes more room than
+    /// a session of groups.
     #[cfg_attr(not(feature = "web"), allow(dead_code))]
-    Squeezed { kept: usize },
+    Squeezed { kept: usize, runs: bool },
     /// Not stored. The history already there could not be read, nor moved
     /// out of the way, so it is kept as it is rather than written over.
     Held,
@@ -95,7 +97,7 @@ impl HistorySaved {
     /// any.
     pub fn kept(&self) -> Option<usize> {
         match self {
-            Self::Stored { kept } | Self::Squeezed { kept } => Some(*kept),
+            Self::Stored { kept } | Self::Squeezed { kept, .. } => Some(*kept),
             Self::Held | Self::Failed(_) => None,
         }
     }
@@ -104,9 +106,16 @@ impl HistorySaved {
     pub fn problem(&self) -> Option<String> {
         match self {
             Self::Stored { .. } => None,
-            Self::Squeezed { kept } => Some(format!(
-                "Only your newest {kept} sessions fit in this browser's storage; older ones were let go."
-            )),
+            Self::Squeezed { kept, runs } => {
+                let why = if *runs {
+                    " Long contest runs take more room."
+                } else {
+                    ""
+                };
+                Some(format!(
+                    "Only your newest {kept} sessions fit in this browser's storage; older ones were let go.{why}"
+                ))
+            }
             Self::Held => Some(
                 "Your saved history could not be read, so it was left as it is and this session was not saved."
                     .into(),
@@ -370,11 +379,17 @@ mod tests {
     #[test]
     fn what_became_of_a_history_is_said_plainly() {
         assert_eq!(HistorySaved::Stored { kept: 4 }.problem(), None);
-        assert_eq!(HistorySaved::Squeezed { kept: 40 }.kept(), Some(40));
+        let squeezed = |runs| HistorySaved::Squeezed { kept: 40, runs };
+        assert_eq!(squeezed(false).kept(), Some(40));
         assert!(
-            HistorySaved::Squeezed { kept: 40 }
+            squeezed(false)
                 .problem()
-                .is_some_and(|text| text.contains("newest 40"))
+                .is_some_and(|text| text.contains("newest 40") && !text.contains("contest"))
+        );
+        assert!(
+            squeezed(true)
+                .problem()
+                .is_some_and(|text| text.ends_with("Long contest runs take more room."))
         );
         assert_eq!(HistorySaved::Held.kept(), None);
         assert!(HistorySaved::Held.problem().is_some());

@@ -280,7 +280,8 @@ not against someone clearing the site's data: only a backup does.
 
 The history keeps your newest 500 sessions. A browser also gives each site only
 a few megabytes; should the history outgrow that — hundreds of sessions of
-hundreds of groups — the newest that fit are kept, and the app says so.
+hundreds of groups, or long contest runs, which take more room — the newest
+that fit are kept, and the app says so.
 
 Sessions can be deleted under **Stats → History**: one from its own row, or
 several with **Select**, all of them included. Deleting everything asks once

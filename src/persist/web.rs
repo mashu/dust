@@ -165,7 +165,10 @@ impl Store for WebStore {
         loop {
             let (raw, kept) = newest_that_fit(newest, budget);
             match store.set_item(SESSIONS_KEY, &raw) {
-                Ok(()) if kept < newest.len() => return HistorySaved::Squeezed { kept },
+                Ok(()) if kept < newest.len() => {
+                    let runs = newest.iter().any(|session| session.contest.is_some());
+                    return HistorySaved::Squeezed { kept, runs };
+                }
                 Ok(()) => return HistorySaved::Stored { kept },
                 Err(_) if kept > 1 => budget = raw.len() / 2,
                 Err(_) => {

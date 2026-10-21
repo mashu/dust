@@ -130,6 +130,15 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
+impl QsoRecord {
+    /// Whether the first of the QSO's groups is the station's call. It is,
+    /// unless the QSO owns none or an earlier QSO holds the station's copy;
+    /// its field groups follow.
+    fn owns_call_group(&self) -> bool {
+        self.g > 0 && self.sc.is_empty()
+    }
+}
+
 /// One QSO of a stored run, as its results list it: what you logged, and
 /// beside it what the station really sent.
 #[derive(Clone, Debug, PartialEq)]
@@ -445,6 +454,29 @@ impl ContestRun {
         )
     }
 
+    /// What each of the run's groups holds, in order, as its QSOs own them
+    /// ([`QsoRecord::owns_call_group`]). A run read by [`ContestLog::run`]
+    /// knows every field and owns exactly its session's groups, so this is
+    /// one for each of them.
+    pub(crate) fn group_copies(&self) -> Vec<GroupCopy> {
+        let mut copies = Vec::new();
+        for qso in &self.qsos {
+            let call = qso.owns_call_group();
+            if call {
+                copies.push(GroupCopy::Call);
+            }
+            // A group past the fields holds nothing a field names.
+            let fields = qso.g as usize - usize::from(call);
+            copies.extend((0..fields).map(|at| {
+                self.fields
+                    .get(at)
+                    .and_then(|name| Field::from_name(name))
+                    .map_or(GroupCopy::Other, GroupCopy::Field)
+            }));
+        }
+        copies
+    }
+
     /// The fields copied from each caller; none if this build does not
     /// know one.
     fn copied(&self) -> Option<Vec<Field>> {
@@ -467,10 +499,9 @@ impl ContestRun {
             let range = at..at + qso.g as usize;
             at = range.end;
             let owned = groups.get(range.clone())?;
-            // A QSO's call group comes first, unless an earlier QSO holds
-            // the station's copy; its field groups follow, unless the
-            // record holds the exchange.
-            let call_group = owned.first().filter(|_| qso.sc.is_empty());
+            // Its field groups follow its call group, unless the record
+            // holds the exchange.
+            let call_group = owned.first().filter(|_| qso.owns_call_group());
             let field_groups = &owned[usize::from(call_group.is_some())..];
             let logged = if qso.k == LOST {
                 None
@@ -545,6 +576,17 @@ impl ContestRun {
         }
         Some(walked)
     }
+}
+
+/// What one of a run's groups holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupCopy {
+    /// A station's call.
+    Call,
+    /// One field of its exchange.
+    Field(Field),
+    /// Nothing the run's layout names.
+    Other,
 }
 
 /// A QSO of a stored run, with the groups it owns.

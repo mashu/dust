@@ -6,12 +6,12 @@
 
 use cw_core::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, Aim, AutoLevelSettings,
-    COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
-    EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN,
-    GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, KeyerMode, NUM_GROUPS_MAX,
-    NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, SpeedPath,
-    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adapts_group_size, adapts_speed,
-    aim_section,
+    CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ERROR_WEIGHT_MAX,
+    EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX,
+    GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, KeyerMode,
+    NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
+    SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    adapts_group_size, adapts_speed, aim_section,
 };
 use dioxus::prelude::*;
 
@@ -20,6 +20,7 @@ use crate::ui::envelope::EnvelopeCard;
 use crate::ui::home::range_label;
 use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
+use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
     CardHead, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange, SliderField, Switch,
     control_id, html_bool,
@@ -89,14 +90,23 @@ pub fn SettingsView(
     on_stop_band: EventHandler<()>,
     on_play_sample: EventHandler<String>,
 ) -> Element {
+    // A contest has a station of its own, and no level to move or groups to
+    // set a preset for.
+    let contest =
+        use_memo(move || settings.read().curriculum.char_set_mode == CharSetMode::Contest)();
     rsx! {
         div { class: "stack",
             header { class: "page-head",
                 h2 { class: "page-title", "Settings" }
                 p { class: "page-sub", "Everything the trainer sends, and how hard it makes you work." }
             }
-            ExperienceCard { settings }
+            if !contest {
+                ExperienceCard { settings }
+            }
             CharsetCard { settings }
+            if contest {
+                StationCard { settings }
+            }
             SessionShapeCard { settings }
             SpeedCard { settings }
             ToneCard { settings }
@@ -106,7 +116,9 @@ pub fn SettingsView(
                 on_play: on_play_sample,
                 on_stop: on_stop_band,
             }
-            AutoLevelSettingsCard { settings }
+            if !contest {
+                AutoLevelSettingsCard { settings }
+            }
             SamplingCard { settings }
             BandConditionsCard {
                 settings,
@@ -193,6 +205,9 @@ fn ExperiencePicker(on: Option<Experience>, on_pick: EventHandler<Experience>) -
 struct SessionShape {
     callsigns: bool,
     words: bool,
+    /// A contest is timed rather than counted, and has no groups.
+    contest: bool,
+    contest_minutes: u32,
     /// The group size is one length, so there is nothing to adapt.
     one_size: bool,
     adaptive: bool,
@@ -218,6 +233,8 @@ impl SessionShape {
         Self {
             callsigns: settings.curriculum.char_set_mode.sends_callsigns(),
             words: settings.curriculum.char_set_mode == CharSetMode::Words,
+            contest: settings.curriculum.char_set_mode == CharSetMode::Contest,
+            contest_minutes: settings.contest.contest_minutes,
             one_size: settings.curriculum.min_group_size >= settings.curriculum.max_group_size,
             adaptive: settings.curriculum.adaptive_group_size,
             adapts: adapts_group_size(settings),
@@ -285,40 +302,56 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                 section: SettingsSection::SessionShape,
             }
             div { class: "field-grid",
+                if s.contest {
+                    NumberField {
+                        label: "Minutes per run",
+                        value: f64::from(s.contest_minutes),
+                        min: 0.0,
+                        max: f64::from(CONTEST_MINUTES_MAX),
+                        step: 1.0,
+                        unit: "min",
+                        onchange: move |v| settings.write().contest.contest_minutes = v as u32,
+                    }
+                } else {
+                    NumberField {
+                        label: if s.callsigns {
+                            "Callsigns per session"
+                        } else if s.words {
+                            "Words per session"
+                        } else {
+                            "Groups per session"
+                        },
+                        value: f64::from(s.num_groups),
+                        min: f64::from(NUM_GROUPS_MIN),
+                        max: f64::from(NUM_GROUPS_MAX),
+                        step: 1.0,
+                        onchange: move |v| settings.write().curriculum.num_groups = v as u32,
+                    }
+                    NumberField {
+                        label: "Answer timeout",
+                        value: s.group_timeout,
+                        min: 0.0,
+                        max: GROUP_TIMEOUT_MAX_SEC,
+                        step: 1.0,
+                        unit: "sec",
+                        onchange: move |v| settings.write().playback.group_timeout = v,
+                    }
+                    NumberField {
+                        label: "Pause after each group",
+                        value: s.group_pause_sec,
+                        min: 0.0,
+                        max: GROUP_PAUSE_MAX_SEC,
+                        step: 0.5,
+                        unit: "sec",
+                        onchange: move |v| settings.write().playback.group_pause_sec = v,
+                    }
+                }
                 NumberField {
-                    label: if s.callsigns {
-                        "Callsigns per session"
-                    } else if s.words {
-                        "Words per session"
+                    label: if s.contest {
+                        "Countdown before the first CQ"
                     } else {
-                        "Groups per session"
+                        "Countdown before the first group"
                     },
-                    value: f64::from(s.num_groups),
-                    min: f64::from(NUM_GROUPS_MIN),
-                    max: f64::from(NUM_GROUPS_MAX),
-                    step: 1.0,
-                    onchange: move |v| settings.write().curriculum.num_groups = v as u32,
-                }
-                NumberField {
-                    label: "Answer timeout",
-                    value: s.group_timeout,
-                    min: 0.0,
-                    max: GROUP_TIMEOUT_MAX_SEC,
-                    step: 1.0,
-                    unit: "sec",
-                    onchange: move |v| settings.write().playback.group_timeout = v,
-                }
-                NumberField {
-                    label: "Pause after each group",
-                    value: s.group_pause_sec,
-                    min: 0.0,
-                    max: GROUP_PAUSE_MAX_SEC,
-                    step: 0.5,
-                    unit: "sec",
-                    onchange: move |v| settings.write().playback.group_pause_sec = v,
-                }
-                NumberField {
-                    label: "Countdown before the first group",
                     value: f64::from(s.countdown_sec),
                     min: 0.0,
                     max: f64::from(COUNTDOWN_MAX_SEC),
@@ -327,11 +360,17 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     onchange: move |v| settings.write().playback.countdown_sec = v as u32,
                 }
             }
-            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                "Time to read the last group before the next send. Zero keeps contest pace. Repeats of the same group stay a word space apart."
-            }
-            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                "The answer timeout moves on from a group you have not started. Once you type, the group waits for you: it is checked when every character is in, or when you press Next or Enter."
+            if s.contest {
+                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "A run of zero minutes lasts until you stop it, and ends at {CONTEST_MINUTES_MAX} all the same."
+                }
+            } else {
+                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "Time to read the last group before the next send. Zero keeps contest pace. Repeats of the same group stay a word space apart."
+                }
+                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "The answer timeout moves on from a group you have not started. Once you type, the group waits for you: it is checked when every character is in, or when you press Next or Enter."
+                }
             }
             // A callsign or a word is as long as it is, so there is nothing to
             // set.
@@ -363,21 +402,24 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     }
                 }
             }
-            SettingsRange {
-                settings,
-                which: RangeSetting::GroupRepeat,
-                label: "Sends per group",
-                unit: "×",
-                min_bound: f64::from(GROUP_REPEAT_MIN),
-                max_bound: f64::from(GROUP_REPEAT_MAX),
-                step: 1.0,
-                hint: "Each group is repeated this many times before the answer box opens — one word space apart, like a station repeating its call. Switch to Random to vary it per group.",
-            }
-            Switch {
-                title: "Lock typing while sending",
-                description: "Keeps you copying by ear instead of typing along.",
-                checked: s.lock_input,
-                onchange: move |on| settings.write().playback.lock_input_during_group_playback = on,
+            // A caller sends again when you ask, and you type as it sends.
+            if !s.contest {
+                SettingsRange {
+                    settings,
+                    which: RangeSetting::GroupRepeat,
+                    label: "Sends per group",
+                    unit: "×",
+                    min_bound: f64::from(GROUP_REPEAT_MIN),
+                    max_bound: f64::from(GROUP_REPEAT_MAX),
+                    step: 1.0,
+                    hint: "Each group is repeated this many times before the answer box opens — one word space apart, like a station repeating its call. Switch to Random to vary it per group.",
+                }
+                Switch {
+                    title: "Lock typing while sending",
+                    description: "Keeps you copying by ear instead of typing along.",
+                    checked: s.lock_input,
+                    onchange: move |on| settings.write().playback.lock_input_during_group_playback = on,
+                }
             }
             div { class: "field",
                 span { class: "field-label", "Key" }
@@ -429,6 +471,8 @@ struct Speed {
     /// The aim is set here, not under Session shape.
     aim_here: bool,
     aim: Aim,
+    /// The ranges are a contest's callers', which no copy speed steers yet.
+    contest: bool,
 }
 
 #[component]
@@ -445,6 +489,7 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
             adapts: adapts_speed(&all),
             aim_here: aim_section(&all) == SettingsSection::Speed,
             aim: all.curriculum.aim,
+            contest: all.curriculum.char_set_mode == CharSetMode::Contest,
         }
     })();
     rsx! {
@@ -477,15 +522,21 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                     hint: "Farnsworth: characters stay fast, the gaps between them stretch.",
                 }
             }
-            Switch {
-                title: "Adapt speed to me",
-                description: if speed.room {
-                    "Within these speeds: faster while you copy the characters, slower when you miss them. Your copy speed is under Stats."
-                } else {
-                    "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
-                },
-                checked: speed.adaptive,
-                onchange: move |on| settings.write().playback.adaptive_speed = on,
+            if speed.contest {
+                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "Callers come at speeds drawn from these ranges, and you send at their middle. − and + shift both during a run."
+                }
+            } else {
+                Switch {
+                    title: "Adapt speed to me",
+                    description: if speed.room {
+                        "Within these speeds: faster while you copy the characters, slower when you miss them. Your copy speed is under Stats."
+                    } else {
+                        "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
+                    },
+                    checked: speed.adaptive,
+                    onchange: move |on| settings.write().playback.adaptive_speed = on,
+                }
             }
             if speed.aim_here {
                 AimFor {

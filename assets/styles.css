@@ -683,6 +683,23 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 700;
 }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+/* Contest mode: the fields copied stand where the alphabet's characters
+   do, each a word wide. */
+.pool-chip.field-chip { padding: 0 0.5rem; font-size: 0.78rem; letter-spacing: 0.06em; }
+.hero-sends { margin: -0.35rem 0 0.9rem; color: var(--hero-ink-soft); font-size: 0.88rem; }
+/* The call a contest needs, asked for where the fields will show. */
+.hero-call { display: grid; gap: 0.35rem; margin: 0.85rem 0 0.9rem; }
+.hero-call .field label { color: var(--hero-ink-soft); }
+/* Drawn as every text box is, so it reads as the box to fill and not as
+   one more of the hero's buttons. */
+.hero-call .field input {
+  background: var(--surface-inset);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+.hero-call .call-reading { color: var(--hero-ink-soft); }
+.hero-call .call-reading.bad { color: var(--bad); }
+.hero-missing { margin: -0.25rem 0 0.85rem; color: var(--bad); font-weight: 700; font-size: 0.9rem; }
 /* ==========================================================================
    Buttons
    ========================================================================== */
@@ -1404,6 +1421,21 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   white-space: nowrap;
 }
 
+/* A contest in place of an alphabet: a QSO of it line by line, who sends
+   each named before it. */
+.qso { display: grid; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
+.qso-line { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
+.qso-who { flex: none; width: 2.6rem; }
+.qso-line.you .call { border-color: var(--copper); color: var(--ink); }
+.qso-line .call { white-space: normal; overflow-wrap: anywhere; }
+/* A callsign is a dozen characters at most: its box is no wider. */
+.call-field input { max-width: 16rem; text-transform: uppercase; }
+/* The example in an empty box reads as written: "e.g.", not "E.G.". */
+.call-field input::placeholder { text-transform: none; }
+/* What your callsign reads as, under it. */
+.call-reading { margin: 0; font-size: 0.85rem; color: var(--ink-soft); }
+.call-reading.bad { color: var(--bad); font-weight: 700; }
+
 /* The keypad: large keys for every character a group can hold, where a
    phone's keyboard would be. Off the phone and tablet builds it is shown
    only where there is a touch screen. */
@@ -1704,6 +1736,17 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .medal-ring { fill: none; stroke: var(--medal-shine); stroke-width: 1.2; opacity: 0.9; }
 .medal-number { font-family: Figtree, system-ui, sans-serif; font-size: 10.5px; font-weight: 800; fill: var(--medal-edge); }
 .mode-pills { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+/* Under the Contest pill, a smaller pill for each contest it ranks apart:
+   a choice within the mode, so the chosen one is tinted as a chosen preset
+   is, not filled as the mode's pill is. */
+.kind-pills { margin-top: -0.55rem; }
+.kind-pills .pill { padding: 0.3rem 0.7rem; font-size: 0.78rem; }
+.kind-pills .pill.active {
+  background: var(--copper-soft);
+  border-color: var(--copper);
+  color: var(--copper-deep);
+  box-shadow: none;
+}
 .best-card {
   display: flex;
   align-items: center;
@@ -2391,11 +2434,17 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .field-grid, .auto-bars { grid-template-columns: 1fr; }
   .range-field .field-grid { grid-template-columns: 1fr 1fr; gap: 0.5rem; }
   .range-field .field .stepper { max-width: none; }
+  /* The two ends share the box: a field's least width would push the
+     second past it. */
+  .range-field .field { min-width: 0; }
   .hero-actions { display: grid; grid-template-columns: 1fr; }
   .hero-actions .btn, .train-actions .btn { width: 100%; min-height: 48px; }
   .train-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .btn { min-height: 44px; }
   .pill, .seg { min-height: 38px; }
+  .kind-pills .pill { min-height: 32px; }
+  /* In the hero the call box spans the column, as Start and Listen do. */
+  .hero-call .call-field input { max-width: none; }
   .field input, .field select, .stepper input, .answer { font-size: 16px; min-height: 44px; }
   .keypad-row { gap: 0.28rem; }
   .key { min-height: 2.85rem; font-size: 1.1rem; }

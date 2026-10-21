@@ -1785,7 +1785,32 @@ mod tests {
             assert_eq!(shown[0], "2026-09-02", "the oldest is the one let go");
             assert_eq!(h.store.load_sessions().len(), 2);
             assert!(
-                h.toast().is_some_and(|text| text.contains("newest 2")),
+                h.toast()
+                    .is_some_and(|text| text.contains("newest 2") && !text.contains("contest")),
+                "{:?}",
+                h.toast()
+            );
+        });
+    }
+
+    /// A history that held a contest run says why it ran short of room: a
+    /// run's log takes more of it than a session of groups.
+    #[test]
+    fn a_squeezed_history_that_held_a_run_says_runs_take_more_room() {
+        run(|| async {
+            let mut h = Harness::new();
+            let qsos = [("K5XYZ", "214", "K5XYZ", "214")];
+            h.ctx.sessions.set(vec![
+                crate::testing::stored_run("2026-09-01", &qsos),
+                crate::testing::stored_session("2026-09-02", &[("KM", "KM")]),
+            ]);
+            h.store.room.set(Some(2));
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.store.load_sessions().len(), 2);
+            assert!(
+                h.toast().is_some_and(|text| text.contains("newest 2")
+                    && text.ends_with("Long contest runs take more room.")),
                 "{:?}",
                 h.toast()
             );

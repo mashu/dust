@@ -42,11 +42,11 @@ pub use auto_level::{
 };
 pub use belief::{Estimate, EstimatePoint};
 pub use board::{
-    BOARD_MIN_GROUPS, BoardEntry, FORM_SESSIONS, TimelinePoint, board_modes, board_place,
-    per_group, score_board, score_timeline,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, TimelinePoint,
+    board_kinds, board_modes, board_place, per_group, score_board, score_timeline,
 };
 pub use callsign::{
-    CALLSIGN_TIER_MAX, CallSpec, CallsignParts, Countries, GeneratedCall, country_of,
+    CALLSIGN_TIER_MAX, CallSpec, CallsignParts, Countries, GeneratedCall, call_fault, country_of,
     generate_call, generate_callsign, parse_callsign, tier_examples, wpx_prefix,
 };
 pub use contest::{

@@ -11,9 +11,11 @@ a run stores, with operator tests and a soak. The app runs it from start to
 results (`src/contest_runtime.rs`) on the run screen of §7
 (`src/ui/contest.rs`, its keys in `src/ui/contest_keys.rs`), with the
 keypad, pause, the hidden-page pause and the sound failure pause, and shows
-the contest results (`src/ui/contest_results.rs`), also from History; the
-settings cards, the Home hero and the stats pills come next. Nobody can
-pick Contest yet (§14).
+the contest results (`src/ui/contest_results.rs`), also from History. So do
+the settings in Contest (the Character set card's contest, Your station in
+`src/ui/settings_station.rs`, and the controls a contest hides), the Home
+hero, the stats pills and notes, the privacy texts, the credits and the
+backup merge. Nobody can pick Contest yet (§14).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -101,17 +103,37 @@ reset: your callsign and only the fields the chosen contest sends. Under the
 call it shows what was read ("Germany · Europe · CQ zone 14 · you are DX")
 or a plain error ("needs a digit", "unknown prefix"), and "No licence yet?
 Make up a call from your country's prefix, a digit and two or three
-letters. Stored on this device only."
+letters. Stored on this device only." Phase 1 has only the country key and
+the WPX prefix to read ("Reads as DL · WPX prefix DL1"); the names,
+continent, zone and side join the line with phase 3's data. The errors are
+`call_fault`'s, the reasons `parse_callsign` refuses a call ("Not a callsign
+yet: needs a digit", "needs a prefix before the digit", "needs letters after
+the last digit", "one slash at most"). A call that reads but whose prefix the
+table cannot place says "unknown prefix, so no country" beside its WPX
+prefix, and still starts a run, as `missing()` asks only that the call
+read. With no call yet, the line says what a run is missing, in
+`missing()`'s words ("Add your callsign to start a contest").
 
-**Home** (`src/ui/home.rs:128-216`) keeps its frame. The hero's eyebrow
-reads "Contest", the level chip "CQ WPX", and field chips (`CALL` `NR`)
-replace the pool chips, with "You send 5NN + serial, as DL1ABC". While
-`myCall` is empty the hero holds an inline callsign field instead. Specs
-show the callers' WPM range, minutes per run and "Single caller" or "1–3
-callers". Start reads "Start contest" (id `btn-start-training`). Contest has
-its own first-session card ("Add your call, press Start contest; Enter sends
-what the QSO needs next"). The level tile shows the callsign tier, and
-`AutoLevelCard` is hidden, as for Words (`crates/cw-core/src/auto_level.rs:220-229`).
+**Home** (`src/ui/home.rs:128-216`) keeps its frame; its subtitle reads
+"Call CQ and work the stations that answer — or just listen." The hero's
+eyebrow reads "Contest", the level chip "CQ WPX", and field chips (`CALL`
+`NR`) replace the pool chips, with "You send 5NN + serial, as DL1ABC".
+While `myCall` is empty, or not a call a contest can read, the hero holds
+an inline callsign field instead, writing the setting Your station writes
+and kept the same way (`ContestSettings::set_my_call`), with the line Your
+station gives a call typed under it. Specs show the callers' WPM range,
+minutes per run ("10 Minutes", or "Open, up to 60 min") and "Single caller"
+or "1–3 callers". Start reads "Start contest" (id `btn-start-training`); a
+start that `missing()` refuses says why in the hero, above Start, unless
+the line under the call field already says why the call will not do, and
+when the call is what is missing, Start moves the focus to its field. The
+runtime keeps its message for the other ways in, such as Run again. Contest
+has its own first-session card ("Add your call, press Start contest; Enter
+sends what the QSO needs next"), and its own tips (`CONTEST_TIPS`: Enter, a
+partial call with `?`, and `?` for a missed number) in place of the
+groups'. The level tile shows the callsign tier, and `AutoLevelCard` is
+hidden, as for Words (`auto_level_progress` is `None` in Contest,
+`crates/cw-core/src/auto_level.rs:220-229`).
 
 **Listen** treats Contest like Callsigns (`src/ui/listen.rs:30-222`), as
 does the one fork in group generation (`sampling.rs:503-507`). Phase 2 adds
@@ -946,10 +968,18 @@ contest score. A History row reads "2026-10-20 · Contest · CQ WPX · 11/12 QSO
 496 pts".
 
 **Settings, Contest chosen.** The Character set card (§2) shows the six
-segments in a 3 + 3 grid, the contest pills, "You send K5XYZ 5NN TT1 · You
-copy NR", the dialogue (You `CQ DL1ABC TEST` · They `K5XYZ` · You
-`K5XYZ 5NN TT1` · They `TU 5NN 214` · You `TU`), the tier stepper and the
-run style. Your station follows it.
+segments in a 3 + 3 grid, the contest pills under a "Contest" eyebrow, "You
+send 5NN + serial · You copy NR" as one line, the dialogue (You `CQ DL1ABC
+TEST` · They `K5XYZ` · You `K5XYZ 5NN TT1` · They `TU 5NN 214` · You `TU`,
+with `<your call>` until the call is one `parse_callsign` reads), the tier
+stepper and the run style. Your station follows it. The dialogue is built
+from the rules row (`ContestRules::example_qso`): your CQ, exchange and TU
+as sent, a placeholder caller from the countries that call you, and its
+exchange as callers send it, each copied field's example
+(`Field::example`). The callsign tier's examples ("What this tier sends")
+are not shown: the dialogue shows a call. Session shape's countdown reads
+"Countdown before the first CQ", and the Speed card says the callers come
+at speeds drawn from its ranges in place of Adapt speed to me.
 
 ## 8. Settings
 
@@ -1021,9 +1051,12 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   `every_setting_belongs_to_exactly_one_section` respectively. Nothing joins
   `PROGRESS`.
 - **Starting** needs a `myCall` that `parse_callsign` reads and valid
-  contest fields; Home and the card say what is missing, in the words of
-  `ContestSettings::missing()`. Until they do, a start refused says it in a
-  message.
+  contest fields. Under the call, Home and Your station say why a call
+  typed does not read, in `call_fault`'s words (§2), and Your station, while
+  the call is empty, what a run is missing, in the words of
+  `ContestSettings::missing()`. Home says `missing()` above Start once a
+  start is refused, unless the line under its call field says it already.
+  A start refused another way in says it in a message.
 
 ## 9. Data model and storage
 
@@ -1241,7 +1274,9 @@ The layout stays `{dustBackup: 1, savedAt, settings, sessions}`
 From phase 1, `merge_sessions` (`backup.rs:114-132`) still matches on
 `timestamp` and `date`, and a restored copy with a contest log replaces a
 present one without. It returns `(merged, added, filled)`; the restore
-message (`state.rs:319-326`) says "Restored 12 sessions and filled in 3".
+message (`state.rs:319-326`) says "Restored 12 sessions and filled in 3,
+with your settings from 19 Oct", or "Filled in 3 sessions and restored your
+settings" when nothing was added.
 
 ### 9.4 Size budget
 
@@ -1262,7 +1297,8 @@ speeds to 0.1 WPM):
 A WPX QSO adds about 290 characters to about 1,600 fixed, so a 10-minute run
 costs 1.6 group sessions at 70/h and 2.9 at 150/h, and in a browser a heavy
 contest user keeps fewer than 500 sessions. The squeeze notice
-(`HistorySaved::Squeezed`) gains "Long contest runs take more room", and
+(`HistorySaved::Squeezed`) gains "Long contest runs take more room" when
+the history held a run with its log (`Squeezed { kept, runs }`), and
 "The newest 500 sessions are kept" (`src/ui/privacy.rs:24`) becomes "Up to
 500 sessions are kept; in a browser, as many of the newest as fit". Groups
 cannot shrink: older builds require `received`, `correct` and
@@ -1297,12 +1333,12 @@ out of the Callsign series (`belief.rs:134-145`, `stats.rs:420-429`,
 | Stat | Contest runs |
 |---|---|
 | Calendar, streak, accuracy | Count; character accuracy covers calls and fields, lost copies included. A day's best reads "Best points" (`heatmap.rs:231`). |
-| Letters (`stats.rs:136-198`) | Accuracy counts every keyed character. Contest timings stay out of `avg_ms` and the slow flag, which measure answers after a send; the note says so. |
+| Letters (`stats.rs:136-198`) | Accuracy counts every keyed character. Contest timings stay out of `avg_ms` and the slow flag, which measure answers after a send; the note says so ("left out of the average time that marks a letter slow"). |
 | Mistakes, sampler beliefs | Count, on keyed tokens: K5XYC for K5XYZ is Z→C, `1T5` for `1N5` is N→T. |
-| Sampling snapshot (`stats.rs:317-397`) | A Contest arm runs the contest's `CallSource` and `CallSpec`, for calls only. |
+| Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. |
 | Copy span, group-length forecast | Not contest measures, as for Callsigns (`ui/stats.rs:211-245`). |
-| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout; a stripped run uses the groups `parse_callsign` accepts. `adaptive_speed_path` is `None` in Contest until phase 5; the card reads "Callers' speeds are drawn evenly from your range, shifted by − / + during a run". |
-| Board (`board.rs`) | A Contest pill with a chip per kind; `board_place` keys on the mark's kind. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO; a run whose log an older build dropped is unplaced. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so. Assisted runs are greyed, unplaced, and out of record and form. |
+| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` is `None` in Contest until phase 5; the card reads "Callers' speeds are drawn evenly from your range, shifted by − / + during a run", its chip "Not adaptive". |
+| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form. |
 | History (`ui/stats_detail.rs:362-371`) | Every row names its mode (phase 0); a contest row opens its results; a stripped run says "log not kept by an older version". |
 | Auto level | Untouched: the contest finish never calls `complete_session` (`auto_level.rs:285-308`). |
 | Runs card (phase 4) | Every run per kind: date, length, QSOs, rate, both scores, error share, best verified per kind and length. |
@@ -1519,7 +1555,9 @@ MRCE's files attach no MPL Exhibit B, so porting its code into a GPL work
 would be allowed (MPL-2.0 §3.3); Dust re-implements it by choice. Credits
 (`src/ui/credits.rs`) name MorseRunner (VE3NEA, MorseRunner CE), the
 compilers of the counted files, Morse Walker, AD1C, the SSA, the FCC and
-F6FVY.
+F6FVY, each in a "Built on" list (`SOURCES`) from the phase that first uses
+its work: phase 1 credits MorseRunner and MorseRunner CE for the callers,
+Enter Sends Message and cut numbers, and F6FVY for the WPX serial data.
 
 ## 12. Code structure
 

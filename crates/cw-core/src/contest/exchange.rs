@@ -104,6 +104,21 @@ impl Field {
         }
     }
 
+    /// A value a station might send for it, for showing what an exchange
+    /// is like: `214`.
+    pub fn example(self) -> &'static str {
+        match self {
+            Self::Rst => "579",
+            Self::Nr => "214",
+            Self::Name => "BOB",
+            Self::St => "OR",
+            Self::Zn => "25",
+            Self::Pwr => "KW",
+            Self::Cl => "3A",
+            Self::Sec => "OR",
+        }
+    }
+
     /// Whether it holds a number, the only place a cut letter is read.
     pub fn numeric(self) -> bool {
         matches!(self, Self::Rst | Self::Nr | Self::Zn | Self::Pwr)
@@ -510,6 +525,14 @@ mod tests {
             assert_eq!(Field::from_name(field.name()), Some(field));
             assert_eq!(field.label(), field.name().to_ascii_uppercase());
             assert!(!field.noun().is_empty());
+            // What the card shows a station sending is a value it could send,
+            // once the field's list has come with its contest.
+            let listed = matches!(field, Field::St | Field::Sec);
+            assert_eq!(
+                field.canonical(field.example()).is_some(),
+                !listed,
+                "{field:?}"
+            );
         }
         assert_eq!(Field::from_name("NR"), None);
     }

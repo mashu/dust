@@ -14,6 +14,7 @@ use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::contest_results::ContestResults;
 use crate::ui::format::counted;
 use crate::ui::settings_charset::mode_label;
+use crate::ui::stats::CONTEST_SPEEDS;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
@@ -146,10 +147,16 @@ fn character_sampling_card(settings: &TrainingSettings, sessions: &[SessionResul
         .max(0.0001);
     let (drawn, others): (Vec<&SamplingRow>, Vec<&SamplingRow>) =
         rows.iter().partition(|row| row.drawn_now);
+    // A contest draws its callers' calls; their exchanges are not drawn.
+    let next = if settings.curriculum.char_set_mode == CharSetMode::Contest {
+        "of turning up in the next caller's call"
+    } else {
+        "of being drawn in the next group"
+    };
     rsx! {
         div { class: "card stack",
             div { class: "tiny", "Sampling snapshot" }
-            p { class: "muted", "Posterior error vs chance of being drawn in the next group (mean weights, not Thompson draws). What every character you have practised has taught counts, whatever set it was sent in." }
+            p { class: "muted", "Posterior error vs chance {next} (mean weights, not Thompson draws). What every character you have practised has taught counts, whatever set it was sent in." }
             if drawn.is_empty() {
                 p { class: "muted", "Pool is empty." }
             }
@@ -242,14 +249,16 @@ fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Elemen
         .fold(0.0_f64, f64::max)
         .max(0.0001);
     let playback = &settings.playback;
-    let mut note = if !playback.adaptive_speed {
-        "Adaptive speed is off, so each group's speed is drawn evenly from your range. Right is the share of characters you copy at that speed."
+    let mut note = if settings.curriculum.char_set_mode == CharSetMode::Contest {
+        format!("{CONTEST_SPEEDS} Right is the share of characters you copy at that speed.")
+    } else if !playback.adaptive_speed {
+        "Adaptive speed is off, so each group's speed is drawn evenly from your range. Right is the share of characters you copy at that speed.".to_string()
     } else if !SpeedPath::of(settings).has_room() {
-        "One speed is set, so there is no speed to choose. Right is the share of characters you copy at it."
+        "One speed is set, so there is no speed to choose. Right is the share of characters you copy at it.".to_string()
     } else {
         "Chance of each speed in the next group, and the share of characters you copy right at it."
-    }
-    .to_string();
+            .to_string()
+    };
     if !playback.link_char_to_effective {
         note.push_str(
             " With Farnsworth spacing, a speed counts the spacing too, as the score does.",

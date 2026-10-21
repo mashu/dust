@@ -132,11 +132,11 @@ pub enum CharSetMode {
     /// There is no level to climb: the list is the curriculum.
     Words,
     /// Contest runs: callers answer your CQ and you copy their calls and
-    /// exchanges. Not offered in the settings yet; until it is, everything
-    /// that asks a mode what to do treats it as Callsign, whose tier shapes
-    /// the callers' calls. On disk it is written as Callsign with a mark
-    /// beside it ([`mode_on_disk`]), so a build that knows no contests still
-    /// reads a run, and the settings.
+    /// exchanges. Not offered by the settings' control yet. It shares the
+    /// callsign tier with Callsign, which shapes the callers' calls. On disk
+    /// it is written as Callsign with a mark beside it ([`mode_on_disk`]),
+    /// so a build that knows no contests still reads a run, and the
+    /// settings.
     Contest,
 }
 
@@ -176,8 +176,7 @@ impl CharSetMode {
     }
 
     /// Whether what is sent is callsigns, shaped by the callsign tier: in
-    /// Callsigns, and from a contest's callers. Until Contest has screens of
-    /// its own, they show it as Callsigns wherever they ask this.
+    /// Callsigns, and from a contest's callers.
     pub fn sends_callsigns(self) -> bool {
         matches!(self, Self::Callsign | Self::Contest)
     }

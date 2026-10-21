@@ -47,6 +47,12 @@ impl ContestSettings {
         }
     }
 
+    /// Your callsign, as typed: kept as a callsign can be written, as
+    /// [`TrainingSettings::clamp`](super::TrainingSettings::clamp) keeps it.
+    pub fn set_my_call(&mut self, typed: &str) {
+        self.my_call = clean_call(typed);
+    }
+
     /// What a run of these settings still needs before it can start, said
     /// for the screen; None once it has everything: a contest whose phase has
     /// shipped, and a callsign Dust can read.
@@ -102,6 +108,9 @@ mod tests {
             let once = clean_call(text);
             assert_eq!(clean_call(&once), once, "{text:?} settles in one pass");
         }
+        let mut settings = ContestSettings::default();
+        settings.set_my_call(" dl1abc/p ");
+        assert_eq!(settings.my_call, "DL1ABC/P");
     }
 
     /// A run starts only with a contest that has shipped and a call that

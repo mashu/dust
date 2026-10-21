@@ -17,14 +17,15 @@ mod medal;
 mod timeline;
 
 use cw_core::{
-    BOARD_MIN_GROUPS, BoardEntry, CharSetMode, FORM_SESSIONS, SessionResult, TimelinePoint,
-    board_modes, score_board, score_timeline,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, CharSetMode, ContestKind,
+    FORM_SESSIONS, SessionResult, TimelinePoint, board_kinds, board_modes, score_board,
+    score_timeline,
 };
 use dioxus::prelude::*;
 
 use crate::ui::format::short_date;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::widgets::{CardHead, IconName, Seg};
+use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 use best::BestCard;
 use board::BoardList;
 pub use medal::Medal;
@@ -57,39 +58,73 @@ fn speed(entry: &BoardEntry) -> String {
     }
 }
 
+/// Which contest runs go on the board, in a phrase: "runs of 5 minutes or
+/// more…". A run's groups are its calls and fields, one each.
+fn run_rule() -> String {
+    format!(
+        "runs of {} minutes or more that hold {BOARD_MIN_GROUPS} groups or more (each call and field is one) and a QSO logged clean",
+        BOARD_RUN_MIN_S / 60
+    )
+}
+
 /// Every session of `mode`, best first, with the personal best, the score
 /// over time and the board itself. Pointing at a row (or tapping it) marks
-/// on the timeline when it was set.
+/// on the timeline when it was set. Contest runs are ranked within their
+/// contest, chosen by a chip of its own under the Contest pill.
 #[component]
 pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     let mut mode = use_signal(|| None::<CharSetMode>);
+    let mut kind = use_signal(|| None::<ContestKind>);
     let hovered = use_signal(|| None::<u64>);
     let pinned = use_signal(|| None::<u64>);
     let modes = board_modes(&sessions);
-    // A mode whose sessions have all been deleted shows every mode again.
+    let kinds = board_kinds(&sessions);
+    // A mode whose sessions have all been deleted shows every mode again,
+    // and a contest with none left the first that has some.
     let current = mode().filter(|chosen| modes.contains(chosen));
-    let board = score_board(&sessions, current);
-    let timeline = score_timeline(&sessions, current);
+    let contest = kind()
+        .filter(|chosen| kinds.contains(chosen))
+        .or(kinds.first().copied());
+    let of = match (current, contest) {
+        (None, _) => BoardOf::All,
+        (Some(CharSetMode::Contest), Some(contest)) => BoardOf::Contest(contest),
+        (Some(mode), _) => BoardOf::Mode(mode),
+    };
+    let board = score_board(&sessions, of);
+    let timeline = score_timeline(&sessions, of);
     let today = crate::time::local_date_string();
 
     let Some(best) = board.first().cloned() else {
-        let scored = sessions
+        let scored: Vec<&SessionResult> = sessions
             .iter()
-            .any(|session| session.score.is_finite() && session.score > 0.0);
-        let (title, body) = if scored {
-            (
-                "No session long enough yet",
-                format!(
-                    "Sessions of {BOARD_MIN_GROUPS} groups or more go on the board, ranked by what they earn a group. Set a longer session under Settings → Session."
-                ),
-            )
-        } else {
-            (
+            .filter(|session| session.score.is_finite() && session.score > 0.0)
+            .collect();
+        // Runs go on by their own rule, and a run has a length to set, not
+        // a count of groups.
+        let runs_only = scored
+            .iter()
+            .all(|session| session.char_set_mode == CharSetMode::Contest);
+        let (title, body) = match (scored.is_empty(), runs_only) {
+            (true, _) => (
                 "No scores yet",
                 format!(
                     "Finish a session of {BOARD_MIN_GROUPS} groups or more and it goes on the board. The best one gets the gold."
                 ),
-            )
+            ),
+            (false, true) => (
+                "No run long enough yet",
+                format!(
+                    "The board takes {}, ranked by what they earn a group. Set Minutes per run to {} or more under Settings → Session shape.",
+                    run_rule(),
+                    BOARD_RUN_MIN_S / 60
+                ),
+            ),
+            (false, false) => (
+                "No session long enough yet",
+                format!(
+                    "Sessions of {BOARD_MIN_GROUPS} groups or more go on the board, ranked by what they earn a group. Set a longer session under Settings → Session."
+                ),
+            ),
         };
         return rsx! {
             div { class: "card",
@@ -115,7 +150,7 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
 
     rsx! {
         div { class: "stack",
-            if modes.len() > 1 {
+            if modes.len() > 1 || kinds.len() > 1 {
                 div { class: "mode-pills",
                     Seg { label: "All modes", pill: true, active: current.is_none(), onclick: move |_| mode.set(None) }
                     for each in modes.iter().copied() {
@@ -124,6 +159,19 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                             pill: true,
                             active: current == Some(each),
                             onclick: move |_| mode.set(Some(each)),
+                        }
+                    }
+                }
+            }
+            if let BoardOf::Contest(shown) = of {
+                div { class: "mode-pills kind-pills",
+                    for each in kinds.iter().copied() {
+                        Seg {
+                            label: each.label(),
+                            id: control_id("kind", each.label()),
+                            pill: true,
+                            active: shown == each,
+                            onclick: move |_| kind.set(Some(each)),
                         }
                     }
                 }

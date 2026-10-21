@@ -519,6 +519,34 @@ pub fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
     }
 }
 
+/// Why `call` is not a callsign, in a few plain words ("needs a digit"), or
+/// `None` when [`parse_callsign`] reads it. `call` is written as a callsign
+/// is kept: upper case, with slashes only inside it. Of the two sides of a
+/// slash, the longer is taken for the call, as the one meant.
+pub fn call_fault(call: &str) -> Option<&'static str> {
+    if parse_callsign(call).is_some() {
+        return None;
+    }
+    if call.matches('/').count() > 1 {
+        return Some("one slash at most");
+    }
+    let base = match call.split_once('/') {
+        Some((left, right)) if right.len() > left.len() => right,
+        Some((left, _)) => left,
+        None => call,
+    };
+    let Some(digit) = base.rfind(|c: char| c.is_ascii_digit()) else {
+        return Some("needs a digit");
+    };
+    Some(if digit == 0 {
+        "needs a prefix before the digit"
+    } else if digit + 1 == base.len() {
+        "needs letters after the last digit"
+    } else {
+        "only letters, digits and a slash"
+    })
+}
+
 /// One side of a call: `prefix + separator + suffix`, or `None` if it is not
 /// a whole call.
 fn parse_base<'a>(
@@ -845,6 +873,47 @@ mod tests {
         assert_eq!(abroad.suffix, "XYZ");
         assert_eq!(abroad.portable, None);
         assert!(parse_callsign("DL/W1AW").is_some_and(|parts| parts.host == Some("DL")));
+    }
+
+    /// A call that does not read says why, and one that does says nothing,
+    /// whatever was typed and kept.
+    #[test]
+    fn what_is_not_a_callsign_says_why() {
+        for (call, fault) in [
+            ("ABC", "needs a digit"),
+            ("", "needs a digit"),
+            ("1AW", "needs a prefix before the digit"),
+            ("W1", "needs letters after the last digit"),
+            ("DL1AB2", "needs letters after the last digit"),
+            ("W1A/P/M", "one slash at most"),
+            ("P/W1", "needs letters after the last digit"),
+            ("DL/ABCD", "needs a digit"),
+        ] {
+            assert_eq!(call_fault(call), Some(fault), "{call:?}");
+        }
+        let mut rng = SplitMix64::new(11);
+        for tier in 1..=CALLSIGN_TIER_MAX {
+            for _ in 0..500 {
+                let call = generate_callsign(tier, &mut rng);
+                assert_eq!(call_fault(&call), None, "{call}");
+            }
+        }
+        for typed in [
+            "K",
+            "KK",
+            "9A",
+            "Q/1",
+            "A/B",
+            "W1AW/P",
+            "DL/W1AW",
+            "ABCDEFGHIJ1",
+        ] {
+            assert_eq!(
+                call_fault(typed).is_none(),
+                parse_callsign(typed).is_some(),
+                "{typed:?}"
+            );
+        }
     }
 
     /// The countries whose real calls include `prefix`, then `digit`, then a

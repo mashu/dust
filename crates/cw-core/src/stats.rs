@@ -10,7 +10,8 @@ use crate::pool::compute_char_pool;
 use crate::sampling::{
     CharSamplingConfig, CharSamplingState, adaptive_bounds, adapts_speed, belief_for,
     beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,
-    generate_callsign_group, generate_word_group, group_size_bounds, normalize_weights,
+    generate_callsign_group, generate_contest_call, generate_word_group, group_size_bounds,
+    normalize_weights,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -24,8 +25,9 @@ pub const SLOW_AVG_MS: f64 = 800.0;
 
 /// What the Letters card says once the history holds a contest run: its
 /// letters count, but not its times.
-pub const CONTEST_TIMES_NOTE: &str = "Contest runs count towards accuracy here, but not towards \
-     the times: theirs include waiting and typing, not only copying.";
+pub const CONTEST_TIMES_NOTE: &str = "Contest runs count towards accuracy here, but their times \
+     are left out of the average time that marks a letter slow: they include waiting and typing, \
+     not only copying.";
 pub const GROUP_START_BIGRAM_TOKEN: char = '▸';
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,10 +346,11 @@ fn whole_group_character_shares(
     let mut total = 0.0;
     let mut sampling = state.clone();
     for _ in 0..DRAWS {
-        let call = if settings.curriculum.char_set_mode == CharSetMode::Words {
-            generate_word_group(settings, &mut sampling, config, rng)
-        } else {
-            generate_callsign_group(settings, &mut sampling, config, rng)
+        let call = match settings.curriculum.char_set_mode {
+            CharSetMode::Words => generate_word_group(settings, &mut sampling, config, rng),
+            // A contest's callers' calls; their exchanges are not drawn.
+            CharSetMode::Contest => generate_contest_call(settings, &mut sampling, config, rng),
+            _ => generate_callsign_group(settings, &mut sampling, config, rng),
         };
         for ch in call.chars() {
             if let Some(count) = counts.get_mut(&ch) {
@@ -829,6 +832,35 @@ mod tests {
                 .any(|row| row.character == '/'),
             "tier 1 has no portable calls"
         );
+    }
+
+    /// A contest's snapshot is of its callers' calls, drawn as the run draws
+    /// them: few portables and stations abroad, where the top tier sends
+    /// plenty for practice. Drawn plainly, with no lean on any character,
+    /// the difference is the spec's alone.
+    #[test]
+    fn contest_sampling_shows_what_its_callers_send() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.callsign_level = crate::callsign::CALLSIGN_TIER_MAX;
+        settings.auto_level.error_weight_strength = 0.0;
+        settings.auto_level.char_sampling_coverage_strength = 0.0;
+        let slash = |mode| {
+            let mut settings = settings.clone();
+            settings.curriculum.char_set_mode = mode;
+            let rows = sampling_rows(&settings, &[]);
+            let total: f64 = rows.iter().map(|row| row.sampling_prob).sum();
+            assert!((total - 1.0).abs() < 1e-6, "{mode:?}: {total}");
+            rows.iter()
+                .find(|row| row.character == '/')
+                .map_or(0.0, |row| row.sampling_prob)
+        };
+        let calls = slash(CharSetMode::Callsign);
+        let callers = slash(CharSetMode::Contest);
+        assert!(
+            callers > 0.0,
+            "a contest still hears a portable now and then"
+        );
+        assert!(callers < calls / 2.0, "{callers} against {calls}");
     }
 
     #[test]

@@ -61,6 +61,11 @@ fn HomeRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     let on_start = use_callback(move |()| start_session(ctx));
     let on_listen = use_callback(move |()| ctx.go_to(Screen::Listen));
+    // The same setting the Your station card writes, kept the same way.
+    let on_call = use_callback(move |typed: String| {
+        let mut settings = ctx.settings;
+        settings.write().contest.set_my_call(&typed);
+    });
     let settings = ctx.settings.read();
     // Every session counts, whatever character set it was recorded with.
     let sessions = ctx.sessions.read();
@@ -75,6 +80,7 @@ fn HomeRoute() -> Element {
             auto_progress: auto_progress(&*ctx.app().store, &settings),
             on_start,
             on_listen,
+            on_call,
         }
     }
 }
