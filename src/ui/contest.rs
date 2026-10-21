@@ -1399,7 +1399,18 @@ mod tests {
             let (mut ui, recorder) = Ui::app_with_settings(settings);
             ui.click("btn-start-training");
             ui.advance(300).await;
-            assert_eq!(recorder.starts()[0].transcript.others.len(), 3);
+            // Three callers answer the first CQ. A caller whose wait runs
+            // out calls again inside the same turn, so count the callers
+            // by their pitch, at least 60 Hz apart, not by their sends.
+            let mut pitches: Vec<f64> = recorder.starts()[0]
+                .transcript
+                .others
+                .iter()
+                .map(|caller| caller.voice.tone_hz)
+                .collect();
+            pitches.sort_by(f64::total_cmp);
+            pitches.dedup();
+            assert_eq!(pitches.len(), 3, "{pitches:?}");
             assert!(
                 ui.run_until(8_000, |ui| ui.has("2 calling") || ui.has("3 calling"))
                     .await,
