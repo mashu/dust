@@ -1698,7 +1698,7 @@ mod ui_tests {
             ui.type_into("field-your-callsign", "dl1abc");
             ui.click("btn-start-training");
             assert_eq!(ui.screen(), "home");
-            assert!(ui.has("Add your name to start a Simple QSO"));
+            assert!(ui.has("Add your name to start a Simple\u{a0}QSO"));
             assert_eq!(
                 ui.take_focused(),
                 ["field-your-name"],
@@ -1771,7 +1771,7 @@ mod ui_tests {
             ui.click("btn-start-training");
             ui.advance(50).await;
             assert_eq!(ui.screen(), "home");
-            assert!(ui.has("Add your name to start a Simple QSO"));
+            assert!(ui.has("Add your name to start a Simple\u{a0}QSO"));
             assert!(!ui.has("class=\"toast\""), "said on Home, not in a toast");
 
             ui.commit("field-your-name", "mat");
@@ -1789,6 +1789,76 @@ mod ui_tests {
                 "{}",
                 first.text
             );
+        });
+    }
+
+    /// The NA Sprint sends your name and your state: Home asks for the
+    /// name, then the state, saying what is missing and taking the cursor
+    /// to the field; a state that is none is said so under its field,
+    /// however it was kept; once it is given the run starts, its CQ the
+    /// Sprint's.
+    #[test]
+    fn home_asks_for_your_name_then_your_state_before_a_sprint() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+            settings.contest.my_call = "K1ABC".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            assert!(ui.shows("field-your-name"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your name to start an NA\u{a0}Sprint"));
+            assert_eq!(ui.take_focused(), ["field-your-name"]);
+
+            // The press that keeps the name brings in the state's field, and
+            // the cursor goes there.
+            ui.type_into("field-your-name", "mike");
+            assert!(
+                !ui.mouse_down("btn-start-training"),
+                "Start took the cursor"
+            );
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_name, "MIKE");
+            assert!(ui.shows("field-your-state-or-province"));
+            assert!(ui.has("Add your state, press Start contest"));
+            assert!(ui.has("Add your state or province to start an NA\u{a0}Sprint"));
+            assert_eq!(ui.take_focused(), ["field-your-state-or-province"]);
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert_eq!(ui.take_focused(), ["field-your-state-or-province"]);
+
+            // A state written out is no code: kept as none, and said so,
+            // whether the field was left or Start pressed from it.
+            ui.commit("field-your-state-or-province", "Mass");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_state, "");
+            assert!(ui.has("MASS is not a state or province"), "{}", ui.html());
+            ui.type_into("field-your-state-or-province", "Ontario");
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(
+                ui.has("ONTARIO is not a state or province"),
+                "{}",
+                ui.html()
+            );
+            assert!(ui.has("Add your state or province to start an NA\u{a0}Sprint"));
+            ui.commit("field-your-state-or-province", "ma");
+            ui.advance(50).await;
+            let kept = ui.stored_settings().await.contest;
+            assert_eq!(
+                (kept.my_name.as_str(), kept.my_state.as_str()),
+                ("MIKE", "MA")
+            );
+            assert!(ui.has("You send serial + name + state, as K1ABC"));
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            ui.advance(10_000).await;
+            let first = &recorder.starts()[0].transcript;
+            assert!(first.text.starts_with("CQ NA K1ABC"), "{}", first.text);
         });
     }
 
@@ -2095,6 +2165,45 @@ mod ui_tests {
             assert!(stored.contest.my_call.is_empty());
             assert_eq!(stored.contest.contest_minutes, 15);
             assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Contest);
+        });
+    }
+
+    /// Your state, for the Sprint, reads as the place it names; what is no
+    /// state is said so only while nothing else of your station has changed
+    /// since: your call put outside the US and Canada sends DX, and the
+    /// card's reset leaves nothing to say.
+    #[test]
+    fn your_station_says_what_your_state_reads_as_while_it_is_so() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+            settings.contest.my_call = "K1ABC".to_string();
+            settings.contest.my_name = "MIKE".to_string();
+            settings.contest.my_state = "MA".to_string();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            assert!(ui.has("Reads as Massachusetts"));
+            ui.commit("field-your-state-or-province", "Mass");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_state, "");
+            assert!(ui.has("MASS is not a state or province"));
+            ui.commit("field-your-callsign", "DL1ABC");
+            ui.advance(50).await;
+            assert!(!ui.has("MASS is not a state or province"));
+            assert!(ui.has("Sends DX: in Dust every station outside the US and Canada sends DX"));
+
+            ui.commit("field-your-callsign", "K1ABC");
+            ui.commit("field-your-state-or-province", "Mass");
+            ui.advance(50).await;
+            assert!(ui.has("MASS is not a state or province"));
+            ui.click("reset-your-station");
+            ui.advance(50).await;
+            assert!(ui.stored_settings().await.contest.my_call.is_empty());
+            assert!(!ui.has("MASS is not a state or province"), "{}", ui.html());
+            // Nor does it come back with the call it was typed under.
+            ui.commit("field-your-callsign", "K1ABC");
+            ui.advance(50).await;
+            assert!(!ui.has("MASS is not a state or province"));
         });
     }
 

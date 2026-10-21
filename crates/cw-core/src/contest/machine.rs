@@ -726,6 +726,9 @@ pub struct ContestMachine<S> {
     my_call: String,
     /// Your name, for a contest whose exchange sends it.
     my_name: String,
+    /// Your state, province or territory, or DX, for a contest whose
+    /// exchange sends it.
+    my_state: String,
     /// One caller at a time, or a pile-up.
     style: RunStyle,
     /// The band's fading, which each caller follows from a point of its
@@ -786,6 +789,7 @@ impl<S: CallSource> ContestMachine<S> {
         let rules = settings.contest.contest_kind.rules().unwrap_or(&RULES[0]);
         let my_call = settings.contest.my_call.clone();
         let my_name = settings.contest.my_name.clone();
+        let my_state = settings.contest.state_sent().to_string();
         let countdown = settings.playback.countdown_sec;
         let pileup = settings.contest.contest_style == RunStyle::Pileup;
         let rng = SplitMix64::new(seed);
@@ -798,6 +802,7 @@ impl<S: CallSource> ContestMachine<S> {
             rules,
             my_call,
             my_name,
+            my_state,
             source,
             draws: rng.fork(RUN_STREAM),
             rng,
@@ -1476,12 +1481,15 @@ impl<S: CallSource> ContestMachine<S> {
         let me = Fill {
             my_call: &self.my_call,
             my_name: &self.my_name,
+            my_state: &self.my_state,
             serial,
             his_name: &his_name,
         };
-        // In a pile-up, a TU signs with your call every third QSO.
+        // In a pile-up, a TU signs with your call every third QSO, unless it
+        // always does.
         let signs = self.style == RunStyle::Pileup
             && self.rules.tu_calls
+            && !self.rules.tu_signs()
             && number.is_multiple_of(TU_SIGNS_EVERY)
             && !self.my_call.is_empty();
         for part in &message {

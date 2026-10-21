@@ -121,6 +121,16 @@ fn name_or_stand_in(my_name: &str) -> &str {
     }
 }
 
+/// Your state where an example of a QSO sends it: the one you gave, DX for
+/// a call outside the US and Canada, or a stand-in until then.
+fn state_or_stand_in(sent: &str) -> &str {
+    if sent.is_empty() {
+        "<your state>"
+    } else {
+        sent
+    }
+}
+
 /// What the card shows in Contest mode: which contest, what its exchange
 /// is, and a QSO of it as it goes, with your call in it.
 #[derive(Clone, PartialEq)]
@@ -133,6 +143,8 @@ struct ContestCard {
     sends: String,
     /// What you copy, as the log heads it: `NR`.
     copies: String,
+    /// What Dust leaves out of the real contest, if anything.
+    simplified: Option<&'static str>,
     /// Who sends each line of the QSO, and what.
     qso: Vec<(Sender, String)>,
 }
@@ -153,6 +165,7 @@ impl ContestCard {
                 callers,
                 sends: String::new(),
                 copies: String::new(),
+                simplified: None,
                 qso: Vec::new(),
             };
         };
@@ -165,13 +178,15 @@ impl ContestCard {
             kind,
             style,
             callers,
-            sends: rules.sends(),
+            sends: rules.sends(side),
             copies: copies.join("\u{a0}"),
+            simplified: rules.simplified,
             qso: rules.example_qso(
                 side,
                 &Fill {
                     my_call: call_or_stand_in(&contest.my_call),
                     my_name: name_or_stand_in(&contest.my_name),
+                    my_state: state_or_stand_in(contest.state_sent()),
                     ..Fill::default()
                 },
             ),
@@ -426,6 +441,9 @@ fn ContestBody(settings: Signal<TrainingSettings>, contest: ContestCard) -> Elem
             // line breaks.
             p { class: "muted", style: "margin: 0;",
                 "You send {contest.sends}\u{a0}· You\u{a0}copy\u{a0}{contest.copies}"
+            }
+            if let Some(simplified) = contest.simplified {
+                p { class: "muted", style: "margin: 0;", "{simplified}" }
             }
             div { class: "eyebrow", "A QSO" }
             ol { class: "qso",

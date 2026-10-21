@@ -43,6 +43,7 @@ use crate::settings::TrainingSettings;
 
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
+pub use data::places::place_name;
 pub use esm::{EntryField, Esm, Fields, MessagePart, QsoState, esm, loggable, message_text};
 pub use exchange::{Field, cut_serial, keyed_token, read_number, send_report, send_serial};
 pub use machine::{
@@ -55,7 +56,7 @@ pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use rules::{ContestRules, Fill, Multiplier, PerSide, Scoring, Side};
 pub use score::{ContestScore, Rates, ScoredQso, Tally, contest_score, rate_at};
-pub use serial::{SerialFit, SerialModel, WPX_SERIALS};
+pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};
 pub use turn::{Fade, MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
 
 /// Run time is kept in milliseconds; rates and contests are told in minutes
@@ -121,6 +122,14 @@ impl ContestKind {
         }
     }
 
+    /// The article its label is said with: an NA Sprint, a Simple QSO.
+    pub fn article(self) -> &'static str {
+        match self {
+            Self::Sprint | Self::ArrlDx => "an",
+            _ => "a",
+        }
+    }
+
     /// Its rules, once its phase has shipped.
     pub fn rules(self) -> Option<&'static ContestRules> {
         rules::RULES.iter().find(|rules| rules.kind == self)
@@ -133,9 +142,10 @@ impl ContestKind {
         self.rules().is_none_or(|rules| rules.scoring.is_some())
     }
 
-    /// The contests that can be run: those with a row of rules.
+    /// The contests that can be run, those with a row of rules, in the
+    /// order the card lists them.
     pub fn shipped() -> impl Iterator<Item = Self> {
-        rules::RULES.iter().map(|rules| rules.kind)
+        Self::ALL.into_iter().filter(|kind| kind.rules().is_some())
     }
 }
 
@@ -308,9 +318,16 @@ mod tests {
     }
 
     #[test]
-    fn wpx_and_simple_qso_have_shipped_so_far() {
+    fn sprint_wpx_and_simple_qso_have_shipped_so_far() {
         let shipped: Vec<ContestKind> = ContestKind::shipped().collect();
-        assert_eq!(shipped, [ContestKind::Wpx, ContestKind::SimpleQso]);
+        assert_eq!(
+            shipped,
+            [
+                ContestKind::Sprint,
+                ContestKind::Wpx,
+                ContestKind::SimpleQso
+            ]
+        );
         for kind in ContestKind::ALL {
             assert_eq!(kind.rules().is_some(), shipped.contains(&kind), "{kind:?}");
             assert!(!kind.label().is_empty());

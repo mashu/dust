@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 
 use super::machine::{ContestEffect, ContestEvent, ContestMachine, OpKey, PauseWhy};
 use super::turn::{Sender, Turn, plan_turn};
-use super::{CallSource, Fields};
+use super::{CallSource, Field, Fields};
 use crate::callsign::{CallSpec, GeneratedCall, country_of, parse_callsign};
 use crate::session::{Answered, MonoMs};
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -272,7 +272,8 @@ pub(crate) enum Copied<'a> {
     /// A call put right: `DE K5XYZ`, or `K5XYZ K5XYZ`.
     Correction(&'a str),
     /// An exchange, as it goes in the Exchange field: a contest's serial,
-    /// its last word; an everyday QSO's report and name, `579 BOB`.
+    /// its last word; an everyday QSO's report and name, `579 BOB`; a
+    /// Sprint's serial, name and state, `145 BOB OR`.
     Exchange(String),
 }
 
@@ -294,8 +295,20 @@ pub(crate) fn copy_of(text: &str) -> Option<Copied<'_>> {
             _ if words.contains(&"5NN") => words
                 .last()
                 .map(|serial| Copied::Exchange((*serial).to_string())),
-            _ => None,
+            _ => sprint_exchange(&words).map(Copied::Exchange),
         },
+    }
+}
+
+/// A Sprint's exchange, after your call: its serial, name and state.
+fn sprint_exchange(words: &[&str]) -> Option<String> {
+    match words {
+        [.., nr, name, st]
+            if nr.chars().all(|c| c.is_ascii_digit()) && Field::St.canonical(st).is_some() =>
+        {
+            Some(format!("{nr} {name} {st}"))
+        }
+        _ => None,
     }
 }
 
@@ -722,6 +735,117 @@ mod tests {
         }
     }
 
+    /// The NA Sprint worked perfectly, one caller at a time and in a
+    /// pile-up: every QSO logged clean with its number, name and state, each
+    /// caller in the US or Canada sending the state its call is in, your
+    /// serial plain and your TU signed, and the score a point a QSO times
+    /// the places worked, each once.
+    #[test]
+    fn a_perfect_operator_works_the_sprint_clean() {
+        use super::super::data::places::places_for;
+        use super::super::{ContestKind, Field, RunStyle};
+        use crate::callsign::Countries;
+        for (seed, style) in [(31, RunStyle::Single), (32, RunStyle::Pileup)] {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_kind = ContestKind::Sprint;
+            settings.contest.contest_style = style;
+            settings.contest.my_call = "K1ABC".to_string();
+            settings.contest.my_name = "MIKE".to_string();
+            settings.contest.my_state = "MA".to_string();
+            settings.curriculum.callsign_level = 6;
+            settings.band.stations_max = 3;
+            let settings = settings.clamp();
+            let sampler = Sampler::new(&[], &settings, seed);
+            let mut runtime = Runtime::start(seed, settings, sampler);
+            work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+            let view = runtime.machine.view();
+            assert!(view.qsos > 15, "{style:?}: {} QSOs", view.qsos);
+            assert_eq!(view.clean, view.qsos, "{style:?}");
+            // What you send: the contest's CQ, both calls and your serial
+            // plain, and a TU signed once, every third QSO of a pile-up too.
+            let yours: Vec<&str> = runtime
+                .turns
+                .iter()
+                .flat_map(|turn| turn.segments.iter())
+                .filter(|segment| segment.who == Sender::You)
+                .map(|segment| segment.text.as_str())
+                .collect();
+            assert!(yours.contains(&"CQ NA K1ABC"), "{yours:?}");
+            assert!(
+                yours.iter().any(|text| text.ends_with(" K1ABC 1 MIKE MA")),
+                "{yours:?}"
+            );
+            assert!(
+                yours.iter().any(|text| text.ends_with(" K1ABC 10 MIKE MA")),
+                "the tenth serial, plain: {yours:?}"
+            );
+            assert!(yours.iter().all(|text| !text.contains("K1ABC K1ABC")));
+            assert!(yours.iter().any(|text| text.contains("TU K1ABC")));
+            let result = runtime.machine.result(0, "2026-10-21".into());
+            let run = result
+                .contest
+                .as_ref()
+                .and_then(|log| log.run(result.groups.len()))
+                .expect("the log reads back");
+            assert_eq!(
+                (run.kind.as_str(), run.style.as_str()),
+                ("sprint", style.name())
+            );
+            assert_eq!(run.fields, ["nr", "name", "st"]);
+            // Each station worked owns a call and three fields; its state
+            // is one its call is in.
+            let mut places = std::collections::BTreeSet::new();
+            let mut at = 0;
+            let mut dupes = 0;
+            for qso in &run.qsos {
+                let owned = &result.groups[at..at + qso.g as usize];
+                at += qso.g as usize;
+                if qso.g == 0 {
+                    dupes += 1;
+                    continue;
+                }
+                assert_eq!(qso.g, 4, "{style:?}: {qso:?}");
+                let (call, st) = (&owned[0].sent, &owned[3].sent);
+                assert!(
+                    Countries::UsAndCanada.admits(&qso.c),
+                    "{style:?}: {call} of {}",
+                    qso.c
+                );
+                assert!(
+                    places_for(call).contains(&st.as_str()),
+                    "{style:?}: {call} sent {st}"
+                );
+                if qso.k.is_empty() {
+                    assert!(owned.iter().all(|group| group.correct), "{style:?}");
+                    places.insert(st.clone());
+                }
+            }
+            let score = run.score(&result.groups).expect("the Sprint scores");
+            assert_eq!(score.verified.qso_points + dupes, view.qsos, "{style:?}");
+            assert_eq!(score.verified, score.raw, "{style:?}: all clean");
+            assert_eq!(score.verified.mults as usize, places.len(), "{style:?}");
+            assert_eq!(
+                score.verified.score,
+                score.verified.qso_points * score.verified.mults
+            );
+            let errors = run.errors(&result.groups).expect("its checks");
+            assert_eq!(
+                errors.wrong,
+                [(Field::Nr, 0), (Field::Name, 0), (Field::St, 0)]
+            );
+            // Callers send their exchange with your call before it, and no
+            // word: the call went out when it called.
+            assert!(runtime.turns.iter().all(|turn| {
+                turn.segments
+                    .iter()
+                    .filter(|segment| segment.who != Sender::You)
+                    .all(|segment| {
+                        !segment.text.starts_with("TU ") && !segment.text.starts_with("R ")
+                    })
+            }));
+        }
+    }
+
     /// What a listener copies from each thing a caller sends, in either
     /// contest.
     #[test]
@@ -751,6 +875,13 @@ mod tests {
             copy_of("UR 5NN 5NN NAME BOB BOB BK"),
             Some(Copied::Exchange("5NN BOB".to_string()))
         );
+        // A Sprint's, with your call before it or without.
+        for exchange in ["K1ABC 145 BOB OR", "145 BOB OR"] {
+            assert_eq!(
+                copy_of(exchange),
+                Some(Copied::Exchange("145 BOB OR".to_string()))
+            );
+        }
         for nothing in ["73 EE", "AGN", "NR?", ""] {
             assert_eq!(copy_of(nothing), None, "{nothing:?}");
         }

@@ -101,6 +101,7 @@ impl TrainingSettings {
             SettingsSection::Station => {
                 self.contest.my_call = d.contest.my_call;
                 self.contest.my_name = d.contest.my_name;
+                self.contest.my_state = d.contest.my_state;
             }
         }
         *self = std::mem::take(self).clamp();

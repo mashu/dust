@@ -30,12 +30,20 @@ use crate::{
 /// deep run reproduces exactly on a short one.
 const SEEDS: u64 = 2_000;
 
-/// The contest soak's pile-up seeds, half as many again as [`SEEDS`]: a
-/// caller that hears you go to someone else drops out of its QSO, and
-/// Enter sends the caller you go on to your exchange rather than a TU that
-/// logs it at once, so fewer of a pile-up's QSOs reach the log with a slip
-/// in the call, and the floor of each kind needs more runs to stand on.
-const PILEUP_SEEDS: u64 = SEEDS + SEEDS / 2;
+/// The contest soak's seeds of single callers, half as many again as
+/// [`SEEDS`]: the runs are shared among the contests that have shipped, and
+/// a Sprint's exchange, three fields long, is put wrong by a slip or junk
+/// more often than a lone number, so fewer of its QSOs reach the log with a
+/// slip in the call, and the floor of each kind needs more runs to stand
+/// on.
+const CONTEST_SEEDS: u64 = SEEDS + SEEDS / 2;
+
+/// The contest soak's pile-up seeds, half as many again as
+/// [`CONTEST_SEEDS`]: a caller that hears you go to someone else drops out
+/// of its QSO, and Enter sends the caller you go on to your exchange rather
+/// than a TU that logs it at once, so fewer of a pile-up's QSOs reach the
+/// log with a slip in the call.
+const PILEUP_SEEDS: u64 = CONTEST_SEEDS + CONTEST_SEEDS / 2;
 
 /// Settings from anywhere, including values no screen would ever produce.
 fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
@@ -788,7 +796,8 @@ fn a_pile_up_is_always_something_you_could_copy() {
 
 /// Settings from anywhere, in Contest mode, of run `style`: any contest that
 /// has shipped, a call from a few that read in different ways, none among
-/// them, a name or none, and runs short enough to reach their end.
+/// them, a name or none, a state or none, and runs short enough to reach
+/// their end.
 fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
     const CALLS: [&str; 6] = ["DL1ABC", "K1ABC", "VP2E/DL1ABC", "JA1XYZ", "W1AW/4", ""];
     let mut s = wild_settings(rng);
@@ -798,6 +807,7 @@ fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
     s.contest.contest_kind = shipped[rng.usize_in(0, shipped.len() - 1)];
     s.contest.my_call = CALLS[rng.usize_in(0, CALLS.len() - 1)].to_string();
     s.contest.my_name = ["MAT", ""][rng.usize_in(0, 1)].to_string();
+    s.contest.my_state = ["MA", "", "DX"][rng.usize_in(0, 2)].to_string();
     s.contest.contest_minutes = [1, 2, 3, 4, 0][rng.usize_in(0, 4)];
     s.clamp()
 }
@@ -1170,13 +1180,16 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
 }
 
 /// The contest soak, every seed a run of `style`: single callers on the
-/// first [`SEEDS`] seeds, pile-ups on the [`PILEUP_SEEDS`] after them, so a
-/// failure's seed says which.
+/// first [`CONTEST_SEEDS`] seeds, pile-ups on the [`PILEUP_SEEDS`] after
+/// them, so a failure's seed says which.
 fn soak_contest_runs(style: RunStyle) {
     let mut outcomes = Outcomes::default();
+    // QSOs logged in each contest, so every one that has shipped is seen to
+    // be soaked.
+    let mut logged_in: std::collections::BTreeMap<&str, u32> = Default::default();
     let seeds = match style {
-        RunStyle::Single => 0..SEEDS,
-        RunStyle::Pileup => SEEDS..SEEDS + PILEUP_SEEDS,
+        RunStyle::Single => 0..CONTEST_SEEDS,
+        RunStyle::Pileup => CONTEST_SEEDS..CONTEST_SEEDS + PILEUP_SEEDS,
     };
     for seed in seeds {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x2F7A_9C35).wrapping_add(37));
@@ -1277,6 +1290,7 @@ fn soak_contest_runs(style: RunStyle) {
             }
         }
         assert_eq!(logged, view.qsos, "seed {seed}");
+        *logged_in.entry(rules.kind.name()).or_default() += logged;
         let checks: Vec<ScoredQso<'_>> = view
             .log
             .iter()
@@ -1284,6 +1298,7 @@ fn soak_contest_runs(style: RunStyle) {
                 RowStatus::Checked(check) => Some(ScoredQso {
                     at_ms: row.at_ms,
                     call: &row.call,
+                    fields: &row.fields,
                     check,
                 }),
                 RowStatus::Pending => None,
@@ -1356,11 +1371,19 @@ fn soak_contest_runs(style: RunStyle) {
             "seed {seed}: the replay is another run"
         );
     }
-    // Every kind of QSO came up, many times over.
+    // Every kind of QSO came up, many times over, and every contest.
     for (kind, count) in outcomes.counts() {
         assert!(
             count >= 100,
             "{style:?}: only {count} {kind} QSOs across the seeds"
+        );
+    }
+    for kind in ContestKind::shipped() {
+        let count = logged_in.get(kind.name()).copied().unwrap_or(0);
+        assert!(
+            count >= 100,
+            "{style:?}: only {count} QSOs logged in {} across the seeds",
+            kind.label()
         );
     }
 }

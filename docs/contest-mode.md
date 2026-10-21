@@ -31,6 +31,9 @@ screen (§2, §7). Fixes from an audit of pile-ups followed: going on to
 another caller mid-QSO is a transition of its own (§4.4, §9.1), a caller
 that only answered your partial is no QSO (§4.7), and callers' timeouts
 overlap, planned into the turn on the air so that none cuts it (§4.3).
+Slice 2b has landed: the NA Sprint, with `myState`, US and Canadian
+places (`contest/data/places.rs`), the Sprint serial fit and the
+deterministic parser (§3, §8, §11.2, §11.6, §11.7).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -141,10 +144,12 @@ minutes per run ("10 Minutes", or "Open, up to 60 min") and "Single caller"
 or "1–3 callers". Start reads "Start contest" (id `btn-start-training`); a
 start that `missing()` refuses says why in the hero, above Start, unless
 the line under the call field already says why the call will not do, and
-when the call or the name is what is missing, Start moves the focus to its
-field once the hero has drawn it (an effect, `src/ui/home.rs`): in a Simple
-QSO with neither, the press that keeps the call swaps the call's field for
-the name's. While the hero holds a field, Start and Listen keep the cursor
+when the call, the name or the state is what is missing, Start moves the
+focus to its field once the hero has drawn it (an effect, `src/ui/home.rs`).
+Home asks for them in that order, one field at a time (`StationAsk`): in a
+Simple QSO with neither call nor name, the press that keeps the call swaps
+the call's field for the name's, and in a Sprint the press that keeps the
+name swaps it for the state's. While the hero holds a field, Start and Listen keep the cursor
 in it and keep what was typed there before they act, so a call typed after
 a refusal starts the run on one press: leaving the box on the press would
 keep the call then and redraw the hero, the button moved, under the finger
@@ -251,6 +256,27 @@ North American Sprint.
   territories (AB BC MB NB NL NS NT NU ON PE QC SK YT); other NA countries
   count too, but Dust never generates them. The card states these.
 - **Your fields.** Name; state, province, or `DX` outside North America.
+- **As built (2b).** The current NCJ rules could not be reached from the
+  build's network (ncjweb.com was refused, and could not be fetched
+  either), so the multiplier list is this section's, which excerpts of
+  NCJ's 2026 rules found by a web search agree with, as does a search
+  summary of ARRL's notice of the contest; it is to be checked against
+  NCJ's rules before a release, and the rules row says so. Those rules have
+  a station outside North America send `DX` and one elsewhere in North
+  America its country; Dust has every station outside the US and Canada
+  send `DX`, a simplification the card and Your station say as one
+  (`ContestRules::simplified`, `state_reading`). Callers are US stations, Alaska and Hawaii among
+  them, and Canadian ones (`Countries::UsAndCanada`), not the islands
+  `NorthAmerica` adds for Field Day: they have no state to send. Canadian,
+  Alaskan and Hawaiian calls have two-letter prefixes, so they call from
+  callsign tier 3 up. Your TU signs with your call every time, so a
+  pile-up's every third TU adds nothing to it; their exchange has no word
+  before it (`their_lead` empty), the caller's call having gone out when
+  it called. A station with no place sends `DX`. The card's pill comes
+  first, as the card lists the contests (`ContestKind::shipped` keeps
+  that order), and a line under "You send" states the simplifications.
+  The dialogue's caller is `W7XYZ`, as the state it sends is Oregon.
+  A QSO logged with `DX` counts a point and no multiplier.
 
 ### CQ WW (`cqww`)
 
@@ -1148,6 +1174,18 @@ one row and the log below them, its rows two lines each; the key bar drops
 Enter's chip, which the keypad's Enter replaces, Stop, and the names of
 keyboard keys.
 
+At a phone's width an exchange of more than one field, a Sprint's
+serial, name and state or a Simple QSO's report and name, takes three
+parts of the fields' row to the call's two, its boxes' letters closed up,
+so a whole one shows ("214 PATRICIA NY" at 360 px, beside "W1ABC/7") and
+its label keeps its whole word, "Exchange · NR NAME ST"; each field's
+label keeps to one line, so the two boxes stay level (2b). The air's
+count of stations calling drops its word there ("RX ▮ 3"), leaving a
+Sprint's exchange going out its line, and a hint too long for the line
+leaves what Enter then does to a wider screen ("Copy their number, name
+and state", and on the desktop ", then TU & log" after it, `Esm::hint_more`).
+The desktop log's exchange column holds a Sprint's serial, name and state.
+
 The keypad takes its rows as props, not the constants at
 `training.rs:353-357`: the character
 rows stay as in group training, only `,` and `.` leave row four, and the
@@ -1285,7 +1323,7 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `myCall` | String | `""` | upper case; `A–Z 0–9 /`; no leading, trailing or doubled `/`; ≤ 12 | Station | 1 |
 | `myName` | String | `""` | `A–Z`, ≤ 10 | Station | 1c |
 | `contestStyle` | `single` `pileup` | `single` | forgiving | Character set | 2 |
-| `myState` | String | `""` | a state, DC, province, territory, `LB` or `DX`; else `""` | Station | 2 |
+| `myState` | String | `""` | a state, DC, province, territory or `DX` (`PQ` read as `QC`, `NF` as `NL`); else `""`; `LB` joins with ARRL DX | Station | 2 |
 | `myZone` | u32 | 0 | 0..=40 (0 = from your call) | Station | 3 |
 | `myClass` | String | `1D` | `[1-9][0-9]?[A-F]`, else `1D` | Station | 3 |
 | `mySection` | String | `""` | a listed section, `YT`, or `DX`; else `""` | Station | 3 |
@@ -1311,9 +1349,30 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   `PROGRESS`.
 - **Starting** needs a `myCall` that `parse_callsign` reads and valid
   contest fields: from 1c, a `myName` where the contest sends one ("Add
-  your name to start a Simple QSO"). Your station shows the name field only
-  then, and Home, once the call reads, holds an inline name field as it
-  holds the call's, and Start moves the focus to it. Under the call, Home and Your station say why a call
+  your name to start a Simple QSO"). Your station shows the name field
+  only where the contest sends a name, and Home, once the call reads, holds
+  an inline name field as it holds the call's, and Start moves the focus to
+  it. From 2b, a state where the contest sends one ("Add your state or
+  province to start an NA Sprint", the contest's name kept on one line).
+  Outside the US and Canada your state is DX, a simplification: the rules
+  have a station outside North America send DX and one elsewhere in North
+  America its country, and Dust has every station outside the US and
+  Canada send DX. While `myState` is empty, a call Dust places outside the
+  US and Canada sends `DX` (`ContestSettings::state_sent`), so a run needs
+  no state from it; a call whose prefix Dust cannot place may be in them,
+  and is asked for its state. As built, where a call is at home is read in
+  `contest/data/places.rs` (`in_us_or_canada`), from every prefix the US
+  gives Alaska and Hawaii and every prefix Canada issues, as the call table
+  holds only some of them: Alaska and Hawaii count as in the US, as their
+  stations send AK and HI in the Sprint, and Hawaii's prefixes with a digit
+  other than 6 or 7 (KH2 is Guam) are outside it. Your station shows the
+  state field only where the contest sends one, its line under it saying
+  what it reads as ("Reads as Massachusetts", "Sends DX: in Dust every
+  station outside the US and Canada sends DX") or that what was typed is no
+  state ("MASS is not a state or province: type its code, as MA or ON, or
+  DX"), however the field was left, Start and Listen on Home among the
+  ways, and only until anything else of your station changes. Home asks for
+  the state after the name, as it asks for the name. Under the call, Home and Your station say why a call
   typed does not read, in `call_fault`'s words (§2), and Your station, while
   the call is empty, what a run is missing, in the words of
   `ContestSettings::missing()`. Home says `missing()` above Start once a
@@ -1657,9 +1716,11 @@ files written by scripts, each naming its source and year.
   { text, country, digit, host, marker }` in `callsign.rs`. A `CallSpec`
   filters countries (`Any`, `WVe` = K and VE, `NotWVe`, `NorthAmerica` = W/VE
   plus Alaska, Hawaii, Puerto Rico and the US Virgin Islands, who call in
-  Sprint and Field Day). A station abroad is in its host's country. A
-  contest spec uses contest shares for portables (4%) and abroad calls (3%)
-  in place of the tiers' 25% and 12% (`callsign.rs:44-47`). With the default
+  Field Day, and, as built (2b), `UsAndCanada` = W/VE plus Alaska and
+  Hawaii, who call in the Sprint, each with a state or province to send).
+  A station abroad is in its host's country. A contest spec uses contest
+  shares for portables (4%) and abroad calls (3%) in place of the tiers'
+  25% and 12% (`callsign.rs:44-47`). With the default
   spec it draws exactly as `generate_callsign` does, which a golden list
   pins.
 - **Parsing.** `parse_callsign` (`callsign.rs:376-377`), with `CallsignParts`
@@ -1693,6 +1754,26 @@ files written by scripts, each naming its source and year.
 - **Canada by digit, for every prefix** (VA, VB, VC, VE, VG, CF–CK, XJ–XO;
   the table holds VE, VA, VC, CK and VB, `prefixes.rs:203-209`): 1 NS, 2 QC, 3 ON, 4 MB, 5 SK, 6 AB, 7 BC, 8 NT,
   9 NB. VO1 NL; VO2 LB in ARRL DX, NL elsewhere; VY0 NU, VY1 YT, VY2 PE.
+- **As built (2b),** `contest/data/places.rs` holds the codes and names,
+  and draws a caller's place from its call once, when its exchange is
+  first fixed, so a dupe sends the same: the call area is a call-area
+  digit after the slash where there is one (`W1AW/4` is in the fourth
+  district), or a host's (`W1AW/VE3` is in Ontario), and one that names
+  no place (`VE3ABC/0`) leaves the station where its own call is. A
+  call-area digit after a Canadian call's slash is a province by VE's
+  digits whatever the prefix (`VY1ABC/2` is in Quebec); VO's and VY's own
+  tables read only their own digits. Within a district the shares are the
+  states' people at the 2020 Census, in thousands. VO2 is NL, as LB comes
+  with ARRL DX. A special-event prefix's digit means what it means under
+  the prefix it stands in for, which can change from one event to the
+  next: CH and CI stood in for VO and VY in 2017, so Dust reads them as
+  Canada's and no place from their digits, and the digit rule above holds
+  for the rest of the prefixes listed. Where a station is at home, the US
+  or Canada, Alaska and Hawaii among them, or elsewhere, is read there too
+  (`in_us_or_canada`), from every prefix the US gives Alaska (AL, KL, NL,
+  WL) and Hawaii (AH, KH, NH, WH with a 6 or a 7; the other digits are
+  Pacific islands no state holds) and every prefix Canada issues, as the
+  call table holds only some of them; else from the table.
 - **W/VE side.** Your country, after any host, is K or VE. KH, KL, KP, AH,
   AL, NH, NL, NP, WH, WL and WP prefixes are DX, as are CY0 and CY9.
 
@@ -1769,10 +1850,11 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
   `final` capped at 9,999 so a serial stays within four digits. `final` is
   log-normal: WPX median 190, σ 1.45, fitted to F6FVY's histogram of last
   serials in MRCE (`CqWpx.pas:127-196`); Sprint median 80, σ 0.9, Dust's
-  estimate. Those bins count logs, and a station you hear tends to have a
-  big log, so `final` is drawn with weight ∝ final^0.5, Dust's estimate
-  between logs and QSOs. A dupe sends its previous serial + 1 +
-  Poisson(final × Δt / L). As built (2a), the dupe's serial is fixed as
+  estimate (`SPRINT_SERIALS`, `L` 4 h). Those bins count logs, and a
+  station you hear tends to have a big log, so `final` is drawn with
+  weight ∝ final^0.5, Dust's estimate between logs and QSOs. A dupe sends
+  its previous serial + 1 + Poisson(final × Δt / L). As built (2a), the
+  dupe's serial is fixed as
   it calls again, Δt the run time since its last exchange was fixed, the
   count drawn as Knuth draws one, within four digits; the rest of its
   exchange is what it sent before, its name among it.
@@ -1829,6 +1911,25 @@ and the log use canonical values; the groups keep keyed tokens (9.1).
 
 The reading shows under the field, unused tokens greyed. The reading is
 stored, not the raw text, so a later parser cannot rewrite an old log.
+
+As built (2b), `parse_exchange` reads every contest in the three passes,
+WPX and Simple QSO as before. The rules above leave some tokens two
+fields', so: a token a copied closed list holds is never a number (`TN`
+is Tennessee, not 9, and a state put right, `145 BOB NE OR`, leaves `NE`
+unused); where a name is copied, a serial or a zone has a digit in it, or
+else is cut letters alone only while another token is left for the name
+(`ANNE ON` is a name, not 1995, and `TNN BOB OR` is 99); a name prefers a
+token no list holds, so `145 BOB TN OR` keeps BOB, and takes one only
+when nothing else is left, and then the first of them (`145 AL AL`, and
+`145 AL OR TN`, a state put right, keeps AL); a serial passes over a
+report only in an exchange that holds one, so in the Sprint `599` is a
+number like any other; and a name passes over a report-shaped token only
+where a report is copied. As only the Sprint copies ST so far,
+`Field::St` reads LB as NL outright; ARRL DX, which counts LB apart, is
+to read it apart when it comes (phase 3). The hint names every field
+still to copy; where that and what Enter then does would not fit a
+phone's line, it leaves the second to a wider screen ("Copy their
+number, name and state").
 
 ### 11.8 Sources and licences
 
@@ -2092,10 +2193,12 @@ One digit off: verified 0. Unsure: asks `K5?` first, its call points
 halve. Pauser: the clock equals the unpaused time. Dupe worker: 0 points,
 no error.
 
-**Soak** (`soak.rs`, seeds of its own: as built, 2,000 runs of single
-callers and 3,000 of pile-ups, 14). Keys carry fields 40% as heard
-(a quarter of them with the call heard before the last, as when logging a
-QSO left after F3), 20% one edit off, 10% empty, 10% partial and 20% junk,
+**Soak** (`soak.rs`, seeds of its own: as built, 3,000 runs of single
+callers and 4,500 of pile-ups, 14, shared among the contests that have
+shipped, each held to a floor of QSOs logged of its own). Keys carry
+fields 40% as heard (a quarter of them with the call heard before the
+last, as when logging a QSO left after F3), 20% one edit off, 10% empty,
+10% partial and 20% junk,
 among stale and current turn events, timers by any id, pause, resume, hide
 and finish.
 
@@ -2226,6 +2329,12 @@ ships a release before phase 1.
 - **2b Sprint.** `myState`; US and Canadian places on the fallback shares;
   the Sprint serial fit; the deterministic parser; Sprint scoring, with the
   multiplier list checked against the current NCJ rules before it ships.
+  Landed, but for that check: the NCJ rules could not be reached from the
+  build's network, though excerpts of them a web search found agree (§3).
+  With a third contest sharing the soak's seeds,
+  and a Sprint's three-field exchange put wrong by a slip more often than
+  a lone number, the soak's seeds rose by half to keep each kind of QSO
+  over its floor.
 - **2c Learner aids.** Hear a QSO with the perfect operator; presets; QRS.
 - The Contest segment joined `CHAR_SET_MODES` right after 2a, at the
   user's request, so Contest can be tried while 2b and 2c are built; at

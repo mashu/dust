@@ -116,6 +116,7 @@ impl TrainingSettings {
         k.contest_minutes = k.contest_minutes.min(CONTEST_MINUTES_MAX);
         k.my_call = super::contest::clean_call(&k.my_call);
         k.my_name = super::contest::clean_name(&k.my_name);
+        k.my_state = super::contest::clean_state(&k.my_state);
         self
     }
 

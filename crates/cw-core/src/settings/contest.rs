@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{STATIONS_MIN, TrainingSettings};
 use crate::callsign::parse_callsign;
+use crate::contest::data::places::{DX, in_us_or_canada, place_code};
 use crate::contest::{ContestKind, RunStyle};
 
 /// The longest run, in minutes, and where a run left open ends.
@@ -40,6 +41,11 @@ pub struct ContestSettings {
     /// Your name, as you send it in a contest whose exchange holds one:
     /// letters only, upper case. Empty until you give one.
     pub my_name: String,
+    /// Your US state, Canadian province or territory, by its code, or DX,
+    /// as you send it in a contest whose exchange holds one. Empty until you
+    /// give one, when a call outside the US and Canada sends DX
+    /// ([`Self::state_sent`]).
+    pub my_state: String,
 }
 
 impl Default for ContestSettings {
@@ -50,6 +56,7 @@ impl Default for ContestSettings {
             contest_minutes: 10,
             my_call: String::new(),
             my_name: String::new(),
+            my_state: String::new(),
         }
     }
 }
@@ -76,10 +83,34 @@ impl ContestSettings {
         self.my_name = clean_name(typed);
     }
 
+    /// Your state, province or territory, as typed: kept as its code, as
+    /// [`TrainingSettings::clamp`](super::TrainingSettings::clamp) keeps
+    /// it, and nothing for what is none.
+    pub fn set_my_state(&mut self, typed: &str) {
+        self.my_state = clean_state(typed);
+    }
+
+    /// The state, province or territory your exchange sends: the one you
+    /// gave, or else DX for a call Dust places outside the US and Canada,
+    /// as Dust has every station there send (the real contests have one
+    /// elsewhere in North America send its country). Empty while a call in
+    /// the US or Canada, Alaska and Hawaii among them, has none, or one Dust
+    /// cannot place, which may be there, or no call reads.
+    pub fn state_sent(&self) -> &str {
+        if !self.my_state.is_empty() {
+            return &self.my_state;
+        }
+        if in_us_or_canada(&self.my_call) == Some(false) {
+            DX
+        } else {
+            ""
+        }
+    }
+
     /// What a run of these settings still needs before it can start, said
     /// for the screen; None once it has everything: a contest whose phase has
-    /// shipped, a callsign Dust can read, and your name where the contest
-    /// sends it.
+    /// shipped, a callsign Dust can read, and your name and your state where
+    /// the contest sends them.
     pub fn missing(&self) -> Option<String> {
         let kind = self.contest_kind;
         let Some(rules) = kind.rules() else {
@@ -91,8 +122,13 @@ impl ContestSettings {
         if parse_callsign(&self.my_call).is_none() {
             return Some(format!("{} is not a callsign Dust can read", self.my_call));
         }
+        // The contest's name kept on one line: "an NA Sprint".
+        let a_run = format!("{} {}", kind.article(), kind.label().replace(' ', "\u{a0}"));
         if rules.sends_name() && self.my_name.is_empty() {
-            return Some(format!("Add your name to start a {}", kind.label()));
+            return Some(format!("Add your name to start {a_run}"));
+        }
+        if rules.sends_state() && self.state_sent().is_empty() {
+            return Some(format!("Add your state or province to start {a_run}"));
         }
         None
     }
@@ -120,6 +156,24 @@ pub(super) fn clean_name(text: &str) -> String {
         .filter(char::is_ascii_uppercase)
         .take(MY_NAME_MAX)
         .collect()
+}
+
+/// What `text`, typed as your state, province or territory, reads as: its
+/// code, upper case, an old one as the new (PQ is QC, NF is NL), or DX.
+/// None for anything else, a name written out among it.
+pub fn state_code(text: &str) -> Option<&'static str> {
+    let letters: String = text
+        .chars()
+        .map(|c| c.to_ascii_uppercase())
+        .filter(char::is_ascii_uppercase)
+        .collect();
+    place_code(&letters)
+}
+
+/// `text` as a state, province or territory is kept: its code
+/// ([`state_code`]), or nothing.
+pub(super) fn clean_state(text: &str) -> String {
+    state_code(text).unwrap_or_default().to_string()
 }
 
 /// `text` as a callsign can be written: upper case, letters, digits and
@@ -209,6 +263,62 @@ mod tests {
         assert_eq!(settings.my_name, "BOB");
     }
 
+    /// A state is kept as its code: a valid one, an old one as the new, DX,
+    /// or nothing.
+    #[test]
+    fn a_state_is_kept_as_its_code() {
+        assert_eq!(clean_state("ma"), "MA");
+        assert_eq!(clean_state(" o.r "), "OR");
+        assert_eq!(clean_state("PQ"), "QC");
+        assert_eq!(clean_state("nf"), "NL");
+        assert_eq!(clean_state("dx"), "DX");
+        for none in ["", "XX", "Mass", "LB", "ORE", "D X X"] {
+            assert_eq!(clean_state(none), "", "{none:?}");
+            assert_eq!(state_code(none), None, "{none:?}");
+        }
+        assert_eq!(state_code(" o.r "), Some("OR"));
+        for text in ["ma", "PQ", "Mass", "dx"] {
+            let once = clean_state(text);
+            assert_eq!(clean_state(&once), once, "{text:?} settles in one pass");
+        }
+        let mut settings = ContestSettings::default();
+        settings.set_my_state(" bc ");
+        assert_eq!(settings.my_state, "BC");
+        settings.set_my_state("Mass");
+        assert_eq!(settings.my_state, "", "no state, rather than a wrong one");
+    }
+
+    /// Outside the US and Canada your state is DX until you give one; in
+    /// them, Alaska and Hawaii too, it is what you give, as it is for a call
+    /// Dust cannot place, which may be in them.
+    #[test]
+    fn your_state_is_dx_outside_the_us_and_canada() {
+        let mut settings = ContestSettings::default();
+        for (call, sent) in [
+            ("DL1ABC", "DX"),
+            ("VP2E/DL1ABC", "DX"),
+            ("KP4AB", "DX"),
+            ("KH2AB", "DX"),
+            ("DL/K1ABC", "DX"),
+            ("K1ABC", ""),
+            ("VE3ABC", ""),
+            ("VG3ABC", ""),
+            ("CF3ABC", ""),
+            ("KL7AB", ""),
+            ("WL7AB", ""),
+            ("KH6AB", ""),
+            ("C31AB", ""),
+            ("ABC", ""),
+            ("", ""),
+        ] {
+            settings.my_call = call.to_string();
+            assert_eq!(settings.state_sent(), sent, "{call:?}");
+        }
+        settings.my_call = "DL1ABC".to_string();
+        settings.my_state = "MA".to_string();
+        assert_eq!(settings.state_sent(), "MA", "what you give is sent");
+    }
+
     /// A run starts only with a contest that has shipped, a call that reads
     /// as one, and your name where the contest sends it, and otherwise says
     /// what it is missing.
@@ -230,7 +340,7 @@ mod tests {
         settings.contest_kind = ContestKind::SimpleQso;
         assert_eq!(
             settings.missing().as_deref(),
-            Some("Add your name to start a Simple QSO")
+            Some("Add your name to start a Simple\u{a0}QSO")
         );
         settings.my_name = "MAT".to_string();
         assert_eq!(settings.missing(), None);
@@ -238,10 +348,28 @@ mod tests {
         settings.my_name.clear();
         settings.contest_kind = ContestKind::Wpx;
         assert_eq!(settings.missing(), None);
+        // The Sprint sends your name and your state: a call in the US asks
+        // for both, one outside it only for the name, its state being DX.
         settings.contest_kind = ContestKind::Sprint;
+        settings.my_call = "K1ABC".to_string();
         assert_eq!(
             settings.missing().as_deref(),
-            Some("NA Sprint is not ready yet")
+            Some("Add your name to start an NA\u{a0}Sprint")
+        );
+        settings.my_name = "MIKE".to_string();
+        assert_eq!(
+            settings.missing().as_deref(),
+            Some("Add your state or province to start an NA\u{a0}Sprint")
+        );
+        settings.my_state = "MA".to_string();
+        assert_eq!(settings.missing(), None);
+        settings.my_state.clear();
+        settings.my_call = "DL1ABC".to_string();
+        assert_eq!(settings.missing(), None, "DX, outside North America");
+        settings.contest_kind = ContestKind::Cqww;
+        assert_eq!(
+            settings.missing().as_deref(),
+            Some("CQ WW is not ready yet")
         );
     }
 

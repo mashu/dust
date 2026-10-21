@@ -6,7 +6,9 @@
 //! of a few states; what it sends next follows from the state. Which
 //! of your calls it takes for its own is [`match_call`].
 
-use super::data::{names::draw_name, reports::draw_report};
+use super::data::names::draw_name;
+use super::data::places::{DX, draw_place};
+use super::data::reports::draw_report;
 use super::esm::MessagePart;
 use super::exchange::{Field, send_report, send_serial};
 use super::place::Placement;
@@ -726,9 +728,9 @@ impl Caller {
                 let text = if self.exchanges_sent > 0 {
                     body
                 } else if self.rng.f64() < FIRST_LEAD {
-                    format!("{} {body}", rules.their_lead[0])
+                    rules.their_first_exchange(0, &body)
                 } else {
-                    format!("{} {body}", rules.their_lead[1])
+                    rules.their_first_exchange(1, &body)
                 };
                 self.exchanges_sent += 1;
                 (text, Says::Exchange)
@@ -772,6 +774,12 @@ impl Caller {
                         // The operator's own, whatever the call: a call comes
                         // back with another name.
                         Field::Name => draw_name(self.call.country, &mut self.rng).to_string(),
+                        // Where its call puts it; a station with no state or
+                        // province sends DX, as one outside North America
+                        // does.
+                        Field::St => draw_place(&self.call.text, &mut self.rng)
+                            .unwrap_or(DX)
+                            .to_string(),
                         _ => return None,
                     };
                     Some((*field, token))

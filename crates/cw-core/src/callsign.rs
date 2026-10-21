@@ -69,8 +69,11 @@ pub enum Countries {
     /// Everyone else: who W/VE works in the ARRL DX contest.
     NotWVe,
     /// The USA with Alaska, Hawaii and its Caribbean islands, and Canada:
-    /// who calls in the North American contests, Sprint and Field Day.
+    /// who calls in Field Day, whose sections cover the islands.
     NorthAmerica,
+    /// The USA with Alaska and Hawaii, and Canada: the stations whose state,
+    /// province or territory the NA Sprint's exchange sends.
+    UsAndCanada,
 }
 
 impl Countries {
@@ -78,11 +81,13 @@ impl Countries {
     /// table names it, may call.
     pub fn admits(self, country: &str) -> bool {
         let w_ve = matches!(country, "K" | "VE");
+        let states = w_ve || matches!(country, "KL" | "KH6");
         match self {
             Self::Any => true,
             Self::WVe => w_ve,
             Self::NotWVe => !w_ve,
-            Self::NorthAmerica => w_ve || matches!(country, "KL" | "KH6" | "KP4" | "KP2"),
+            Self::NorthAmerica => states || matches!(country, "KP4" | "KP2"),
+            Self::UsAndCanada => states,
         }
     }
 }
@@ -583,12 +588,12 @@ fn parse_base<'a>(
 /// rules count such a call by its own prefix.
 const MODIFIERS: &[&str] = &["P", "M", "QRP", "A", "MM", "AM"];
 
-impl CallsignParts<'_> {
+impl<'a> CallsignParts<'a> {
     /// Where the station says it is, when that is not its own call's
     /// country: the host it signs first (`DL/W1AW`), or a country after the
     /// slash (`W1AW/KH6`). A single digit after it is a call area at home,
     /// and a modifier says nothing about where.
-    fn place(&self) -> Option<&str> {
+    fn place(&self) -> Option<&'a str> {
         self.host.or(self
             .portable
             .filter(|marker| !MODIFIERS.contains(marker) && self.area_digit().is_none()))
@@ -601,6 +606,43 @@ impl CallsignParts<'_> {
         let digit = chars.next().filter(char::is_ascii_digit)?;
         chars.next().is_none().then_some(digit)
     }
+
+    /// Where the station says it is: the one walk its country, its WPX
+    /// prefix and its call area all read.
+    fn area(&self) -> CallArea<'a> {
+        let Some(place) = self.place() else {
+            return CallArea {
+                prefix: self.prefix,
+                digit: Some(self.separator),
+                marker: self.area_digit(),
+            };
+        };
+        let host = host_prefix(place);
+        let (prefix, digit) = match host.char_indices().last() {
+            Some((at, digit)) if digit.is_ascii_digit() => (&host[..at], Some(digit)),
+            _ => (host, None),
+        };
+        CallArea {
+            prefix,
+            digit,
+            marker: None,
+        }
+    }
+}
+
+/// Where a station signing a call says it is ([`call_area`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CallArea<'a> {
+    /// The prefix of the country it is in: a host's, signed before the call
+    /// or after it (`VE3/W1AW` and `W1AW/VE3` are `VE`), cut as
+    /// [`host_prefix`] cuts one, or else its own.
+    pub prefix: &'a str,
+    /// That prefix's digit: a host's (the `3` of `VE3`), none for a host
+    /// with none (`PA/N8XYZ`), or else the call's own.
+    pub digit: Option<char>,
+    /// A call-area digit after the slash, which says where at home the
+    /// station is: the `4` of `W1AW/4`.
+    pub marker: Option<char>,
 }
 
 /// A host as MorseRunner cuts one: its letters after the last digit go, but
@@ -625,16 +667,9 @@ fn host_prefix(place: &str) -> &str {
 /// `KH6`, `W1XYZ/VE` is `VE0`); and the modifiers `/P`, `/M`, `/QRP`, `/A`,
 /// `/MM` and `/AM` change nothing.
 pub fn wpx_prefix(call: &str) -> Option<String> {
-    let parts = parse_callsign(call)?;
-    if let Some(place) = parts.place() {
-        let mut prefix = host_prefix(place).to_string();
-        if !prefix.ends_with(|c: char| c.is_ascii_digit()) {
-            prefix.push('0');
-        }
-        return Some(prefix);
-    }
-    let digit = parts.area_digit().unwrap_or(parts.separator);
-    Some(format!("{}{digit}", parts.prefix))
+    let area = call_area(call)?;
+    let digit = area.marker.or(area.digit).unwrap_or('0');
+    Some(format!("{}{digit}", area.prefix))
 }
 
 /// The country a call is in, by its DXCC primary prefix as the table names
@@ -643,11 +678,16 @@ pub fn wpx_prefix(call: &str) -> Option<String> {
 /// by a digit none of them has (`VP8`). A station abroad is in its host's
 /// country.
 pub fn country_of(call: &str) -> Option<&'static str> {
-    let parts = parse_callsign(call)?;
-    match parts.place() {
-        Some(place) => country_by_prefix(host_prefix(place)),
-        None => country_by_prefix(&format!("{}{}", parts.prefix, parts.separator)),
-    }
+    let area = call_area(call)?;
+    let text: String = area.prefix.chars().chain(area.digit).collect();
+    country_by_prefix(&text)
+}
+
+/// Where a station signing `call` says it is: the prefix and digit of the
+/// country it is in, and a call-area digit after the slash. None for what
+/// is not a call.
+pub(crate) fn call_area(call: &str) -> Option<CallArea<'_>> {
+    parse_callsign(call).map(|parts| parts.area())
 }
 
 /// The country of `text`, a call's prefix and digit (`R9`, `KH6`) or a host
@@ -1196,6 +1236,7 @@ mod tests {
             Countries::WVe,
             Countries::NotWVe,
             Countries::NorthAmerica,
+            Countries::UsAndCanada,
         ];
         for countries in all {
             for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
@@ -1216,6 +1257,13 @@ mod tests {
         assert!(Countries::NotWVe.admits("KH6") && !Countries::NotWVe.admits("VE"));
         assert!(Countries::NorthAmerica.admits("KL") && Countries::NorthAmerica.admits("KP4"));
         assert!(!Countries::NorthAmerica.admits("XE") && !Countries::NorthAmerica.admits("DL"));
+        // The Sprint's callers each have a state or province to send.
+        for country in ["K", "VE", "KL", "KH6"] {
+            assert!(Countries::UsAndCanada.admits(country), "{country}");
+        }
+        for country in ["KP4", "KP2", "XE", "DL"] {
+            assert!(!Countries::UsAndCanada.admits(country), "{country}");
+        }
         // Alaska, Hawaii and the islands do call in a North American contest.
         let na = generated(
             CALLSIGN_TIER_MAX,
@@ -1245,6 +1293,33 @@ mod tests {
         // Below the tiers that send them, a contest sends neither.
         let tier4 = generated(4, CallSpec::contest(Countries::Any), 2_000);
         assert!(tier4.iter().all(|call| !call.text.contains('/')));
+    }
+
+    /// Where a station says it is: its own call area, one after the slash,
+    /// or a host's.
+    #[test]
+    fn a_call_says_which_call_area_it_is_in() {
+        let area = |prefix, digit, marker| {
+            Some(CallArea {
+                prefix,
+                digit,
+                marker,
+            })
+        };
+        for (call, read) in [
+            ("K5XYZ", area("K", Some('5'), None)),
+            ("VE3ABC", area("VE", Some('3'), None)),
+            ("W1AW/4", area("W", Some('1'), Some('4'))),
+            ("W1AW/P", area("W", Some('1'), None)),
+            ("VE3/W1AW", area("VE", Some('3'), None)),
+            ("W1AW/VE3", area("VE", Some('3'), None)),
+            ("W1AW/KH6", area("KH", Some('6'), None)),
+            ("VP2E/DL1ABC", area("VP", Some('2'), None)),
+            ("PA/N8XYZ", area("PA", None, None)),
+            ("ABC", None),
+        ] {
+            assert_eq!(call_area(call), read, "{call}");
+        }
     }
 
     #[test]

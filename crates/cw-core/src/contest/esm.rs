@@ -147,8 +147,12 @@ pub struct Esm {
     pub message: Vec<MessagePart>,
     /// The key's label: `CQ`, `Send K5XYZ + exch`, `? Again`, `TU & log`.
     pub label: String,
-    /// One line on what to do next.
+    /// One line on what to do next, as much of it as a phone's line holds.
     pub hint: String,
+    /// The rest of it, what Enter then does, where a phone's line has no
+    /// room for that: a wider screen says it after the hint. Empty where the
+    /// hint says it all.
+    pub hint_more: String,
     /// Where the cursor goes after it, if it moves: to Exchange when Enter
     /// does not log and the call is whole, as MorseRunner advances; back to
     /// Call once the QSO is logged.
@@ -187,6 +191,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             message: vec![MessagePart::Cq],
             label: "CQ".to_string(),
             hint: hint.to_string(),
+            hint_more: String::new(),
             focus: None,
             corrected: false,
         };
@@ -210,9 +215,11 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
     // Your TU went out without logging: Enter logs that QSO, with a TU.
     if !qso.thanked.is_empty() && call == qso.thanked && v && e == ExchangeState::Complete {
         let message = vec![MessagePart::Tu];
+        let (hint, hint_more) = hint(&message, &call, e, &[]);
         return Esm {
             label: label(&message),
-            hint: hint(&message, &call, e, &[]),
+            hint,
+            hint_more,
             message,
             focus: Some(EntryField::Call),
             corrected: false,
@@ -224,6 +231,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             message: Vec::new(),
             label: "Fix call".to_string(),
             hint: "They corrected you: fix the call, then Enter".to_string(),
+            hint_more: String::new(),
             focus: Some(EntryField::Call),
             corrected: true,
         };
@@ -233,6 +241,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             message: Vec::new(),
             label: label(&[]),
             hint: "Exchange cannot be read: fix it, then Enter".to_string(),
+            hint_more: String::new(),
             focus: Some(EntryField::Exchange),
             corrected: false,
         };
@@ -261,9 +270,11 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
     } else {
         v.then_some(EntryField::Exchange)
     };
+    let (hint, hint_more) = hint(&message, &call, e, &missing);
     Esm {
         label: label(&message),
-        hint: hint(&message, &call, e, &missing),
+        hint,
+        hint_more,
         message,
         focus,
         corrected: false,
@@ -299,8 +310,31 @@ fn label(message: &[MessagePart]) -> String {
     }
 }
 
-/// One line on what to do next.
-fn hint(message: &[MessagePart], call: &str, e: ExchangeState, missing: &[Field]) -> String {
+/// The most of a hint a phone's line shows: the hint's slot was measured at
+/// 360 px to hold 47 characters.
+const HINT_LEN_MAX: usize = 47;
+
+/// What to do, `what`, and what Enter then does, `then`, as a hint and the
+/// rest of it: both in the hint where a phone's line has room for them;
+/// where it has not, only what to do, the rest for a wider screen, as the
+/// Enter key says it on a phone.
+fn fit(what: String, then: &str) -> (String, String) {
+    if what.chars().count() + then.chars().count() <= HINT_LEN_MAX {
+        (what + then, String::new())
+    } else {
+        (what, then.to_string())
+    }
+}
+
+/// One line on what to do next, and the rest of it that a phone's line has
+/// no room for ([`fit`]).
+fn hint(
+    message: &[MessagePart],
+    call: &str,
+    e: ExchangeState,
+    missing: &[Field],
+) -> (String, String) {
+    let whole = |hint: &str| (hint.to_string(), String::new());
     let nouns = |fields: &[Field]| {
         let nouns: Vec<&str> = fields.iter().map(|field| field.noun()).collect();
         match nouns.split_last() {
@@ -313,33 +347,36 @@ fn hint(message: &[MessagePart], call: &str, e: ExchangeState, missing: &[Field]
         .iter()
         .any(|part| matches!(part, MessagePart::HisCall(_)));
     if message.contains(&MessagePart::Tu) {
-        return if resends_call {
-            "Enter sends the call put right, TU, and logs".to_string()
+        return whole(if resends_call {
+            "Enter sends the call put right, TU, and logs"
         } else if message.contains(&MessagePart::Exchange) {
-            "Enter sends your exch with TU, and logs".to_string()
+            "Enter sends your exch with TU, and logs"
         } else {
-            "Enter sends TU and logs the QSO".to_string()
-        };
+            "Enter sends TU and logs the QSO"
+        });
     }
     if message.contains(&MessagePart::Again) {
         return if e == ExchangeState::Missing {
-            format!("Still to copy: their {}. Enter asks again", nouns(missing))
+            fit(
+                format!("Still to copy: their {}", nouns(missing)),
+                ". Enter asks again",
+            )
         } else {
-            format!("Copy their {}, then TU & log", nouns(missing))
+            fit(format!("Copy their {}", nouns(missing)), ", then TU & log")
         };
     }
     if message.contains(&MessagePart::Exchange) {
-        return if resends_call {
-            "Enter sends their call and your exchange".to_string()
+        return whole(if resends_call {
+            "Enter sends their call and your exchange"
         } else {
-            "Enter sends your exchange".to_string()
-        };
+            "Enter sends your exchange"
+        });
     }
-    if call.contains('?') {
-        "Enter asks for the call: fill in what you hear".to_string()
+    whole(if call.contains('?') {
+        "Enter asks for the call: fill in what you hear"
     } else {
-        "Not a whole call: finish it, or put ? for a gap".to_string()
-    }
+        "Not a whole call: finish it, or put ? for a gap"
+    })
 }
 
 /// `message` as it goes out on the air, filled in with `me`.
@@ -477,7 +514,7 @@ mod tests {
         hints.dedup();
         assert!(hints.len() >= 10, "{hints:?}");
         for hint in hints {
-            assert!(hint.chars().count() <= 47, "{hint:?}");
+            assert!(hint.chars().count() <= HINT_LEN_MAX, "{hint:?}");
         }
     }
 
@@ -529,7 +566,64 @@ mod tests {
         assert_eq!(enter("579 B0B").label, "Fix exchange");
         for exch in ["", "5", "579", "BOB", "579 BOB", "57?"] {
             let hint = enter(exch).hint;
-            assert!(hint.chars().count() <= 47, "{hint:?}");
+            assert!(hint.chars().count() <= HINT_LEN_MAX, "{hint:?}");
+        }
+    }
+
+    /// In the Sprint you copy a number, a name and a state: the hint says
+    /// which are still to come in a phone's line, leaving what Enter then
+    /// does to a wider screen where all of them do not fit beside it.
+    #[test]
+    fn a_sprint_copies_its_number_name_and_state() {
+        let rules = ContestKind::Sprint.rules().expect("Sprint has shipped");
+        let enter = |exch: &str| {
+            let qso = QsoState {
+                call_sent: "W7XYZ".to_string(),
+                exchange_sent: true,
+                ..QsoState::default()
+            };
+            let fields = Fields {
+                call: "W7XYZ".to_string(),
+                exch: exch.to_string(),
+                ..Fields::default()
+            };
+            esm(&qso, &fields, rules, Side::WVe)
+        };
+        assert_eq!(enter("").hint, "Copy their number, name and state");
+        assert_eq!(enter("").hint_more, ", then TU & log");
+        assert_eq!(enter("").message, [Again]);
+        assert_eq!(enter("145").hint, "Still to copy: their name and state");
+        assert_eq!(enter("145").hint_more, ". Enter asks again");
+        assert_eq!(
+            enter("145 BOB").hint,
+            "Still to copy: their state. Enter asks again"
+        );
+        assert_eq!(enter("145 BOB").hint_more, "", "all of it fits");
+        let done = enter("145 BOB OR");
+        assert_eq!(done.message, [Tu]);
+        assert_eq!(done.label, "TU & log");
+        assert_eq!(enter("145 B0B OR").label, "Fix exchange");
+        let me = Fill {
+            my_call: "K1ABC",
+            ..Fill::default()
+        };
+        assert_eq!(
+            message_text(&done.message, rules, Side::WVe, &me),
+            "TU K1ABC"
+        );
+        for exch in [
+            "",
+            "1",
+            "145",
+            "BOB",
+            "OR",
+            "145 BOB",
+            "BOB OR",
+            "145 OR",
+            "145 BOB OR",
+        ] {
+            let hint = enter(exch).hint;
+            assert!(hint.chars().count() <= HINT_LEN_MAX, "{hint:?}");
         }
     }
 

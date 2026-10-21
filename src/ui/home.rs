@@ -1,6 +1,6 @@
 use cw_core::{
-    AutoLevelProgress, CharSetMode, LevelAxis, RunStyle, SessionResult, Side, TrainingSettings,
-    compute_char_pool, compute_streak_status, newest_unlocked, parse_callsign,
+    AutoLevelProgress, CharSetMode, ContestSettings, LevelAxis, RunStyle, SessionResult, Side,
+    TrainingSettings, compute_char_pool, compute_streak_status, newest_unlocked, parse_callsign,
 };
 use dioxus::prelude::*;
 
@@ -9,7 +9,8 @@ use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::settings_charset::{pileup_callers, pileup_count};
 use crate::ui::settings_station::{
-    CallField, CallReading, NameField, StationDraft, focus_call_field, focus_name_field,
+    CallField, CallReading, NameField, StateEntry, StationDraft, focus_call_field,
+    focus_name_field, focus_state_field, state_rejected,
 };
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, keep_focus, pretty_number};
@@ -86,18 +87,80 @@ struct ContestHero {
     callers: (String, String),
     /// Who calls, in words: "single caller", "1–3 callers".
     who_calls: String,
-    /// Your call is missing, or not one a contest can read: the hero asks
-    /// for it.
-    needs_call: bool,
-    /// The call reads, but the contest sends your name and you have given
-    /// none: the hero asks for it.
-    needs_name: bool,
+    /// The field of your station the hero asks for, the first a run is
+    /// missing; none once it has them all.
+    asks: Option<StationAsk>,
     /// A call is typed that a contest cannot read, so the line under the
     /// field already says what is wrong with it.
     call_flagged: bool,
     /// What a run still needs before it can start, said as the settings say
     /// it.
     missing: Option<String>,
+}
+
+/// One of your station's fields, as the hero asks for it: in this order,
+/// each once the one before it is there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StationAsk {
+    /// Your call is missing, or not one a contest can read.
+    Call,
+    /// The call reads, but the contest sends your name and you have given
+    /// none.
+    Name,
+    /// The call and the name are there, but the contest sends your state
+    /// and a call in the US or Canada has none.
+    State,
+}
+
+impl StationAsk {
+    /// The first field of `contest` a run is missing, if the hero asks for
+    /// one.
+    fn of(contest: &ContestSettings) -> Option<Self> {
+        let rules = contest.contest_kind.rules();
+        if parse_callsign(&contest.my_call).is_none() {
+            Some(Self::Call)
+        } else if rules.is_some_and(|rules| rules.sends_name()) && contest.my_name.is_empty() {
+            Some(Self::Name)
+        } else if rules.is_some_and(|rules| rules.sends_state()) && contest.state_sent().is_empty()
+        {
+            Some(Self::State)
+        } else {
+            None
+        }
+    }
+
+    /// `typed` kept in `contest`, as its field keeps it.
+    fn keep(self, contest: &mut ContestSettings, typed: &str) {
+        match self {
+            Self::Call => contest.set_my_call(typed),
+            Self::Name => contest.set_my_name(typed),
+            Self::State => contest.set_my_state(typed),
+        }
+    }
+
+    /// What gives its field the focus.
+    fn focus(self) -> fn() {
+        match self {
+            Self::Call => focus_call_field,
+            Self::Name => focus_name_field,
+            Self::State => focus_state_field,
+        }
+    }
+
+    /// What the first contest's card says to do.
+    fn first_step(self) -> &'static str {
+        match self {
+            Self::Call => {
+                "Add your call, press Start contest; Enter sends what the QSO needs next."
+            }
+            Self::Name => {
+                "Add your name, press Start contest; Enter sends what the QSO needs next."
+            }
+            Self::State => {
+                "Add your state, press Start contest; Enter sends what the QSO needs next."
+            }
+        }
+    }
 }
 
 /// What the hero shows in Contest mode, and nothing in any other.
@@ -118,7 +181,7 @@ impl ContestHero {
             )
             .collect();
         let sends = rules.map_or_else(String::new, |rules| {
-            format!("You send {}, as {}", rules.sends(), contest.my_call)
+            format!("You send {}, as {}", rules.sends(side), contest.my_call)
         });
         let limit = contest.limit_minutes();
         let length = match contest.contest_minutes {
@@ -138,17 +201,15 @@ impl ContestHero {
                 ((count, label), pileup_callers(settings))
             }
         };
-        let needs_call = parse_callsign(&contest.my_call).is_none();
-        let sends_name = rules.is_some_and(|rules| rules.sends_name());
+        let asks = StationAsk::of(contest);
         Self {
             fields,
             sends,
             length,
             callers,
             who_calls,
-            needs_call,
-            needs_name: !needs_call && sends_name && contest.my_name.is_empty(),
-            call_flagged: needs_call && !contest.my_call.is_empty(),
+            asks,
+            call_flagged: asks == Some(StationAsk::Call) && !contest.my_call.is_empty(),
             missing: contest.missing(),
         }
     }
@@ -182,12 +243,17 @@ pub fn Home(
     /// none.
     #[props(default)]
     on_name: EventHandler<String>,
+    /// Your state, typed into the hero while a contest that sends it has
+    /// none.
+    #[props(default)]
+    on_state: EventHandler<String>,
 ) -> Element {
     let level = level_reading(&settings);
     let contest = contest_hero(&settings);
     // A start the run would refuse says why here, rather than in a toast,
     // unless the line under the call field says it already; and when the
-    // call or the name is what is missing, Start takes you to its field.
+    // call, the name or the state is what is missing, Start takes you to its
+    // field.
     let mut refused = use_signal(|| false);
     // It does so once the hero has drawn the field, from an effect: the
     // press that kept a call may have swapped the call's field for the
@@ -199,29 +265,38 @@ pub fn Home(
         }
     });
     let missing = contest.as_ref().and_then(|hero| hero.missing.clone());
-    let needs_call = contest.as_ref().is_some_and(|hero| hero.needs_call);
-    let needs_name = contest.as_ref().is_some_and(|hero| hero.needs_name);
+    let asks = contest.as_ref().and_then(|hero| hero.asks);
     let call_flagged = contest.as_ref().is_some_and(|hero| hero.call_flagged);
     let refusal = missing.filter(|_| refused() && !call_flagged);
+    // A state typed that is no code is kept as none, and the line under the
+    // field says so, however it was kept.
+    let state_said = use_signal(|| None::<String>);
     // While the hero holds a field, Start and Listen keep the cursor in it,
     // and keep what was typed there before they act. Leaving the box would
     // keep it on the press instead, and redraw the hero under the finger,
     // the button moved, before the click came.
     let draft = StationDraft::use_draft();
-    let asks = needs_call || needs_name;
     let hold = move |e: MouseEvent| {
-        if asks {
+        if asks.is_some() {
             keep_focus(e);
+        }
+    };
+    // Each field kept as its own setting keeps it.
+    let keep = move |ask: StationAsk, typed: String| match ask {
+        StationAsk::Call => on_call.call(typed),
+        StationAsk::Name => on_name.call(typed),
+        StationAsk::State => {
+            let mut said = state_said;
+            said.set(state_rejected(&typed));
+            on_state.call(typed);
         }
     };
     // What was typed and not kept yet, kept as leaving the box keeps it;
     // and what it was, for Start to decide on.
     let keep_typed = move || {
         let typed = draft.take()?;
-        if needs_call {
-            on_call.call(typed.clone());
-        } else if needs_name {
-            on_name.call(typed.clone());
+        if let Some(ask) = asks {
+            keep(ask, typed.clone());
         }
         Some(typed)
     };
@@ -279,25 +354,37 @@ pub fn Home(
                     }
                 }
                 if let Some(hero) = &contest {
-                    if hero.needs_call {
+                    if hero.asks == Some(StationAsk::Call) {
                         div { class: "hero-call",
                             CallField {
                                 value: settings.contest.my_call.clone(),
                                 on_commit: move |typed| {
                                     refused.set(false);
-                                    on_call.call(typed);
+                                    keep(StationAsk::Call, typed);
                                 },
                                 draft,
                             }
                             CallReading { call: settings.contest.my_call.clone() }
                         }
-                    } else if hero.needs_name {
+                    } else if hero.asks == Some(StationAsk::Name) {
                         div { class: "hero-call",
                             NameField {
                                 value: settings.contest.my_name.clone(),
                                 on_commit: move |typed| {
                                     refused.set(false);
-                                    on_name.call(typed);
+                                    keep(StationAsk::Name, typed);
+                                },
+                                draft,
+                            }
+                        }
+                    } else if hero.asks == Some(StationAsk::State) {
+                        div { class: "hero-call",
+                            StateEntry {
+                                value: settings.contest.my_state.clone(),
+                                rejected: state_said(),
+                                on_commit: move |typed| {
+                                    refused.set(false);
+                                    keep(StationAsk::State, typed);
                                 },
                                 draft,
                             }
@@ -370,12 +457,10 @@ pub fn Home(
                             // the press, as a browser lets sound start only
                             // in one.
                             let mut settings = held.clone();
-                            if let Some(typed) = keep_typed() {
-                                if needs_call {
-                                    settings.contest.set_my_call(&typed);
-                                } else {
-                                    settings.contest.set_my_name(&typed);
-                                }
+                            if let Some(typed) = keep_typed()
+                                && let Some(ask) = asks
+                            {
+                                ask.keep(&mut settings.contest, &typed);
                             }
                             let hero = contest_hero(&settings).filter(|hero| hero.missing.is_some());
                             let Some(hero) = hero else {
@@ -383,10 +468,8 @@ pub fn Home(
                                 return;
                             };
                             refused.set(true);
-                            if hero.needs_call {
-                                take_to.set(Some(focus_call_field));
-                            } else if hero.needs_name {
-                                take_to.set(Some(focus_name_field));
+                            if let Some(ask) = hero.asks {
+                                take_to.set(Some(ask.focus()));
                             }
                         },
                         Icon { name: IconName::Play }
@@ -428,13 +511,7 @@ pub fn Home(
                         note: format!("{} · {}", level.summary, hero.who_calls),
                     }
                     p { class: "muted", style: "margin: 0;",
-                        if hero.needs_call {
-                            "Add your call, press Start contest; Enter sends what the QSO needs next."
-                        } else if hero.needs_name {
-                            "Add your name, press Start contest; Enter sends what the QSO needs next."
-                        } else {
-                            "Press Start contest; Enter sends what the QSO needs next."
-                        }
+                        {hero.asks.map_or("Press Start contest; Enter sends what the QSO needs next.", StationAsk::first_step)}
                     }
                 }
             } else {
@@ -467,7 +544,7 @@ pub fn Home(
 
 #[cfg(test)]
 mod tests {
-    use super::{ContestHero, LevelReading, level_reading, range_label};
+    use super::{ContestHero, LevelReading, StationAsk, level_reading, range_label};
     use cw_core::{CharSetMode, RunStyle, TrainingSettings};
 
     #[test]
@@ -517,7 +594,7 @@ mod tests {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Contest;
         let hero = ContestHero::of(&settings);
-        assert!(hero.needs_call);
+        assert_eq!(hero.asks, Some(StationAsk::Call));
         assert_eq!(hero.fields, ["CALL", "NR"]);
         assert_eq!(hero.length, ("10".to_string(), "Minutes".to_string()));
         assert_eq!(
@@ -527,18 +604,18 @@ mod tests {
         assert!(!hero.call_flagged, "nothing typed for the line to flag");
         settings.contest.my_call = "ABC".to_string();
         let hero = ContestHero::of(&settings);
-        assert!(hero.needs_call && hero.call_flagged, "not a call yet");
+        assert_eq!(hero.asks, Some(StationAsk::Call));
+        assert!(hero.call_flagged, "not a call yet");
         settings.contest.my_call = "DL1ABC".to_string();
         settings.contest.contest_minutes = 0;
         let hero = ContestHero::of(&settings);
-        assert!(!hero.needs_call);
+        assert_eq!(hero.asks, None, "WPX sends no name");
         assert_eq!(hero.missing, None);
         assert_eq!(hero.sends, "You send 5NN + serial, as DL1ABC");
         assert_eq!(
             hero.length,
             ("Open".to_string(), "Up to 60 min".to_string())
         );
-        assert!(!hero.needs_name, "WPX sends no name");
     }
 
     /// The specs say who calls: a single caller, or as many as a pile-up
@@ -570,20 +647,52 @@ mod tests {
         settings.curriculum.char_set_mode = CharSetMode::Contest;
         settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
         let hero = ContestHero::of(&settings);
-        assert!(hero.needs_call && !hero.needs_name, "the call first");
+        assert_eq!(hero.asks, Some(StationAsk::Call), "the call first");
         settings.contest.my_call = "DL1ABC".to_string();
         let hero = ContestHero::of(&settings);
-        assert!(!hero.needs_call && hero.needs_name);
+        assert_eq!(hero.asks, Some(StationAsk::Name));
         assert_eq!(hero.fields, ["CALL", "RST", "NAME"]);
         assert_eq!(
             hero.missing.as_deref(),
-            Some("Add your name to start a Simple QSO")
+            Some("Add your name to start a Simple\u{a0}QSO")
         );
         settings.contest.my_name = "MAT".to_string();
         let hero = ContestHero::of(&settings);
-        assert!(!hero.needs_name);
+        assert_eq!(hero.asks, None);
         assert_eq!(hero.missing, None);
         assert_eq!(hero.sends, "You send 599 + name, as DL1ABC");
+    }
+
+    /// The NA Sprint sends your name and your state: once the call reads,
+    /// the hero asks for the name, then the state, and sends what you send
+    /// in the order it goes; a call outside the US and Canada sends DX, so
+    /// it asks for no state.
+    #[test]
+    fn a_sprint_hero_asks_for_your_name_then_your_state() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+        settings.contest.my_call = "K1ABC".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, Some(StationAsk::Name));
+        assert_eq!(hero.fields, ["CALL", "NR", "NAME", "ST"]);
+        settings.contest.my_name = "MIKE".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, Some(StationAsk::State));
+        assert_eq!(
+            hero.missing.as_deref(),
+            Some("Add your state or province to start an NA\u{a0}Sprint")
+        );
+        settings.contest.my_state = "MA".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, None);
+        assert_eq!(hero.missing, None);
+        assert_eq!(hero.sends, "You send serial + name + state, as K1ABC");
+        settings.contest.my_state.clear();
+        settings.contest.my_call = "DL1ABC".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, None, "DX, outside the US and Canada");
+        assert_eq!(hero.missing, None);
     }
 
     /// A level stored for a longer alphabet is kept for it, but not shown as

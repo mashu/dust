@@ -303,6 +303,40 @@ fn a_simple_qso_row_reads_its_pace() {
     });
 }
 
+/// An NA Sprint run's row reads as a WPX run's does, with its rate, and
+/// opens its results with its contest score.
+#[test]
+fn a_sprint_row_reads_as_a_run() {
+    run(|| async {
+        let contest = crate::testing::stored_sprint_run(
+            "2026-10-21",
+            &[
+                [
+                    ("W7XYZ", "W7XYZ"),
+                    ("145", "145"),
+                    ("BOB", "BOB"),
+                    ("OR", "OR"),
+                ],
+                [
+                    ("VE3ABC", "VE3ABC"),
+                    ("23", "23"),
+                    ("DAVE", "DAVE"),
+                    ("ON", "QC"),
+                ],
+            ],
+        );
+        let (mut ui, _recorder) = open_history(&[contest]);
+        assert!(
+            ui.has("Contest · NA\u{a0}Sprint · 1/2\u{a0}QSOs · 12/h"),
+            "{}",
+            ui.html()
+        );
+        ui.click("history-open-0");
+        assert!(ui.has("Contest score"));
+        assert!(ui.has("1\u{a0}wrong\u{a0}ST"));
+    });
+}
+
 /// A contest run's row reads as a run — its contest, its QSOs clean of
 /// those logged, its rate — and its points say so; it opens the run's
 /// results, to be read and left again, with no run started from them.

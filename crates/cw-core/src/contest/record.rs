@@ -332,9 +332,10 @@ impl ContestRun {
         let logged = self.checks(groups)?;
         let scored: Vec<ScoredQso<'_>> = logged
             .iter()
-            .map(|(at_ms, call, check)| ScoredQso {
+            .map(|(at_ms, typed, check)| ScoredQso {
                 at_ms: *at_ms,
-                call,
+                call: &typed.call,
+                fields: &typed.fields,
                 check,
             })
             .collect();
@@ -387,9 +388,9 @@ impl ContestRun {
                     .unwrap_or_default()
             };
             let (n, call, check) = match walked.logged {
-                Some((call, check)) => {
+                Some((typed, check)) => {
                     logged += 1;
-                    (Some(logged), call, Some(check))
+                    (Some(logged), typed.call, Some(check))
                 }
                 None => {
                     let call = call_group.map(|group| group.received.clone());
@@ -480,15 +481,15 @@ impl ContestRun {
     }
 
     /// Each logged QSO, checked as it was while the run went on: when it
-    /// was logged, the call as logged, and the check.
-    fn checks(&self, groups: &[GroupResult]) -> Option<Vec<(u64, String, QsoCheck)>> {
+    /// was logged, the call and exchange as logged, and the check.
+    fn checks(&self, groups: &[GroupResult]) -> Option<Vec<(u64, QsoText, QsoCheck)>> {
         let walked = self.walk(groups)?;
         Some(
             walked
                 .into_iter()
                 .filter_map(|walked| {
-                    let (call, check) = walked.logged?;
-                    Some((walked.qso.t, call, check))
+                    let (typed, check) = walked.logged?;
+                    Some((walked.qso.t, typed, check))
                 })
                 .collect(),
         )
@@ -551,28 +552,29 @@ impl ContestRun {
                 } else {
                     qso.lc.clone()
                 };
-                let check = match qso.k.as_str() {
-                    NIL => check_qso(
-                        &QsoText {
-                            call: call.clone(),
-                            fields: Vec::new(),
-                        },
-                        None,
-                        |_| false,
-                    ),
+                let tokens = |held: &[String]| -> Vec<(Field, String)> {
+                    fields
+                        .iter()
+                        .zip(held)
+                        .filter(|(_, token)| !token.is_empty())
+                        .map(|(field, token)| (*field, token.clone()))
+                        .collect()
+                };
+                match qso.k.as_str() {
+                    // A NIL's exchange is the record's, always.
+                    NIL => {
+                        let typed = QsoText {
+                            call,
+                            fields: tokens(&qso.l),
+                        };
+                        let check = check_qso(&typed, None, |_| false);
+                        Some((typed, check))
+                    }
                     _ => {
                         let station: &str = match call_group {
                             Some(group) => &group.sent,
                             None if !qso.sc.is_empty() => &qso.sc,
                             None => return None,
-                        };
-                        let tokens = |held: &[String]| -> Vec<(Field, String)> {
-                            fields
-                                .iter()
-                                .zip(held)
-                                .filter(|(_, token)| !token.is_empty())
-                                .map(|(field, token)| (*field, token.clone()))
-                                .collect()
                         };
                         let copied = |held: fn(&GroupResult) -> &String| {
                             fields
@@ -590,21 +592,17 @@ impl ContestRun {
                             call: station.to_string(),
                             fields: sent,
                         };
-                        let check = check_qso(
-                            &QsoText {
-                                call: call.clone(),
-                                fields: typed,
-                            },
-                            Some(&sent),
-                            |call| clean.contains(&call),
-                        );
+                        let typed = QsoText {
+                            call,
+                            fields: typed,
+                        };
+                        let check = check_qso(&typed, Some(&sent), |call| clean.contains(&call));
                         if check.is_clean() {
                             clean.push(station);
                         }
-                        check
+                        Some((typed, check))
                     }
-                };
-                Some((call, check))
+                }
             };
             walked.push(Walked {
                 qso,
@@ -638,9 +636,9 @@ struct Walked<'a> {
     call_group: Option<&'a GroupResult>,
     /// Its field groups, unless the record holds the exchange.
     field_groups: &'a [GroupResult],
-    /// Logged: the call as logged, and how it checked. None for a QSO
-    /// never logged.
-    logged: Option<(String, QsoCheck)>,
+    /// Logged: the call and exchange as logged, and how it checked. None
+    /// for a QSO never logged.
+    logged: Option<(QsoText, QsoCheck)>,
 }
 
 impl From<&ContestRun> for ContestLog {
@@ -733,7 +731,7 @@ mod tests {
             // A kind this build has never heard of, and one whose phase has
             // not shipped here.
             changed("kind", json!("cwt")),
-            changed("kind", json!("sprint")),
+            changed("kind", json!("cqww")),
             changed("style", json!("swarm")),
             changed("fields", json!(["nr", "cwtNumber"])),
             changed("myWpm", json!(null)),

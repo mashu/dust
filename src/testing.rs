@@ -129,6 +129,14 @@ pub fn stored_simple_qso_run(date: &str, qsos: &[[(&str, &str); 3]]) -> SessionR
     stored_contest_run(date, "simpleQso", &["rst", "name"], &copies)
 }
 
+/// A finished ten-minute NA Sprint run, the way the app stores it: each
+/// QSO's call, serial, name and state as the station sent them, each beside
+/// what you logged, one a minute.
+pub fn stored_sprint_run(date: &str, qsos: &[[(&str, &str); 4]]) -> SessionResult {
+    let copies: Vec<Vec<(&str, &str)>> = qsos.iter().map(|qso| qso.to_vec()).collect();
+    stored_contest_run(date, "sprint", &["nr", "name", "st"], &copies)
+}
+
 /// A finished ten-minute run of the contest `kind`, copying `fields`: each
 /// QSO its groups, sent beside received, one a minute.
 fn stored_contest_run(

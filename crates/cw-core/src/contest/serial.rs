@@ -4,12 +4,13 @@
 //!
 //! A caller's log, `final` QSOs by the contest's end, is log-normal. For WPX
 //! its median is 190 and its spread σ 1.45, fitted to F6FVY's histogram of
-//! last serials in MorseRunner's `CqWpx.pas`. Those counts are of logs, and
-//! a station you hear tends to keep a big one, so `final` is drawn with a
-//! weight of `final^0.5`: Dust's estimate, between counting logs and counting
-//! QSOs. The run starts at a time `T0` drawn evenly through the contest's
-//! `L` hours, leaving room for the run, and a caller's serial at run time
-//! `t` is `1 + floor(final · (T0 + t) / L)`, never past `final`.
+//! last serials in MorseRunner's `CqWpx.pas`; for the NA Sprint, four hours
+//! long, its median is 80 and σ 0.9, Dust's estimate. Those counts are of
+//! logs, and a station you hear tends to keep a big one, so `final` is drawn
+//! with a weight of `final^0.5`: Dust's estimate, between counting logs and
+//! counting QSOs. The run starts at a time `T0` drawn evenly through the
+//! contest's `L` hours, leaving room for the run, and a caller's serial at
+//! run time `t` is `1 + floor(final · (T0 + t) / L)`, never past `final`.
 
 use super::{MS_PER_HOUR, MS_PER_MINUTE};
 use crate::rng::Rng;
@@ -30,6 +31,14 @@ pub const WPX_SERIALS: SerialFit = SerialFit {
     median: 190.0,
     sigma: 1.45,
     hours: 48.0,
+};
+
+/// The NA Sprint: 4 hours, logs of Dust's estimate, smaller and less spread
+/// than WPX's, as the contest is short and its field North American.
+pub const SPRINT_SERIALS: SerialFit = SerialFit {
+    median: 80.0,
+    sigma: 0.9,
+    hours: 4.0,
 };
 
 /// How strongly a big log is more likely to be heard: logs are drawn with
@@ -202,6 +211,29 @@ mod tests {
             .sum::<f64>()
             / 20_000.0;
         assert!((variance - mean).abs() < 0.1, "variance {variance:.3}");
+    }
+
+    /// A Sprint caller's serial stays within its four-hour contest, the
+    /// longest run fitting in it, and the logs heard sit where the fit puts
+    /// them.
+    #[test]
+    fn a_sprint_serial_climbs_through_its_four_hours() {
+        let mut rng = SplitMix64::new(80);
+        let mut ends = Vec::new();
+        for _ in 0..5_000 {
+            let model = SerialModel::draw(SPRINT_SERIALS, 60, &mut rng);
+            assert!(model.offset_ms <= model.length_ms - (60 * MS_PER_MINUTE) as f64);
+            let start = model.serial_at(0);
+            let end = model.serial_at(60 * MS_PER_MINUTE);
+            assert!(start >= 1 && end >= start, "{model:?}");
+            assert!(f64::from(end) <= model.log_size, "{end} past {model:?}");
+            ends.push(model.log_size);
+        }
+        ends.sort_by(f64::total_cmp);
+        let median = ends[ends.len() / 2];
+        let sigma = SPRINT_SERIALS.sigma;
+        let heard = SPRINT_SERIALS.median * (HEARD_WEIGHT * sigma * sigma).exp();
+        assert!((median / heard - 1.0).abs() < 0.08, "median {median:.0}");
     }
 
     #[test]

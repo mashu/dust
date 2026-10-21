@@ -1576,6 +1576,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .field-grid.run-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .run-fields .field { min-width: 0; }
 .run-fields .answer { margin-top: 0; }
+/* Each field's label keeps to one line, so the two boxes stay level. */
+.run-fields label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The station corrected you: the call wants putting right. Filled and
    tagged, so it never reads as the focus ring in another orange. */
 .field.corrected .answer,
@@ -1703,10 +1705,10 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .run-log-rows { display: grid; gap: 0.15rem; margin: 0; padding: 0; list-style: none; }
 /* Each row is a grid of its own, so its tracks are fixed: a long copy is
    cut short rather than pushing the columns of its row out of line. The
-   exchange's track holds an everyday QSO's report and name. */
+   exchange's track holds a Sprint's serial, name and state. */
 .log-row {
   display: grid;
-  grid-template-columns: 1.6rem 3rem minmax(5rem, 1fr) 7.5rem 4.2rem 2.2rem minmax(0, 1.5fr);
+  grid-template-columns: 1.6rem 3rem minmax(5rem, 1fr) 9.5rem 4.2rem 2.2rem minmax(0, 1.5fr);
   align-items: center;
   gap: 0.5rem;
   min-height: var(--log-row, 1.9rem);
@@ -2522,6 +2524,15 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .run-log { --log-row: 2.9rem; }
   .run-rate { margin-left: 0; }
   .run-rate-word, .run-rate-unit { display: none; }
+  /* What Enter then does, where the hint's line has no room for it, and
+     the word after the count of stations calling, which would leave your
+     message too little of its line. */
+  .run-hint-more, .run-air-word { display: none; }
+  /* An exchange of more than one field takes more of the row than the call
+     beside it, and the boxes' letters close up, so a whole one shows:
+     "214 PATRICIA NY" at 360 px, beside "W1ABC/7". */
+  .field-grid.run-fields.run-fields-long { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+  .run-fields-long .answer { letter-spacing: 0; }
   .run-speed { gap: 0.3rem; }
   .log-row {
     grid-template-columns: 1.4rem 2.8rem minmax(0, 1fr) auto;

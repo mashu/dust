@@ -9,6 +9,8 @@
 use std::collections::BTreeSet;
 
 use super::check::QsoCheck;
+use super::data::places::DX;
+use super::exchange::Field;
 use super::rules::{Multiplier, Scoring};
 use super::{MS_PER_HOUR, MS_PER_MINUTE};
 use crate::callsign::wpx_prefix;
@@ -20,7 +22,26 @@ pub struct ScoredQso<'a> {
     pub at_ms: u64,
     /// The call as you logged it.
     pub call: &'a str,
+    /// The exchange as you logged it, each field's token or value.
+    pub fields: &'a [(Field, String)],
     pub check: &'a QsoCheck,
+}
+
+impl ScoredQso<'_> {
+    /// The multiplier it counts for as `multiplier` counts them, as logged:
+    /// its WPX prefix, or the state, province or territory logged, DX and
+    /// nothing among none.
+    fn multiplier(&self, multiplier: Multiplier) -> Option<String> {
+        match multiplier {
+            Multiplier::WpxPrefix => wpx_prefix(self.call),
+            Multiplier::Place => self
+                .fields
+                .iter()
+                .find(|(field, _)| *field == Field::St)
+                .and_then(|(_, token)| Field::St.canonical(token))
+                .filter(|place| place != DX),
+        }
+    }
 }
 
 /// One column of the score: QSO points, multipliers, and their product.
@@ -78,9 +99,7 @@ pub fn contest_score(scoring: &Scoring, qsos: &[ScoredQso<'_>], run_ms: u64) -> 
 fn tally(scoring: &Scoring, counted: &[&ScoredQso<'_>]) -> Tally {
     let mults: BTreeSet<String> = counted
         .iter()
-        .filter_map(|qso| match scoring.multiplier {
-            Multiplier::WpxPrefix => wpx_prefix(qso.call),
-        })
+        .filter_map(|qso| qso.multiplier(scoring.multiplier))
         .collect();
     let qsos = u32::try_from(counted.len()).unwrap_or(u32::MAX);
     let qso_points = qsos.saturating_mul(scoring.points);
@@ -148,8 +167,16 @@ mod tests {
         ScoredQso {
             at_ms: at_s * 1_000,
             call,
+            fields: &[],
             check,
         }
+    }
+
+    fn sprint() -> Scoring {
+        ContestKind::Sprint
+            .rules()
+            .and_then(|rules| rules.scoring)
+            .expect("the Sprint scores")
     }
 
     fn wrong() -> QsoCheck {
@@ -261,6 +288,7 @@ mod tests {
                 .map(|i| ScoredQso {
                     at_ms: i as u64 * 40_000,
                     call: calls[rng.usize_in(0, calls.len() - 1)],
+                    fields: &[],
                     check: &checks[rng.usize_in(0, checks.len() - 1)],
                 })
                 .collect();
@@ -269,6 +297,82 @@ mod tests {
             assert!(score.verified.mults <= score.raw.mults);
             assert!(score.verified.score <= score.raw.score);
         }
+    }
+
+    /// A Sprint run worked by hand: a point a QSO, times each state,
+    /// province or territory once, DC and Alaska among them, as logged for
+    /// raw and as sent for verified; DX counts no multiplier.
+    #[test]
+    fn a_hand_worked_sprint_log_scores_raw_and_verified() {
+        let place = |st: &str| vec![(Field::Nr, "1".to_string()), (Field::St, st.to_string())];
+        let (or, ma, dc, ak, qc, pq, tx, dx) = (
+            place("OR"),
+            place("MA"),
+            place("DC"),
+            place("AK"),
+            place("QC"),
+            place("PQ"),
+            place("TX"),
+            place("DX"),
+        );
+        let clean = clean();
+        let wrong_st = QsoCheck {
+            errors: vec![QsoError::Field(Field::St)],
+            dupe: false,
+        };
+        let dupe = QsoCheck {
+            errors: Vec::new(),
+            dupe: true,
+        };
+        fn sprinted<'a>(
+            at_s: u64,
+            call: &'a str,
+            fields: &'a [(Field, String)],
+            check: &'a QsoCheck,
+        ) -> ScoredQso<'a> {
+            ScoredQso {
+                at_ms: at_s * 1_000,
+                call,
+                fields,
+                check,
+            }
+        }
+        let log = [
+            sprinted(20, "W7XYZ", &or, &clean),
+            // Oregon again: a QSO more, no multiplier more.
+            sprinted(40, "K7ABC", &or, &clean),
+            sprinted(60, "W1ABC", &ma, &clean),
+            sprinted(80, "K3DC", &dc, &clean),
+            sprinted(100, "KL7AB", &ak, &clean),
+            sprinted(120, "VE2ABC", &qc, &clean),
+            // PQ is Quebec, which is counted already.
+            sprinted(140, "VA2XYZ", &pq, &clean),
+            // Logged as Texas but sent as something else: raw counts TX.
+            sprinted(160, "W5ABC", &tx, &wrong_st),
+            // A DX station is a QSO, and no multiplier.
+            sprinted(180, "DL1ABC", &dx, &clean),
+            // A dupe scores nothing.
+            sprinted(200, "W7XYZ", &or, &dupe),
+        ];
+        let score = contest_score(&sprint(), &log, 600_000);
+        // Raw: nine calls; OR MA DC AK QC TX.
+        assert_eq!(
+            score.raw,
+            Tally {
+                qso_points: 9,
+                mults: 6,
+                score: 54
+            }
+        );
+        // Verified: all but W5ABC; OR MA DC AK QC.
+        assert_eq!(
+            score.verified,
+            Tally {
+                qso_points: 8,
+                mults: 5,
+                score: 40
+            }
+        );
     }
 
     #[test]

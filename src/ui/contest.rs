@@ -266,12 +266,20 @@ fn from_button(ctx: AppCtx, press: impl FnOnce()) {
 fn EntryCard(qso: QsoState, running: bool, countdown: Option<u32>, now: Signal<MonoMs>) -> Element {
     let ctx = use_context::<AppCtx>();
     let (exchange_id, _) = field_name(EntryField::Exchange);
-    let exchange = exchange_label(ctx.entry.copies());
+    let copies = ctx.entry.copies();
+    let exchange = exchange_label(copies);
+    // An exchange of more than one field, a Sprint's number, name and
+    // state, takes more of a phone's row than the call beside it.
+    let fields = if copies.len() > 1 {
+        "field-grid run-fields run-fields-long"
+    } else {
+        "field-grid run-fields"
+    };
     rsx! {
         div { class: "card run-entry",
             HintLine { qso: qso.clone(), countdown }
             AirLine { now }
-            div { class: "field-grid run-fields",
+            div { class: fields,
                 CallField { qso: qso.clone(), disabled: countdown.is_some() }
                 div { class: "field",
                     label { r#for: exchange_id, "{exchange}" }
@@ -284,7 +292,7 @@ fn EntryCard(qso: QsoState, running: bool, countdown: Option<u32>, now: Signal<M
     }
 }
 
-/// "Exchange · NR": the field, and what goes in it.
+/// "Exchange · NR NAME ST": the field, and what goes in it.
 fn exchange_label(copies: &[Field]) -> String {
     let fields: Vec<&str> = copies.iter().map(|field| field.label()).collect();
     if fields.is_empty() {
@@ -302,16 +310,22 @@ fn exchange_label(copies: &[Field]) -> String {
 #[component]
 fn HintLine(qso: QsoState, countdown: Option<u32>) -> Element {
     let ctx = use_context::<AppCtx>();
-    let hint = if let Some(left) = countdown {
-        format!("Your first CQ goes out in {left} s")
+    let (hint, more) = if let Some(left) = countdown {
+        (format!("Your first CQ goes out in {left} s"), String::new())
     } else {
         ctx.entry
             .enter(&qso)
-            .map(|enter| enter.hint)
+            .map(|enter| (enter.hint, enter.hint_more))
             .unwrap_or_default()
     };
     rsx! {
-        p { class: "run-line run-hint", "{hint}" }
+        p { class: "run-line run-hint",
+            "{hint}"
+            // What Enter then does, where a phone's line has no room for it.
+            if !more.is_empty() {
+                span { class: "run-hint-more", "{more}" }
+            }
+        }
     }
 }
 
@@ -346,7 +360,11 @@ fn AirLine(now: Signal<MonoMs>) -> Element {
             p { class: "run-line run-rx",
                 span { class: "run-tag", "RX" }
                 if calling > 0 {
-                    span { "▮ {calling} calling" }
+                    // "▮ 3" on a phone, leaving your message its room.
+                    span {
+                        "▮ {calling}"
+                        span { class: "run-air-word", " calling" }
+                    }
                 } else {
                     span { class: "muted", "—" }
                 }
@@ -1376,7 +1394,11 @@ mod tests {
             let tx = text_of(&ui, "run-line run-tx");
             assert!(tx.starts_with("TX ▸CQ DL1ABC"), "{tx}");
             assert!(ui.has(r#"role="timer""#) && ui.has(r#"aria-live="off""#));
-            assert!(ui.run_until(8_000, |ui| ui.has("1 calling")).await);
+            assert!(
+                ui.run_until(8_000, |ui| text_of(ui, "run-line run-rx")
+                    .contains("1 calling"))
+                    .await
+            );
             let call = recorder.starts()[0].transcript.others[0].text.clone();
             assert!(!text_of(&ui, "run-air").contains(&call), "what they send");
             assert_eq!(text_of(&ui, "run-line run-tx"), "TX ▸—", "yours is out");
@@ -1412,8 +1434,11 @@ mod tests {
             pitches.dedup();
             assert_eq!(pitches.len(), 3, "{pitches:?}");
             assert!(
-                ui.run_until(8_000, |ui| ui.has("2 calling") || ui.has("3 calling"))
-                    .await,
+                ui.run_until(8_000, |ui| {
+                    let rx = text_of(ui, "run-line run-rx");
+                    rx.contains("2 calling") || rx.contains("3 calling")
+                })
+                .await,
                 "never more than one at once"
             );
         });
@@ -1827,6 +1852,10 @@ mod tests {
             [PadKey::Field, PadKey::Send("TU & log".into())]
         );
         assert_eq!(exchange_label(&[Field::Nr]), "Exchange · NR");
+        assert_eq!(
+            exchange_label(&[Field::Nr, Field::Name, Field::St]),
+            "Exchange · NR NAME ST"
+        );
         assert_eq!(exchange_label(&[]), "Exchange");
     }
 
@@ -1900,6 +1929,74 @@ mod tests {
             // The pace is never cut; on a phone it drops its word and unit.
             assert!(rule(".run-rate {").contains("flex: none"));
             assert!(css.contains(".run-rate-word, .run-rate-unit { display: none; }"));
+        });
+    }
+
+    /// A Sprint's lines at a phone's width: its exchange of three fields,
+    /// your name a long one, goes out whole; the Exchange field takes more
+    /// of the row than the call beside it and keeps its label whole on one
+    /// line, the two boxes level; and the hint leaves what Enter then does
+    /// to a wider screen where its line has no room for it.
+    #[test]
+    fn a_sprints_long_lines_keep_to_their_slots() {
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+            settings.contest.my_call = "K1ABC".to_string();
+            settings.contest.my_name = "MAXIMILIAN".to_string();
+            settings.contest.my_state = "MA".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.advance(8_000).await;
+            let answer = recorder.starts()[0].transcript.others[0].text.clone();
+            let call = answer.split_whitespace().next().unwrap_or_default();
+            assert!(
+                ui.has(r#"class="field-grid run-fields run-fields-long""#),
+                "{}",
+                ui.html()
+            );
+            assert!(ui.has(">Exchange · NR NAME ST</label>"), "{}", ui.html());
+            ui.type_into("field-call", call);
+            ui.press_enter("field-call");
+            ui.advance(300).await;
+            let tx = text_of(&ui, "run-line run-tx");
+            assert!(
+                tx.contains(&format!("{call} K1ABC 1 MAXIMILIAN MA")),
+                "{tx}"
+            );
+            assert_eq!(
+                text_of(&ui, "run-line run-hint"),
+                "Copy their number, name and state, then TU & log"
+            );
+            assert!(ui.has(r#"<span class="run-hint-more">, then TU &#38; log</span>"#));
+
+            let css = include_str!("../../assets/styles.css");
+            let rule = |selector: &str| {
+                css.split(selector)
+                    .nth(1)
+                    .and_then(|rest| rest.split('}').next())
+                    .unwrap_or_else(|| panic!("a rule for {selector}"))
+                    .to_string()
+            };
+            for needed in [
+                "white-space: nowrap",
+                "overflow: hidden",
+                "text-overflow: ellipsis",
+            ] {
+                assert!(rule(".run-fields label {").contains(needed), "{needed}");
+            }
+            // On a phone, and only there, the exchange takes three parts of
+            // the row to the call's two, and the hint's rest and the word
+            // after the count of callers go.
+            let phone = css
+                .split("@media (max-width: 640px) {")
+                .find(|block| block.contains(".run-rate-word"))
+                .expect("the phone's rules");
+            assert!(phone.contains(
+                ".field-grid.run-fields.run-fields-long { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }"
+            ));
+            assert!(phone.contains(".run-hint-more, .run-air-word { display: none; }"));
+            assert!(!rule(".field-grid.run-fields {").contains("3fr"));
         });
     }
 }

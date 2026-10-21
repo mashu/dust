@@ -8,6 +8,7 @@
 //! number: elsewhere `TN` is Tennessee and `AL` a name.
 
 use super::CallerHabits;
+use super::data::places::place_code;
 use crate::alignment::align_group;
 use crate::rng::Rng;
 
@@ -139,10 +140,17 @@ impl Field {
             Self::Cl => class(token),
             Self::Name => (!token.is_empty() && token.chars().all(|c| c.is_ascii_uppercase()))
                 .then(|| token.to_string()),
-            // States and sections are read off their lists, which come with
-            // the contests that use them: Sprint, then ARRL DX and Field Day.
-            // Until then nothing reads as either.
-            Self::St | Self::Sec => None,
+            // A state, province or territory by its code, an old code as the
+            // new (PQ is QC, NF is NL), or DX. Labrador, LB, is NL, as the
+            // Sprint counts it, the one contest yet that copies a state;
+            // ARRL DX, which counts LB apart, is to read it apart when it
+            // comes.
+            Self::St => place_code(token)
+                .or((token == "LB").then_some("NL"))
+                .map(str::to_string),
+            // Sections are read off their list, which comes with Field Day.
+            // Until then nothing reads as one.
+            Self::Sec => None,
         }
     }
 
@@ -376,6 +384,14 @@ mod tests {
         // CL: a number and a letter.
         assert!(Field::Cl.same("03A", "3A"));
         assert!(Field::Cl.same("1D", "01D"));
+        // ST: a code, equal after PQ is read as QC and NF as NL; DX is DX.
+        assert!(Field::St.same("OR", "OR"));
+        assert!(Field::St.same("PQ", "QC"));
+        assert!(Field::St.same("NF", "NL"));
+        assert!(Field::St.same("LB", "NL"), "in the Sprint");
+        assert!(Field::St.same("DX", "DX"));
+        assert!(!Field::St.same("OR", "WA"));
+        assert!(!Field::St.same("NL", "NS"));
         // NAME: letters, equal as they are.
         assert!(Field::Name.same("BOB", "BOB"));
         assert!(!Field::Name.same("BOB", "ROB"));
@@ -405,8 +421,10 @@ mod tests {
         for bad in ["", "B0B", "BO B"] {
             assert_eq!(canonical(Field::Name, bad), None, "{bad:?}");
         }
-        // States and sections have no list yet, so nothing is one.
-        assert_eq!(canonical(Field::St, "OR"), None);
+        for bad in ["", "XX", "ORE", "or", "TN?", "1", "LBX"] {
+            assert_eq!(canonical(Field::St, bad), None, "{bad:?}");
+        }
+        // Sections have no list yet, so nothing is one.
         assert_eq!(canonical(Field::Sec, "EMA"), None);
     }
 
@@ -425,6 +443,8 @@ mod tests {
         }
         assert_eq!(canonical(Field::Name, "AL").as_deref(), Some("AL"));
         assert_eq!(canonical(Field::Name, "TONE").as_deref(), Some("TONE"));
+        assert_eq!(canonical(Field::St, "TN").as_deref(), Some("TN"));
+        assert_eq!(canonical(Field::St, "NE").as_deref(), Some("NE"));
         assert_eq!(canonical(Field::Cl, "1A").as_deref(), Some("1A"));
         assert_eq!(canonical(Field::Cl, "TA"), None, "no cut digits in a class");
         assert_eq!(canonical(Field::Cl, "1T"), None);
@@ -560,7 +580,7 @@ mod tests {
             assert!(!field.noun().is_empty());
             // What the card shows a station sending is a value it could send,
             // once the field's list has come with its contest.
-            let listed = matches!(field, Field::St | Field::Sec);
+            let listed = field == Field::Sec;
             assert_eq!(
                 field.canonical(field.example()).is_some(),
                 !listed,

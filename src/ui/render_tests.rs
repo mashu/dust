@@ -327,6 +327,67 @@ fn home_in_contest_mode_says_what_a_run_is() {
     assert!(!html.contains("home-missing"), "nothing refused yet");
 }
 
+/// Home in Contest mode for the NA Sprint as K1ABC, called `my_name`, in
+/// `my_state`, and no history.
+fn sprint_home(my_name: &'static str, my_state: &'static str) -> String {
+    #[component]
+    fn SprintHome(my_name: &'static str, my_state: &'static str) -> Element {
+        let mut settings = crate::testing::contest_settings();
+        settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+        settings.contest.my_call = "K1ABC".to_string();
+        settings.contest.my_name = my_name.to_string();
+        settings.contest.my_state = my_state.to_string();
+        rsx! {
+            Home {
+                settings,
+                last_accuracy: None,
+                session_count: 0,
+                pool: String::new(),
+                sessions: Vec::new(),
+                today: "2026-10-21".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    }
+    render_props(SprintHome, SprintHomeProps { my_name, my_state })
+}
+
+/// With the call and the name, a Sprint's hero asks for your state where
+/// the fields will show; with it, it shows what a run copies and sends.
+#[test]
+fn home_asks_for_your_state_before_a_sprint() {
+    let html = sprint_home("MIKE", "");
+    for shown in [
+        "NA Sprint",
+        r#"id="field-your-state-or-province""#,
+        "Your state or province",
+        "e.g. MA, ON or DX",
+        "Add your state, press Start contest; Enter sends what the QSO needs next.",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in ["field-your-callsign", "field-your-name", "field-chip"] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // The name comes first.
+    let html = sprint_home("", "");
+    assert!(html.contains(r#"id="field-your-name""#), "{html}");
+    assert!(!html.contains("field-your-state"), "{html}");
+    let html = sprint_home("MIKE", "MA");
+    for shown in [
+        r#"class="pool-chip field-chip">NR<"#,
+        r#"class="pool-chip field-chip">NAME<"#,
+        r#"class="pool-chip field-chip">ST<"#,
+        "You send serial + name + state, as K1ABC",
+        "Press Start contest; Enter sends what the QSO needs next.",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("field-your-state"), "{html}");
+}
+
 #[test]
 fn home_without_history_invites_a_first_session() {
     let html = render(|| {
@@ -703,7 +764,7 @@ fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
         ">TU BOB 73 EE<",
         ">73 EE<",
         r#"for="field-your-name""#,
-        "Add your name to start a Simple QSO",
+        "Add your name to start a Simple\u{a0}QSO",
         "Signing DL1ABC<",
     ] {
         assert!(html.contains(shown), "no {shown:?} in {html}");
@@ -729,6 +790,103 @@ fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
         }
     });
     assert!(!wpx.contains("field-your-name"));
+}
+
+/// Settings in Contest mode for the NA Sprint as `my_call`, called
+/// `my_name`, in `my_state`.
+fn sprint_settings(my_call: &'static str, my_name: &'static str, my_state: &'static str) -> String {
+    #[component]
+    fn SprintSettings(
+        my_call: &'static str,
+        my_name: &'static str,
+        my_state: &'static str,
+    ) -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+            settings.contest.my_call = my_call.to_string();
+            settings.contest.my_name = my_name.to_string();
+            settings.contest.my_state = my_state.to_string();
+            settings
+        });
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    }
+    render_props(
+        SprintSettings,
+        SprintSettingsProps {
+            my_call,
+            my_name,
+            my_state,
+        },
+    )
+}
+
+/// The NA Sprint has its pill, first as the card lists the contests, its
+/// dialogue from its row, the simplifications it makes, and on Your station
+/// a name and a state, each asked for in turn, the state read as the place
+/// it names, or as DX for a call outside the US and Canada.
+#[test]
+fn a_sprint_shows_its_dialogue_and_asks_for_your_name_and_state() {
+    let html = sprint_settings("K1ABC", "", "");
+    for shown in [
+        "Contest · NA Sprint",
+        r#"id="contest-na-sprint" class="pill active""#,
+        "You send serial + name + state\u{a0}· You\u{a0}copy\u{a0}NR\u{a0}NAME\u{a0}ST",
+        "Simplified: you keep your frequency (in the real contest you QSY after each QSO), so you sign last",
+        "outside the US and Canada you send DX",
+        ">CQ NA K1ABC<",
+        ">W7XYZ<",
+        ">W7XYZ K1ABC 1 &#60;your name&#62; &#60;your state&#62;<",
+        ">K1ABC 214 BOB OR<",
+        ">TU K1ABC<",
+        r#"for="field-your-name""#,
+        r#"for="field-your-state-or-province""#,
+        "Add your name to start an NA\u{a0}Sprint",
+        "Signing K1ABC<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // The pills go as the card lists the contests: the Sprint first.
+    let sprint = html.find("contest-na-sprint").expect("the pill");
+    let wpx = html.find("contest-cq-wpx").expect("the pill");
+    assert!(sprint < wpx);
+    let html = sprint_settings("K1ABC", "MIKE", "");
+    assert!(
+        html.contains("Add your state or province to start an NA\u{a0}Sprint"),
+        "{html}"
+    );
+    let html = sprint_settings("K1ABC", "MIKE", "MA");
+    for shown in [
+        "Signing K1ABC · MIKE · MA",
+        "Reads as Massachusetts",
+        ">W7XYZ K1ABC 1 MIKE MA<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("Add your"), "{html}");
+    // Outside North America your state is DX, and nothing is missing.
+    let html = sprint_settings("DL1ABC", "MAT", "");
+    for shown in [
+        "Sends DX: in Dust every station outside the US and Canada sends DX",
+        "Signing DL1ABC · MAT · DX",
+        ">W7XYZ DL1ABC 1 MAT DX<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // WPX sends no state, so Your station has no field for one.
+    let wpx = simple_qso_settings("MAT");
+    assert!(!wpx.contains("field-your-state"));
 }
 
 #[test]
@@ -855,6 +1013,52 @@ fn a_contest_run_has_results_of_its_own() {
         !html.contains("btn-history"),
         "fresh from the run: no History"
     );
+}
+
+/// An NA Sprint run's results: its contest score, a point a QSO times the
+/// places worked, raw as logged and verified as sent, with what the checks
+/// found field by field, and its rate.
+#[test]
+fn a_sprint_run_has_results_with_its_score() {
+    let html = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_sprint_run(
+                    "2026-10-21",
+                    &[
+                        [("W7XYZ", "W7XYZ"), ("145", "145"), ("BOB", "BOB"), ("OR", "OR")],
+                        [("VE3ABC", "VE3ABC"), ("23", "23"), ("DAVE", "DAVE"), ("ON", "ON")],
+                        [("K3DC", "K3DC"), ("7", "7"), ("JIM", "JIM"), ("DC", "DC")],
+                        [("KL7AB", "KL7AB"), ("88", "88"), ("SUE", "SUE"), ("AK", "AK")],
+                        [("W5ABC", "W5ABC"), ("61", "61"), ("TOM", "TIM"), ("TX", "NM")],
+                    ],
+                ),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    for shown in [
+        "Run complete",
+        "NA Sprint · 10:00",
+        "5 QSOs, 30 an hour. One NAME was wrong; one ST was wrong.",
+        ">QSOs<",
+        ">4/5<",
+        ">Rate<",
+        ">30/h<",
+        "Contest score",
+        // Raw: five QSOs, OR ON DC AK NM as logged; verified: four, and
+        // their four places.
+        r#"<th scope="row">Raw</th><td>5</td><td>5</td><td>25</td>"#,
+        r#"<th scope="row">Verified</th><td>4</td><td>4</td><td>16</td>"#,
+        "0\u{a0}busted\u{a0}calls\u{a0}· 0\u{a0}wrong\u{a0}NR\u{a0}· 1\u{a0}wrong\u{a0}NAME\u{a0}· 1\u{a0}wrong\u{a0}ST\u{a0}· 0\u{a0}NIL\u{a0}· 0\u{a0}dupes",
+        "TIM→TOM",
+        "NM→TX",
+        "wrong NAME, wrong ST",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
 }
 
 /// A Simple QSO run has no contest score: its pace is minutes a QSO, and in
