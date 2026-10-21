@@ -159,6 +159,8 @@ pub mod fake {
     /// plays with, and what it says.
     #[derive(Clone, Debug)]
     pub struct Started {
+        /// What it plays, and whether its wanted send went past the
+        /// receiver, as your message in a contest does.
         pub plan: PlannedTransmission,
         pub qsb: Option<Qsb>,
         pub transcript: Transmission,

@@ -625,7 +625,9 @@ mod tests {
     use crate::testing::{Harness, contest_settings, run};
     use crate::time::POLL_MS;
     use cw_core::band::BandKey;
-    use cw_core::{CharSetMode, ContestView, parse_callsign, plan_morse_playback_for};
+    use cw_core::{
+        CharSetMode, ContestView, MONITOR_LEVEL, parse_callsign, plan_morse_playback_for,
+    };
 
     impl LiveContest {
         /// The run's hold on the audio, for a test to end or to stop.
@@ -838,6 +840,32 @@ mod tests {
                 Call::Band(key) => *key == band,
                 _ => true,
             }));
+        });
+    }
+
+    /// Your message in a run goes around the receiver: every turn the player
+    /// is handed is planned dry, your tones at the monitor's level. A session
+    /// of groups never is: the station you copy is one the receiver hears.
+    #[test]
+    fn a_runs_turns_are_planned_dry_and_a_sessions_groups_never() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            let starts = h.recorder.starts();
+            assert!(starts.len() >= 3, "{} turns", starts.len());
+            assert!(starts.iter().all(|start| start.plan.dry_wanted));
+            let cq = &starts[0].plan.wanted.events;
+            assert!(!cq.is_empty(), "your CQ was not played");
+            assert!(cq.iter().all(|tone| tone.target_gain == MONITOR_LEVEL));
+
+            let mut h = Harness::new();
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let starts = h.recorder.starts();
+            assert!(!starts.is_empty(), "no group was sent");
+            assert!(starts.iter().all(|start| !start.plan.dry_wanted));
         });
     }
 

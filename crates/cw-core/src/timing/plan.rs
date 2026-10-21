@@ -36,6 +36,12 @@ pub struct PlaybackPlan {
 pub struct PlannedTransmission {
     pub wanted: PlaybackPlan,
     pub others: Vec<PlaybackPlan>,
+    /// `wanted` is played past the receiver, its filter and its AGC, into
+    /// the output stage the way the paddle's sidetone goes: your own message
+    /// in a contest, which a rig monitors rather than receives. Its tones
+    /// carry the level it is heard at. `others` always come through the
+    /// receiver.
+    pub dry_wanted: bool,
 }
 
 /// Lay out every station's sound against one clock.
@@ -64,7 +70,11 @@ pub fn plan_transmission(
             plan
         })
         .collect();
-    PlannedTransmission { wanted, others }
+    PlannedTransmission {
+        wanted,
+        others,
+        dry_wanted: false,
+    }
 }
 
 /// Plan a send from one station. Every repeat of a group uses the same voice.
@@ -73,11 +83,23 @@ pub fn plan_morse_playback_for(
     settings: &TrainingSettings,
     voice: &StationVoice,
 ) -> PlaybackPlan {
+    let target_gain = DEFAULT_TARGET_GAIN * voice.volume.clamp(0.0, 1.0);
+    plan_morse_playback_at(text, settings, voice, target_gain)
+}
+
+/// [`plan_morse_playback_for`], with every tone at `target_gain` whatever
+/// the voice's volume says: for a send that is never heard through the
+/// receiver, whose level is not a station's.
+pub(crate) fn plan_morse_playback_at(
+    text: &str,
+    settings: &TrainingSettings,
+    voice: &StationVoice,
+    target_gain: f64,
+) -> PlaybackPlan {
     let resolved_char_wpm = voice.char_wpm.max(1.0);
     let resolved_effective_wpm = voice.effective_wpm.max(1.0).min(resolved_char_wpm);
     let extra = clamp_extra_spacing(settings.playback.extra_word_space_multiplier);
     let side_tone = voice.tone_hz;
-    let target_gain = DEFAULT_TARGET_GAIN * voice.volume.clamp(0.0, 1.0);
 
     let dot_char = dot_seconds(resolved_char_wpm);
     let unit = spacing_unit_sec(resolved_char_wpm, resolved_effective_wpm);

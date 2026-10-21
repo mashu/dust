@@ -7,8 +7,9 @@ use std::sync::atomic::AtomicUsize;
 use super::*;
 use cw_core::band::{BandMixer, FilterDesign, Qsb};
 use cw_core::{
-    CALLSIGN_TIER_MAX, STATIONS_MAX, SplitMix64, TrainingSettings, Transmission, generate_callsign,
-    plan_transmission, resolve_station,
+    CALLSIGN_TIER_MAX, FILTER_WIDTH_MIN, MONITOR_LEVEL, PlannedTransmission, STATIONS_MAX, Segment,
+    Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, Turn, VOLUME_MAX, VOLUME_MIN,
+    generate_callsign, plan_morse_playback_for, plan_transmission, plan_turn, resolve_station,
 };
 
 /// Low enough to keep the long listens quick; the band sounds the same at
@@ -46,6 +47,11 @@ fn power(samples: &[f32]) -> f64 {
 
 fn db(ratio: f64) -> f64 {
     10.0 * ratio.log10()
+}
+
+/// The furthest a waveform swings from nothing.
+fn loudest(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0, |a, s| a.max(s.abs()))
 }
 
 /// The biggest change between neighbouring samples: where a waveform is cut
@@ -207,6 +213,248 @@ fn a_send_finishes_when_it_has_been_heard() {
     assert_eq!(alone.latency_sec(), 0.0);
 }
 
+/// A keyer at `tone_hz` and `volume`, at 25 WPM.
+fn keyer(tone_hz: f64, volume: f64) -> StationVoice {
+    StationVoice {
+        tone_hz,
+        char_wpm: 25.0,
+        effective_wpm: 25.0,
+        volume,
+        weight: 1.0,
+        dash_ratio: 3.0,
+    }
+}
+
+/// `who` sending `text` in a contest's turn, from `start_sec`.
+fn segment(
+    settings: &TrainingSettings,
+    who: Sender,
+    text: &str,
+    voice: StationVoice,
+    start_sec: f64,
+) -> Segment {
+    let end_sec = start_sec + plan_morse_playback_for(text, settings, &voice).duration_sec;
+    Segment {
+        who,
+        text: text.into(),
+        voice,
+        start_sec,
+        end_sec,
+    }
+}
+
+/// A contest's turn, as the run plans it.
+fn planned_turn(settings: &TrainingSettings, segments: &[&Segment]) -> PlannedTransmission {
+    let turn = Turn {
+        id: 1,
+        at_run_ms: 0,
+        segments: segments.iter().map(|segment| (*segment).clone()).collect(),
+    };
+    plan_turn(&turn, settings)
+}
+
+/// What the mixer plays of `plan` over `band`, if there is one, from its
+/// start to a little past its end.
+fn hear(
+    settings: &TrainingSettings,
+    plan: &PlannedTransmission,
+    band: Option<BandVoice>,
+) -> Vec<f32> {
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.set_band(band, &mut swept);
+    let receiver = FilterDesign::from_settings(settings);
+    mixer.start(SendVoice::new(plan, &receiver, None, SR, 0.0), &mut swept);
+    render(
+        &mut mixer,
+        ((plan.wanted.duration_sec + 0.1) * f64::from(SR)) as usize,
+    )
+}
+
+/// Your message in a contest is not received, so the receiver's filter
+/// takes none of it: sent a kilohertz off the narrowest filter, which all
+/// but silences it through the receiver, it is heard at the monitor's level.
+#[test]
+fn your_message_is_not_filtered() {
+    let mut settings = hiss();
+    settings.band.filter_width_hz = FILTER_WIDTH_MIN;
+    let off = settings.side_tone_center() + 1_000.0;
+    let mine = segment(&settings, Sender::You, "TTT", keyer(off, 1.0), 0.0);
+    let dry = planned_turn(&settings, &[&mine]);
+    let monitored = f64::from(loudest(&hear(&settings, &dry, None)));
+    assert!(
+        (monitored - MONITOR_LEVEL).abs() < 0.02 * MONITOR_LEVEL,
+        "your message peaked at {monitored}"
+    );
+    let received = PlannedTransmission {
+        dry_wanted: false,
+        ..dry
+    };
+    let filtered = f64::from(loudest(&hear(&settings, &received, None)));
+    assert!(
+        filtered < 0.1 * MONITOR_LEVEL,
+        "through the receiver it peaked at {filtered}"
+    );
+}
+
+/// The AGC never hears your message, so the weakest reply right after it
+/// comes in as it would after silence: over the reply's first 0.3 s the
+/// receiver plays exactly what it plays for the reply alone. Through the
+/// receiver, as your message used to go, it ducked them.
+#[test]
+fn your_message_never_ducks_the_reply_after_it() {
+    let settings = hiss();
+    let centre = settings.side_tone_center();
+    let mine = segment(
+        &settings,
+        Sender::You,
+        "K5XYZ 5NN TT7",
+        keyer(centre, 1.0),
+        0.0,
+    );
+    let weak = keyer(centre, VOLUME_MIN);
+    let reply = segment(
+        &settings,
+        Sender::Caller(0),
+        "TU 5NN 214",
+        weak,
+        mine.end_sec + 0.1,
+    );
+    let sr = f64::from(SR);
+    let first = (reply.start_sec * sr) as usize..((reply.start_sec + 0.3) * sr) as usize;
+    let on_band = || Some(band(&settings, 3));
+
+    let after = hear(
+        &settings,
+        &planned_turn(&settings, &[&mine, &reply]),
+        on_band(),
+    );
+    let alone = hear(&settings, &planned_turn(&settings, &[&reply]), on_band());
+    assert_eq!(after[first.clone()], alone[first.clone()]);
+
+    let mut received = planned_turn(&settings, &[&mine, &reply]);
+    received.dry_wanted = false;
+    let ducked = hear(&settings, &received, on_band());
+    let level = db(power(&ducked[first.clone()]) / power(&alone[first]));
+    assert!(
+        level < -1.0,
+        "through the receiver the reply came in {level:.2} dB down"
+    );
+}
+
+/// Your message joins after the AGC, not under its gain: on a band whose
+/// static, and a caller at full level calling across you, pull the gain
+/// well down, what your message adds to the receiver's output is its own
+/// tones at the monitor's level, sample for sample. Ridden by the gain, it
+/// would duck on every crash.
+#[test]
+fn your_message_is_not_ridden_by_the_agc() {
+    let mut settings = TrainingSettings::default();
+    settings.band.qsb_enabled = false;
+    settings.band.qrn_level = 1.0;
+    let centre = settings.side_tone_center();
+    let mine = segment(
+        &settings,
+        Sender::You,
+        "K5XYZ 5NN TT7",
+        keyer(centre, 1.0),
+        0.0,
+    );
+    let loud = segment(
+        &settings,
+        Sender::Caller(0),
+        "K5XYZ K5XYZ K5XYZ",
+        keyer(centre, VOLUME_MAX),
+        0.2,
+    );
+    assert!(loud.end_sec > mine.end_sec);
+    let both = planned_turn(&settings, &[&mine, &loud]);
+    let callers = planned_turn(&settings, &[&loud]);
+    let on_band = || Some(band(&settings, 3));
+
+    let with = hear(&settings, &both, on_band());
+    let without = hear(&settings, &callers, on_band());
+    let alone = PlannedTransmission {
+        others: Vec::new(),
+        ..both
+    };
+    let yours = hear(&settings, &alone, None);
+    assert_eq!(with.len(), without.len());
+    for (i, ((a, b), y)) in with.iter().zip(&without).zip(&yours).enumerate() {
+        assert!((a - b - y).abs() < 1e-6, "at {i}: {} against {y}", a - b);
+    }
+
+    // The gain it was not under, as the band rides the caller alone.
+    let mut ridden = band(&settings, 3);
+    let receiver = FilterDesign::from_settings(&settings);
+    let mut voice = SendVoice::new(&callers, &receiver, None, SR, 0.0);
+    ridden.reserve_stations(voice.callers_now());
+    let lowest = (0..(mine.end_sec * f64::from(SR)) as usize)
+        .map(|_| ridden.next(voice.next().heard).gain)
+        .fold(1.0, f64::min);
+    assert!(
+        lowest < 0.5,
+        "under your message the gain fell only to {lowest}"
+    );
+}
+
+/// A turn stretched to its last reply plays until that reply has been
+/// heard, though your message ended long before it: dry or not, a send is
+/// as long as its plan.
+#[test]
+fn a_stretched_turn_finishes_once_its_last_reply_is_heard() {
+    let settings = hiss();
+    let centre = settings.side_tone_center();
+    let mine = segment(&settings, Sender::You, "TU", keyer(centre, 1.0), 0.0);
+    let slow = StationVoice {
+        char_wpm: 12.0,
+        effective_wpm: 12.0,
+        ..keyer(centre, 1.0)
+    };
+    let reply = segment(
+        &settings,
+        Sender::Caller(0),
+        "K5XYZ",
+        slow,
+        mine.end_sec + 0.3,
+    );
+    let dry = planned_turn(&settings, &[&mine, &reply]);
+    assert!(dry.wanted.duration_sec > mine.end_sec + 1.0);
+    let latency = SR as usize / 10;
+    let finishing = |plan: &PlannedTransmission| {
+        let mut mixer = Mixer::new(SR);
+        let mut swept = Swept::new();
+        let voice = SendVoice::new(plan, &FilterDesign::from_settings(&settings), None, SR, 0.0);
+        let finished = voice.finished_flag();
+        mixer.start(voice, &mut swept);
+        let mut played = Vec::new();
+        while !finished.load(Ordering::Acquire) && played.len() < SR as usize * 10 {
+            let mut out = vec![0.0f32; 64];
+            mixer.render(&mut out, latency);
+            played.extend(out);
+        }
+        played
+    };
+
+    let played = finishing(&dry);
+    let sr = f64::from(SR);
+    let ends = (dry.wanted.duration_sec * sr).ceil() as usize;
+    assert!(
+        played.len() >= ends + latency && played.len() <= ends + latency + SR as usize / 10,
+        "finished after {} frames, its reply heard by {}",
+        played.len(),
+        ends + latency
+    );
+    let last = dry.others[0].events.last().expect("a reply");
+    let from = (last.start_sec * sr) as usize;
+    assert!(loudest(&played[from..ends]) > 0.1, "the reply was cut");
+    let received = PlannedTransmission {
+        dry_wanted: false,
+        ..dry
+    };
+    assert_eq!(finishing(&received).len(), played.len());
+}
+
 /// The output stage catches what is too loud rather than squaring it off:
 /// the same curve the band is calibrated through, applied once to the sum.
 #[test]
@@ -357,13 +605,15 @@ fn counted(body: impl FnOnce()) -> Counts {
 
 /// A pile-up, as a session sends it: the station being copied, with every
 /// other station the settings allow calling across it, through the receiver
-/// and under the fading.
-fn pile_up(settings: &TrainingSettings, rng: &mut SplitMix64, at_sec: f64) -> SendVoice {
+/// and under the fading. `dry`, the station being copied is played past the
+/// receiver, as your message in a contest is.
+fn pile_up(settings: &TrainingSettings, rng: &mut SplitMix64, at_sec: f64, dry: bool) -> SendVoice {
     let voice = resolve_station(settings, rng);
     let call = Transmission::calling(settings, "CQ TEST", voice, rng, |rng| {
         generate_callsign(CALLSIGN_TIER_MAX, rng)
     });
-    let plan = plan_transmission(&call, settings);
+    let mut plan = plan_transmission(&call, settings);
+    plan.dry_wanted = dry;
     SendVoice::new(
         &plan,
         &FilterDesign::from_settings(settings),
@@ -386,7 +636,8 @@ fn on_ui(mixer: &Mutex<Mixer>, change: impl FnOnce(&mut Mixer, &mut Swept)) {
 /// on the system, and a callback that waits is a hole in the sound.
 ///
 /// A minute of a busy band — its stations, its static, a pile-up calling
-/// over the sends, the fading on them — while the UI rebuilds the band as a
+/// over the sends, the fading on them, every other send with its wanted
+/// station played past the receiver — while the UI rebuilds the band as a
 /// dragged slider does and takes it away, starts sends over each other,
 /// stops one and lets another play out, keys the paddle's sidetone, and now
 /// and then holds the mixer through a buffer — and for a moment rebuilds the
@@ -447,7 +698,8 @@ fn the_audio_callback_never_allocates_or_frees() {
             on_ui(&mixer, |mixer, swept| mixer.set_band(next, swept));
         }
         if burst || (cycle < 100 && cycle % 8 == 0) {
-            let voice = pile_up(&settings, &mut rng, played as f64 / f64::from(SR));
+            let at_sec = played as f64 / f64::from(SR);
+            let voice = pile_up(&settings, &mut rng, at_sec, sends.len() % 2 == 0);
             sends.push(voice.finished_flag());
             on_ui(&mixer, |mixer, swept| mixer.start(voice, swept));
         }

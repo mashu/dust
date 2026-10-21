@@ -10,8 +10,27 @@ use crate::morse::morse_for;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
 use crate::timing::{
     Interferer, PlannedTransmission, PlaybackPlan, StationVoice, Transmission,
-    plan_morse_playback_for,
+    plan_morse_playback_at, plan_morse_playback_for,
 };
+
+/// How loud you hear your own message, as a peak of full scale. It is
+/// played past the receiver, as a rig's sidetone is, so no band setting
+/// moves its level or takes any of it away.
+///
+/// Half of full scale: about 3 dB under the paddle's sidetone at the default
+/// volume floor (0.7), so a message sounds like your own keying; 4.4 dB over
+/// the loudest caller (0.3, before the AGC), so at the hardest noise the
+/// floor sits about 11 dB under it through the default filter, where the
+/// loudest caller stands 7 dB clear; and under the output stage's limiter,
+/// which starts to bend at 0.7, so it is never bent on its own and the
+/// band's crests on top of it are caught rather than clipped.
+///
+/// The worst band is the widest filter at the hardest noise and static:
+/// there your message is only about 5 dB over the band's RMS, and the
+/// limiter takes the band's crests on top of it for some 6% of the time. A
+/// steady tone still stands well clear of hiss spread over two kilohertz,
+/// and going louder would only bend more of it.
+pub const MONITOR_LEVEL: f64 = 0.5;
 
 /// Who sends a segment of a turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,8 +101,9 @@ impl Turn {
 }
 
 /// The voice you send in: the receiver's centre pitch, your speed with no
-/// Farnsworth spacing, a keyer's fist, and full level, so even the hardest
-/// band leaves it over the noise.
+/// Farnsworth spacing, and a keyer's fist. Its volume is full, but
+/// [`plan_turn`] plays it at [`MONITOR_LEVEL`] whatever the volume says:
+/// you hear your message as you send it, not through the receiver.
 pub(super) fn your_voice(settings: &TrainingSettings, wpm: f64) -> StationVoice {
     StationVoice {
         tone_hz: settings.side_tone_center(),
@@ -137,15 +157,22 @@ pub(super) fn sounding_at(spans: &[(usize, f64, f64)], at_sec: f64) -> Option<us
 
 /// The sound of `turn`. `wanted` is your message, stretched to end with the
 /// last reply, because both players play a send for as long as `wanted`
-/// lasts. `others` are the replies, each after its delay and never cut,
-/// which is why [`crate::plan_transmission`], which cuts them where
+/// lasts. It is dry: played past the receiver at [`MONITOR_LEVEL`], so the
+/// filter never shapes it and the AGC never ducks a reply for it. `others`
+/// are the replies, through the receiver, each after its delay and never
+/// cut, which is why [`crate::plan_transmission`], which cuts them where
 /// `wanted` ends, is not used. A turn of callers alone has a `wanted` with
 /// no tones in it.
 pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmission {
     let mut wanted: Option<PlaybackPlan> = None;
     let mut others = Vec::new();
     for segment in &turn.segments {
-        let mut plan = plan_morse_playback_for(&segment.text, settings, &segment.voice);
+        let mut plan = match segment.who {
+            Sender::You => {
+                plan_morse_playback_at(&segment.text, settings, &segment.voice, MONITOR_LEVEL)
+            }
+            Sender::Caller(_) => plan_morse_playback_for(&segment.text, settings, &segment.voice),
+        };
         for tone in &mut plan.events {
             tone.start_sec += segment.start_sec;
         }
@@ -177,14 +204,18 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
         }
     });
     wanted.duration_sec = wanted.duration_sec.max(ends);
-    PlannedTransmission { wanted, others }
+    PlannedTransmission {
+        wanted,
+        others,
+        dry_wanted: true,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::rng::SplitMix64;
-    use crate::timing::{DEFAULT_TARGET_GAIN, resolve_station};
+    use crate::timing::{DEFAULT_TARGET_GAIN, plan_transmission, resolve_station};
 
     fn settings() -> TrainingSettings {
         let mut settings = TrainingSettings::default();
@@ -254,12 +285,12 @@ mod tests {
         }
     }
 
-    /// Your tones are a keyer's at full level: every one the same gain, its
-    /// envelope never above it, nothing faded.
+    /// Your tones are a keyer's at the monitor's level: every one the same
+    /// gain, its envelope never above it, nothing faded.
     #[test]
     fn your_tones_are_unfaded() {
         let planned = plan_turn(&turn(), &settings());
-        let gain = DEFAULT_TARGET_GAIN * VOLUME_MAX;
+        let gain = MONITOR_LEVEL;
         assert!(!planned.wanted.events.is_empty());
         for tone in &planned.wanted.events {
             assert!((tone.target_gain - gain).abs() < 1e-12);
@@ -275,6 +306,36 @@ mod tests {
             .map(|tone| tone.duration_sec)
             .fold(f64::MAX, f64::min);
         assert!((shortest - 1.2 / 30.0).abs() < 1e-9);
+    }
+
+    /// Your message is played past the receiver, and only yours: `wanted`
+    /// holds your tones alone, at the monitor's level, and each caller comes
+    /// through the receiver at its own, as a group session's every station
+    /// does.
+    #[test]
+    fn your_message_is_dry_and_the_callers_are_not() {
+        let turn = turn();
+        let settings = settings();
+        let planned = plan_turn(&turn, &settings);
+        assert!(planned.dry_wanted);
+        let (mine, reply) = (&turn.segments[0], &turn.segments[1]);
+        let yours = plan_morse_playback_for(&mine.text, &settings, &mine.voice);
+        assert_eq!(planned.wanted.events.len(), yours.events.len());
+        assert_eq!(planned.others.len(), 1);
+        let level = DEFAULT_TARGET_GAIN * reply.voice.volume;
+        assert!(level < MONITOR_LEVEL);
+        for tone in &planned.others[0].events {
+            assert!((tone.target_gain - level).abs() < 1e-12);
+        }
+
+        // A turn of callers alone is still yours to monitor: nothing in it.
+        let mut callers = turn.clone();
+        callers.segments.remove(0);
+        let alone = plan_turn(&callers, &settings);
+        assert!(alone.dry_wanted && alone.wanted.events.is_empty());
+
+        let transcript = turn.transcript().expect("a transcript");
+        assert!(!plan_transmission(&transcript, &settings).dry_wanted);
     }
 
     /// Written down, a turn is your message and each reply after its delay;

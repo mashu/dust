@@ -18,6 +18,7 @@ pub use envelope::{EnvelopePoint, EnvelopeShape, envelope_shape};
 #[cfg(test)]
 pub(crate) use pileup::resolve_pileup;
 pub use pileup::{Interferer, Transmission};
+pub(crate) use plan::plan_morse_playback_at;
 pub use plan::{
     DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, ToneEvent, plan_morse_playback_for,
     plan_transmission,

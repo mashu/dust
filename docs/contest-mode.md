@@ -15,9 +15,11 @@ the contest results (`src/ui/contest_results.rs`), also from History. So do
 the settings in Contest (the Character set card's contest, Your station in
 `src/ui/settings_station.rs`, and the controls a contest hides), the Home
 hero, the stats pills and notes, the privacy texts, the credits and the
-backup merge. Slices 1c and 1d have landed too: Simple QSO, with its names
-and reports (`contest/data/`) and `myName`, and the contester's keys with
-their buttons on the key bar. Nobody can pick Contest yet (§14).
+backup merge. Slices 1b, 1c and 1d have landed too: your own message
+played dry, around the receiver at a fixed monitor level (5.3); Simple QSO,
+with its names and reports (`contest/data/`) and `myName`; and the
+contester's keys with their buttons on the key bar. Nobody can pick Contest
+yet (§14).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -583,7 +585,7 @@ Logged QSOs cannot be edited, as in MRCE.
 ### 5.1 A turn is one send
 
 The players hold one send; starting another releases it
-(`mixer/mod.rs:100-106`, `web/mod.rs:229-230`), and desktop UI timers fire
+(`mixer/mod.rs:111-117`, `web/mod.rs:233-240`), and desktop UI timers fire
 too late for a 0.1–0.6 s reply gap (`paddle.rs:94-96`). So each of your
 actions is one send, a turn, holding your message and every reply:
 
@@ -596,8 +598,8 @@ Your message is fixed when you key, so every reply can be decided then. A
 pure `plan_turn` builds the plan. `wanted` is your message, with
 `duration_sec` stretched to the last reply's end; both players play to
 `wanted`'s length (native `SendVoice` ends there plus its tail,
-`mixer/send.rs:150-170`). `others` are the replies, delayed and never cut,
-so `plan_transmission`, which cuts at `wanted`'s end (`plan.rs:52-66`), is
+`mixer/send.rs:185-201`). `others` are the replies, delayed and never cut,
+so `plan_transmission`, which cuts at `wanted`'s end (`plan.rs:58-72`), is
 not used. A turn of callers only has a `wanted` with no tones. Only
 patience, the countdown, the resume timer and the run end use UI timers,
 all seconds long. The app gains `start_planned` beside `start_send`
@@ -658,7 +660,7 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   with no `Player` borrow held (`player.rs:194-212`). The runtime dispatches
   `TurnStarted{id, heard_from}`: the start plus the player's lead and
   latency estimate (web `schedule_lead_sec` and `heard_latency`,
-  `wait.rs:124-132`, `web/mod.rs:114`; native `latency_frames`,
+  `wait.rs:124-132`, `web/mod.rs:122`; native `latency_frames`,
   `audio/native.rs:272-280`). A
   caller's segment counts as heard once it has reached the ear; your own
   count from the start, which is lenient. Each player's send says it as
@@ -672,19 +674,45 @@ You hear your messages from phase 1, at the side-tone centre
 (`settings/ranges.rs:175-178`) and your run speed (6.6), with no Farnsworth
 spacing and no fist variation.
 
-- **Slice 1a** plays it as `wanted` through the receiver at `VOLUME_MAX`.
-  At the hardest noise it is only a few dB over the floor (2 dB SNR at full
-  level, `band/calibration.rs:35-36`), and the AGC ducks a weak reply's
-  first 0.3 s: an interim.
-- **Slice 1b** gives it a dry path at a fixed monitor level, marked
-  `dry_wanted` in the plan. The web player schedules it into
-  `chain.floor_in`, past the filter and AGC but through the limiter
-  (`ScheduledSend::schedule` takes an `into` node, `web/send.rs:21-27`);
-  native sums an unfiltered `SendVoice` after `send * gain` in
-  `Mixer::render` (`mixer/mod.rs:155-176`).
+- **Slice 1a** played it as `wanted` through the receiver at `VOLUME_MAX`.
+  At the hardest noise it was only a few dB over the floor (2 dB SNR at
+  full level, `band/calibration.rs:35-36`), and the AGC ducked a weak
+  reply's first 0.3 s: an interim.
+- **Slice 1b**, as built, plays it dry, as a rig's sidetone is played.
+  `plan_turn` marks the plan `dry_wanted` (`PlannedTransmission`,
+  `timing/plan.rs:36-45`) and plans your tones at `MONITOR_LEVEL`, half of
+  full scale (`contest/turn.rs:16-33`), whatever the voice's volume, which
+  could reach only 0.3 (`plan_morse_playback_at`). That is about 3 dB under
+  the paddle's sidetone at the default volume floor (0.7,
+  `player.rs:228-233`), 4.4 dB over the loudest caller before the AGC,
+  about 11 dB over the hardest noise through the default filter (the
+  loudest caller is 7 dB over it), and under the limiter's knee (0.7), so
+  alone it is never bent and the band's crests on it are caught, not
+  clipped. The worst band is the widest filter (2000 Hz) at the hardest
+  noise and static: there it is only about 5 dB over the band's RMS, and
+  the limiter catches the band's crests on it some 6% of the time. A
+  steady tone still stands well clear of hiss two kilohertz wide, and a
+  louder level would only bend more of it. Every turn's `wanted` is dry, a
+  turn of callers alone included (it has no tones); `plan_transmission`
+  never marks one, so group sessions and the band preview play as before.
+  - The web player schedules it into `chain.floor_in`, around the filter,
+    the fading and the AGC but through the limiter, as the paddle's
+    sidetone goes: `ScheduledSend::schedule` takes `dry_into` beside
+    `into` and gives your message a gain of its own, which a stop ramps
+    down with the other (`web/send.rs:12-81`, `web/mod.rs:246-256`).
+  - Natively one `SendVoice` holds your message apart from the stations
+    it filters, unfaded, and gives both each sample (`SendSample { heard,
+    dry }`, `mixer/send.rs:119-149`); `Mixer::render` adds `dry` after
+    `heard * gain`, before the limiter, so the AGC never hears it
+    (`mixer/mod.rs:187-191`). A stop releases both.
+  - The callers keep their path through the filter, QSB-free, and the AGC.
+    The send's length and `PlaybackWait` still follow the stretched
+    `wanted`, and the background's reservation counts `plan.others` only
+    (5.6). The silent player and the recorder are unchanged; the recorder
+    keeps each plan, `dry_wanted` with it.
 
 The turn plays from a copy of the run settings with `qsb_enabled = false`:
-QSB is attached per send (`Qsb::of`, `audio/native.rs:241`) and `BandKey`
+QSB is attached per send (`Qsb::of`, `audio/native.rs:244`) and `BandKey`
 has no QSB field (`band/key.rs:19-49`), so the band never rebuilds. Callers
 fade on their own from phase 2 (5.5).
 
@@ -708,9 +736,9 @@ phase 2 adds `place_contest_callers`:
 ### 5.5 Per-caller QSB (phase 2)
 
 The envelope curves carry the gain: `build_envelope_curve` bakes
-`target_gain` in (`plan.rs:99-102`); the native player reads `target_gain`
-only for a curve with fewer than two points (`mixer/send.rs:63-66`), the
-web player only when the browser refuses a curve (`web/send.rs:130-139`).
+`target_gain` in (`plan.rs:121-124`); the native player reads `target_gain`
+only for a curve with fewer than two points (`mixer/send.rs:64-67`), the
+web player only when the browser refuses a curve (`web/send.rs:164-173`).
 
 Each caller gets the band's `Qsb` model at its own time offset, following
 the Band card's QSB switch. `plan_turn` bakes the fade into each tone's
@@ -718,7 +746,7 @@ curve point by point at `ENVELOPE_SAMPLE_RATE` (`envelope.rs:9`), one `Arc`
 per tone, and scales `target_gain` to match. The QSB control runs
 0.03–1.5 Hz (`settings/mod.rs:47-48`) with components up to 2.3× that
 (`band/qsb.rs:26`), so a fade held per tone would step audibly. The web
-curve cache (`web/send.rs:94-109`) then holds a few hundred entries per
+curve cache (`web/send.rs:128-143`) then holds a few hundred entries per
 turn. No player changes. Flutter (3–33 Hz, `DxStn.pas:97-99`) waits for
 phase 5.
 
@@ -728,7 +756,7 @@ The band runs as now (`band/mod.rs:9-30`); its traffic already sends contest
 phrases, more as `stationsMax` rises (`activity.rs:194-195, 1281-1305`), and
 at one station it is empty (`activity.rs:43-50`). While callers sound, the
 background gives up slots counted from `plan.others.len()`
-(`mixer/mod.rs:150-154`; web `Reservation`), so your message takes none.
+(`mixer/mod.rs:162-166`; web `Reservation`), so your message takes none.
 On-frequency QRM comes with Caller habits `rough` (phase 4): a scripted
 station at 30–50 WPM sending `QRL?`, a long CQ or `<you> QSY QSY`
 (`Contest.pas:783`, `QrmStn.pas`).
@@ -742,8 +770,13 @@ clock parks and a send waits (`wait.rs:88-107`); the run pauses first.
 ### 5.8 Later
 
 Phase 5 adds a receiver gate after the AGC while you send, as a non-QSK rig
-mutes (`Contest.pas:806-834`); per-station gain for flutter; and a player
-that starts a send at a given time, so a continuation splices in a gap.
+mutes (`Contest.pas:806-834`). Since 1b both players hold your message
+apart from what the receiver hears (`SendSample::dry` natively, its own
+gain into `floor_in` in the browser), so the gate keys off the dry plan and
+closes only the receiver's output; until then the band runs on under your
+message, as with full break-in. Phase 5 also adds per-station gain for
+flutter, and a player that starts a send at a given time, so a continuation
+splices in a gap.
 
 ## 6. Clock, pause and counters
 
@@ -1691,7 +1724,7 @@ whichever is live.
 | `rules.rs`, `esm.rs`, `clock.rs` | the `ContestRules` table; `esm()`, `Fields::edit`; `RunClock` |
 | `machine.rs` | `ContestMachine`, events, effects, `ContestView` |
 | `caller.rs` | caller states, patience, matching, replies, collisions, QRS |
-| `turn.rs` | `Turn`, segments, continuations, `plan_turn`, per-caller fades |
+| `turn.rs` | `Turn`, segments, continuations, `plan_turn`, `MONITOR_LEVEL`, per-caller fades |
 | `place.rs` | `place_contest_callers` (phase 2) |
 | `exchange.rs`, `parse.rs` | canonical forms, cut numbers, keyed tokens; `parse_exchange` |
 | `serial.rs`, `check.rs`, `score.rs` | serials; `QsoCheck`; `contest_score`, rates |
@@ -1709,7 +1742,8 @@ disk, `Station`, `wild`); `settings/curriculum.rs` (Contest → `LevelAxis::Call
 `auto_level.rs` (Contest arms; `impl CallSource for Sampler`); `stats.rs`,
 `board.rs`, `speed.rs` (history rows, kinds, assisted runs, contest speed
 evidence, no adaptive path); `timing/pileup.rs` (reach helpers
-`pub(crate)`); `soak.rs`, `lib.rs` (the contest soak; exports).
+`pub(crate)`); `timing/plan.rs` (`dry_wanted`, `plan_morse_playback_at`,
+1b); `soak.rs`, `lib.rs` (the contest soak; exports).
 
 **New in the app:** `src/contest_runtime.rs` (`LiveContest`, start,
 dispatch, effects, `play_turn`, finish, the heartbeat check);
@@ -1761,7 +1795,8 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   Sprint list pinned; 85 sections, named by list version; hand-worked logs
   per contest; verified ≤ raw; a dupe scores 0, is no error, counts clean;
   KL7 and KH6 are CQ WW countries.
-- **Turns:** `wanted` ends last; no reply is cut; your tones are unfaded;
+- **Turns:** `wanted` ends last; no reply is cut; your tones are unfaded,
+  at the monitor's level; your message is dry and the callers are not;
   callers fade independently and smoothly; a continuation keeps every
   character of your message; capacity follows reach ÷ 60 Hz + 1.
 
@@ -1861,14 +1896,22 @@ per further QSO.
 
 **Runtime tests** (fake player): a full run stores a log and shows
 Results; Exit with one QSO shows Results; the recorder sees QSB `None`,
-`wanted` last and no reply cut; a cancel never pauses, a failure does;
+`wanted` last and no reply cut, and a dry `wanted` in every turn and in no
+group session; a cancel never pauses, a failure does;
 `on_start` dispatches `TurnStarted`; pause releases the audio and sends
 `keep_awake(false)`; `Paused{Sound}` then Resume opens a player before the
 1 s timer; a key typed between two renders survives; `Pause{Hidden}` and a
 heartbeat gap both credit the gap as paused; a bad own call refuses to
 start; a turn waiting out a retry never starts over a newer one, and an
 Esc before a turn's task runs stops it. A unit test drives
-`audio::silent::MorsePlayer` through a stretched turn and a cancel.
+`audio::silent::MorsePlayer` through a stretched turn and a cancel. Native
+mixer tests (1b): your message a kilohertz off the narrowest filter still
+peaks at the monitor's level; a weak reply right after it plays exactly as
+it would alone, where through the receiver it was ducked; a stretched turn
+finishes once its last reply is heard, dry or not; over a band whose
+static and a full-level caller pull the AGC well down, your message adds
+exactly its own tones to what is heard, unridden; and a dry send gives
+your tones out unfiltered and unfaded, and stops them with the rest.
 
 **Render tests:** Home in Contest with and without a call; no alphabet,
 group, Experience or Auto level controls; Your station's fields and
@@ -1927,7 +1970,9 @@ ships a release before phase 1.
   `start_session` followed, `start_session` ran such settings as Callsigns
   at the same tier, and that arm removed the shim.
 - **1b Honest clock and sound.** The dry path for your message. The rate
-  and − / + came with 1a's run screen.
+  and − / + came with 1a's run screen. Landed: `plan_turn` marks your
+  message `dry_wanted` at `MONITOR_LEVEL`, and both players play it around
+  the receiver, through the limiter (5.3).
 - **1c Simple QSO.** Names data, the RST and NAME exchange, `myName`.
   Landed, with Morse Walker credited for `BK` and `73 EE`.
 - **1d Contester keys.** F2, F3, F5, `;`, `.`, `,`, `+`, Shift+Enter, and

@@ -5,7 +5,8 @@
 //!   AGC as a compressor, and the soft limiter.
 //! - [`receiver`]: the receiver's filter as IIR nodes, crossfaded on a retune.
 //! - [`stream`]: the band, generated here and streamed in.
-//! - [`send`]: one send's tones, scheduled.
+//! - [`send`]: one send's tones, scheduled, your own in a contest around the
+//!   receiver.
 //! - [`sidetone`]: the paddle's sidetone.
 //! - [`param`]: the fades and the letting go every part of it needs.
 
@@ -196,8 +197,10 @@ impl MorsePlayer {
     fn release_send(&mut self) {
         self.released.collect(self.ctx.current_time());
         if let Some(send) = self.send.take() {
-            let (gain, done) = send.release(&self.ctx);
-            self.released.retire(gain, done);
+            let (gains, done) = send.release(&self.ctx);
+            for gain in gains {
+                self.released.retire(gain, done);
+            }
         }
     }
 }
@@ -240,9 +243,13 @@ impl MorseBackend for MorsePlayer {
         // and the waiter alike.
         let lead = schedule_lead_sec(reported_latency(&self.ctx, "baseLatency"));
         let start = self.ctx.current_time() + lead;
+        // Your own message in a contest goes where the paddle's sidetone
+        // goes: around the receiver, whose filter and AGC are for what you
+        // copy, but through the limiter.
         let send = ScheduledSend::schedule(
             &self.ctx,
             &self.chain.mix,
+            &self.chain.floor_in,
             plan,
             Qsb::of(&settings.band),
             start,

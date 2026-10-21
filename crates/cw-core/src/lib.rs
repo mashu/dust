@@ -52,8 +52,8 @@ pub use callsign::{
 pub use contest::{
     AirView, CallSource, CallerHabits, ContestEffect, ContestEvent, ContestKind, ContestLog,
     ContestMachine, ContestPhase, ContestRules, ContestRun, ContestScore, ContestView, EntryField,
-    Esm, ExchangeState, Field, Fields, Fill, LogRow, MessagePart, Multiplier, OpKey, PauseWhy,
-    PerSide, QsoCheck, QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField, Reading,
+    Esm, ExchangeState, Field, Fields, Fill, LogRow, MONITOR_LEVEL, MessagePart, Multiplier, OpKey,
+    PauseWhy, PerSide, QsoCheck, QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField, Reading,
     RowStatus, RunClock, RunErrors, RunQso, RunStyle, RunSummary, ScoredQso, Scoring, Segment,
     Sender, SerialFit, SerialModel, Side, StoredLog, Tally, Turn, WPX_SERIALS, check_qso,
     contest_score, cut_serial, esm, keyed_token, loggable, message_text, normalize_call,

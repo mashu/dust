@@ -52,7 +52,7 @@ pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummar
 pub use rules::{ContestRules, Fill, Multiplier, PerSide, Scoring, Side};
 pub use score::{ContestScore, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SerialFit, SerialModel, WPX_SERIALS};
-pub use turn::{Segment, Sender, Turn, plan_turn};
+pub use turn::{MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
 
 /// Run time is kept in milliseconds; rates and contests are told in minutes
 /// and hours.

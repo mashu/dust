@@ -5,9 +5,10 @@
 //! Everything the receiver plays is worked out here, a sample at a time and
 //! in one place, as one receiver would: the send through the filter, the
 //! band, the AGC hearing the two together and riding both, bands handing
-//! over to each other. The output stage — the paddle's sidetone, and the
-//! limiter on the lot — is added by the stream, which runs it even when the
-//! UI holds the mixer for a moment.
+//! over to each other. Your own message in a contest joins after all of it,
+//! as a rig's sidetone does. The output stage — the paddle's sidetone, and
+//! the limiter on the lot — is added by the stream, which runs it even when
+//! the UI holds the mixer for a moment.
 
 mod band;
 mod send;
@@ -164,7 +165,7 @@ impl Mixer {
             band.reserve_stations(callers);
         }
         for slot in out.iter_mut() {
-            let mut send = self.send.as_mut().map_or(0.0, SendVoice::next);
+            let mut send = self.send.as_mut().map(SendVoice::next).unwrap_or_default();
             for old in &mut self.retiring {
                 send += old.next();
             }
@@ -174,16 +175,20 @@ impl Mixer {
             // behind.
             let mut gain = None;
             if let Some(band) = self.band.as_mut() {
-                let played = band.next(send);
+                let played = band.next(send.heard);
                 background += played.band;
                 gain = Some(played.gain);
             }
             for band in self.fading.iter_mut().rev() {
-                let played = band.next(send);
+                let played = band.next(send.heard);
                 background += played.band;
                 gain.get_or_insert(1.0 + (played.gain - 1.0) * played.weight);
             }
-            *slot += (background + send * gain.unwrap_or(1.0)) as f32;
+            // Your own message comes in after the AGC: the receiver never
+            // hears it, so it neither ducks the reply that follows nor is
+            // shaped by the filter, and only the limiter is past it.
+            let heard = send.heard * gain.unwrap_or(1.0);
+            *slot += (background + heard + send.dry) as f32;
         }
         for send in self.send.iter().chain(&self.retiring) {
             send.settle(latency);
