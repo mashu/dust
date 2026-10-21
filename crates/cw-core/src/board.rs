@@ -22,7 +22,6 @@
 //! the board with it. Two equal scores are placed in the order they were set:
 //! the first to reach a score holds the higher place, as on any record list.
 
-use crate::contest::CONTEST_MARK;
 use crate::session::SessionResult;
 use crate::settings::CharSetMode;
 
@@ -86,16 +85,6 @@ fn a_whole_run(session: &SessionResult) -> bool {
     })
 }
 
-/// The contest a run was of, by its mark: `wpx` of `contest:wpx`. None for
-/// any other session.
-fn contest_kind(session: &SessionResult) -> Option<&str> {
-    if session.char_set_mode != CharSetMode::Contest {
-        return None;
-    }
-    let marked = session.alphabet_fingerprint.strip_prefix(CONTEST_MARK)?;
-    marked.split(':').next()
-}
-
 fn of_mode(session: &SessionResult, mode: Option<CharSetMode>) -> bool {
     mode.is_none_or(|mode| session.char_set_mode == mode)
 }
@@ -150,10 +139,10 @@ pub fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize,
     let session = sessions
         .iter()
         .find(|session| session.timestamp == timestamp)?;
-    let kind = contest_kind(session);
+    let kind = session.contest_name();
     let board: Vec<BoardEntry> = score_board(sessions, Some(session.char_set_mode))
         .into_iter()
-        .filter(|entry| contest_kind(&sessions[entry.index]) == kind)
+        .filter(|entry| sessions[entry.index].contest_name() == kind)
         .collect();
     let place = board
         .iter()

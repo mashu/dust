@@ -573,7 +573,89 @@ fn results_renders_the_score_ring_and_rows() {
     assert!(html.contains("Unlocked a new character"));
     assert!(html.contains("50%"));
     assert!(html.contains("1/2"));
+    assert!(html.contains(">Points<"), "Dust's points read Points");
+    assert!(!html.contains(">Score<"));
     assert!(!html.contains("place-banner"), "no place, no banner");
+}
+
+/// A contest run's results: the share of QSOs logged clean, the run in a
+/// sentence, the four tiles, both contest scores with what the checks
+/// found, and the log beside what was really sent.
+#[test]
+fn a_contest_run_has_results_of_its_own() {
+    let html = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_run(
+                    "2026-10-20",
+                    &[("K5XYZ", "214", "K5XYZ", "214"), ("DL2XYZ", "13", "DL2XYZ", "31")],
+                ),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    for shown in [
+        "Run complete",
+        ">CLEAN<",
+        r#"aria-label="50% of QSOs logged clean""#,
+        "50%",
+        "CQ WPX · 10:00",
+        "2 QSOs, 12 an hour. One NR was wrong.",
+        ">QSOs<",
+        ">1/2<",
+        ">Rate<",
+        ">12/h<",
+        ">Accuracy<",
+        ">Points<",
+        "Contest score",
+        ">QSO pts<",
+        ">Mults<",
+        ">Score<",
+        ">Raw<",
+        ">Verified<",
+        "0 busted calls · 1 wrong NR · 0 NIL · 0 dupes",
+        "Log, with what was really sent",
+        "31→13",
+        "wrong NR",
+        "Run again",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("Session complete"), "a run is not a session");
+    assert!(!html.contains("Group by group"));
+    assert!(
+        !html.contains("btn-history"),
+        "fresh from the run: no History"
+    );
+}
+
+/// A run long enough for the board says where it stands among runs of its
+/// own contest.
+#[test]
+fn a_contest_run_is_placed_among_runs_of_its_contest() {
+    let html = render(|| {
+        let qsos: Vec<(String, String)> = (1..=5)
+            .map(|n| (format!("K{n}XYZ"), format!("{n}{n}")))
+            .collect();
+        let rows: Vec<(&str, &str, &str, &str)> = qsos
+            .iter()
+            .map(|(call, nr)| (call.as_str(), nr.as_str(), call.as_str(), nr.as_str()))
+            .collect();
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_run("2026-10-20", &rows),
+                place: Some((3, 14)),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(html.contains("3rd best of your 14 CQ WPX runs"), "{html}");
+    assert!(html.contains("100%"), "every QSO clean");
+    assert!(html.contains("Every one logged clean."));
 }
 
 /// A session that tops the board says so with the gold medal; one further
@@ -1175,10 +1257,11 @@ mod interactions {
             "Groups",
             "Speed",
             "Accuracy",
-            "Score",
+            "Points",
         ] {
             assert!(ui.has(&format!(">{row}<")), "no {row} on the card");
         }
+        assert!(!ui.has(">Score<"), "Dust's points read Points");
         assert!(ui.input_tag("day-2026-09-08").contains("selected"));
         ui.click("day-2026-09-08");
         assert!(!ui.has("day-tip"));

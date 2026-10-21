@@ -54,9 +54,10 @@ pub use contest::{
     ContestMachine, ContestPhase, ContestRules, ContestRun, ContestScore, ContestView, EntryField,
     Esm, ExchangeState, Field, Fields, LogRow, MessagePart, Multiplier, OpKey, PauseWhy, PerSide,
     QsoCheck, QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField, Reading, RowStatus,
-    RunClock, RunStyle, ScoredQso, Scoring, Segment, Sender, SerialFit, SerialModel, Side, Tally,
-    Turn, WPX_SERIALS, check_qso, contest_score, cut_serial, esm, keyed_token, message_text,
-    normalize_call, parse_exchange, plan_turn, rate_at, read_number, send_serial,
+    RunClock, RunErrors, RunQso, RunStyle, RunSummary, ScoredQso, Scoring, Segment, Sender,
+    SerialFit, SerialModel, Side, StoredLog, Tally, Turn, WPX_SERIALS, check_qso, contest_score,
+    cut_serial, esm, keyed_token, message_text, normalize_call, parse_exchange, plan_turn, rate_at,
+    read_number, send_serial,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,

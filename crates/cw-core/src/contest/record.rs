@@ -6,11 +6,13 @@
 //! A build that knows no contests reads it as a callsign session; one that
 //! knows an older log layout keeps the newer log untouched.
 
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
-use super::check::{QsoCheck, QsoText, check_qso};
+use super::check::{QsoCheck, QsoError, QsoText, check_qso};
 use super::exchange::Field;
-use super::score::{ContestScore, ScoredQso, contest_score};
+use super::score::{ContestScore, Rates, ScoredQso, contest_score};
 use super::{ContestKind, RunStyle};
 use crate::alignment::CopyTally;
 use crate::score::{calculate_total_chars, compute_average_response_ms};
@@ -116,6 +118,114 @@ pub struct QsoRecord {
     /// logged.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sc: String,
+    /// How many repeats you asked of the station and heard, as the live
+    /// log counts them. Its groups' sends count only the repeats charged to
+    /// the copy, which leave out one asked while the field already read
+    /// right.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub a: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// One QSO of a stored run, as its results list it: what you logged, and
+/// beside it what the station really sent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunQso {
+    /// Its number in the log, from 1; none for a QSO never logged.
+    pub n: Option<u32>,
+    /// When it was logged or lost, in run time.
+    pub at_ms: u64,
+    /// The call as you logged it, or for a QSO never logged, as you copied
+    /// it.
+    pub call: String,
+    /// The station's call; empty for a NIL logged with nobody heard.
+    pub station: String,
+    /// Each field: what you logged, and what the station sent, empty where
+    /// it sent nothing.
+    pub fields: Vec<(Field, String, String)>,
+    /// The station's speed.
+    pub wpm: Option<f64>,
+    /// How many repeats you asked for, as the live log counted them.
+    pub asked: u32,
+    /// How it checked; none for a QSO never logged.
+    pub check: Option<QsoCheck>,
+}
+
+/// What a run's checks found, counted, for the line under its score.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunErrors {
+    pub busted_calls: u32,
+    /// Each field the run copies, with how many were wrong.
+    pub wrong: Vec<(Field, u32)>,
+    pub nils: u32,
+    /// Stations logged again, which are no error.
+    pub dupes: u32,
+}
+
+/// A stored run in figures, as its History row and its results give them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RunSummary {
+    /// QSOs logged, dupes and NILs among them.
+    pub qsos: usize,
+    /// Those logged clean, a dupe copied right among them.
+    pub clean: usize,
+    /// QSOs an hour over the whole run.
+    pub rate: Option<f64>,
+    /// QSOs logged that you asked a repeat for.
+    pub repeated: usize,
+    /// Stations worked and never logged.
+    pub lost: usize,
+}
+
+/// What became of a contest run's log, as the history says it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StoredLog {
+    /// It reads.
+    Read(RunSummary),
+    /// An older version dropped it: the run's mark alone is left.
+    Dropped,
+    /// It is one this version cannot read: a later layout, or a contest
+    /// that has not shipped here.
+    Unreadable,
+}
+
+impl SessionResult {
+    /// The contest a run was of, by its mark: `wpx` of `contest:wpx`,
+    /// known to this build or not. None for any other session.
+    pub fn contest_name(&self) -> Option<&str> {
+        if self.char_set_mode != CharSetMode::Contest {
+            return None;
+        }
+        let marked = self.alphabet_fingerprint.strip_prefix(CONTEST_MARK)?;
+        marked.split(':').next()
+    }
+
+    /// The contest a run was of, when this build knows it.
+    pub fn contest_kind(&self) -> Option<ContestKind> {
+        self.contest_name().and_then(ContestKind::from_name)
+    }
+
+    /// A contest run's log, when this build can read it.
+    pub fn contest_run(&self) -> Option<ContestRun> {
+        self.contest.as_ref()?.run(self.groups.len())
+    }
+
+    /// What became of a contest run's log; none for any other session.
+    pub fn stored_log(&self) -> Option<StoredLog> {
+        if self.char_set_mode != CharSetMode::Contest {
+            return None;
+        }
+        let Some(log) = &self.contest else {
+            return Some(StoredLog::Dropped);
+        };
+        let summary = log
+            .run(self.groups.len())
+            .and_then(|run| run.summary(&self.groups));
+        Some(summary.map_or(StoredLog::Unreadable, StoredLog::Read))
+    }
 }
 
 impl ContestLog {
@@ -217,100 +327,238 @@ impl ContestRun {
     /// How many of the run's QSOs were logged clean, a dupe copied right
     /// among them; none for groups that are not this run's.
     pub fn clean_qsos(&self, groups: &[GroupResult]) -> Option<usize> {
-        let logged = self.checks(groups)?;
+        Some(self.summary(groups)?.clean)
+    }
+
+    /// The run in figures, its QSOs checked against its session's
+    /// `groups`; none for groups that are not this run's.
+    pub fn summary(&self, groups: &[GroupResult]) -> Option<RunSummary> {
+        let walked = self.walk(groups)?;
+        let logged: Vec<(&QsoRecord, &QsoCheck)> = walked
+            .iter()
+            .filter_map(|walked| Some((walked.qso, &walked.logged.as_ref()?.1)))
+            .collect();
+        let times: Vec<u64> = logged.iter().map(|(qso, _)| qso.t).collect();
+        Some(RunSummary {
+            qsos: logged.len(),
+            clean: logged.iter().filter(|(_, check)| check.is_clean()).count(),
+            rate: Rates::of(&times, self.run_ms).whole_run,
+            repeated: logged.iter().filter(|(qso, _)| qso.a > 0).count(),
+            lost: walked.len() - logged.len(),
+        })
+    }
+
+    /// Every QSO of the run, logged or not, as its results list it, with
+    /// what its station really sent beside what you logged: its session's
+    /// `groups` hold both, and their `timings` the stations' speeds. None
+    /// for groups that are not this run's.
+    pub fn log(&self, groups: &[GroupResult], timings: &[SessionTiming]) -> Option<Vec<RunQso>> {
+        let fields = self.copied()?;
+        let mut logged = 0;
+        let mut out = Vec::new();
+        for walked in self.walk(groups)? {
+            let Walked {
+                qso,
+                call_group,
+                field_groups,
+                ..
+            } = walked;
+            let token = |held: &[String], i: usize, group: fn(&GroupResult) -> &String| {
+                held.get(i)
+                    .or_else(|| field_groups.get(i).map(group))
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let (n, call, check) = match walked.logged {
+                Some((call, check)) => {
+                    logged += 1;
+                    (Some(logged), call, Some(check))
+                }
+                None => {
+                    let call = call_group.map(|group| group.received.clone());
+                    (None, call.unwrap_or_default(), None)
+                }
+            };
+            out.push(RunQso {
+                n,
+                at_ms: qso.t,
+                call,
+                station: call_group.map_or_else(|| qso.sc.clone(), |group| group.sent.clone()),
+                fields: fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, field)| {
+                        let typed = token(&qso.l, i, |group| &group.received);
+                        let sent = token(&qso.s, i, |group| &group.sent);
+                        (*field, typed, sent)
+                    })
+                    .collect(),
+                wpm: timings
+                    .get(walked.groups)
+                    .and_then(<[SessionTiming]>::first)
+                    .and_then(|timing| timing.char_wpm),
+                asked: qso.a,
+                check,
+            });
+        }
+        Some(out)
+    }
+
+    /// What the checks of the run's logged QSOs found, counted; none for
+    /// groups that are not this run's.
+    pub fn errors(&self, groups: &[GroupResult]) -> Option<RunErrors> {
+        let mut errors = RunErrors {
+            wrong: self.copied()?.into_iter().map(|field| (field, 0)).collect(),
+            ..RunErrors::default()
+        };
+        for (_, _, check) in self.checks(groups)? {
+            errors.dupes += u32::from(check.dupe);
+            for error in &check.errors {
+                match error {
+                    QsoError::Nil => errors.nils += 1,
+                    QsoError::Call { .. } => errors.busted_calls += 1,
+                    QsoError::Field(field) => {
+                        if let Some((_, count)) =
+                            errors.wrong.iter_mut().find(|(held, _)| held == field)
+                        {
+                            *count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Some(errors)
+    }
+
+    /// Each logged QSO, checked as it was while the run went on: when it
+    /// was logged, the call as logged, and the check.
+    fn checks(&self, groups: &[GroupResult]) -> Option<Vec<(u64, String, QsoCheck)>> {
+        let walked = self.walk(groups)?;
         Some(
-            logged
-                .iter()
-                .filter(|(_, _, check)| check.is_clean())
-                .count(),
+            walked
+                .into_iter()
+                .filter_map(|walked| {
+                    let (call, check) = walked.logged?;
+                    Some((walked.qso.t, call, check))
+                })
+                .collect(),
         )
     }
 
-    /// Each logged QSO, checked as it was while the run went on against
-    /// what its station sent, which its groups or its record hold: when it
-    /// was logged, the call as logged, and the check.
-    fn checks(&self, groups: &[GroupResult]) -> Option<Vec<(u64, String, QsoCheck)>> {
-        let fields: Vec<Field> = self
-            .fields
+    /// The fields copied from each caller; none if this build does not
+    /// know one.
+    fn copied(&self) -> Option<Vec<Field>> {
+        self.fields
             .iter()
             .map(|name| Field::from_name(name))
-            .collect::<Option<_>>()?;
-        let mut logged = Vec::new();
+            .collect()
+    }
+
+    /// Each QSO of the run with the groups it owns among `groups`, each
+    /// logged one checked as it was while the run went on against what its
+    /// station sent, which its groups or its record hold. None for groups
+    /// that are not this run's.
+    fn walk<'a>(&'a self, groups: &'a [GroupResult]) -> Option<Vec<Walked<'a>>> {
+        let fields = self.copied()?;
+        let mut walked = Vec::new();
         let mut clean: Vec<&str> = Vec::new();
         let mut at = 0;
         for qso in &self.qsos {
-            let owned = groups.get(at..at + qso.g as usize)?;
-            at += qso.g as usize;
-            if qso.k == LOST {
-                continue;
-            }
-            // A logged QSO's call group comes first, unless an earlier QSO
-            // holds the station's copy; its field groups follow, unless the
+            let range = at..at + qso.g as usize;
+            at = range.end;
+            let owned = groups.get(range.clone())?;
+            // A QSO's call group comes first, unless an earlier QSO holds
+            // the station's copy; its field groups follow, unless the
             // record holds the exchange.
             let call_group = owned.first().filter(|_| qso.sc.is_empty());
-            let call = if qso.lc.is_empty() {
-                call_group?.received.clone()
+            let field_groups = &owned[usize::from(call_group.is_some())..];
+            let logged = if qso.k == LOST {
+                None
             } else {
-                qso.lc.clone()
-            };
-            let check = match qso.k.as_str() {
-                NIL => check_qso(
-                    &QsoText {
-                        call: call.clone(),
-                        fields: Vec::new(),
-                    },
-                    None,
-                    |_| false,
-                ),
-                _ => {
-                    let station: &str = match call_group {
-                        Some(group) => &group.sent,
-                        None if !qso.sc.is_empty() => &qso.sc,
-                        None => return None,
-                    };
-                    let field_groups = &owned[usize::from(call_group.is_some())..];
-                    let tokens = |held: &[String]| -> Vec<(Field, String)> {
-                        fields
-                            .iter()
-                            .zip(held)
-                            .filter(|(_, token)| !token.is_empty())
-                            .map(|(field, token)| (*field, token.clone()))
-                            .collect()
-                    };
-                    let copied = |held: fn(&GroupResult) -> &String| {
-                        fields
-                            .iter()
-                            .zip(field_groups)
-                            .map(|(field, group)| (*field, held(group).clone()))
-                            .collect()
-                    };
-                    let (typed, sent) = if qso.s.is_empty() {
-                        (copied(|group| &group.received), copied(|group| &group.sent))
-                    } else {
-                        (tokens(&qso.l), tokens(&qso.s))
-                    };
-                    let sent = QsoText {
-                        call: station.to_string(),
-                        fields: sent,
-                    };
-                    let check = check_qso(
+                let call = if qso.lc.is_empty() {
+                    call_group?.received.clone()
+                } else {
+                    qso.lc.clone()
+                };
+                let check = match qso.k.as_str() {
+                    NIL => check_qso(
                         &QsoText {
                             call: call.clone(),
-                            fields: typed,
+                            fields: Vec::new(),
                         },
-                        Some(&sent),
-                        |call| clean.contains(&call),
-                    );
-                    if check.is_clean() {
-                        clean.push(station);
+                        None,
+                        |_| false,
+                    ),
+                    _ => {
+                        let station: &str = match call_group {
+                            Some(group) => &group.sent,
+                            None if !qso.sc.is_empty() => &qso.sc,
+                            None => return None,
+                        };
+                        let tokens = |held: &[String]| -> Vec<(Field, String)> {
+                            fields
+                                .iter()
+                                .zip(held)
+                                .filter(|(_, token)| !token.is_empty())
+                                .map(|(field, token)| (*field, token.clone()))
+                                .collect()
+                        };
+                        let copied = |held: fn(&GroupResult) -> &String| {
+                            fields
+                                .iter()
+                                .zip(field_groups)
+                                .map(|(field, group)| (*field, held(group).clone()))
+                                .collect()
+                        };
+                        let (typed, sent) = if qso.s.is_empty() {
+                            (copied(|group| &group.received), copied(|group| &group.sent))
+                        } else {
+                            (tokens(&qso.l), tokens(&qso.s))
+                        };
+                        let sent = QsoText {
+                            call: station.to_string(),
+                            fields: sent,
+                        };
+                        let check = check_qso(
+                            &QsoText {
+                                call: call.clone(),
+                                fields: typed,
+                            },
+                            Some(&sent),
+                            |call| clean.contains(&call),
+                        );
+                        if check.is_clean() {
+                            clean.push(station);
+                        }
+                        check
                     }
-                    check
-                }
+                };
+                Some((call, check))
             };
-            logged.push((qso.t, call, check));
+            walked.push(Walked {
+                qso,
+                groups: range,
+                call_group,
+                field_groups,
+                logged,
+            });
         }
-        Some(logged)
+        Some(walked)
     }
+}
+
+/// A QSO of a stored run, with the groups it owns.
+struct Walked<'a> {
+    qso: &'a QsoRecord,
+    /// Where its groups sit among the session's.
+    groups: Range<usize>,
+    /// Its call group, unless an earlier QSO holds the station's copy.
+    call_group: Option<&'a GroupResult>,
+    /// Its field groups, unless the record holds the exchange.
+    field_groups: &'a [GroupResult],
+    /// Logged: the call as logged, and how it checked. None for a QSO
+    /// never logged.
+    logged: Option<(String, QsoCheck)>,
 }
 
 impl From<&ContestRun> for ContestLog {
@@ -339,6 +587,7 @@ mod tests {
             lc: String::new(),
             s: Vec::new(),
             sc: String::new(),
+            a: 0,
         }
     }
 
@@ -383,6 +632,7 @@ mod tests {
         assert!(value.get("assisted").is_none());
         assert!(value["qsos"][0].get("k").is_none());
         assert!(value["qsos"][0].get("l").is_none());
+        assert!(value["qsos"][0].get("a").is_none());
         assert_eq!(value["qsos"][2]["k"], "lost");
     }
 
@@ -615,6 +865,176 @@ mod tests {
         assert!(result.score > 0.0);
         assert!(result.accuracy > 0.5 && result.accuracy < 1.0);
         assert_eq!(result.contest.and_then(|log| log.run(5)), Some(run()));
+    }
+
+    /// The results list every QSO with what its station sent beside what
+    /// you logged, its speed and its repeats, and count what the checks
+    /// found. A QSO never logged has no number and no check.
+    #[test]
+    fn a_stored_run_lists_its_qsos_with_what_was_really_sent() {
+        let mut stored = run();
+        stored.qsos = vec![
+            qso(30_000, 2, 1),
+            QsoRecord {
+                lc: "DL2XYZ".into(),
+                a: 1,
+                ..qso(60_000, 2, 2)
+            },
+            QsoRecord {
+                k: NIL.into(),
+                l: vec!["12".into()],
+                lc: "W1AQ".into(),
+                ..qso(90_000, 0, 3)
+            },
+            QsoRecord {
+                k: LOST.into(),
+                ..qso(120_000, 2, 3)
+            },
+            QsoRecord {
+                lc: "K5XYZ".into(),
+                sc: "K5XYZ".into(),
+                l: vec!["215".into()],
+                s: vec!["215".into()],
+                ..qso(150_000, 0, 3)
+            },
+        ];
+        let groups = [
+            group("K5XYZ", "K5XYZ"),
+            group("214", "214"),
+            group("DL2XYZ", "DL2XYW"),
+            group("13", "31"),
+            group("G4ABC", "G4AB"),
+            group("TT7", ""),
+        ];
+        let timing = |wpm, sends| SessionTiming {
+            time_to_complete_ms: 900.0,
+            char_wpm: Some(wpm),
+            effective_wpm: Some(wpm),
+            sends,
+        };
+        // Its sends count only the repeats charged to the copy: the record
+        // holds those you asked for.
+        let timings = [
+            timing(24.0, 1),
+            timing(24.0, 1),
+            timing(26.0, 1),
+            timing(26.0, 3),
+            timing(28.0, 1),
+            timing(28.0, 1),
+        ];
+        let log = stored.log(&groups, &timings).expect("the run's groups");
+        let numbers: Vec<Option<u32>> = log.iter().map(|qso| qso.n).collect();
+        assert_eq!(numbers, [Some(1), Some(2), Some(3), None, Some(4)]);
+        assert_eq!(log[0].fields, [(Field::Nr, "214".into(), "214".into())]);
+        assert_eq!(
+            log[0].check.as_ref().map(QsoCheck::words).as_deref(),
+            Some("clean")
+        );
+        // Corrected on the air, logged right: the log keeps the call put
+        // right, and the number copied wrong.
+        assert_eq!(
+            (log[1].call.as_str(), log[1].station.as_str()),
+            ("DL2XYZ", "DL2XYZ")
+        );
+        assert_eq!(log[1].fields, [(Field::Nr, "31".into(), "13".into())]);
+        assert_eq!((log[1].wpm, log[1].asked), (Some(26.0), 1));
+        // A NIL with nobody heard: no station, nothing sent.
+        assert_eq!(
+            (log[2].call.as_str(), log[2].station.as_str()),
+            ("W1AQ", "")
+        );
+        assert_eq!(log[2].fields, [(Field::Nr, "12".into(), String::new())]);
+        // Lost: the call as copied, the number the station sent.
+        assert_eq!(
+            (log[3].call.as_str(), log[3].station.as_str()),
+            ("G4AB", "G4ABC")
+        );
+        assert_eq!(log[3].fields, [(Field::Nr, String::new(), "TT7".into())]);
+        assert_eq!(log[3].check, None);
+        // A dupe, whose copy QSO 1 holds.
+        assert_eq!(log[4].station, "K5XYZ");
+        assert_eq!(log[4].fields, [(Field::Nr, "215".into(), "215".into())]);
+        assert!(log[4].check.as_ref().is_some_and(|check| check.dupe));
+        assert_eq!(log[4].wpm, None);
+
+        assert_eq!(
+            stored.errors(&groups),
+            Some(RunErrors {
+                busted_calls: 0,
+                wrong: vec![(Field::Nr, 1)],
+                nils: 1,
+                dupes: 1,
+            })
+        );
+        assert_eq!(
+            stored.summary(&groups),
+            Some(RunSummary {
+                qsos: 4,
+                clean: 2,
+                rate: Some(24.0),
+                repeated: 1,
+                lost: 1,
+            })
+        );
+        assert_eq!(stored.log(&groups[1..], &timings), None);
+        assert_eq!(stored.errors(&groups[1..]), None);
+        assert_eq!(stored.summary(&groups[1..]), None);
+    }
+
+    /// A run is known by its mark, and the history says whether its log
+    /// reads, was dropped by an older version, or is one this version
+    /// cannot read.
+    #[test]
+    fn the_history_says_what_became_of_a_runs_log() {
+        let settings = TrainingSettings::default();
+        let timing = SessionTiming {
+            time_to_complete_ms: 900.0,
+            char_wpm: Some(24.0),
+            effective_wpm: Some(24.0),
+            sends: 1,
+        };
+        let groups = ["K5XYZ", "214", "DL2XYZ", "TT7", "W1AW"]
+            .map(|sent| (group(sent, sent), timing.clone()))
+            .to_vec();
+        let kept = run().result(groups, &settings, 9_000, "2026-10-20".into());
+        assert_eq!(kept.contest_kind(), Some(ContestKind::Wpx));
+        assert_eq!(kept.contest_run(), Some(run()));
+        assert_eq!(
+            kept.stored_log(),
+            Some(StoredLog::Read(RunSummary {
+                qsos: 2,
+                clean: 2,
+                rate: Some(12.0),
+                repeated: 0,
+                lost: 1,
+            }))
+        );
+        let dropped = SessionResult {
+            contest: None,
+            ..kept.clone()
+        };
+        assert_eq!(dropped.contest_kind(), Some(ContestKind::Wpx));
+        assert_eq!(dropped.stored_log(), Some(StoredLog::Dropped));
+        let mut later = kept.clone();
+        if let Some(log) = later.contest.as_mut() {
+            log.0["v"] = json!(2);
+        }
+        assert_eq!(later.stored_log(), Some(StoredLog::Unreadable));
+        let unknown = SessionResult {
+            alphabet_fingerprint: "contest:cwt".into(),
+            ..dropped
+        };
+        assert_eq!(
+            (unknown.contest_name(), unknown.contest_kind()),
+            (Some("cwt"), None)
+        );
+        let assisted = SessionResult {
+            alphabet_fingerprint: "contest:wpx:a".into(),
+            ..kept
+        };
+        assert_eq!(assisted.contest_kind(), Some(ContestKind::Wpx));
+        let koch = SessionResult::empty_for_test();
+        assert_eq!((koch.contest_kind(), koch.stored_log()), (None, None));
     }
 
     #[test]

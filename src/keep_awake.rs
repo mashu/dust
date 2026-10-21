@@ -190,7 +190,7 @@ pub(crate) mod tests {
             ui.click("btn-resume");
             assert_eq!(asked(), vec![true, false, true]);
             ui.click("btn-end-run");
-            assert_eq!(ui.screen(), "home", "nobody was worked");
+            assert_eq!(ui.screen(), "results", "nobody was worked: nothing kept");
             assert_eq!(asked(), vec![true, false, true, false]);
         });
     }

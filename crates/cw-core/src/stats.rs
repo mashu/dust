@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::alignment::align_group;
 use crate::belief::EstimatePoint;
+use crate::contest::{ContestKind, StoredLog};
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
@@ -102,6 +103,10 @@ pub struct SessionHistoryRow {
     /// What the session practised: every row says, since the history holds
     /// every mode whatever is chosen now.
     pub mode: CharSetMode,
+    /// The contest a run was of, when this build knows it.
+    pub contest: Option<ContestKind>,
+    /// What became of a run's log; none for a session of groups.
+    pub log: Option<StoredLog>,
     /// Where the session sits in the history the rows were made from, so a
     /// row names one session even when two finished in the same millisecond.
     pub index: usize,
@@ -422,6 +427,8 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
             total_chars: s.total_chars,
             timestamp: s.timestamp,
             mode: s.char_set_mode,
+            contest: s.contest_kind(),
+            log: s.stored_log(),
             index,
         })
         .collect();

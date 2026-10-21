@@ -37,9 +37,19 @@ pub fn TrainingProgress(
     } else {
         "Your turn".to_string()
     };
+    let pct = if total == 0 {
+        0.0
+    } else {
+        ((focused + 1) as f64 / total as f64) * 100.0
+    };
     rsx! {
         div { style: "display: contents;",
-            ProgressHeader { current: focused, total, status, live: playing }
+            ProgressHeader {
+                status,
+                live: playing,
+                figure: format!("{} / {total}", focused + 1),
+                pct,
+            }
         }
     }
 }
@@ -202,7 +212,7 @@ impl AnswerDraft {
 /// only cover the screen — and come and go with every group, moving
 /// everything above it each time. A keyboard plugged in or paired still
 /// types into the box: `none` asks only that no keyboard be drawn on screen.
-const ANSWER_INPUT_MODE: &str = "none";
+pub(crate) const ANSWER_INPUT_MODE: &str = "none";
 
 /// The open group: its number, how many times it has been sent, and the box
 /// it is answered in.
@@ -343,11 +353,34 @@ fn AnswerBox(
 }
 
 /// A key on the keypad.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum PadKey {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PadKey {
     Char(char),
     Back,
+    /// The answer is done.
     Next,
+    /// A run's next field: from Call on to Exchange, a space in Exchange.
+    Field,
+    /// A run's Enter, named for what it sends.
+    Send(String),
+}
+
+/// One row of keys, and how the row lays them out: `keypad-row`, with a
+/// class of its own for a row that is not ten even keys.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PadRow {
+    pub keys: Vec<PadKey>,
+    pub class: &'static str,
+}
+
+impl PadRow {
+    /// A row of ten even keys, one for each of `chars`.
+    pub fn chars(chars: &str) -> Self {
+        Self {
+            keys: chars.chars().map(PadKey::Char).collect(),
+            class: "keypad-row",
+        }
+    }
 }
 
 /// The keypad's character rows, top to bottom: digits, then the letters as a
@@ -355,6 +388,19 @@ enum PadKey {
 const PAD_ROWS: [&str; 4] = ["1234567890", "QWERTYUIOP", "ASDFGHJKL/", "ZXCVBNM,.?"];
 /// What the bottom row holds before ⌫ and Next.
 const PAD_LAST: [char; 2] = ['=', '+'];
+
+/// The keys a group is answered with: every character a group can hold,
+/// then ⌫ and Next.
+fn group_rows() -> Vec<PadRow> {
+    let mut rows: Vec<PadRow> = PAD_ROWS.into_iter().map(PadRow::chars).collect();
+    let mut last: Vec<PadKey> = PAD_LAST.into_iter().map(PadKey::Char).collect();
+    last.extend([PadKey::Back, PadKey::Next]);
+    rows.push(PadRow {
+        keys: last,
+        class: "keypad-row keypad-last",
+    });
+    rows
+}
 
 /// What a character key is called: its id, and what a screen reader says.
 fn pad_name(ch: char) -> (String, String) {
@@ -370,7 +416,45 @@ fn pad_name(ch: char) -> (String, String) {
     (control_id("key", word), word.to_string())
 }
 
-/// Large keys for every character a group can hold, to answer by touch.
+/// What a key is called and shows: its id, what a screen reader says, what
+/// it reads, and its class.
+fn pad_face(key: &PadKey) -> (String, String, String, &'static str) {
+    match key {
+        PadKey::Char(ch) => {
+            let (id, label) = pad_name(*ch);
+            (id, label, ch.to_string(), "key group-text")
+        }
+        PadKey::Back => (
+            control_id("key", "delete"),
+            "Delete".into(),
+            "⌫".into(),
+            "key key-back",
+        ),
+        PadKey::Next => (
+            control_id("key", "next"),
+            "Next".into(),
+            "Next".into(),
+            "key key-next",
+        ),
+        PadKey::Field => (
+            control_id("key", "field"),
+            "Next field".into(),
+            "␣ Field".into(),
+            "key key-field",
+        ),
+        // Named for what it sends, aloud as on screen; the ↵ after it is
+        // drawn apart, so a long label is cut short before it.
+        PadKey::Send(label) => (
+            control_id("key", "enter"),
+            label.clone(),
+            label.clone(),
+            "key key-next key-send",
+        ),
+    }
+}
+
+/// Large keys, laid out in the `rows` the screen gives it, to answer or log
+/// by touch.
 ///
 /// The phone's keyboard stays away ([`ANSWER_INPUT_MODE`]), so the screen
 /// keeps one layout for the whole session. A key takes no focus: a press
@@ -389,7 +473,7 @@ fn pad_name(ch: char) -> (String, String) {
 /// builds, and on the web and desktop whenever the device has a touch
 /// screen. A desktop with only a mouse and keyboard has no use for it.
 #[component]
-fn Keypad(open: bool, on_key: Callback<PadKey>) -> Element {
+pub(crate) fn Keypad(open: bool, rows: Vec<PadRow>, on_key: Callback<PadKey>) -> Element {
     let class = if cfg!(any(feature = "mobile", feature = "mobile-silent")) {
         "keypad"
     } else {
@@ -397,69 +481,53 @@ fn Keypad(open: bool, on_key: Callback<PadKey>) -> Element {
     };
     // Set by a press on the way down, so the click after it is not a second.
     let mut pressed_down = use_hook(|| CopyValue::new(false));
-    let key =
-        move |pressed: PadKey, id: String, label: String, text: String, class: &'static str| {
-            rsx! {
-                button {
-                    id,
-                    class,
-                    r#type: "button",
-                    aria_label: label,
-                    disabled: html_bool(!open),
-                    onpointerdown: move |e| {
-                        // Nor does the focus move, or any mouse event follow
-                        // to move it: the box keeps it.
-                        e.prevent_default();
-                        pressed_down.set(true);
-                        on_key.call(pressed);
-                    },
-                    onclick: move |_| {
-                        let by_finger = *pressed_down.peek();
-                        pressed_down.set(false);
-                        if !by_finger {
-                            on_key.call(pressed);
-                        }
-                    },
+    let key = move |pressed: PadKey| {
+        let (id, label, text, class) = pad_face(&pressed);
+        let sends = matches!(pressed, PadKey::Send(_));
+        let clicked = pressed.clone();
+        rsx! {
+            button {
+                id,
+                class,
+                r#type: "button",
+                aria_label: label,
+                disabled: html_bool(!open),
+                onpointerdown: move |e| {
+                    // Nor does the focus move, or any mouse event follow
+                    // to move it: the box keeps it.
+                    e.prevent_default();
+                    pressed_down.set(true);
+                    on_key.call(pressed.clone());
+                },
+                onclick: move |_| {
+                    let by_finger = *pressed_down.peek();
+                    pressed_down.set(false);
+                    if !by_finger {
+                        on_key.call(clicked.clone());
+                    }
+                },
+                if sends {
+                    span { class: "key-label", "{text}" }
+                    span { class: "key-return", "↵" }
+                } else {
                     "{text}"
                 }
             }
-        };
+        }
+    };
     rsx! {
         div { class, role: "group", aria_label: "Keypad",
-            for row in PAD_ROWS {
-                div { class: "keypad-row",
-                    for ch in row.chars() {
-                        {
-                            let (id, label) = pad_name(ch);
-                            key(PadKey::Char(ch), id, label, ch.to_string(), "key group-text")
-                        }
+            for row in rows {
+                div { class: row.class,
+                    for pressed in row.keys {
+                        {key(pressed)}
                     }
                 }
-            }
-            div { class: "keypad-row keypad-last",
-                for ch in PAD_LAST {
-                    {
-                        let (id, label) = pad_name(ch);
-                        key(PadKey::Char(ch), id, label, ch.to_string(), "key group-text")
-                    }
-                }
-                {key(PadKey::Back, control_id("key", "delete"), "Delete".into(), "⌫".into(), "key key-back")}
-                {key(PadKey::Next, control_id("key", "next"), "Next".into(), "Next".into(), "key key-next")}
             }
         }
     }
 }
 
-/// The open group, the one before it, the keypad, and the way out of the
-/// session.
-///
-/// Only two groups are on screen, each in a slot of its own that does not
-/// move: the one just answered above, dimmed, with how it went, and the open
-/// one below it, with the box. The keypad takes the room under them that a
-/// keyboard would have.
-///
-/// The answer box is local: [`AnswerDraft`] says when the session hears it.
-/// Typing itself does not clone the session.
 /// "▲ 27 WPM", or "▼ 27/21 WPM" under Farnsworth: the speed adaptive speed
 /// chose, and which way it moved.
 fn speed_label(speed: ChosenSpeed) -> String {
@@ -478,6 +546,16 @@ fn speed_label(speed: ChosenSpeed) -> String {
     }
 }
 
+/// The open group, the one before it, the keypad, and the way out of the
+/// session.
+///
+/// Only two groups are on screen, each in a slot of its own that does not
+/// move: the one just answered above, dimmed, with how it went, and the open
+/// one below it, with the box. The keypad takes the room under them that a
+/// keyboard would have.
+///
+/// The answer box is local: [`AnswerDraft`] says when the session hears it.
+/// Typing itself does not clone the session.
 #[component]
 pub fn TrainingView(
     current: usize,
@@ -561,6 +639,8 @@ pub fn TrainingView(
             PadKey::Char(ch) => draft.push(current, ch, &sent_now),
             PadKey::Back => draft.pop(current, &sent_now),
             PadKey::Next => on_confirm.call(()),
+            // A run's keys: the keys a group is answered with have neither.
+            PadKey::Field | PadKey::Send(_) => {}
         }
     });
     // One short line. How to key with the paddles is the settings screen's to
@@ -634,7 +714,7 @@ pub fn TrainingView(
                     }
                 }
             }
-            Keypad { open: live, on_key }
+            Keypad { open: live, rows: group_rows(), on_key }
             div { class: "train-actions",
                 button {
                     id: control_id("btn", "end session"),

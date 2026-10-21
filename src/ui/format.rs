@@ -71,6 +71,19 @@ pub fn counted<N: Display + PartialEq + From<u8>>(n: N, noun: &str) -> String {
     }
 }
 
+/// As [`counted`], with a few in words, as a sentence says them: "one
+/// call", "two NRs", "13 calls".
+pub fn counted_in_words(n: usize, noun: &str) -> String {
+    const WORDS: [&str; 10] = [
+        "no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    let counted = counted(n, noun);
+    match WORDS.get(n) {
+        Some(word) => counted.replacen(&n.to_string(), word, 1),
+        None => counted,
+    }
+}
+
 /// A stretch of run time as a clock reads it: "07:42", "60:00".
 pub fn minutes_seconds(ms: u64) -> String {
     let seconds = ms / 1_000;
@@ -139,6 +152,10 @@ mod tests {
         assert_eq!(counted(1_u32, "session"), "1 session");
         assert_eq!(counted(2_usize, "session"), "2 sessions");
         assert_eq!(counted(0_u32, "character"), "0 characters");
+        assert_eq!(counted_in_words(1, "call"), "one call");
+        assert_eq!(counted_in_words(2, "NR"), "two NRs");
+        assert_eq!(counted_in_words(0, "QSO"), "no QSOs");
+        assert_eq!(counted_in_words(13, "call"), "13 calls");
     }
 
     #[test]

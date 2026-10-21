@@ -164,7 +164,39 @@ pub enum ContestEffect {
 pub struct AirView {
     pub heard_from: MonoMs,
     pub my_text: String,
+    /// Where each character of your message that sounds stops sounding, in
+    /// seconds from the start of the turn, by its byte in `my_text`.
+    pub my_chars: Vec<(usize, f64)>,
     pub spans: Vec<(Sender, f64, f64)>,
+}
+
+impl AirView {
+    /// How far into the turn the ear is at `now`, in seconds; nothing has
+    /// reached it before its sound does.
+    fn heard_sec(&self, now: MonoMs) -> f64 {
+        now.since(self.heard_from) as f64 / 1_000.0
+    }
+
+    /// What is still being sent of your message at `now`: from the
+    /// character sounding then, as a key now would send it again. Empty
+    /// once it has all gone out.
+    pub fn still_sending(&self, now: MonoMs) -> &str {
+        let at_sec = self.heard_sec(now);
+        self.my_chars
+            .iter()
+            .find(|(_, end)| *end > at_sec)
+            .map_or("", |(at, _)| &self.my_text[*at..])
+    }
+
+    /// How many stations are sending at `now`. What they send is never
+    /// shown.
+    pub fn calling(&self, now: MonoMs) -> usize {
+        let at_sec = self.heard_sec(now);
+        self.spans
+            .iter()
+            .filter(|(who, start, end)| *who != Sender::You && *start <= at_sec && at_sec < *end)
+            .count()
+    }
 }
 
 /// Where a logged QSO's check stands.
@@ -211,8 +243,30 @@ pub struct ContestView {
     /// QSOs logged, dupes and NILs among them, and those checked clean.
     pub qsos: u32,
     pub clean: u32,
-    /// QSOs an hour over the last five minutes, once the run is a minute old.
-    pub rate: Option<f64>,
+    /// Your serial for the next QSO, as your exchange sends it; 0 in a
+    /// contest without one.
+    pub serial: u32,
+}
+
+impl ContestView {
+    /// Run time at `now`, as the run bar's clock shows it: never past the
+    /// limit, and nothing before the clock has started. A look, which
+    /// stamps nothing ([`RunClock::peek_ms`]).
+    pub fn run_ms(&self, now: MonoMs) -> u64 {
+        self.clock
+            .map_or(0, |clock| clock.peek_ms(now))
+            .min(self.limit_ms)
+    }
+
+    /// QSOs an hour at `now`, over the last five minutes of run time, once
+    /// the run is a minute old.
+    pub fn rate(&self, now: MonoMs) -> Option<f64> {
+        let run_ms = self.run_ms(now);
+        let times: Vec<u64> = self.log.iter().map(|row| row.at_ms).collect();
+        (run_ms >= RATE_AFTER_MS)
+            .then(|| rate_at(&times, run_ms))
+            .flatten()
+    }
 }
 
 /// How long after Resume the callers come back: a moment to get the ear in.
@@ -438,6 +492,9 @@ struct Air {
     first_start: Option<MonoMs>,
     /// Your message's parts, each with the byte in your text it ends before.
     parts: Vec<(MessagePart, usize)>,
+    /// Where each character of your message stops sounding, for the screen
+    /// to show what is still to go.
+    my_chars: Vec<(usize, f64)>,
     /// Its callers' segments, in order, and what each says.
     replies: Vec<(Replying, Says)>,
     /// How much of each reply has been counted: a key that logs without
@@ -689,12 +746,9 @@ impl<S: CallSource> ContestMachine<S> {
         }
     }
 
-    /// The run as the screen shows it at `now`.
-    pub fn view(&self, now: MonoMs) -> ContestView {
-        let run_ms = match self.ended {
-            Some((run_ms, _)) => Some(run_ms),
-            None => self.clock.map(|mut clock| clock.elapsed_ms(now)),
-        };
+    /// The run as the screen shows it. Nothing in it moves with the time
+    /// alone: the screen reads the clock and the rate off it as it ticks.
+    pub fn view(&self) -> ContestView {
         let log: Vec<LogRow> = self
             .entries
             .iter()
@@ -714,7 +768,6 @@ impl<S: CallSource> ContestMachine<S> {
                 },
             })
             .collect();
-        let times: Vec<u64> = log.iter().map(|row| row.at_ms).collect();
         let clean = log
             .iter()
             .filter(|row| matches!(&row.status, RowStatus::Checked(check) if check.is_clean()))
@@ -734,6 +787,7 @@ impl<S: CallSource> ContestMachine<S> {
                     .find(|segment| segment.who == Sender::You)
                     .map(|segment| segment.text.clone())
                     .unwrap_or_default(),
+                my_chars: air.my_chars.clone(),
                 spans: air
                     .turn
                     .segments
@@ -743,9 +797,7 @@ impl<S: CallSource> ContestMachine<S> {
             }),
             qsos: u32::try_from(log.len()).unwrap_or(u32::MAX),
             clean: u32::try_from(clean).unwrap_or(u32::MAX),
-            rate: run_ms
-                .filter(|run_ms| *run_ms >= RATE_AFTER_MS)
-                .and_then(|run_ms| rate_at(&times, run_ms)),
+            serial: self.serial_sent(),
             log,
         }
     }
@@ -1333,9 +1385,14 @@ impl<S: CallSource> ContestMachine<S> {
     ) -> Vec<ContestEffect> {
         let mut segments = Vec::new();
         let mut your_end = 0.0;
+        let mut my_chars = Vec::new();
         if !mine.text.is_empty() {
             let voice = your_voice(&self.settings, self.my_wpm());
             your_end = sending_sec(&mine.text, &self.settings, &voice);
+            my_chars = char_spans(&mine.text, &self.settings, &voice)
+                .into_iter()
+                .map(|(at, _, end)| (at, end))
+                .collect();
             self.sent_wpm.push(voice.char_wpm);
             segments.push(Segment {
                 who: Sender::You,
@@ -1379,6 +1436,7 @@ impl<S: CallSource> ContestMachine<S> {
             heard_from: now,
             first_start: None,
             parts: mine.parts,
+            my_chars,
             counted: vec![Counted::Nothing; replies.len()],
             replies,
             pending: mine.pending,
@@ -1896,6 +1954,7 @@ impl<S: CallSource> ContestMachine<S> {
                 lc,
                 s,
                 sc: if again { sent.call } else { String::new() },
+                a: heard.asked(),
             },
             row: Some(Row {
                 call: logged.call.clone(),
@@ -1997,6 +2056,9 @@ impl<S: CallSource> ContestMachine<S> {
                 },
                 s: Vec::new(),
                 sc: String::new(),
+                // No QSO with the station it is against: nothing asked of
+                // it was for this one.
+                a: 0,
             },
             row: Some(Row {
                 call: logged.call.clone(),
@@ -2048,6 +2110,7 @@ impl<S: CallSource> ContestMachine<S> {
                 lc: String::new(),
                 s: Vec::new(),
                 sc: String::new(),
+                a: heard.asked(),
             },
             groups,
             row: None,
@@ -2123,7 +2186,10 @@ impl<S: CallSource> ContestMachine<S> {
             ContestPhase::Countdown { .. } => {
                 self.timers = Timers::default();
                 self.phase = ContestPhase::Paused { why };
-                vec![ContestEffect::ReleaseAudio]
+                vec![
+                    ContestEffect::ReleaseAudio,
+                    ContestEffect::Announce("Paused".to_string()),
+                ]
             }
             ContestPhase::Running => {
                 if let Some(clock) = &mut self.clock {
@@ -2160,7 +2226,10 @@ impl<S: CallSource> ContestMachine<S> {
             self.phase = ContestPhase::Countdown {
                 left: self.settings.playback.countdown_sec.max(1),
             };
-            return vec![self.countdown_step()];
+            return vec![
+                self.countdown_step(),
+                ContestEffect::Announce("Resumed".to_string()),
+            ];
         };
         // The pause it ends, for a copy typed before it and sent after.
         let paused_before = clock.paused_before_ms();
@@ -2338,7 +2407,7 @@ mod tests {
     }
 
     fn view(runtime: &Runtime<ScriptCalls>) -> ContestView {
-        runtime.machine.view(MonoMs(runtime.now))
+        runtime.machine.view()
     }
 
     fn result(runtime: &Runtime<ScriptCalls>) -> (SessionResult, ContestRun) {
@@ -2683,7 +2752,7 @@ mod tests {
         let exchange = to_its_exchange(&mut cut);
         cut.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
         cut.apply(ContestEvent::FinishNow);
-        let view = cut.machine.view(MonoMs(cut.now));
+        let view = cut.machine.view();
         assert_eq!(view.log[0].status, RowStatus::Checked(QsoCheck::default()));
         let (_, run) = result(&cut);
         assert_eq!(run.qsos.len(), 1, "no lost copy beside it");
@@ -2893,6 +2962,8 @@ mod tests {
         assert_eq!(effects.last(), Some(&ContestEffect::ShowNothingKept));
     }
 
+    /// A pause in the countdown is said as one in the run is, and so is
+    /// carrying on.
     #[test]
     fn a_pause_in_the_countdown_starts_it_again() {
         let mut settings = run_settings(25.0);
@@ -2905,7 +2976,13 @@ mod tests {
             why: PauseWhy::Hidden,
             at: MonoMs(1_500),
         });
-        assert_eq!(effects, [ContestEffect::ReleaseAudio]);
+        assert_eq!(
+            effects,
+            [
+                ContestEffect::ReleaseAudio,
+                ContestEffect::Announce("Paused".into())
+            ]
+        );
         runtime.run_to(20_000);
         assert_eq!(
             runtime.machine.phase(),
@@ -2917,6 +2994,10 @@ mod tests {
         assert!(runtime.turns.is_empty());
         let effects = runtime.apply(ContestEvent::Resume);
         assert_eq!(timers(&effects), [1_000]);
+        assert_eq!(
+            effects.last(),
+            Some(&ContestEffect::Announce("Resumed".into()))
+        );
         assert_eq!(runtime.machine.phase(), ContestPhase::Countdown { left: 3 });
         runtime.run_to(23_000);
         assert_eq!(runtime.machine.phase(), ContestPhase::Running);
@@ -3275,16 +3356,45 @@ mod tests {
         assert!(runtime.machine.result(0, "x".into()).groups.is_empty());
     }
 
-    /// The rate shows once the run is a minute old.
+    /// The rate shows once the run is a minute old, and the clock the run
+    /// bar reads stops at the limit.
     #[test]
     fn the_rate_shows_after_the_first_minute() {
         let mut runtime = runtime(&["K5XYZ"]);
         let exchange = to_its_exchange(&mut runtime);
         runtime.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
         runtime.finish_turn();
-        assert_eq!(view(&runtime).rate, None);
-        runtime.now = 60_000;
-        assert_eq!(view(&runtime).rate, Some(60.0));
+        let shown = view(&runtime);
+        assert_eq!(shown.rate(MonoMs(runtime.now)), None);
+        assert_eq!(shown.rate(MonoMs(60_000)), Some(60.0));
+        assert_eq!(shown.run_ms(MonoMs(60_000)), 60_000);
+        assert_eq!(shown.run_ms(MonoMs(9_000_000)), shown.limit_ms);
+        assert_eq!(shown.serial, 2, "the next QSO's serial");
+    }
+
+    /// The air shows what is still to go of your message, from the
+    /// character sounding, and how many are calling, never what they send.
+    #[test]
+    fn the_air_shows_what_is_still_to_go_and_who_is_calling() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        runtime.finish_turn();
+        let keyed = runtime.now;
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        let air = view(&runtime).air.expect("on the air");
+        let at = |ms: u64| MonoMs(keyed + ms);
+        assert!(air.my_text.starts_with("K5XYZ 5NN"), "{}", air.my_text);
+        assert_eq!(air.still_sending(at(0)), air.my_text);
+        let (second, _) = air.my_chars[1];
+        let first_end = air.my_chars[0].1;
+        let into_second = at((first_end * 1_000.0) as u64 + 1);
+        assert_eq!(air.still_sending(into_second), &air.my_text[second..]);
+        let (_, your_end) = *air.my_chars.last().expect("characters");
+        let after = at((your_end * 1_000.0) as u64 + 1);
+        assert_eq!(air.still_sending(after), "");
+        assert_eq!(air.calling(at(0)), 0, "only you, to start");
+        let (_, start, end) = air.spans[1];
+        assert_eq!(air.calling(at(((start + end) * 500.0) as u64)), 1);
+        assert_eq!(air.calling(at((end * 1_000.0) as u64 + 1)), 0);
     }
 
     /// The call group, the field groups and the sends of each, as the run
@@ -3321,6 +3431,29 @@ mod tests {
         assert_eq!(asked(None), (vec![1, 2], 1), "after its end");
         assert_eq!(asked(Some(0.98)), (vec![1, 2], 1), "just before its end");
         assert_eq!(asked(Some(0.5)), (vec![1, 2], 1), "halfway through");
+    }
+
+    /// The run keeps the repeats you asked for as the live log counts
+    /// them, though one asked with the field already right costs its copy
+    /// nothing: the results read the same `?×n` as the run did.
+    #[test]
+    fn the_log_keeps_the_repeats_you_asked_for() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let exchange = to_its_exchange(&mut runtime);
+        let number = serial(&exchange);
+        runtime.key(OpKey::Again, "K5XYZ", &number);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", &number);
+        runtime.finish_turn();
+        runtime.apply(ContestEvent::FinishNow);
+        assert_eq!(sends(&runtime), [1, 1], "the field already read right");
+        assert_eq!(view(&runtime).log[0].asked, 1);
+        let (result, run) = result(&runtime);
+        assert_eq!(run.qsos[0].a, 1);
+        let log = run
+            .log(&result.groups, &result.group_timings)
+            .expect("the run's groups");
+        assert_eq!(log[0].asked, 1);
     }
 
     /// A `?` before anything of the station has reached you is no repeat:
@@ -3888,7 +4021,7 @@ mod tests {
                 why: PauseWhy::Sound
             }
         );
-        let clock = failed.view(MonoMs(68_000)).clock;
+        let clock = failed.view().clock;
         assert_eq!(
             clock.map(|mut clock| clock.elapsed_ms(MonoMs(68_000))),
             Some(50_100),

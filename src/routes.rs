@@ -14,10 +14,11 @@ use dioxus::prelude::*;
 use crate::persist::auto_progress;
 use crate::playback;
 use crate::session_runtime::{send_event, start_session};
-use crate::state::{AppCtx, Screen, SessionPick};
+use crate::state::{AppCtx, Finished, Screen, SessionPick};
 use crate::time::{local_date_string, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
+use crate::ui::contest_results::NothingKept;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
@@ -310,8 +311,10 @@ fn ResultsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     let on_again = use_callback(move |()| start_session(ctx));
     let on_home = use_callback(move |()| ctx.go_to(Screen::Home));
-    let Some(result) = ctx.result.read().clone() else {
-        return rsx! { p { class: "muted", "No result." } };
+    let result = match ctx.result.read().clone() {
+        Some(Finished::Kept(result)) => *result,
+        Some(Finished::NothingKept) => return rsx! { NothingKept { on_again, on_home } },
+        None => return rsx! { p { class: "muted", "No result." } },
     };
     let place = cw_core::board_place(&ctx.sessions.read(), result.timestamp);
     rsx! {

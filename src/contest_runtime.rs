@@ -11,8 +11,8 @@
 
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestRules, EntryField, Esm,
-    Fields, MonoMs, OpKey, PauseWhy, QsoState, Sampler, Side, TrainingSettings, Turn, esm,
-    plan_turn,
+    Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, Side, TrainingSettings,
+    Turn, esm, parse_exchange, plan_turn,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -20,7 +20,7 @@ use dioxus::prelude::*;
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease};
 use crate::session_runtime::{Live, keep_and_show};
-use crate::state::{AppCtx, Screen};
+use crate::state::{AppCtx, Finished, Said, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
 /// A gap this long between two of the run screen's ticks is time the app
@@ -39,6 +39,9 @@ pub struct LiveContest {
     lease: Lease,
     /// When the run screen's clock last ticked, once it has.
     last_tick: Option<MonoMs>,
+    /// What the run has to say to a screen reader, held while anything is
+    /// on the air so that speech never covers the Morse.
+    unsaid: Vec<String>,
 }
 
 /// The run's Call and Exchange fields, as typed.
@@ -100,14 +103,25 @@ impl ContestEntry {
         }
     }
 
-    /// A paddle letter, keyed into the field with the cursor. The page has
-    /// not seen it, so that input is drawn again.
+    /// A character the paddles or the keypad typed into the field with the
+    /// cursor. The page has not seen it, so that input is drawn again.
     pub fn push(mut self, letter: char) {
         let field = *self.focus.peek();
         let mut text = self.text(field);
         text.push(letter);
         self.edit(field, text);
         *self.repaint.write() += 1;
+    }
+
+    /// The keypad's ⌫ took the last character out of the field with the
+    /// cursor. The page has not seen it, so that input is drawn again.
+    pub fn pop(mut self) {
+        let field = *self.focus.peek();
+        let mut text = self.text(field);
+        if text.pop().is_some() {
+            self.edit(field, text);
+            *self.repaint.write() += 1;
+        }
     }
 
     /// Both fields empty again, and their inputs drawn so.
@@ -153,6 +167,22 @@ impl ContestEntry {
         let _ = self.typed.read();
         let (rules, side) = (*self.reads.peek())?;
         Some(esm(qso, &self.fields.peek(), rules, side))
+    }
+
+    /// The Exchange field as the run reads it, for "Reads as". Reading it
+    /// subscribes the caller to every edit. Nothing before a run has
+    /// started.
+    pub fn reading(self) -> Option<Reading> {
+        let _ = self.typed.read();
+        let (rules, side) = (*self.reads.peek())?;
+        Some(parse_exchange(rules, side, &self.fields.peek().exch))
+    }
+
+    /// What the run copies from each caller, for the Exchange field's label.
+    pub fn copies(self) -> &'static [Field] {
+        self.reads
+            .peek()
+            .map_or(&[], |(rules, side)| rules.copied(side))
     }
 
     /// While the calling component is mounted, `finish` ends a paddle letter
@@ -223,13 +253,14 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     let (machine, effects) = ContestMachine::start(seed_rng(), now, settings, sampler);
     entry.start(rules, side);
     announced.set(None);
-    view.set(Some(machine.view(now)));
+    view.set(Some(machine.view()));
     screen.set(Screen::Training);
     *app.session.borrow_mut() = Some(Live::Contest(Box::new(LiveContest {
         machine,
         sound,
         lease: lease.clone(),
         last_tick: None,
+        unsaid: Vec::new(),
     })));
     run_effects(ctx, &lease, effects);
 }
@@ -251,6 +282,16 @@ pub fn press_key(ctx: AppCtx, key: OpKey) {
     lease.wake();
     let fields = ctx.entry.snapshot();
     apply(ctx, Some(ContestEvent::Key { key, fields }));
+}
+
+/// − / +: your speed, and later callers', moved by `delta` WPM for the rest
+/// of the run. The player is woken inside the press, as for a key.
+pub fn change_speed(ctx: AppCtx, delta: i32) {
+    let Some(lease) = run_lease(ctx) else {
+        return;
+    };
+    lease.wake();
+    apply(ctx, Some(ContestEvent::Speed { delta }));
 }
 
 /// Pause the run, from now: you pressed Pause, or the page went out of
@@ -366,7 +407,7 @@ fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
         // Much of what arrives changes nothing — a stale send's news, a key
         // that sends nothing — and publishing it anyway would redraw the
         // screen for it.
-        let shown = live.machine.view(now);
+        let shown = live.machine.view();
         if view.peek().as_ref() != Some(&shown) {
             view.set(Some(shown));
         }
@@ -396,15 +437,47 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<ContestEffect>) {
             }
             ContestEffect::ClearFields => ctx.entry.clear(),
             ContestEffect::Focus(field) => focus_field(ctx, field),
-            ContestEffect::Announce(text) => {
-                let mut announced = ctx.announced;
-                announced.set(Some(text));
-            }
+            ContestEffect::Announce(text) => announce(ctx, text),
             ContestEffect::PersistAndShowResults => keep_run(ctx),
             ContestEffect::ShowNothingKept => keep_nothing(ctx),
             ContestEffect::AbortToHome => abandon_run(ctx),
         }
     }
+    speak_if_silent(ctx);
+}
+
+/// Hold `text` for a screen reader until the air is silent.
+fn announce(ctx: AppCtx, text: String) {
+    match ctx.app().session.borrow_mut().as_mut() {
+        Some(Live::Contest(live)) => live.unsaid.push(text),
+        _ => say(ctx, vec![text]),
+    }
+}
+
+/// Say what the run holds for a screen reader, once nothing is on the air.
+fn speak_if_silent(ctx: AppCtx) {
+    let silent = ctx
+        .contest
+        .peek()
+        .as_ref()
+        .is_some_and(|view| view.air.is_none());
+    if !silent {
+        return;
+    }
+    let unsaid = match ctx.app().session.borrow_mut().as_mut() {
+        Some(Live::Contest(live)) => std::mem::take(&mut live.unsaid),
+        _ => return,
+    };
+    say(ctx, unsaid);
+}
+
+/// Say `unsaid`, all of it at once, in the order it came.
+fn say(ctx: AppCtx, unsaid: Vec<String>) {
+    if unsaid.is_empty() {
+        return;
+    }
+    let mut announced = ctx.announced;
+    announced.set(Some(Said::new(unsaid.join(". "))));
 }
 
 /// Play `turn`, and tell the machine when each attempt at it started, and
@@ -471,17 +544,19 @@ pub fn focus_field(ctx: AppCtx, field: EntryField) {
     }
 }
 
-/// The run, taken out of the app, with the audio given back.
+/// The run, taken out of the app, with the audio given back. Its sound has
+/// stopped, so what it held for a screen reader is said now.
 fn end_run(ctx: AppCtx) -> Option<LiveContest> {
     let taken = ctx
         .app()
         .session
         .borrow_mut()
         .take_if(|live| matches!(live, Live::Contest(_)));
-    let Some(Live::Contest(live)) = taken else {
+    let Some(Live::Contest(mut live)) = taken else {
         return None;
     };
     live.lease.release();
+    say(ctx, std::mem::take(&mut live.unsaid));
     Some(*live)
 }
 
@@ -503,10 +578,20 @@ fn keep_run(ctx: AppCtx) {
 }
 
 /// A run with no station worked has nothing for any stat: it is let go, and
-/// the practice screen, where another starts, says so.
+/// the results screen says so, with another run a press away.
 fn keep_nothing(ctx: AppCtx) {
-    abandon_run(ctx);
-    ctx.toasts.show("No stations worked — nothing kept");
+    let AppCtx {
+        mut screen,
+        contest: mut view,
+        mut result,
+        mut auto_message,
+        ..
+    } = ctx;
+    end_run(ctx);
+    view.set(None);
+    result.set(Some(Finished::NothingKept));
+    auto_message.set(None);
+    screen.set(Screen::Results);
 }
 
 /// End the run without keeping it.
@@ -636,7 +721,13 @@ mod tests {
                 "the audio was given back"
             );
 
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.char_set_mode, CharSetMode::Contest);
             assert_eq!(result.alphabet_fingerprint, "contest:wpx");
             let log = result.contest.as_ref().expect("its log");
@@ -682,7 +773,13 @@ mod tests {
             h.in_app(|| crate::session_runtime::finish_run(ctx));
             h.pump();
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             let stored = result
                 .contest
                 .as_ref()
@@ -1058,7 +1155,8 @@ mod tests {
         });
     }
 
-    /// A run that worked nobody keeps nothing, and says so.
+    /// A run that worked nobody keeps nothing, and its results screen says
+    /// so in place of a result.
     #[test]
     fn a_run_with_nobody_worked_keeps_nothing() {
         run(|| async {
@@ -1067,12 +1165,82 @@ mod tests {
             let ctx = h.ctx;
             h.in_app(|| crate::session_runtime::finish_run(ctx));
             h.pump();
-            assert_eq!(h.screen(), Screen::Home);
-            assert_eq!(
-                h.toast().as_deref(),
-                Some("No stations worked — nothing kept")
-            );
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(*h.ctx.result.peek(), Some(Finished::NothingKept));
+            assert!(h.app.session.borrow().is_none());
             assert!(h.ctx.sessions.peek().is_empty());
+            // The next run that keeps something shows its result instead.
+            h.start_training();
+            work(&mut h, 60_000, Some(1)).await;
+            h.in_app(|| crate::session_runtime::finish_run(ctx));
+            h.pump();
+            assert!(
+                h.ctx
+                    .result
+                    .peek()
+                    .clone()
+                    .and_then(Finished::kept)
+                    .is_some()
+            );
+        });
+    }
+
+    /// What the run says as it ends, time's up last, is still said once
+    /// the results are up: the region that says it is the app's, not the
+    /// run screen's.
+    #[test]
+    fn times_up_is_said_on_the_results() {
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.contest.contest_minutes = 1;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            work(&mut h, 90_000, None).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let said = h.ctx.announced.peek().clone().map(|said| said.text);
+            assert!(
+                said.as_deref()
+                    .is_some_and(|said| said.ends_with("Time's up")),
+                "{said:?}"
+            );
+        });
+    }
+
+    /// What the run says for a screen reader waits for the air to fall
+    /// silent, and comes whole: a check shown as the TU goes out is said
+    /// once it has; Pause, which silences the air, is said at once.
+    #[test]
+    fn what_the_run_says_waits_for_the_air_to_fall_silent() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let said = |h: &Harness| {
+                h.ctx
+                    .announced
+                    .peek()
+                    .as_ref()
+                    .map(|said| said.text.clone())
+            };
+            assert!(h.run_until(30_000, quiet).await);
+            copy_what_was_heard(&mut h);
+            press(&mut h, OpKey::Esm);
+            assert!(h.run_until(30_000, quiet).await);
+            copy_what_was_heard(&mut h);
+            press(&mut h, OpKey::Esm);
+            // Logged with the TU on the air: nothing is said over it.
+            assert!(view(&h).is_some_and(|view| view.air.is_some()));
+            assert_eq!(said(&h), None);
+            assert!(h.run_until(30_000, quiet).await);
+            let logged = said(&h).expect("said once the TU was out");
+            assert!(logged.ends_with("logged, clean"), "{logged}");
+            let ctx = h.ctx;
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            assert_eq!(said(&h).as_deref(), Some("Paused"));
+            let first = h.ctx.announced.peek().clone().map(|said| said.serial);
+            h.in_app(|| resume_run(ctx));
+            h.in_app(|| pause_run(ctx, PauseWhy::You));
+            let again = h.ctx.announced.peek().clone().map(|said| said.serial);
+            assert_ne!(first, again, "the same words, said again");
         });
     }
 }

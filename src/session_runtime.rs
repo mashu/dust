@@ -22,7 +22,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::{LiveContest, send_run_event, start_run};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease};
-use crate::state::{AppCtx, Screen};
+use crate::state::{AppCtx, Finished, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
 /// What has the training screen: a session of groups, or a contest run.
@@ -514,7 +514,7 @@ pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     if let Some(problem) = saved.problem() {
         toasts.show(problem);
     }
-    result.set(Some(finished));
+    result.set(Some(Finished::Kept(Box::new(finished))));
     screen.set(Screen::Results);
 }
 
@@ -549,7 +549,13 @@ mod tests {
             h.start_training();
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.groups.len(), 2);
             assert!(result.groups.iter().all(|g| g.correct));
             assert_eq!(result.accuracy, 1.0);
@@ -703,7 +709,13 @@ mod tests {
                 h.ctx.answer.hold(0, "K".into());
                 h.send(event.clone());
                 if event == SessionEvent::FinishNow {
-                    let result = h.ctx.result.peek().clone().expect("{event:?} kept it");
+                    let result = h
+                        .ctx
+                        .result
+                        .peek()
+                        .clone()
+                        .and_then(Finished::kept)
+                        .expect("{event:?} kept it");
                     assert_eq!(result.groups[0].received, "K", "{event:?}");
                 } else {
                     assert_eq!(input_of(&h, 0).as_deref(), Some("K"), "{event:?}");
@@ -999,7 +1011,13 @@ mod tests {
             h.send(SessionEvent::FinishNow);
             h.advance(200).await;
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.groups.len(), 1);
             assert_eq!(h.ctx.sessions.peek().len(), 1);
         });
@@ -1084,7 +1102,13 @@ mod tests {
             h.play_through(120_000).await;
 
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.groups.len(), 2);
             assert_eq!(result.accuracy, 1.0, "every call was answered correctly");
             // The calls themselves are cw-core's to get right; here, every
@@ -1298,7 +1322,13 @@ mod tests {
 
             // Every group was answered correctly, because the pile-up is not
             // part of the answer.
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.accuracy, 1.0);
             assert_eq!(h.ctx.sessions.peek().len(), 1);
         });
@@ -1470,7 +1500,13 @@ mod tests {
             );
             h.set_behaviour(Behaviour::RefuseToStart);
             assert!(h.run_until(30_000, |h| h.screen() == Screen::Results).await);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.groups.len(), 1);
         });
     }

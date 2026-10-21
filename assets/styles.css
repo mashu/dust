@@ -1189,6 +1189,23 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   0%, 100% { box-shadow: 0 0 0 0 var(--copper-soft); opacity: 1; }
   50% { box-shadow: 0 0 0 6px transparent; opacity: 0.55; }
 }
+/* The head of a training screen: what is going on and how far it has come,
+   on one line that never wraps, however long what it says. */
+.progress-head { flex-wrap: nowrap; margin-bottom: 0.65rem; }
+.progress-head .train-status { flex-wrap: nowrap; min-width: 0; }
+.progress-status {
+  min-width: 0;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.progress-figure { flex: none; color: var(--ink-dim); font-size: 0.85rem; }
+/* An open run's longest length, after its clock: a phone keeps the room for
+   what the run is. */
+@media (max-width: 400px) {
+  .progress-figure-note { display: none; }
+}
 .progress-bar {
   height: 7px;
   background: var(--surface-sunken);
@@ -1439,6 +1456,213 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   z-index: 6;
   padding: 0.8rem 0 calc(0.8rem + env(safe-area-inset-bottom));
   background: var(--bg);
+}
+
+/* ==========================================================================
+   Contest run
+   ========================================================================== */
+
+/* Every line of the run is a slot one line high, cut short rather than
+   wrapped, and held at its height when it has nothing to say: nothing under
+   it moves as it changes, and on a phone the keypad stays put. */
+.run-line {
+  margin: 0;
+  min-width: 0;
+  min-height: 1.5em;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-counts {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.65rem;
+  font-size: 0.85rem;
+}
+.run-rate { margin-left: 0.9rem; }
+.run-qsos { flex: 1; }
+.run-speed { display: inline-flex; flex: none; align-items: center; gap: 0.35rem; }
+.run-speed-unit { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; color: var(--ink-dim); }
+.run-speed .step {
+  position: relative;
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 1.05rem;
+  font-weight: 700;
+  transition: color 0.14s var(--ease), background 0.14s var(--ease);
+}
+.run-speed .step:hover { color: var(--copper-deep); background: var(--copper-soft); }
+/* A finger's target, larger than the key it shows: a mis-tap mid-run would
+   change your sending speed. */
+.run-speed .step::before { content: ""; position: absolute; inset: -0.45rem -0.2rem; }
+.run-speed .step:disabled { opacity: 0.45; }
+.run-wpm-value {
+  min-width: 2ch;
+  text-align: center;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 700;
+}
+
+.run-entry { display: grid; gap: 0.55rem; }
+/* As group training's hint reads. */
+.run-hint { color: var(--ink-dim); font-size: 0.92rem; }
+.run-air { display: flex; justify-content: space-between; gap: 0.8rem; font-size: 0.85rem; }
+.run-tx { flex: 1; }
+.run-rx { flex: none; color: var(--ink-soft); }
+.run-tag {
+  margin-right: 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+}
+.run-tx .mono { letter-spacing: 0.06em; }
+/* The two fields stay side by side, even on a phone. */
+.field-grid.run-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.run-fields .field { min-width: 0; }
+.run-fields .answer { margin-top: 0; }
+/* The station corrected you: the call wants putting right. Filled and
+   tagged, so it never reads as the focus ring in another orange. */
+.field.corrected .answer,
+.field.corrected .answer:focus {
+  border: 2px solid var(--warn);
+  background: var(--warn-soft);
+  box-shadow: none;
+}
+.field-tag {
+  margin-left: 0.4rem;
+  padding: 0.02rem 0.4rem;
+  border-radius: var(--pill);
+  background: var(--warn-soft);
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.run-reads { font-size: 0.85rem; }
+.reads-bad { color: var(--bad); font-weight: 700; }
+.run-keys { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.run-key kbd {
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+/* Enter's chip keeps one width whatever it says, cutting a long label
+   short, so the keys after it never change rows from one turn to the
+   next. */
+.run-key-enter { flex: 0 0 13rem; max-width: 100%; min-width: 0; justify-content: flex-start; }
+.run-key-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-key.btn-primary kbd { border-color: currentColor; background: transparent; color: inherit; }
+/* Where touch is how you type, the keypad's Enter stands in for the chip,
+   a finger never needs Stop, and no key names a keyboard's keys. */
+.run.touch .run-key-desk, .run.touch .run-key kbd { display: none; }
+@media (any-pointer: coarse) {
+  .run .run-key-desk, .run .run-key kbd { display: none; }
+}
+
+/* The run's keypad: ⌫ after the last row of characters, then the next
+   field and Enter, which names what it sends. */
+.keypad-tail { grid-template-columns: repeat(8, minmax(0, 1fr)) 2fr; }
+.keypad-send { grid-template-columns: 3fr 7fr; }
+.key-field { font-size: 1rem; }
+.keypad-send .key {
+  min-width: 0;
+  padding: 0 0.5rem;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Enter's label is cut short before its ↵, never the ↵ itself. */
+.key-send { display: flex; align-items: center; justify-content: center; gap: 0.4rem; }
+.key-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.key-return { flex: none; }
+
+/* The log comes before the run's buttons, but where the keypad shows they
+   come straight under it, and the log below them; paused, there is no
+   keypad, and the log comes first again. */
+.run-log { order: 1; }
+.run-actions { order: 2; }
+.run.touch .run-actions { order: 0; }
+@media (any-pointer: coarse) {
+  .run:not(.paused) .run-actions { order: 0; }
+}
+.run-ask { flex-basis: 100%; margin: 0; font-weight: 600; }
+
+.run-paused-line { display: flex; align-items: center; gap: 0.45rem; margin: 0; font-weight: 700; }
+.run-paused-why { margin: 0.3rem 0 0; }
+.run-resume { width: 100%; margin-top: 0.8rem; }
+
+/* The log, newest first: six rows tall, each a row of the log's columns,
+   its check in words. */
+.run-log { --log-row: 1.9rem; }
+.run-log-head { margin-bottom: 0.6rem; font-size: 0.85rem; }
+.run-log-body { height: calc(6 * var(--log-row) + 5 * 0.15rem); overflow-y: auto; }
+.run-log-empty { margin: 0; }
+.run-countdown { height: 100%; }
+.run-log-rows { display: grid; gap: 0.15rem; margin: 0; padding: 0; list-style: none; }
+/* Each row is a grid of its own, so its tracks are fixed: a long copy is
+   cut short rather than pushing the columns of its row out of line. */
+.log-row {
+  display: grid;
+  grid-template-columns: 1.6rem 3rem minmax(5rem, 1fr) 5.5rem 4.2rem 2.2rem minmax(0, 1.5fr);
+  align-items: center;
+  gap: 0.5rem;
+  min-height: var(--log-row, 1.9rem);
+  padding: 0 0.45rem;
+  border-radius: 7px;
+  font-size: 0.85rem;
+}
+.log-row:nth-child(odd) { background: var(--surface-2); }
+.log-row > span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.log-n, .log-at, .log-wpm, .log-asked { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+/* What was copied slashes its zero, as group characters do. */
+.log-call, .log-fields {
+  font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace;
+  letter-spacing: 0.04em;
+}
+.log-at { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+.log-call { font-weight: 700; }
+.log-row.wrong .log-check { color: var(--bad); font-weight: 600; }
+
+/* Results: four tiles, the contest score's table, and nothing kept. */
+.grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.7rem; }
+.run-about { margin: 0 0 0.35rem; }
+.run-summary { margin: 0; line-height: 1.45; }
+.score-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.score-table th, .score-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line-soft); }
+.score-table thead th { font-size: 0.75rem; font-weight: 700; color: var(--ink-dim); text-align: right; }
+.score-table tbody th { text-align: left; font-weight: 700; }
+.score-table td { text-align: right; font-family: "IBM Plex Mono", ui-monospace, monospace; }
+.score-errors { margin: 0.65rem 0 0; font-size: 0.84rem; }
+.run-results-back { align-self: flex-start; }
+.nothing-kept h2 { margin: 0 0 0.4rem; font-size: 1.3rem; letter-spacing: -0.02em; }
+.nothing-kept p { margin: 0; }
+
+/* Read by a screen reader, never seen. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* ==========================================================================
@@ -1779,6 +2003,21 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 }
 .history-item:hover { background: var(--surface-2); }
 .history-item.selectable { grid-template-columns: auto minmax(0, 1fr) auto; }
+/* A run's row opens its results: its date and its figures, as one button,
+   with a chevron that says so. */
+.history-open {
+  grid-column: 1 / 3;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0;
+  text-align: left;
+}
+.history-open-mark { display: grid; color: var(--ink-dim); }
+.history-open-mark .icon { width: 1rem; height: 1rem; transform: rotate(-90deg); }
+.history-open:hover .history-open-mark,
+.history-open:focus-visible .history-open-mark { color: var(--copper-deep); }
 .history-item.chosen { background: var(--copper-soft); border-color: var(--copper); }
 .history-when { display: grid; gap: 0.1rem; min-width: 0; }
 .history-sub { font-size: 0.78rem; color: var(--ink-dim); }
@@ -2160,6 +2399,30 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .field input, .field select, .stepper input, .answer { font-size: 16px; min-height: 44px; }
   .keypad-row { gap: 0.28rem; }
   .key { min-height: 2.85rem; font-size: 1.1rem; }
+  .run-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .run.paused .run-actions, .run-actions.asking { grid-template-columns: 1fr 1fr; }
+  .run-actions .btn { padding-left: 0.5rem; padding-right: 0.5rem; }
+  .run-ask { grid-column: 1 / -1; }
+  .grid-4 { grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+  /* A log row takes two lines: who and what, then speed and how it checked. */
+  .run-log { --log-row: 2.9rem; }
+  .run-rate { margin-left: 0.5rem; }
+  .run-rate-word { display: none; }
+  .run-speed { gap: 0.3rem; }
+  .log-row {
+    grid-template-columns: 1.4rem 2.8rem minmax(0, 1fr) auto;
+    grid-template-areas: "n at call fields" ". asked check wpm";
+    row-gap: 0;
+    padding: 0.2rem 0.4rem;
+  }
+  .log-n { grid-area: n; }
+  .log-at { grid-area: at; }
+  .log-call { grid-area: call; }
+  .log-fields { grid-area: fields; }
+  .log-asked { grid-area: asked; }
+  .log-wpm { grid-area: wpm; }
+  .log-check { grid-area: check; }
+  .log-fields, .log-wpm { justify-self: end; }
   /* A session on a phone, from the header to the keypad, fits one screen:
      nothing to scroll to reach a key, and nothing that moves. */
   .shell:not(.has-nav) .header-bar { margin-bottom: 0.6rem; }

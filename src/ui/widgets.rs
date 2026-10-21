@@ -101,6 +101,7 @@ pub enum IconName {
     Chart,
     Sliders,
     Play,
+    Pause,
     Stop,
     Headphones,
     Check,
@@ -132,11 +133,12 @@ pub enum IconName {
 impl IconName {
     /// Every icon, for the test that draws them all.
     #[cfg(test)]
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::Signal,
         Self::Chart,
         Self::Sliders,
         Self::Play,
+        Self::Pause,
         Self::Stop,
         Self::Headphones,
         Self::Check,
@@ -182,6 +184,7 @@ impl IconName {
                 "M16 17v4",
             ],
             Self::Play => &["M7 4.5l12 7.5-12 7.5z"],
+            Self::Pause => &["M8.5 5v14", "M15.5 5v14"],
             Self::Stop => &["M6.5 6.5h11v11h-11z"],
             Self::Headphones => &["M4 14v-2a8 8 0 0116 0v2", "M4 14h3v6H4z", "M17 14h3v6h-3z"],
             Self::Check => &["M4.5 12.5l5 5 10-11"],
@@ -337,13 +340,27 @@ pub fn GroupResultRow(index: usize, group: GroupResult) -> Element {
     }
 }
 
+/// The head of a training screen: what is going on, how far it has come as
+/// a figure and a bar, and anything the screen adds under the bar.
 #[component]
-pub fn ProgressHeader(current: usize, total: usize, status: String, live: bool) -> Element {
-    let pct = if total == 0 {
-        0.0
-    } else {
-        ((current + 1) as f64 / total as f64) * 100.0
-    };
+pub fn ProgressHeader(
+    status: String,
+    live: bool,
+    /// How far it has come: "3 / 20", or a run's clock.
+    figure: String,
+    /// Said after the figure where there is room for it: an open run's
+    /// longest length. A phone leaves it out.
+    #[props(default)]
+    figure_note: String,
+    /// The bar's fill, in percent.
+    pct: f64,
+    /// The figure is a clock: a screen reader reads it when asked, and does
+    /// not read every tick out.
+    #[props(default)]
+    timer: bool,
+    #[props(default)] children: Element,
+) -> Element {
+    let pct = pct.clamp(0.0, 100.0);
     let dot = if live {
         "status-dot live"
     } else {
@@ -351,18 +368,26 @@ pub fn ProgressHeader(current: usize, total: usize, status: String, live: bool) 
     };
     rsx! {
         div { class: "card",
-            div { class: "row-between", style: "margin-bottom: 0.65rem;",
+            div { class: "row-between progress-head",
                 div { class: "train-status",
                     span { class: dot }
-                    span { style: "font-weight: 700;", "{status}" }
+                    span { class: "progress-status", "{status}" }
                 }
-                span { class: "mono", style: "color: var(--ink-dim); font-size: 0.85rem;",
-                    "{current + 1} / {total}"
+                if timer {
+                    span { class: "mono progress-figure", role: "timer", aria_live: "off",
+                        "{figure}"
+                        if !figure_note.is_empty() {
+                            span { class: "progress-figure-note", "{figure_note}" }
+                        }
+                    }
+                } else {
+                    span { class: "mono progress-figure", "{figure}" }
                 }
             }
             div { class: "progress-bar",
                 span { style: "width: {pct}%;" }
             }
+            {children}
         }
     }
 }

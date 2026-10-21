@@ -8,13 +8,12 @@ parsing, exchanges and cut numbers, ESM, the run clock, callers' serials,
 checks, both scores, the run's log layout, and the contest settings. So is
 its engine: single callers, turns and `plan_turn`, the run machine and what
 a run stores, with operator tests and a soak. The app runs it from start to
-results (`src/contest_runtime.rs`) on a plain run screen
-(`src/ui/contest.rs`), with pause, the hidden-page pause and the sound
-failure pause; the screen's full layout, the keypad, the contest results
-and the settings cards come next. Until then a run that worked nobody goes
-back Home with its message, not to a panel with Run again (4.2), and what
-the run announces shows at once, not held till the air is silent (§7).
-Nobody can pick Contest yet (§14).
+results (`src/contest_runtime.rs`) on the run screen of §7
+(`src/ui/contest.rs`, its keys in `src/ui/contest_keys.rs`), with the
+keypad, pause, the hidden-page pause and the sound failure pause, and shows
+the contest results (`src/ui/contest_results.rs`), also from History; the
+settings cards, the Home hero and the stats pills come next. Nobody can
+pick Contest yet (§14).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -298,7 +297,7 @@ The machine needs the fields only at a key press. The runtime maps
 | In | Event | Effects → next |
 |---|---|---|
 | Countdown n | TimerFired | 1 s → n−1. At 0 the clock and run-end timer start and your first CQ goes out → Running |
-| Countdown | Pause | timers forgotten, `ReleaseAudio` → Paused; Resume restarts the countdown |
+| Countdown | Pause | timers forgotten, `ReleaseAudio`, "Paused" announced → Paused; Resume restarts the countdown, "Resumed" announced |
 | Running, Silent | Key | ESM (4.4) or the key picks the message; a logging key logs (4.8); replies are decided → `PlayTurn` (new id) |
 | Running, Turn | Key but StopTx | a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing, and Shift+Enter first counts what of it has reached you, as a key that sends does |
 | Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange of the message keyed last not fully sent (`Main.pas:884-891`), not for one carried from an earlier key, heard then; the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it (5.2) → Silent |
@@ -412,7 +411,7 @@ always goes out again as typed, alone. Where MRCE refuses an invalid
 exchange (`Main.pas:1210-1216`), Dust also sends nothing: the fault is your
 typing. When Enter does not log and V holds, focus moves to Exchange, as
 MRCE's `MustAdvance` (`Main.pas:1222-1223`); after logging it returns to
-Call. `esm(&qso, &fields, &rules, side) -> Esm { message, label, hint, focus }`
+Call. `esm(&qso, &fields, &rules, side) -> Esm { message, label, hint, focus, corrected }`
 is pure: the machine runs it on the key, the screen on its own field text.
 It takes your side because ARRL DX's exchange depends on it, as
 `parse_exchange` does. When rows combine, the label names each part:
@@ -438,8 +437,15 @@ It takes your side because ARRL DX's exchange depends on it, as
   fullscreen takes Esc, so the run calls `navigator.keyboard.lock(['Escape'])`
   where it exists, and Alt+S always stops. Insert is the screen readers'
   modifier key, so `;` is the documented key.
-- During a run, F1–F10 and F12 lose their browser defaults, through the F11
-  pattern plus a document listener like the paddles' (`paddle.rs:459-475`).
+- During a run, the run's keys lose their browser defaults. One listener
+  on the document hears them wherever the focus is, nowhere included, on
+  every build: a script the run screen puts on the page, as the
+  visibility listener is (6.4), which keeps each key from the browser and
+  tells the run through `dioxus.send` (`src/ui/contest_keys.rs`). A key is
+  known by where it sits (`KeyS`, as Alt+S types ß on a Mac); a key held
+  down is told once; Ctrl, Shift and the Command key make any key a
+  shortcut, passed by. F1–F10 and F12 join the list as their keys ship.
+  Alt+P pauses, and on a paused run carries on.
 - Every key has a button. The key bar's "Enter · TU & log" chip names what
   Enter sends, and F3 reads "F3 TU (no log)".
 - Paddles key into the focused field (`paddle.rs:287-299`) and never
@@ -792,7 +798,7 @@ in place of `current/total`.
 │ ████████████████████████████████████░░░░░░░░░░░░                 │
 │ QSOs 9 · 8 clean    Rate 70/h                   WPM [−] 24 [+]   │
 ├──────────────────────────────────────────────────────────────────┤
-│ Copy their number into Exchange, then TU & log.                  │
+│ Copy their number, then TU & log.                                │
 │ TX ▸ K5XYZ 5NN T1T                               RX ▮ 1 calling  │
 │ ┌ CALL ────────────────────┐  ┌ EXCHANGE · NR ────────────────┐  │
 │ │ K5XYZ▌                   │  │ 214                           │  │
@@ -810,12 +816,23 @@ in place of `current/total`.
 ```
 
 - **The hint line** is `esm()`'s `hint` ("Type the call you hear, then
-  Enter"), one line, as group training's (`training.rs:566-585`).
+  Enter"), one line, as group training's (`training.rs:566-585`), and in
+  its type. The hints are short enough for a phone's line ("Copy their
+  number, then TU & log"). Before the first CQ it says the seconds to it
+  ("Your first CQ goes out in 3 s"), as a phone shows the log's place, where
+  the countdown stands, only below the keypad.
 - **The air line** shows only your own message, the part still being sent.
   RX counts the stations sending but never shows what they send (Show copy,
-  phase 4, is the exception).
-- **A correction** turns the Call border to `--warn`: "They corrected you:
-  fix the call, then Enter."
+  phase 4, is the exception). Each says "—" when it has nothing, as
+  "Reads as" does.
+- **A correction** turns the Call border to `--warn` and fills the field,
+  with a "corrected" tag by its label, so it never reads as the focus ring:
+  "They corrected you: fix the call, then Enter." (`esm()` says so with
+  `corrected`.)
+- **The key bar's buttons** keep the cursor in its field, as the keypad's
+  keys do: a click on CQ or + takes no focus, so the letters typed next and
+  Enter still reach the fields. Enter's chip keeps one width, cutting a long
+  label short, so the keys after it never change rows.
 - **The log** is newest first, six rows tall. A row shows `…` until its
   station is done, then a word ("clean", "busted call, was K5ABC"), since
   icons are `aria-hidden` (`widgets.rs:277`). `?×1` counts asked repeats.
@@ -851,13 +868,22 @@ line is a fixed one-line slot with an ellipsis (as `.train-hint`,
    Log (scroll) · [ Discard ]
 ```
 
+At a phone's width the run bar keeps the desktop's three lines: the status
+and the clock, the bar, then the QSOs, the rate (without its word) and
+− / +, whose targets are larger than the keys they show; a status too long
+for its line is cut short, and an open run's clock drops its " · up to
+60:00". Where the keypad shows, Pause, End run and Discard come under it in
+one row and the log below them, its rows two lines each; the key bar drops
+Enter's chip, which the keypad's Enter replaces, Stop, and the names of
+keyboard keys.
+
 The keypad takes its rows as props, not the constants at
 `training.rs:353-357`: the character
 rows stay as in group training, only `,` and `.` leave row four, and the
 last row is `␣ Field` (Call to Exchange; a space in Exchange) and the ESM
-key, whose label and `aria-label` name what it sends. Fields keep
-`inputmode="none"` (`training.rs:205`); a tapped field takes focus and the
-paddles.
+key, whose label and `aria-label` name what it sends, cut short before its
+`↵` when long. Fields keep `inputmode="none"` (`training.rs:205`); a tapped
+field takes focus and the paddles.
 
 **Typing never loses keys.** A controlled input redrawn while typed in drops
 the key typed in between (`training.rs:47-60`). Each field is an
@@ -872,15 +898,19 @@ its check, a correction, paused, resumed, time's up), queued until the air
 is silent so speech never covers the Morse.
 
 **Paused,** the entry card gives way to "⏸ Paused. Your QSO waits: W7XYZ ·
-37", a full-width Resume and the log, with Discard and End run below.
+37", a full-width Resume and the log, with Discard and End run below, End
+run no longer primary, so Resume is the one thing to press. The pause sign
+is drawn as an icon, as `⏸` is missing from many a phone's fonts. Discard,
+paused or not, asks once more: "Discard this run? Its QSOs are not kept".
 
 **Results** (a contest branch of `ResultsView`, `src/ui/results.rs:59-167`;
-the same view opens read-only from a History row):
+the same view opens read-only from a History row, in the list's place, with
+History at its top and Back at its foot, and no Run again):
 
 ```
 ┌────────────────────────────────────────────────┐
 │  ╭─────╮   Run complete · CQ WPX · 10:00       │
-│  │ 92% │   12 QSOs, 72 an hour. Two calls      │
+│  │ 92% │   12 QSOs, 72 an hour. Two QSOs       │
 │  │CLEAN│   needed a repeat; one NR was wrong.  │
 │  ╰─────╯                                       │
 ├────────────────────────────────────────────────┤
@@ -902,11 +932,17 @@ the same view opens read-only from a History row):
 └────────────────────────────────────────────────┘
 ```
 
-The ring, captioned "QSOs clean", is the share logged clean; ACCURACY is
+The ring, captioned "CLEAN" as the group results' ring is "ACCURACY", and
+named "92% of QSOs logged clean" for a screen reader, is the share logged
+clean. The sentence counts QSOs logged: those you asked a repeat for (the
+`?×n` the run showed, which the log keeps), each check that found something,
+and any station worked and never logged. ACCURACY is
 character accuracy, as Home and History show it; POINTS are Dust's copy
-points (10); the banner ranks within the contest kind. Simple QSO shows
-QSOs, minutes per QSO and accuracy per field, with no contest score. A
-History row reads "2026-10-20 · Contest · CQ WPX · 11/12 QSOs · 72/h · 97% ·
+points (10); the banner ranks within the contest kind. Where what you
+logged differs from what was sent, the log reads logged→sent (`13→31` is
+13 logged, 31 sent; `K5ABD→K5ABC`), and a QSO never logged says so.
+Simple QSO shows QSOs, minutes per QSO and accuracy per field, with no
+contest score. A History row reads "2026-10-20 · Contest · CQ WPX · 11/12 QSOs · 72/h · 97% ·
 496 pts".
 
 **Settings, Contest chosen.** The Character set card (§2) shows the six
@@ -1031,7 +1067,9 @@ only when `v` is exactly 1, the kind, style and field names are known to
 this build, and the `g` values add up to `groups`. Otherwise the log stays
 as read, shown as "Contest run (this version cannot read its log)", or
 "cannot score Sprint" for a known layout with an unknown kind. History
-parses each log once per load.
+parses each log once per load, its rows made again only when the history
+changes, and a run's row and its results read their figures from one
+`ContestRun::summary`.
 
 ```rust
 // contest/record.rs
@@ -1074,13 +1112,17 @@ pub struct QsoRecord {
     pub s: Vec<String>, // what the station sent of it, beside `l`, for the check
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sc: String,     // the station's call, where an earlier QSO holds its copy
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub a: u32,         // repeats you asked of the station and heard, as the live log's ?×n
 }
 ```
 
 Your callsign and exchange are not stored in a run: no score needs them.
 Checks, dupes, points, multipliers and rates are worked out on read, as
-`score` is. `v` rises only for a change an older reader would misread; a
-key that later phases add with a default does not raise it.
+`score` is. `a` is kept because the groups' `sends` count only the repeats
+charged to the copy, and the results show the `?×n` the run showed. `v`
+rises only for a change an older reader would misread; a key that later
+phases add with a default does not raise it.
 
 **How a run fills the groups** (`ContestRun::result()`, which takes the
 groups the machine kept, as the stored layout holds none;
@@ -1501,11 +1543,18 @@ pub struct ContestView {
     pub phase: ContestPhase, pub clock: Option<RunClock> /* None in the countdown */,
     pub limit_ms: u64, pub my_wpm: f64,
     pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call
-    pub air: Option<AirView>,  // started, your text, segment spans
+    pub air: Option<AirView>,  // heard from, your text and where each character ends, segment spans
     pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked
-    pub qsos: u32, pub clean: u32, pub rate: Option<f64>,
+    pub qsos: u32, pub clean: u32,
+    pub serial: u32,           // your next serial; 0 without one
 }
+impl ContestView { pub fn run_ms(&self, now: MonoMs) -> u64; pub fn rate(&self, now: MonoMs) -> Option<f64>; }
+impl AirView { pub fn still_sending(&self, now: MonoMs) -> &str; pub fn calling(&self, now: MonoMs) -> usize; }
 ```
+
+Nothing in the view moves with the time alone, so `view()` takes no time:
+the run bar reads the clock and the rate off it as it ticks, and the air
+line what is still to go of your message.
 
 Effects carry `Turn`, which derives `PartialEq` (as `StationVoice` does,
 `station.rs:12`), so machine tests compare effects as the group tests do
@@ -1528,7 +1577,9 @@ through one entry point, `press_key`, which calls `paddle.finish_letter()`
 `entry.snapshot()`, then dispatches `Key`. `run_effects` handles
 `ClearFields` and `Focus` through `ctx.entry` and the focus script
 (`widgets.rs:67`, shared with the group boxes); `Announce` sets
-`ctx.announced`, which the screen reads. One `use_answer_box` registration
+`ctx.announced` once nothing is on the air, held until then; the one
+polite region that speaks it sits in the app's frame, so what the run
+says as it ends is still said on the results. One `use_answer_box` registration
 routes paddle letters to the focused field. `app.session` holds
 `Live::{Groups, Contest}`, each boxed; `finish_run` and `abort_run` reach
 whichever is live.
@@ -1776,11 +1827,12 @@ ships a release before phase 1.
   `contestActive` back as Contest; until the Contest arm of
   `start_session` followed, `start_session` ran such settings as Callsigns
   at the same tier, and that arm removed the shim.
-- **1b Honest clock and sound.** The dry path for your message; rate;
-  − / +.
+- **1b Honest clock and sound.** The dry path for your message. The rate
+  and − / + came with 1a's run screen.
 - **1c Simple QSO.** Names data, the RST and NAME exchange, `myName`.
-- **1d Contester keys.** F2, F3, F5, `;`, `.`, `,`, `+`, Shift+Enter; the key
-  bar; browser defaults suppressed; Esc lock in fullscreen.
+- **1d Contester keys.** F2, F3, F5, `;`, `.`, `,`, `+`, Shift+Enter, and
+  their buttons on the key bar. The key bar, browser defaults kept from
+  the run's keys and Esc locked in fullscreen came with 1a's run screen.
 
 **Phase 2: pile-ups and Sprint,** the first release.
 

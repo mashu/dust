@@ -116,10 +116,11 @@ pub struct AppCtx {
     pub runtime: Signal<Option<GroupSession>>,
     /// The contest run in flight, as its screen shows it.
     pub contest: Signal<Option<ContestView>>,
-    /// What the run last said for a screen reader: logged, paused, time up.
-    pub announced: Signal<Option<String>>,
-    /// The session just finished, for the results screen.
-    pub result: Signal<Option<SessionResult>>,
+    /// What the run last said for a screen reader, once the air fell
+    /// silent: logged and how it checked, corrected, paused, time up.
+    pub announced: Signal<Option<Said>>,
+    /// How the session just finished ended, for the results screen.
+    pub result: Signal<Option<Finished>>,
     /// What the session just finished did to the level, if anything.
     pub auto_message: Signal<Option<String>>,
     pub toasts: Toasts,
@@ -398,6 +399,46 @@ fn why_not_stored(saved: &HistorySaved) -> Option<String> {
             Some("your saved history could not be read, so it was left as it is".into())
         }
         HistorySaved::Failed(reason) => Some(reason.clone()),
+    }
+}
+
+/// How the session just finished ended, as its results screen shows it.
+/// One value, so the screen can never show both.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Finished {
+    Kept(Box<SessionResult>),
+    /// A run that worked nobody, so nothing was kept.
+    NothingKept,
+}
+
+#[cfg(test)]
+impl Finished {
+    /// The session kept, if one was.
+    pub fn kept(self) -> Option<SessionResult> {
+        match self {
+            Self::Kept(result) => Some(*result),
+            Self::NothingKept => None,
+        }
+    }
+}
+
+/// Something said to a screen reader.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Said {
+    pub text: String,
+    /// Which time this was said. The same words said twice are said twice:
+    /// a screen reader speaks what is put in its region anew, not what is
+    /// left there unchanged.
+    pub serial: u64,
+}
+
+impl Said {
+    pub fn new(text: String) -> Self {
+        static SAID: AtomicU64 = AtomicU64::new(0);
+        Self {
+            text,
+            serial: SAID.fetch_add(1, Ordering::Relaxed),
+        }
     }
 }
 

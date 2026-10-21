@@ -8,7 +8,7 @@ use cw_core::{CharSetMode, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
 use crate::persist::Store;
-use crate::testing::{Ui, run, stored_session, test_settings};
+use crate::testing::{Ui, run, stored_run, stored_session, test_settings};
 use crate::ui::stats::StatsView;
 
 /// Five sessions a day apart, oldest first, the way the store keeps them.
@@ -274,7 +274,55 @@ fn every_row_names_its_mode() {
         let (ui, _recorder) = open_history(&[koch, calls, contest]);
         assert!(ui.has("Koch · 1/1 groups"));
         assert!(ui.has("Callsigns · 1/1 groups"));
-        assert!(ui.has("Contest · 0/1 groups"));
+        assert!(ui.has("Contest · CQ\u{a0}WPX · log not kept by an older version"));
+        assert!(ui.controls("history-open-").is_empty(), "no log to open");
+    });
+}
+
+/// A contest run's row reads as a run — its contest, its QSOs clean of
+/// those logged, its rate — and its points say so; it opens the run's
+/// results, to be read and left again, with no run started from them.
+#[test]
+fn a_contest_row_opens_the_runs_results() {
+    run(|| async {
+        let koch = stored_session("2026-10-01", &[("KM", "KM")]);
+        let contest = stored_run(
+            "2026-10-20",
+            &[
+                ("K5XYZ", "214", "K5XYZ", "214"),
+                ("DL2XYZ", "13", "DL2XYZ", "31"),
+            ],
+        );
+        let pts = format!("{} pts", contest.score.round());
+        let (mut ui, recorder) = open_history(&[koch, contest]);
+        assert!(
+            ui.has("Contest · CQ\u{a0}WPX · 1/2\u{a0}QSOs · 12/h"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has(&pts), "{pts}");
+        assert!(ui.has(" pts<"), "every row's points say so");
+        assert_eq!(ui.controls("history-open-"), ["history-open-1"]);
+
+        // Named by what the row shows, as every row is read.
+        assert!(!ui.input_tag("history-open-1").contains("aria-label"));
+        ui.click("history-open-1");
+        assert!(ui.has("Run complete"));
+        assert!(ui.has("CQ WPX · 10:00 · Tue\u{a0}20\u{a0}Oct\u{a0}2026"));
+        assert!(ui.has("31→13"), "what was logged, and really sent");
+        assert!(!ui.shows("btn-run-again"), "read only");
+        assert!(
+            ui.controls("history-delete-").is_empty(),
+            "the list gave way to the results"
+        );
+        ui.click("btn-back");
+        assert!(ui.has("2 sessions on this device"));
+        assert_eq!(ui.screen(), "stats");
+        // The way back at the top goes the same way.
+        ui.click("history-open-1");
+        ui.click("btn-history");
+        assert!(ui.has("2 sessions on this device"));
+        assert!(recorder.calls().is_empty(), "nothing was started");
     });
 }
 

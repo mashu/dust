@@ -663,6 +663,7 @@ fn only_group_characters_slash_their_zero() {
             ".group-text",
             ".letter-chip",
             ".listen-heard-item",
+            ".log-call, .log-fields",
             ".paddle-heard",
             ".pool-chip",
             ".sent",

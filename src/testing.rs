@@ -97,6 +97,70 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
     machine.session().result(1_000, date.to_string())
 }
 
+/// A finished ten-minute WPX run, the way the app stores it: each QSO's
+/// call and number as the station sent them and as you logged them, one a
+/// minute.
+pub fn stored_run(date: &str, qsos: &[(&str, &str, &str, &str)]) -> SessionResult {
+    let group = |sent: &str, received: &str| cw_core::GroupResult {
+        sent: sent.to_string(),
+        received: received.to_string(),
+        correct: sent == received,
+    };
+    let groups: Vec<cw_core::GroupResult> = qsos
+        .iter()
+        .flat_map(|(call, nr, logged_call, logged_nr)| {
+            [group(call, logged_call), group(nr, logged_nr)]
+        })
+        .collect();
+    let mut tally = cw_core::CopyTally::default();
+    for group in &groups {
+        tally.add(&group.sent, &group.received);
+    }
+    let records: Vec<serde_json::Value> = (1..=qsos.len() as u64)
+        .map(|n| serde_json::json!({ "t": n * 60_000, "h": n * 60_000 - 20_000, "g": 2, "nr": n }))
+        .collect();
+    let log = serde_json::json!({
+        "v": 1,
+        "kind": "wpx",
+        "style": "single",
+        "callers": [1, 1],
+        "side": "",
+        "myCountry": "DL",
+        "myContinent": "",
+        "myZone": 0,
+        "fields": ["nr"],
+        "limitS": 600,
+        "runMs": 600_000,
+        "pausedMs": 0,
+        "myWpm": 26.0,
+        "qsos": records,
+    });
+    let mut run = SessionResult {
+        date: date.to_string(),
+        timestamp: 1_760_000_000_000,
+        group_timings: groups
+            .iter()
+            .map(|_| cw_core::SessionTiming {
+                time_to_complete_ms: 900.0,
+                char_wpm: Some(26.0),
+                effective_wpm: Some(26.0),
+                sends: 1,
+            })
+            .collect(),
+        groups,
+        accuracy: tally.accuracy(),
+        tally,
+        char_set_mode: cw_core::CharSetMode::Contest,
+        alphabet_fingerprint: "contest:wpx".to_string(),
+        contest: Some(cw_core::ContestLog(log)),
+        char_wpm: 26.0,
+        effective_wpm: 26.0,
+        ..SessionResult::empty_for_test()
+    };
+    run.score = run.points();
+    run
+}
+
 /// Settings that make a session short and predictable to test.
 pub fn test_settings() -> TrainingSettings {
     let mut settings = TrainingSettings::default();

@@ -1067,7 +1067,7 @@ fn contest_run(
         if !was_terminal && machine.is_terminal() {
             ended = Some(at.0);
         }
-        let view = machine.view(at);
+        let view = machine.view();
         if let Some(mut clock) = view.clock {
             let reading = clock.elapsed_ms(at);
             // The one step back by design: a send whose every retry failed
@@ -1120,7 +1120,7 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
             events.push((ContestEvent::FinishNow, MonoMs(end)));
             end
         });
-        let view = machine.view(MonoMs(finished_at));
+        let view = machine.view();
         let result = machine.result(finished_at, "2026-10-20".into());
         // One station, one copy: every station worked, logged or lost has
         // its groups in exactly one of its QSOs, however often it was
@@ -1232,6 +1232,26 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
             "seed {seed}: the stored run scores differently"
         );
         assert!(stored.verified.score <= stored.raw.score, "seed {seed}");
+        // Its results list each QSO logged as the run's own log did.
+        let listed = run
+            .log(&result.groups, &result.group_timings)
+            .expect("a stored run lists its QSOs");
+        let listed: Vec<_> = listed.iter().filter(|qso| qso.n.is_some()).collect();
+        assert_eq!(listed.len(), view.log.len(), "seed {seed}");
+        for (row, qso) in view.log.iter().zip(listed) {
+            assert_eq!(
+                (&qso.call, qso.at_ms, qso.asked),
+                (&row.call, row.at_ms, row.asked),
+                "seed {seed}: QSO {} lists otherwise than it ran",
+                row.n
+            );
+            assert_eq!(
+                Some(&row.status),
+                qso.check.clone().map(RowStatus::Checked).as_ref(),
+                "seed {seed}: QSO {} checks otherwise than it ran",
+                row.n
+            );
+        }
 
         // The same events, replayed, make the same run.
         let replays: Vec<_> = (0..2)

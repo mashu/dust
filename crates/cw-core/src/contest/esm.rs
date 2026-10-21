@@ -135,6 +135,9 @@ pub struct Esm {
     /// does not log and the call is whole, as MorseRunner advances; back to
     /// Call once the QSO is logged.
     pub focus: Option<EntryField>,
+    /// The station corrected the call the Call field still reads: Enter
+    /// sends nothing until it is put right.
+    pub corrected: bool,
 }
 
 impl Esm {
@@ -154,6 +157,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             label: "CQ".to_string(),
             hint: "Type the call you hear, then Enter".to_string(),
             focus: None,
+            corrected: false,
         };
     }
     let reading = parse_exchange(rules, side, &fields.exch);
@@ -169,6 +173,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             hint: hint(&message, &call, e, &[]),
             message,
             focus: Some(EntryField::Call),
+            corrected: false,
         };
     }
     // Sent again as it stands, the call would only be corrected again.
@@ -178,6 +183,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             label: "Fix call".to_string(),
             hint: "They corrected you: fix the call, then Enter".to_string(),
             focus: Some(EntryField::Call),
+            corrected: true,
         };
     }
     if n && v && e == ExchangeState::Invalid {
@@ -186,6 +192,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             label: label(&[]),
             hint: "Exchange cannot be read: fix it, then Enter".to_string(),
             focus: Some(EntryField::Exchange),
+            corrected: false,
         };
     }
     let mut message = Vec::new();
@@ -217,6 +224,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
         hint: hint(&message, &call, e, &missing),
         message,
         focus,
+        corrected: false,
     }
 }
 
@@ -264,9 +272,9 @@ fn hint(message: &[MessagePart], call: &str, e: ExchangeState, missing: &[Field]
         .any(|part| matches!(part, MessagePart::HisCall(_)));
     if message.contains(&MessagePart::Tu) {
         return if resends_call {
-            "Enter sends the corrected call with TU, and logs".to_string()
+            "Enter sends the call put right, TU, and logs".to_string()
         } else if message.contains(&MessagePart::Exchange) {
-            "Enter sends your exchange with TU, and logs".to_string()
+            "Enter sends your exch with TU, and logs".to_string()
         } else {
             "Enter sends TU and logs the QSO".to_string()
         };
@@ -275,7 +283,7 @@ fn hint(message: &[MessagePart], call: &str, e: ExchangeState, missing: &[Field]
         return if e == ExchangeState::Missing {
             format!("Still to copy: their {}. Enter asks again", nouns(missing))
         } else {
-            format!("Copy their {} into Exchange, then TU & log", nouns(missing))
+            format!("Copy their {}, then TU & log", nouns(missing))
         };
     }
     if message.contains(&MessagePart::Exchange) {
@@ -286,9 +294,9 @@ fn hint(message: &[MessagePart], call: &str, e: ExchangeState, missing: &[Field]
         };
     }
     if call.contains('?') {
-        "Enter asks for the call again: fill in what you hear".to_string()
+        "Enter asks for the call: fill in what you hear".to_string()
     } else {
-        "Not a whole call yet: finish it, or put ? where you missed some".to_string()
+        "Not a whole call: finish it, or put ? for a gap".to_string()
     }
 }
 
@@ -385,6 +393,44 @@ mod tests {
         assert_eq!(fields.exch_complete, Some(MonoMs(800)));
     }
 
+    /// Every hint a WPX run gives keeps to one line of a 360 px phone,
+    /// where the hint's slot was measured to hold 47 characters of it: the
+    /// part that says what to do is never the part cut short.
+    #[test]
+    fn every_hint_fits_a_phones_line() {
+        let mut hints = Vec::new();
+        for (call_sent, exchange_sent) in [("", false), ("K5XYZ", false), ("K5XYZ", true)] {
+            for call in ["", "K5", "K5?", "K5XYZ", "K5XYW"] {
+                for exch in ["", "5NN", "214", "BOB"] {
+                    hints.push(enter(call_sent, exchange_sent, call, exch).hint);
+                }
+            }
+        }
+        let corrected = QsoState {
+            call_sent: "K5XYZ".into(),
+            exchange_sent: true,
+            corrected: true,
+            ..QsoState::default()
+        };
+        let fields = Fields {
+            call: "K5XYZ".into(),
+            exch: "214".into(),
+            ..Fields::default()
+        };
+        hints.push(esm(&corrected, &fields, rules(), Side::Dx).hint);
+        let thanked = QsoState {
+            thanked: "K5XYZ".into(),
+            ..corrected
+        };
+        hints.push(esm(&thanked, &fields, rules(), Side::Dx).hint);
+        hints.sort();
+        hints.dedup();
+        assert!(hints.len() >= 10, "{hints:?}");
+        for hint in hints {
+            assert!(hint.chars().count() <= 47, "{hint:?}");
+        }
+    }
+
     #[test]
     fn an_empty_call_field_calls_cq() {
         let esm = enter("", false, "", "");
@@ -449,7 +495,7 @@ mod tests {
         assert_eq!(esm.message, [Again]);
         assert_eq!(esm.label, "? Again");
         assert_eq!(sent(&esm), "?");
-        assert_eq!(esm.hint, "Copy their number into Exchange, then TU & log");
+        assert_eq!(esm.hint, "Copy their number, then TU & log");
         assert_eq!(esm.focus, Some(EntryField::Exchange));
     }
 
@@ -461,6 +507,7 @@ mod tests {
         assert_eq!(esm.label, "Fix exchange");
         assert_eq!(sent(&esm), "");
         assert_eq!(esm.focus, Some(EntryField::Exchange));
+        assert!(!esm.corrected, "it waits for the exchange");
         // Even with the call changed since.
         assert!(enter("K5XYZ", true, "K5XYW", "BOB").message.is_empty());
     }
@@ -513,9 +560,11 @@ mod tests {
             assert_eq!(esm.label, "Fix call");
             assert_eq!(esm.hint, "They corrected you: fix the call, then Enter");
             assert_eq!(esm.focus, Some(EntryField::Call));
+            assert!(esm.corrected);
         }
         // Fixed, it goes out with what the QSO needs.
         let fixed = esm(&qso, &fields("K5XYZ", ""), rules(), Side::Dx);
+        assert!(!fixed.corrected);
         assert_eq!(sent(&fixed), "K5XYZ ?");
         let fixed = esm(&qso, &fields("K5XYZ", "214"), rules(), Side::Dx);
         assert_eq!(sent(&fixed), "K5XYZ TU");

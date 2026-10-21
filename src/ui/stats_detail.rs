@@ -2,14 +2,16 @@ use std::collections::BTreeSet;
 
 use cw_core::{
     CONTEST_TIMES_NOTE, CharSetMode, GROUP_START_BIGRAM_TOKEN, MasteryStatus, SamplingRow,
-    SessionResult, SpeedPath, TrainingSettings, character_diagnostics, group_length_forecast,
-    mistake_stats, sampling_rows, session_history, speed_forecast,
+    SessionHistoryRow, SessionResult, SpeedPath, StoredLog, TrainingSettings, board_place,
+    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
+    speed_forecast,
 };
 use dioxus::prelude::*;
 
 use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
 use crate::ui::backup::{BackupCard, Backups};
+use crate::ui::contest_results::ContestResults;
 use crate::ui::format::counted;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
@@ -279,6 +281,50 @@ fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Elemen
 /// How many sessions the history lists before it offers more.
 const HISTORY_PAGE: usize = 40;
 
+/// What a row says under its date: "Koch · 18/20 groups · 96 chars", or for
+/// a contest run "Contest · CQ WPX · 11/12 QSOs · 72/h", whose parts each
+/// keep to one piece, so a narrow line breaks only between them.
+fn history_sub(row: &SessionHistoryRow) -> String {
+    let Some(log) = &row.log else {
+        return format!(
+            "{} · {}/{} groups · {} chars",
+            mode_label(row.mode),
+            row.correct_groups,
+            row.groups,
+            row.total_chars
+        );
+    };
+    let mut parts = vec![mode_label(row.mode).to_string()];
+    if let Some(kind) = row.contest {
+        parts.push(kind.label().replace(' ', "\u{a0}"));
+    }
+    match log {
+        StoredLog::Read(run) => {
+            parts.push(format!("{}/{}\u{a0}QSOs", run.clean, run.qsos));
+            if let Some(rate) = run.rate {
+                parts.push(format!("{rate:.0}/h"));
+            }
+        }
+        StoredLog::Dropped => parts.push("log not kept by an older version".to_string()),
+        StoredLog::Unreadable => parts.push("this version cannot read its log".to_string()),
+    }
+    parts.join(" · ")
+}
+
+/// Whether a row opens its run's results: a contest run whose log reads.
+fn opens(row: &SessionHistoryRow) -> bool {
+    matches!(row.log, Some(StoredLog::Read(_)))
+        && row.contest.is_some_and(|kind| kind.rules().is_some())
+}
+
+/// The script that brings the results of a run opened from History into
+/// view, where its row was perhaps far down the list.
+#[cfg(not(test))]
+const SHOW_RESULTS: &str = r#"const shown = document.getElementById("run-results");
+if (shown) {
+    shown.scrollIntoView({ block: "start" });
+}"#;
+
 /// Every session kept on this device, newest first.
 ///
 /// Given `on_delete`, sessions can be deleted: one from its own row, or
@@ -292,11 +338,42 @@ pub fn HistoryTab(
     on_delete: Option<EventHandler<Vec<SessionPick>>>,
     backups: Option<Backups>,
 ) -> Element {
-    let rows = session_history(&sessions);
+    // Each run's log is read and checked to make its row: once for the
+    // history as it stands, not again for every choice made in the list.
+    let rows = use_memo(use_reactive!(|sessions| session_history(&sessions)));
+    let rows = rows.read();
     let mut selecting = use_signal(|| false);
     let mut chosen = use_signal(BTreeSet::<SessionPick>::new);
     let mut confirming = use_signal(|| false);
     let mut shown = use_signal(|| HISTORY_PAGE);
+    // The run whose results are open, read again from its row: only while
+    // it is still in the history.
+    let mut opened = use_signal(|| None::<SessionPick>);
+    use_effect(move || {
+        // Tests have no page to run it on.
+        #[cfg(not(test))]
+        if opened().is_some() {
+            spawn(async {
+                let _ = document::eval(SHOW_RESULTS).await;
+            });
+        }
+        #[cfg(test)]
+        let _ = opened();
+    });
+    let open_run = opened().and_then(|pick| {
+        sessions
+            .get(pick.index)
+            .filter(|session| session.timestamp == pick.timestamp)
+    });
+    if let Some(result) = open_run {
+        return rsx! {
+            ContestResults {
+                result: result.clone(),
+                place: board_place(&sessions, result.timestamp),
+                on_back: move |()| opened.set(None),
+            }
+        };
+    }
 
     let every: Vec<SessionPick> = rows
         .iter()
@@ -367,14 +444,16 @@ pub fn HistoryTab(
                             let pick = SessionPick { index: row.index, timestamp: row.timestamp };
                             let is_chosen = chosen.read().contains(&pick);
                             let key = row.index.to_string();
+                            // Spans, as a button that holds them may hold
+                            // nothing else.
                             let when = rsx! {
-                                div { class: "history-when",
-                                    div { class: "mono", "{row.date}" }
-                                    div { class: "history-sub", "{mode_label(row.mode)} · {row.correct_groups}/{row.groups} groups · {row.total_chars} chars" }
+                                span { class: "history-when",
+                                    span { class: "mono", "{row.date}" }
+                                    span { class: "history-sub", "{history_sub(row)}" }
                                 }
-                                div { class: "history-acc",
+                                span { class: "history-acc",
                                     span { class: "value", "{row.accuracy_pct.round()}%" }
-                                    span { class: "muted", "{row.score.round()}" }
+                                    span { class: "muted", "{row.score.round()} pts" }
                                 }
                             };
                             if selecting_now {
@@ -398,7 +477,19 @@ pub fn HistoryTab(
                             } else {
                                 rsx! {
                                     div { class: "history-item",
-                                        {when}
+                                        // Named by what it shows, as every
+                                        // other row is read.
+                                        if opens(row) {
+                                            button {
+                                                id: control_id("history-open", &key),
+                                                class: "history-open",
+                                                onclick: move |_| opened.set(Some(pick)),
+                                                {when}
+                                                span { class: "history-open-mark", Icon { name: IconName::Chevron } }
+                                            }
+                                        } else {
+                                            {when}
+                                        }
                                         if let Some(on_delete) = on_delete {
                                             button {
                                                 id: control_id("history-delete", &key),

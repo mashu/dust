@@ -498,7 +498,7 @@ mod tests {
     fn a_perfect_operator_is_verified_throughout_at_the_planned_rate() {
         for seed in [1, 2, 3] {
             let runtime = worked(Habit::Perfect, 25.0, seed);
-            let view = runtime.machine.view(MonoMs(runtime.now));
+            let view = runtime.machine.view();
             assert!(view.qsos > 20, "seed {seed}: {} QSOs", view.qsos);
             assert_eq!(view.clean, view.qsos, "seed {seed}");
             let result = runtime.machine.result(0, "2026-10-20".into());
@@ -547,7 +547,7 @@ mod tests {
             let sampler = Sampler::new(&[], &settings, seed);
             let mut runtime = Runtime::start(seed, settings, sampler);
             work(&mut runtime, &mut Operator::new(Habit::HumanPaced), &[]);
-            let view = runtime.machine.view(MonoMs(runtime.now));
+            let view = runtime.machine.view();
             let hours = 10.0 / 60.0;
             let rate = f64::from(view.qsos) / hours;
             assert!(
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn one_digit_off_verifies_nothing() {
         let runtime = worked(Habit::DigitOff, 25.0, 6);
-        let view = runtime.machine.view(MonoMs(runtime.now));
+        let view = runtime.machine.view();
         assert!(view.qsos > 10);
         assert_eq!(view.clean, 0);
         let result = runtime.machine.result(0, "2026-10-20".into());
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn an_unsure_operator_pays_half_for_each_call() {
         let runtime = worked(Habit::Unsure, 25.0, 7);
-        let view = runtime.machine.view(MonoMs(runtime.now));
+        let view = runtime.machine.view();
         assert!(view.qsos > 10);
         assert_eq!(view.clean, view.qsos);
         let result = runtime.machine.result(0, "2026-10-20".into());

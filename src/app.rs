@@ -12,6 +12,7 @@ use crate::session_runtime::finish_run;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
+use crate::ui::contest::RunAnnouncer;
 use crate::ui::paddle::use_paddle_keys;
 use crate::ui::tour::{TourButton, TourDock};
 use crate::ui::widgets::{Icon, IconName, control_id};
@@ -219,6 +220,7 @@ pub fn App() -> Element {
                 }
             }
             TourDock {}
+            RunAnnouncer {}
             if let Some(toast) = toasts.current() {
                 div { class: if show_nav { "toast-dock has-nav" } else { "toast-dock" },
                     div { class: "toast", role: "status",
