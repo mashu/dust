@@ -170,8 +170,7 @@ pub(super) const RULES: &[ContestRules] = &[
             multiplier: Multiplier::WpxPrefix,
         }),
     },
-    // An everyday QSO, Dust's own, a first real one for a learner, with `BK`
-    // and `73 EE` borrowed from Morse Walker's POTA mode: `CQ CQ DE DL1ABC
+    // An everyday QSO, a first real one for a learner: `CQ CQ DE DL1ABC
     // DL1ABC K` · `DL1ABC DE K5XYZ K5XYZ K` · `K5XYZ DE DL1ABC UR 599 599
     // NAME MAT MAT BK` · `R TNX UR 579 579 NAME BOB BOB BK` · `TU BOB 73 EE`
     // · `73 EE`. The report is copied, as the name is. A TU ends the QSO and

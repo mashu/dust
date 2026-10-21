@@ -640,11 +640,16 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
     ] {
         assert!(!html.contains(gone), "{gone:?} in {html}");
     }
-    // No alphabet's segment is the one chosen.
-    for (_, label) in crate::ui::settings_charset::CHAR_SET_MODES {
+    // Contest's segment is the one chosen, and no alphabet's.
+    for (mode, label) in crate::ui::settings_charset::CHAR_SET_MODES {
         let id = crate::ui::widgets::control_id("seg", label);
+        let class = if mode == CharSetMode::Contest {
+            "seg active"
+        } else {
+            "seg"
+        };
         assert!(
-            html.contains(&format!(r#"id="{id}" class="seg">"#)),
+            html.contains(&format!(r#"id="{id}" class="{class}">"#)),
             "{id} {html}"
         );
     }

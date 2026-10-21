@@ -5,13 +5,13 @@
 //!   copied, who calls and how it scores.
 //! - [`exchange`], [`parse`]: an exchange's fields, their canonical values and
 //!   cut numbers, and how what you type is read.
-//! - [`esm`]: what Enter sends next, as MorseRunner's Enter Sends Message.
+//! - [`esm`]: what Enter sends next (Enter Sends Message).
 //! - [`clock`], [`serial`]: the run's clock, and the serials callers send.
 //! - [`check`], [`score`]: a logged QSO checked against what was sent, and a
 //!   log's contest score and rates.
 //! - [`record`]: how a run is kept in the history, so that every build, older
 //!   or newer, reads it back as practice and keeps what it does not know.
-//! - [`caller`]: the stations that answer, as MorseRunner's callers behave.
+//! - [`caller`]: the stations that answer.
 //! - [`place`]: where callers sit against the receiver, and how loud.
 //! - [`turn`]: each thing you send and every reply to it, as one send, each
 //!   caller fading on a path of its own.

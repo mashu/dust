@@ -1,7 +1,6 @@
 //! Who makes Dust: the author, the maintainers who publish it in a store
 //! under their own account, everyone else who has worked on it, and the
-//! closed testing group; and after them, the work Dust is built on. The
-//! card sits in Settings, beside the privacy card,
+//! closed testing group. The card sits in Settings, beside the privacy card,
 //! so a store reviewer or a user can see whose app it is without leaving it.
 //! It starts folded to its head, and opens when the head is pressed: the list
 //! only grows, and the settings above it are what the screen is for.
@@ -129,43 +128,9 @@ pub const TESTERS: &[Tester] = &[
     },
 ];
 
-/// Work Dust is built on: a program whose behaviour it re-implements, or
-/// data it is fitted to. Each is listed once Dust uses it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Source {
-    pub name: &'static str,
-    /// Who made it, by callsign, where the card names them so.
-    pub callsign: Option<&'static str>,
-    /// What Dust takes from it, in a sentence.
-    pub used: &'static str,
-}
-
-/// What Contest mode is built on, so far: its callers, Enter Sends Message
-/// and cut numbers come from MorseRunner, written again from how it
-/// behaves, not from its code; its WPX serials from data MorseRunner CE
-/// quotes. To credit one more, add a line in the phase that first uses it.
-pub const SOURCES: &[Source] = &[
-    Source {
-        name: "MorseRunner",
-        callsign: Some("VE3NEA"),
-        used: "Contest mode's callers, Enter Sends Message and cut numbers behave as MorseRunner's do: written again for Dust from how they behave, not taken from its code.",
-    },
-    Source {
-        name: "MorseRunner Community Edition",
-        callsign: None,
-        used: "The edition that carries MorseRunner on, whose callers, Enter Sends Message and number cutting Dust follows as they are today.",
-    },
-    Source {
-        name: "WPX serial data",
-        callsign: Some("F6FVY"),
-        used: "The serials WPX callers send are fitted to F6FVY's counts of contest logs, as MorseRunner Community Edition quotes them.",
-    },
-    Source {
-        name: "Morse Walker",
-        callsign: None,
-        used: "Simple QSO's BK and 73 EE are borrowed from its POTA mode.",
-    },
-];
+/// Dust is its own work. Contest mode took a few ideas from how
+/// MorseRunner plays a contest, and one line says so.
+pub const INSPIRATION: &str = "Contest mode takes some inspiration from MorseRunner.";
 
 /// The people in `credits`, by role, in the card's order, leaving out the
 /// roles nobody holds.
@@ -184,7 +149,6 @@ fn by_role(credits: &[Credit]) -> Vec<(Role, Vec<Credit>)> {
 pub fn CreditsCard(
     #[props(default = CREDITS)] credits: &'static [Credit],
     #[props(default = TESTERS)] testers: &'static [Tester],
-    #[props(default = SOURCES)] sources: &'static [Source],
 ) -> Element {
     let version = env!("CARGO_PKG_VERSION");
     let mut open = use_signal(|| false);
@@ -199,7 +163,7 @@ pub fn CreditsCard(
                 span { class: "card-head-main",
                     span {
                         span { class: "card-title", "Credits" }
-                        span { class: "card-note", "The people who make Dust, and the work it is built on" }
+                        span { class: "card-note", "The people who make Dust" }
                     }
                 }
                 Icon { name: IconName::Chevron }
@@ -240,22 +204,7 @@ pub fn CreditsCard(
                             }
                         }
                     }
-                    if !sources.is_empty() {
-                        div { class: "credit-group",
-                            div { class: "tiny", "Built on" }
-                            for source in sources {
-                                div { class: "credit",
-                                    p { class: "credit-name",
-                                        "{source.name}"
-                                        if let Some(call) = source.callsign {
-                                            span { class: "mono credit-call", "{call}" }
-                                        }
-                                    }
-                                    p { class: "muted", "{source.used}" }
-                                }
-                            }
-                        }
-                    }
+                    p { class: "muted", "{INSPIRATION}" }
                     p { class: "muted",
                         "Dust {version} is free software, under the GNU General Public License version 3 or later, with permission to publish it in app stores for iOS, Android or any other platform as long as it stays free of charge and its source stays available: share it and change it, and what is built from it stays free. "
                         a {
@@ -279,11 +228,7 @@ mod tests {
 
     /// The card, opened.
     fn render(credits: &'static [Credit], testers: &'static [Tester]) -> String {
-        let props = CreditsCardProps {
-            credits,
-            testers,
-            sources: &[],
-        };
+        let props = CreditsCardProps { credits, testers };
         let mut ui = Ui::new(CreditsCard, props);
         ui.open_disclosures();
         ui.html()
@@ -294,7 +239,6 @@ mod tests {
         let props = CreditsCardProps {
             credits: CREDITS,
             testers: TESTERS,
-            sources: SOURCES,
         };
         let mut ui = Ui::new(CreditsCard, props);
         assert!(ui.has("The people who make Dust"), "the head always shows");
@@ -425,36 +369,14 @@ mod tests {
         );
     }
 
-    /// What Contest mode is built on is credited after the people, each
-    /// with what Dust takes from it.
+    /// Other programs get one line between them, not a list: Dust is its
+    /// own work, and only Contest mode borrowed ideas.
     #[test]
-    fn what_dust_is_built_on_is_credited() {
-        let props = CreditsCardProps {
-            credits: CREDITS,
-            testers: TESTERS,
-            sources: SOURCES,
-        };
-        let mut ui = Ui::new(CreditsCard, props);
-        ui.open_disclosures();
-        let html = ui.html();
-        let testing = html.find(">Closed testing<").expect("a testing heading");
-        let built = html.find(">Built on<").expect("a heading for the sources");
-        assert!(testing < built, "the people come first: {html}");
-        for credited in [
-            "MorseRunner",
-            "VE3NEA",
-            "MorseRunner Community Edition",
-            "F6FVY",
-            "Enter Sends Message",
-            "written again for Dust",
-            "Morse Walker",
-        ] {
-            assert!(html.contains(credited), "{credited} is missing: {html}");
-        }
-        let team = CREDITS.iter().filter(|c| c.callsign.is_some()).count();
-        let built_on = SOURCES.iter().filter(|s| s.callsign.is_some()).count();
-        assert_eq!(callsigns(&html), team + TESTERS.len() + built_on);
-        assert!(!render(CREDITS, TESTERS).contains("Built on"));
+    fn other_programs_get_one_line() {
+        let html = render(CREDITS, TESTERS);
+        assert_eq!(html.matches("MorseRunner").count(), 1, "{html}");
+        assert!(html.contains(INSPIRATION), "{html}");
+        assert!(!html.contains("Built on"), "{html}");
     }
 
     #[test]

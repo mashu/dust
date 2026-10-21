@@ -1,10 +1,9 @@
-//! The stations that answer your CQ. They behave as MorseRunner's callers
-//! do, re-written from what those do (`DxOper.pas`, MorseRunner CE,
-//! credited): how long one waits for you, how many times it calls before it
-//! gives up, and what each of your messages makes it do.
+//! The stations that answer your CQ: how long one waits for you, how many
+//! times it calls before it gives up, and what each of your messages makes
+//! it do.
 //!
 //! A caller hears each of your messages whole, in order, and ends up in one
-//! of MorseRunner's states; what it sends next follows from the state. Which
+//! of a few states; what it sends next follows from the state. Which
 //! of your calls it takes for its own is [`match_call`].
 
 use super::data::{names::draw_name, reports::draw_report};

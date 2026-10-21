@@ -50,25 +50,22 @@ fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<Str
 }
 
 /// The character sets, in the order the control offers them.
-pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
+pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 6] = [
     (CharSetMode::Koch, "Koch"),
     (CharSetMode::Digits, "Digits"),
     (CharSetMode::Mixed, "Mixed"),
     (CharSetMode::Callsign, "Callsigns"),
     (CharSetMode::Words, "Words"),
+    (CharSetMode::Contest, "Contest"),
 ];
 
-/// What a character set is called on screen: "Callsigns". Contest has its
-/// name before the control offers it, for the runs a later version kept.
+/// What a character set is called on screen: "Callsigns".
 pub(crate) fn mode_label(mode: CharSetMode) -> &'static str {
-    match mode {
-        CharSetMode::Contest => "Contest",
-        offered => CHAR_SET_MODES
-            .iter()
-            .find(|(each, _)| *each == offered)
-            .map(|(_, label)| *label)
-            .unwrap_or_default(),
-    }
+    CHAR_SET_MODES
+        .iter()
+        .find(|(each, _)| *each == mode)
+        .map(|(_, label)| *label)
+        .unwrap_or_default()
 }
 
 /// The run styles, in the order the card offers them.
@@ -281,7 +278,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     },
                 }
             }
-            div { class: "segmented",
+            div { class: "segmented charset-modes",
                 for (mode, label) in CHAR_SET_MODES {
                     Seg {
                         label,

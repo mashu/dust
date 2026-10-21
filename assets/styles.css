@@ -824,6 +824,15 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   color: var(--ink);
   box-shadow: var(--shadow-sm);
 }
+/* Six character sets wrap five and one on a phone, Contest alone on its
+   row; three and three keep them in step. */
+@media (max-width: 600px) {
+  .segmented.charset-modes {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border-radius: var(--r-lg);
+  }
+}
 
 .chip {
   display: inline-flex;

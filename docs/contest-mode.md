@@ -1,7 +1,7 @@
 # Contest mode
 
 Status: being built phase by phase (§14). Phase 0, history that lasts, has
-landed: Contest exists as a mode no one can pick yet, runs written by later
+landed: Contest exists as a mode, runs written by later
 builds are read and kept, and History names every session's mode. Phase 1's
 cw-core foundations are in: the WPX rules row, contest calls and their
 parsing, exchanges and cut numbers, ESM, the run clock, callers' serials,
@@ -14,15 +14,15 @@ keypad, pause, the hidden-page pause and the sound failure pause, and shows
 the contest results (`src/ui/contest_results.rs`), also from History. So do
 the settings in Contest (the Character set card's contest, Your station in
 `src/ui/settings_station.rs`, and the controls a contest hides), the Home
-hero, the stats pills and notes, the privacy texts, the credits and the
-backup merge. Slices 1b, 1c and 1d have landed too: your own message
+hero, the stats pills and notes, the privacy texts and the backup merge. Slices 1b, 1c and 1d have landed too: your own message
 played dry, around the receiver at a fixed monitor level (5.3); Simple QSO,
 with its names and reports (`contest/data/`) and `myName`; and the
 contester's keys with their buttons on the key bar. Slice 2a has landed
 too: `contestStyle` and pile-ups (`contest/place.rs`, the callers' fades in
 `contest/turn.rs`), with collisions, best-match partials, missed exchanges,
-calling twice, dupes, and F4, F6, F8 and F12. Nobody can pick Contest yet
-(§14).
+calling twice, dupes, and F4, F6, F8 and F12. Contest is in the mode
+picker from slice 2a on, ahead of the rest of phase 2, so it can be tried
+while Sprint and the learner aids are built (§14).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -84,10 +84,9 @@ is practised, so Contest goes there.
 
 **The picker.** `CharSetMode` gains `Contest`
 (`crates/cw-core/src/settings/mod.rs:116-144`). `CHAR_SET_MODES` gains
-`(CharSetMode::Contest, "Contest")` (`src/ui/settings_charset.rs:51-58`)
-when the first release ships (§14). `.segmented` wraps
-(`assets/styles.css:785-803`); at 420 px and below the six segments sit in
-a 3 + 3 grid.
+`(CharSetMode::Contest, "Contest")` (`src/ui/settings_charset.rs:51-60`).
+`.segmented` wraps; the picker's `.charset-modes` sits the six segments
+three and three at 600 px and below, so Contest is never alone on a row.
 
 **The card in Contest mode.** The title stays "Character set", so its Reset
 still means what it says; the note (`settings_charset.rs:123-142`) reads
@@ -370,7 +369,8 @@ kept" with Run again; otherwise `PersistAndShowResults`.
 
 ### 4.3 Callers
 
-The callers follow MRCE's model, re-written from its behaviour, credited.
+The callers' timings and states are modelled on how stations call in a
+contest; MRCE's sources are the reference for the numbers below.
 
 - **Reply delay** 0.1–0.6 s after your message (`DxOper.pas:225-232`).
 - **Reply timeout** `(6 − skill)` s, Gaussian, within ±50%
@@ -1740,24 +1740,21 @@ The repository is GPL-3.0-or-later (`Cargo.toml:9`).
 | Data | Source | Status |
 |---|---|---|
 | Call shapes | `callsign/prefixes.rs` | counts only |
-| DX zones, continents | cty.dat (AD1C) | no licence found; facts only, credited; ask AD1C; fallback CQ's country list |
+| DX zones, continents | cty.dat (AD1C) | no licence found; facts only; ask AD1C; fallback CQ's country list |
 | NA zones, places, sections | CQ, USPS, FCC, ISO 3166-2:CA, ARRL/RAC | public facts |
 | State by call area | FCC ULS | US Government work, counts only |
-| FD class, power, section shares | MRCE's `FDGOTA.txt` (W1MI, SM7IUN, W7SST), `ARRLDXCW_USDX.txt` (VE2FK, SM7IUN, K3CT, WV4P) | in an MPL-2.0 repository, compiled from contest logs; rounded shares only; credited; ask W7SST |
+| FD class, power, section shares | MRCE's `FDGOTA.txt` (W1MI, SM7IUN, W7SST), `ARRLDXCW_USDX.txt` (VE2FK, SM7IUN, K3CT, WV4P) | in an MPL-2.0 repository, compiled from contest logs; rounded shares only; ask W7SST |
 | WPX serial fit | F6FVY's data in MRCE `CqWpx.pas` | two derived numbers |
 | Names | SSA baby names; written by hand for Dust until they can be fetched (§11.5) | public domain; GPL-3.0-or-later |
 | DX names, reports, Sprint fit | written for Dust | GPL-3.0-or-later |
-| Caller behaviour | MRCE (MPL-2.0) | re-implemented, credited |
+| Caller behaviour | modelled on MRCE (MPL-2.0) | written for Dust; no code taken |
 
-MRCE's files attach no MPL Exhibit B, so porting its code into a GPL work
-would be allowed (MPL-2.0 §3.3); Dust re-implements it by choice. Credits
-(`src/ui/credits.rs`) name MorseRunner (VE3NEA, MorseRunner CE), the
-compilers of the counted files, Morse Walker, AD1C, the SSA, the FCC and
-F6FVY, each in a "Built on" list (`SOURCES`) from the phase that first uses
-its work: phase 1 credits MorseRunner and MorseRunner CE for the callers,
-Enter Sends Message and cut numbers, F6FVY for the WPX serial data, and
-Morse Walker for Simple QSO's `BK` and `73 EE`. The SSA joins once its
-counts replace the hand-written names (§11.5).
+Dust is its own work: its sampling, noise model, signal processing,
+envelopes and training parameters were built from scratch. Contest mode
+took some ideas from how MorseRunner plays a contest, written for Dust and
+taking none of its code, and the Credits card (`src/ui/credits.rs`) says so
+in one line. Data sources are named in the tables' own headers, not on the
+card.
 
 ## 12. Code structure
 
@@ -2092,7 +2089,7 @@ ships a release before phase 1.
   message `dry_wanted` at `MONITOR_LEVEL`, and both players play it around
   the receiver, through the limiter (5.3).
 - **1c Simple QSO.** Names data, the RST and NAME exchange, `myName`.
-  Landed, with Morse Walker credited for `BK` and `73 EE`.
+  Landed.
 - **1d Contester keys.** F2, F3, F5, `;`, `.`, `,`, `+`, Shift+Enter, and
   their buttons on the key bar. The key bar, browser defaults kept from
   the run's keys and Esc locked in fullscreen came with 1a's run screen.
@@ -2112,7 +2109,9 @@ ships a release before phase 1.
   the Sprint serial fit; the deterministic parser; Sprint scoring, with the
   multiplier list checked against the current NCJ rules before it ships.
 - **2c Learner aids.** Hear a QSO with the perfect operator; presets; QRS.
-- **Then** the Contest segment joins `CHAR_SET_MODES`.
+- The Contest segment joined `CHAR_SET_MODES` right after 2a, at the
+  user's request, so Contest can be tried while 2b and 2c are built; at
+  600 px and below the six segments sit three and three.
 
 The user can work single callers and pile-ups in WPX, Sprint and Simple QSO
 on a phone or a desktop.
