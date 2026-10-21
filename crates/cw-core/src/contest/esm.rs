@@ -2,7 +2,13 @@
 //! the two fields, as MorseRunner's Enter does it.
 //!
 //! Four things decide it. **C**: the Call field still reads the call last
-//! sent. **N**: the station you work took your exchange. **V**: the call is
+//! sent. **N**: the station you work took your exchange; in a pile-up,
+//! only while the Call field could still be its call, since another caller
+//! has had no exchange from you. Once the station has answered the call
+//! sent without correcting it, that call is its own, and any other whole
+//! call is another caller's; before then only a call that cannot be the one
+//! sent, not even a slip of it or what a partial asked for, is, as a near
+//! call may be the slip put right. **V**: the call is
 //! whole, with no `?`. **E**: how much of the exchange the Exchange field
 //! holds. Each of MorseRunner's rows that holds adds its part, and the parts
 //! go out as one message: `K5XYZ` typed sends `K5XYZ 5NN TT7`; then `?`
@@ -14,6 +20,7 @@
 //! It is pure, so the machine runs it on a key and the screen on its own
 //! field text, for the key's label and the hint.
 
+use super::caller::{CallMatch, match_call};
 use super::exchange::Field;
 use super::parse::{ExchangeState, normalize_call, parse_exchange};
 use super::rules::{ContestRules, Fill, Side};
@@ -40,6 +47,14 @@ pub struct QsoState {
     /// Nobody is calling you or working with you, as after a TU that
     /// brings nobody, or a station gone: Enter's CQ is for the next one.
     pub nobody_calling: bool,
+    /// Callers call in a pile-up: a call typed that cannot be the one sent
+    /// is another caller's, and your exchange has not gone to it. A single
+    /// caller stays in its QSO whatever call you send.
+    pub pileup: bool,
+    /// The station you work has answered the call last sent with its
+    /// exchange, or by asking for yours, with no correction: that call is
+    /// its own, so in a pile-up any other whole call is another caller's.
+    pub call_taken: bool,
 }
 
 /// The two fields as typed, with when they were typed: a copy is timed from
@@ -179,8 +194,19 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
     let reading = parse_exchange(rules, side, &fields.exch);
     let e = reading.state;
     let c = call == qso.call_sent;
-    let n = qso.exchange_sent;
     let v = parse_callsign(&call).is_some();
+    // In a pile-up you go on to another caller by typing its call: your
+    // exchange went to the last one, not to it. Its call taken, any other
+    // whole call is another's; before then, a call that cannot be a slip
+    // of the one sent.
+    let another = qso.pileup
+        && !qso.call_sent.is_empty()
+        && if qso.call_taken && v {
+            !c
+        } else {
+            match_call(&qso.call_sent, &call) == CallMatch::No
+        };
+    let n = qso.exchange_sent && !another;
     // Your TU went out without logging: Enter logs that QSO, with a TU.
     if !qso.thanked.is_empty() && call == qso.thanked && v && e == ExchangeState::Complete {
         let message = vec![MessagePart::Tu];
@@ -622,6 +648,54 @@ mod tests {
         let asks = enter("K5XYW", true, "K5XYZ", "");
         assert_eq!(sent(&asks), "K5XYZ ?");
         assert_eq!(asks.label, "Send K5XYZ + ?");
+    }
+
+    /// In a pile-up a call that cannot be the one sent is another caller's,
+    /// which has had no exchange from you: Enter sends it its call and your
+    /// exchange. A slip of the call sent, or the call a partial asked for,
+    /// is the same station's still, until it has answered the call sent
+    /// without correcting it: then any other whole call is another's. A
+    /// single caller stays in its QSO whatever call you send, so there
+    /// Enter keeps to MorseRunner's.
+    #[test]
+    fn in_a_pile_up_another_callers_call_gets_your_exchange() {
+        let taken = |pileup: bool, call_taken: bool, call_sent: &str, call: &str, exch: &str| {
+            let qso = QsoState {
+                call_sent: call_sent.to_string(),
+                exchange_sent: true,
+                pileup,
+                call_taken,
+                ..QsoState::default()
+            };
+            let fields = Fields {
+                call: call.to_string(),
+                exch: exch.to_string(),
+                ..Fields::default()
+            };
+            esm(&qso, &fields, rules(), Side::Dx)
+        };
+        let enter = |pileup, call_sent: &str, call: &str, exch: &str| {
+            taken(pileup, false, call_sent, call, exch)
+        };
+        let another = enter(true, "K5XYZ", "W7ABC", "");
+        assert_eq!(another.label, "Send W7ABC + exch");
+        assert_eq!(sent(&another), "W7ABC 5NN TT7");
+        assert_eq!(another.hint, "Enter sends their call and your exchange");
+        // The number copied is the last station's: no TU for this one.
+        assert_eq!(sent(&enter(true, "K5XYZ", "W7ABC", "214")), "W7ABC 5NN TT7");
+        assert_eq!(sent(&enter(true, "K5XYW", "K5XYZ", "")), "K5XYZ ?");
+        assert_eq!(sent(&enter(true, "K5X?", "K5XYZ", "214")), "K5XYZ TU");
+        assert_eq!(sent(&enter(false, "K5XYZ", "W7ABC", "")), "W7ABC ?");
+        // Its call taken: a near call is another caller's too, but a
+        // partial still asks the station you work for its call.
+        assert_eq!(sent(&enter(true, "K5XYZ", "K5XYA", "214")), "K5XYA TU");
+        assert_eq!(
+            sent(&taken(true, true, "K5XYZ", "K5XYA", "214")),
+            "K5XYA 5NN TT7"
+        );
+        assert_eq!(sent(&taken(true, true, "K5XYZ", "K5XYZ", "214")), "TU");
+        assert_eq!(sent(&taken(true, true, "K5XYZ", "K5?", "")), "K5?");
+        assert_eq!(sent(&taken(false, true, "K5XYZ", "K5XYA", "")), "K5XYA ?");
     }
 
     /// The station corrected the call: while the Call field still reads the

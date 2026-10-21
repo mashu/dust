@@ -92,11 +92,21 @@ pub(super) fn match_call(sent: &str, call: &str) -> CallMatch {
 
 /// How `sent` is heard by the station signing `call`: as [`match_call`]
 /// has it, but for a piece of its call that is no call itself, which asks
-/// for the rest as a partial does, with nothing to put right.
+/// for the rest as a partial does, with nothing to put right. A piece fits
+/// with every character it has; a slip that is no call, such as a dropped
+/// digit, with the characters of the call it gets right, as MorseRunner
+/// ranks it by edit distance (`DxOper.pas:597-631`), so it goes to the call
+/// it is nearest.
 fn heard_as(sent: &str, call: &str) -> CallMatch {
     match match_call(sent, call) {
         CallMatch::Close if parse_callsign(sent).is_none() => CallMatch::Partial {
-            fits: sent.chars().count(),
+            fits: if call.contains(sent) {
+                sent.chars().count()
+            } else {
+                call.chars()
+                    .count()
+                    .saturating_sub(edit_distance(sent, call) as usize)
+            },
         },
         found => found,
     }
@@ -192,6 +202,8 @@ pub(super) struct Reaction {
     pub(super) called: bool,
     /// It took your exchange as sent to it, while you work it.
     pub(super) took_exchange: bool,
+    /// Your exchange was for it, but it missed it and asks for it again.
+    pub(super) missed_exchange: bool,
 }
 
 /// How many tries a caller makes before it gives up: `3 + RndRayleigh(3)`,
@@ -538,6 +550,7 @@ impl Caller {
                         if self.state == NeedQso {
                             self.state = NeedCallNr;
                         }
+                        reaction.missed_exchange = true;
                         replies = Some(true);
                         continue;
                     }
@@ -591,7 +604,10 @@ impl Caller {
                 }
                 // The station you work leaves: not one a B4 after someone
                 // else's call was not for, nor one that heard you work
-                // someone else.
+                // someone else. One you sent a slip of its call takes a B4
+                // for that slip's, and puts its call right, as MorseRunner's
+                // does (`DxOper.pas:755`).
+                MessagePart::B4 if matches!(self.state, NeedCall | NeedCallNr) => {}
                 MessagePart::B4 | MessagePart::Nil
                     if self.state.worked() && addressed != Some(false) && !self.other_qso =>
                 {
@@ -639,10 +655,29 @@ impl Caller {
     /// work leaves after [`SILENT_TIMEOUTS`] in a row.
     pub(super) fn time_out(&mut self) -> bool {
         self.deadline = None;
+        self.wait_over();
+        self.state.active()
+    }
+
+    /// Whether it sends again when its reply timeout runs out, with
+    /// `pending` more of its timeouts already sending and not yet heard:
+    /// one that would spend its last try, or sit through its last silence,
+    /// leaves instead.
+    pub(super) fn calls_on_time_out(&self, pending: u32) -> bool {
+        match self.state {
+            CallerState::NeedQso => self.patience > pending + 1,
+            state if state.worked() => self.silent + pending + 1 < SILENT_TIMEOUTS,
+            _ => false,
+        }
+    }
+
+    /// What a timeout costs it: a caller spends a try, and calls again, so
+    /// a `?` now is for it; the station you work sits through one more
+    /// silence, and leaves after [`SILENT_TIMEOUTS`] in a row.
+    pub(super) fn wait_over(&mut self) {
         match self.state {
             CallerState::NeedQso => {
                 self.spend_try();
-                // It calls again: a `?` now is for it.
                 self.other_qso = false;
             }
             state if state.worked() => {
@@ -653,7 +688,6 @@ impl Caller {
             }
             _ => {}
         }
-        self.state.active()
     }
 
     /// What it sends now to you, `my_call`, as its state has it, at
@@ -1380,6 +1414,11 @@ mod tests {
         };
         assert_eq!(worked("K5?", &["K5XYZ", "K5AB"]), [true, false]);
         assert_eq!(worked("K5XY", &["K5XYZ", "K5XY"]), [false, true]);
+        // A slip that is no call, its digit dropped, goes to the call it is
+        // fewest edits from, as a piece goes to the call it covers most of.
+        assert_eq!(best("KXYZ", &["K5XYZ", "K5XYA"]), [true, false]);
+        assert_eq!(best("KXYA", &["K5XYZ", "K5XYA"]), [false, true]);
+        assert_eq!(best("XYZ", &["K5XYZ", "W1XYZ"]), [true, true]);
         // With nobody to compare, any fit answers, as the single caller
         // does.
         let mut alone = pileup_caller(1, "K5XYZ");
@@ -1550,6 +1589,39 @@ mod tests {
         single.hear(&[call("W1AW")], &[]);
         assert_eq!(single.state, CallerState::NeedNr);
         assert!(!single.waits());
+    }
+
+    /// B4 sends away the station it is for, but one you sent a slip of its
+    /// call takes the B4 for that slip's, and puts its call right, as
+    /// MorseRunner's does; a caller still calling calls again.
+    #[test]
+    fn b4_with_a_slip_of_the_call_is_put_right() {
+        let mut worked = caller(1);
+        worked.hear(&[call("K5XYZ"), Exchange], &[]);
+        worked.hear(&[MessagePart::B4], &[]);
+        assert_eq!(worked.state, CallerState::Gone);
+        for (message, state) in [
+            (
+                vec![call("K5XYW"), MessagePart::B4],
+                CallerState::NeedCallNr,
+            ),
+            (
+                vec![call("K5XYW"), Exchange, MessagePart::B4],
+                CallerState::NeedCall,
+            ),
+        ] {
+            let mut slip = caller(1);
+            let reaction = slip.hear(&message, &[]);
+            assert_eq!(slip.state, state, "{message:?}");
+            assert!(reaction.replies);
+            assert_eq!(
+                slip.reply(rules(), Side::Dx, "DL1ABC", 0).map(|r| r.1),
+                Some(Says::Correction)
+            );
+        }
+        let mut calling = caller(1);
+        assert!(calling.hear(&[call("W1AW"), MessagePart::B4], &[]).replies);
+        assert_eq!(calling.state, CallerState::NeedQso);
     }
 
     /// With the Call field empty, a `?` is for a caller that heard you work

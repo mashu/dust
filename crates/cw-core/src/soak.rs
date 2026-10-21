@@ -30,11 +30,12 @@ use crate::{
 /// deep run reproduces exactly on a short one.
 const SEEDS: u64 = 2_000;
 
-/// The contest soak's pile-up seeds, a quarter more than [`SEEDS`]: a
-/// caller that hears you go to someone else drops out of its QSO, so fewer
-/// of a pile-up's QSOs reach the log with a slip in the call, and the
-/// floor of each kind needs more runs to stand on.
-const PILEUP_SEEDS: u64 = SEEDS + SEEDS / 4;
+/// The contest soak's pile-up seeds, half as many again as [`SEEDS`]: a
+/// caller that hears you go to someone else drops out of its QSO, and
+/// Enter sends the caller you go on to your exchange rather than a TU that
+/// logs it at once, so fewer of a pile-up's QSOs reach the log with a slip
+/// in the call, and the floor of each kind needs more runs to stand on.
+const PILEUP_SEEDS: u64 = SEEDS + SEEDS / 2;
 
 /// Settings from anywhere, including values no screen would ever produce.
 fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
@@ -1104,7 +1105,16 @@ fn contest_run(
             }
         };
         let was_terminal = machine.is_terminal();
+        let lost = machine.lost_copies();
         effects = machine.apply(event.clone(), at);
+        // A station you left for another, or whose QSO ended with another
+        // station's call in the Call field, keeps the call you had for it:
+        // no copy lost now is a call another station took from you.
+        let crossed = machine.crossed_since(&lost);
+        assert!(
+            crossed.is_empty(),
+            "seed {seed} step {step}: lost copies that are another station's call: {crossed:?}"
+        );
         if was_terminal {
             assert!(
                 effects.is_empty(),
@@ -1180,7 +1190,13 @@ fn soak_contest_runs(style: RunStyle) {
         } = contest_run(seed, &settings, None);
         let finished_at = ended.unwrap_or_else(|| {
             let end = events.last().map_or(0, |(_, at)| at.0) + 1;
+            let lost = machine.lost_copies();
             let _ = machine.apply(ContestEvent::FinishNow, MonoMs(end));
+            let crossed = machine.crossed_since(&lost);
+            assert!(
+                crossed.is_empty(),
+                "seed {seed}: lost at the end, copies that are another station's call: {crossed:?}"
+            );
             events.push((ContestEvent::FinishNow, MonoMs(end)));
             end
         });
