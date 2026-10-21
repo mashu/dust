@@ -1,9 +1,8 @@
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, Fill, GROUP_SIZE_MAX, LevelAxis,
     MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
-    SequenceChoice, SettingsSection, Side, TrainingSettings, WORD_LIST_MAX, WordList,
-    compute_char_pool, current_practice_window, parse_callsign, tier_examples,
-    unlocked_practice_count,
+    SequenceChoice, SettingsSection, TrainingSettings, WORD_LIST_MAX, WordList, compute_char_pool,
+    current_practice_window, parse_callsign, tier_examples, unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
@@ -134,6 +133,12 @@ fn state_or_stand_in(sent: &str) -> &str {
     }
 }
 
+/// Your CQ zone where an example of a QSO sends it: the one you gave or
+/// your call reads as, or a stand-in until one is known.
+fn zone_or_stand_in(zone: Option<u32>) -> String {
+    zone.map_or_else(|| "<your zone>".to_string(), |zone| zone.to_string())
+}
+
 /// What the card shows in Contest mode: which contest, what its exchange
 /// is, and a QSO of it as it goes, with your call in it.
 #[derive(Clone, PartialEq)]
@@ -146,6 +151,9 @@ struct ContestCard {
     sends: String,
     /// What you copy, as the log heads it: `NR`.
     copies: String,
+    /// The side you are on and who you work from it, where sides change
+    /// it.
+    side_note: Option<String>,
     /// What Dust leaves out of the real contest, if anything.
     simplified: Option<&'static str>,
     /// Who sends each line of the QSO, and what.
@@ -160,7 +168,7 @@ impl ContestCard {
     fn of(settings: &TrainingSettings) -> Self {
         let contest = &settings.contest;
         let kind = contest.contest_kind;
-        let side = Side::of_call(&contest.my_call);
+        let side = contest.side();
         let style = contest.contest_style;
         let callers = pileup_callers(settings);
         let preset = ContestPreset::of(settings);
@@ -171,6 +179,7 @@ impl ContestCard {
                 callers,
                 sends: String::new(),
                 copies: String::new(),
+                side_note: None,
                 simplified: None,
                 qso: Vec::new(),
                 preset,
@@ -181,12 +190,14 @@ impl ContestCard {
             .iter()
             .map(|field| field.label())
             .collect();
+        let zone = zone_or_stand_in(contest.zone());
         Self {
             kind,
             style,
             callers,
             sends: rules.sends(side),
             copies: copies.join("\u{a0}"),
+            side_note: rules.side_note(side, parse_callsign(&contest.my_call).is_some()),
             simplified: rules.simplified,
             qso: rules.example_qso(
                 side,
@@ -194,6 +205,8 @@ impl ContestCard {
                     my_call: call_or_stand_in(&contest.my_call),
                     my_name: name_or_stand_in(&contest.my_name),
                     my_state: state_or_stand_in(contest.state_sent()),
+                    my_zone: &zone,
+                    my_power: &contest.my_power,
                     ..Fill::default()
                 },
             ),
@@ -513,6 +526,9 @@ fn ContestBody(
             // line breaks.
             p { class: "muted", style: "margin: 0;",
                 "You send {contest.sends}\u{a0}· You\u{a0}copy\u{a0}{contest.copies}"
+            }
+            if let Some(side_note) = &contest.side_note {
+                p { id: "side-line", class: "muted", style: "margin: 0;", "{side_note}" }
             }
             if let Some(simplified) = contest.simplified {
                 p { class: "muted", style: "margin: 0;", "{simplified}" }

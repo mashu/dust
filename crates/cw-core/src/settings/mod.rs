@@ -602,7 +602,10 @@ mod ranges;
 mod reset;
 mod save;
 
-pub use contest::{CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX, MY_NAME_MAX, state_code};
+pub use contest::{
+    CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX, MY_NAME_MAX, MY_POWER_MAX, MY_ZONE_MAX,
+    power_reading, state_code,
+};
 pub use contest_preset::ContestPreset;
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
 pub use curriculum::LevelAxis;
@@ -900,6 +903,8 @@ mod tests {
         s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
         s.contest.my_name = " jean-luc maximilian ".to_string();
         s.contest.my_state = " p.q. ".to_string();
+        s.contest.my_zone = 9_000;
+        s.contest.my_power = "9000 watts".to_string();
         s
     }
 
@@ -1005,6 +1010,8 @@ mod tests {
         assert_eq!(s.contest.my_call, "DL1/ABC/QRP");
         assert_eq!(s.contest.my_name, "JEANLUCMAX");
         assert_eq!(s.contest.my_state, "QC");
+        assert_eq!(s.contest.my_zone, super::contest::MY_ZONE_MAX);
+        assert_eq!(s.contest.my_power, "100");
 
         // The strengths have tops as well as bottoms, the ones the settings
         // screen offers.
@@ -1495,6 +1502,8 @@ mod tests {
         s.contest.my_call = "DL1ABC".to_string();
         s.contest.my_name = "MAT".to_string();
         s.contest.my_state = "MA".to_string();
+        s.contest.my_zone = 15;
+        s.contest.my_power = "KW".to_string();
         s
     }
 
@@ -1518,15 +1527,17 @@ mod tests {
         assert!(s.contest.my_call.len() <= MY_CALL_MAX);
     }
 
-    /// Your state is Your station's: its reset clears it with your call and
-    /// name, and no other section's touches it.
+    /// Your state, zone and power are Your station's: its reset puts them
+    /// back with your call and name, and no other section's touches them.
     #[test]
-    fn your_state_belongs_to_your_station() {
+    fn your_state_zone_and_power_belong_to_your_station() {
         for section in SettingsSection::ALL {
             let mut s = wildly_different();
             s.reset_section(section);
             let cleared = section == SettingsSection::Station;
             assert_eq!(s.contest.my_state.is_empty(), cleared, "{section:?}");
+            assert_eq!(s.contest.my_zone == 0, cleared, "{section:?}");
+            assert_eq!(s.contest.my_power == "100", cleared, "{section:?}");
         }
     }
 
@@ -1543,6 +1554,8 @@ mod tests {
         assert_eq!(json["myCall"], "");
         assert_eq!(json["myName"], "");
         assert_eq!(json["myState"], "");
+        assert_eq!(json["myZone"], 0);
+        assert_eq!(json["myPower"], "100");
         assert!(s.contest.my_name.is_empty());
         assert!(json.get("contest").is_none(), "flattened");
     }

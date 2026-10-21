@@ -8,9 +8,11 @@
 
 use super::data::names::draw_name;
 use super::data::places::{DX, draw_place};
+use super::data::power::draw_power;
 use super::data::reports::draw_report;
+use super::data::zones::draw_zone;
 use super::esm::MessagePart;
-use super::exchange::{Field, send_report, send_serial};
+use super::exchange::{Field, send_power, send_report, send_serial, send_zone};
 use super::place::Placement;
 use super::rules::{ContestRules, Side};
 use super::serial::SerialModel;
@@ -966,12 +968,20 @@ impl Caller {
                         // The operator's own, whatever the call: a call comes
                         // back with another name.
                         Field::Name => draw_name(self.call.country, &mut self.rng).to_string(),
-                        // Where its call puts it; a station with no state or
+                        // Where its call puts it, Labrador apart where the
+                        // contest counts it so; a station with no state or
                         // province sends DX, as one outside North America
                         // does.
-                        Field::St => draw_place(&self.call.text, &mut self.rng)
+                        Field::St => draw_place(&self.call.text, rules.labrador, &mut self.rng)
                             .unwrap_or(DX)
                             .to_string(),
+                        // Where its call puts it.
+                        Field::Zn => {
+                            let zone = draw_zone(&self.call.text, &mut self.rng)?;
+                            send_zone(zone, habits, &mut self.rng)
+                        }
+                        // As DX stations send it.
+                        Field::Pwr => send_power(draw_power(&mut self.rng), habits, &mut self.rng),
                         _ => return None,
                     };
                     Some((*field, token))
@@ -992,7 +1002,7 @@ impl Caller {
         run_ms: u64,
     ) -> String {
         let fields = self.exchange(rules, side, run_ms).to_vec();
-        rules.their_exchange_text(my_call, &self.call.text, &fields)
+        rules.their_exchange_text(side, my_call, &self.call.text, &fields)
     }
 
     /// How long it waits for you before it tries again, in milliseconds,

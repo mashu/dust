@@ -28,8 +28,10 @@ use std::collections::BTreeSet;
 use super::caller::{CallMatch, Caller, CallerState, Likeness, Says, match_call};
 use super::check::{QsoCheck, QsoText, check_qso};
 use super::clock::RunClock;
+use super::data::places::home_country;
+use super::data::zones::home_continent;
 use super::esm::{EntryField, Fields, MessagePart, QsoState, esm, loggable, message_text};
-use super::exchange::{Field, keyed_token};
+use super::exchange::Field;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
@@ -39,7 +41,7 @@ use super::turn::{Fade, Segment, Sender, Turn, char_spans, sending_sec, sounding
 use super::{CallSource, MS_PER_MINUTE, RunStyle};
 use crate::alignment::CopyTally;
 use crate::band::Qsb;
-use crate::callsign::{country_of, parse_callsign};
+use crate::callsign::parse_callsign;
 use crate::machine::COUNTDOWN_STEP_MS;
 use crate::rng::{Rng, SplitMix64};
 use crate::session::{
@@ -449,9 +451,10 @@ impl Heard {
     /// A group for each field of `sent`, logged as `logged` and read as
     /// `reading`, the field first read complete at `done_run`: as keyed,
     /// once its exchange has begun to reach you, and a miss before that,
-    /// as a guess is no copy.
+    /// as a guess is no copy. `rules` say what values are the same.
     fn field_groups(
         &self,
+        rules: &ContestRules,
         sent: &[(Field, String)],
         logged: &QsoText,
         reading: &Reading,
@@ -484,7 +487,7 @@ impl Heard {
                 let share = exch_ms * token.chars().count() as u64 / length;
                 group(
                     token,
-                    &keyed_token(*field, token, typed),
+                    &rules.keyed_token(*field, token, typed),
                     share,
                     1 + u32::try_from(asks).unwrap_or(u32::MAX),
                     voice,
@@ -779,6 +782,11 @@ pub struct ContestMachine<S> {
     /// Your state, province or territory, or DX, for a contest whose
     /// exchange sends it.
     my_state: String,
+    /// Your CQ zone, for a contest whose exchange sends it; 0 where none
+    /// is known.
+    my_zone: u32,
+    /// Your power, for a contest whose exchange sends it.
+    my_power: String,
     /// One caller at a time, or a pile-up.
     style: RunStyle,
     /// The band's fading, which each caller follows from a point of its
@@ -840,6 +848,8 @@ impl<S: CallSource> ContestMachine<S> {
         let my_call = settings.contest.my_call.clone();
         let my_name = settings.contest.my_name.clone();
         let my_state = settings.contest.state_sent().to_string();
+        let my_zone = settings.contest.zone().unwrap_or(0);
+        let my_power = settings.contest.my_power.clone();
         let countdown = settings.playback.countdown_sec;
         let pileup = settings.contest.contest_style == RunStyle::Pileup;
         let rng = SplitMix64::new(seed);
@@ -853,6 +863,8 @@ impl<S: CallSource> ContestMachine<S> {
             my_call,
             my_name,
             my_state,
+            my_zone,
+            my_power,
             source,
             draws: rng.fork(RUN_STREAM),
             rng,
@@ -1044,11 +1056,11 @@ impl<S: CallSource> ContestMachine<S> {
             } else {
                 String::new()
             },
-            my_country: country_of(&self.my_call).unwrap_or_default().to_string(),
-            // Continents and zones come with the contests that score by
-            // them; WPX does not.
-            my_continent: String::new(),
-            my_zone: 0,
+            my_country: home_country(&self.my_call).unwrap_or_default().to_string(),
+            my_continent: home_continent(&self.my_call)
+                .unwrap_or_default()
+                .to_string(),
+            my_zone: self.my_zone,
             fields: self
                 .rules
                 .copied(self.side)
@@ -1545,6 +1557,8 @@ impl<S: CallSource> ContestMachine<S> {
             my_call: &self.my_call,
             my_name: &self.my_name,
             my_state: &self.my_state,
+            my_zone: &self.my_zone.to_string(),
+            my_power: &self.my_power,
             serial,
             his_name: &his_name,
         };
@@ -2891,7 +2905,9 @@ impl<S: CallSource> ContestMachine<S> {
             call: station.caller.call.text.clone(),
             fields: station.caller.exchange(rules, side, run_ms).to_vec(),
         };
-        let check = check_qso(logged, Some(&sent), |call| clean.iter().any(|c| c == call));
+        let check = check_qso(rules, logged, Some(&sent), |call| {
+            clean.iter().any(|c| c == call)
+        });
         let heard = &station.heard;
         let (call_voice, exch_voice) = heard.voices(station.caller.voice);
         // Never sent with your exchange: the call as logged, timed as last
@@ -2911,7 +2927,14 @@ impl<S: CallSource> ContestMachine<S> {
                 1 + heard.call_repeats(&first_call),
                 &call_voice,
             ));
-            groups.extend(heard.field_groups(&sent.fields, logged, reading, done_run, &exch_voice));
+            groups.extend(heard.field_groups(
+                rules,
+                &sent.fields,
+                logged,
+                reading,
+                done_run,
+                &exch_voice,
+            ));
         }
         let copies_fields = !again && heard.exch_begun;
         let by_field = |text: &QsoText| -> Vec<String> {
@@ -3034,7 +3057,7 @@ impl<S: CallSource> ContestMachine<S> {
         edited_run: u64,
         run_ms: u64,
     ) -> Entry {
-        let check = check_qso(logged, None, |_| false);
+        let check = check_qso(self.rules, logged, None, |_| false);
         let against = self.nil_target(&logged.call);
         let nr = self.serial_sent();
         let (rules, side) = (self.rules, self.side);
@@ -3054,6 +3077,7 @@ impl<S: CallSource> ContestMachine<S> {
                     &call_voice,
                 )];
                 groups.extend(heard.field_groups(
+                    rules,
                     &exchange,
                     logged,
                     reading,

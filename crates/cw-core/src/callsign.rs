@@ -31,11 +31,14 @@
 //! also says where each one is and can keep to the countries a contest
 //! hears ([`CallSpec`]). Reading a call back — its parts, its country and
 //! its WPX prefix — is [`parse_callsign`], [`country_of`] and [`wpx_prefix`].
+//! Beside the counts, the table holds each country's name, CQ zone and
+//! continent, the facts a contest scores by ([`country_name`]), with the
+//! prefixes cty.dat puts in another zone or on another continent.
 
 mod prefixes;
 
 use crate::rng::{Rng, SplitMix64};
-use prefixes::PREFIXES;
+use prefixes::{CONTINENT_PREFIXES, COUNTRIES, PREFIXES, ZONE_PREFIXES};
 
 pub const CALLSIGN_TIER_MIN: u32 = 1;
 pub const CALLSIGN_TIER_MAX: u32 = 6;
@@ -265,6 +268,83 @@ const fn area(
     }
 }
 
+/// A country of the table: its name, CQ zone and continent.
+#[derive(Clone, Copy, Debug)]
+struct Country {
+    /// Its DXCC primary prefix, as [`Prefix::country`] names it.
+    key: &'static str,
+    name: &'static str,
+    zone: u32,
+    /// Its continent, by the two letters contests use: `EU`, `NA`.
+    continent: &'static str,
+}
+
+/// The country `key`, called `name`, in CQ zone `zone` on `continent`.
+const fn country(
+    key: &'static str,
+    name: &'static str,
+    zone: u32,
+    continent: &'static str,
+) -> Country {
+    Country {
+        key,
+        name,
+        zone,
+        continent,
+    }
+}
+
+/// The table's facts about the country `key`, if it is one of its.
+fn country_row(key: &str) -> Option<&'static Country> {
+    COUNTRIES.iter().find(|country| country.key == key)
+}
+
+/// What the country `key`, a DXCC primary prefix as [`country_of`] reads
+/// one, is called: "Japan". None for one the table does not hold.
+pub fn country_name(key: &str) -> Option<&'static str> {
+    country_row(key).map(|country| country.name)
+}
+
+/// The continent of a station in the country `key` whose call reads
+/// `text`, its prefix and digit (`TA1`), by the two letters contests use:
+/// `EU`, `NA`, `SA`, `AS`, `AF` or `OC`. The prefix's where the table puts
+/// it on another continent than its country's (European Turkey's TA1 is in
+/// Europe), and else the country's. None for a country the table does not
+/// hold.
+pub(crate) fn continent_in(key: &str, text: &str) -> Option<&'static str> {
+    CONTINENT_PREFIXES
+        .iter()
+        .find(|(country, prefix, _)| *country == key && *prefix == text)
+        .map(|(_, _, continent)| *continent)
+        .or_else(|| country_row(key).map(|country| country.continent))
+}
+
+/// What a continent's two letters stand for: "Europe". None for anything
+/// else.
+pub fn continent_name(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "AF" => "Africa",
+        "AS" => "Asia",
+        "EU" => "Europe",
+        "NA" => "North America",
+        "OC" => "Oceania",
+        "SA" => "South America",
+        _ => return None,
+    })
+}
+
+/// The CQ zone of a station in the country `key` whose call reads `text`,
+/// its prefix and the digit its zone goes by (`BY0`): the prefix's where
+/// the table puts it in another zone than its country's, and else the
+/// country's. None for a country the table does not hold.
+pub(crate) fn zone_in(key: &str, text: &str) -> Option<u32> {
+    ZONE_PREFIXES
+        .iter()
+        .find(|(country, prefix, _)| *country == key && *prefix == text)
+        .map(|(_, _, zone)| *zone)
+        .or_else(|| country_row(key).map(|country| country.zone))
+}
+
 impl Prefix {
     fn shape(&self) -> PrefixShape {
         if self.prefix.chars().any(|c| c.is_ascii_digit()) {
@@ -380,10 +460,22 @@ fn separator(prefix: &Prefix, rng: &mut impl Rng) -> char {
     pick_weighted(&digits, rng).copied().unwrap_or('1')
 }
 
-/// A suffix length both the tier and the country allow, as often as real
-/// calls of the prefix have it.
-fn suffix_len(tier: &Tier, prefix: &Prefix, rng: &mut impl Rng) -> usize {
-    pick_weighted(&prefix.lengths_in(tier), rng)
+/// Guantanamo Bay's calls: KG4 with a two-letter suffix. The table counts
+/// the rest of KG4 under the US, with KG's other digits, whose two-letter
+/// suffixes are the US's own, and does not hold Guantanamo Bay.
+pub(crate) const GUANTANAMO: (&str, char, usize) = ("KG", '4', 2);
+
+/// A suffix length both the tier and the country allow after `prefix` and
+/// `digit`, as often as real calls of the prefix have it; never one that
+/// would make the call another country's, as KG4 with two letters would be
+/// Guantanamo Bay's.
+fn suffix_len(tier: &Tier, prefix: &Prefix, digit: char, rng: &mut impl Rng) -> usize {
+    let lengths: Vec<(usize, f64)> = prefix
+        .lengths_in(tier)
+        .into_iter()
+        .filter(|(len, _)| (prefix.prefix, digit, *len) != GUANTANAMO)
+        .collect();
+    pick_weighted(&lengths, rng)
         .copied()
         .unwrap_or(tier.suffix_min.max(1))
 }
@@ -412,7 +504,7 @@ pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> Generated
         host: None,
         marker: None,
     };
-    for _ in 0..suffix_len(tier, prefix, rng) {
+    for _ in 0..suffix_len(tier, prefix, digit, rng) {
         call.text.push(LETTERS[rng.usize_in(0, LETTERS.len() - 1)]);
     }
     let (portable_share, abroad_share) = if spec.contest_shares {
@@ -1141,6 +1233,108 @@ mod tests {
         assert!(share("9A") > 0.0, "some Croats");
     }
 
+    /// Every country the counts keep has its name, CQ zone and continent,
+    /// and nothing else has; zones run 1 to 40, continents are the six.
+    #[test]
+    fn every_country_has_a_name_a_zone_and_a_continent() {
+        for entry in PREFIXES {
+            assert!(country_row(entry.country).is_some(), "{}", entry.country);
+        }
+        for country in COUNTRIES {
+            assert!(
+                PREFIXES.iter().any(|entry| entry.country == country.key),
+                "{}",
+                country.key
+            );
+            assert!((1..=40).contains(&country.zone), "{}", country.key);
+            assert!(
+                continent_name(country.continent).is_some(),
+                "{}",
+                country.key
+            );
+            assert!(!country.name.is_empty());
+        }
+        let mut keys: Vec<&str> = COUNTRIES.iter().map(|country| country.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), COUNTRIES.len(), "a country listed twice");
+        for (country, prefix, zone) in ZONE_PREFIXES {
+            assert!(country_row(country).is_some(), "{country} {prefix}");
+            assert!((1..=40).contains(zone), "{prefix}");
+            assert_ne!(
+                Some(*zone),
+                country_row(country).map(|row| row.zone),
+                "{prefix}"
+            );
+            assert!(prefix.ends_with(|c: char| c.is_ascii_digit()), "{prefix}");
+        }
+        // The US and Canada go by state and province, entered by hand.
+        assert!(
+            ZONE_PREFIXES
+                .iter()
+                .all(|(country, _, _)| !matches!(*country, "K" | "VE"))
+        );
+        for (country, prefix, continent) in CONTINENT_PREFIXES {
+            assert!(continent_name(continent).is_some(), "{prefix}");
+            assert_ne!(
+                Some(*continent),
+                country_row(country).map(|row| row.continent),
+                "{prefix}"
+            );
+            assert!(prefix.ends_with(|c: char| c.is_ascii_digit()), "{prefix}");
+        }
+    }
+
+    /// A sample of the facts, as cty.dat gives them: names, zones and
+    /// continents, Alaska and Hawaii countries of their own, China's zones
+    /// on a prefix and its digit, and the continents of WAE entities the
+    /// table counts under another country: European Turkey and African
+    /// Italy.
+    #[test]
+    fn the_countries_are_where_cty_dat_puts_them() {
+        for (key, name, zone, continent) in [
+            ("K", "United States", 5, "NA"),
+            ("DL", "Fed. Rep. of Germany", 14, "EU"),
+            ("JA", "Japan", 25, "AS"),
+            ("UA", "European Russia", 16, "EU"),
+            ("UA9", "Asiatic Russia", 17, "AS"),
+            ("VK", "Australia", 30, "OC"),
+            ("PY", "Brazil", 11, "SA"),
+            ("ZS", "South Africa", 38, "AF"),
+            ("KL", "Alaska", 1, "NA"),
+            ("KH6", "Hawaii", 31, "OC"),
+            ("KP4", "Puerto Rico", 8, "NA"),
+            ("EA8", "Canary Islands", 33, "AF"),
+            ("TF", "Iceland", 40, "EU"),
+        ] {
+            assert_eq!(country_name(key), Some(name), "{key}");
+            assert_eq!(zone_in(key, ""), Some(zone), "{key}");
+            assert_eq!(continent_in(key, ""), Some(continent), "{key}");
+        }
+        assert_eq!(zone_in("BY", "BY1"), Some(24));
+        assert_eq!(zone_in("BY", "BY0"), Some(23));
+        assert_eq!(zone_in("BY", "BG9"), Some(23));
+        assert_eq!(zone_in("BY", "3H0"), Some(23));
+        assert_eq!(zone_in("I", "IG9"), Some(33));
+        assert_eq!(zone_in("I", "I1"), Some(15));
+        for prefix in ["TA1", "TB1", "TC1", "YM1"] {
+            assert_eq!(continent_in("TA", prefix), Some("EU"), "{prefix}");
+            assert_eq!(zone_in("TA", prefix), Some(20), "{prefix}");
+        }
+        assert_eq!(continent_in("TA", "TA2"), Some("AS"));
+        assert_eq!(continent_in("I", "IH9"), Some("AF"));
+        // An override is its country's alone.
+        assert_eq!(zone_in("DL", "BY0"), Some(14));
+        assert_eq!(continent_in("DL", "TA1"), Some("EU"));
+        assert_eq!(continent_in("JA", "TA1"), Some("AS"));
+        assert_eq!(country_name("XX"), None);
+        assert_eq!(continent_in("XX", "XX1"), None);
+        assert_eq!(zone_in("XX", "XX1"), None);
+        assert_eq!(continent_name("EU"), Some("Europe"));
+        assert_eq!(continent_name("NA"), Some("North America"));
+        assert_eq!(continent_name("XX"), None);
+    }
+
     #[test]
     fn a_weighted_table_always_yields_something() {
         let mut rng = SplitMix64::new(3);
@@ -1273,6 +1467,23 @@ mod tests {
         assert!(na.iter().any(|call| call.country == "KL"));
         assert!(na.iter().any(|call| call.country == "KH6"));
         assert!(na.iter().any(|call| call.country == "VE"));
+    }
+
+    /// KG4 with two letters is Guantanamo Bay's, so no US call is drawn
+    /// that way, though KG4 has one- and three-letter suffixes and KG's
+    /// other digits two-letter ones.
+    #[test]
+    fn no_us_call_is_guantanamo_bays() {
+        let kg: Vec<GeneratedCall> = generated(3, CallSpec::contest(Countries::WVe), 60_000)
+            .into_iter()
+            .filter(|call| call.text.starts_with("KG"))
+            .collect();
+        let suffix = |call: &GeneratedCall| call.text.len() - 3;
+        assert!(kg.iter().any(|call| call.digit == '4'));
+        assert!(kg.iter().any(|call| call.digit != '4' && suffix(call) == 2));
+        for call in &kg {
+            assert!(call.digit != '4' || suffix(call) != 2, "{call:?}");
+        }
     }
 
     /// A contest's callers are mostly at home: portables and stations abroad

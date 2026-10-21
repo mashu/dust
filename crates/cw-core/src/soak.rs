@@ -795,11 +795,21 @@ fn a_pile_up_is_always_something_you_could_copy() {
 }
 
 /// Settings from anywhere, in Contest mode, of run `style`: any contest that
-/// has shipped, a call from a few that read in different ways, none among
-/// them, a name or none, a state or none, and runs short enough to reach
-/// their end.
+/// has shipped, a call from a few that read in different ways and are on
+/// either side of ARRL DX, none among them, a name or none, a state or
+/// none, Labrador among them, a zone or none, any power, and runs short
+/// enough to reach their end.
 fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
-    const CALLS: [&str; 6] = ["DL1ABC", "K1ABC", "VP2E/DL1ABC", "JA1XYZ", "W1AW/4", ""];
+    const CALLS: [&str; 8] = [
+        "DL1ABC",
+        "K1ABC",
+        "VP2E/DL1ABC",
+        "JA1XYZ",
+        "W1AW/4",
+        "VO2AB",
+        "KH6XYZ",
+        "",
+    ];
     let mut s = wild_settings(rng);
     s.curriculum.char_set_mode = CharSetMode::Contest;
     s.contest.contest_style = style;
@@ -807,7 +817,9 @@ fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
     s.contest.contest_kind = shipped[rng.usize_in(0, shipped.len() - 1)];
     s.contest.my_call = CALLS[rng.usize_in(0, CALLS.len() - 1)].to_string();
     s.contest.my_name = ["MAT", ""][rng.usize_in(0, 1)].to_string();
-    s.contest.my_state = ["MA", "", "DX"][rng.usize_in(0, 2)].to_string();
+    s.contest.my_state = ["MA", "", "DX", "LB"][rng.usize_in(0, 3)].to_string();
+    s.contest.my_zone = [0, 0, 14, 40][rng.usize_in(0, 3)];
+    s.contest.my_power = ["100", "KW", "5", "1K"][rng.usize_in(0, 3)].to_string();
     s.contest.contest_minutes = [1, 2, 3, 4, 0][rng.usize_in(0, 4)];
     s.clamp()
 }
@@ -1148,12 +1160,15 @@ fn contest_run(
         if let Some(mut clock) = view.clock {
             let reading = clock.elapsed_ms(at);
             // The one step back by design: a send whose every retry failed
-            // gives its retries back as time paused.
+            // gives its retries back as time paused, whether that pauses
+            // the run or, past its limit all the same, ends it.
             let failed = matches!(event, ContestEvent::TurnFailed { .. })
-                && view.phase
-                    == (ContestPhase::Paused {
-                        why: PauseWhy::Sound,
-                    });
+                && matches!(
+                    view.phase,
+                    ContestPhase::Paused {
+                        why: PauseWhy::Sound
+                    } | ContestPhase::Finished
+                );
             assert!(
                 reading >= shown || failed,
                 "seed {seed} step {step}: the clock went back"
@@ -1333,7 +1348,7 @@ fn soak_contest_runs(style: RunStyle) {
         }
         match rules.scoring {
             Some(scoring) => {
-                let live = contest_score(&scoring, &checks, run.run_ms);
+                let live = contest_score(&scoring, &run.me(), &checks, run.run_ms);
                 let stored = run.score(&result.groups).expect("a stored run scores");
                 assert_eq!(
                     stored, live,

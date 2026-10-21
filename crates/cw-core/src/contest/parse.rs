@@ -35,7 +35,8 @@ pub enum ExchangeState {
 pub struct ReadField {
     pub field: Field,
     pub token: String,
-    /// The canonical value ([`Field::canonical`]).
+    /// The canonical value, as the contest reads it
+    /// ([`ContestRules::canonical`]).
     pub value: String,
 }
 
@@ -97,15 +98,18 @@ impl Pass {
 /// Items may come in any order, and a later item of a kind replaces an
 /// earlier one, so a correction typed last wins. One deterministic parser
 /// reads every contest, in three passes: each closed-list field takes the
-/// last token on its list (`TN` is Tennessee); each numeric field the last
-/// number left, where a serial is not exactly a report (`5NN`, `ENN`,
-/// `599`) in an exchange that holds one, unless nothing else is there, and
-/// a copied report is the last token shaped as one (`57N` is 579); and the
-/// free-text fields fill from what is left, right to left, a name being an
-/// all-letter token that is not a report where one is copied. Where a name
-/// is copied too, a serial or a zone is letters alone only when nothing
-/// with a digit is there and another token is left for the name: `ANNE` is
-/// a name, not 1995, and `TNN BOB` is 99 and BOB.
+/// last token on its list (`TN` is Tennessee), power never a report in an
+/// exchange that holds one (`5NN KW` is a kilowatt, and `5NN` alone no
+/// power at all); each numeric field the last number left, where a serial
+/// or a zone is not exactly a report (`5NN`, `ENN`, `599`) in an exchange
+/// that holds one, unless nothing else is there, and a copied report is the
+/// last token shaped as one (`57N` is 579); and the free-text fields fill
+/// from what is left, right to left, a name being an all-letter token that
+/// is not a report where one is copied. Where a name is copied too, a
+/// serial or a zone is letters alone only when nothing with a digit is
+/// there and another token is left for the name: `ANNE` is a name, not
+/// 1995, and `TNN BOB` is 99 and BOB. Values are read as the contest reads
+/// them: Labrador is NL but in ARRL DX.
 pub fn parse_exchange(rules: &ContestRules, side: Side, text: &str) -> Reading {
     let tokens: Vec<String> = text
         .split_whitespace()
@@ -113,6 +117,7 @@ pub fn parse_exchange(rules: &ContestRules, side: Side, text: &str) -> Reading {
         .collect();
     let copied = rules.copied(side);
     let others = Others {
+        rules,
         copied,
         report: rules.rst,
     };
@@ -178,14 +183,16 @@ pub fn parse_exchange(rules: &ContestRules, side: Side, text: &str) -> Reading {
 
 /// What the rest of an exchange asks of a token, so each field reads only
 /// what is its own.
-struct Others {
+struct Others<'a> {
+    /// The contest, which says how a value reads.
+    rules: &'a ContestRules,
     /// The fields copied.
     copied: &'static [Field],
     /// A report is part of the exchange, so `5NN` typed is it.
     report: bool,
 }
 
-impl Others {
+impl Others<'_> {
     /// Whether one of the closed lists copied holds `token`, which then is
     /// never read as cut digits: `TN` is Tennessee, not 9.
     fn listed(&self, token: &str) -> bool {
@@ -224,16 +231,16 @@ fn take(
     field: Field,
     tokens: &[String],
     taken: &[bool],
-    others: &Others,
+    others: &Others<'_>,
 ) -> Option<(usize, String)> {
-    let read = |(at, token): (usize, &str)| Some((at, field.canonical(token)?));
+    let read = |(at, token): (usize, &str)| Some((at, others.rules.canonical(field, token)?));
     let last = |accept: &dyn Fn(&str) -> bool| open(tokens, taken, accept).rev().find_map(read);
     let first = |accept: &dyn Fn(&str) -> bool| open(tokens, taken, accept).find_map(read);
     match field {
         Field::Nr | Field::Zn => {
             let number = |token: &str| !others.listed(token);
-            // A report reads as a number too, but is a serial only when it
-            // is all there is.
+            // A report reads as a number too, but is a serial or a zone only
+            // when it is all there is.
             let not_report = |token: &str| !(others.report && REPORTS.contains(&token));
             let by = |accept: &dyn Fn(&str) -> bool| {
                 last(&|token| number(token) && accept(token) && not_report(token))
@@ -257,6 +264,9 @@ fn take(
         // first of them, so a state put right leaves the name as it was.
         Field::Name => last(&|token| others.names(token) && !others.listed(token))
             .or_else(|| first(&|token| others.names(token))),
+        // No station runs 599 W: what reads as the report is the report,
+        // however it is cut.
+        Field::Pwr => last(&|token| !(others.report && Field::Rst.same(token, "599"))),
         _ => last(&|_| true),
     }
 }
@@ -397,6 +407,80 @@ mod tests {
         }
     }
 
+    fn cqww(text: &str) -> Reading {
+        let rules = ContestKind::Cqww.rules().expect("CQ WW has shipped");
+        parse_exchange(rules, Side::Dx, text)
+    }
+
+    /// The CQ WW rows of the design's table: a zone is the last number
+    /// left that is not the report, cut letters and padding read as digits.
+    #[test]
+    fn cqww_reads_as_the_table_says() {
+        for (typed, zone) in [
+            ("A4", "14"),
+            ("5NN 05", "5"),
+            ("5NN 25", "25"),
+            ("25 5NN", "25"),
+            ("14 15", "15"),
+            ("TN", "9"),
+            ("5nn a4", "14"),
+        ] {
+            let reading = cqww(typed);
+            assert_eq!(reading.value(Field::Zn), Some(zone), "{typed}");
+            assert_eq!(reading.state, ExchangeState::Complete, "{typed}");
+        }
+        // The report alone is no zone, and a zone past 40 none either.
+        assert_eq!(cqww("5NN").state, ExchangeState::Missing);
+        assert_eq!(cqww("").state, ExchangeState::Empty);
+        for typed in ["41", "5NN 0", "BOB", "5NN 14?"] {
+            assert_eq!(cqww(typed).state, ExchangeState::Invalid, "{typed}");
+        }
+    }
+
+    fn arrl_dx(side: Side, text: &str) -> Reading {
+        let rules = ContestKind::ArrlDx.rules().expect("ARRL DX has shipped");
+        parse_exchange(rules, side, text)
+    }
+
+    /// The ARRL DX rows of the design's table: as W/VE you copy power, a
+    /// kilowatt however it is written and never the report; as DX a state,
+    /// province or territory, Labrador apart.
+    #[test]
+    fn arrl_dx_reads_as_the_table_says() {
+        for (typed, power) in [
+            ("1TT", "100"),
+            ("KW", "KW"),
+            ("K", "KW"),
+            ("1K", "KW"),
+            ("5NN 1TT", "100"),
+            ("5NN KW", "KW"),
+            ("KW 5NN", "KW"),
+            ("100 500", "500"),
+            ("5", "5"),
+            ("KW 5N9", "KW"),
+        ] {
+            let reading = arrl_dx(Side::WVe, typed);
+            assert_eq!(reading.value(Field::Pwr), Some(power), "{typed}");
+            assert_eq!(reading.state, ExchangeState::Complete, "{typed}");
+        }
+        assert_eq!(arrl_dx(Side::WVe, "5NN").state, ExchangeState::Missing);
+        assert_eq!(arrl_dx(Side::WVe, "OR").state, ExchangeState::Invalid);
+        for (typed, st) in [
+            ("OR", "OR"),
+            ("5NN OR", "OR"),
+            ("LB", "LB"),
+            ("5NN NL", "NL"),
+            ("PQ", "QC"),
+            ("MA OR", "OR"),
+        ] {
+            let reading = arrl_dx(Side::Dx, typed);
+            assert_eq!(reading.value(Field::St), Some(st), "{typed}");
+            assert_eq!(reading.state, ExchangeState::Complete, "{typed}");
+        }
+        assert_eq!(arrl_dx(Side::Dx, "5NN").state, ExchangeState::Missing);
+        assert_eq!(arrl_dx(Side::Dx, "KW").state, ExchangeState::Invalid);
+    }
+
     #[test]
     fn a_later_number_replaces_an_earlier_one() {
         let reading = wpx("145 146");
@@ -444,22 +528,19 @@ mod tests {
     #[test]
     fn parsing_survives_anything_and_settles_on_its_own_output() {
         const TYPED: &[char] = &[
-            '1', '2', '5', '9', '0', 'T', 'N', 'E', 'A', 'O', 'B', 'X', 'L', 'R', '?', '/', ' ',
-            ' ', ' ', 'é', 'n', '\t',
+            '1', '2', '5', '9', '0', 'T', 'N', 'E', 'A', 'O', 'B', 'X', 'L', 'R', 'K', 'W', '?',
+            '/', ' ', ' ', ' ', 'é', 'n', '\t',
         ];
         let mut rng = SplitMix64::new(11);
+        let kinds: Vec<ContestKind> = ContestKind::shipped().collect();
         for round in 0..10_000 {
-            let kind = [
-                ContestKind::Wpx,
-                ContestKind::SimpleQso,
-                ContestKind::Sprint,
-            ][round % 3];
-            let rules = kind.rules().expect("shipped");
+            let rules = kinds[round % kinds.len()].rules().expect("shipped");
+            let side = [Side::Dx, Side::WVe][round / kinds.len() % 2];
             let len = rng.usize_in(0, 16);
             let text: String = (0..len)
                 .map(|_| TYPED[rng.usize_in(0, TYPED.len() - 1)])
                 .collect();
-            let reading = parse_exchange(rules, Side::Dx, &text);
+            let reading = parse_exchange(rules, side, &text);
             assert_eq!(
                 reading.state == ExchangeState::Empty,
                 text.trim().is_empty(),
@@ -467,7 +548,7 @@ mod tests {
             );
             for read in &reading.fields {
                 assert_eq!(
-                    read.field.canonical(&read.token).as_deref(),
+                    rules.canonical(read.field, &read.token).as_deref(),
                     Some(read.value.as_str())
                 );
             }
@@ -475,7 +556,7 @@ mod tests {
             assert_eq!(normalize_call(&call), call, "{text:?}");
             if reading.state == ExchangeState::Complete {
                 let values: Vec<&str> = reading.fields.iter().map(|f| f.value.as_str()).collect();
-                let again = parse_exchange(rules, Side::Dx, &values.join(" "));
+                let again = parse_exchange(rules, side, &values.join(" "));
                 assert_eq!(again.state, ExchangeState::Complete, "{text:?}");
                 assert_eq!(again.fields.len(), reading.fields.len());
                 for (first, second) in reading.fields.iter().zip(&again.fields) {

@@ -759,31 +759,14 @@ mod tests {
         use super::super::{ContestKind, Field, RunStyle};
         use crate::callsign::Countries;
         for (seed, style) in [(31, RunStyle::Single), (32, RunStyle::Pileup)] {
-            let mut settings = run_settings(25.0);
-            settings.contest.contest_kind = ContestKind::Sprint;
-            settings.contest.contest_style = style;
-            settings.contest.my_call = "K1ABC".to_string();
-            settings.contest.my_name = "MIKE".to_string();
-            settings.contest.my_state = "MA".to_string();
-            settings.curriculum.callsign_level = 6;
-            settings.band.stations_max = 3;
-            let settings = settings.clamp();
-            let sampler = Sampler::new(&[], &settings, seed);
-            let mut runtime = Runtime::start(seed, settings, sampler);
-            work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+            let (runtime, run, result, yours) =
+                perfect_run(ContestKind::Sprint, style, "K1ABC", "MA", seed);
             let view = runtime.machine.view();
             assert!(view.qsos > 15, "{style:?}: {} QSOs", view.qsos);
             assert_eq!(view.clean, view.qsos, "{style:?}");
             // What you send: the contest's CQ, both calls and your serial
             // plain, and a TU signed once, every third QSO of a pile-up too.
-            let yours: Vec<&str> = runtime
-                .turns
-                .iter()
-                .flat_map(|turn| turn.segments.iter())
-                .filter(|segment| segment.who == Sender::You)
-                .map(|segment| segment.text.as_str())
-                .collect();
-            assert!(yours.contains(&"CQ NA K1ABC"), "{yours:?}");
+            assert!(yours.iter().any(|text| text == "CQ NA K1ABC"), "{yours:?}");
             assert!(
                 yours.iter().any(|text| text.ends_with(" K1ABC 1 MIKE MA")),
                 "{yours:?}"
@@ -794,12 +777,6 @@ mod tests {
             );
             assert!(yours.iter().all(|text| !text.contains("K1ABC K1ABC")));
             assert!(yours.iter().any(|text| text.contains("TU K1ABC")));
-            let result = runtime.machine.result(0, "2026-10-21".into());
-            let run = result
-                .contest
-                .as_ref()
-                .and_then(|log| log.run(result.groups.len()))
-                .expect("the log reads back");
             assert_eq!(
                 (run.kind.as_str(), run.style.as_str()),
                 ("sprint", style.name())
@@ -825,7 +802,7 @@ mod tests {
                     qso.c
                 );
                 assert!(
-                    places_for(call).contains(&st.as_str()),
+                    places_for(call, false).contains(&st.as_str()),
                     "{style:?}: {call} sent {st}"
                 );
                 if qso.k.is_empty() {
@@ -856,6 +833,199 @@ mod tests {
                         !segment.text.starts_with("TU ") && !segment.text.starts_with("R ")
                     })
             }));
+        }
+    }
+
+    /// A run of `kind` as `call`, called MIKE, from `state`, worked
+    /// perfectly in `style` from `seed`, with callers from every tier and
+    /// up to three at once: the runtime, its stored run and session, and
+    /// every message you sent.
+    fn perfect_run(
+        kind: super::super::ContestKind,
+        style: super::super::RunStyle,
+        call: &str,
+        state: &str,
+        seed: u64,
+    ) -> (
+        Runtime<Sampler>,
+        crate::contest::ContestRun,
+        crate::session::SessionResult,
+        Vec<String>,
+    ) {
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_kind = kind;
+        settings.contest.contest_style = style;
+        settings.contest.my_call = call.to_string();
+        settings.contest.my_name = "MIKE".to_string();
+        settings.contest.my_state = state.to_string();
+        settings.curriculum.callsign_level = 6;
+        settings.band.stations_max = 3;
+        let settings = settings.clamp();
+        assert_eq!(settings.contest.missing(), None, "{kind:?} as {call}");
+        let sampler = Sampler::new(&[], &settings, seed);
+        let mut runtime = Runtime::start(seed, settings, sampler);
+        work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+        let result = runtime.machine.result(0, "2026-10-21".into());
+        let run = result
+            .contest
+            .as_ref()
+            .and_then(|log| log.run(result.groups.len()))
+            .expect("the log reads back");
+        let yours = runtime
+            .turns
+            .iter()
+            .flat_map(|turn| turn.segments.iter())
+            .filter(|segment| segment.who == Sender::You)
+            .map(|segment| segment.text.clone())
+            .collect();
+        (runtime, run, result, yours)
+    }
+
+    /// CQ WW worked perfectly from Europe and from North America, one
+    /// caller at a time and in a pile-up: every QSO clean, your zone sent
+    /// cut, each caller's zone one its call is in, and the score its
+    /// points by distance times the zones and countries worked, each once.
+    #[test]
+    fn a_perfect_operator_works_cqww_clean_from_anywhere() {
+        use super::super::data::places::home_country;
+        use super::super::data::zones::{draw_zone, home_continent};
+        use super::super::{ContestKind, RunStyle};
+        for (seed, style, call, sent, home) in [
+            (41, RunStyle::Single, "DL1ABC", " 5NN A4", ("DL", "EU", 14)),
+            (42, RunStyle::Pileup, "DL1ABC", " 5NN A4", ("DL", "EU", 14)),
+            (43, RunStyle::Single, "K1ABC", " 5NN 5", ("K", "NA", 5)),
+            (44, RunStyle::Pileup, "K1ABC", " 5NN 5", ("K", "NA", 5)),
+        ] {
+            let case = format!("{call} {style:?}");
+            let (runtime, run, result, yours) =
+                perfect_run(ContestKind::Cqww, style, call, "", seed);
+            let view = runtime.machine.view();
+            assert!(view.qsos > 15, "{case}: {} QSOs", view.qsos);
+            assert_eq!(view.clean, view.qsos, "{case}");
+            assert!(yours.contains(&format!("CQ {call} TEST")), "{case}");
+            assert!(
+                yours.iter().any(|text| text.ends_with(sent)),
+                "{case}: {yours:?}"
+            );
+            assert_eq!(run.fields, ["zn"], "{case}");
+            assert_eq!(run.side, "", "{case}: the same from either side");
+            assert_eq!(
+                (
+                    run.my_country.as_str(),
+                    run.my_continent.as_str(),
+                    run.my_zone
+                ),
+                home,
+                "{case}"
+            );
+            let mut points = 0;
+            let mut mults = std::collections::BTreeSet::new();
+            let mut at = 0;
+            let mut rng = SplitMix64::new(seed);
+            for qso in &run.qsos {
+                let owned = &result.groups[at..at + qso.g as usize];
+                at += qso.g as usize;
+                if qso.g == 0 {
+                    continue;
+                }
+                assert_eq!(qso.g, 2, "{case}: {qso:?}");
+                let (his, zone) = (&owned[0].sent, &owned[1].sent);
+                let zones: std::collections::BTreeSet<u32> =
+                    (0..300).filter_map(|_| draw_zone(his, &mut rng)).collect();
+                let zone: u32 = zone.parse().expect("a zone in plain digits");
+                assert!(zones.contains(&zone), "{case}: {his} sent zone {zone}");
+                // A station still being worked when time ran out is lost.
+                if !qso.k.is_empty() {
+                    continue;
+                }
+                assert!(owned.iter().all(|group| group.correct), "{case}");
+                let country = home_country(his).expect("a placed caller");
+                points += match home_continent(his) {
+                    _ if country == home.0 => 0,
+                    Some(continent) if continent == home.1 && continent == "NA" => 2,
+                    Some(continent) if continent == home.1 => 1,
+                    _ => 3,
+                };
+                mults.insert(format!("zone {zone}"));
+                mults.insert(country.to_string());
+            }
+            let score = run.score(&result.groups).expect("CQ WW scores");
+            assert_eq!(score.verified, score.raw, "{case}: all clean");
+            assert_eq!(score.verified.qso_points, points, "{case}");
+            assert_eq!(score.verified.mults as usize, mults.len(), "{case}");
+            assert_eq!(
+                score.verified.score,
+                score.verified.qso_points * score.verified.mults
+            );
+        }
+    }
+
+    /// ARRL DX worked perfectly from either side, one caller at a time and
+    /// in a pile-up: as DX, only W/VE calls, each sending the state or
+    /// province its call is in, Labrador apart, and your power cut; as W/VE,
+    /// only DX calls, each sending its power, and your state; three points
+    /// a QSO times what your side counts, each once.
+    #[test]
+    fn a_perfect_operator_works_arrl_dx_clean_from_either_side() {
+        use super::super::data::places::{places_for, w_ve_place};
+        use super::super::{ContestKind, Field, RunStyle};
+        use crate::callsign::Countries;
+        for (seed, style, call, state, side) in [
+            (51, RunStyle::Single, "DL1ABC", "", "dx"),
+            (52, RunStyle::Pileup, "DL1ABC", "", "dx"),
+            (53, RunStyle::Single, "K1ABC", "MA", "wve"),
+            (54, RunStyle::Pileup, "K1ABC", "MA", "wve"),
+        ] {
+            let case = format!("{call} {style:?}");
+            let (runtime, run, result, yours) =
+                perfect_run(ContestKind::ArrlDx, style, call, state, seed);
+            let view = runtime.machine.view();
+            assert!(view.qsos > 15, "{case}: {} QSOs", view.qsos);
+            assert_eq!(view.clean, view.qsos, "{case}");
+            assert_eq!(run.side, side, "{case}");
+            let dx = side == "dx";
+            let ending = if dx { " 5NN 1TT" } else { " 5NN MA" };
+            assert!(
+                yours.iter().any(|text| text.ends_with(ending)),
+                "{case}: {yours:?}"
+            );
+            assert_eq!(run.fields, [if dx { "st" } else { "pwr" }], "{case}");
+            let mut mults = std::collections::BTreeSet::new();
+            let mut at = 0;
+            let mut qsos = 0;
+            for qso in &run.qsos {
+                let owned = &result.groups[at..at + qso.g as usize];
+                at += qso.g as usize;
+                if qso.g == 0 {
+                    continue;
+                }
+                let (his, sent) = (&owned[0].sent, &owned[1].sent);
+                assert_eq!(
+                    Countries::WVe.admits(&qso.c),
+                    dx,
+                    "{case}: {his} of {}",
+                    qso.c
+                );
+                if dx {
+                    assert!(
+                        places_for(his, true).contains(&sent.as_str()),
+                        "{case}: {his} sent {sent}"
+                    );
+                    assert!(w_ve_place(sent), "{case}: {sent}");
+                } else {
+                    assert!(Field::Pwr.canonical(sent).is_some(), "{case}: {sent}");
+                }
+                // A station still being worked when time ran out is lost.
+                if !qso.k.is_empty() {
+                    continue;
+                }
+                qsos += 1;
+                mults.insert(if dx { sent.clone() } else { qso.c.clone() });
+            }
+            let score = run.score(&result.groups).expect("ARRL DX scores");
+            assert_eq!(score.verified, score.raw, "{case}: all clean");
+            assert_eq!(score.verified.qso_points, 3 * qsos, "{case}");
+            assert_eq!(score.verified.mults as usize, mults.len(), "{case}");
         }
     }
 
@@ -965,6 +1135,32 @@ mod tests {
                 "BOB",
                 Some("W7ABC BOB MA"),
                 "CQ NA W7ABC",
+            ),
+            (ContestKind::Cqww, "", "", Some("DL1ABC"), "CQ DL1ABC TEST"),
+            (ContestKind::Cqww, "JA1XYZ", "", None, "CQ JA1XYZ TEST"),
+            // A call that does not say its zone has one stand in.
+            (
+                ContestKind::Cqww,
+                "C31AB",
+                "",
+                Some("C31AB zone 14"),
+                "CQ C31AB TEST",
+            ),
+            // ARRL DX: DX sends its power, always given; W/VE its state.
+            (
+                ContestKind::ArrlDx,
+                "",
+                "",
+                Some("DL1ABC"),
+                "CQ DL1ABC TEST",
+            ),
+            (ContestKind::ArrlDx, "G4ABC", "", None, "CQ G4ABC TEST"),
+            (
+                ContestKind::ArrlDx,
+                "K1ABC",
+                "",
+                Some("K1ABC MA"),
+                "CQ K1ABC TEST",
             ),
         ] {
             let mut settings = TrainingSettings::default();

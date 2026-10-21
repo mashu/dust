@@ -29,6 +29,7 @@ use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView};
 use crate::audio::fake::Recorder;
 use crate::session_runtime::AnswerOutbox;
 use crate::state::{AppState, Screen};
+use crate::testing::reads_as;
 
 std::thread_local! {
     /// How many times a [`Keyed`] with no sound device has looked for one.
@@ -680,7 +681,12 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
         "Callsign tier (1–6)",
         ">Your station<",
         "Signing DL1ABC",
-        "Reads as DL · WPX prefix DL1",
+        &reads_as(&[
+            "Fed. Rep. of Germany",
+            "Europe",
+            "CQ zone 14",
+            "WPX prefix DL1",
+        ]),
         "Stored on this device only.",
         "Minutes per run",
         "Band activity",
@@ -795,39 +801,13 @@ fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
 /// Settings in Contest mode for the NA Sprint as `my_call`, called
 /// `my_name`, in `my_state`.
 fn sprint_settings(my_call: &'static str, my_name: &'static str, my_state: &'static str) -> String {
-    #[component]
-    fn SprintSettings(
-        my_call: &'static str,
-        my_name: &'static str,
-        my_state: &'static str,
-    ) -> Element {
-        let settings = use_signal(|| {
-            let mut settings = crate::testing::contest_settings();
-            settings.contest.contest_kind = cw_core::ContestKind::Sprint;
-            settings.contest.my_call = my_call.to_string();
-            settings.contest.my_name = my_name.to_string();
-            settings.contest.my_state = my_state.to_string();
-            settings
-        });
-        rsx! {
-            Keyed { screen: Screen::Settings,
-                SettingsView {
-                    settings,
-                    previewing: false,
-                    sample_playing: None,
-                    on_preview_band: move |_| {},
-                    on_stop_band: move |_| {},
-                    on_play_sample: move |_: String| {},
-                }
-            }
-        }
-    }
-    render_props(
-        SprintSettings,
-        SprintSettingsProps {
-            my_call,
-            my_name,
-            my_state,
+    station_settings(
+        cw_core::ContestKind::Sprint,
+        Station {
+            call: my_call,
+            name: my_name,
+            state: my_state,
+            ..Station::default()
         },
     )
 }
@@ -887,6 +867,210 @@ fn a_sprint_shows_its_dialogue_and_asks_for_your_name_and_state() {
     // WPX sends no state, so Your station has no field for one.
     let wpx = simple_qso_settings("MAT");
     assert!(!wpx.contains("field-your-state"));
+}
+
+/// Your station, as a render test gives it.
+#[derive(Clone, Copy, PartialEq)]
+struct Station {
+    call: &'static str,
+    name: &'static str,
+    state: &'static str,
+    zone: u32,
+    power: &'static str,
+}
+
+impl Default for Station {
+    fn default() -> Self {
+        Self {
+            call: "",
+            name: "",
+            state: "",
+            zone: 0,
+            power: "100",
+        }
+    }
+}
+
+/// Your station as `call`, everything else as it is until given.
+fn called(call: &'static str) -> Station {
+    Station {
+        call,
+        ..Station::default()
+    }
+}
+
+/// Settings in Contest mode for `kind` as `station`.
+fn station_settings(kind: cw_core::ContestKind, station: Station) -> String {
+    #[component]
+    fn StationSettings(kind: cw_core::ContestKind, station: Station) -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = kind;
+            settings.contest.my_call = station.call.to_string();
+            settings.contest.my_name = station.name.to_string();
+            settings.contest.my_state = station.state.to_string();
+            settings.contest.my_zone = station.zone;
+            settings.contest.my_power = station.power.to_string();
+            settings
+        });
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    }
+    render_props(StationSettings, StationSettingsProps { kind, station })
+}
+
+/// CQ WW has its pill, its dialogue from its row with your zone cut, what
+/// it simplifies, and on Your station your zone, read from your call while
+/// you give none, with no name, state or power.
+#[test]
+fn cqww_shows_its_dialogue_and_your_zone() {
+    let html = station_settings(cw_core::ContestKind::Cqww, called("DL1ABC"));
+    let reading = reads_as(&["Fed. Rep. of Germany", "Europe", "CQ zone 14"]);
+    for shown in [
+        "Contest · CQ WW",
+        r#"id="contest-cq-ww" class="pill active""#,
+        "You send 5NN + zone\u{a0}· You\u{a0}copy\u{a0}ZN",
+        "one band, so a station, a zone and a country each count once",
+        "no WAE countries",
+        ">CQ DL1ABC TEST<",
+        ">JA1XYZ<",
+        ">JA1XYZ 5NN A4<",
+        ">TU 5NN 25<",
+        r#"for="field-your-cq-zone-0-40""#,
+        "0 takes it from your call: zone 14, sent A4",
+        &format!("{reading}<"),
+        "Signing DL1ABC · zone 14",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in [
+        "field-your-name",
+        "field-your-state",
+        "field-your-power",
+        "side-line",
+    ] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // A zone given goes out in place of the call's, which the line names.
+    let html = station_settings(
+        cw_core::ContestKind::Cqww,
+        Station {
+            zone: 15,
+            ..called("DL1ABC")
+        },
+    );
+    for shown in [
+        "Sends A5: zone 15, where your call reads as zone 14",
+        ">JA1XYZ 5NN A5<",
+        "Signing DL1ABC · zone 15",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // A state left from another contest gives a US call its zone, and the
+    // lines say so, though CQ WW has no field for it.
+    let html = station_settings(
+        cw_core::ContestKind::Cqww,
+        Station {
+            state: "CA",
+            ..called("K1ABC")
+        },
+    );
+    for shown in [
+        "0 takes it from your call and state: zone 3 in California, sent 3",
+        &reads_as(&["United States", "North America", "CQ zone 3 in California"]),
+        ">JA1XYZ 5NN 3<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // A call Dust cannot place needs its zone given before a run, and
+    // reads as no country, its WPX prefix left to WPX.
+    let html = station_settings(cw_core::ContestKind::Cqww, called("C31AB"));
+    for shown in [
+        "Add your CQ zone to start a CQ\u{a0}WW",
+        "JA1XYZ 5NN &#60;your zone&#62;",
+        &format!("{}<", reads_as(&["unknown prefix, so no country"])),
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+}
+
+/// ARRL DX has its pill and says which side you are on: as DX, you send
+/// your power, which Your station asks for, and copy a state; as W/VE, you
+/// send your state, Labrador among them, and copy power.
+#[test]
+fn arrl_dx_says_your_side_and_asks_for_what_it_sends() {
+    let html = station_settings(cw_core::ContestKind::ArrlDx, called("DL1ABC"));
+    let reading = reads_as(&["Fed. Rep. of Germany", "Europe", "CQ zone 14", "you are DX"]);
+    for shown in [
+        "Contest · ARRL DX",
+        r#"id="contest-arrl-dx" class="pill active""#,
+        "You send 5NN + power\u{a0}· You\u{a0}copy\u{a0}ST",
+        r#"id="side-line" class="muted" style="margin: 0;">You are DX: you work US and Canada only<"#,
+        "Simplified: one band, so a station and a multiplier each count once.",
+        ">W7XYZ 5NN 1TT<",
+        ">TU 5NN OR<",
+        r#"for="field-your-power""#,
+        "Sends 1TT: 100 W",
+        &reading,
+        "Signing DL1ABC · 100 W",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in ["field-your-name", "field-your-state", "field-your-cq-zone"] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // The pills go as the card lists the contests.
+    let order: Vec<usize> = [
+        "contest-na-sprint",
+        "contest-arrl-dx",
+        "contest-cq-wpx",
+        "contest-cq-ww",
+        "contest-simple-qso",
+    ]
+    .iter()
+    .map(|id| html.find(id).expect("every pill"))
+    .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+    let html = station_settings(cw_core::ContestKind::ArrlDx, called("K1ABC"));
+    for shown in [
+        "You send 5NN + state\u{a0}· You\u{a0}copy\u{a0}PWR",
+        "You are W/VE: you work DX only (Alaska and Hawaii count as DX)",
+        ">G4XYZ 5NN &#60;your state&#62;<",
+        ">TU 5NN KW<",
+        r#"for="field-your-state-or-province""#,
+        "Add your state or province to start an ARRL\u{a0}DX",
+        "you\u{a0}are\u{a0}W/VE",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("field-your-power"), "{html}");
+    // With no call yet, you are DX until you add one.
+    let html = station_settings(cw_core::ContestKind::ArrlDx, called(""));
+    assert!(
+        html.contains("Until you add your call you are DX: you work US and Canada only"),
+        "{html}"
+    );
+    // Labrador is a place of its own in ARRL DX.
+    let html = station_settings(
+        cw_core::ContestKind::ArrlDx,
+        Station {
+            state: "LB",
+            ..called("VO2AB")
+        },
+    );
+    for shown in ["Reads as Labrador", "Signing VO2AB · LB", ">G4XYZ 5NN LB<"] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
 }
 
 #[test]

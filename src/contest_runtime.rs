@@ -238,7 +238,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     let Some(rules) = settings.contest.contest_kind.rules() else {
         return;
     };
-    let side = Side::of_call(&settings.contest.my_call);
+    let side = settings.contest.side();
     let AppCtx {
         mut screen,
         contest: mut view,

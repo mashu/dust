@@ -48,7 +48,13 @@ operator, on Listen and on the Character set card (§2, `hear_qsos` in
 incomplete tries (§4.3). With them, two fixes from browser tests: what
 Start keeps from Home's hero is stored as the run starts (§2), and the TU
 that logs after a TU without logging asks no caller to call again (§4.6,
-§9.1).
+§9.1). Slice 3a has landed, the first part of phase 3: CQ WW and ARRL DX
+(§3), with each country's name, CQ zone and continent from cty.dat in the
+call table and North America's zones by hand (`contest/data/zones.rs`,
+§11.3), the ARRL DX side and Labrador (`contest/data/places.rs`, §11.2),
+the counted power shares (`contest/data/power.rs`, §11.5), points by
+distance and the multipliers of both sides (`contest/score.rs`), and
+`myZone`, `myPower` and LB in `myState` on Your station (§2, §8).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -139,16 +145,29 @@ reset: your callsign and only the fields the chosen contest sends. Under the
 call it shows what was read ("Germany · Europe · CQ zone 14 · you are DX")
 or a plain error ("needs a digit", "unknown prefix"), and "No licence yet?
 Make up a call from your country's prefix, a digit and two or three
-letters. Stored on this device only." Phase 1 has only the country key and
-the WPX prefix to read ("Reads as DL · WPX prefix DL1"); the names,
-continent, zone and side join the line with phase 3's data. The errors are
-`call_fault`'s, the reasons `parse_callsign` refuses a call ("Not a callsign
-yet: needs a digit", "needs a prefix before the digit", "needs letters after
-the last digit", "one slash at most"). A call that reads but whose prefix the
-table cannot place says "unknown prefix, so no country" beside its WPX
-prefix, and still starts a run, as `missing()` asks only that the call
-read. With no call yet, the line says what a run is missing, in
-`missing()`'s words ("Add your callsign to start a contest").
+letters. Stored on this device only." Phase 1 had only the country key and
+the WPX prefix to read ("Reads as DL · WPX prefix DL1"). As built (3a), the
+line names the country the call is at home in, as cty.dat names it
+(`home_country`, which places the prefixes of Alaska and Canada the call
+table lacks, §11.2), its continent (by prefix: European Turkey's TA1 is in
+Europe) and the CQ zone the call reads as, "in California" where your
+state and not the call alone gave it, then what the contest counts the call
+by: its WPX prefix in WPX, your side in ARRL DX ("Reads as Fed. Rep. of
+Germany · Europe · CQ zone 14 · you are DX"). Each part is kept on one
+line, so a phone's line breaks only after a dot, as the results' error line
+does. Your zone, in CQ WW, and your power, in ARRL DX from the DX side, are
+fields of their own, each with a line under it saying how it goes out ("0
+takes it from your call: zone 14, sent A4", or "from your call and state:
+zone 3 in California"; "Sends 1TT: 100 W"). The errors are `call_fault`'s,
+the reasons `parse_callsign` refuses a call ("Not a callsign yet: needs a
+digit", "needs a prefix before the digit", "needs letters after the last
+digit", "one slash at most"). A call that reads but that Dust cannot place
+says "unknown prefix, so no country" (and its WPX prefix in WPX), and
+still starts a run unless the contest needs a zone or a state the call
+cannot tell: CQ WW then asks for your zone, and the Sprint, or ARRL DX from
+the W/VE side, for your state. With no call yet, the line says what a run
+is missing, in `missing()`'s words ("Add your callsign to start a
+contest").
 
 **Home** (`src/ui/home.rs:128-216`) keeps its frame; its subtitle reads
 "Call CQ and work the stations that answer — or just listen." The hero's
@@ -162,12 +181,16 @@ minutes per run ("10 Minutes", or "Open, up to 60 min") and "Single caller"
 or "1–3 callers". Start reads "Start contest" (id `btn-start-training`); a
 start that `missing()` refuses says why in the hero, above Start, unless
 the line under the call field already says why the call will not do, and
-when the call, the name or the state is what is missing, Start moves the
-focus to its field once the hero has drawn it (an effect, `src/ui/home.rs`).
-Home asks for them in that order, one field at a time (`StationAsk`): in a
-Simple QSO with neither call nor name, the press that keeps the call swaps
-the call's field for the name's, and in a Sprint the press that keeps the
-name swaps it for the state's. While the hero holds a field, Start and Listen keep the cursor
+when the call, the name, the state or the zone is what is missing, Start
+moves the focus to its field once the hero has drawn it (an effect,
+`src/ui/home.rs`). Home asks for them in that order, one field at a time
+(`StationAsk`): in a Simple QSO with neither call nor name, the press that
+keeps the call swaps the call's field for the name's, and in a Sprint the
+press that keeps the name swaps it for the state's. As built (3a), CQ WW
+asks for your zone, "Your CQ zone", only for a call that does not say it,
+and keeps 1 to 40 (anything else is 0, your call's), with its own first
+step on the first contest's card ("Add your CQ zone, press Start
+contest; …"). While the hero holds a field, Start and Listen keep the cursor
 in it and keep what was typed there before they act, so a call typed after
 a refusal starts the run on one press: leaving the box on the press would
 keep the call then and redraw the hero, the button moved, under the finger
@@ -351,6 +374,24 @@ North American Sprint.
   lists that beside "one band".
 - **Your fields.** Callsign; your zone comes from your call (and state or
   province in North America), with an override.
+- **As built (3a).** Your zone goes out cut and unpadded (`A4` for 14, `5`
+  for 5), as MRCE sends yours; callers send theirs in plain digits under
+  easy habits, the only ones until the Caller habits setting comes (phase
+  4), and the real habits are built and tested already (`send_zone`,
+  §11.6). F12 sends `NR?`, as MRCE's does in every contest. A QSO's points
+  and country go by the call logged, placed where it is at home
+  (`home_country`, §11.2), its continent by its prefix (European Turkey is
+  in Europe): a call Dust cannot place is worth no points and no country,
+  and from a call of yours it cannot place every placed station is on
+  another continent. Your own country and continent are read the same way,
+  so NL7AB is Alaska's and VG3ABC Canada's. Your own country is a
+  multiplier too, as the contest has it. A call that does not say its zone
+  (one Dust cannot place, or a Canadian call whose digit names no province,
+  such as CH1 or VE0, until you give your province) needs `myZone` before a
+  run, which Home asks for in a field of its own, and Hear a QSO stands in
+  zone 14 for it. The card says what it leaves out: "Simplified: one band,
+  so a station, a zone and a country each count once; and no WAE
+  countries, only DXCC ones."
 
 ### ARRL DX (`arrlDx`)
 
@@ -367,6 +408,26 @@ later contests, is the world-wide one.
   ON MB SK AB BC NT NL LB NU YT PE, 63 in all (the ARRL DX rules). VO2
   stations send `LB`, a multiplier of its own. Alaska and Hawaii are DX.
 - **Your fields.** State or province (with LB), or power.
+- **As built (3a).** Your side is read where your call puts you
+  (`w_ve`, `contest/data/places.rs`): W/VE by every prefix the 48 states,
+  DC and Canada issue, the table's or not, and DX anywhere else, a call
+  Dust cannot place among it. The card's line under "You send" says it,
+  from the row's `works`: "You are DX: you work US and Canada only", or
+  "You are W/VE: you work DX only (Alaska and Hawaii count as DX)"; while
+  your call does not read, "Until you add your call you are DX: you work
+  US and Canada only". As DX your power goes out cut (`1TT` for 100 W,
+  `KW` as written) and Your station asks for it, 100 W until you give it;
+  as W/VE your state, and Home and Your station ask for it as in the
+  Sprint. A W/VE caller from VO2 sends `LB`; a DX caller sends its power
+  as written under easy habits, and cut under real ones (`send_power`,
+  §11.6). Callers lead their first exchange with `TU` or `R`, as in WPX,
+  and F12 sends `NR?`. A QSO is worth 3 points only with the other side
+  (`Points::OtherSide`), by the call logged: one logged on your own side,
+  a busted call among them, claims nothing even raw, neither points nor a
+  multiplier. As W/VE, a call logged in W/VE counts no country; as DX, a
+  state counts only from a W/VE call. With no call yet, Hear a QSO stands
+  in as DL1ABC, on the DX side. The card says "Simplified: one band, so a
+  station and a multiplier each count once."
 
 ### Field Day (`fieldDay`)
 
@@ -1489,11 +1550,11 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `myCall` | String | `""` | upper case; `A–Z 0–9 /`; no leading, trailing or doubled `/`; ≤ 12 | Station | 1 |
 | `myName` | String | `""` | `A–Z`, ≤ 10 | Station | 1c |
 | `contestStyle` | `single` `pileup` | `single` | forgiving | Character set | 2 |
-| `myState` | String | `""` | a state, DC, province, territory or `DX` (`PQ` read as `QC`, `NF` as `NL`); else `""`; `LB` joins with ARRL DX | Station | 2 |
-| `myZone` | u32 | 0 | 0..=40 (0 = from your call) | Station | 3 |
+| `myState` | String | `""` | a state, DC, province, territory or `DX` (`PQ` read as `QC`, `NF` as `NL`); else `""`; `LB` joins with ARRL DX (as built, kept in any contest and sent as `NL` but in ARRL DX) | Station | 2 |
+| `myZone` | u32 | 0 | 0..=40 (0 = from your call, and your state in North America) | Station | 3 |
 | `myClass` | String | `1D` | `[1-9][0-9]?[A-F]`, else `1D` | Station | 3 |
 | `mySection` | String | `""` | a listed section, `YT`, or `DX`; else `""` | Station | 3 |
-| `myPower` | String | `100` | 1..=1500, `K`, `KW` or `1K`; else `100` | Station | 3 |
+| `myPower` | String | `100` | 1..=1500 (leading zeros dropped), `K`, `KW` or `1K` as written; else `100` | Station | 3 |
 | `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 |
 | `contestShowCopy` | bool | false | — | Session shape | 4 |
 
@@ -1538,9 +1599,19 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   state ("MASS is not a state or province: type its code, as MA or ON, or
   DX"), however the field was left, Start and Listen on Home among the
   ways, and only until anything else of your station changes. Home asks for
-  the state after the name, as it asks for the name. Under the call, Home and Your station say why a call
-  typed does not read, in `call_fault`'s words (§2), and Your station, while
-  the call is empty, what a run is missing, in the words of
+  the state after the name, as it asks for the name. As built (3a), ARRL
+  DX asks for a state only from the W/VE side, and CQ WW for your zone
+  only where your call does not say it ("Add your CQ zone to start a CQ
+  WW"), which Home says above Start, with a field of its own in the hero
+  that Start takes the cursor to. Your power is always given. Your station
+  says a power typed that is none ("MAX is not a power: …; 100 W is
+  sent") until anything else of your station changes, its reset among
+  them, as it says a state. Your zone follows your state too where you
+  give one for a call in the US or Canada, in every contest, and the lines
+  under your call and your zone then name it ("zone 3 in California").
+  Under the call, Home and Your station say why a call typed does not
+  read, in `call_fault`'s words (§2), and Your station, while the call is
+  empty, what a run is missing, in the words of
   `ContestSettings::missing()`. Home says `missing()` above Start once a
   start is refused, unless the line under its call field says it already.
   A start refused another way in says it in a message.
@@ -1603,7 +1674,7 @@ pub struct ContestRun {
     pub side: String,             // "wve", "dx", or "" where sides do not apply
     pub my_country: String,       // facts the score uses, stored because
     pub my_continent: String,     //   the tables that derive them change
-    pub my_zone: u32,
+    pub my_zone: u32,             //   (as built, 3a: kept for every run)
     pub fields: Vec<String>,      // each QSO's copied fields: ["nr"]
     pub limit_s: u32,
     pub run_ms: u64,              // pauses left out
@@ -1962,7 +2033,29 @@ files written by scripts, each naming its source and year.
   Pacific islands no state holds) and every prefix Canada issues, as the
   call table holds only some of them; else from the table.
 - **W/VE side.** Your country, after any host, is K or VE. KH, KL, KP, AH,
-  AL, NH, NL, NP, WH, WL and WP prefixes are DX, as are CY0 and CY9.
+  AL, NH, NL, NP, WH, WL and WP prefixes are DX, as are CY0 and CY9, and
+  KG4 with a two-letter suffix (Guantanamo Bay).
+- **As built (3a),** the side is read in `places.rs` (`w_ve`), from where
+  a call is at home as the places read it: the US's call districts and
+  every prefix Canada issues are W/VE; Alaska's and Hawaii's prefixes, the
+  islands' (which the table places in Puerto Rico or the Virgin Islands),
+  CY0 and CY9 (which it does not place), Guantanamo Bay's KG4 with two
+  letters, and every other call are DX. A test pins each prefix above with
+  every digit. LB comes with ARRL DX: a VO2 caller's place is LB there
+  (`draw_place`'s `labrador`), and NL in the Sprint, as before.
+- **The country a contest scores** a station in (`home_country`) is read
+  from the same: K for the US's call districts, KL for every prefix Alaska
+  has, KH6 for Hawaii's with a 6 or a 7, VE for every prefix Canada issues;
+  KP4 for KP, NP and WP with a 3 or a 4 and KP2 with a 2, where the table
+  reads KP2 as Puerto Rico; none for the Pacific islands KH signs
+  with another digit, Navassa (KP1), Desecheo (KP5) and Guantanamo Bay,
+  which the table does not hold (it reads KH2 as Hawaii and KG4AB as the
+  US); and else the table's. CQ WW's points and multipliers, your own
+  country and continent kept with a run, and the line under your call all
+  use it, so they agree with the side and the zone. The generator never
+  draws KG4 with two letters, as the table counts KG's two-letter suffixes
+  from its other digits; a test pins that every call a contest draws is in
+  the country the generator labels it with.
 
 ### 11.3 CQ zones and continents
 
@@ -1980,8 +2073,40 @@ files written by scripts, each naming its source and year.
 
 North America is hand-entered from the CQ zone list, because cty.dat gives
 Canada zone 05 bar a few northern prefixes, VE3, VE7 and VE8 included
-(VER20200405, `prefixes.rs:5`). A test pins it row by
-row.
+(VER20200405, which `prefixes.rs` names in its header). A test pins it row
+by row.
+
+As built (3a), `scripts/callsign-prefixes.py` writes, after the call
+shapes (which stay as they were), each country's name, CQ zone and
+continent as cty.dat gives them (`COUNTRIES`), and the CQ overrides that
+fall on a prefix and its digit (`ZONE_PREFIXES`): China's 52 (`BY0`,
+`3H9`). Three groups of overrides are left out. Those that turn on the
+suffix's first letter, Russia's oblasts (`R8T(16)`), as the table reads a
+call by its prefix and digit; so Asiatic Russia is zone 17 throughout, and
+`R8(17)` is its country's zone already. Canada's (`CH2(2)`, `VO2(2)`,
+`VY0(2)`, `VY1(1)` and the rest), as Canada's zones are entered by hand.
+And Antarctica's (`AX0(39)`, `VI0(39)`, `VK0(39)`, `ZL5(30)`, `ZM5(30)`,
+`ZS7(38)`), as Antarctica is not a country of the table. An entity that
+counts only for the WAE award keeps its prefixes' zone and continent where
+they differ from the DXCC entity its calls are counted under
+(`CONTINENT_PREFIXES`, and `ZONE_PREFIXES`): European Turkey's TA1, TB1,
+TC1 and YM1 are in Europe, though Turkey is in Asia, and African Italy's
+IG9 and IH9 in Africa, zone 33; so a TA1 caller is a point from Germany,
+not three. The script writes the cty.dat version into the header. The US
+and Canada are left out of the zone overrides:
+`contest/data/zones.rs` holds every state, DC, province and
+territory, with Labrador, and the two split places with the share of
+their stations in the other zone (QC 2 at 1%, NU 1 at 10%); VK6 and VK8 are
+29 there. A caller's zone is drawn: its state among its district's by
+their people, then a split place's zone by its shares. Your zone from your
+call is the one most stations there are in: a district's zone with the
+most people (K7 is 3, K4 is 5, K8 is 4), or your state's where you give
+one, even in a contest that does not send it; `myZone` overrides both. A
+call in the US or Canada whose digit names no place (CH1, VE0) reads as no
+zone until you give your state or province, which then gives it; a call
+Dust cannot place (C31, KH2) reads as none, and `myZone` gives it.
+Labrador is zone 2 whatever the contest. A caller's zone is never missing:
+every call the generator draws in the US and Canada has a place.
 
 ### 11.4 Sections
 
@@ -2025,7 +2150,10 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
   1B 13.1%, 2A 6.7%, 3A 6.7%, 4A 3.5%, 1A 2.9%, 5A 1.8%; 1C, 2D, 2F, 2B, 2E
   about 1% each; the rest 4%.
 - **Power,** from 3,779 DX rows of `ARRLDXCW_USDX.txt`: 100 34.7%, KW 25.0%,
-  500 12.8%, K 10.9%, 400 4.6%, 200 3.0%, 5 2.4%, others 6.6%.
+  500 12.8%, K 10.9%, 400 4.6%, 200 3.0%, 5 2.4%, others 6.6%. As built
+  (`contest/data/power.rs`), the others are the next counted values at
+  their shares (300 and 50 at 1.2%, 700 at 1.0%, then 99, 600, 750, 150,
+  1K, 800, 80 and a tail at 0.1% each), each sent as written.
 - **Reports** (Simple QSO), Dust's estimate: 599 40%, 579 20%, 589 15%,
   569 10%, 559 8%, 449 4%, 339 3%.
 
@@ -2052,12 +2180,21 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
   (`:555-562`), and `ENN` in 5% of messages (`:527-528`).
 - **Your numbers** are always cut, except your Sprint serial and Simple
   QSO's `599`, as its template writes it.
+- **As built (3a),** a caller's zone and power go through `send_zone` and
+  `send_power` beside `send_serial`, with the habits the caller is given
+  (easy until the setting comes): easy sends plain digits and power as
+  written; real pads a zone below 9 with a zero 5% of the time, as MRCE's
+  CQ WW does (`CqWW.pas:305-307`), and cuts its zeros, ones and nines for
+  70% of callers; a power's run of zeros is always `TT` (`1TT`), a zero
+  alone `T` 98% of the time (MRCE sends `O` for some of them), and 70% of
+  callers cut its ones and nines too (`ATT`). A kilowatt goes as written.
+  The three cuts share one helper (`cut` in `exchange.rs`).
 
 | Field | Canonical | Equal when |
 |---|---|---|
 | NR, ZN | integer, no leading zeros | numbers equal (`TT1` = 1, `05` = 5) |
 | RST | three digits | equal (`5NN` = `ENN` = 599) |
-| ST | code | equal after PQ → QC, NF → NL; LB → NL in Sprint only |
+| ST | code | equal after PQ → QC, NF → NL; LB → NL in Sprint only (as built: in every contest but ARRL DX, `ContestRules::canonical`) |
 | SEC | code | equal; YT = TER |
 | PWR | number or `KW` | `K` = `KW` = `1K` = 1000; `1TT` = 100 |
 | CL | number and letter | `03A` = `3A` |
@@ -2111,9 +2248,16 @@ when nothing else is left, and then the first of them (`145 AL AL`, and
 `145 AL OR TN`, a state put right, keeps AL); a serial passes over a
 report only in an exchange that holds one, so in the Sprint `599` is a
 number like any other; and a name passes over a report-shaped token only
-where a report is copied. As only the Sprint copies ST so far,
-`Field::St` reads LB as NL outright; ARRL DX, which counts LB apart, is
-to read it apart when it comes (phase 3). The hint names every field
+where a report is copied. As only the Sprint copied ST then, `Field::St`
+read LB as NL outright. As built (3a), LB is a code of its own in
+`Field::St`, and a contest reads values through its rules
+(`ContestRules::canonical`, `same`, and the check and the groups' keyed
+tokens with them): the row's `labrador` flag, set only for ARRL DX, keeps
+LB apart, and every other contest reads it as NL, so the Sprint still
+reads `7 MIKE LB` as NL and logs it right for a station that sent NL.
+Power is a closed list that never takes what reads as the report
+(`5NN KW` is a kilowatt, `5NN` alone no power), as no station runs 599 W.
+The hint names every field
 still to copy; where that and what Enter then does would not fit a
 phone's line, it leaves the second to a wider screen ("Copy their
 number, name and state").
@@ -2125,7 +2269,7 @@ The repository is GPL-3.0-or-later (`Cargo.toml:9`).
 | Data | Source | Status |
 |---|---|---|
 | Call shapes | `callsign/prefixes.rs` | counts only |
-| DX zones, continents | cty.dat (AD1C) | no licence found; facts only; ask AD1C; fallback CQ's country list |
+| DX country names, zones, continents | cty.dat (AD1C) | no licence found; facts only; ask AD1C; fallback CQ's country list |
 | NA zones, places, sections | CQ, USPS, FCC, ISO 3166-2:CA, ARRL/RAC | public facts |
 | State by call area | FCC ULS | US Government work, counts only |
 | FD class, power, section shares | MRCE's `FDGOTA.txt` (W1MI, SM7IUN, W7SST), `ARRLDXCW_USDX.txt` (VE2FK, SM7IUN, K3CT, WV4P) | in an MPL-2.0 repository, compiled from contest logs; rounded shares only; ask W7SST |
@@ -2218,7 +2362,7 @@ whichever is live.
 | `serial.rs`, `check.rs`, `score.rs` | serials; `QsoCheck`; `contest_score`, rates |
 | `record.rs` | `ContestLog`, `ContestRun`, `QsoRecord`, `result()` |
 | `bot.rs` | operators that hear the turns; Hear a QSO uses the perfect one (as built, 2c: shipped, `hear_qsos` and `HeardQsos`; the test operators, scripted calls and run settings kept to tests in `bot/script.rs`) |
-| `data/` | `names`, `reports` (1c); `places`, `zones`, `sections`, `fd`, `power` |
+| `data/` | `names`, `reports` (1c); `places` (2b, the ARRL DX side and Labrador 3a), `zones` and `power` (3a); `sections`, `fd` |
 
 **Changed in cw-core:** `Cargo.toml` (`serde_json`); `settings/mod.rs`,
 `contest.rs` (new), `contest_preset.rs` (new, 2c), `save.rs`, `reset.rs`,
@@ -2602,6 +2746,27 @@ station fields and your side; region-filtered callers; zones, sections,
 class and power shares; FCC counts in place of the fallback; both scripts
 and a regenerated `callsign/prefixes.rs`. Every table line is checked
 against the published rules and pinned before it ships.
+
+- **3a CQ WW and ARRL DX.** Landed: zones and continents from cty.dat in a
+  regenerated `callsign/prefixes.rs`, its call shapes unchanged; North
+  America's zones by hand; the ARRL DX side; power shares; both rows,
+  their scoring and their pills; `myZone`, `myPower` and LB. The soak
+  shares its seeds among five contests now, each over its floor, and
+  draws calls on both sides of ARRL DX, Labrador's among them. Its check
+  that the clock never goes back now also passes the retries a failed send
+  gives back when that ends a run past its limit, as the machine does
+  (§4.2), which a new seed met. After review: a station is scored in the
+  country it is at home in (`home_country`), so Alaska's and Canada's
+  prefixes the table lacks score as their countries, and the US's islands
+  the table misreads as the countries they are, or as none where it holds
+  none (KH2); European Turkey is in Europe; ARRL DX
+  gives nothing for a QSO on your own side; Guantanamo Bay's KG4 with two
+  letters is DX and never drawn; your state settles your zone for a
+  Canadian call whose digit names no place; callers' zones and power have
+  their real-habits path (§11.6); Home asks for a zone in a field of its
+  own; and the card and Your station say your side, your call's reading
+  and your zone in the words §2, §3 and §8 give.
+- **3b Field Day** comes next.
 
 **Phase 4: realism and aids.**
 

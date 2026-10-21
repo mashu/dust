@@ -234,6 +234,16 @@ pub fn test_settings() -> TrainingSettings {
     settings
 }
 
+/// The line under a call, as Your station and Home write it: "Reads as"
+/// and `parts`, each kept on one line, a dot between them.
+pub fn reads_as(parts: &[&str]) -> String {
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|part| part.replace(' ', "\u{a0}"))
+        .collect();
+    format!("Reads as {}", parts.join("\u{a0}· "))
+}
+
 /// Settings that run a contest at once: WPX as DL1ABC, every speed 30 WPM,
 /// a quiet band with the fading on, which the run's turns leave off.
 pub fn contest_settings() -> TrainingSettings {

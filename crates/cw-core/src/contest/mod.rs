@@ -26,7 +26,7 @@ mod check;
 mod clock;
 pub(crate) mod data;
 mod esm;
-mod exchange;
+pub(crate) mod exchange;
 mod machine;
 mod parse;
 mod place;
@@ -45,9 +45,13 @@ use crate::settings::TrainingSettings;
 pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
-pub use data::places::place_name;
+pub use data::places::{home_country, place_name};
+pub use data::zones::home_continent;
 pub use esm::{EntryField, Esm, Fields, MessagePart, QsoState, esm, loggable, message_text};
-pub use exchange::{Field, cut_serial, keyed_token, read_number, send_report, send_serial};
+pub use exchange::{
+    Field, cut_power, cut_serial, cut_zone, keyed_token, read_number, send_power, send_report,
+    send_serial, send_zone,
+};
 pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
     PauseWhy, RowStatus,
@@ -56,8 +60,8 @@ pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchang
 pub use place::filter_capacity;
 pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
-pub use rules::{ContestRules, Fill, Multiplier, PerSide, Scoring, Side};
-pub use score::{ContestScore, Rates, ScoredQso, Tally, contest_score, rate_at};
+pub use rules::{ContestRules, Fill, Multiplier, PerSide, Points, Scoring, Side};
+pub use score::{ContestScore, MyStation, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SPRINT_SERIALS, SerialFit, SerialModel, WPX_SERIALS};
 pub use turn::{Fade, MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
 
@@ -320,13 +324,15 @@ mod tests {
     }
 
     #[test]
-    fn sprint_wpx_and_simple_qso_have_shipped_so_far() {
+    fn every_contest_but_field_day_has_shipped_so_far() {
         let shipped: Vec<ContestKind> = ContestKind::shipped().collect();
         assert_eq!(
             shipped,
             [
                 ContestKind::Sprint,
+                ContestKind::ArrlDx,
                 ContestKind::Wpx,
+                ContestKind::Cqww,
                 ContestKind::SimpleQso
             ]
         );

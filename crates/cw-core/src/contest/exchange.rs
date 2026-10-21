@@ -38,13 +38,16 @@ pub enum Field {
 const NUMBER_LEN_MAX: usize = 9;
 
 /// The highest CQ zone.
-const ZONE_MAX: u32 = 40;
+pub(crate) const ZONE_MAX: u32 = 40;
 
 /// The most power an amateur station runs, in watts.
-const POWER_MAX: u32 = 1_500;
+pub(crate) const POWER_MAX: u32 = 1_500;
 
 /// Power that is logged as `KW`.
 const KILOWATT: u32 = 1_000;
+
+/// How a kilowatt is written, each read as `KW` and sent as written.
+pub(crate) const KILOWATT_SPELLINGS: [&str; 3] = ["K", "KW", "1K"];
 
 impl Field {
     pub const ALL: [Self; 8] = [
@@ -141,13 +144,10 @@ impl Field {
             Self::Name => (!token.is_empty() && token.chars().all(|c| c.is_ascii_uppercase()))
                 .then(|| token.to_string()),
             // A state, province or territory by its code, an old code as the
-            // new (PQ is QC, NF is NL), or DX. Labrador, LB, is NL, as the
-            // Sprint counts it, the one contest yet that copies a state;
-            // ARRL DX, which counts LB apart, is to read it apart when it
-            // comes.
-            Self::St => place_code(token)
-                .or((token == "LB").then_some("NL"))
-                .map(str::to_string),
+            // new (PQ is QC, NF is NL), Labrador (LB), or DX. A contest that
+            // counts Labrador as part of NL, as the Sprint does, reads LB as
+            // NL (`ContestRules::canonical`).
+            Self::St => place_code(token).map(str::to_string),
             // Sections are read off their list, which comes with Field Day.
             // Until then nothing reads as one.
             Self::Sec => None,
@@ -181,6 +181,12 @@ fn cut_letter(digit: u32, heard: char) -> Option<char> {
     if cut_digit(heard) == Some(digit) {
         return Some(heard);
     }
+    usual_cut(digit)
+}
+
+/// The letter `digit` is usually cut to: `T` for 0, `A` for 1, `E` for 5
+/// and `N` for 9.
+fn usual_cut(digit: u32) -> Option<char> {
     match digit {
         0 => Some('T'),
         1 => Some('A'),
@@ -188,6 +194,18 @@ fn cut_letter(digit: u32, heard: char) -> Option<char> {
         9 => Some('N'),
         _ => None,
     }
+}
+
+/// `digits` with each of the digits in `cut` as its usual letter
+/// ([`usual_cut`]): `cut("190", &['0', '9'])` is `1NT`.
+fn cut(digits: &str, cut: &[char]) -> String {
+    digits
+        .chars()
+        .map(|c| match c.to_digit(10) {
+            Some(digit) if cut.contains(&c) => usual_cut(digit).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
 }
 
 /// A token read as a number, digits and cut letters alike: `1N5` is 195,
@@ -218,7 +236,7 @@ fn report(token: &str) -> Option<String> {
 /// Power in watts, or `KW` for a kilowatt however it is written: `K`, `KW`,
 /// `1K` or `1000`.
 fn power(token: &str) -> Option<String> {
-    if matches!(token, "K" | "KW" | "1K") {
+    if KILOWATT_SPELLINGS.contains(&token) {
         return Some("KW".to_string());
     }
     match read_number(token)? {
@@ -241,23 +259,45 @@ fn class(token: &str) -> Option<String> {
         .then(|| format!("{count}{letter}"))
 }
 
+/// The digits a serial is cut by, and a zone or a power: zeros and nines,
+/// and a zone's ones too, as MorseRunner cuts them.
+const SERIAL_CUTS: [char; 2] = ['0', '9'];
+const ZONE_CUTS: [char; 3] = ['0', '1', '9'];
+
 /// Your serial as you send it, as MorseRunner sends yours: padded to three
 /// digits, its zeros cut to `T` and nines to `N` (`TT7`, `1N5`).
 pub fn cut_serial(serial: u32) -> String {
-    format!("{serial:03}")
-        .chars()
-        .map(|c| match c {
-            '0' => 'T',
-            '9' => 'N',
-            c => c,
-        })
-        .collect()
+    cut(&format!("{serial:03}"), &SERIAL_CUTS)
+}
+
+/// Your CQ zone as you send it, cut as MorseRunner sends yours: zeros as
+/// `T`, ones as `A` and nines as `N`, and no padding (`A4` for 14, `5` for
+/// 5).
+pub fn cut_zone(zone: u32) -> String {
+    cut(&zone.to_string(), &ZONE_CUTS)
+}
+
+/// Your power as you send it, cut as MorseRunner sends yours: watts with
+/// zeros as `T` and nines as `N` (`1TT` for 100), and a kilowatt as you
+/// write it (`K`, `KW`, `1K`).
+pub fn cut_power(power: &str) -> String {
+    if !power.chars().all(|c| c.is_ascii_digit()) {
+        return power.to_string();
+    }
+    cut(power, &SERIAL_CUTS)
 }
 
 /// How often a caller with real habits cuts a zero that is not padding, and
 /// a nine.
 const REAL_CUT_ZERO: f64 = 0.98;
 const REAL_CUT_NINE: f64 = 0.97;
+
+/// How many callers with real habits cut a zone's or a power's zeros, ones
+/// and nines, each keeping to it for the QSO; and how often one pads a
+/// zone below 9 with a zero, as MorseRunner's do.
+const REAL_CUT_ZONE: f64 = 0.70;
+const REAL_PAD_ZONE: f64 = 0.05;
+const REAL_PAD_BELOW: u32 = 9;
 
 /// A caller's serial as it sends it. Easy habits send plain digits (`7`);
 /// real ones send as MorseRunner's callers do: padded to three with the
@@ -280,6 +320,51 @@ pub fn send_serial(serial: u32, habits: CallerHabits, rng: &mut impl Rng) -> Str
             c => c,
         })
         .collect()
+}
+
+/// A caller's CQ zone as it sends it. Easy habits send plain digits (`5`,
+/// `14`); real ones send as MorseRunner's callers do: a zone below 9 now
+/// and then padded with a zero (`05`), and its zeros, ones and nines cut
+/// by most callers (`T5`, `A4`).
+pub fn send_zone(zone: u32, habits: CallerHabits, rng: &mut impl Rng) -> String {
+    let plain = zone.to_string();
+    if habits == CallerHabits::Easy {
+        return plain;
+    }
+    let padded = if zone < REAL_PAD_BELOW && rng.f64() < REAL_PAD_ZONE {
+        format!("0{plain}")
+    } else {
+        plain
+    };
+    if rng.f64() < REAL_CUT_ZONE {
+        cut(&padded, &ZONE_CUTS)
+    } else {
+        padded
+    }
+}
+
+/// A caller's power as it sends it. Easy habits send it as written (`100`,
+/// `KW`); real ones as MorseRunner's callers do: a run of zeros always as
+/// `TT` (`1TT`), a zero alone as `T` almost always, and most callers cut
+/// ones and nines too (`ATT`). A kilowatt goes as written.
+pub fn send_power(power: &str, habits: CallerHabits, rng: &mut impl Rng) -> String {
+    if habits == CallerHabits::Easy || !power.chars().all(|c| c.is_ascii_digit()) {
+        return power.to_string();
+    }
+    let cut_zero = rng.f64() < REAL_CUT_ZERO;
+    let zeros = |at: usize| power[at..].starts_with("00") || power[..at].ends_with('0');
+    let sent: String = power
+        .char_indices()
+        .map(|(at, c)| match c {
+            '0' if cut_zero || zeros(at) => 'T',
+            c => c,
+        })
+        .collect();
+    if rng.f64() < REAL_CUT_ZONE {
+        cut(&sent, &ZONE_CUTS)
+    } else {
+        sent
+    }
 }
 
 /// A caller's report as it sends it, where the report is copied: plain
@@ -388,7 +473,10 @@ mod tests {
         assert!(Field::St.same("OR", "OR"));
         assert!(Field::St.same("PQ", "QC"));
         assert!(Field::St.same("NF", "NL"));
-        assert!(Field::St.same("LB", "NL"), "in the Sprint");
+        // Labrador is a code of its own; the Sprint reads it as NL
+        // (`ContestRules::same`).
+        assert!(!Field::St.same("LB", "NL"));
+        assert!(Field::St.same("LB", "LB"));
         assert!(Field::St.same("DX", "DX"));
         assert!(!Field::St.same("OR", "WA"));
         assert!(!Field::St.same("NL", "NS"));
@@ -464,6 +552,34 @@ mod tests {
         assert_eq!(read_number("1234567890"), None, "too long to be a number");
     }
 
+    /// Your zone goes out cut and unpadded, and your power cut, a kilowatt
+    /// as you write it, each read back as what it is.
+    #[test]
+    fn your_zone_and_power_are_cut() {
+        assert_eq!(cut_zone(14), "A4");
+        assert_eq!(cut_zone(5), "5");
+        assert_eq!(cut_zone(25), "25");
+        assert_eq!(cut_zone(10), "AT");
+        assert_eq!(cut_zone(19), "AN");
+        assert_eq!(cut_zone(40), "4T");
+        for zone in 1..=40 {
+            assert!(Field::Zn.same(&cut_zone(zone), &zone.to_string()), "{zone}");
+        }
+        assert_eq!(cut_power("100"), "1TT");
+        assert_eq!(cut_power("500"), "5TT");
+        assert_eq!(cut_power("5"), "5");
+        assert_eq!(cut_power("1500"), "15TT");
+        assert_eq!(cut_power("99"), "NN");
+        for kilowatt in ["K", "KW", "1K"] {
+            assert_eq!(cut_power(kilowatt), kilowatt);
+            assert!(Field::Pwr.same(&cut_power(kilowatt), "1000"));
+        }
+        for watts in 1..=1_500 {
+            let power = watts.to_string();
+            assert!(Field::Pwr.same(&cut_power(&power), &power), "{power}");
+        }
+    }
+
     /// Your serial goes out padded and cut, as MorseRunner sends yours.
     #[test]
     fn your_serial_is_padded_and_cut() {
@@ -525,6 +641,69 @@ mod tests {
         }
         assert!(cut > 930 && cut < 1_000, "{cut} cut");
         assert!(Field::Rst.same(&send_report(579, CallerHabits::Rough, &mut rng), "579"));
+    }
+
+    /// A zone goes out plain under easy habits; under real ones most
+    /// callers cut its zeros, ones and nines, and a few pad a zone below 9,
+    /// each read back as the zone it is.
+    #[test]
+    fn callers_send_their_zone_as_their_habits_have_it() {
+        let mut rng = SplitMix64::new(7);
+        for zone in [5, 14, 19, 40] {
+            assert_eq!(
+                send_zone(zone, CallerHabits::Easy, &mut rng),
+                zone.to_string()
+            );
+        }
+        let (mut cut, mut padded) = (0, 0);
+        for _ in 0..2_000 {
+            let sent = send_zone(14, CallerHabits::Real, &mut rng);
+            assert!(["14", "A4"].contains(&sent.as_str()), "{sent}");
+            cut += usize::from(sent == "A4");
+            let sent = send_zone(5, CallerHabits::Real, &mut rng);
+            assert!(["5", "05", "T5"].contains(&sent.as_str()), "{sent}");
+            padded += usize::from(sent.len() == 2);
+        }
+        assert!(cut > 1_300 && cut < 1_500, "{cut} of 2000 cut");
+        assert!(padded > 60 && padded < 150, "{padded} of 2000 padded");
+        for habits in [CallerHabits::Real, CallerHabits::Rough] {
+            for zone in 1..=40 {
+                let sent = send_zone(zone, habits, &mut rng);
+                assert!(Field::Zn.same(&sent, &zone.to_string()), "{sent}");
+            }
+        }
+        // A zone of 9 or more is never padded.
+        assert!((0..500).all(|_| send_zone(25, CallerHabits::Real, &mut rng).len() == 2));
+    }
+
+    /// Power goes out as written under easy habits; under real ones a run
+    /// of zeros is always cut, a zero alone almost always, and most callers
+    /// cut ones and nines too; a kilowatt goes as written, and each reads
+    /// back as the power it is.
+    #[test]
+    fn callers_send_their_power_as_their_habits_have_it() {
+        let mut rng = SplitMix64::new(8);
+        for power in ["100", "5", "KW", "K", "1K"] {
+            assert_eq!(send_power(power, CallerHabits::Easy, &mut rng), power);
+        }
+        let mut cut = 0;
+        for _ in 0..2_000 {
+            let sent = send_power("100", CallerHabits::Real, &mut rng);
+            assert!(["1TT", "ATT"].contains(&sent.as_str()), "{sent}");
+            cut += usize::from(sent == "ATT");
+            let sent = send_power("50", CallerHabits::Real, &mut rng);
+            assert!(["5T", "50"].contains(&sent.as_str()), "{sent}");
+        }
+        assert!(cut > 1_300 && cut < 1_500, "{cut} of 2000 cut");
+        for habits in [CallerHabits::Real, CallerHabits::Rough] {
+            for power in ["5", "10", "99", "100", "150", "500", "750", "1500"] {
+                let sent = send_power(power, habits, &mut rng);
+                assert!(Field::Pwr.same(&sent, power), "{power} as {sent}");
+            }
+            for kilowatt in KILOWATT_SPELLINGS {
+                assert_eq!(send_power(kilowatt, habits, &mut rng), kilowatt);
+            }
+        }
     }
 
     /// What a group keeps of a field: the sent token when the values match,

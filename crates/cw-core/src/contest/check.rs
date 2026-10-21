@@ -1,10 +1,11 @@
 //! A logged QSO checked against what the station really sent, as
 //! MorseRunner checks a log: not in their log, a busted call, a dupe, and
-//! each field copied wrong. Values are compared canonically ([`Field::same`]),
-//! so `7` logged for `TT7` is right.
+//! each field copied wrong. Values are compared canonically, as the contest
+//! reads them ([`ContestRules::same`]), so `7` logged for `TT7` is right.
 
 use super::exchange::Field;
 use super::parse::normalize_call;
+use super::rules::ContestRules;
 
 /// A QSO's call and exchange: as you logged it, or as the station sent it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -70,9 +71,10 @@ impl QsoCheck {
 }
 
 /// Check `logged` against `sent`, what the station worked really sent, or
-/// against nobody when no station matched. `logged_clean` says whether a
-/// call is already in the log, copied right.
+/// against nobody when no station matched, as `rules` read the values.
+/// `logged_clean` says whether a call is already in the log, copied right.
 pub fn check_qso(
+    rules: &ContestRules,
     logged: &QsoText,
     sent: Option<&QsoText>,
     logged_clean: impl Fn(&str) -> bool,
@@ -92,7 +94,7 @@ pub fn check_qso(
     for (field, value) in &sent.fields {
         if !logged
             .value(*field)
-            .is_some_and(|logged| field.same(logged, value))
+            .is_some_and(|logged| rules.same(*field, logged, value))
         {
             errors.push(QsoError::Field(*field));
         }
@@ -106,6 +108,17 @@ pub fn check_qso(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contest::ContestKind;
+
+    /// The checks of WPX, whose exchange is a number.
+    fn check_qso(
+        logged: &QsoText,
+        sent: Option<&QsoText>,
+        logged_clean: impl Fn(&str) -> bool,
+    ) -> QsoCheck {
+        let rules = ContestKind::Wpx.rules().expect("WPX has shipped");
+        super::check_qso(rules, logged, sent, logged_clean)
+    }
 
     fn qso(call: &str, nr: &str) -> QsoText {
         QsoText {
@@ -200,6 +213,28 @@ mod tests {
         };
         let check = check_qso(&missing, Some(&qso("K5XYZ", "214")), nothing_logged);
         assert_eq!(check.errors, [QsoError::Field(Field::Nr)]);
+    }
+
+    /// Labrador logged for Newfoundland and Labrador is right in the
+    /// Sprint, which counts it as NL, and wrong in ARRL DX, which counts
+    /// it apart.
+    #[test]
+    fn labrador_is_right_for_nl_only_where_it_is_part_of_it() {
+        let qso = |st: &str| QsoText {
+            call: "VO2AB".into(),
+            fields: vec![(Field::St, st.to_string())],
+        };
+        let sprint = ContestKind::Sprint.rules().expect("shipped");
+        let arrl_dx = ContestKind::ArrlDx.rules().expect("shipped");
+        let check = |rules, logged, sent| {
+            super::check_qso(rules, &qso(logged), Some(&qso(sent)), nothing_logged)
+        };
+        assert!(check(sprint, "LB", "NL").is_clean());
+        assert_eq!(
+            check(arrl_dx, "NL", "LB").errors,
+            [QsoError::Field(Field::St)]
+        );
+        assert!(check(arrl_dx, "LB", "LB").is_clean());
     }
 
     /// A station already logged clean is a dupe, and a dupe copied right is

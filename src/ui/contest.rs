@@ -1122,6 +1122,78 @@ mod tests {
         });
     }
 
+    /// A QSO of `kind` worked on the screen as `call` in `state`: the
+    /// caller's call heard and sent with your exchange, which goes out as
+    /// `yours`; the hint naming what to copy; its exchange copied as heard,
+    /// read as `reads`, then TU and logged clean.
+    async fn work_one_qso(
+        kind: cw_core::ContestKind,
+        call: &str,
+        state: &str,
+        yours: &str,
+        copy: &str,
+        reads: &str,
+    ) {
+        let mut settings = contest_settings();
+        settings.contest.contest_kind = kind;
+        settings.contest.my_call = call.to_string();
+        settings.contest.my_state = state.to_string();
+        let (mut ui, recorder) = Ui::app_with_settings(settings);
+        ui.click("btn-start-training");
+        ui.advance(8_000).await;
+        let his = recorder.starts()[0].transcript.others[0].text.clone();
+        assert!(
+            ui.has(&format!(">Exchange · {reads}</label>")),
+            "{}",
+            ui.html()
+        );
+        ui.type_into("field-call", &his);
+        ui.press_enter("field-call");
+        ui.advance(300).await;
+        let tx = text_of(&ui, "run-line run-tx");
+        assert!(tx.contains(&format!("{his} {yours}")), "{kind:?}: {tx}");
+        assert_eq!(
+            text_of(&ui, "run-line run-hint"),
+            format!("Copy their {copy}, then TU & log")
+        );
+        ui.advance(8_000).await;
+        let starts = recorder.starts();
+        let exchange = starts
+            .iter()
+            .find(|start| start.transcript.text == format!("{his} {yours}"))
+            .expect("your call and exchange")
+            .transcript
+            .others[0]
+            .text
+            .clone();
+        let heard = exchange.split_whitespace().last().unwrap_or_default();
+        ui.type_into("field-exchange", heard);
+        assert!(
+            text_of(&ui, "run-line run-reads").starts_with(&format!("Reads as: {reads} ")),
+            "{kind:?}: {}",
+            text_of(&ui, "run-line run-reads")
+        );
+        ui.press_enter("field-exchange");
+        assert!(
+            ui.run_until(15_000, |ui| text_of(ui, "log-check") == "clean")
+                .await,
+            "{kind:?}"
+        );
+    }
+
+    /// CQ WW and ARRL DX worked on the screen: your zone cut, and their
+    /// zone copied; as DX your power cut and their state copied; as W/VE
+    /// your state and their power copied.
+    #[test]
+    fn cqww_and_arrl_dx_are_worked_on_the_screen() {
+        use cw_core::ContestKind;
+        run(|| async {
+            work_one_qso(ContestKind::Cqww, "DL1ABC", "", "5NN A4", "zone", "ZN").await;
+            work_one_qso(ContestKind::ArrlDx, "DL1ABC", "", "5NN 1TT", "state", "ST").await;
+            work_one_qso(ContestKind::ArrlDx, "K1ABC", "MA", "5NN MA", "power", "PWR").await;
+        });
+    }
+
     /// Enter's chip and the hint say what Enter does in each row of the
     /// design's table (§4.4), and "Reads as" what the exchange reads as.
     #[test]

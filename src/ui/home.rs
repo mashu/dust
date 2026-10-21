@@ -1,5 +1,5 @@
 use cw_core::{
-    AutoLevelProgress, CharSetMode, ContestSettings, LevelAxis, RunStyle, SessionResult, Side,
+    AutoLevelProgress, CharSetMode, ContestSettings, LevelAxis, RunStyle, SessionResult,
     TrainingSettings, compute_char_pool, compute_streak_status, newest_unlocked, parse_callsign,
 };
 use dioxus::prelude::*;
@@ -9,8 +9,8 @@ use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::settings_charset::{pileup_callers, pileup_count};
 use crate::ui::settings_station::{
-    CallField, CallReading, NameField, StateEntry, StationDraft, focus_call_field,
-    focus_name_field, focus_state_field, state_rejected,
+    CallField, CallReading, NameField, StateEntry, StationDraft, ZoneField, focus_call_field,
+    focus_name_field, focus_state_field, focus_zone_field, state_rejected,
 };
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, keep_focus, pretty_number};
@@ -110,6 +110,9 @@ enum StationAsk {
     /// The call and the name are there, but the contest sends your state
     /// and a call in the US or Canada has none.
     State,
+    /// The rest is there, but the contest sends your CQ zone and your call
+    /// does not say it.
+    Zone,
 }
 
 impl StationAsk {
@@ -121,9 +124,14 @@ impl StationAsk {
             Some(Self::Call)
         } else if rules.is_some_and(|rules| rules.sends_name()) && contest.my_name.is_empty() {
             Some(Self::Name)
-        } else if rules.is_some_and(|rules| rules.sends_state()) && contest.state_sent().is_empty()
+        } else if rules.is_some_and(|rules| rules.sends_state(contest.side()))
+            && contest.state_sent().is_empty()
         {
             Some(Self::State)
+        } else if rules.is_some_and(|rules| rules.sends_zone(contest.side()))
+            && contest.zone().is_none()
+        {
+            Some(Self::Zone)
         } else {
             None
         }
@@ -135,6 +143,7 @@ impl StationAsk {
             Self::Call => contest.set_my_call(typed),
             Self::Name => contest.set_my_name(typed),
             Self::State => contest.set_my_state(typed),
+            Self::Zone => contest.set_my_zone(typed),
         }
     }
 
@@ -144,6 +153,7 @@ impl StationAsk {
             Self::Call => focus_call_field,
             Self::Name => focus_name_field,
             Self::State => focus_state_field,
+            Self::Zone => focus_zone_field,
         }
     }
 
@@ -159,6 +169,9 @@ impl StationAsk {
             Self::State => {
                 "Add your state, press Start contest; Enter sends what the QSO needs next."
             }
+            Self::Zone => {
+                "Add your CQ zone, press Start contest; Enter sends what the QSO needs next."
+            }
         }
     }
 }
@@ -172,7 +185,7 @@ impl ContestHero {
     fn of(settings: &TrainingSettings) -> Self {
         let contest = &settings.contest;
         let rules = contest.contest_kind.rules();
-        let side = Side::of_call(&contest.my_call);
+        let side = contest.side();
         let fields = std::iter::once("CALL")
             .chain(
                 rules
@@ -247,13 +260,17 @@ pub fn Home(
     /// none.
     #[props(default)]
     on_state: EventHandler<String>,
+    /// Your CQ zone, typed into the hero while a contest that sends it has
+    /// none your call says.
+    #[props(default)]
+    on_zone: EventHandler<String>,
 ) -> Element {
     let level = level_reading(&settings);
     let contest = contest_hero(&settings);
     // A start the run would refuse says why here, rather than in a toast,
     // unless the line under the call field says it already; and when the
-    // call, the name or the state is what is missing, Start takes you to its
-    // field.
+    // call, the name, the state or the zone is what is missing, Start takes
+    // you to its field.
     let mut refused = use_signal(|| false);
     // It does so once the hero has drawn the field, from an effect: the
     // press that kept a call may have swapped the call's field for the
@@ -290,6 +307,7 @@ pub fn Home(
             said.set(state_rejected(&typed));
             on_state.call(typed);
         }
+        StationAsk::Zone => on_zone.call(typed),
     };
     // What was typed and not kept yet, kept as leaving the box keeps it;
     // and what it was, for Start to decide on.
@@ -364,7 +382,12 @@ pub fn Home(
                                 },
                                 draft,
                             }
-                            CallReading { call: settings.contest.my_call.clone() }
+                            CallReading {
+                                call: settings.contest.my_call.clone(),
+                                kind: settings.contest.contest_kind,
+                                zone: settings.contest.zone_from_call(),
+                                zone_by: settings.contest.zone_state(),
+                            }
                         }
                     } else if hero.asks == Some(StationAsk::Name) {
                         div { class: "hero-call",
@@ -385,6 +408,17 @@ pub fn Home(
                                 on_commit: move |typed| {
                                     refused.set(false);
                                     keep(StationAsk::State, typed);
+                                },
+                                draft,
+                            }
+                        }
+                    } else if hero.asks == Some(StationAsk::Zone) {
+                        div { class: "hero-call",
+                            ZoneField {
+                                value: settings.contest.my_zone,
+                                on_commit: move |typed| {
+                                    refused.set(false);
+                                    keep(StationAsk::Zone, typed);
                                 },
                                 draft,
                             }
@@ -693,6 +727,65 @@ mod tests {
         let hero = ContestHero::of(&settings);
         assert_eq!(hero.asks, None, "DX, outside the US and Canada");
         assert_eq!(hero.missing, None);
+    }
+
+    /// ARRL DX asks by your side: as DX it asks for nothing more, as you
+    /// send your power, always given, and copy a state; as W/VE it asks for
+    /// your state and copies power.
+    #[test]
+    fn an_arrl_dx_hero_asks_by_your_side() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        settings.contest.contest_kind = cw_core::ContestKind::ArrlDx;
+        settings.contest.my_call = "DL1ABC".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, None);
+        assert_eq!(hero.missing, None);
+        assert_eq!(hero.fields, ["CALL", "ST"]);
+        assert_eq!(hero.sends, "You send 5NN + power, as DL1ABC");
+        settings.contest.my_call = "K1ABC".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, Some(StationAsk::State));
+        assert_eq!(hero.fields, ["CALL", "PWR"]);
+        assert_eq!(
+            hero.missing.as_deref(),
+            Some("Add your state or province to start an ARRL\u{a0}DX")
+        );
+        settings.contest.my_state = "MA".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, None);
+        assert_eq!(hero.sends, "You send 5NN + state, as K1ABC");
+    }
+
+    /// CQ WW takes your zone from your call, and asks for it only where
+    /// your call does not say it, in a field of its own, as the first
+    /// contest's card says.
+    #[test]
+    fn a_cqww_hero_asks_for_your_zone_where_your_call_does_not_say_it() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        settings.contest.contest_kind = cw_core::ContestKind::Cqww;
+        settings.contest.my_call = "DL1ABC".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, None);
+        assert_eq!(hero.fields, ["CALL", "ZN"]);
+        assert_eq!(hero.sends, "You send 5NN + zone, as DL1ABC");
+        settings.contest.my_call = "C31AB".to_string();
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.asks, Some(StationAsk::Zone));
+        assert_eq!(
+            hero.missing.as_deref(),
+            Some("Add your CQ zone to start a CQ\u{a0}WW")
+        );
+        assert!(
+            StationAsk::Zone
+                .first_step()
+                .starts_with("Add your CQ zone,")
+        );
+        StationAsk::Zone.keep(&mut settings.contest, " 27 ");
+        assert_eq!(settings.contest.my_zone, 27);
+        let hero = ContestHero::of(&settings);
+        assert_eq!((hero.asks, hero.missing), (None, None));
     }
 
     /// A level stored for a longer alphabet is kept for it, but not shown as

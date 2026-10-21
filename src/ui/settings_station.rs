@@ -1,21 +1,28 @@
 //! Your station: the callsign you sign in a contest, and the fields of the
-//! exchange you send, given once: your name and your state, for a contest
-//! that sends them. The card shows in Contest mode only, under the
-//! character set whose contest it serves, and Home asks for the call, then
-//! the name, then the state, in the same words while it has none.
+//! exchange you send, given once: your name, your state, your CQ zone and
+//! your power, for a contest that sends them. The card shows in Contest
+//! mode only, under the character set whose contest it serves, and Home
+//! asks for the call, then the name, then the state, then the zone, in the
+//! same words while it has none.
 
 use cw_core::{
-    SettingsSection, TrainingSettings, call_fault, country_of, parse_callsign, place_name,
-    state_code, wpx_prefix,
+    ContestKind, ContestRules, MY_ZONE_MAX, SettingsSection, Side, TrainingSettings, call_fault,
+    continent_name, country_name, cut_power, cut_zone, home_continent, home_country,
+    parse_callsign, place_name, power_reading, state_code, wpx_prefix,
 };
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{CardHead, IconName, SectionReset, control_id};
+use crate::ui::widgets::{CardHead, IconName, NumberField, SectionReset, control_id};
 
-/// What the callsign, name and state fields are called, and so their ids.
+/// What the callsign, name, state, zone and power fields are called, and so
+/// their ids.
 const CALL_LABEL: &str = "Your callsign";
 const NAME_LABEL: &str = "Your name";
 const STATE_LABEL: &str = "Your state or province";
+const ZONE_LABEL: &str = "Your CQ zone (0–40)";
+const POWER_LABEL: &str = "Your power";
+/// What Home's zone field is called, where only a zone of 1 to 40 will do.
+const ZONE_ENTRY_LABEL: &str = "Your CQ zone";
 
 /// Give the field called `label` the focus, as a start refused for want of
 /// what it holds does. The script looks for the field at once, so it has to
@@ -51,27 +58,67 @@ pub(crate) fn focus_state_field() {
     focus_field(STATE_LABEL);
 }
 
+/// Give Home's zone field the focus, as a start refused for want of a zone
+/// does.
+pub(crate) fn focus_zone_field() {
+    focus_field(ZONE_ENTRY_LABEL);
+}
+
+/// A CQ zone as the lines under your call and your zone name it: "zone 3",
+/// and "zone 3 in California" where your state, `by`, and not your call
+/// alone gave it.
+fn zone_text(zone: u32, by: Option<&str>) -> String {
+    match by.and_then(place_name) {
+        Some(place) => format!("zone {zone} in {place}"),
+        None => format!("zone {zone}"),
+    }
+}
+
 /// What a callsign reads as, in a line under it: where a contest places the
 /// station, or why it is not a callsign yet. Nothing for no call at all.
 ///
-/// The country is the table's key for it (`DL`), the one fact about a call
-/// phase 1 holds besides its WPX prefix; names, continents, zones and your
-/// side join the line as the contests that need them come.
-fn call_reading(call: &str) -> Option<(String, bool)> {
+/// A call Dust places reads as its country, its continent and `zone`, the
+/// CQ zone it reads as, by your state `zone_by` where that gave it; then
+/// what `kind` counts it by: its WPX prefix in WPX, and your side in ARRL
+/// DX. "Fed. Rep. of Germany · Europe · CQ zone 14 · you are DX". Each part
+/// is kept on one line, and a narrow line breaks after a dot.
+fn call_reading(
+    call: &str,
+    kind: ContestKind,
+    zone: Option<u32>,
+    zone_by: Option<&str>,
+) -> Option<(String, bool)> {
     if call.is_empty() {
         return None;
     }
     if let Some(fault) = call_fault(call) {
         return Some((format!("Not a callsign yet: {fault}"), false));
     }
-    let wpx = wpx_prefix(call).unwrap_or_default();
-    Some(match country_of(call) {
-        Some(country) => (format!("Reads as {country} · WPX prefix {wpx}"), true),
-        None => (
-            format!("Reads as WPX prefix {wpx} · unknown prefix, so no country"),
-            true,
-        ),
-    })
+    let mut parts = match home_country(call) {
+        Some(country) => {
+            let mut parts = vec![country_name(country).unwrap_or(country).to_string()];
+            parts.extend(
+                home_continent(call)
+                    .and_then(continent_name)
+                    .map(str::to_string),
+            );
+            parts.extend(zone.map(|zone| format!("CQ {}", zone_text(zone, zone_by))));
+            parts
+        }
+        None => vec!["unknown prefix, so no country".to_string()],
+    };
+    if kind == ContestKind::Wpx {
+        let wpx = wpx_prefix(call).unwrap_or_default();
+        parts.push(format!("WPX prefix {wpx}"));
+    }
+    if kind == ContestKind::ArrlDx {
+        parts.push(format!("you are {}", Side::of_call(call).label()));
+    }
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|part| part.replace(' ', "\u{a0}"))
+        .collect();
+    Some((format!("Reads as {}", parts.join("\u{a0}· ")), true))
 }
 
 /// What is typed into one of your station's fields and not kept yet, which
@@ -129,12 +176,18 @@ pub(crate) fn NameField(
     }
 }
 
-/// What typing `typed` as your state leaves for the line under the field to
-/// say: the text, upper case, where it is no code and so is kept as none;
-/// nothing where it is a code, or nothing was typed.
-pub(crate) fn state_rejected(typed: &str) -> Option<String> {
+/// What typing `typed` into a field that keeps only what `reads` leaves
+/// for the line under it to say: the text, upper case, where it does not
+/// read and so is not kept; nothing where it reads, or nothing was typed.
+fn rejected(typed: &str, reads: impl Fn(&str) -> bool) -> Option<String> {
     let typed = typed.trim();
-    (state_code(typed).is_none() && !typed.is_empty()).then(|| typed.to_uppercase())
+    (!reads(typed) && !typed.is_empty()).then(|| typed.to_uppercase())
+}
+
+/// What typing `typed` as your state leaves for the line under the field to
+/// say ([`rejected`]): what is no code, kept as none.
+pub(crate) fn state_rejected(typed: &str) -> Option<String> {
+    rejected(typed, |typed| state_code(typed).is_some())
 }
 
 /// What your state reads as, in a line under it: the place its code names,
@@ -150,6 +203,15 @@ fn state_reading(
         return Some((
             format!("{typed} is not a state or province: type its code, as MA or ON, or DX"),
             false,
+        ));
+    }
+    // Labrador, which only ARRL DX counts apart.
+    if let (Some(given), Some(within)) = (place_name(state), place_name(sent))
+        && state != sent
+    {
+        return Some((
+            format!("Sends {sent}: this contest counts {given} as part of {within}"),
+            true,
         ));
     }
     if let Some(name) = place_name(state) {
@@ -265,11 +327,21 @@ fn StationText(
     }
 }
 
-/// The line under a callsign: what it reads as, or why it does not read;
-/// with no call, `unset`, if there is something to say then.
+/// The line under a callsign: what it reads as in the contest `kind`, its
+/// CQ zone `zone` among it, by your state `zone_by` where that gave it, or
+/// why it does not read; with no call, `unset`, if there is something to
+/// say then.
 #[component]
-pub(crate) fn CallReading(call: String, #[props(default)] unset: Option<String>) -> Element {
-    let Some((line, read)) = call_reading(&call).or(unset.map(|line| (line, true))) else {
+pub(crate) fn CallReading(
+    call: String,
+    kind: ContestKind,
+    zone: Option<u32>,
+    zone_by: Option<&'static str>,
+    #[props(default)] unset: Option<String>,
+) -> Element {
+    let Some((line, read)) =
+        call_reading(&call, kind, zone, zone_by).or(unset.map(|line| (line, true)))
+    else {
         return rsx! {};
     };
     rsx! {
@@ -299,16 +371,148 @@ fn NameReading(missing: Option<String>) -> Element {
     }
 }
 
+/// What your zone reads as, in a line under it: the zone your call reads
+/// as while you give none, by your state `by` where that gave it; what you
+/// give and how it goes out, and the zone your call reads as beside one you
+/// give that differs; or else `missing`, what a run is missing once that is
+/// the zone.
+fn zone_reading(
+    given: u32,
+    from_call: Option<u32>,
+    by: Option<&str>,
+    missing: Option<&str>,
+) -> String {
+    let whose = if by.is_some() {
+        "your call and state"
+    } else {
+        "your call"
+    };
+    match (given, from_call) {
+        (0, Some(zone)) => format!(
+            "0 takes it from {whose}: {}, sent {}",
+            zone_text(zone, by),
+            cut_zone(zone)
+        ),
+        (0, None) => missing
+            .unwrap_or("Your call does not say your zone: give it, 1\u{a0}to\u{a0}40")
+            .to_string(),
+        (zone, Some(read)) if read != zone => format!(
+            "Sends {}: zone {zone}, where {whose} reads as {}",
+            cut_zone(zone),
+            zone_text(read, by)
+        ),
+        (zone, _) => format!("Sends {}: zone {zone}", cut_zone(zone)),
+    }
+}
+
+/// The line under your zone.
+#[component]
+fn ZoneReading(
+    given: u32,
+    from_call: Option<u32>,
+    by: Option<&'static str>,
+    missing: Option<String>,
+) -> Element {
+    let line = zone_reading(given, from_call, by, missing.as_deref());
+    rsx! {
+        p {
+            id: control_id("reading", "your zone"),
+            class: "call-reading",
+            aria_live: "polite",
+            "{line}"
+        }
+    }
+}
+
+/// Your CQ zone, typed in on Home while your call does not say it, and the
+/// line under it: a zone from 1 to 40 is kept, and anything else as none.
+#[component]
+pub(crate) fn ZoneField(
+    value: u32,
+    on_commit: EventHandler<String>,
+    #[props(default)] draft: Option<StationDraft>,
+) -> Element {
+    let shown = if value == 0 {
+        String::new()
+    } else {
+        value.to_string()
+    };
+    rsx! {
+        StationText {
+            label: ZONE_ENTRY_LABEL,
+            placeholder: "1 to 40",
+            value: shown,
+            on_commit,
+            draft,
+        }
+        ZoneReading { given: value, from_call: None, by: None, missing: None }
+    }
+}
+
+/// What typing `typed` as your power leaves for the line under the field to
+/// say ([`rejected`]): what is no power, kept as 100 W.
+fn power_rejected(typed: &str) -> Option<String> {
+    rejected(typed, |typed| power_reading(typed).is_some())
+}
+
+/// Your power as the card's lines say it: "100 W", or none for a
+/// kilowatt, which is said as written.
+fn watts_text(power: &str) -> Option<String> {
+    power
+        .chars()
+        .all(|c| c.is_ascii_digit())
+        .then(|| format!("{power} W"))
+}
+
+/// What your power reads as, in a line under it: how it goes out, or why
+/// what was typed is none.
+fn power_line(power: &str, rejected: Option<&str>) -> (String, bool) {
+    if let Some(typed) = rejected {
+        return (
+            format!("{typed} is not a power: type watts, 1 to 1500, or K, KW or 1K; 100 W is sent"),
+            false,
+        );
+    }
+    let what = watts_text(power).unwrap_or_else(|| "a kilowatt".to_string());
+    (format!("Sends {}: {what}", cut_power(power)), true)
+}
+
+/// The line under your power.
+#[component]
+fn PowerReading(power: String, rejected: Option<String>) -> Element {
+    let (line, read) = power_line(&power, rejected.as_deref());
+    rsx! {
+        p {
+            id: control_id("reading", "your power"),
+            class: if read { "call-reading" } else { "call-reading bad" },
+            aria_live: "polite",
+            "{line}"
+        }
+    }
+}
+
 /// What Your station shows: the call, whether a contest can read it, your
-/// name and state where the contest sends them, and what a run is missing.
+/// name, state, zone and power where the contest sends them, and what a run
+/// is missing.
 #[derive(Clone, PartialEq)]
 struct Station {
     my_call: String,
     readable: bool,
+    kind: ContestKind,
+    /// The CQ zone your call reads as, and your state where that and not
+    /// your call alone gives it; and the zone your exchange sends.
+    zone_from_call: Option<u32>,
+    zone_by: Option<&'static str>,
+    zone: Option<u32>,
     /// Your name, where the contest sends one; none where it does not.
     my_name: Option<String>,
     /// Your state as given, and as sent, where the contest sends one.
     my_state: Option<(String, String)>,
+    /// Your zone as given, 0 for the one your call reads as, where the
+    /// contest sends one.
+    my_zone: Option<u32>,
+    /// Your power, where the contest sends it.
+    my_power: Option<String>,
     missing: Option<String>,
 }
 
@@ -317,7 +521,13 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
     // A state typed that is none, said under the field until anything else
     // of your station changes: your call, your name, the contest, or the
     // card's reset.
-    let mut rejected = use_signal(|| None::<String>);
+    let mut state_said = use_signal(|| None::<String>);
+    // And a power typed that is none, the same way.
+    let mut power_said = use_signal(|| None::<String>);
+    let mut unsay = move || {
+        state_said.set(None);
+        power_said.set(None);
+    };
     let around = use_memo(move || {
         let contest = &settings.read().contest;
         (
@@ -328,44 +538,66 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
     });
     use_effect(move || {
         around.read();
-        rejected.set(None);
+        unsay();
     });
     let station = use_memo(move || {
         let contest = &settings.read().contest;
         let rules = contest.contest_kind.rules();
+        let side = contest.side();
+        let sends =
+            |sends: fn(&ContestRules, Side) -> bool| rules.is_some_and(|rules| sends(rules, side));
         let sends_name = rules.is_some_and(|rules| rules.sends_name());
-        let sends_state = rules.is_some_and(|rules| rules.sends_state());
         Station {
             readable: parse_callsign(&contest.my_call).is_some(),
             my_call: contest.my_call.clone(),
+            kind: contest.contest_kind,
+            zone_from_call: contest.zone_from_call(),
+            zone_by: contest.zone_state(),
+            zone: contest.zone(),
             my_name: sends_name.then(|| contest.my_name.clone()),
-            my_state: sends_state
+            my_state: sends(ContestRules::sends_state)
                 .then(|| (contest.my_state.clone(), contest.state_sent().to_string())),
+            my_zone: sends(ContestRules::sends_zone).then_some(contest.my_zone),
+            my_power: sends(ContestRules::sends_power).then(|| contest.my_power.clone()),
             missing: contest.missing(),
         }
     });
     let s = station.read();
+    // Your zone, where the contest sends it.
+    let zone = s.my_zone.and(s.zone);
     let note = if s.readable {
-        // What you sign with, as far as it is given: "K1ABC · MIKE · MA".
-        let name = s.my_name.iter().filter(|name| !name.is_empty());
+        // What you sign with, as far as it is given: "K1ABC · MIKE · MA",
+        // "DL1ABC · zone 14", "DL1ABC · 100 W".
+        let name = s.my_name.iter().filter(|name| !name.is_empty()).cloned();
         let state = s
             .my_state
             .iter()
-            .map(|(_, sent)| sent)
+            .map(|(_, sent)| sent.clone())
             .filter(|sent| !sent.is_empty());
-        let signing: Vec<&str> = std::iter::once(&s.my_call)
+        let zone = zone.map(|zone| format!("zone {zone}"));
+        let power = s
+            .my_power
+            .iter()
+            .map(|power| watts_text(power).unwrap_or_else(|| power.clone()));
+        let signing: Vec<String> = std::iter::once(s.my_call.clone())
             .chain(name)
             .chain(state)
-            .map(String::as_str)
+            .chain(zone)
+            .chain(power)
             .collect();
         format!("Signing {}", signing.join(" · "))
     } else {
-        match (&s.my_name, &s.my_state) {
-            (Some(_), Some(_)) => "Your callsign, name and state, for the contests you run",
-            (Some(_), None) => "Your callsign and name, for the contests you run",
-            _ => "Your callsign, for the contests you run",
-        }
-        .to_string()
+        // What the card asks for: "Your callsign, name and state".
+        let mut asks = vec!["callsign"];
+        asks.extend(s.my_name.as_ref().map(|_| "name"));
+        asks.extend(s.my_state.as_ref().map(|_| "state"));
+        asks.extend(s.my_zone.map(|_| "CQ zone"));
+        asks.extend(s.my_power.as_ref().map(|_| "power"));
+        let asks = match asks.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => asks.join(""),
+        };
+        format!("Your {asks}, for the contests you run")
     };
     // Said under the call while it is missing, and under the name once only
     // the name is.
@@ -380,13 +612,18 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
         .as_ref()
         .filter(|(_, sent)| sent.is_empty() && s.readable && name_missing.is_none())
         .and(s.missing.clone());
+    // And under the zone once only the zone is.
+    let zone_missing = s
+        .my_zone
+        .filter(|_| zone.is_none() && s.readable)
+        .and(s.missing.clone());
     rsx! {
         div { class: "card stack-sm",
             CardHead { icon: IconName::Flag, title: "Your station", note,
                 SectionReset {
                     label: "your station",
                     on_reset: move |()| {
-                        rejected.set(None);
+                        unsay();
                         settings.write().reset_section(SettingsSection::Station);
                     },
                 }
@@ -399,7 +636,13 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
             }
             // With no call yet, what a run is missing, in the words Home
             // says it in.
-            CallReading { call: s.my_call.clone(), unset: s.missing.clone() }
+            CallReading {
+                call: s.my_call.clone(),
+                kind: s.kind,
+                zone: s.zone_from_call,
+                zone_by: s.zone_by,
+                unset: s.missing.clone(),
+            }
             p { class: "muted", style: "margin: 0;",
                 "No licence yet? Make up a call from your country's prefix, a digit and two or three letters. Stored on this device only."
             }
@@ -415,12 +658,42 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
                     value: state,
                     sent,
                     missing: state_missing,
-                    rejected: rejected(),
+                    rejected: state_said(),
                     on_commit: move |typed: String| {
-                        rejected.set(state_rejected(&typed));
+                        state_said.set(state_rejected(&typed));
                         settings.write().contest.set_my_state(&typed);
                     },
                 }
+            }
+            if let Some(given) = s.my_zone {
+                NumberField {
+                    label: ZONE_LABEL,
+                    id: control_id("field", ZONE_LABEL),
+                    value: f64::from(given),
+                    min: 0.0,
+                    max: f64::from(MY_ZONE_MAX),
+                    step: 1.0,
+                    onchange: move |zone: f64| settings.write().contest.my_zone = zone as u32,
+                }
+                ZoneReading {
+                    given,
+                    from_call: s.zone_from_call,
+                    by: s.zone_by,
+                    missing: zone_missing,
+                }
+            }
+            if let Some(power) = s.my_power.clone() {
+                StationText {
+                    label: POWER_LABEL,
+                    placeholder: "e.g. 100 or KW",
+                    value: power.clone(),
+                    on_commit: move |typed: String| {
+                        power_said.set(power_rejected(&typed));
+                        settings.write().contest.set_my_power(&typed);
+                    },
+                    draft: None,
+                }
+                PowerReading { power, rejected: power_said() }
             }
         }
     }
@@ -428,7 +701,10 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{call_reading, state_reading, state_rejected};
+    use super::{
+        call_reading, power_line, power_rejected, state_reading, state_rejected, zone_reading,
+    };
+    use cw_core::ContestKind;
 
     /// The line under your state: the place it names, DX outside the US
     /// and Canada, why what was typed is no state, or what a run is
@@ -470,6 +746,20 @@ mod tests {
             Some((missing.to_string(), true))
         );
         assert_eq!(state_reading("", "", None, None), None);
+        // Labrador reads as itself where it is counted apart, and as part
+        // of Newfoundland and Labrador where it is not.
+        assert_eq!(
+            state_reading("LB", "LB", None, None),
+            Some(("Reads as Labrador".to_string(), true))
+        );
+        assert_eq!(
+            state_reading("LB", "NL", None, None),
+            Some((
+                "Sends NL: this contest counts Labrador as part of Newfoundland and Labrador"
+                    .to_string(),
+                true
+            ))
+        );
         // What is said of a state typed: nothing for a code, or nothing.
         assert_eq!(state_rejected(" Mass "), Some("MASS".to_string()));
         for kept in ["ma", "PQ", "dx", "  ", ""] {
@@ -477,25 +767,136 @@ mod tests {
         }
     }
 
+    /// A call reads as its country, its continent and its CQ zone, and
+    /// what the contest counts it by: its WPX prefix in WPX, your side in
+    /// ARRL DX. Each part stays on one line.
     #[test]
     fn a_call_reads_as_where_a_contest_places_it() {
+        let read = |call, kind, zone, by| {
+            call_reading(call, kind, zone, by).map(|(line, _)| line.replace('\u{a0}', " "))
+        };
         assert_eq!(
-            call_reading("DL1ABC"),
-            Some(("Reads as DL · WPX prefix DL1".to_string(), true))
+            read("DL1ABC", ContestKind::ArrlDx, Some(14), None).as_deref(),
+            Some("Reads as Fed. Rep. of Germany · Europe · CQ zone 14 · you are DX")
         );
         assert_eq!(
-            call_reading("W1AW/4"),
-            Some(("Reads as K · WPX prefix W4".to_string(), true))
-        );
-        // A call the table cannot place still has its WPX prefix.
-        assert_eq!(
-            call_reading("C31AB").map(|(line, read)| (line.contains("unknown prefix"), read)),
-            Some((true, true))
+            read("DL1ABC", ContestKind::Wpx, Some(14), None).as_deref(),
+            Some("Reads as Fed. Rep. of Germany · Europe · CQ zone 14 · WPX prefix DL1")
         );
         assert_eq!(
-            call_reading("ABC"),
+            read("W1AW/4", ContestKind::Cqww, Some(5), None).as_deref(),
+            Some("Reads as United States · North America · CQ zone 5")
+        );
+        assert_eq!(
+            read("K1ABC", ContestKind::ArrlDx, Some(5), None).as_deref(),
+            Some("Reads as United States · North America · CQ zone 5 · you are W/VE")
+        );
+        assert_eq!(
+            read("KH6XYZ", ContestKind::ArrlDx, Some(31), None).as_deref(),
+            Some("Reads as Hawaii · Oceania · CQ zone 31 · you are DX")
+        );
+        // Your state, where that and not your call alone gave the zone.
+        assert_eq!(
+            read("K1ABC", ContestKind::Cqww, Some(3), Some("CA")).as_deref(),
+            Some("Reads as United States · North America · CQ zone 3 in California")
+        );
+        // Alaska's and Canada's prefixes the call table does not hold, and
+        // European Turkey.
+        assert_eq!(
+            read("NL7AB", ContestKind::ArrlDx, Some(1), None).as_deref(),
+            Some("Reads as Alaska · North America · CQ zone 1 · you are DX")
+        );
+        assert_eq!(
+            read("TA1ABC", ContestKind::Cqww, Some(20), None).as_deref(),
+            Some("Reads as Asiatic Turkey · Europe · CQ zone 20")
+        );
+        // A call the table cannot place has its WPX prefix in WPX only.
+        assert_eq!(
+            read("C31AB", ContestKind::Wpx, None, None).as_deref(),
+            Some("Reads as unknown prefix, so no country · WPX prefix C31")
+        );
+        assert_eq!(
+            read("C31AB", ContestKind::ArrlDx, None, None).as_deref(),
+            Some("Reads as unknown prefix, so no country · you are DX")
+        );
+        assert_eq!(
+            read("KH2AB", ContestKind::Cqww, None, None).as_deref(),
+            Some("Reads as unknown prefix, so no country")
+        );
+        // A narrow line breaks only after a dot.
+        let line = call_reading("DL1ABC", ContestKind::Cqww, Some(14), None)
+            .map(|(line, _)| line)
+            .unwrap_or_default();
+        assert_eq!(
+            line.split(' ').collect::<Vec<_>>(),
+            [
+                "Reads",
+                "as",
+                "Fed.\u{a0}Rep.\u{a0}of\u{a0}Germany\u{a0}·",
+                "Europe\u{a0}·",
+                "CQ\u{a0}zone\u{a0}14"
+            ]
+        );
+        assert_eq!(
+            call_reading("ABC", ContestKind::Wpx, None, None),
             Some(("Not a callsign yet: needs a digit".to_string(), false))
         );
-        assert_eq!(call_reading(""), None);
+        assert_eq!(call_reading("", ContestKind::Wpx, None, None), None);
+    }
+
+    /// The line under your zone: the one your call reads as while you give
+    /// none, by your state where that gave it, and what you give, cut as it
+    /// goes out.
+    #[test]
+    fn a_zone_reads_as_what_is_sent() {
+        assert_eq!(
+            zone_reading(0, Some(14), None, None),
+            "0 takes it from your call: zone 14, sent A4"
+        );
+        assert_eq!(
+            zone_reading(0, Some(3), Some("CA"), None),
+            "0 takes it from your call and state: zone 3 in California, sent 3"
+        );
+        assert_eq!(zone_reading(5, Some(5), None, None), "Sends 5: zone 5");
+        assert_eq!(
+            zone_reading(15, Some(14), None, None),
+            "Sends A5: zone 15, where your call reads as zone 14"
+        );
+        assert_eq!(
+            zone_reading(4, Some(3), Some("CA"), None),
+            "Sends 4: zone 4, where your call and state reads as zone 3 in California"
+        );
+        assert_eq!(
+            zone_reading(0, None, None, None),
+            "Your call does not say your zone: give it, 1\u{a0}to\u{a0}40"
+        );
+        let missing = "Add your CQ zone to start a CQ\u{a0}WW";
+        assert_eq!(zone_reading(0, None, None, Some(missing)), missing);
+    }
+
+    /// The line under your power: how it goes out, or why what was typed
+    /// is none.
+    #[test]
+    fn a_power_reads_as_what_is_sent() {
+        assert_eq!(
+            power_line("100", None),
+            ("Sends 1TT: 100 W".to_string(), true)
+        );
+        assert_eq!(
+            power_line("KW", None),
+            ("Sends KW: a kilowatt".to_string(), true)
+        );
+        assert_eq!(
+            power_line("100", Some("MAX")),
+            (
+                "MAX is not a power: type watts, 1 to 1500, or K, KW or 1K; 100 W is sent"
+                    .to_string(),
+                false
+            )
+        );
+        assert_eq!(power_rejected(" max "), Some("MAX".to_string()));
+        for kept in ["100", "kw", " 5 ", ""] {
+            assert_eq!(power_rejected(kept), None, "{kept:?}");
+        }
     }
 }

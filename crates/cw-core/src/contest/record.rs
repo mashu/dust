@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use super::check::{QsoCheck, QsoError, QsoText, check_qso};
 use super::exchange::Field;
-use super::score::{ContestScore, Rates, ScoredQso, contest_score};
+use super::rules::{ContestRules, Side};
+use super::score::{ContestScore, MyStation, Rates, ScoredQso, contest_score};
 use super::{ContestKind, RunStyle};
 use crate::alignment::CopyTally;
 use crate::score::{calculate_total_chars, compute_average_response_ms};
@@ -327,8 +328,7 @@ impl ContestRun {
     /// against what its station sent, which its groups hold. None for a
     /// contest without a score, or groups that are not this run's.
     pub fn score(&self, groups: &[GroupResult]) -> Option<ContestScore> {
-        let rules = ContestKind::from_name(&self.kind)?.rules()?;
-        let scoring = rules.scoring?;
+        let scoring = self.rules()?.scoring?;
         let logged = self.checks(groups)?;
         let scored: Vec<ScoredQso<'_>> = logged
             .iter()
@@ -339,7 +339,21 @@ impl ContestRun {
                 check,
             })
             .collect();
-        Some(contest_score(&scoring, &scored, self.run_ms))
+        Some(contest_score(&scoring, &self.me(), &scored, self.run_ms))
+    }
+
+    /// Where you were, as the score counts it: the facts the run kept.
+    pub(crate) fn me(&self) -> MyStation<'_> {
+        MyStation {
+            side: Side::from_name(&self.side),
+            country: &self.my_country,
+            continent: &self.my_continent,
+        }
+    }
+
+    /// The rules of the run's contest, when this build has them.
+    fn rules(&self) -> Option<&'static ContestRules> {
+        ContestKind::from_name(&self.kind)?.rules()
     }
 
     /// How many of the run's QSOs were logged clean, a dupe copied right
@@ -532,6 +546,7 @@ impl ContestRun {
     /// station sent, which its groups or its record hold. None for groups
     /// that are not this run's.
     fn walk<'a>(&'a self, groups: &'a [GroupResult]) -> Option<Vec<Walked<'a>>> {
+        let rules = self.rules()?;
         let fields = self.copied()?;
         let mut walked = Vec::new();
         let mut clean: Vec<&str> = Vec::new();
@@ -567,7 +582,7 @@ impl ContestRun {
                             call,
                             fields: tokens(&qso.l),
                         };
-                        let check = check_qso(&typed, None, |_| false);
+                        let check = check_qso(rules, &typed, None, |_| false);
                         Some((typed, check))
                     }
                     _ => {
@@ -596,7 +611,8 @@ impl ContestRun {
                             call,
                             fields: typed,
                         };
-                        let check = check_qso(&typed, Some(&sent), |call| clean.contains(&call));
+                        let check =
+                            check_qso(rules, &typed, Some(&sent), |call| clean.contains(&call));
                         if check.is_clean() {
                             clean.push(station);
                         }
@@ -731,7 +747,7 @@ mod tests {
             // A kind this build has never heard of, and one whose phase has
             // not shipped here.
             changed("kind", json!("cwt")),
-            changed("kind", json!("cqww")),
+            changed("kind", json!("fieldDay")),
             changed("style", json!("swarm")),
             changed("fields", json!(["nr", "cwtNumber"])),
             changed("myWpm", json!(null)),

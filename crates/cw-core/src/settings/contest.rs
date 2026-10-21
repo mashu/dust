@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{STATIONS_MIN, TrainingSettings};
 use crate::callsign::parse_callsign;
-use crate::contest::data::places::{DX, in_us_or_canada, place_code};
-use crate::contest::{ContestKind, RunStyle};
+use crate::contest::data::places::{DX, fold_labrador, in_us_or_canada, place_code};
+use crate::contest::data::zones::zone_of;
+use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
+use crate::contest::{ContestKind, RunStyle, Side};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -18,6 +20,18 @@ pub const MY_CALL_MAX: usize = 12;
 
 /// The longest name kept: a given name as operators send it is short.
 pub const MY_NAME_MAX: usize = 10;
+
+/// The highest CQ zone, and the zone setting's top: 0 below it takes your
+/// zone from your call.
+pub const MY_ZONE_MAX: u32 = ZONE_MAX;
+
+/// The most power kept, in watts: the most an amateur station runs, as the
+/// exchange reads a power.
+pub const MY_POWER_MAX: u32 = POWER_MAX;
+
+/// The power sent until you give yours, and what a power that is none is
+/// kept as.
+const MY_POWER_DEFAULT: &str = "100";
 
 /// The most callers at once a pile-up starts from, picked while the Band
 /// card's stations range holds one station: one to three, as the design
@@ -31,6 +45,9 @@ const STAND_IN_CALL: (&str, &str) = ("DL1ABC", "K1ABC");
 /// Your name and state, where a contest sends them and none is given yet.
 const STAND_IN_NAME: &str = "MIKE";
 const STAND_IN_STATE: &str = "MA";
+/// Your CQ zone, where a contest sends it and your call does not say: the
+/// stand-in call's.
+const STAND_IN_ZONE: u32 = 14;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -50,10 +67,17 @@ pub struct ContestSettings {
     /// letters only, upper case. Empty until you give one.
     pub my_name: String,
     /// Your US state, Canadian province or territory, by its code, or DX,
-    /// as you send it in a contest whose exchange holds one. Empty until you
-    /// give one, when a call outside the US and Canada sends DX
-    /// ([`Self::state_sent`]).
+    /// as you send it in a contest whose exchange holds one; or LB for
+    /// Labrador, which ARRL DX counts apart. Empty until you give one, when
+    /// a call outside the US and Canada sends DX ([`Self::state_sent`]).
     pub my_state: String,
+    /// Your CQ zone, as you send it in CQ WW, for a call whose zone it
+    /// cannot tell, or one Dust cannot place: 1 to 40, and 0 to take it
+    /// from your call ([`Self::zone`]).
+    pub my_zone: u32,
+    /// Your power, as you send it in ARRL DX from outside W/VE: watts from
+    /// 1 to 1500, or `K`, `KW` or `1K` for a kilowatt.
+    pub my_power: String,
 }
 
 impl Default for ContestSettings {
@@ -65,6 +89,8 @@ impl Default for ContestSettings {
             my_call: String::new(),
             my_name: String::new(),
             my_state: String::new(),
+            my_zone: 0,
+            my_power: MY_POWER_DEFAULT.to_string(),
         }
     }
 }
@@ -98,15 +124,74 @@ impl ContestSettings {
         self.my_state = clean_state(typed);
     }
 
+    /// Your CQ zone, as typed: a zone from 1 to [`MY_ZONE_MAX`], and 0, to
+    /// take it from your call, for anything else.
+    pub fn set_my_zone(&mut self, typed: &str) {
+        self.my_zone = typed
+            .trim()
+            .parse()
+            .ok()
+            .filter(|zone| *zone <= MY_ZONE_MAX)
+            .unwrap_or(0);
+    }
+
+    /// Your power, as typed: kept as
+    /// [`TrainingSettings::clamp`](super::TrainingSettings::clamp) keeps
+    /// it, and 100 W for what is none.
+    pub fn set_my_power(&mut self, typed: &str) {
+        self.my_power = clean_power(typed);
+    }
+
+    /// Your side of the ARRL DX contest, from your call.
+    pub fn side(&self) -> Side {
+        Side::of_call(&self.my_call)
+    }
+
+    /// The CQ zone your call reads as: by your state or province where you
+    /// give one in the US or Canada, else by where your call puts you. None
+    /// for a call Dust cannot place.
+    pub fn zone_from_call(&self) -> Option<u32> {
+        zone_of(&self.my_call, Some(self.my_state.as_str()))
+    }
+
+    /// Your state, province or territory, where it and not your call alone
+    /// gives the zone your call reads as ([`Self::zone_from_call`]): one
+    /// you give for a call in the US or Canada whose zone it changes, or
+    /// whose digit names no place. It does so in every contest, those that
+    /// do not send it among them.
+    pub fn zone_state(&self) -> Option<&'static str> {
+        let state = place_code(&self.my_state)?;
+        (zone_of(&self.my_call, Some(state)) != zone_of(&self.my_call, None)).then_some(state)
+    }
+
+    /// The CQ zone your exchange sends: the one you gave, or else the one
+    /// your call reads as ([`Self::zone_from_call`]). None while neither is
+    /// known.
+    pub fn zone(&self) -> Option<u32> {
+        match self.my_zone {
+            0 => self.zone_from_call(),
+            zone => Some(zone),
+        }
+    }
+
     /// The state, province or territory your exchange sends: the one you
     /// gave, or else DX for a call Dust places outside the US and Canada,
     /// as Dust has every station there send (the real contests have one
-    /// elsewhere in North America send its country). Empty while a call in
-    /// the US or Canada, Alaska and Hawaii among them, has none, or one Dust
-    /// cannot place, which may be there, or no call reads.
+    /// elsewhere in North America send its country). Labrador is NL but in
+    /// a contest that counts it apart. Empty while a call in the US or
+    /// Canada, Alaska and Hawaii among them, has none, or one Dust cannot
+    /// place, which may be there, or no call reads.
     pub fn state_sent(&self) -> &str {
         if !self.my_state.is_empty() {
-            return &self.my_state;
+            let apart = self
+                .contest_kind
+                .rules()
+                .is_some_and(|rules| rules.labrador);
+            return if apart {
+                &self.my_state
+            } else {
+                fold_labrador(&self.my_state)
+            };
         }
         if in_us_or_canada(&self.my_call) == Some(false) {
             DX
@@ -117,8 +202,8 @@ impl ContestSettings {
 
     /// What a run of these settings still needs before it can start, said
     /// for the screen; None once it has everything: a contest whose phase has
-    /// shipped, a callsign Dust can read, and your name and your state where
-    /// the contest sends them.
+    /// shipped, a callsign Dust can read, and your name, your state and your
+    /// zone where the contest sends them. Your power is always given.
     pub fn missing(&self) -> Option<String> {
         let kind = self.contest_kind;
         let Some(rules) = kind.rules() else {
@@ -132,34 +217,50 @@ impl ContestSettings {
         }
         // The contest's name kept on one line: "an NA Sprint".
         let a_run = format!("{} {}", kind.article(), kind.label().replace(' ', "\u{a0}"));
+        let side = self.side();
         if rules.sends_name() && self.my_name.is_empty() {
             return Some(format!("Add your name to start {a_run}"));
         }
-        if rules.sends_state() && self.state_sent().is_empty() {
+        if rules.sends_state(side) && self.state_sent().is_empty() {
             return Some(format!("Add your state or province to start {a_run}"));
+        }
+        if rules.sends_zone(side) && self.zone().is_none() {
+            return Some(format!("Add your CQ zone to start {a_run}"));
         }
         None
     }
 
     /// Fill in with stand-ins what of your station a run still needs, as
     /// Hear a QSO plays it before you have given it, and say what your
-    /// station is then, if any of it stands in: `DL1ABC`, `K1ABC MIKE MA`.
+    /// station is then, if any of it stands in: `DL1ABC`, `K1ABC MIKE MA`,
+    /// `C31AB zone 14`.
     /// It answers each thing [`Self::missing`] asks for, beside it so that
     /// the two change together; nothing for a contest not ready yet.
     pub(crate) fn stand_in(&mut self) -> Option<String> {
         let rules = self.contest_kind.rules()?;
         let mut stood_in = false;
         if parse_callsign(&self.my_call).is_none() {
+            // A North American call for a contest whose every side sends
+            // your state, as its callers are there.
             let (dx, home) = STAND_IN_CALL;
-            self.my_call = if rules.sends_state() { home } else { dx }.to_string();
+            let home_only = rules.sends_state(Side::Dx) && rules.sends_state(Side::WVe);
+            self.my_call = if home_only { home } else { dx }.to_string();
             stood_in = true;
         }
+        let side = self.side();
         if rules.sends_name() && self.my_name.is_empty() {
             self.my_name = STAND_IN_NAME.to_string();
             stood_in = true;
         }
-        if rules.sends_state() && self.state_sent().is_empty() {
+        if rules.sends_state(side) && self.state_sent().is_empty() {
             self.my_state = STAND_IN_STATE.to_string();
+            stood_in = true;
+        }
+        // Your zone stands in only for a call that does not say it; your
+        // power is always given.
+        let zone_stood_in = rules.sends_zone(side) && self.zone().is_none();
+        if zone_stood_in {
+            self.my_zone = STAND_IN_ZONE;
             stood_in = true;
         }
         if !stood_in {
@@ -169,8 +270,11 @@ impl ContestSettings {
         if rules.sends_name() {
             station.push(self.my_name.clone());
         }
-        if rules.sends_state() {
+        if rules.sends_state(side) {
             station.push(self.state_sent().to_string());
+        }
+        if zone_stood_in {
+            station.push(format!("zone {STAND_IN_ZONE}"));
         }
         Some(station.join(" "))
     }
@@ -201,8 +305,8 @@ pub(super) fn clean_name(text: &str) -> String {
 }
 
 /// What `text`, typed as your state, province or territory, reads as: its
-/// code, upper case, an old one as the new (PQ is QC, NF is NL), or DX.
-/// None for anything else, a name written out among it.
+/// code, upper case, an old one as the new (PQ is QC, NF is NL), LB for
+/// Labrador, or DX. None for anything else, a name written out among it.
 pub fn state_code(text: &str) -> Option<&'static str> {
     let letters: String = text
         .chars()
@@ -216,6 +320,32 @@ pub fn state_code(text: &str) -> Option<&'static str> {
 /// ([`state_code`]), or nothing.
 pub(super) fn clean_state(text: &str) -> String {
     state_code(text).unwrap_or_default().to_string()
+}
+
+/// What `text`, typed as your power, reads as: watts from 1 to
+/// [`MY_POWER_MAX`], without leading zeros, or a kilowatt as written, `K`,
+/// `KW` or `1K`. None for anything else.
+pub fn power_reading(text: &str) -> Option<String> {
+    let typed: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if KILOWATT_SPELLINGS.contains(&typed.as_str()) {
+        return Some(typed);
+    }
+    if !typed.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let watts: u32 = typed.parse().ok()?;
+    (1..=MY_POWER_MAX)
+        .contains(&watts)
+        .then(|| watts.to_string())
+}
+
+/// `text` as your power is kept: [`power_reading`], or 100 W.
+pub(super) fn clean_power(text: &str) -> String {
+    power_reading(text).unwrap_or_else(|| MY_POWER_DEFAULT.to_string())
 }
 
 /// `text` as a callsign can be written: upper case, letters, digits and
@@ -314,7 +444,8 @@ mod tests {
         assert_eq!(clean_state("PQ"), "QC");
         assert_eq!(clean_state("nf"), "NL");
         assert_eq!(clean_state("dx"), "DX");
-        for none in ["", "XX", "Mass", "LB", "ORE", "D X X"] {
+        assert_eq!(clean_state("lb"), "LB", "Labrador, for ARRL DX");
+        for none in ["", "XX", "Mass", "LBX", "ORE", "D X X"] {
             assert_eq!(clean_state(none), "", "{none:?}");
             assert_eq!(state_code(none), None, "{none:?}");
         }
@@ -408,11 +539,124 @@ mod tests {
         settings.my_state.clear();
         settings.my_call = "DL1ABC".to_string();
         assert_eq!(settings.missing(), None, "DX, outside North America");
+        // CQ WW takes your zone from your call, and asks for it only of a
+        // call Dust cannot place.
         settings.contest_kind = ContestKind::Cqww;
+        assert_eq!(settings.missing(), None);
+        settings.my_call = "C31AB".to_string();
         assert_eq!(
             settings.missing().as_deref(),
-            Some("CQ WW is not ready yet")
+            Some("Add your CQ zone to start a CQ\u{a0}WW")
         );
+        settings.my_zone = 14;
+        assert_eq!(settings.missing(), None);
+        // ARRL DX: W/VE sends a state, DX its power, which is always given.
+        settings.contest_kind = ContestKind::ArrlDx;
+        settings.my_call = "K1ABC".to_string();
+        assert_eq!(
+            settings.missing().as_deref(),
+            Some("Add your state or province to start an ARRL\u{a0}DX")
+        );
+        settings.my_call = "DL1ABC".to_string();
+        assert_eq!(settings.missing(), None);
+        settings.my_call = "KH6AB".to_string();
+        assert_eq!(settings.missing(), None, "Hawaii is DX");
+        settings.contest_kind = ContestKind::FieldDay;
+        assert_eq!(
+            settings.missing().as_deref(),
+            Some("Field Day is not ready yet")
+        );
+    }
+
+    /// Your zone is the one you give, or else the one your call reads as:
+    /// by your state in the US or Canada, else by where your call is.
+    #[test]
+    fn your_zone_is_given_or_read_from_your_call() {
+        let mut settings = ContestSettings {
+            my_call: "DL1ABC".to_string(),
+            ..ContestSettings::default()
+        };
+        assert_eq!(
+            (settings.zone_from_call(), settings.zone()),
+            (Some(14), Some(14))
+        );
+        settings.my_zone = 15;
+        assert_eq!(
+            (settings.zone_from_call(), settings.zone()),
+            (Some(14), Some(15))
+        );
+        settings.my_zone = 0;
+        settings.my_call = "K7ABC".to_string();
+        assert_eq!(settings.zone(), Some(3));
+        assert_eq!(settings.zone_state(), None);
+        settings.my_state = "MT".to_string();
+        assert_eq!(settings.zone(), Some(4), "Montana is zone 4");
+        assert_eq!(settings.zone_state(), Some("MT"), "not the call alone");
+        settings.my_state = "WA".to_string();
+        assert_eq!(settings.zone_state(), None, "the call's own zone");
+        settings.my_call = "C31AB".to_string();
+        settings.my_state.clear();
+        assert_eq!(settings.zone(), None);
+        // A zone typed is kept as a zone, and anything else as 0.
+        for (typed, kept) in [
+            (" 14 ", 14),
+            ("40", 40),
+            ("0", 0),
+            ("41", 0),
+            ("A4", 0),
+            ("", 0),
+        ] {
+            settings.set_my_zone(typed);
+            assert_eq!(settings.my_zone, kept, "{typed:?}");
+        }
+    }
+
+    /// Your power is kept as watts from 1 to 1500 or a kilowatt as written,
+    /// and anything else as 100 W.
+    #[test]
+    fn your_power_is_kept_as_watts_or_a_kilowatt() {
+        for (typed, kept) in [
+            ("100", "100"),
+            (" 0100 ", "100"),
+            ("5", "5"),
+            ("1500", "1500"),
+            ("1000", "1000"),
+            ("k", "K"),
+            ("kw", "KW"),
+            ("1k", "1K"),
+            (" k w ", "KW"),
+        ] {
+            assert_eq!(power_reading(typed).as_deref(), Some(kept), "{typed:?}");
+            assert_eq!(clean_power(typed), kept, "{typed:?}");
+        }
+        for none in ["", "0", "1501", "1TT", "100W", "2KW", "MAX", "99999999999"] {
+            assert_eq!(power_reading(none), None, "{none:?}");
+            assert_eq!(clean_power(none), "100", "{none:?}");
+        }
+        for text in ["100", " 0100 ", "kw", "MAX"] {
+            let once = clean_power(text);
+            assert_eq!(clean_power(&once), once, "{text:?} settles in one pass");
+        }
+        let mut settings = ContestSettings::default();
+        assert_eq!(settings.my_power, "100");
+        settings.set_my_power("kw");
+        assert_eq!(settings.my_power, "KW");
+    }
+
+    /// Labrador is sent as LB in ARRL DX, which counts it apart, and as NL
+    /// in every other contest.
+    #[test]
+    fn labrador_is_sent_apart_only_in_arrl_dx() {
+        let mut settings = ContestSettings {
+            my_call: "VO2AB".to_string(),
+            my_state: "LB".to_string(),
+            contest_kind: ContestKind::ArrlDx,
+            ..ContestSettings::default()
+        };
+        assert_eq!(settings.state_sent(), "LB");
+        settings.contest_kind = ContestKind::Sprint;
+        assert_eq!(settings.state_sent(), "NL");
+        assert_eq!(settings.zone(), Some(2), "Labrador is zone 2");
     }
 
     /// Whatever of your station is given, the stand-ins leave nothing a
@@ -421,7 +665,7 @@ mod tests {
     #[test]
     fn a_station_stood_in_for_has_all_a_run_needs() {
         for kind in ContestKind::shipped() {
-            for call in ["", "ABC", "DL1ABC", "K1ABC", "VE3ABC/P"] {
+            for call in ["", "ABC", "DL1ABC", "K1ABC", "VE3ABC/P", "C31AB"] {
                 for name in ["", "ANN"] {
                     for state in ["", "OR"] {
                         let given = ContestSettings {
@@ -444,7 +688,7 @@ mod tests {
             }
         }
         let mut not_ready = ContestSettings {
-            contest_kind: ContestKind::Cqww,
+            contest_kind: ContestKind::FieldDay,
             ..ContestSettings::default()
         };
         assert_eq!(not_ready.stand_in(), None);

@@ -12,8 +12,8 @@
 //! never say Points.
 
 use cw_core::{
-    ContestKind, ContestScore, Field, QsoCheck, QsoError, RunErrors, RunQso, RunSummary,
-    SessionResult,
+    ContestKind, ContestRules, ContestScore, Field, QsoCheck, QsoError, RunErrors, RunQso,
+    RunSummary, SessionResult,
 };
 use dioxus::prelude::*;
 
@@ -37,6 +37,7 @@ pub fn ContestResults(
     let kind = result.contest_kind().map_or("Contest", ContestKind::label);
     // A contest without a score is told by its pace and its copy.
     let scored = result.contest_kind().is_none_or(ContestKind::scored);
+    let rules = result.contest_kind().and_then(ContestKind::rules);
     let run = result.contest_run();
     let groups = &result.groups;
     let log = run
@@ -159,7 +160,7 @@ pub fn ContestResults(
                                 n: qso.n.map(|n| n.to_string()).unwrap_or_default(),
                                 at_ms: qso.at_ms,
                                 call: call_text(qso),
-                                fields: fields_text(qso),
+                                fields: fields_text(qso, rules),
                                 wpm: qso.wpm,
                                 asked: qso.asked,
                                 check: check_text(qso),
@@ -391,14 +392,18 @@ fn call_text(qso: &RunQso) -> String {
     }
 }
 
-/// What was logged of the exchange, and what was sent where it differs:
-/// "13→31".
-fn fields_text(qso: &RunQso) -> String {
+/// What was logged of the exchange, and what was sent where it differs as
+/// the run's contest reads it, `rules`: "13→31".
+fn fields_text(qso: &RunQso, rules: Option<&ContestRules>) -> String {
     let fields: Vec<String> = qso
         .fields
         .iter()
         .map(|(field, typed, sent)| {
-            if sent.is_empty() || field.same(typed, sent) {
+            let same = rules.map_or_else(
+                || field.same(typed, sent),
+                |rules| rules.same(*field, typed, sent),
+            );
+            if sent.is_empty() || same {
                 typed.clone()
             } else if typed.is_empty() {
                 format!("—→{sent}")
@@ -570,7 +575,7 @@ mod tests {
         };
         let row = qso("DL2XYZ", "DL2XYZ", "13", "31", Some(wrong));
         assert_eq!(
-            (call_text(&row), fields_text(&row), check_text(&row)),
+            (call_text(&row), fields_text(&row, None), check_text(&row)),
             ("DL2XYZ".into(), "13→31".into(), "wrong NR".into())
         );
         assert!(is_wrong(&row));
@@ -582,7 +587,7 @@ mod tests {
         };
         let row = qso("K5ABD", "K5ABC", "7", "TT7", Some(busted));
         assert_eq!(
-            (call_text(&row), fields_text(&row)),
+            (call_text(&row), fields_text(&row, None)),
             ("K5ABD→K5ABC".into(), "7".into()),
             "a cut number logged plain is right"
         );
@@ -590,7 +595,11 @@ mod tests {
         assert!(!is_wrong(&clean));
         let lost = qso("G4AB", "G4ABC", "", "TT7", None);
         assert_eq!(
-            (call_text(&lost), fields_text(&lost), check_text(&lost)),
+            (
+                call_text(&lost),
+                fields_text(&lost, None),
+                check_text(&lost)
+            ),
             ("G4AB→G4ABC".into(), "—→TT7".into(), "not logged".into())
         );
         assert!(is_wrong(&lost));

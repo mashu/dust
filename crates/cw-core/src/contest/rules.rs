@@ -2,10 +2,11 @@
 //! calls and how it scores. A new contest is a row and its data.
 
 use super::ContestKind;
-use super::exchange::{Field, cut_serial};
+use super::data::places::{fold_labrador, w_ve};
+use super::exchange::{self, Field, cut_power, cut_serial, cut_zone};
 use super::serial::{SPRINT_SERIALS, SerialFit, WPX_SERIALS};
 use super::turn::Sender;
-use crate::callsign::{CallSpec, Countries, country_of};
+use crate::callsign::{CallSpec, Countries};
 
 /// Your side of the ARRL DX contest, from your call: W/VE works only DX, and
 /// DX only W/VE. Every other contest is the same from either side.
@@ -18,12 +19,21 @@ pub enum Side {
 }
 
 impl Side {
-    /// Your side, from the country your call is in. A call that cannot be
-    /// read is DX: W/VE is the side that has to be shown.
+    /// Your side, from where your call puts you: W/VE in the 48 contiguous
+    /// states, DC and Canada, by every prefix they issue, and DX anywhere
+    /// else, Alaska, Hawaii and the islands among it. A call Dust cannot
+    /// place is DX: W/VE is the side that has to be shown.
     pub fn of_call(call: &str) -> Self {
-        match country_of(call) {
-            Some(country) if Countries::WVe.admits(country) => Self::WVe,
-            _ => Self::Dx,
+        if w_ve(call) { Self::WVe } else { Self::Dx }
+    }
+
+    /// The side a run's log keeps as `name`: W/VE for `wve`, and DX for
+    /// anything else, where sides do not apply among it.
+    pub fn from_name(name: &str) -> Self {
+        if name == Self::WVe.name() {
+            Self::WVe
+        } else {
+            Self::Dx
         }
     }
 
@@ -32,6 +42,14 @@ impl Side {
         match self {
             Self::WVe => "wve",
             Self::Dx => "dx",
+        }
+    }
+
+    /// What the screens call it: `DX`, `W/VE`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WVe => "W/VE",
+            Self::Dx => "DX",
         }
     }
 }
@@ -68,24 +86,51 @@ pub enum Multiplier {
     WpxPrefix,
     /// Each different US state, DC, and Canadian province or territory
     /// logged, as the NA Sprint counts them, Alaska and Hawaii among the
-    /// states. DX counts none.
+    /// states and Labrador part of NL. DX counts none.
     Place,
+    /// Each CQ zone logged, and each DXCC country of a call logged, as CQ
+    /// WW counts them: Alaska and Hawaii are countries of their own, and
+    /// your own country counts too.
+    ZoneAndCountry,
+    /// Each DXCC country of a call logged outside W/VE, as a W/VE station
+    /// counts them in the ARRL DX contest.
+    Country,
+    /// Each of the 48 contiguous states, DC, and Canada's provinces and
+    /// territories logged, Labrador apart, 63 in all, as a DX station counts
+    /// them in the ARRL DX contest.
+    WVePlace,
+}
+
+/// What a QSO is worth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Points {
+    /// The same for every QSO.
+    Each(u32),
+    /// So much for a QSO with a call on the other side from yours, and
+    /// nothing for one on your own, as the ARRL DX contest has W/VE work
+    /// only DX.
+    OtherSide(u32),
+    /// By how far the station is from you, as CQ WW counts it: nothing in
+    /// your own country, one point on your continent, two between North
+    /// American countries, and three on another continent.
+    ByDistance,
 }
 
 /// How a contest scores: points for each QSO that counts, times the
-/// multipliers worked.
+/// multipliers worked, on your side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scoring {
-    pub points: u32,
-    pub multiplier: Multiplier,
+    pub points: Points,
+    pub multiplier: PerSide<Multiplier>,
 }
 
 /// One contest. In your texts, `{my}` stands for your call, `{myname}` for
-/// your name, `{mystate}` for your state, province or territory, `{rst}` for
-/// your report, `{nr}` for your serial, and in your TU `{hisname}` for the
-/// name you copied of the station you work. In a caller's, `{my}` is your
-/// call, `{his}` its own, `{rst}` its report, and each field you copy its
-/// name in braces: `{nr}`, `{name}`.
+/// your name, `{mystate}` for your state, province or territory, `{myzone}`
+/// for your CQ zone, `{mypwr}` for your power, `{rst}` for your report,
+/// `{nr}` for your serial, and in your TU `{hisname}` for the name you
+/// copied of the station you work. In a caller's, `{my}` is your call,
+/// `{his}` its own, `{rst}` its report, and each field you copy its name in
+/// braces: `{nr}`, `{name}`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContestRules {
     pub kind: ContestKind,
@@ -93,8 +138,9 @@ pub struct ContestRules {
     pub cq: &'static str,
     /// What ends a QSO.
     pub tu: &'static str,
-    /// What you ask for the station's exchange again with (F12): `NR?`
-    /// where the exchange holds a number, `AGN` where it does not.
+    /// What you ask for the station's exchange again with (F12): `NR?` in
+    /// a contest, as MorseRunner's F12 sends it, `AGN` in an everyday QSO,
+    /// whose exchange holds no number.
     pub query: &'static str,
     /// What you send after their call.
     pub exchange: PerSide<&'static str>,
@@ -115,8 +161,8 @@ pub struct ContestRules {
     pub callers: PerSide<CallSpec>,
     /// How a caller answers your CQ.
     pub answer: &'static str,
-    /// A caller's exchange as it sends it.
-    pub their_exchange: &'static str,
+    /// A caller's exchange as it sends it, on your side.
+    pub their_exchange: PerSide<&'static str>,
     /// What a caller sends before its exchange the first time: the first
     /// of these as often as `caller.rs`'s `FIRST_LEAD` has it, the second
     /// otherwise. Sent again, the exchange goes alone.
@@ -135,6 +181,13 @@ pub struct ContestRules {
     pub serials: Option<SerialFit>,
     /// How it scores; none for a contest that does not.
     pub scoring: Option<Scoring>,
+    /// Whether Labrador, LB, is a place of its own, as the ARRL DX contest
+    /// counts it, rather than part of Newfoundland and Labrador, NL, as the
+    /// Sprint counts it.
+    pub labrador: bool,
+    /// Who you work from each side, as the card says it after the side
+    /// you are on; none in a contest the same from either side.
+    pub works: Option<PerSide<&'static str>>,
     /// What Dust leaves out of the real contest, as the card says it; none
     /// where it says nothing.
     pub simplified: Option<&'static str>,
@@ -148,6 +201,12 @@ pub struct Fill<'a> {
     /// Your state, province or territory, or DX, where the exchange sends
     /// it.
     pub my_state: &'a str,
+    /// Your CQ zone, where the exchange sends it, in digits, which go out
+    /// cut; anything else, a stand-in, goes out as it is.
+    pub my_zone: &'a str,
+    /// Your power, where the exchange sends it: watts, or `K`, `KW` or `1K`
+    /// for a kilowatt.
+    pub my_power: &'a str,
     /// Your serial for the QSO; none in a contest without one.
     pub serial: u32,
     /// The name you copied of the station you work, as the Exchange field
@@ -174,16 +233,18 @@ pub(super) const RULES: &[ContestRules] = &[
         copied: PerSide::both(&[Field::Nr]),
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{his}",
-        their_exchange: "{rst} {nr}",
+        their_exchange: PerSide::both("{rst} {nr}"),
         their_lead: ["TU", "R"],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
         serials: Some(WPX_SERIALS),
         scoring: Some(Scoring {
-            points: 1,
-            multiplier: Multiplier::WpxPrefix,
+            points: Points::Each(1),
+            multiplier: PerSide::both(Multiplier::WpxPrefix),
         }),
+        labrador: false,
+        works: None,
         simplified: None,
     },
     // The NCJ North American Sprint without its QSY rule: `CQ NA K1ABC` ·
@@ -213,19 +274,110 @@ pub(super) const RULES: &[ContestRules] = &[
         copied: PerSide::both(&[Field::Nr, Field::Name, Field::St]),
         callers: PerSide::both(CallSpec::contest(Countries::UsAndCanada)),
         answer: "{his}",
-        their_exchange: "{my} {nr} {name} {st}",
+        their_exchange: PerSide::both("{my} {nr} {name} {st}"),
         their_lead: ["", ""],
         their_query: ["NR?", "AGN"],
         signoff: None,
         tu_calls: true,
         serials: Some(SPRINT_SERIALS),
         scoring: Some(Scoring {
-            points: 1,
-            multiplier: Multiplier::Place,
+            points: Points::Each(1),
+            multiplier: PerSide::both(Multiplier::Place),
         }),
+        labrador: false,
+        works: None,
         simplified: Some(
             "Simplified: you keep your frequency (in the real contest you QSY after each QSO), so you sign last; one band, so a station counts once; and outside the US and Canada you send DX (in the real contest, the rest of North America sends its country).",
         ),
+    },
+    // CQ World Wide DX: `CQ DL1ABC TEST` · `JA1XYZ` · `JA1XYZ 5NN A4` ·
+    // `TU 5NN 25` · `TU`. Your zone goes out cut, as MorseRunner sends it,
+    // and callers from anywhere send theirs. A QSO is worth nothing in your
+    // own country, a point on your continent, two between North American
+    // countries and three on another continent, times the zones and the
+    // DXCC countries worked, Alaska and Hawaii among them (MorseRunner folds
+    // them into the USA). One band, so each counts once; and no WAE
+    // countries, only DXCC ones.
+    ContestRules {
+        kind: ContestKind::Cqww,
+        cq: "CQ {my} TEST",
+        tu: "TU",
+        query: "NR?",
+        exchange: PerSide::both("{rst} {myzone}"),
+        report: "5NN",
+        rst: true,
+        serial: false,
+        serial_cut: false,
+        copied: PerSide::both(&[Field::Zn]),
+        callers: PerSide::both(CallSpec::contest(Countries::Any)),
+        answer: "{his}",
+        their_exchange: PerSide::both("{rst} {zn}"),
+        their_lead: ["TU", "R"],
+        their_query: ["NR?", "AGN"],
+        signoff: None,
+        tu_calls: true,
+        serials: None,
+        scoring: Some(Scoring {
+            points: Points::ByDistance,
+            multiplier: PerSide::both(Multiplier::ZoneAndCountry),
+        }),
+        labrador: false,
+        works: None,
+        simplified: Some(
+            "Simplified: one band, so a station, a zone and a country each count once; and no WAE countries, only DXCC ones.",
+        ),
+    },
+    // The ARRL International DX contest: W/VE works only DX, and DX only
+    // W/VE. As DX: `CQ DL1ABC TEST` · `W7XYZ` · `W7XYZ 5NN 1TT` (your 100 W,
+    // cut) · `R 5NN OR` · `TU`. As W/VE: `G4XYZ 5NN MA` · `TU 5NN KW`. Three
+    // points a QSO with the other side, and none with your own, times the
+    // DXCC countries a W/VE station works, or the 48 states, DC and
+    // Canada's provinces and territories a DX station does, Labrador (VO2)
+    // apart as LB; Alaska and Hawaii are DX. One band, so each counts once.
+    ContestRules {
+        kind: ContestKind::ArrlDx,
+        cq: "CQ {my} TEST",
+        tu: "TU",
+        query: "NR?",
+        exchange: PerSide {
+            wve: "{rst} {mystate}",
+            dx: "{rst} {mypwr}",
+        },
+        report: "5NN",
+        rst: true,
+        serial: false,
+        serial_cut: false,
+        copied: PerSide {
+            wve: &[Field::Pwr],
+            dx: &[Field::St],
+        },
+        callers: PerSide {
+            wve: CallSpec::contest(Countries::NotWVe),
+            dx: CallSpec::contest(Countries::WVe),
+        },
+        answer: "{his}",
+        their_exchange: PerSide {
+            wve: "{rst} {pwr}",
+            dx: "{rst} {st}",
+        },
+        their_lead: ["TU", "R"],
+        their_query: ["NR?", "AGN"],
+        signoff: None,
+        tu_calls: true,
+        serials: None,
+        scoring: Some(Scoring {
+            points: Points::OtherSide(3),
+            multiplier: PerSide {
+                wve: Multiplier::Country,
+                dx: Multiplier::WVePlace,
+            },
+        }),
+        labrador: true,
+        works: Some(PerSide {
+            wve: "you work DX only (Alaska and Hawaii count as DX)",
+            dx: "you work US and Canada only",
+        }),
+        simplified: Some("Simplified: one band, so a station and a multiplier each count once."),
     },
     // An everyday QSO, a first real one for a learner: `CQ CQ DE DL1ABC
     // DL1ABC K` · `DL1ABC DE K5XYZ K5XYZ K` · `K5XYZ DE DL1ABC UR 599 599
@@ -245,13 +397,15 @@ pub(super) const RULES: &[ContestRules] = &[
         copied: PerSide::both(&[Field::Rst, Field::Name]),
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
         answer: "{my} DE {his} {his} K",
-        their_exchange: "UR {rst} {rst} NAME {name} {name} BK",
+        their_exchange: PerSide::both("UR {rst} {rst} NAME {name} {name} BK"),
         their_lead: ["R TNX", "R TNX"],
         their_query: ["AGN", "AGN"],
         signoff: Some("73 EE"),
         tu_calls: false,
         serials: None,
         scoring: None,
+        labrador: false,
+        works: None,
         simplified: None,
     },
 ];
@@ -272,24 +426,71 @@ impl ContestRules {
         self.exchange.wve != self.exchange.dx
             || self.copied.wve != self.copied.dx
             || self.callers.wve != self.callers.dx
+            || self.their_exchange.wve != self.their_exchange.dx
+    }
+
+    /// The side you are on and who you work from it, where sides change
+    /// it: "You are DX: you work US and Canada only". Until your call reads
+    /// (`call_reads`), your side is the one a call stands in for, and the
+    /// line says so. None in a contest the same from either side.
+    pub fn side_note(&self, side: Side, call_reads: bool) -> Option<String> {
+        let works = self.works?.on(side);
+        let side = side.label();
+        Some(if call_reads {
+            format!("You are {side}: {works}")
+        } else {
+            format!("Until you add your call you are {side}: {works}")
+        })
     }
 
     /// Whether your exchange sends your name, so a run needs one.
     pub fn sends_name(&self) -> bool {
-        self.sends_mine("{myname}")
+        self.exchange.wve.contains("{myname}") || self.exchange.dx.contains("{myname}")
     }
 
-    /// Whether your exchange sends your state, province or territory, so a
-    /// run needs one: DX, outside the US and Canada.
-    pub fn sends_state(&self) -> bool {
-        self.sends_mine("{mystate}")
+    /// Whether your exchange on `side` sends your state, province or
+    /// territory, so a run needs one: DX, outside the US and Canada.
+    pub fn sends_state(&self, side: Side) -> bool {
+        self.exchange.on(side).contains("{mystate}")
     }
 
-    /// Whether your exchange, from either side, holds `held`.
-    fn sends_mine(&self, held: &str) -> bool {
-        [self.exchange.wve, self.exchange.dx]
-            .iter()
-            .any(|exchange| exchange.contains(held))
+    /// Whether your exchange on `side` sends your CQ zone.
+    pub fn sends_zone(&self, side: Side) -> bool {
+        self.exchange.on(side).contains("{myzone}")
+    }
+
+    /// Whether your exchange on `side` sends your power.
+    pub fn sends_power(&self, side: Side) -> bool {
+        self.exchange.on(side).contains("{mypwr}")
+    }
+
+    /// `token` as this contest reads `field` in it ([`Field::canonical`]):
+    /// Labrador's LB is NL where the contest does not count it apart.
+    pub fn canonical(&self, field: Field, token: &str) -> Option<String> {
+        let value = field.canonical(token)?;
+        Some(if field == Field::St && !self.labrador {
+            fold_labrador(&value).to_string()
+        } else {
+            value
+        })
+    }
+
+    /// Whether two tokens hold the same value of `field` in this contest.
+    pub fn same(&self, field: Field, a: &str, b: &str) -> bool {
+        match (self.canonical(field, a), self.canonical(field, b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// A field as a session's group keeps it ([`exchange::keyed_token`]):
+    /// `sent` where what was typed holds the same value in this contest.
+    pub(super) fn keyed_token(&self, field: Field, sent: &str, typed: &str) -> String {
+        if self.same(field, sent, typed) {
+            sent.to_string()
+        } else {
+            exchange::keyed_token(field, sent, typed)
+        }
     }
 
     /// Whether your TU signs with your call every time, as the Sprint's
@@ -328,6 +529,8 @@ impl ContestRules {
             ("{nr}", "serial"),
             ("{myname}", "name"),
             ("{mystate}", "state"),
+            ("{myzone}", "zone"),
+            ("{mypwr}", "power"),
         ]
         .into_iter()
         .filter_map(|(held, part)| Some((exchange.find(held)?, part)))
@@ -349,10 +552,11 @@ impl ContestRules {
         squeeze(&self.answer.replace("{my}", my_call).replace("{his}", &his))
     }
 
-    /// A caller's exchange as it sends it, each field it holds the token in
-    /// `fields`, without the word before its first.
+    /// A caller's exchange as it sends it to you on `side`, each field it
+    /// holds the token in `fields`, without the word before its first.
     pub(super) fn their_exchange_text(
         &self,
+        side: Side,
         my_call: &str,
         his_call: &str,
         fields: &[(Field, String)],
@@ -363,6 +567,7 @@ impl ContestRules {
             .map_or(self.report, |(_, token)| token.as_str());
         let mut text = self
             .their_exchange
+            .on(side)
             .replace("{my}", my_call)
             .replace("{his}", his_call)
             .replace("{rst}", report);
@@ -390,6 +595,8 @@ impl ContestRules {
             Countries::NotWVe => "G4XYZ",
             // In the seventh call district, where the example's state is.
             _ if self.copied(side).contains(&Field::St) => "W7XYZ",
+            // In Japan, whose zone the example's is.
+            _ if self.copied(side).contains(&Field::Zn) => "JA1XYZ",
             _ => "K5XYZ",
         };
         let fields: Vec<(Field, String)> = self
@@ -415,7 +622,7 @@ impl ContestRules {
                 them,
                 self.their_first_exchange(
                     0,
-                    &self.their_exchange_text(me.my_call, caller, &fields),
+                    &self.their_exchange_text(side, me.my_call, caller, &fields),
                 ),
             ),
             (Sender::You, self.tu_text(&Fill { his_name, ..first })),
@@ -425,8 +632,9 @@ impl ContestRules {
     }
 
     /// `template`, one of your texts, filled in with `me`: your call, name,
-    /// state, report and serial, and the name of the station you work. A
-    /// name not there leaves no gap.
+    /// state, zone, power, report and serial, and the name of the station
+    /// you work. A name not there leaves no gap. Your zone and power go out
+    /// cut, as MorseRunner sends yours.
     fn fill(&self, template: &str, me: &Fill<'_>) -> String {
         let serial = if self.serial_cut {
             cut_serial(me.serial)
@@ -438,11 +646,19 @@ impl ContestRules {
                 .replace("{my}", me.my_call)
                 .replace("{myname}", me.my_name)
                 .replace("{mystate}", me.my_state)
+                .replace("{myzone}", &cut_zone_text(me.my_zone))
+                .replace("{mypwr}", &cut_power(me.my_power))
                 .replace("{hisname}", me.his_name)
                 .replace("{rst}", self.report)
                 .replace("{nr}", &serial),
         )
     }
+}
+
+/// A zone given as `text` as you send it: cut ([`cut_zone`]) where it is a
+/// number, and as it is otherwise, a stand-in among it.
+fn cut_zone_text(text: &str) -> String {
+    text.parse().map_or_else(|_| text.to_string(), cut_zone)
 }
 
 /// `text` with one space between words, and none at either end.
@@ -468,23 +684,37 @@ mod tests {
         ContestKind::Sprint.rules().expect("Sprint has shipped")
     }
 
-    /// You, as DL1ABC called MAT, sending `serial`, working `his_name`.
+    fn cqww() -> &'static ContestRules {
+        ContestKind::Cqww.rules().expect("CQ WW has shipped")
+    }
+
+    fn arrl_dx() -> &'static ContestRules {
+        ContestKind::ArrlDx.rules().expect("ARRL DX has shipped")
+    }
+
+    /// You, as DL1ABC called MAT in zone 14 running 100 W, sending
+    /// `serial`, working `his_name`.
     fn me(serial: u32, his_name: &str) -> Fill<'_> {
         Fill {
             my_call: "DL1ABC",
             my_name: "MAT",
             my_state: "DX",
+            my_zone: "14",
+            my_power: "100",
             serial,
             his_name,
         }
     }
 
-    /// You, as K1ABC called MIKE in Massachusetts, sending `serial`.
+    /// You, as K1ABC called MIKE in Massachusetts, zone 5, sending
+    /// `serial`.
     fn k1abc(serial: u32) -> Fill<'static> {
         Fill {
             my_call: "K1ABC",
             my_name: "MIKE",
             my_state: "MA",
+            my_zone: "5",
+            my_power: "KW",
             serial,
             his_name: "BOB",
         }
@@ -504,7 +734,7 @@ mod tests {
         assert_eq!(rules.exchange_text(Side::WVe, &k1abc), "5NN 1N5");
         assert_eq!(rules.tu_text(&me(7, "BOB")), "TU");
         assert_eq!(rules.sends(Side::Dx), "5NN + serial");
-        assert!(!rules.sends_state() && !rules.tu_signs());
+        assert!(!rules.sends_state(Side::Dx) && !rules.tu_signs());
         assert!(!rules.sends_name());
         assert!(rules.prefills_report(Side::Dx));
         assert_eq!(rules.copied(Side::Dx), [Field::Nr]);
@@ -513,7 +743,7 @@ mod tests {
         assert_eq!(rules.answer_text("DL1ABC", "K5XYZ", true), "K5XYZ K5XYZ");
         let theirs = [(Field::Nr, "214".to_string())];
         assert_eq!(
-            rules.their_exchange_text("DL1ABC", "K5XYZ", &theirs),
+            rules.their_exchange_text(Side::Dx, "DL1ABC", "K5XYZ", &theirs),
             "5NN 214"
         );
         assert!(rules.tu_calls && rules.signoff.is_none());
@@ -522,8 +752,8 @@ mod tests {
         assert_eq!(
             rules.scoring,
             Some(Scoring {
-                points: 1,
-                multiplier: Multiplier::WpxPrefix
+                points: Points::Each(1),
+                multiplier: PerSide::both(Multiplier::WpxPrefix)
             })
         );
     }
@@ -554,7 +784,7 @@ mod tests {
             (Field::Name, "BOB".to_string()),
         ];
         assert_eq!(
-            rules.their_exchange_text("DL1ABC", "K5XYZ", &theirs),
+            rules.their_exchange_text(Side::Dx, "DL1ABC", "K5XYZ", &theirs),
             "UR 579 579 NAME BOB BOB BK"
         );
         assert_eq!(rules.their_lead, ["R TNX", "R TNX"]);
@@ -585,7 +815,7 @@ mod tests {
         assert_eq!(rules.tu_text(&k1abc(7)), "TU K1ABC");
         assert!(rules.tu_signs() && rules.tu_calls && rules.signoff.is_none());
         assert_eq!(rules.sends(Side::WVe), "serial + name + state");
-        assert!(rules.sends_name() && rules.sends_state());
+        assert!(rules.sends_name() && rules.sends_state(Side::WVe) && rules.sends_state(Side::Dx));
         assert!(!rules.rst && !rules.prefills_report(Side::WVe));
         assert_eq!(rules.copied(Side::Dx), [Field::Nr, Field::Name, Field::St]);
         assert_eq!(
@@ -599,7 +829,7 @@ mod tests {
             (Field::Name, "BOB".to_string()),
             (Field::St, "OR".to_string()),
         ];
-        let sent = rules.their_exchange_text("K1ABC", "W7XYZ", &theirs);
+        let sent = rules.their_exchange_text(Side::WVe, "K1ABC", "W7XYZ", &theirs);
         assert_eq!(sent, "K1ABC 145 BOB OR");
         assert_eq!(rules.their_first_exchange(0, &sent), sent, "led by nothing");
         assert_eq!(rules.query, "NR?");
@@ -608,10 +838,122 @@ mod tests {
         assert_eq!(
             rules.scoring,
             Some(Scoring {
-                points: 1,
-                multiplier: Multiplier::Place
+                points: Points::Each(1),
+                multiplier: PerSide::both(Multiplier::Place)
             })
         );
+    }
+
+    /// CQ WW on the air, as the design has it: your zone cut, theirs
+    /// plain, callers from anywhere, a TU that brings the next, points by
+    /// distance times zones and countries.
+    #[test]
+    fn cqww_sends_what_the_contest_sends() {
+        let rules = cqww();
+        assert_eq!(rules.cq_text(&me(0, "")), "CQ DL1ABC TEST");
+        assert_eq!(rules.exchange_text(Side::Dx, &me(0, "")), "5NN A4");
+        assert_eq!(rules.exchange_text(Side::WVe, &k1abc(0)), "5NN 5");
+        assert_eq!(rules.tu_text(&me(0, "")), "TU");
+        assert_eq!(rules.sends(Side::Dx), "5NN + zone");
+        assert!(rules.sends_zone(Side::Dx) && rules.sends_zone(Side::WVe));
+        assert!(!rules.sends_state(Side::WVe) && !rules.sends_power(Side::Dx));
+        assert!(!rules.sends_name() && rules.prefills_report(Side::Dx));
+        assert_eq!(rules.copied(Side::WVe), [Field::Zn]);
+        assert_eq!(rules.callers(Side::WVe), CallSpec::contest(Countries::Any));
+        let theirs = [(Field::Zn, "25".to_string())];
+        assert_eq!(
+            rules.their_exchange_text(Side::Dx, "DL1ABC", "JA1XYZ", &theirs),
+            "5NN 25"
+        );
+        assert!(rules.tu_calls && rules.signoff.is_none() && rules.serials.is_none());
+        assert!(!rules.sided() && rules.side_note(Side::Dx, true).is_none());
+        assert_eq!(
+            rules.scoring,
+            Some(Scoring {
+                points: Points::ByDistance,
+                multiplier: PerSide::both(Multiplier::ZoneAndCountry)
+            })
+        );
+        assert!(
+            rules
+                .simplified
+                .is_some_and(|line| line.contains("one band") && line.contains("no WAE"))
+        );
+    }
+
+    /// ARRL DX on the air, from either side: as DX you send your power cut
+    /// and copy a state from W/VE callers; as W/VE you send your state and
+    /// copy power from DX callers; three points a QSO, times what your side
+    /// counts.
+    #[test]
+    fn arrl_dx_sends_what_the_contest_sends_from_either_side() {
+        let rules = arrl_dx();
+        assert!(rules.sided() && rules.labrador);
+        assert_eq!(rules.cq_text(&me(0, "")), "CQ DL1ABC TEST");
+        assert_eq!(rules.exchange_text(Side::Dx, &me(0, "")), "5NN 1TT");
+        assert_eq!(rules.exchange_text(Side::WVe, &k1abc(0)), "5NN MA");
+        assert_eq!(rules.sends(Side::Dx), "5NN + power");
+        assert_eq!(rules.sends(Side::WVe), "5NN + state");
+        assert!(rules.sends_power(Side::Dx) && !rules.sends_power(Side::WVe));
+        assert!(rules.sends_state(Side::WVe) && !rules.sends_state(Side::Dx));
+        assert_eq!(rules.copied(Side::Dx), [Field::St]);
+        assert_eq!(rules.copied(Side::WVe), [Field::Pwr]);
+        assert_eq!(rules.callers(Side::Dx), CallSpec::contest(Countries::WVe));
+        assert_eq!(
+            rules.callers(Side::WVe),
+            CallSpec::contest(Countries::NotWVe)
+        );
+        let st = [(Field::St, "OR".to_string())];
+        assert_eq!(
+            rules.their_exchange_text(Side::Dx, "DL1ABC", "W7XYZ", &st),
+            "5NN OR"
+        );
+        let pwr = [(Field::Pwr, "KW".to_string())];
+        assert_eq!(
+            rules.their_exchange_text(Side::WVe, "K1ABC", "G4XYZ", &pwr),
+            "5NN KW"
+        );
+        assert_eq!(
+            rules.side_note(Side::Dx, true).as_deref(),
+            Some("You are DX: you work US and Canada only")
+        );
+        assert_eq!(
+            rules.side_note(Side::WVe, true).as_deref(),
+            Some("You are W/VE: you work DX only (Alaska and Hawaii count as DX)")
+        );
+        // With no call yet you are DX, as the call that stands in is.
+        assert_eq!(
+            rules.side_note(Side::Dx, false).as_deref(),
+            Some("Until you add your call you are DX: you work US and Canada only")
+        );
+        assert_eq!(
+            rules.scoring,
+            Some(Scoring {
+                points: Points::OtherSide(3),
+                multiplier: PerSide {
+                    wve: Multiplier::Country,
+                    dx: Multiplier::WVePlace
+                }
+            })
+        );
+    }
+
+    /// Labrador is LB in ARRL DX, a place of its own, and NL in the Sprint;
+    /// every other value reads alike in every contest.
+    #[test]
+    fn labrador_reads_apart_only_in_arrl_dx() {
+        assert_eq!(arrl_dx().canonical(Field::St, "LB").as_deref(), Some("LB"));
+        assert!(!arrl_dx().same(Field::St, "LB", "NL"));
+        assert_eq!(sprint().canonical(Field::St, "LB").as_deref(), Some("NL"));
+        assert!(sprint().same(Field::St, "LB", "NL"));
+        assert_eq!(sprint().keyed_token(Field::St, "NL", "LB"), "NL");
+        assert_eq!(arrl_dx().keyed_token(Field::St, "NL", "LB"), "LB");
+        for rules in RULES {
+            assert_eq!(rules.canonical(Field::Nr, "TT7").as_deref(), Some("7"));
+            assert_eq!(rules.canonical(Field::St, "PQ").as_deref(), Some("QC"));
+            assert!(rules.same(Field::Pwr, "K", "1000"));
+            assert!(rules.same(Field::Zn, "A4", "14"));
+        }
     }
 
     /// The card's QSO is the row's: its CQ, your exchange and TU, and the
@@ -642,6 +984,33 @@ mod tests {
                 (they, "R TNX UR 579 579 NAME BOB BOB BK".to_string()),
                 (you, "TU BOB 73 EE".to_string()),
                 (they, "73 EE".to_string()),
+            ]
+        );
+        // A CQ WW caller is in the zone it sends: Japan's.
+        assert_eq!(
+            cqww().example_qso(Side::Dx, &me(0, "")),
+            [
+                (you, "CQ DL1ABC TEST".to_string()),
+                (they, "JA1XYZ".to_string()),
+                (you, "JA1XYZ 5NN A4".to_string()),
+                (they, "TU 5NN 25".to_string()),
+                (you, "TU".to_string()),
+            ]
+        );
+        // ARRL DX: a W/VE caller sends you its state, and a DX caller its
+        // power.
+        assert_eq!(
+            arrl_dx().example_qso(Side::Dx, &me(0, ""))[2..4],
+            [
+                (you, "W7XYZ 5NN 1TT".to_string()),
+                (they, "TU 5NN OR".to_string()),
+            ]
+        );
+        assert_eq!(
+            arrl_dx().example_qso(Side::WVe, &k1abc(0))[2..4],
+            [
+                (you, "G4XYZ 5NN MA".to_string()),
+                (they, "TU 5NN KW".to_string()),
             ]
         );
         // A Sprint caller is where the state it sends is: W7 is Oregon's
@@ -692,13 +1061,16 @@ mod tests {
                 );
                 // Callers send every field you copy, and their report if
                 // the exchange holds one.
+                let theirs = rules.their_exchange.on(side);
                 for field in rules.copied(side) {
                     let held = format!("{{{}}}", field.name());
-                    assert!(rules.their_exchange.contains(&held), "{:?}", rules.kind);
+                    assert!(theirs.contains(&held), "{:?}", rules.kind);
                 }
+                assert_eq!(theirs.contains("{rst}"), rules.rst, "{:?}", rules.kind);
+                // Your exchange holds what the flags say it sends.
                 assert_eq!(
-                    rules.their_exchange.contains("{rst}"),
-                    rules.rst,
+                    rules.sends_state(side),
+                    exchange.contains("{mystate}"),
                     "{:?}",
                     rules.kind
                 );
@@ -711,6 +1083,8 @@ mod tests {
             }
             assert!(rules.cq.contains("{my}"), "{:?}", rules.kind);
             assert!(rules.answer.contains("{his}"), "{:?}", rules.kind);
+            // The card says who you work exactly where sides change it.
+            assert_eq!(rules.works.is_some(), rules.sided(), "{:?}", rules.kind);
         }
         for kind in ContestKind::ALL {
             let rows = RULES.iter().filter(|rules| rules.kind == kind).count();
@@ -736,11 +1110,26 @@ mod tests {
             ("NL7AB", Side::Dx),
             ("WL7AB", Side::Dx),
             ("CY0AA", Side::Dx),
+            ("CY9AA", Side::Dx),
             ("", Side::Dx),
+            // Canada's prefixes are W/VE, the table's or not.
+            ("VG3ABC", Side::WVe),
+            ("VO2AB", Side::WVe),
+            ("VY1AB", Side::WVe),
         ] {
             assert_eq!(Side::of_call(call), side, "{call:?}");
         }
+        // Every prefix the design names DX is, with any digit
+        // (`places.rs` pins them all): a spot check.
+        for call in ["KH2ABC", "AH6AB", "WP4AB", "KG4AB"] {
+            assert_eq!(Side::of_call(call), Side::Dx, "{call}");
+        }
         assert_eq!(Side::WVe.name(), "wve");
         assert_eq!(Side::Dx.name(), "dx");
+        for side in [Side::WVe, Side::Dx] {
+            assert_eq!(Side::from_name(side.name()), side);
+        }
+        assert_eq!(Side::from_name(""), Side::Dx);
+        assert_eq!((Side::WVe.label(), Side::Dx.label()), ("W/VE", "DX"));
     }
 }

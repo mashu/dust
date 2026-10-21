@@ -2374,7 +2374,12 @@ mod ui_tests {
             ui.commit("field-your-callsign", " dl1abc ");
             ui.advance(50).await;
             assert_eq!(ui.stored_settings().await.contest.my_call, "DL1ABC");
-            assert!(ui.has("Reads as DL · WPX prefix DL1"));
+            assert!(ui.has(&crate::testing::reads_as(&[
+                "Fed. Rep. of Germany",
+                "Europe",
+                "CQ zone 14",
+                "WPX prefix DL1"
+            ])));
             assert!(
                 ui.input_tag("field-your-callsign")
                     .contains("value=\"DL1ABC\"")
@@ -2431,6 +2436,60 @@ mod ui_tests {
             ui.commit("field-your-callsign", "K1ABC");
             ui.advance(50).await;
             assert!(!ui.has("MASS is not a state or province"));
+        });
+    }
+
+    /// Your power, for ARRL DX as DX: what is no power is said so, kept as
+    /// 100 W, until the card's reset, even with no call or name for the
+    /// reset to change.
+    #[test]
+    fn your_stations_reset_takes_back_a_power_that_was_none() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::ArrlDx;
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            assert!(ui.shows("field-your-power"));
+            ui.commit("field-your-power", "max");
+            ui.advance(50).await;
+            assert!(ui.has("MAX is not a power"));
+            assert_eq!(ui.stored_settings().await.contest.my_power, "100");
+            ui.click("reset-your-station");
+            ui.advance(50).await;
+            assert!(!ui.has("MAX is not a power"), "{}", ui.html());
+            assert!(ui.has("Sends 1TT: 100 W"));
+        });
+    }
+
+    /// CQ WW from a call that does not say its zone: Home says so in a
+    /// zone field of its own, Start takes the cursor there, and a zone
+    /// typed and kept by the press of Start starts the run.
+    #[test]
+    fn home_asks_for_your_zone_before_a_cqww_from_a_call_that_does_not_say_it() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Cqww;
+            settings.contest.my_call = "C31AB".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            assert!(ui.shows("field-your-cq-zone"));
+            assert!(ui.has("Add your CQ zone, press Start contest"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your CQ zone to start a CQ\u{a0}WW"));
+            assert_eq!(ui.take_focused(), ["field-your-cq-zone"]);
+            ui.type_into("field-your-cq-zone", "27");
+            assert!(
+                !ui.mouse_down("btn-start-training"),
+                "Start took the cursor"
+            );
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            assert_eq!(ui.stored_settings().await.contest.my_zone, 27);
+            ui.advance(10_000).await;
+            let first = &recorder.starts()[0].transcript;
+            assert!(first.text.starts_with("CQ C31AB TEST"), "{}", first.text);
         });
     }
 
