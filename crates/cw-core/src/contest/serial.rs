@@ -79,6 +79,19 @@ impl SerialModel {
         // the most drawn into five digits.
         serial.min(self.log_size as u32)
     }
+
+    /// The serial it sends when it calls again, a dupe, `elapsed_ms` after
+    /// it sent `before`: the next in its log, its QSO with you being in it,
+    /// and as many more as it worked meanwhile, a Poisson count of its rate,
+    /// `final × Δt / L`. Within four digits.
+    pub fn after(&self, before: u32, elapsed_ms: u64, rng: &mut impl Rng) -> u32 {
+        let worked = self.log_size * elapsed_ms as f64 / self.length_ms;
+        // A mean of a couple of hundred at most: the biggest WPX log over
+        // the longest run.
+        let more = rng.poisson(worked, LOG_SIZE_MAX as usize);
+        let serial = u64::from(before) + 1 + more as u64;
+        u32::try_from(serial.min(LOG_SIZE_MAX as u64)).unwrap_or(u32::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +161,47 @@ mod tests {
             );
             assert!(serial <= LOG_SIZE_MAX as u32, "{serial}");
         }
+    }
+
+    /// A dupe sends the serial after its last, and more the longer since:
+    /// about as many as its log's rate gives over the time between, a
+    /// Poisson count of it.
+    #[test]
+    fn a_dupe_sends_the_next_serial_and_what_it_worked_meanwhile() {
+        let mut rng = SplitMix64::new(11);
+        let model = SerialModel {
+            log_size: 4_800.0,
+            offset_ms: 0.0,
+            length_ms: 48.0 * MS_PER_HOUR as f64,
+        };
+        // A hundred QSOs an hour: a minute later, about one and two thirds.
+        let draws: Vec<u32> = (0..20_000)
+            .map(|_| model.after(214, MS_PER_MINUTE, &mut rng))
+            .collect();
+        assert!(draws.iter().all(|serial| *serial >= 215));
+        let mean = draws
+            .iter()
+            .map(|serial| f64::from(serial - 215))
+            .sum::<f64>()
+            / 20_000.0;
+        assert!((mean - 5.0 / 3.0).abs() < 0.05, "mean {mean:.3}");
+        assert_eq!(
+            model.after(214, 0, &mut rng),
+            215,
+            "straight after: the next"
+        );
+        assert_eq!(
+            model.after(9_999, 0, &mut rng),
+            9_999,
+            "four digits at most"
+        );
+        // A Poisson count's variance is its mean.
+        let variance = draws
+            .iter()
+            .map(|serial| (f64::from(serial - 215) - mean).powi(2))
+            .sum::<f64>()
+            / 20_000.0;
+        assert!((variance - mean).abs() < 0.1, "variance {variance:.3}");
     }
 
     #[test]

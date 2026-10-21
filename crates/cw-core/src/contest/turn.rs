@@ -5,11 +5,18 @@
 //! thing you send is one turn: your message, then each caller's reply after
 //! its own delay, all against one clock. Your message is fixed when you key
 //! it, so the replies are decided then as well.
+//!
+//! Each caller fades on a path of its own: the band's fading, from a point of
+//! its own in it, laid into the envelope of every tone it sends, so that two
+//! callers in one turn rise and fall apart and your own message never fades.
 
+use std::sync::Arc;
+
+use crate::band::Qsb;
 use crate::morse::morse_for;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
 use crate::timing::{
-    Interferer, PlannedTransmission, PlaybackPlan, StationVoice, Transmission,
+    Interferer, PlannedTransmission, PlaybackPlan, StationVoice, ToneEvent, Transmission,
     plan_morse_playback_at, plan_morse_playback_for,
 };
 
@@ -40,6 +47,15 @@ pub enum Sender {
     Caller(u32),
 }
 
+/// How a caller's segment fades: the band's fading, as the Band card sets
+/// it, read from `from_sec` on its clock where the segment starts. Each
+/// caller reads it from a point of its own, so no two fade together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fade {
+    pub qsb: Qsb,
+    pub from_sec: f64,
+}
+
 /// One station's part of a turn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment {
@@ -49,6 +65,8 @@ pub struct Segment {
     /// When it starts and ends, in seconds from the start of the turn.
     pub start_sec: f64,
     pub end_sec: f64,
+    /// A caller's fading; none for your message, or with fading off.
+    pub fade: Option<Fade>,
 }
 
 /// One send: your message, if there is one, and the replies to it.
@@ -163,6 +181,10 @@ pub(super) fn sounding_at(spans: &[(usize, f64, f64)], at_sec: f64) -> Option<us
 /// cut, which is why [`crate::plan_transmission`], which cuts them where
 /// `wanted` ends, is not used. A turn of callers alone has a `wanted` with
 /// no tones in it.
+///
+/// A caller's fade is laid into its tones' envelopes ([`fade_tones`]), as
+/// both players play a tone at its envelope; the send itself carries no
+/// fading, so none reaches your message.
 pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmission {
     let mut wanted: Option<PlaybackPlan> = None;
     let mut others = Vec::new();
@@ -171,7 +193,13 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
             Sender::You => {
                 plan_morse_playback_at(&segment.text, settings, &segment.voice, MONITOR_LEVEL)
             }
-            Sender::Caller(_) => plan_morse_playback_for(&segment.text, settings, &segment.voice),
+            Sender::Caller(_) => {
+                let mut plan = plan_morse_playback_for(&segment.text, settings, &segment.voice);
+                if let Some(fade) = segment.fade {
+                    fade_tones(&mut plan.events, fade);
+                }
+                plan
+            }
         };
         for tone in &mut plan.events {
             tone.start_sec += segment.start_sec;
@@ -211,6 +239,39 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
     }
 }
 
+/// Lay `fade` into each of `tones`, timed from the start of their segment:
+/// every point of a tone's envelope, which is sampled at the envelope's
+/// rate (`ENVELOPE_SAMPLE_RATE`), is scaled by the fade at the moment it
+/// plays, so a fade a few times a second still moves smoothly through a long
+/// dah. Each tone has an envelope of its own then, no longer one shared by
+/// every dit, and its level, which a player reads only where it cannot play
+/// the envelope, is scaled by the fade at its middle.
+fn fade_tones(tones: &mut [ToneEvent], fade: Fade) {
+    for tone in tones {
+        let points = tone.envelope.len();
+        let at = |point: usize| {
+            let through = if points > 1 {
+                point as f64 / (points - 1) as f64
+            } else {
+                0.5
+            };
+            fade.qsb
+                .gain_at(fade.from_sec + tone.start_sec + tone.duration_sec * through)
+        };
+        let faded: Vec<f32> = tone
+            .envelope
+            .iter()
+            .enumerate()
+            .map(|(point, level)| level * at(point))
+            .collect();
+        tone.envelope = Arc::from(faded);
+        tone.target_gain *= f64::from(
+            fade.qsb
+                .gain_at(fade.from_sec + tone.start_sec + tone.duration_sec / 2.0),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +292,7 @@ mod tests {
             voice,
             start_sec,
             end_sec,
+            fade: None,
         }
     }
 
@@ -306,6 +368,109 @@ mod tests {
             .map(|tone| tone.duration_sec)
             .fold(f64::MAX, f64::min);
         assert!((shortest - 1.2 / 30.0).abs() < 1e-9);
+    }
+
+    /// Fading as deep and as quick as the Band card goes.
+    fn deep_fast_fade() -> Qsb {
+        let band = crate::settings::BandSettings {
+            qsb_enabled: true,
+            qsb_depth: 1.0,
+            qsb_rate_hz: crate::settings::QSB_RATE_MAX_HZ,
+            ..crate::settings::BandSettings::default()
+        };
+        Qsb::of(&band).expect("fading is on")
+    }
+
+    /// The turn, its reply read from `from_sec` of a deep, quick fade.
+    fn faded(from_sec: f64) -> Turn {
+        let mut turn = turn();
+        turn.segments[1].fade = Some(Fade {
+            qsb: deep_fast_fade(),
+            from_sec,
+        });
+        turn
+    }
+
+    /// A caller's fade is laid into each of its tones, point by point at the
+    /// moment each point plays, every tone with an envelope of its own and
+    /// its level scaled to match; it moves smoothly from point to point, and
+    /// two callers read from their own points in it rise and fall apart.
+    #[test]
+    fn callers_fade_independently_and_smoothly() {
+        let settings = settings();
+        let qsb = deep_fast_fade();
+        let plain = plan_turn(&turn(), &settings);
+        let mut gains = Vec::new();
+        for from_sec in [0.0, 37.3] {
+            let planned = plan_turn(&faded(from_sec), &settings);
+            let reply = &turn().segments[1];
+            let (tones, unfaded) = (&planned.others[0].events, &plain.others[0].events);
+            assert_eq!(tones.len(), unfaded.len());
+            let mut heard = Vec::new();
+            for (at, (tone, base)) in tones.iter().zip(unfaded).enumerate() {
+                assert_eq!(tone.envelope.len(), base.envelope.len());
+                // Timed from the reply's start, which the turn moved it to.
+                let start = tone.start_sec - reply.start_sec;
+                let points = tone.envelope.len() - 1;
+                for (point, (level, level_then)) in
+                    tone.envelope.iter().zip(base.envelope.iter()).enumerate()
+                {
+                    let t = from_sec + start + tone.duration_sec * point as f64 / points as f64;
+                    let expected = level_then * qsb.gain_at(t);
+                    assert!((level - expected).abs() < 1e-6, "tone {at}, point {point}");
+                }
+                let middle = qsb.gain_at(from_sec + start + tone.duration_sec / 2.0);
+                assert!((tone.target_gain - base.target_gain * f64::from(middle)).abs() < 1e-9);
+                for other in &tones[..at] {
+                    assert!(
+                        !Arc::ptr_eq(&tone.envelope, &other.envelope),
+                        "one envelope a tone"
+                    );
+                }
+                // Smoothly: from one point to the next the fade moves a
+                // hair, never in a step.
+                let steps = tone.envelope.iter().zip(base.envelope.iter());
+                let ratios: Vec<f64> = steps
+                    .filter(|(_, level)| **level > 0.05)
+                    .map(|(faded, level)| f64::from(faded / level))
+                    .collect();
+                assert!(
+                    ratios.windows(2).all(|w| (w[1] - w[0]).abs() < 0.01),
+                    "tone {at}"
+                );
+                heard.push(f64::from(middle));
+            }
+            // Deep enough to be heard: it moves across the reply.
+            let (low, high) = heard
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(lo, hi), g| (lo.min(*g), hi.max(*g)));
+            assert!(high - low > 0.05, "{from_sec}: {low:.2}..{high:.2}");
+            gains.push(heard);
+        }
+        let apart = gains[0]
+            .iter()
+            .zip(&gains[1])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(apart > 0.2, "two callers faded together: {apart:.2}");
+    }
+
+    /// Faded callers or not, your message is never faded: your tones keep
+    /// the monitor's level and share their envelopes, as a keyer's do.
+    #[test]
+    fn your_tones_stay_unfaded_beside_faded_callers() {
+        let mut turn = faded(12.0);
+        turn.segments[0].fade = Some(Fade {
+            qsb: deep_fast_fade(),
+            from_sec: 3.0,
+        });
+        let planned = plan_turn(&turn, &settings());
+        let unfaded = plan_turn(&self::turn(), &settings());
+        assert_eq!(planned.wanted.events.len(), unfaded.wanted.events.len());
+        for (tone, base) in planned.wanted.events.iter().zip(&unfaded.wanted.events) {
+            assert_eq!(tone.target_gain, MONITOR_LEVEL);
+            assert_eq!(&tone.envelope[..], &base.envelope[..]);
+        }
     }
 
     /// Your message is played past the receiver, and only yours: `wanted`

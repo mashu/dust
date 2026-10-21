@@ -240,6 +240,7 @@ fn segment(
         voice,
         start_sec,
         end_sec,
+        fade: None,
     }
 }
 

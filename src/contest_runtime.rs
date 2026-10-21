@@ -12,7 +12,7 @@
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestRules, EntryField, Esm,
     Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, Side, TrainingSettings,
-    Turn, esm, loggable, parse_exchange, plan_turn,
+    Turn, esm, loggable, normalize_call, parse_exchange, plan_turn,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -32,9 +32,10 @@ const HEARTBEAT_GAP_MS: u64 = 2_000;
 /// are played with, and its hold on the audio.
 pub struct LiveContest {
     machine: ContestMachine<Sampler>,
-    /// The settings the run started with, fading off. A send has its fading
-    /// laid on as it plays, and callers will bring fades of their own (phase
-    /// 2); the band has no fading in it, so it plays on, never rebuilt.
+    /// The settings the run started with, fading off. Each caller brings a
+    /// fade of its own, laid into its tones ([`plan_turn`]), so no send has
+    /// fading laid on as it plays, your message least of all; and the band
+    /// has no fading in it, so it plays on, never rebuilt.
     sound: TrainingSettings,
     lease: Lease,
     /// When the run screen's clock last ticked, once it has.
@@ -186,6 +187,13 @@ impl ContestEntry {
         self.reads
             .peek()
             .is_some_and(|(rules, side)| loggable(&self.fields.peek(), rules, side))
+    }
+
+    /// The Call field as the run reads it, for what is said of the call
+    /// typed: "B4 07:31". Reading it subscribes the caller to every edit.
+    pub fn call(self) -> String {
+        let _ = self.typed.read();
+        normalize_call(&self.fields.peek().call)
     }
 
     /// What the run copies from each caller, for the Exchange field's label.

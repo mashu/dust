@@ -1816,6 +1816,72 @@ mod ui_tests {
         });
     }
 
+    /// The run style is chosen on the Character set card, which says how
+    /// many a pile-up brings and where that is set; the Band card's range is
+    /// then the callers at once, with their spread and how many the filter
+    /// fits, and back to the band's activity for a single caller. Home says
+    /// who calls.
+    #[test]
+    fn a_pile_up_is_chosen_with_the_contest_and_shaped_on_the_band_card() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("nav-settings");
+            ui.open_disclosures();
+            for shown in ["Run style", "One station calls at a time", "Band activity"] {
+                assert!(ui.has(shown), "{shown} should show");
+            }
+            assert!(!ui.shows("slider-pile-up-spread"));
+            assert!(!ui.shows("filter-fits"));
+
+            // A pile-up of one is none: picked on the range as it ships,
+            // the range opens to one to three.
+            ui.click("style-pile-up");
+            ui.advance(50).await;
+            let stored = ui.stored_settings().await;
+            assert_eq!(stored.contest.contest_style, cw_core::RunStyle::Pileup);
+            assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 3));
+            assert!(
+                ui.has("1–3 callers · set on the Band card"),
+                "{}",
+                ui.html()
+            );
+            assert!(ui.has("Callers at once"));
+            assert!(!ui.has("Band activity"));
+            assert!(ui.shows("slider-pile-up-spread"));
+            assert!(ui.shows("filter-fits"));
+            assert!(ui.has("Your filter fits"));
+            assert!(
+                !ui.shows("slider-pile-up-is-weaker-by"),
+                "no wanted station to sit under"
+            );
+            // Held at one, it counts one caller.
+            ui.click("link-callers-at-once");
+            ui.advance(50).await;
+            assert!(ui.has("1 caller · set on the Band card"));
+            assert!(ui.has("1 caller<"), "{}", ui.html());
+            assert!(!ui.has("1 callers"));
+            ui.click("link-callers-at-once");
+            ui.commit("from-callers-at-once", "1");
+            ui.commit("to-callers-at-once", "3");
+            ui.advance(50).await;
+            let stored = ui.stored_settings().await;
+            assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 3));
+            assert!(ui.has("1–3 callers · set on the Band card"));
+
+            ui.click("nav-practice");
+            assert!(ui.has("1–3</span>"), "{}", ui.html());
+            assert!(ui.has("Callers</span>"));
+
+            ui.click("nav-settings");
+            ui.click("style-single-caller");
+            ui.advance(50).await;
+            assert!(ui.has("Band activity"));
+            assert!(!ui.shows("slider-pile-up-spread"));
+            ui.click("nav-practice");
+            assert!(ui.has("Single</span>"));
+        });
+    }
+
     /// Your call is typed once, kept as a call is written, and read back:
     /// where a contest places it, or why it is no call yet.
     #[test]

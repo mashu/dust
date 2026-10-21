@@ -363,12 +363,14 @@ fn AirLine(now: Signal<MonoMs>) -> Element {
 }
 
 /// The Call field, its border turned to a warning while the station's
-/// correction waits to be put right. Its own component, so that only its
-/// frame follows the typing, never the input inside it.
+/// correction waits to be put right, and a call already logged clean tagged
+/// with when: "B4 07:31". Its own component, so that only its frame follows
+/// the typing, never the input inside it.
 #[component]
 fn CallField(qso: QsoState, disabled: bool) -> Element {
     let ctx = use_context::<AppCtx>();
     let corrected = ctx.entry.enter(&qso).is_some_and(|enter| enter.corrected);
+    let before = worked_before(ctx);
     let (id, label) = field_name(EntryField::Call);
     rsx! {
         div { class: if corrected { "field corrected" } else { "field" },
@@ -376,11 +378,23 @@ fn CallField(qso: QsoState, disabled: bool) -> Element {
                 "{label}"
                 if corrected {
                     span { class: "field-tag", "corrected" }
+                } else if let Some(at_ms) = before {
+                    span { class: "field-tag field-tag-b4", "B4 {minutes_seconds(at_ms)}" }
                 }
             }
             EntryInput { field: EntryField::Call, disabled }
         }
     }
+}
+
+/// When the call typed was logged clean already, if it was: working it again
+/// is a dupe. Reading it subscribes the caller to every edit and to the log.
+fn worked_before(ctx: AppCtx) -> Option<u64> {
+    let call = ctx.entry.call();
+    ctx.contest
+        .read()
+        .as_ref()
+        .and_then(|view| view.worked_before(&call))
 }
 
 /// One of the two fields.
@@ -473,13 +487,19 @@ fn ReadsAs() -> Element {
 
 /// The key bar's buttons after Enter's, in order: what each sends, its key
 /// on a keyboard, what it says, and whether a finger has it too. The keypad
-/// stands in for the rest where touch is how you type.
-const KEY_BAR: [(OpKey, &str, &str, bool); 10] = [
+/// stands in for the rest where touch is how you type, but for B4, which a
+/// finger has while the call typed is a dupe, at the end of the row, so the
+/// keys it always has never move. NR? says the contest's own word for it.
+const KEY_BAR: [(OpKey, &str, &str, bool); 14] = [
     (OpKey::Cq, "F1", "CQ", true),
     (OpKey::Exchange, "F2", "Exch", false),
     (OpKey::Tu, "F3", "TU (no log)", false),
+    (OpKey::MyCall, "F4", "My call", false),
     (OpKey::HisCall, "F5", "His", false),
+    (OpKey::B4, "F6", "B4", false),
     (OpKey::Again, "F7", "? Again", true),
+    (OpKey::Nil, "F8", "NIL", false),
+    (OpKey::NrQuery, "F12", "NR?", false),
     (OpKey::HisCallAndExchange, ";", "His + exch", false),
     (OpKey::TuAndLog, ".", "TU & log", false),
     (OpKey::LogOnly, "Shift+Enter", "Log", false),
@@ -489,8 +509,10 @@ const KEY_BAR: [(OpKey, &str, &str, bool); 10] = [
 
 /// The message keys, each with its key on a keyboard, and Enter named for
 /// what it sends. The keys Enter would press now are lit, as MorseRunner
-/// lights them. Where touch is how you type, the keypad's own Enter takes
-/// the chip's place, and only CQ, Again and Wipe stay.
+/// lights them; B4, which Enter never sends, is offered apart while the call
+/// typed is a dupe. Where touch is how you type, the keypad's own Enter
+/// takes the chip's place, and only CQ, Again and Wipe stay, and B4 on a
+/// dupe.
 #[component]
 fn KeyBar(qso: QsoState, live: bool) -> Element {
     let ctx = use_context::<AppCtx>();
@@ -499,7 +521,15 @@ fn KeyBar(qso: QsoState, live: bool) -> Element {
         .iter()
         .flat_map(|enter| enter.message.iter().map(OpKey::sending))
         .collect();
+    let dupe = worked_before(ctx).is_some();
     let loggable = ctx.entry.loggable();
+    let query = ctx
+        .settings
+        .peek()
+        .contest
+        .contest_kind
+        .rules()
+        .map_or("NR?", |rules| rules.query);
     rsx! {
         div { class: "run-keys", role: "group", aria_label: "Messages",
             EnterChip { qso, live }
@@ -507,7 +537,9 @@ fn KeyBar(qso: QsoState, live: bool) -> Element {
                 {
                     // Logging without Enter needs a QSO to log.
                     let logs = matches!(key, OpKey::TuAndLog | OpKey::LogOnly);
-                    let class = key_class(touch, pressed.contains(&key));
+                    let offered = dupe && key == OpKey::B4;
+                    let class = key_class(touch || offered, pressed.contains(&key), offered);
+                    let says = if key == OpKey::NrQuery { query } else { label };
                     rsx! {
                         button {
                             id: control_id("btn", label),
@@ -517,7 +549,7 @@ fn KeyBar(qso: QsoState, live: bool) -> Element {
                             onmousedown: keep_focus,
                             onclick: move |_| from_button(ctx, || press_key(ctx, key)),
                             kbd { "{keyboard}" }
-                            "{label}"
+                            "{says}"
                         }
                     }
                 }
@@ -526,15 +558,21 @@ fn KeyBar(qso: QsoState, live: bool) -> Element {
     }
 }
 
-/// A key bar button's classes: kept from a finger unless `touch`, and lit
-/// when Enter would press it `next`.
-fn key_class(touch: bool, next: bool) -> &'static str {
-    match (touch, next) {
-        (true, false) => "btn btn-secondary btn-sm run-key",
-        (true, true) => "btn btn-secondary btn-sm run-key run-key-next",
-        (false, false) => "btn btn-secondary btn-sm run-key run-key-desk",
-        (false, true) => "btn btn-secondary btn-sm run-key run-key-desk run-key-next",
+/// A key bar button's classes: kept from a finger unless `touch`, lit when
+/// Enter would press it `next`, and B4 `offered` on a dupe, in the B4 tag's
+/// copper wash rather than lit, as Enter never sends it.
+fn key_class(touch: bool, next: bool, offered: bool) -> String {
+    let mut class = String::from("btn btn-secondary btn-sm run-key");
+    if !touch {
+        class.push_str(" run-key-desk");
     }
+    if next {
+        class.push_str(" run-key-next");
+    }
+    if offered {
+        class.push_str(" run-key-b4");
+    }
+    class
 }
 
 /// Enter, labelled with what it sends: read from the fields as typed. The
@@ -1087,6 +1125,8 @@ mod tests {
                 .to_string();
             assert_eq!(answer, format!("DL1ABC DE {call} {call} K"));
             assert!(ui.has("Exchange · RST NAME"));
+            // Nothing in the exchange is numbered: F12 asks AGN.
+            assert!(ui.has("<kbd>F12</kbd>AGN</button>"), "{}", ui.html());
             ui.type_into("field-call", &call);
             ui.press_enter("field-call");
             assert!(ui.run_until(60_000, |ui| enter(ui).1 == "? Again").await);
@@ -1347,6 +1387,74 @@ mod tests {
             ui.advance(61_000).await;
             assert_eq!(text_of(&ui, "run-rate"), "Rate 0/h");
             assert!(ui.has("01:0"));
+        });
+    }
+
+    /// In a pile-up the air counts every station sending at once.
+    #[test]
+    fn a_pile_up_counts_every_station_sending() {
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.contest.contest_style = cw_core::RunStyle::Pileup;
+            settings.band.stations_min = 3;
+            settings.band.stations_max = 3;
+            settings.band.filter_width_hz = cw_core::FILTER_WIDTH_MAX;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.advance(300).await;
+            assert_eq!(recorder.starts()[0].transcript.others.len(), 3);
+            assert!(
+                ui.run_until(8_000, |ui| ui.has("2 calling") || ui.has("3 calling"))
+                    .await,
+                "never more than one at once"
+            );
+        });
+    }
+
+    /// A call already logged clean is tagged with when it was, "B4 00:12",
+    /// and offers B4 apart from the keys Enter would press, which a finger
+    /// has then too; B4 sends it its call and `QSO B4`.
+    #[test]
+    fn a_call_logged_clean_shows_b4() {
+        run(|| async {
+            let (mut ui, recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            ui.press_enter("field-call");
+            ui.advance(8_000).await;
+            let exchange = recorder.starts().last().expect("sent").transcript.clone();
+            let serial = exchange.others[0]
+                .text
+                .split_whitespace()
+                .last()
+                .unwrap_or_default()
+                .to_string();
+            ui.type_into("field-exchange", &serial);
+            ui.press_enter("field-exchange");
+            ui.advance(8_000).await;
+            assert!(!ui.has("field-tag-b4"), "nothing typed is a dupe");
+            let b4 = ui.input_tag("btn-b4");
+            assert!(
+                b4.contains("run-key-desk") && !b4.contains("run-key-b4"),
+                "{b4}"
+            );
+            ui.type_into("field-call", &call);
+            let tag = text_of(&ui, "field-tag field-tag-b4");
+            assert!(tag.starts_with("B4 00:"), "{tag}");
+            let b4 = ui.input_tag("btn-b4");
+            assert!(
+                !b4.contains("run-key-desk") && b4.contains("run-key-b4"),
+                "{b4}"
+            );
+            assert!(!b4.contains("run-key-next"), "Enter does not send it");
+            ui.click("btn-b4");
+            let sent = recorder
+                .starts()
+                .last()
+                .expect("sent")
+                .transcript
+                .text
+                .clone();
+            assert_eq!(sent, format!("{call} QSO B4"));
         });
     }
 

@@ -1,19 +1,21 @@
 //! A run's keys on a keyboard (§4.5 of `docs/contest-mode.md`), as
 //! MorseRunner has them wherever a browser lets it: F1 calls CQ, F2 sends
-//! your exchange, F3 TU without logging, F5 their call, `;` (or Insert)
-//! their call and your exchange, F7 `?`; `.`, `,` or `+` send TU and log,
-//! and Enter held with Shift, Ctrl or Alt logs without sending. Esc or Alt+S
-//! stops sending, Alt+W wipes the fields, PgUp and PgDn move your speed,
-//! Alt+P pauses and carries on, Alt+E ends the run. Enter alone, and Space
-//! in the Call field, are the fields' own; Tab moves on as on any page. F11
-//! stays the app's fullscreen and `[` `]` the paddles.
+//! your exchange, F3 TU without logging, F4 your call, F5 their call, F6
+//! `QSO B4`, F7 `?`, F8 `NIL`, F12 `NR?` (`AGN` in Simple QSO, which has no
+//! number), `;` (or Insert) their call and your exchange; `.`, `,` or `+`
+//! send TU and log, and Enter held with Shift, Ctrl or Alt logs without
+//! sending. Esc or Alt+S stops sending, Alt+W wipes the fields, PgUp and
+//! PgDn move your speed, Alt+P pauses and carries on, Alt+E ends the run.
+//! Enter alone, and Space in the Call field, are the fields' own; Tab moves
+//! on as on any page. F11 stays the app's fullscreen and `[` `]` the
+//! paddles.
 //!
 //! While the run screen is up, a listener on the document hears these keys
 //! wherever the focus is, nowhere at all included, and keeps the browser
 //! from doing what it would with them: help on F1, find on F3, a reload on
-//! F5, caret browsing on F7, a scroll on PgUp, a menu on Alt, `.` typed into
-//! a field. In fullscreen it asks for Esc as well, which a browser otherwise
-//! keeps to leave fullscreen with.
+//! F5, caret browsing on F7, the developer tools on F12, a scroll on PgUp,
+//! a menu on Alt, `.` typed into a field. In fullscreen it asks for Esc as
+//! well, which a browser otherwise keeps to leave fullscreen with.
 
 use cw_core::{ContestPhase, OpKey, PauseWhy};
 use dioxus::prelude::*;
@@ -66,12 +68,16 @@ impl Known {
 const HELD_ENTER: &str = "Shift+Enter";
 
 /// Each key, and what it does.
-const KEYS: [(Known, RunAction); 18] = [
+const KEYS: [(Known, RunAction); 22] = [
     (Known::Alone("F1"), RunAction::Key(OpKey::Cq)),
     (Known::Alone("F2"), RunAction::Key(OpKey::Exchange)),
     (Known::Alone("F3"), RunAction::Key(OpKey::Tu)),
+    (Known::Alone("F4"), RunAction::Key(OpKey::MyCall)),
     (Known::Alone("F5"), RunAction::Key(OpKey::HisCall)),
+    (Known::Alone("F6"), RunAction::Key(OpKey::B4)),
     (Known::Alone("F7"), RunAction::Key(OpKey::Again)),
+    (Known::Alone("F8"), RunAction::Key(OpKey::Nil)),
+    (Known::Alone("F12"), RunAction::Key(OpKey::NrQuery)),
     (Known::Typed(";"), RunAction::Key(OpKey::HisCallAndExchange)),
     // Insert as well, as MorseRunner has it; `;` is the one the screen
     // names, as a screen reader keeps Insert for itself.
@@ -254,8 +260,12 @@ mod tests {
             ("F1", RunAction::Key(OpKey::Cq)),
             ("F2", RunAction::Key(OpKey::Exchange)),
             ("F3", RunAction::Key(OpKey::Tu)),
+            ("F4", RunAction::Key(OpKey::MyCall)),
             ("F5", RunAction::Key(OpKey::HisCall)),
+            ("F6", RunAction::Key(OpKey::B4)),
             ("F7", RunAction::Key(OpKey::Again)),
+            ("F8", RunAction::Key(OpKey::Nil)),
+            ("F12", RunAction::Key(OpKey::NrQuery)),
             (";", RunAction::Key(OpKey::HisCallAndExchange)),
             ("Insert", RunAction::Key(OpKey::HisCallAndExchange)),
             (".", RunAction::Key(OpKey::TuAndLog)),
@@ -283,10 +293,9 @@ mod tests {
             "Enter",
             "Space",
             "Tab",
-            "F4",
-            "F6",
-            "F8",
-            "F12",
+            "F9",
+            "F10",
+            "Shift+F4",
         ] {
             assert_eq!(action_for(name), None, "{name}");
         }
@@ -301,7 +310,7 @@ mod tests {
         let script = keys_script();
         assert!(
             script.contains(
-                r#"new Set(["F1", "F2", "F3", "F5", "F7", "Insert", "Escape", "PageUp", "PageDown"])"#
+                r#"new Set(["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F12", "Insert", "Escape", "PageUp", "PageDown"])"#
             ),
             "{script}"
         );
@@ -451,6 +460,37 @@ mod tests {
                 ui.with_app(|ctx| ctx.contest.peek().as_ref().map(|view| view.qsos)),
                 Some(3)
             );
+        });
+    }
+
+    /// F4 sends your call, F6 the call typed and `QSO B4`, F8 `NIL` and F12
+    /// `NR?`, each as MorseRunner sends it.
+    #[test]
+    fn your_call_b4_nil_and_nr_keys_send_their_messages() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-start-training");
+            ui.advance(8_000).await;
+            let sent = |recorder: &crate::audio::fake::Recorder| {
+                recorder
+                    .starts()
+                    .last()
+                    .map(|start| start.transcript.text.clone())
+                    .unwrap_or_default()
+            };
+            let call = recorder.starts()[0].transcript.others[0].text.clone();
+            for (key, message) in [
+                ("F4", "DL1ABC".to_string()),
+                ("F8", "NIL".to_string()),
+                ("F12", "NR?".to_string()),
+            ] {
+                ui.with_app(|ctx| pressed(ctx, key));
+                assert_eq!(sent(&recorder), message, "{key}");
+                ui.advance(8_000).await;
+            }
+            ui.type_into("field-call", &call);
+            ui.with_app(|ctx| pressed(ctx, "F6"));
+            assert_eq!(sent(&recorder), format!("{call} QSO B4"));
         });
     }
 

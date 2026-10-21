@@ -1,13 +1,14 @@
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSetMode, ContestKind, Fill, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL,
-    PracticeWindow, SEQUENCE_PRESETS, STARTER_WORDS, Sender, SequenceChoice, SettingsSection, Side,
-    TrainingSettings, WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window,
-    parse_callsign, tier_examples, unlocked_practice_count,
+    PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender, SequenceChoice,
+    SettingsSection, Side, TrainingSettings, WORD_LIST_MAX, WordList, compute_char_pool,
+    current_practice_window, parse_callsign, tier_examples, unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
+use crate::ui::home::range_label;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id,
 };
@@ -70,6 +71,31 @@ pub(crate) fn mode_label(mode: CharSetMode) -> &'static str {
     }
 }
 
+/// The run styles, in the order the card offers them.
+const RUN_STYLES: [(RunStyle, &str); 2] = [
+    (RunStyle::Single, "Single caller"),
+    (RunStyle::Pileup, "Pile-up"),
+];
+
+/// How many call at once in a pile-up of `settings`, from the Band card's
+/// stations range, and the noun that counts them: "1–3" callers, "1" caller.
+pub(crate) fn pileup_count(settings: &TrainingSettings) -> (String, &'static str) {
+    let band = &settings.band;
+    let count = range_label(f64::from(band.stations_min), f64::from(band.stations_max));
+    let noun = if band.stations_max == 1 {
+        "caller"
+    } else {
+        "callers"
+    };
+    (count, noun)
+}
+
+/// The same in words: "1–3 callers", "3 callers", "1 caller".
+pub(crate) fn pileup_callers(settings: &TrainingSettings) -> String {
+    let (count, noun) = pileup_count(settings);
+    format!("{count} {noun}")
+}
+
 /// The practice windows, and how many characters each needs unlocked before
 /// it is offered.
 const PRACTICE_WINDOWS: [(PracticeWindow, &str, usize); 3] = [
@@ -103,6 +129,9 @@ fn name_or_stand_in(my_name: &str) -> &str {
 #[derive(Clone, PartialEq)]
 struct ContestCard {
     kind: ContestKind,
+    /// One caller at a time, or a pile-up, and how many call in one.
+    style: RunStyle,
+    callers: String,
     /// What you send: `5NN + serial`.
     sends: String,
     /// What you copy, as the log heads it: `NR`.
@@ -118,9 +147,13 @@ impl ContestCard {
         let contest = &settings.contest;
         let kind = contest.contest_kind;
         let side = Side::of_call(&contest.my_call);
+        let style = contest.contest_style;
+        let callers = pileup_callers(settings);
         let Some(rules) = kind.rules() else {
             return Self {
                 kind,
+                style,
+                callers,
                 sends: String::new(),
                 copies: String::new(),
                 qso: Vec::new(),
@@ -133,6 +166,8 @@ impl ContestCard {
             .collect();
         Self {
             kind,
+            style,
+            callers,
             sends: rules.sends(),
             copies: copies.join("\u{a0}"),
             qso: rules.example_qso(
@@ -309,6 +344,9 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
             }
+            if let Some(contest) = c.contest.clone() {
+                RunStylePicker { settings, style: contest.style, callers: contest.callers }
+            }
             if c.mode == CharSetMode::Mixed {
                 NumberField {
                     label: "Share of letters",
@@ -410,6 +448,31 @@ fn ContestBody(settings: Signal<TrainingSettings>, contest: ContestCard) -> Elem
                 }
             }
         }
+    }
+}
+
+/// How a run goes: one station at a time, or a pile-up of as many as the
+/// Band card's stations range draws, which the line under it names.
+#[component]
+fn RunStylePicker(settings: Signal<TrainingSettings>, style: RunStyle, callers: String) -> Element {
+    let line = match style {
+        RunStyle::Single => "One station calls at a time".to_string(),
+        RunStyle::Pileup => format!("{callers} · set on the Band card"),
+    };
+    rsx! {
+        div { class: "eyebrow", "Run style" }
+        div { class: "mode-pills",
+            for (each, label) in RUN_STYLES {
+                Seg {
+                    label,
+                    id: control_id("style", label),
+                    pill: true,
+                    active: style == each,
+                    onclick: move |_| settings.write().set_contest_style(each),
+                }
+            }
+        }
+        p { id: "run-style-line", class: "muted", style: "margin: 0;", "{line}" }
     }
 }
 

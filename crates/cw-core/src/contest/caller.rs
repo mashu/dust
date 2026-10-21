@@ -7,16 +7,17 @@
 //! of MorseRunner's states; what it sends next follows from the state. Which
 //! of your calls it takes for its own is [`match_call`].
 
-use super::CallerHabits;
 use super::data::{names::draw_name, reports::draw_report};
 use super::esm::MessagePart;
 use super::exchange::{Field, send_report, send_serial};
+use super::place::Placement;
 use super::rules::{ContestRules, Side};
 use super::serial::SerialModel;
+use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
 use crate::callsign::{GeneratedCall, parse_callsign};
 use crate::rng::{Rng, SplitMix64};
-use crate::settings::{SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, TrainingSettings};
+use crate::settings::TrainingSettings;
 use crate::timing::{StationVoice, resolve_station};
 
 /// Where a caller is in its QSO with you, as MorseRunner's operators are
@@ -90,6 +91,53 @@ pub(super) fn match_call(sent: &str, call: &str) -> CallMatch {
     }
 }
 
+/// How `sent` is heard by the station signing `call`: as [`match_call`]
+/// has it, but for a piece of its call that is no call itself, which asks
+/// for the rest as a partial does, with nothing to put right.
+fn heard_as(sent: &str, call: &str) -> CallMatch {
+    match match_call(sent, call) {
+        CallMatch::Close if parse_callsign(sent).is_none() => CallMatch::Partial {
+            fits: sent.chars().count(),
+        },
+        found => found,
+    }
+}
+
+/// How well a call you sent fits a station's, to rank the stations on the
+/// frequency by: its own call first, then a slip in it, then a partial.
+/// Within a kind, the station you work comes first, so a partial or a slip
+/// that fits it goes to it, as you would mean it; then the fewer edits for
+/// the call's length the better, or the larger the share of its call the
+/// partial's characters cover. Only the best answer (§4.7 of the design).
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub(super) struct Likeness {
+    /// 2 for its own call, 1 for a slip, 0 for a partial.
+    tier: u8,
+    /// Whether you are working it.
+    worked: bool,
+    /// How much of its call the match covers, from 0 to 1.
+    share: f64,
+}
+
+impl Likeness {
+    /// How well `sent`, heard as `found`, fits `call`, of a station you are
+    /// working or not; none when it is not its call at all.
+    fn of(found: CallMatch, sent: &str, call: &str, worked: bool) -> Option<Self> {
+        let length = call.chars().count().max(1) as f64;
+        let (tier, share) = match found {
+            CallMatch::Exact => (2, 1.0),
+            CallMatch::Close => (1, 1.0 - edit_distance(sent, call) as f64 / length),
+            CallMatch::Partial { fits } => (0, fits as f64 / length),
+            CallMatch::No => return None,
+        };
+        Some(Self {
+            tier,
+            worked,
+            share,
+        })
+    }
+}
+
 /// How many characters of the partial `pattern` fit `call` beyond its
 /// `?`s, if it fits anywhere in it. Matched anywhere, a trailing "any tail"
 /// fits wherever the rest does, so it adds nothing to the search.
@@ -140,6 +188,9 @@ pub(super) struct Reaction {
     /// It took a call you sent for its own, exactly or close, or answered
     /// your partial or a piece of its call: you are working it now.
     pub(super) matched: bool,
+    /// It took a call you sent for its own, exactly or close: it heard its
+    /// call from you, not only a question about it.
+    pub(super) called: bool,
     /// It took your exchange as sent to it, while you work it.
     pub(super) took_exchange: bool,
 }
@@ -166,9 +217,17 @@ const REPLY_DELAY_SEC: (f64, f64) = (0.1, 0.6);
 const TIMEOUT_BASE_SEC: f64 = 6.0;
 const TIMEOUT_SPREAD: f64 = 0.5;
 
-/// How far either side of the receiver's centre a single caller sits
-/// (`DxStn.pas:102-105`).
-const SINGLE_PITCH_SPREAD_HZ: f64 = 50.0;
+/// How many pile-up callers send their call twice, as MorseRunner's do
+/// (`DxOper.pas:500-502`). A single caller never does.
+const CALLS_TWICE: f64 = 0.1;
+
+/// How often a pile-up caller misses your exchange and asks for it again,
+/// as MorseRunner's callers take it nine times in ten (`DxOper.pas:762-770`).
+const MISSES_EXCHANGE: f64 = 0.1;
+
+/// How far into its fading a caller starts, at most, in seconds: each is on
+/// a path of its own, so no two fade together.
+const FADE_OFFSET_MAX_SEC: f64 = 3_600.0;
 
 /// How often the first exchange a caller sends starts with the first of
 /// the contest's words for it rather than the second: `TU 5NN 214` rather
@@ -195,8 +254,8 @@ pub(super) struct Caller {
     patience: u32,
     /// It heard you work someone else since it last called, so a bare `?`
     /// is not for it, as MorseRunner's `osNeedPrevEnd` (`DxOper.pas:744-748,
-    /// 793`). Your CQ or TU, its own call, its next call, or a `?` with the
-    /// Call field empty clears it.
+    /// 793`). Your CQ, TU, B4 or NIL, its own call, its next call, or a `?`
+    /// with the Call field empty clears it.
     other_qso: bool,
     /// It answered your partial while it called, so your exchange now is
     /// for it, as MorseRunner's near match makes it `osNeedCallNr`
@@ -205,6 +264,9 @@ pub(super) struct Caller {
     /// Its timeouts in a row with nothing from you, while you work it.
     silent: u32,
     serial: SerialModel,
+    /// The serial its last exchange sent, and the run time it was fixed
+    /// at: what a dupe's next serial follows from.
+    serial_sent: Option<(u32, u64)>,
     /// Its exchange as it sends it, fixed the first time it is needed.
     exchange: Option<Vec<(Field, String)>>,
     /// How many times it has sent its exchange.
@@ -216,32 +278,41 @@ pub(super) struct Caller {
     signoff: Option<&'static str>,
     /// Your TU closed its QSO, and it signs off next.
     signs_off: bool,
+    /// It calls in a pile-up, where a caller now and then misses your
+    /// exchange.
+    pileup: bool,
+    /// It sends its call twice when it calls.
+    twice: bool,
+    /// Where on the band's fading it is at the start of the run, in
+    /// seconds: its own path, faded apart from every other caller's.
+    pub(super) fade_from_sec: f64,
     rng: SplitMix64,
 }
 
 impl Caller {
-    /// A station calling with `call`, its voice and habits drawn from `rng`,
-    /// its speed from `settings` (the run's, shifted by − / +).
+    /// A station calling with `call` in a run of `style`, where `placed`
+    /// puts it, its voice and habits drawn from `rng`, its speed from
+    /// `settings` (the run's, shifted by − / +).
     pub(super) fn arrive(
         call: GeneratedCall,
         settings: &TrainingSettings,
         rules: &ContestRules,
         run_minutes: u32,
+        style: RunStyle,
+        placed: Placement,
         mut rng: SplitMix64,
     ) -> Self {
         let mut voice = resolve_station(settings, &mut rng);
-        let centre = settings.side_tone_center();
-        voice.tone_hz = rng
-            .pick_in_range(
-                centre - SINGLE_PITCH_SPREAD_HZ,
-                centre + SINGLE_PITCH_SPREAD_HZ,
-            )
-            .clamp(SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ);
+        voice.tone_hz = placed.tone_hz;
+        voice.volume = placed.volume;
         let skill = rng.usize_in(1, 3) as u32;
         let patience = draw_patience(&mut rng);
         // A contest whose callers send no serial never reads this one.
         let fit = rules.serials.unwrap_or(super::WPX_SERIALS);
         let serial = SerialModel::draw(fit, run_minutes, &mut rng);
+        let pileup = style == RunStyle::Pileup;
+        let twice = pileup && rng.f64() < CALLS_TWICE;
+        let fade_from_sec = rng.pick_in_range(0.0, FADE_OFFSET_MAX_SEC);
         Self {
             call,
             voice,
@@ -253,18 +324,89 @@ impl Caller {
             answered_partial: false,
             silent: 0,
             serial,
+            serial_sent: None,
             exchange: None,
             exchanges_sent: 0,
             tu_calls: rules.tu_calls,
             signoff: rules.signoff,
             signs_off: false,
+            pileup,
+            twice,
+            fade_from_sec,
             rng,
         }
     }
 
+    /// A station worked before calls again at `run_ms`, a dupe, at
+    /// `tone_hz`: the same operator, with fresh patience and a QSO to start.
+    /// Its exchange is the one it sent before, but for its serial, which is
+    /// the next in its log, and later the longer since (§11.6 of the
+    /// design).
+    pub(super) fn call_again(&mut self, tone_hz: f64, run_ms: u64) {
+        self.voice.tone_hz = tone_hz;
+        self.state = CallerState::NeedQso;
+        self.deadline = None;
+        self.patience = draw_patience(&mut self.rng);
+        self.other_qso = false;
+        self.answered_partial = false;
+        self.silent = 0;
+        self.exchanges_sent = 0;
+        self.signs_off = false;
+        let Some((before, at)) = self.serial_sent else {
+            return;
+        };
+        let serial = self
+            .serial
+            .after(before, run_ms.saturating_sub(at), &mut self.rng);
+        self.serial_sent = Some((serial, run_ms));
+        let fields = self.exchange.iter_mut().flatten();
+        for (_, token) in fields.filter(|(field, _)| *field == Field::Nr) {
+            *token = send_serial(serial, CallerHabits::Easy, &mut self.rng);
+        }
+    }
+
+    /// How well `sent` fits its call, to rank it among the stations on the
+    /// frequency.
+    pub(super) fn likeness(&self, sent: &str) -> Option<Likeness> {
+        let call = &self.call.text;
+        Likeness::of(heard_as(sent, call), sent, call, self.state.worked())
+    }
+
+    /// In a pile-up, whether it heard you start a QSO with someone else and
+    /// waits, silent, for it to end, as MorseRunner's `osNeedPrevEnd` never
+    /// sends (`DxOper.pas:227-228`): no timeout, and no try spent, until your
+    /// CQ, TU, B4 or NIL, its own call, or a `?` with the Call field empty.
+    /// A single caller calls again on its timeout, kinder to a learner.
+    pub(super) fn waits(&self) -> bool {
+        self.pileup && self.state == CallerState::NeedQso && self.other_qso
+    }
+
+    /// In a pile-up, it was still sending when you keyed over it, heard
+    /// only your message's tail, and finished first: it sends again a
+    /// moment after you, as MorseRunner's callers do on hearing garbage
+    /// (`DxStn.pas:249-253`). A caller spends a try on it; the station you
+    /// work stays, as you are keying. Whether it still sends.
+    pub(super) fn keyed_over(&mut self) -> bool {
+        match self.state {
+            CallerState::NeedQso => self.spend_try(),
+            state if state.worked() => self.silent = 0,
+            _ => {}
+        }
+        self.state.active()
+    }
+
+    /// In a pile-up, whether it misses the exchange it is waiting for, and
+    /// asks for it again.
+    fn misses_exchange(&mut self) -> bool {
+        self.pileup && self.rng.f64() < MISSES_EXCHANGE
+    }
+
     /// Hear one of your messages, whole and in order, and settle what it
-    /// does next.
-    pub(super) fn hear(&mut self, message: &[MessagePart]) -> Reaction {
+    /// does next. `best` holds, for each part of it, how well the call in
+    /// it fits the station it fits best among those on the frequency: a
+    /// call that fits another better is someone else's, so only the best
+    /// match answers a partial. Nothing there, nobody else competes.
+    pub(super) fn hear(&mut self, message: &[MessagePart], best: &[Option<Likeness>]) -> Reaction {
         use CallerState::{Done, Gone, NeedCall, NeedCallNr, NeedEnd, NeedNr, NeedQso};
         if self.state.worked() {
             // It stays while you keep keying.
@@ -276,7 +418,7 @@ impl Caller {
         // Whether the last call in the message was its own: an exchange or
         // a `?` after someone else's call is not for it.
         let mut addressed = None;
-        for part in message {
+        for (at, part) in message.iter().enumerate() {
             let part = match part {
                 // A call with no character in it, `?` or `??`, asks as the
                 // `?` of F7 does: nobody's call.
@@ -304,7 +446,13 @@ impl Caller {
                     self.other_qso = false;
                     self.answered_partial = false;
                     match self.state {
-                        NeedQso if self.tu_calls => replies = Some(true),
+                        // It calls again with fresh patience, as MorseRunner's
+                        // TU puts a caller back to calling (`DxOper.pas:776-777`):
+                        // passed over QSO after QSO, it stays while you run.
+                        NeedQso if self.tu_calls => {
+                            self.patience = draw_patience(&mut self.rng);
+                            replies = Some(true);
+                        }
                         state if state.worked() => {
                             self.state = Done;
                             self.signs_off = self.signoff.is_some();
@@ -313,17 +461,21 @@ impl Caller {
                     }
                 }
                 MessagePart::HisCall(sent) if self.state.active() => {
-                    let found = match match_call(sent, &self.call.text) {
-                        // A piece of its call that is no call itself asks
-                        // for the rest, as a partial does: nothing to put
-                        // right.
-                        CallMatch::Close if parse_callsign(sent).is_none() => CallMatch::Partial {
-                            fits: sent.chars().count(),
-                        },
-                        found => found,
-                    };
+                    // A piece of its call that is no call itself asks for
+                    // the rest, as a partial does: nothing to put right.
+                    let heard = heard_as(sent, &self.call.text);
+                    // A call that fits another station better is that
+                    // station's.
+                    let own = Likeness::of(heard, sent, &self.call.text, self.state.worked());
+                    let beaten = best
+                        .get(at)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|best| own.is_none_or(|own| own < best));
+                    let found = if beaten { CallMatch::No } else { heard };
                     addressed = Some(found != CallMatch::No);
                     reaction.matched |= found != CallMatch::No;
+                    reaction.called |= matches!(found, CallMatch::Exact | CallMatch::Close);
                     self.other_qso = found == CallMatch::No;
                     if found == CallMatch::No {
                         self.answered_partial = false;
@@ -342,8 +494,8 @@ impl Caller {
                             replies = Some(true);
                             reaction.asked = true;
                         }
-                        // The single caller answers any partial: it is the
-                        // only one there to ask.
+                        // A partial it fits best answers with its call: the
+                        // single caller any it fits, as the only one there.
                         (CallMatch::Partial { .. }, state) => {
                             replies = Some(true);
                             reaction.asked = true;
@@ -353,13 +505,43 @@ impl Caller {
                         (CallMatch::Exact, NeedCall) => self.state = NeedEnd,
                         (CallMatch::Close, NeedQso | NeedNr) => self.state = NeedCallNr,
                         (CallMatch::Close, NeedEnd) => self.state = NeedCall,
+                        // In a pile-up, someone else's call ends the QSO for
+                        // the station you worked, as MorseRunner's
+                        // (`DxOper.pas:744-748`): one that has sent its
+                        // exchange takes the QSO as complete; one still
+                        // waiting goes back to calling, and waits for that
+                        // other QSO to end.
+                        (CallMatch::No, NeedEnd) if self.pileup => {
+                            self.state = Done;
+                            replies = Some(false);
+                        }
+                        (CallMatch::No, NeedNr | NeedCall | NeedCallNr) if self.pileup => {
+                            self.state = NeedQso;
+                            replies = Some(false);
+                        }
                         // Someone else's call: it waits, and calls again
-                        // when its timeout runs out.
+                        // when its timeout runs out, or in a pile-up when
+                        // that QSO ends.
                         (CallMatch::No, _) => replies = Some(false),
                         _ => {}
                     }
                 }
                 MessagePart::Exchange if addressed != Some(false) => {
+                    let waits = match self.state {
+                        NeedNr | NeedCallNr => true,
+                        NeedQso => addressed == Some(true) || self.answered_partial,
+                        _ => false,
+                    };
+                    // In a pile-up it now and then misses your exchange, and
+                    // asks for it again; one that answered your partial puts
+                    // its call right meanwhile, as it would for a slip.
+                    if waits && self.misses_exchange() {
+                        if self.state == NeedQso {
+                            self.state = NeedCallNr;
+                        }
+                        replies = Some(true);
+                        continue;
+                    }
                     reaction.took_exchange |= self.state.worked();
                     match self.state {
                         NeedNr => self.state = NeedEnd,
@@ -389,8 +571,33 @@ impl Caller {
                     replies = Some(true);
                     reaction.asked = true;
                 }
-                MessagePart::Nil if self.state == NeedQso => self.spend_try(),
-                MessagePart::B4 | MessagePart::Nil if self.state.worked() => self.state = Gone,
+                // Your call alone: a caller still calling, and not waiting
+                // on a QSO it heard you start, calls you again, as after a
+                // CQ.
+                MessagePart::MyCall if self.state == NeedQso && !self.other_qso => {
+                    replies = Some(true);
+                }
+                // The QSO you were in is over: a caller still calling, the
+                // rest of the pile-up among them, calls again, as
+                // MorseRunner's B4 and NIL put it back to calling
+                // (`DxOper.pas:716-724, 751-753`). B4 gives it fresh
+                // patience, then each costs the try any answer does.
+                MessagePart::B4 | MessagePart::Nil if self.state == NeedQso => {
+                    self.other_qso = false;
+                    self.answered_partial = false;
+                    if *part == MessagePart::B4 {
+                        self.patience = draw_patience(&mut self.rng);
+                    }
+                    replies = Some(true);
+                }
+                // The station you work leaves: not one a B4 after someone
+                // else's call was not for, nor one that heard you work
+                // someone else.
+                MessagePart::B4 | MessagePart::Nil
+                    if self.state.worked() && addressed != Some(false) && !self.other_qso =>
+                {
+                    self.state = Gone;
+                }
                 _ => {}
             }
         }
@@ -462,7 +669,7 @@ impl Caller {
     ) -> Option<(String, Says)> {
         let call = self.call.text.clone();
         let said = match self.state {
-            CallerState::NeedQso => (rules.answer_text(my_call, &call), Says::Call),
+            CallerState::NeedQso => (rules.answer_text(my_call, &call, self.twice), Says::Call),
             CallerState::NeedNr => {
                 let query = if self.rng.f64() < FIRST_QUERY {
                     rules.their_query[0]
@@ -522,7 +729,9 @@ impl Caller {
                 .filter_map(|field| {
                     let token = match field {
                         Field::Nr => {
-                            send_serial(self.serial.serial_at(run_ms), habits, &mut self.rng)
+                            let serial = self.serial.serial_at(run_ms);
+                            self.serial_sent = Some((serial, run_ms));
+                            send_serial(serial, habits, &mut self.rng)
                         }
                         Field::Rst => {
                             send_report(draw_report(&mut self.rng), habits, &mut self.rng)
@@ -597,7 +806,23 @@ mod tests {
         let mut call = generate_call(3, CallSpec::default(), &mut rng);
         call.text = "K5XYZ".to_string();
         let settings = TrainingSettings::default().clamp();
-        Caller::arrive(call, &settings, rules(), 10, rng.fork(1))
+        Caller::arrive(
+            call,
+            &settings,
+            rules(),
+            10,
+            RunStyle::Single,
+            centre(),
+            rng.fork(1),
+        )
+    }
+
+    /// A place at the centre, at full strength.
+    fn centre() -> Placement {
+        Placement {
+            tone_hz: 500.0,
+            volume: 1.0,
+        }
     }
 
     fn call(text: &str) -> MessagePart {
@@ -693,13 +918,13 @@ mod tests {
     fn a_caller_answers_its_call_and_your_exchange_then_your_tu() {
         let mut caller = caller(1);
         assert_eq!(caller.state, CallerState::NeedQso);
-        let reaction = caller.hear(&[Cq]);
+        let reaction = caller.hear(&[Cq], &[]);
         assert!(reaction.replies && !reaction.asked && !reaction.matched);
         assert_eq!(
             caller.reply(rules(), Side::Dx, "DL1ABC", 0).map(|r| r.1),
             Some(Says::Call)
         );
-        let reaction = caller.hear(&[call("K5XYZ"), Exchange]);
+        let reaction = caller.hear(&[call("K5XYZ"), Exchange], &[]);
         assert_eq!(caller.state, CallerState::NeedEnd);
         assert!(reaction.replies && reaction.matched);
         let (text, says) = caller
@@ -709,13 +934,13 @@ mod tests {
         let serial = caller.exchange(rules(), Side::Dx, 0)[0].1.clone();
         assert!(text == format!("TU 5NN {serial}") || text == format!("R 5NN {serial}"));
         // Asked again, it sends the same serial, alone.
-        let reaction = caller.hear(&[Again]);
+        let reaction = caller.hear(&[Again], &[]);
         assert!(reaction.replies && reaction.asked);
         let again = caller
             .reply(rules(), Side::Dx, "DL1ABC", 120_000)
             .expect("a reply");
         assert_eq!(again.0, format!("5NN {serial}"));
-        assert!(!caller.hear(&[Tu]).replies);
+        assert!(!caller.hear(&[Tu], &[]).replies);
         assert_eq!(caller.state, CallerState::Done);
     }
 
@@ -732,14 +957,22 @@ mod tests {
         generated.text = "K5XYZ".to_string();
         generated.country = "K";
         let settings = TrainingSettings::default().clamp();
-        let mut caller = Caller::arrive(generated, &settings, rules, 10, rng.fork(1));
-        assert!(!caller.hear(&[Tu]).replies, "a TU is no CQ here");
-        assert!(caller.hear(&[Cq]).replies);
+        let mut caller = Caller::arrive(
+            generated,
+            &settings,
+            rules,
+            10,
+            RunStyle::Single,
+            centre(),
+            rng.fork(1),
+        );
+        assert!(!caller.hear(&[Tu], &[]).replies, "a TU is no CQ here");
+        assert!(caller.hear(&[Cq], &[]).replies);
         assert_eq!(
             caller.reply(rules, Side::Dx, "DL1ABC", 0),
             Some(("DL1ABC DE K5XYZ K5XYZ K".to_string(), Says::Call))
         );
-        caller.hear(&[call("K5XYZ"), Exchange]);
+        caller.hear(&[call("K5XYZ"), Exchange], &[]);
         let (text, says) = caller.reply(rules, Side::Dx, "DL1ABC", 0).expect("a reply");
         assert_eq!(says, Says::Exchange);
         let fields = caller.exchange(rules, Side::Dx, 0).to_vec();
@@ -751,13 +984,13 @@ mod tests {
             format!("R TNX UR {} {} NAME {} {} BK", rst.1, rst.1, name.1, name.1)
         );
         // Sent again, the exchange goes without its first words.
-        caller.hear(&[Again]);
+        caller.hear(&[Again], &[]);
         let again = caller.reply(rules, Side::Dx, "DL1ABC", 0).expect("a reply");
         assert_eq!(
             again.0,
             format!("UR {} {} NAME {} {} BK", rst.1, rst.1, name.1, name.1)
         );
-        let reaction = caller.hear(&[Tu]);
+        let reaction = caller.hear(&[Tu], &[]);
         assert!(reaction.replies && !reaction.asked);
         assert_eq!(caller.state, CallerState::Done);
         assert_eq!(
@@ -765,16 +998,24 @@ mod tests {
             Some(("73 EE".to_string(), Says::Signoff))
         );
         assert_eq!(caller.reply(rules, Side::Dx, "DL1ABC", 0), None, "once");
-        assert!(!caller.hear(&[Tu]).replies);
+        assert!(!caller.hear(&[Tu], &[]).replies);
         // Its call alone, it asks for your exchange, and never for a serial
         // the QSO has none of.
         for seed in 0..40 {
             let mut rng = SplitMix64::new(seed);
             let mut generated = generate_call(3, CallSpec::default(), &mut rng);
             generated.text = "K5XYZ".to_string();
-            let mut caller = Caller::arrive(generated, &settings, rules, 10, rng.fork(1));
-            caller.hear(&[Cq]);
-            assert!(caller.hear(&[call("K5XYZ")]).replies);
+            let mut caller = Caller::arrive(
+                generated,
+                &settings,
+                rules,
+                10,
+                RunStyle::Single,
+                centre(),
+                rng.fork(1),
+            );
+            caller.hear(&[Cq], &[]);
+            assert!(caller.hear(&[call("K5XYZ")], &[]).replies);
             assert_eq!(caller.state, CallerState::NeedNr);
             assert_eq!(
                 caller.reply(rules, Side::Dx, "DL1ABC", 0),
@@ -797,7 +1038,7 @@ mod tests {
                 vec![call("K5?")],
                 vec![Tu],
             ] {
-                assert!(!caller.hear(&message).replies, "{state:?} {message:?}");
+                assert!(!caller.hear(&message, &[]).replies, "{state:?} {message:?}");
                 assert_eq!(caller.state, state);
             }
             assert!(caller.reply(rules(), Side::Dx, "DL1ABC", 0).is_none());
@@ -810,18 +1051,18 @@ mod tests {
     #[test]
     fn a_cq_fails_the_worked_qso_until_its_exchange_is_out() {
         let mut waiting = caller(3);
-        waiting.hear(&[call("K5XYZ")]);
+        waiting.hear(&[call("K5XYZ")], &[]);
         assert_eq!(waiting.state, CallerState::NeedNr);
-        waiting.hear(&[Cq]);
+        waiting.hear(&[Cq], &[]);
         assert_eq!(waiting.state, CallerState::Gone);
         let mut corrected = caller(3);
-        corrected.hear(&[call("K5XYW"), Exchange]);
+        corrected.hear(&[call("K5XYW"), Exchange], &[]);
         assert_eq!(corrected.state, CallerState::NeedCall);
-        corrected.hear(&[Cq]);
+        corrected.hear(&[Cq], &[]);
         assert_eq!(corrected.state, CallerState::Gone);
         let mut complete = caller(3);
-        complete.hear(&[call("K5XYZ"), Exchange]);
-        complete.hear(&[Cq]);
+        complete.hear(&[call("K5XYZ"), Exchange], &[]);
+        complete.hear(&[Cq], &[]);
         assert_eq!(complete.state, CallerState::Done);
     }
 
@@ -829,20 +1070,20 @@ mod tests {
     #[test]
     fn a_close_call_is_corrected() {
         let mut caller = caller(4);
-        let reaction = caller.hear(&[call("K5XYW"), Exchange]);
+        let reaction = caller.hear(&[call("K5XYW"), Exchange], &[]);
         assert!(reaction.replies && reaction.matched && !reaction.asked);
         let (text, says) = caller
             .reply(rules(), Side::Dx, "DL1ABC", 0)
             .expect("a reply");
         assert_eq!(says, Says::Correction);
         assert!(text == "DE K5XYZ" || text == "K5XYZ K5XYZ", "{text}");
-        caller.hear(&[call("K5XYZ"), Tu]);
+        caller.hear(&[call("K5XYZ"), Tu], &[]);
         assert_eq!(caller.state, CallerState::Done);
         // Close before your exchange, it waits for both.
         let mut early = self::caller(4);
-        early.hear(&[call("K5XY")]);
+        early.hear(&[call("K5XY")], &[]);
         assert_eq!(early.state, CallerState::NeedCallNr);
-        early.hear(&[call("K5XYZ"), Exchange]);
+        early.hear(&[call("K5XYZ"), Exchange], &[]);
         assert_eq!(early.state, CallerState::NeedEnd);
     }
 
@@ -850,22 +1091,22 @@ mod tests {
     #[test]
     fn another_call_silences_a_caller_until_its_timeout() {
         let mut caller = caller(5);
-        let reaction = caller.hear(&[call("DL1ABC"), Exchange]);
+        let reaction = caller.hear(&[call("DL1ABC"), Exchange], &[]);
         assert_eq!(reaction, Reaction::default());
         assert_eq!(caller.state, CallerState::NeedQso);
         assert!(caller.time_out(), "it calls again");
         // Your exchange alone, to nobody it knows of: silent too.
-        assert!(!caller.hear(&[Exchange]).replies);
+        assert!(!caller.hear(&[Exchange], &[]).replies);
     }
 
     /// A partial or `?` brings its call again, and you asked for that.
     #[test]
     fn a_partial_or_a_question_brings_the_call_again() {
         let mut caller = caller(6);
-        let reaction = caller.hear(&[call("K5?")]);
+        let reaction = caller.hear(&[call("K5?")], &[]);
         assert!(reaction.replies && reaction.asked && reaction.matched);
         assert_eq!(caller.state, CallerState::NeedQso);
-        let reaction = caller.hear(&[Again]);
+        let reaction = caller.hear(&[Again], &[]);
         assert!(reaction.replies && reaction.asked && !reaction.matched);
     }
 
@@ -887,9 +1128,9 @@ mod tests {
             ),
         ] {
             let mut caller = caller(9);
-            caller.hear(&message);
+            caller.hear(&message, &[]);
             assert_eq!(caller.state, before);
-            let reaction = caller.hear(&[call("K5X?")]);
+            let reaction = caller.hear(&[call("K5X?")], &[]);
             assert!(reaction.replies && reaction.asked && reaction.matched);
             assert_eq!(caller.state, after);
             let (text, says) = caller
@@ -906,24 +1147,27 @@ mod tests {
     #[test]
     fn a_question_after_someone_elses_call_is_not_for_it() {
         let mut caller = caller(1);
-        assert!(!caller.hear(&[call("W1AW"), Again]).replies);
-        assert!(!caller.hear(&[Again]).replies, "it heard you work W1AW");
+        assert!(!caller.hear(&[call("W1AW"), Again], &[]).replies);
+        assert!(
+            !caller.hear(&[Again], &[]).replies,
+            "it heard you work W1AW"
+        );
         let mut other = self::caller(2);
-        other.hear(&[call("W1AW"), Exchange]);
-        assert!(!other.hear(&[Again]).replies);
+        other.hear(&[call("W1AW"), Exchange], &[]);
+        assert!(!other.hear(&[Again], &[]).replies);
         assert!(other.time_out(), "it calls again");
-        assert!(other.hear(&[Again]).replies);
+        assert!(other.hear(&[Again], &[]).replies);
         // After your CQ, a `?` is for it again.
         let mut cq = self::caller(3);
-        cq.hear(&[call("W1AW")]);
-        cq.hear(&[Cq]);
-        assert!(cq.hear(&[Again]).replies);
+        cq.hear(&[call("W1AW")], &[]);
+        cq.hear(&[Cq], &[]);
+        assert!(cq.hear(&[Again], &[]).replies);
         // The station you work answers a `?`, but not one after another
         // call.
         let mut worked = self::caller(4);
-        worked.hear(&[call("K5XYZ"), Exchange]);
-        assert!(!worked.hear(&[call("W1AW"), Again]).replies);
-        assert!(worked.hear(&[Again]).replies);
+        worked.hear(&[call("K5XYZ"), Exchange], &[]);
+        assert!(!worked.hear(&[call("W1AW"), Again], &[]).replies);
+        assert!(worked.hear(&[Again], &[]).replies);
     }
 
     /// Each message a caller still calling answers costs it a try, as each
@@ -933,18 +1177,18 @@ mod tests {
     fn each_message_a_caller_answers_costs_a_try() {
         let mut caller = caller(3);
         let tries = caller.patience;
-        assert!(caller.hear(&[Cq]).replies);
-        assert!(caller.hear(&[Again]).replies);
+        assert!(caller.hear(&[Cq], &[]).replies);
+        assert!(caller.hear(&[Again], &[]).replies);
         assert_eq!(caller.patience, tries - 2);
         let mut answered = 2;
-        while caller.hear(&[Cq]).replies {
+        while caller.hear(&[Cq], &[]).replies {
             answered += 1;
         }
         assert_eq!(answered, tries - 1);
         assert_eq!(caller.state, CallerState::Gone);
         // A message it does not answer costs nothing.
         let mut silent = self::caller(3);
-        silent.hear(&[call("W1AW"), Exchange]);
+        silent.hear(&[call("W1AW"), Exchange], &[]);
         assert_eq!(silent.patience, tries);
     }
 
@@ -965,12 +1209,12 @@ mod tests {
     #[test]
     fn a_worked_station_leaves_after_three_silent_timeouts() {
         let mut caller = caller(8);
-        caller.hear(&[call("K5XYZ"), Exchange]);
+        caller.hear(&[call("K5XYZ"), Exchange], &[]);
         // Keying in between keeps it, however long it goes on.
         for _ in 0..20 {
             assert!(caller.time_out());
             assert!(caller.time_out());
-            caller.hear(&[Again]);
+            caller.hear(&[Again], &[]);
         }
         assert!(caller.time_out());
         assert!(caller.time_out());
@@ -985,13 +1229,13 @@ mod tests {
     #[test]
     fn an_exchange_after_an_answered_partial_is_for_the_caller() {
         let mut together = caller(1);
-        let reaction = together.hear(&[call("K5?"), Exchange]);
+        let reaction = together.hear(&[call("K5?"), Exchange], &[]);
         assert!(reaction.replies && reaction.matched && reaction.took_exchange);
         assert_eq!(together.state, CallerState::NeedCall);
         assert!(!together.other_qso);
         let mut after = caller(1);
-        after.hear(&[call("K5?")]);
-        let reaction = after.hear(&[Exchange]);
+        after.hear(&[call("K5?")], &[]);
+        let reaction = after.hear(&[Exchange], &[]);
         assert!(reaction.replies && reaction.took_exchange);
         assert_eq!(after.state, CallerState::NeedCall);
         assert_eq!(
@@ -999,9 +1243,9 @@ mod tests {
             Some(Says::Correction)
         );
         let mut moved = caller(1);
-        moved.hear(&[call("K5?")]);
-        moved.hear(&[call("W1AW")]);
-        assert!(!moved.hear(&[Exchange]).replies);
+        moved.hear(&[call("K5?")], &[]);
+        moved.hear(&[call("W1AW")], &[]);
+        assert!(!moved.hear(&[Exchange], &[]).replies);
         assert_eq!(moved.state, CallerState::NeedQso);
     }
 
@@ -1012,7 +1256,7 @@ mod tests {
     fn a_piece_of_the_call_asks_and_a_bare_question_is_nobodys_call() {
         let mut piece = caller(2);
         let tries = piece.patience;
-        let reaction = piece.hear(&[call("K5")]);
+        let reaction = piece.hear(&[call("K5")], &[]);
         assert!(reaction.replies && reaction.asked && reaction.matched);
         assert_eq!(piece.state, CallerState::NeedQso);
         assert_eq!(piece.patience, tries - 1);
@@ -1022,15 +1266,291 @@ mod tests {
         );
         // A slip that is a whole call is still put right.
         let mut slip = caller(2);
-        slip.hear(&[call("K5XYW")]);
+        slip.hear(&[call("K5XYW")], &[]);
         assert_eq!(slip.state, CallerState::NeedCallNr);
         let mut bare = caller(2);
-        let reaction = bare.hear(&[call("?")]);
+        let reaction = bare.hear(&[call("?")], &[]);
         assert!(reaction.replies && reaction.asked && !reaction.matched);
         let mut worked = caller(2);
-        worked.hear(&[call("K5XYZ")]);
-        worked.hear(&[call("??")]);
+        worked.hear(&[call("K5XYZ")], &[]);
+        worked.hear(&[call("??")], &[]);
         assert_eq!(worked.state, CallerState::NeedNr, "nothing to put right");
+    }
+
+    /// A caller of a run of `style` signing `call`, from `seed`.
+    fn caller_as(seed: u64, call: &str, style: RunStyle) -> Caller {
+        let mut rng = SplitMix64::new(seed);
+        let mut generated = generate_call(3, CallSpec::default(), &mut rng);
+        generated.text = call.to_string();
+        let settings = TrainingSettings::default().clamp();
+        Caller::arrive(
+            generated,
+            &settings,
+            rules(),
+            10,
+            style,
+            centre(),
+            rng.fork(1),
+        )
+    }
+
+    fn pileup_caller(seed: u64, call: &str) -> Caller {
+        caller_as(seed, call, RunStyle::Pileup)
+    }
+
+    /// Only the best match answers: a partial goes to the callers whose
+    /// call it covers the largest share of, a slip to the closest call, and
+    /// a call to its own station, however well it fits another. To the
+    /// others it is someone else's call.
+    #[test]
+    fn only_the_best_match_answers() {
+        let best = |sent: &str, calls: &[&str]| -> Vec<bool> {
+            let mut callers: Vec<Caller> = calls
+                .iter()
+                .enumerate()
+                .map(|(seed, call)| pileup_caller(seed as u64, call))
+                .collect();
+            let message = [call(sent)];
+            let best = callers
+                .iter()
+                .filter_map(|caller| caller.likeness(sent))
+                .reduce(|a, b| if b > a { b } else { a });
+            callers
+                .iter_mut()
+                .map(|caller| caller.hear(&message, &[best]).replies)
+                .collect()
+        };
+        // `K5?` covers two of K5AB's four, and two of K5XYZ's five.
+        assert_eq!(best("K5?", &["K5XYZ", "K5AB"]), [false, true]);
+        // Covering as much of both, both answer.
+        assert_eq!(best("K5?", &["K5XYZ", "K5ABC"]), [true, true]);
+        assert_eq!(best("K5XY?", &["K5XYZ", "K5ABC"]), [true, false]);
+        // A slip goes to the call it is nearest; its own call beats any
+        // slip, and a piece that is no call asks as a partial does.
+        // Callers that never miss your exchange, to see who takes it.
+        let slip = |calls: &[&str]| {
+            let mut callers: Vec<Caller> = calls
+                .iter()
+                .enumerate()
+                .map(|(seed, call)| caller_as(seed as u64, call, RunStyle::Single))
+                .collect();
+            let sent = "K5XYW";
+            let best = callers
+                .iter()
+                .filter_map(|caller| caller.likeness(sent))
+                .reduce(|a, b| if b > a { b } else { a });
+            let message = [call(sent), MessagePart::Exchange];
+            callers
+                .iter_mut()
+                .map(|caller| {
+                    caller.hear(&message, &[best, None]);
+                    caller.state
+                })
+                .collect::<Vec<_>>()
+        };
+        // Two edits off K5AAW, one off K5XYZ.
+        assert_eq!(
+            slip(&["K5XYZ", "K5AAW"]),
+            [CallerState::NeedCall, CallerState::NeedQso]
+        );
+        assert_eq!(
+            slip(&["K5XYZ", "K5XYW"]),
+            [CallerState::NeedQso, CallerState::NeedEnd]
+        );
+        // The station you work keeps a partial that fits it, though a
+        // caller's call it covers more of; a caller's own call beats a slip
+        // of the call you work.
+        let worked = |sent: &str, calls: &[&str]| -> Vec<bool> {
+            let mut callers: Vec<Caller> = calls
+                .iter()
+                .enumerate()
+                .map(|(seed, call)| pileup_caller(seed as u64, call))
+                .collect();
+            // Callers that never miss your exchange, to see who takes it.
+            callers[0] = caller_as(0, calls[0], RunStyle::Single);
+            callers[0].hear(&[call(calls[0]), MessagePart::Exchange], &[]);
+            let message = [call(sent)];
+            let best = callers
+                .iter()
+                .filter_map(|caller| caller.likeness(sent))
+                .reduce(|a, b| if b > a { b } else { a });
+            callers
+                .iter_mut()
+                .map(|caller| caller.hear(&message, &[best]).replies)
+                .collect()
+        };
+        assert_eq!(worked("K5?", &["K5XYZ", "K5AB"]), [true, false]);
+        assert_eq!(worked("K5XY", &["K5XYZ", "K5XY"]), [false, true]);
+        // With nobody to compare, any fit answers, as the single caller
+        // does.
+        let mut alone = pileup_caller(1, "K5XYZ");
+        assert!(alone.hear(&[call("K5?")], &[]).replies);
+        assert!(alone.likeness("W1AW").is_none());
+    }
+
+    /// In a pile-up a caller now and then misses your exchange and asks for
+    /// it again, `NR?` or `AGN`, about one time in ten; a single caller
+    /// never misses it.
+    #[test]
+    fn a_pile_up_caller_now_and_then_misses_your_exchange() {
+        let mut missed = 0;
+        for seed in 0..2_000 {
+            let mut caller = pileup_caller(seed, "K5XYZ");
+            caller.hear(&[call("K5XYZ")], &[]);
+            let reaction = caller.hear(&[Exchange], &[]);
+            assert!(reaction.replies);
+            if caller.state == CallerState::NeedNr {
+                missed += 1;
+                assert!(!reaction.took_exchange, "seed {seed}");
+                let (text, says) = caller
+                    .reply(rules(), Side::Dx, "DL1ABC", 0)
+                    .expect("a reply");
+                assert_eq!(says, Says::Query);
+                assert!(text == "NR?" || text == "AGN", "{text}");
+            } else {
+                assert_eq!(caller.state, CallerState::NeedEnd, "seed {seed}");
+                assert!(reaction.took_exchange);
+            }
+        }
+        let share = f64::from(missed) / 2_000.0;
+        assert!((share - 0.1).abs() < 0.02, "missed {share:.3}");
+        for seed in 0..500 {
+            let mut caller = caller(seed);
+            caller.hear(&[call("K5XYZ")], &[]);
+            caller.hear(&[Exchange], &[]);
+            assert_eq!(caller.state, CallerState::NeedEnd, "seed {seed}");
+        }
+    }
+
+    /// One pile-up caller in ten sends its call twice; a single caller never
+    /// does.
+    #[test]
+    fn one_pile_up_caller_in_ten_calls_twice() {
+        let mut twice = 0;
+        for seed in 0..2_000 {
+            let mut caller = pileup_caller(seed, "K5XYZ");
+            caller.hear(&[Cq], &[]);
+            match caller.reply(rules(), Side::Dx, "DL1ABC", 0) {
+                Some((text, Says::Call)) if text == "K5XYZ K5XYZ" => twice += 1,
+                Some((text, Says::Call)) => assert_eq!(text, "K5XYZ"),
+                other => panic!("seed {seed}: {other:?}"),
+            }
+        }
+        let share = f64::from(twice) / 2_000.0;
+        assert!((share - 0.1).abs() < 0.02, "twice {share:.3}");
+        for seed in 0..500 {
+            let mut caller = caller(seed);
+            caller.hear(&[Cq], &[]);
+            let reply = caller.reply(rules(), Side::Dx, "DL1ABC", 0);
+            assert_eq!(reply, Some(("K5XYZ".to_string(), Says::Call)));
+        }
+    }
+
+    /// Your call alone brings a caller still calling back, as a CQ does,
+    /// unless it heard you start a QSO with someone else; the station you
+    /// work sends what it owes.
+    #[test]
+    fn your_call_alone_brings_the_callers_back() {
+        let mut calling = caller(1);
+        let tries = calling.patience;
+        let reaction = calling.hear(&[MessagePart::MyCall], &[]);
+        assert!(reaction.replies && !reaction.matched);
+        assert_eq!(calling.patience, tries - 1, "a try spent");
+        let mut waiting = caller(2);
+        waiting.hear(&[call("W1AW")], &[]);
+        assert!(!waiting.hear(&[MessagePart::MyCall], &[]).replies);
+        let mut worked = caller(3);
+        worked.hear(&[call("K5XYZ"), Exchange], &[]);
+        assert!(worked.hear(&[MessagePart::MyCall], &[]).replies);
+        assert_eq!(worked.state, CallerState::NeedEnd);
+    }
+
+    /// A station worked before calls again with a QSO to start, and sends
+    /// the serial after the one it sent you, or later; the rest of its
+    /// exchange is as it was: the same operator, the same name.
+    #[test]
+    fn a_dupe_calls_again_with_its_next_serial() {
+        let mut caller = caller(4);
+        caller.hear(&[call("K5XYZ"), Exchange], &[]);
+        let first = caller.exchange(rules(), Side::Dx, 60_000)[0].1.clone();
+        caller.hear(&[Tu], &[]);
+        assert_eq!(caller.state, CallerState::Done);
+        caller.call_again(612.0, 120_000);
+        assert_eq!(caller.state, CallerState::NeedQso);
+        assert_eq!(caller.voice.tone_hz, 612.0);
+        assert!(caller.hear(&[Cq], &[]).replies);
+        caller.hear(&[call("K5XYZ"), Exchange], &[]);
+        let again = caller.exchange(rules(), Side::Dx, 180_000)[0].1.clone();
+        let (first, again): (u32, u32) = (first.parse().unwrap(), again.parse().unwrap());
+        assert!(again > first, "{first} then {again}");
+        let simple = ContestKind::SimpleQso
+            .rules()
+            .expect("Simple QSO has shipped");
+        for seed in 0..50 {
+            let mut rng = SplitMix64::new(seed);
+            let mut generated = generate_call(3, CallSpec::default(), &mut rng);
+            generated.text = "K5XYZ".to_string();
+            let settings = TrainingSettings::default().clamp();
+            let mut caller = Caller::arrive(
+                generated,
+                &settings,
+                simple,
+                10,
+                RunStyle::Single,
+                centre(),
+                rng.fork(1),
+            );
+            let first = caller.exchange(simple, Side::Dx, 0).to_vec();
+            caller.call_again(612.0, 60_000);
+            assert_eq!(
+                caller.exchange(simple, Side::Dx, 60_000),
+                first,
+                "seed {seed}"
+            );
+        }
+    }
+
+    /// A TU gives a caller still calling fresh patience before it spends
+    /// the try any answer does, as MorseRunner's TU puts it back to calling:
+    /// passed over QSO after QSO, it stays while you run. A CQ only costs.
+    #[test]
+    fn a_tu_gives_a_caller_still_calling_fresh_patience() {
+        let mut caller = pileup_caller(3, "K5XYZ");
+        for _ in 0..50 {
+            caller.hear(&[call("W1AW"), Exchange], &[]);
+            assert!(caller.hear(&[Tu], &[]).replies);
+        }
+        assert_eq!(caller.state, CallerState::NeedQso);
+        let tries = caller.patience;
+        assert!(caller.hear(&[Cq], &[]).replies);
+        assert_eq!(caller.patience, tries - 1);
+    }
+
+    /// In a pile-up, someone else's call ends the QSO for the station you
+    /// worked: back to calling, waiting for that QSO to end, if it still
+    /// waited for your exchange; done, if it had sent its own. A single
+    /// caller stays as it was.
+    #[test]
+    fn someone_elses_call_ends_a_pile_up_qso() {
+        let mut waiting = pileup_caller(1, "K5XYZ");
+        waiting.hear(&[call("K5XYZ")], &[]);
+        waiting.hear(&[call("W1AW"), Exchange], &[]);
+        assert_eq!(waiting.state, CallerState::NeedQso);
+        assert!(waiting.waits(), "till that QSO ends");
+        assert!(waiting.hear(&[Tu], &[]).replies, "your TU ends it");
+        assert!(!waiting.waits());
+        let mut complete = pileup_caller(1, "K5XYZ");
+        complete.hear(&[call("K5XYZ"), Exchange], &[]);
+        while complete.state != CallerState::NeedEnd {
+            complete.hear(&[Exchange], &[]);
+        }
+        complete.hear(&[call("W1AW")], &[]);
+        assert_eq!(complete.state, CallerState::Done);
+        let mut single = caller(1);
+        single.hear(&[call("K5XYZ")], &[]);
+        single.hear(&[call("W1AW")], &[]);
+        assert_eq!(single.state, CallerState::NeedNr);
+        assert!(!single.waits());
     }
 
     /// With the Call field empty, a `?` is for a caller that heard you work
@@ -1038,9 +1558,9 @@ mod tests {
     #[test]
     fn a_question_with_the_field_empty_is_for_anyone_calling() {
         let mut caller = caller(3);
-        caller.hear(&[call("W1AW")]);
-        assert!(!caller.hear(&[Again]).replies);
+        caller.hear(&[call("W1AW")], &[]);
+        assert!(!caller.hear(&[Again], &[]).replies);
         caller.forget_other_qso();
-        assert!(caller.hear(&[Again]).replies);
+        assert!(caller.hear(&[Again], &[]).replies);
     }
 }

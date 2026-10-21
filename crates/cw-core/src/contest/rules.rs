@@ -88,6 +88,9 @@ pub struct ContestRules {
     pub cq: &'static str,
     /// What ends a QSO.
     pub tu: &'static str,
+    /// What you ask for the station's exchange again with (F12): `NR?`
+    /// where the exchange holds a number, `AGN` where it does not.
+    pub query: &'static str,
     /// What you send after their call.
     pub exchange: PerSide<&'static str>,
     /// Your report, as your exchange sends it.
@@ -148,6 +151,7 @@ pub(super) const RULES: &[ContestRules] = &[
         kind: ContestKind::Wpx,
         cq: "CQ {my} TEST",
         tu: "TU",
+        query: "NR?",
         exchange: PerSide::both("{rst} {nr}"),
         report: "5NN",
         rst: true,
@@ -176,6 +180,7 @@ pub(super) const RULES: &[ContestRules] = &[
         kind: ContestKind::SimpleQso,
         cq: "CQ CQ DE {my} {my} K",
         tu: "TU {hisname} 73 EE",
+        query: "AGN",
         exchange: PerSide::both("DE {my} UR {rst} {rst} NAME {myname} {myname} BK"),
         report: "599",
         rst: true,
@@ -253,14 +258,16 @@ impl ContestRules {
             .join(" + ")
     }
 
-    /// How a caller signing `his_call` answers your CQ, as `my_call`.
-    pub(super) fn answer_text(&self, my_call: &str, his_call: &str) -> String {
-        squeeze(
-            &self
-                .answer
-                .replace("{my}", my_call)
-                .replace("{his}", his_call),
-        )
+    /// How a caller signing `his_call` answers your CQ, as `my_call`. One
+    /// that calls `twice` sends its call twice where the answer has it
+    /// once; an answer that sends it twice already is sent as it is.
+    pub(super) fn answer_text(&self, my_call: &str, his_call: &str, twice: bool) -> String {
+        let his = if twice && self.answer.matches("{his}").count() == 1 {
+            format!("{his_call} {his_call}")
+        } else {
+            his_call.to_string()
+        };
+        squeeze(&self.answer.replace("{my}", my_call).replace("{his}", &his))
     }
 
     /// A caller's exchange as it sends it, each field it holds the token in
@@ -311,7 +318,7 @@ impl ContestRules {
         let them = Sender::Caller(0);
         let mut qso = vec![
             (Sender::You, self.cq_text(me)),
-            (them, self.answer_text(me.my_call, caller)),
+            (them, self.answer_text(me.my_call, caller, false)),
             (
                 Sender::You,
                 format!("{caller} {}", self.exchange_text(side, &first)),
@@ -392,7 +399,8 @@ mod tests {
         assert!(rules.prefills_report(Side::Dx));
         assert_eq!(rules.copied(Side::Dx), [Field::Nr]);
         assert_eq!(rules.callers(Side::WVe), CallSpec::contest(Countries::Any));
-        assert_eq!(rules.answer_text("DL1ABC", "K5XYZ"), "K5XYZ");
+        assert_eq!(rules.answer_text("DL1ABC", "K5XYZ", false), "K5XYZ");
+        assert_eq!(rules.answer_text("DL1ABC", "K5XYZ", true), "K5XYZ K5XYZ");
         let theirs = [(Field::Nr, "214".to_string())];
         assert_eq!(
             rules.their_exchange_text("DL1ABC", "K5XYZ", &theirs),
@@ -424,10 +432,13 @@ mod tests {
         assert_eq!(rules.tu_text(&me(0, "BOB")), "TU BOB 73 EE");
         // No name copied: no gap where it would be.
         assert_eq!(rules.tu_text(&me(0, "")), "TU 73 EE");
-        assert_eq!(
-            rules.answer_text("DL1ABC", "K5XYZ"),
-            "DL1ABC DE K5XYZ K5XYZ K"
-        );
+        // Its call is twice in it already, whoever calls.
+        for twice in [false, true] {
+            assert_eq!(
+                rules.answer_text("DL1ABC", "K5XYZ", twice),
+                "DL1ABC DE K5XYZ K5XYZ K"
+            );
+        }
         let theirs = [
             (Field::Rst, "579".to_string()),
             (Field::Name, "BOB".to_string()),

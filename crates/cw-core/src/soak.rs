@@ -19,16 +19,22 @@ use crate::{
     ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Fields, MonoMs, OpKey, PILEUP_LEVEL_MAX_DB,
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError, Rng, RowStatus,
-    STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso, Sender, SessionId, SessionPhase, SessionResult,
-    SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool, contest_score,
-    evaluate_auto_level, generate_training_group, plan_morse_playback_for, plan_transmission,
-    plan_turn, resolve_station,
+    RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso, Sender, SessionId, SessionPhase,
+    SessionResult, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
+    contest_score, evaluate_auto_level, generate_training_group, plan_morse_playback_for,
+    plan_transmission, plan_turn, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
 /// Turn it up when hunting: the failures name the seed they came from, so a
 /// deep run reproduces exactly on a short one.
 const SEEDS: u64 = 2_000;
+
+/// The contest soak's pile-up seeds, a quarter more than [`SEEDS`]: a
+/// caller that hears you go to someone else drops out of its QSO, so fewer
+/// of a pile-up's QSOs reach the log with a slip in the call, and the
+/// floor of each kind needs more runs to stand on.
+const PILEUP_SEEDS: u64 = SEEDS + SEEDS / 4;
 
 /// Settings from anywhere, including values no screen would ever produce.
 fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
@@ -779,13 +785,14 @@ fn a_pile_up_is_always_something_you_could_copy() {
     }
 }
 
-/// Settings from anywhere, in Contest mode: any contest that has shipped, a
-/// call from a few that read in different ways, none among them, a name or
-/// none, and runs short enough to reach their end.
-fn contest_settings(rng: &mut SplitMix64) -> TrainingSettings {
+/// Settings from anywhere, in Contest mode, of run `style`: any contest that
+/// has shipped, a call from a few that read in different ways, none among
+/// them, a name or none, and runs short enough to reach their end.
+fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
     const CALLS: [&str; 6] = ["DL1ABC", "K1ABC", "VP2E/DL1ABC", "JA1XYZ", "W1AW/4", ""];
     let mut s = wild_settings(rng);
     s.curriculum.char_set_mode = CharSetMode::Contest;
+    s.contest.contest_style = style;
     let shipped: Vec<ContestKind> = ContestKind::shipped().collect();
     s.contest.contest_kind = shipped[rng.usize_in(0, shipped.len() - 1)];
     s.contest.my_call = CALLS[rng.usize_in(0, CALLS.len() - 1)].to_string();
@@ -879,6 +886,19 @@ struct Outcomes {
     lost: u32,
 }
 
+impl Outcomes {
+    /// Each kind of QSO, and how many came up.
+    fn counts(&self) -> [(&'static str, u32); 5] {
+        [
+            ("clean", self.clean),
+            ("busted", self.busted),
+            ("field error", self.field),
+            ("NIL", self.nil),
+            ("lost", self.lost),
+        ]
+    }
+}
+
 /// What a contest soak run has seen of the machine's effects: every id
 /// handed out, the turns and timers among them, the last call and exchange
 /// a listener would have copied from the callers, and the call before it.
@@ -894,7 +914,8 @@ struct Seen {
 
 /// Every effect a contest run hands back has to be one the runtime can act
 /// on: an id never handed out before, a timer that runs, a turn with
-/// something in it and no reply past your message.
+/// something in it, no station sending over itself and no reply past your
+/// message; and in a pile-up, its callers sixty hertz apart or more.
 fn check_contest_effects(
     effects: &[ContestEffect],
     settings: &TrainingSettings,
@@ -918,6 +939,32 @@ fn check_contest_effects(
                         other.duration_sec <= planned.wanted.duration_sec + 1e-9,
                         "seed {seed} step {step}: a reply ends after your message"
                     );
+                }
+                let callers: Vec<_> = turn
+                    .segments
+                    .iter()
+                    .filter(|segment| segment.who != Sender::You)
+                    .collect();
+                for (at, caller) in callers.iter().enumerate() {
+                    for other in &callers[..at] {
+                        // A caller keyed over sends again only once its rest
+                        // is done.
+                        let apart_in_time =
+                            caller.start_sec >= other.end_sec || other.start_sec >= caller.end_sec;
+                        assert!(
+                            caller.who != other.who || apart_in_time,
+                            "seed {seed} step {step}: a station sends over itself"
+                        );
+                        if caller.who != other.who
+                            && settings.contest.contest_style == RunStyle::Pileup
+                        {
+                            let apart = (caller.voice.tone_hz - other.voice.tone_hz).abs();
+                            assert!(
+                                apart >= 60.0 - 1e-6,
+                                "seed {seed} step {step}: two callers {apart:.1} Hz apart"
+                            );
+                        }
+                    }
                 }
                 for segment in &turn.segments {
                     if segment.who == Sender::You {
@@ -1103,13 +1150,27 @@ fn contest_run(
 /// operator can send (§13 of the design): keys with fields as heard, a slip
 /// off, empty, partial or junk; turn news for the turn on the air and for
 /// stale ones; timers by any id; pauses, resumes, hidden pages and early
-/// ends. Whatever happens, the run stays whole and keeps what it should.
+/// ends. Whatever happens, the run stays whole and keeps what it should, a
+/// run of single callers and a pile-up alike.
 #[test]
 fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
+    for style in RunStyle::ALL {
+        soak_contest_runs(style);
+    }
+}
+
+/// The contest soak, every seed a run of `style`: single callers on the
+/// first [`SEEDS`] seeds, pile-ups on the [`PILEUP_SEEDS`] after them, so a
+/// failure's seed says which.
+fn soak_contest_runs(style: RunStyle) {
     let mut outcomes = Outcomes::default();
-    for seed in 0..SEEDS {
+    let seeds = match style {
+        RunStyle::Single => 0..SEEDS,
+        RunStyle::Pileup => SEEDS..SEEDS + PILEUP_SEEDS,
+    };
+    for seed in seeds {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x2F7A_9C35).wrapping_add(37));
-        let settings = contest_settings(&mut rng);
+        let settings = contest_settings(&mut rng, style);
         let SoakRun {
             mut events,
             mut machine,
@@ -1280,20 +1341,10 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
         );
     }
     // Every kind of QSO came up, many times over.
-    let Outcomes {
-        clean,
-        busted,
-        field,
-        nil,
-        lost,
-    } = outcomes;
-    for (kind, count) in [
-        ("clean", clean),
-        ("busted", busted),
-        ("field error", field),
-        ("NIL", nil),
-        ("lost", lost),
-    ] {
-        assert!(count >= 100, "only {count} {kind} QSOs across the seeds");
+    for (kind, count) in outcomes.counts() {
+        assert!(
+            count >= 100,
+            "{style:?}: only {count} {kind} QSOs across the seeds"
+        );
     }
 }

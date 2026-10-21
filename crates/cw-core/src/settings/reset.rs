@@ -57,6 +57,7 @@ impl TrainingSettings {
                 self.curriculum.sequence_is_custom = d.curriculum.sequence_is_custom;
                 self.curriculum.practice_window = d.curriculum.practice_window;
                 self.contest.contest_kind = d.contest.contest_kind;
+                self.contest.contest_style = d.contest.contest_style;
             }
             SettingsSection::ToneAndVolume => {
                 self.band.side_tone_min = d.band.side_tone_min;

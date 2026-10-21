@@ -1,11 +1,12 @@
-//! What Contest mode adds to the settings: which contest a run is, how long
-//! it lasts, and your station. Everything else a run uses is shared with
-//! group training.
+//! What Contest mode adds to the settings: which contest a run is, whether
+//! one station calls at a time or a pile-up, how long a run lasts, and your
+//! station. Everything else a run uses is shared with group training.
 
 use serde::{Deserialize, Serialize};
 
+use super::{STATIONS_MIN, TrainingSettings};
 use crate::callsign::parse_callsign;
-use crate::contest::ContestKind;
+use crate::contest::{ContestKind, RunStyle};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -17,11 +18,19 @@ pub const MY_CALL_MAX: usize = 12;
 /// The longest name kept: a given name as operators send it is short.
 pub const MY_NAME_MAX: usize = 10;
 
+/// The most callers at once a pile-up starts from, picked while the Band
+/// card's stations range holds one station: one to three, as the design
+/// gives a pile-up (§8).
+const PILEUP_CALLERS_MAX: u32 = 3;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ContestSettings {
     /// The contest a run is, chosen where the alphabet is in other modes.
     pub contest_kind: ContestKind,
+    /// One caller at a time, or a pile-up of as many as the Band card's
+    /// stations range draws.
+    pub contest_style: RunStyle,
     /// How long a run lasts, in minutes. Zero runs until you stop it, and
     /// ends at [`CONTEST_MINUTES_MAX`] all the same.
     pub contest_minutes: u32,
@@ -37,6 +46,7 @@ impl Default for ContestSettings {
     fn default() -> Self {
         Self {
             contest_kind: ContestKind::Wpx,
+            contest_style: RunStyle::Single,
             contest_minutes: 10,
             my_call: String::new(),
             my_name: String::new(),
@@ -85,6 +95,20 @@ impl ContestSettings {
             return Some(format!("Add your name to start a {}", kind.label()));
         }
         None
+    }
+}
+
+impl TrainingSettings {
+    /// Run contests in `style`. A pile-up of one caller is none at all, so
+    /// picking one while the Band card's stations range holds a single
+    /// station opens the range to one to three callers, as MorseRunner's
+    /// pile-up starts busier than its single calls (`Ini.pas:261`); a range
+    /// you have set is left as it is.
+    pub fn set_contest_style(&mut self, style: RunStyle) {
+        self.contest.contest_style = style;
+        if style == RunStyle::Pileup && self.band.stations_max <= STATIONS_MIN {
+            self.band.stations_max = PILEUP_CALLERS_MAX;
+        }
     }
 }
 
@@ -138,6 +162,33 @@ mod tests {
         let mut settings = ContestSettings::default();
         settings.set_my_call(" dl1abc/p ");
         assert_eq!(settings.my_call, "DL1ABC/P");
+    }
+
+    /// Picking a pile-up on a stations range of one opens it to one to
+    /// three callers; a range already set is kept, and so is the range when
+    /// a single caller is picked again.
+    #[test]
+    fn a_pile_up_picked_on_a_range_of_one_opens_it() {
+        let mut settings = TrainingSettings::default();
+        settings.set_contest_style(RunStyle::Pileup);
+        assert_eq!(settings.contest.contest_style, RunStyle::Pileup);
+        assert_eq!(
+            (settings.band.stations_min, settings.band.stations_max),
+            (1, 3)
+        );
+        settings.set_contest_style(RunStyle::Single);
+        assert_eq!(settings.contest.contest_style, RunStyle::Single);
+        assert_eq!(
+            (settings.band.stations_min, settings.band.stations_max),
+            (1, 3)
+        );
+        settings.band.stations_min = 2;
+        settings.band.stations_max = 2;
+        settings.set_contest_style(RunStyle::Pileup);
+        assert_eq!(
+            (settings.band.stations_min, settings.band.stations_max),
+            (2, 2)
+        );
     }
 
     /// A name is kept as it is sent: letters only, upper case, ten at most.

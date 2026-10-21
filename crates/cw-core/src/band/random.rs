@@ -75,22 +75,6 @@ impl Draw {
         let wait = -(1.0 - self.f64()).ln() * sample_rate / rate;
         wait.round().clamp(0.0, 1e15) as u64
     }
-
-    /// A Poisson count with mean `mean`, by multiplying uniforms (Knuth),
-    /// and never more than `most`: the means here are a handful at most.
-    pub fn poisson(&mut self, mean: f64, most: usize) -> usize {
-        if mean.is_nan() || mean <= 0.0 {
-            return 0;
-        }
-        let limit = (-mean).exp();
-        let mut product = self.f64();
-        let mut count = 0;
-        while product > limit && count < most {
-            product *= self.f64();
-            count += 1;
-        }
-        count
-    }
 }
 
 /// Standard normal deviates one at a time, for the noise floors: Box–Muller,

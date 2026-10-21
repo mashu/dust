@@ -1,5 +1,5 @@
 use cw_core::{
-    AutoLevelProgress, CharSetMode, LevelAxis, SessionResult, Side, TrainingSettings,
+    AutoLevelProgress, CharSetMode, LevelAxis, RunStyle, SessionResult, Side, TrainingSettings,
     compute_char_pool, compute_streak_status, newest_unlocked, parse_callsign,
 };
 use dioxus::prelude::*;
@@ -7,6 +7,7 @@ use dioxus::prelude::*;
 use crate::audio::AUDIO_IS_SILENT;
 use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
+use crate::ui::settings_charset::{pileup_callers, pileup_count};
 use crate::ui::settings_station::{
     CallField, CallReading, NameField, focus_call_field, focus_name_field,
 };
@@ -80,6 +81,11 @@ struct ContestHero {
     sends: String,
     /// How long a run is, as the specs give it: its figure and caption.
     length: (String, String),
+    /// Who calls, as the specs give it: "Single" "Caller", or "1–3"
+    /// "Callers".
+    callers: (String, String),
+    /// Who calls, in words: "single caller", "1–3 callers".
+    who_calls: String,
     /// Your call is missing, or not one a contest can read: the hero asks
     /// for it.
     needs_call: bool,
@@ -114,12 +120,27 @@ impl ContestHero {
             0 => ("Open".to_string(), format!("Up to {limit} min")),
             _ => (limit.to_string(), "Minutes".to_string()),
         };
+        let (callers, who_calls) = match contest.contest_style {
+            RunStyle::Single => (
+                ("Single".to_string(), "Caller".to_string()),
+                "single caller".to_string(),
+            ),
+            RunStyle::Pileup => {
+                let (count, noun) = pileup_count(settings);
+                // A label, as the others have it: "Callers".
+                let mut label = noun.to_string();
+                label[..1].make_ascii_uppercase();
+                ((count, label), pileup_callers(settings))
+            }
+        };
         let needs_call = parse_callsign(&contest.my_call).is_none();
         let sends_name = rules.is_some_and(|rules| rules.sends_name());
         Self {
             fields,
             sends,
             length,
+            callers,
+            who_calls,
             needs_call,
             needs_name: !needs_call && sends_name && contest.my_name.is_empty(),
             call_flagged: needs_call && !contest.my_call.is_empty(),
@@ -274,10 +295,9 @@ pub fn Home(
                             span { class: "spec-value", "{hero.length.0}" }
                             span { class: "spec-label", "{hero.length.1}" }
                         }
-                        // One station answers each CQ until pile-ups come.
                         div {
-                            span { class: "spec-value", "Single" }
-                            span { class: "spec-label", "Caller" }
+                            span { class: "spec-value", "{hero.callers.0}" }
+                            span { class: "spec-label", "{hero.callers.1}" }
                         }
                     } else if callsigns || words {
                         div {
@@ -348,7 +368,7 @@ pub fn Home(
                     CardHead {
                         icon: IconName::Sparkle,
                         title: "First contest",
-                        note: format!("{} · single caller", level.summary),
+                        note: format!("{} · {}", level.summary, hero.who_calls),
                     }
                     p { class: "muted", style: "margin: 0;",
                         if hero.needs_call {
@@ -391,7 +411,7 @@ pub fn Home(
 #[cfg(test)]
 mod tests {
     use super::{ContestHero, LevelReading, level_reading, range_label};
-    use cw_core::{CharSetMode, TrainingSettings};
+    use cw_core::{CharSetMode, RunStyle, TrainingSettings};
 
     #[test]
     fn the_level_reading_follows_the_mode() {
@@ -462,6 +482,27 @@ mod tests {
             ("Open".to_string(), "Up to 60 min".to_string())
         );
         assert!(!hero.needs_name, "WPX sends no name");
+    }
+
+    /// The specs say who calls: a single caller, or as many as a pile-up
+    /// draws from the Band card's stations range.
+    #[test]
+    fn a_contest_hero_says_who_calls() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.callers, ("Single".to_string(), "Caller".to_string()));
+        assert_eq!(hero.who_calls, "single caller");
+        settings.contest.contest_style = RunStyle::Pileup;
+        settings.band.stations_min = 1;
+        settings.band.stations_max = 3;
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.callers, ("1–3".to_string(), "Callers".to_string()));
+        assert_eq!(hero.who_calls, "1–3 callers");
+        settings.band.stations_max = 1;
+        let hero = ContestHero::of(&settings);
+        assert_eq!(hero.callers, ("1".to_string(), "Caller".to_string()));
+        assert_eq!(hero.who_calls, "1 caller");
     }
 
     /// A Simple QSO copies a report and a name, sends yours, and asks for

@@ -12,7 +12,9 @@
 //! - [`record`]: how a run is kept in the history, so that every build, older
 //!   or newer, reads it back as practice and keeps what it does not know.
 //! - [`caller`]: the stations that answer, as MorseRunner's callers behave.
-//! - [`turn`]: each thing you send and every reply to it, as one send.
+//! - [`place`]: where callers sit against the receiver, and how loud.
+//! - [`turn`]: each thing you send and every reply to it, as one send, each
+//!   caller fading on a path of its own.
 //! - [`machine`]: the run itself, as a pure state machine.
 //! - [`data`]: the values callers' exchanges are drawn from.
 
@@ -26,6 +28,7 @@ mod esm;
 mod exchange;
 mod machine;
 mod parse;
+mod place;
 mod record;
 mod rules;
 mod score;
@@ -47,12 +50,13 @@ pub use machine::{
     PauseWhy, RowStatus,
 };
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
+pub use place::filter_capacity;
 pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use rules::{ContestRules, Fill, Multiplier, PerSide, Scoring, Side};
 pub use score::{ContestScore, Rates, ScoredQso, Tally, contest_score, rate_at};
 pub use serial::{SerialFit, SerialModel, WPX_SERIALS};
-pub use turn::{MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
+pub use turn::{Fade, MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
 
 /// Run time is kept in milliseconds; rates and contests are told in minutes
 /// and hours.

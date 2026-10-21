@@ -18,8 +18,11 @@ hero, the stats pills and notes, the privacy texts, the credits and the
 backup merge. Slices 1b, 1c and 1d have landed too: your own message
 played dry, around the receiver at a fixed monitor level (5.3); Simple QSO,
 with its names and reports (`contest/data/`) and `myName`; and the
-contester's keys with their buttons on the key bar. Nobody can pick Contest
-yet (§14).
+contester's keys with their buttons on the key bar. Slice 2a has landed
+too: `contestStyle` and pile-ups (`contest/place.rs`, the callers' fades in
+`contest/turn.rs`), with collisions, best-match partials, missed exchanges,
+calling twice, dupes, and F4, F6, F8 and F12. Nobody can pick Contest yet
+(§14).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -97,7 +100,8 @@ still means what it says; the note (`settings_charset.rs:123-142`) reads
 - "Callsign tier (1–6)", the stored `callsignLevel` shared with Callsigns,
   which shapes the callers' calls;
 - from phase 2, the run style (Single caller or Pile-up, "1–3 callers · set
-  on the Band card") and presets (§8).
+  on the Band card"; as built, Single caller says "One station calls at a
+  time") and presets (§8).
 
 The alphabet controls are not drawn: the `if` blocks at
 `settings_charset.rs:171-275` gain a Contest arm.
@@ -164,7 +168,9 @@ fields per side, which callers answer, and the scoring rule. A new contest
 is a row plus its data. In all of them you run (call CQ); callers send RST
 as `5NN` (`Station.pas:529`), prefilled 599 and never checked, as loggers
 do, except in Simple QSO; in pile-ups TU becomes `TU <your call>` every
-third QSO, as in MRCE's Pile-Up and WPX modes (`Contest.pas:468-474`); and
+third QSO, as in MRCE's Pile-Up and WPX modes (`Contest.pas:468-474`), in
+a contest whose TU works as a CQ (not Simple QSO, whose TU greets the
+station by name and brings nobody); and
 you type into two fields, Call and Exchange, as
 in the screenshot, with exchange items in any order and a later item of a
 kind replacing an earlier one (11.7).
@@ -281,7 +287,12 @@ settings so scores compare between people.
   as in MRCE's Single Calls (`DxStn.pas:102-105`).
 - **Pile-up** (phase 2). After each CQ or TU, new callers join until the
   number calling reaches a fresh draw from the Band card's stations range
-  (1–5). Callers not worked keep calling while their patience lasts.
+  (1–5). Callers not worked keep calling while their patience lasts. As
+  built (2a), the draw is capped at what the filter fits (5.4), and the
+  callers already calling, the station you work among them, count. Your
+  call alone (F4) brings callers too once a QSO is in the log, as MRCE's
+  (`Contest.pas:1001-1025`). A pile-up of one caller is none, so picking
+  Pile-up while the stations range holds one station opens it to 1–3 (8).
 - **No Search & Pounce,** which neither MorseRunner nor Morse Walker
   simulates.
 
@@ -364,33 +375,41 @@ The callers follow MRCE's model, re-written from its behaviour, credited.
 - **Reply delay** 0.1–0.6 s after your message (`DxOper.pas:225-232`).
 - **Reply timeout** `(6 − skill)` s, Gaussian, within ±50%
   (`DxOper.pas:282-287`). Each timeout costs a unit of patience and the
-  caller sends again.
+  caller sends again. As built (2a), each caller's wait is its own, as in
+  MRCE (`DxStn.pas:204-208, 292-301`): it is dropped while you send, and
+  drawn afresh from the end of the caller's own send, or once it has heard
+  you; another caller's send leaves it alone, so on a quiet frequency every
+  caller calls in turn, not only the quickest.
 - **Patience** while calling is `3 + RndRayleigh(3)` tries, rounded
   (`DxOper.pas:496-498`). MRCE's `RndRayleigh(m)` is `m·√(−ln u₁ − ln u₂)`
   (`RndFunc.pas:55-58`), not a Rayleigh draw of mean `m`, so it gives
   4–14 tries with a mean near 7, and only 2.6% of callers give up after 4,
   which keeps callers from vanishing just after they call (MRCE issue
   #200, `DxOper.pas:486-493`). Each message a caller answers while it
-  calls (CQ, TU, `?`, a partial) costs a try too, as MRCE's `DecPatience`
-  (`DxOper.pas:709, 825`), so CQ after CQ moves the frequency on to
-  someone else.
+  calls (CQ, TU, `?`, a partial, B4, NIL) costs a try too, as MRCE's
+  `DecPatience` (`DxOper.pas:709, 825`), so CQ after CQ moves the
+  frequency on to someone else. TU and B4 first give it fresh patience, as
+  MRCE's `SetState(osNeedQso)` does (`DxOper.pas:751-753, 776-777`), so a
+  caller passed over QSO after QSO stays while you run.
 - **The station you work stays** while you keep keying, and leaves after 3
   silent timeouts in a row, as MRCE's Caller Stays (`DxOper.pas:319-335`).
 - **QRS** (phase 2, habits `easy`). After 3 incomplete tries (4 for a skilled
   caller) a caller slows by 12–20% by skill, 2% more from the fourth
   (`DxOper.pas:343-375`).
 - **Calling twice.** 10% of pile-up callers send their call twice; single
-  callers never do (`DxOper.pas:500-502`).
+  callers never do (`DxOper.pas:500-502`). As built, a caller that calls
+  twice sends its call twice where the contest's answer has it once
+  (`K5XYZ K5XYZ`); Simple QSO's answer sends it twice already.
 
 | You send | A caller still calling | The station you work |
 |---|---|---|
 | CQ or TU | calls; once its call has begun to reach you, that is a call you asked for again (9.1) | after TU: `Done`. After CQ: `Done` if it has already sent its exchange (`NeedEnd`); before that the QSO fails and it leaves (`DxOper.pas:705-711`) |
 | `<call> <exch>`, exact | falls silent | sends its exchange |
 | `<call> <exch>`, close (4.7) | falls silent | corrects you: `DE K5XYZ` or `K5XYZ K5XYZ` |
-| `<call> <exch>`, no match | calls again after its timeout | — |
+| `<call> <exch>`, no match | calls again after its timeout; in a pile-up it waits for that QSO to end, as MRCE's `osNeedPrevEnd` never sends (`DxOper.pas:227-228`) | in a pile-up, the QSO is over for it (`DxOper.pas:744-748`): waiting for your exchange, it calls again and waits for the other QSO to end; its exchange sent, it is `Done` |
 | `?`, `AGN`, `NR?` | repeats its call, unless it heard you work someone else since it last called and the Call field is not empty, as MRCE's `osNeedPrevEnd` (`DxOper.pas:744-748, 793`) | re-sends what it owes: call or exchange. After someone else's call, neither answers |
 | partial `K5?` | only the best matches answer; your exchange after a partial it answered, in that message or a later one, is for it: it takes it and puts its call right (`NeedCall`), as MRCE's `osNeedCallNr` (`DxOper.pas:734-742, 768-776`) | sends its call, as MRCE's `mcAlmost` (`DxOper.pas:734-742`): `NeedNr` → `NeedCallNr`, `NeedEnd` → `NeedCall` |
-| B4, NIL (phase 2) | NIL costs a patience | leaves, and Enter starts afresh (4.4) |
+| B4, NIL (phase 2) | calls again at once, the QSO you were in over: B4 with fresh patience, each costing a try (`DxOper.pas:716-724, 751-753`) | leaves, and Enter starts afresh (4.4): only the station they are for, not one a B4 after another call names, nor one that heard you work someone else |
 
 From phase 2, in pile-ups only:
 
@@ -399,6 +418,32 @@ From phase 2, in pile-ups only:
   from a fragment (`DxStn.pas:240-253`).
 - **Missed exchanges.** 10% of the time a caller misses your exchange and
   sends `NR?` or `AGN` (`DxOper.pas:762-770, 844-849`).
+
+As built (2a): a caller still sending at your key goes on from the
+character sounding then, sent again whole and heard over your message, as
+your own rest is (5.2), its start charged already, and the ranking of the
+call you send counts it (4.7). One that never heard you and is done before
+you are heard only your message's tail: it calls again 0.1–0.6 s after
+you, a try spent, as MRCE's callers do on hearing garbage
+(`DxStn.pas:249-253`); one still sending as you end waits from the end of
+its send. A CQ, TU or NIL is heard from a fragment: the caller goes on over
+it all the same, and answers once you and it are both done. Esc takes the
+rest back with the message. A missed exchange is not taken, so N stays
+false and Enter sends the call and exchange again; a caller that answered
+your partial and then missed your exchange puts its call right meanwhile
+(`NeedCallNr`). Your call alone (F4) brings a caller still calling back as
+a CQ does, unless it heard you start a QSO with someone else; a single
+caller's call brought so is a `?` by another key, as a CQ's is (4.6). In a
+pile-up, no call brought again by CQ, TU or F4 is charged.
+
+A pile-up caller that hears you start a QSO with someone else waits for it
+to end, as MRCE's `osNeedPrevEnd`: it has no timeout, so it neither calls
+over that QSO nor spends a try on waiting, and a `?` with the Call field
+typed is not for it; your CQ, TU, B4 or NIL, its own call, or a `?` with
+the Call field empty brings it back. The station you work hearing another
+call is over its QSO as the table says. A single caller calls again on its
+timeout, and stays in its QSO when you send another call, kinder to a
+learner.
 
 A single caller you talk over stops and hears you, kinder to a learner.
 
@@ -410,7 +455,8 @@ exchange keyed then, after someone else's call, goes to the station you
 work. A station that hears its call alone (F5) waits for your exchange and
 asks for it with `NR?` or `AGN`, as MRCE's `NeedNr` does (in Simple QSO,
 `AGN` alone: the contest's row says what its callers ask with). The patience timer
-runs to the first waiting caller's timeout; each caller draws its own.
+runs to the first waiting caller's timeout; each caller draws its own, and
+keeps it till it sends or hears you again.
 
 ### 4.4 Enter Sends Message
 
@@ -470,7 +516,7 @@ It takes your side because ARRL DX's exchange depends on it, as
 | Your exchange; TU without logging (as MRCE) | F2; F3 | — | 1d |
 | His call; his call + exchange | F5; `;` (Insert also works) | — | 1d |
 | TU and log; log without sending | `.` `,` `+`; Shift/Ctrl/Alt+Enter | (ESM) | 1d |
-| Your call, B4, NIL, NR? | F4, F6, F8, F12 | `B4` on a dupe | 2 |
+| Your call, B4, NIL, NR? (AGN in Simple QSO) | F4, F6, F8, F12 | `B4` on a dupe | 2 |
 
 - F11 stays fullscreen (`app.rs:140-147`), so Wipe is Alt+W (Ctrl+W closes
   a tab), and `[` `]` stay the paddles (`paddle.rs:113-125`). Web
@@ -495,9 +541,16 @@ It takes your side because ARRL DX's exchange depends on it, as
   now are lit (its CQ is F1's, their call F5's, your exchange F2's, `?`
   F7's, its TU `.`'s), and `.` and Shift+Enter wait, disabled, until the
   call is whole and the exchange complete (`loggable`). On a desktop
-  window 760 px wide or more the bar takes two rows, Enter to F5 and F7 to
-  Esc; narrower, more. Where a finger types, only CQ, ? Again and Wipe stay
-  beside the keypad.
+  window 760 px wide or more the bar took two rows, Enter to F5 and F7 to
+  Esc; with F4 My call, F6 B4, F8 NIL and F12 NR? (2a) it takes three,
+  Enter to F4, F5 to `.`, and Shift+Enter to Esc, and three from 640 px,
+  none alone on a row; narrower, Enter takes a row of its own and the
+  other keys two or three even columns. F12 names the contest's own word
+  for its query: `AGN` in Simple QSO, whose exchange has no number. While
+  the call typed was logged clean, B4 is offered in the B4 tag's copper
+  wash, not lit, for Enter never sends it. Where a finger types, only CQ,
+  ? Again and Wipe stay beside the keypad, and B4 on a dupe, at the row's
+  end, so the keys a finger knows never move.
 - `;` `.` `,` `+` are known by the character they type, Shift held or not
   (`+` takes Shift on many a keyboard, `;` on others), and never typed into
   a field, as in MorseRunner; one typed by a paddle key (`+` sits on `]` in
@@ -537,7 +590,19 @@ only time (9.1).
   that is no call itself (`K5`, `5XYZ`) asks for the rest as a partial
   does, and is not put right as a slip is; a call with no character but
   `?` is the `?` of F7, nobody's call. Only the best share of matched
-  characters answers; the single caller always does.
+  characters answers; the single caller always does. As built, every
+  station on the frequency is ranked, those still sending too, as MRCE's
+  `FindBestMatches` ranks them (`StnColl.pas:171-194`), so a call keyed
+  over its own station is no near call's: its own call first, then a slip,
+  then a partial or a piece. Within a kind the station you work comes
+  first, so a partial or a slip that fits it is for it (a partial while
+  you work a station brings its call, 4.3), though a caller's own call
+  still beats it; then the fewer edits for the call's length the better,
+  or the larger the share of the station's call the characters cover
+  (`K5?` is two of K5AB's four, two of K5XYZ's five). Those that tie at the
+  top answer, and to the rest it is someone else's call. In a pile-up, a
+  station that only answered your partial is no QSO yet: several may, and
+  you work one (9.1).
 - **AGN, NR?** ask for the exchange while working someone, and for calls
   otherwise. Typed in the Call field, `AGN` is just text.
 - **Giving up.** CQ while working a station ends that QSO (4.3), and Enter
@@ -548,7 +613,18 @@ only time (9.1).
   B4 button. A dupe scores 0 and is not an error, as contest rules remove
   dupes without penalty; MRCE counts it in Raw (`Log.pas:654-660`), so
   Dust's raw score is lower on runs with dupes. Before phase 2, a call
-  already in the log or on frequency is drawn again, up to 8 times.
+  already in the log or on frequency is drawn again, up to 8 times. As
+  built (2a), dupes come in both run styles of a contest that scores (not
+  Simple QSO, which is no contest and has no dupe rule), from the stations
+  logged with a QSO (not a NIL) and done, but not one on the frequency at
+  your key or closed by its TU, which does not call straight back: the same
+  station, its exchange as it sent it but for the serial (11.6), its copy
+  kept in the QSO it was logged in, so nothing that comes of the dupe owns
+  groups or is a lost copy. B4 (F6, and the phone's `B4` on a dupe) sends
+  the call typed first when it has not gone out (`K5XYZ QSO B4`), as TU and
+  log does: a dupe that has not heard its call would not know the B4 was
+  meant for it, and no other station takes it for its own. It leaves,
+  Enter starts afresh, and the rest of the pile-up calls again (4.3).
 
 ### 4.8 Logging and the check
 
@@ -623,7 +699,10 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   `heard_from` includes the lead and latency, so a character is sent again
   rather than lost. In a pile-up, callers still sounding carry on from their
   character at that moment, re-based, so collisions stay audible; a single
-  caller stops and hears you.
+  caller stops and hears you. As built (2a), they carry on under a CQ, TU
+  or NIL too, which they hear from a fragment, and answer once done (4.3);
+  one carried on whose rest has not reached the ear yet, inside the
+  player's lead, still goes on whole at the next key, as it began before.
 - **Only Esc cuts.** StopTx emits `StopAudio` (an 8 ms release,
   `audio/shape.rs:13`); a call or exchange not fully sent counts as not
   sent, as MRCE's Esc resets CallSent and NrSent (`Main.pas:884-891`). The
@@ -714,7 +793,8 @@ spacing and no fist variation.
 The turn plays from a copy of the run settings with `qsb_enabled = false`:
 QSB is attached per send (`Qsb::of`, `audio/native.rs:244`) and `BandKey`
 has no QSB field (`band/key.rs:19-49`), so the band never rebuilds. Callers
-fade on their own from phase 2 (5.5).
+fade on their own from phase 2 (5.5), in their tones' envelopes, so the
+send still carries no QSB.
 
 ### 5.4 Pile-ups against the filter
 
@@ -733,6 +813,17 @@ phase 2 adds `place_contest_callers`:
 - **Capacity** is the reach width ÷ 60 Hz + 1, about six on a 300 Hz filter;
   the rest wait. The Band card says "Your filter fits 6 callers".
 
+As built (2a), `place_contest_caller` (`contest/place.rs`) places one
+caller at a time, as each joins, against the callers already on the
+frequency, and `filter_capacity` gives the Band card its count. Placed
+at random, callers would wedge the reach shut well short of its capacity,
+so a pitch is offered at random up to eight times and taken only if it
+leaves room for the rest, else the lowest place left, which always does:
+capacity callers always fit. The reach is the spread either side of the
+centre within the −15 dB edges. Strength is drawn U-shaped for single
+callers too, `sin(π(u − ½))` across the volume range; a dupe calling
+again keeps its strength and is placed afresh.
+
 ### 5.5 Per-caller QSB (phase 2)
 
 The envelope curves carry the gain: `build_envelope_curve` bakes
@@ -743,7 +834,14 @@ web player only when the browser refuses a curve (`web/send.rs:164-173`).
 Each caller gets the band's `Qsb` model at its own time offset, following
 the Band card's QSB switch. `plan_turn` bakes the fade into each tone's
 curve point by point at `ENVELOPE_SAMPLE_RATE` (`envelope.rs:9`), one `Arc`
-per tone, and scales `target_gain` to match. The QSB control runs
+per tone, and scales `target_gain` to match. As built (2a), single callers
+fade too. The machine holds `Qsb::of` the run's band settings, none with
+the switch off, and each caller draws a start point of its own up to an
+hour into the fade; a segment carries `Fade { qsb, from_sec }`, the
+caller's point at the segment's start (its start point, plus the turn's
+key time, plus the segment's start), and `plan_turn` reads only that, as
+the runtime plays from settings with the switch off. A segment of yours
+is never faded, whatever it carries. The QSB control runs
 0.03–1.5 Hz (`settings/mod.rs:47-48`) with components up to 2.3× that
 (`band/qsb.rs:26`), so a fade held per tone would step audibly. The web
 curve cache (`web/send.rs:128-143`) then holds a few hundred entries per
@@ -1076,7 +1174,7 @@ fist variation.
 |---|---|
 | Character and effective speed ranges | the callers' speeds; you send at the middle; −/+ shifts both for the run |
 | `callsignLevel` | the callers' call shapes, shared with Callsigns mode |
-| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today |
+| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept |
 | `pileupSpreadHz` | Pile-up only: how far either side of the centre callers land; hidden for Single, where it does nothing |
 | Session shape's first field | "Minutes per run" in place of "Groups per session" (`settings.rs:288-295`) |
 
@@ -1257,7 +1355,10 @@ exactly as it was while the run went on.
   station worked, logged or lost owns its groups in exactly one QSO.
 - **A lost QSO** (`k: "lost"`): a station whose call you sent, or that
   answered your partial, whose QSO ended unlogged (wiped, gone, failed by
-  your CQ, closed by your F3 and never logged, open at the end). One call
+  your CQ, closed by your F3 and never logged, open at the end). In a
+  pile-up, where several may answer a partial and you work one, only a
+  station that heard its call from you, or took your exchange, has a QSO
+  to lose; one that only answered your partial has none. One call
   group, then one per copied field, each a miss (received empty, 1 send,
   the token the station sent or would have sent), whether its exchange had
   reached you or not, as a QSO logged before its exchange came has. So a
@@ -1271,9 +1372,11 @@ exactly as it was while the run went on.
 - **A NIL** (`k: "nil"`): a call group, and a group for each field as a
   logged QSO has them (as keyed once the station's exchange has begun to
   reach you, a miss before that), against the station you work, or else
-  the station heard whose call the logged one is or is close to, or else
-  the single caller, the newest heard, and never an older one; received =
-  the logged call. So a NIL owns the groups a QSO logged with that station
+  the station heard whose call the logged one is or is close to, or else,
+  in a run of single callers, the single caller, the newest heard, and
+  never an older one; in a pile-up the newest caller is no likelier the
+  station than any other, so a call like nobody's is charged to nobody.
+  Received = the logged call. So a NIL owns the groups a QSO logged with that station
   would, copied no better, and never pays better than finishing: one
   logged on a caller before you work it copies none of its exchange, and
   one logged with a busted call once the exchange is in keeps the fields
@@ -1572,7 +1675,10 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
   estimate. Those bins count logs, and a station you hear tends to have a
   big log, so `final` is drawn with weight ∝ final^0.5, Dust's estimate
   between logs and QSOs. A dupe sends its previous serial + 1 +
-  Poisson(final × Δt / L).
+  Poisson(final × Δt / L). As built (2a), the dupe's serial is fixed as
+  it calls again, Δt the run time since its last exchange was fixed, the
+  count drawn as Knuth draws one, within four digits; the rest of its
+  exchange is what it sent before, its name among it.
 - **Habits `easy`:** plain digits, no padding (`7`). **`real`,** as MRCE:
   padded to three with the leading zeros as `TT` (`Station.pas:493-494,
   536-537`), 98% of other zeros as T, 9 as N 97% of the time (`:538-539,
@@ -1668,7 +1774,7 @@ pub struct Turn { pub id: u64, pub at_run_ms: u64, pub segments: Vec<Segment> }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment { pub who: Sender /* You | Caller(u32) */, pub text: String,
                      pub voice: StationVoice, pub start_sec: f64, pub end_sec: f64,
-                     pub fade: Option<FadeKey> /* from phase 2 (5.5) */ }
+                     pub fade: Option<Fade> /* from phase 2 (5.5) */ }
 pub struct Fields { pub call: String, pub exch: String,
                     pub call_edited: MonoMs, pub exch_complete: Option<MonoMs> }
 pub struct ContestView {
@@ -1725,7 +1831,7 @@ whichever is live.
 | `machine.rs` | `ContestMachine`, events, effects, `ContestView` |
 | `caller.rs` | caller states, patience, matching, replies, collisions, QRS |
 | `turn.rs` | `Turn`, segments, continuations, `plan_turn`, `MONITOR_LEVEL`, per-caller fades |
-| `place.rs` | `place_contest_callers` (phase 2) |
+| `place.rs` | `place_contest_caller`, `filter_capacity` (phase 2) |
 | `exchange.rs`, `parse.rs` | canonical forms, cut numbers, keyed tokens; `parse_exchange` |
 | `serial.rs`, `check.rs`, `score.rs` | serials; `QsoCheck`; `contest_score`, rates |
 | `record.rs` | `ContestLog`, `ContestRun`, `QsoRecord`, `result()` |
@@ -1840,8 +1946,8 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   was cut short; a repeat cut before it began is charged once heard; a
   pause you choose mid-send brings no quick repeat; a message without a
   call goes with the call last sent to the station; a NIL matching nobody
-  goes only to the newest station heard; a partial while the station waits
-  is charged and timed;
+  goes only to the newest station heard, of single callers; a partial
+  while the station waits is charged and timed;
 - a TU without logging then a log is checked against that station, and Esc
   after it leaves that QSO to log; your exchange after an answered partial
   is answered; a question with the Call field empty brings the caller back;
@@ -1856,7 +1962,17 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   try of one that answered your partial, starts Enter afresh;
   a lost QSO owns a missed group for each field; a NIL before working the
   station costs its fields too; walking away once the exchanges are out is
-  no way up the board.
+  no way up the board;
+- in pile-ups (2a): as many call as the range draws, as far as the filter
+  fits; only the best match answers, and the station you work keeps a
+  partial that fits it; a caller keyed over hears nothing, goes on through
+  continuations and under a CQ, and calls again a moment after you; each
+  caller's timeout is its own, and callers wait while you work someone
+  else; a station you leave for another calls again; B4 and NIL send away
+  only the station they are for, and the rest calls again; callers that
+  only answered a partial lose no copy; a NIL like nobody's charges nobody;
+  dupes are one arrival in fifty once five QSOs are logged; your call
+  brings newcomers; F4, F6, F8 and F12 send their messages.
 
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
@@ -1867,14 +1983,16 @@ One digit off: verified 0. Unsure: asks `K5?` first, its call points
 halve. Pauser: the clock equals the unpaused time. Dupe worker: 0 points,
 no error.
 
-**Soak** (`soak.rs`, its own 2,000 seeds). Keys carry fields 40% as heard
+**Soak** (`soak.rs`, seeds of its own: as built, 2,000 runs of single
+callers and 2,500 of pile-ups, 14). Keys carry fields 40% as heard
 (a quarter of them with the call heard before the last, as when logging a
 QSO left after F3), 20% one edit off, 10% empty, 10% partial and 20% junk,
 among stale and current turn events, timers by any id, pause, resume, hide
 and finish.
 
 - Every step: no panic, fresh ids, a clock that never goes back, but for
-  the retries a failed send gives back as paused (4.2).
+  the retries a failed send gives back as paused (4.2); no station sends
+  over itself in a turn, and pile-up callers sit 60 Hz apart or more.
 - The end: serial = QSOs logged + 1; QSO times rise and stay within
   `run_ms` ≤ the limit; `run_ms + paused_ms` is the wall-clock span, or at
   most that when time ran out, as a run noticed past its limit ends at the
@@ -1985,7 +2103,11 @@ ships a release before phase 1.
 - **2a Pile-ups.** `contestStyle`; arrivals from the stations range;
   `place_contest_callers`; per-caller QSB; best-match partials; collisions
   carried through continuations; NR?/AGN; calling twice; dupes, B4 and NIL;
-  F4, F6, F8, F12; "2 calling"; the Band card labels.
+  F4, F6, F8, F12; "2 calling"; the Band card labels. Landed, with the
+  contest soak run in both styles, each on seeds of its own (2,000 of
+  single callers, 2,500 of pile-ups, where callers drop out of a QSO you
+  leave and fewer QSOs reach the log with a slip in the call) and each
+  held to the coverage floor.
 - **2b Sprint.** `myState`; US and Canadian places on the fallback shares;
   the Sprint serial fit; the deterministic parser; Sprint scoring, with the
   multiplier list checked against the current NCJ rules before it ships.

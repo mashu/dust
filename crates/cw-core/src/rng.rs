@@ -48,6 +48,23 @@ pub trait Rng {
         let (radius, angle) = box_muller(self);
         radius * angle.cos()
     }
+
+    /// A Poisson count with mean `mean`, by multiplying uniforms (Knuth),
+    /// and never more than `most`, which bounds the draws it takes too:
+    /// one more than the count.
+    fn poisson(&mut self, mean: f64, most: usize) -> usize {
+        if mean.is_nan() || mean <= 0.0 {
+            return 0;
+        }
+        let limit = (-mean).exp();
+        let mut product = self.f64();
+        let mut count = 0;
+        while product > limit && count < most {
+            product *= self.f64();
+            count += 1;
+        }
+        count
+    }
 }
 
 /// Box–Muller's radius and angle for one pair of standard normal deviates:

@@ -893,6 +893,7 @@ mod tests {
         s.auto_level.auto_adjust_above_threshold_count = 900;
         s.auto_level.auto_adjust_below_threshold_count = 900;
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
+        s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_minutes = 9_000;
         s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
         s.contest.my_name = " jean-luc maximilian ".to_string();
@@ -1485,6 +1486,7 @@ mod tests {
         s.auto_level.char_sampling_coverage_strength = 0.9;
         s.auto_level.char_sampling_thompson = false;
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
+        s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_minutes = 25;
         s.contest.my_call = "DL1ABC".to_string();
         s.contest.my_name = "MAT".to_string();
@@ -1519,6 +1521,7 @@ mod tests {
         assert!(s.contest.my_call.is_empty());
         let json = serde_json::to_value(&s).expect("serialize");
         assert_eq!(json["contestKind"], "wpx");
+        assert_eq!(json["contestStyle"], "single");
         assert_eq!(json["contestMinutes"], 10);
         assert_eq!(json["myCall"], "");
         assert_eq!(json["myName"], "");

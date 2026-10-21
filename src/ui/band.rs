@@ -2,11 +2,12 @@ use cw_core::band::{FilterDesign, heard_snr_db};
 use cw_core::{
     BandSettings, CharSetMode, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape,
     PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN,
-    QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, STATIONS_MAX, STATIONS_MIN, SettingsSection,
-    TrainingSettings,
+    QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RunStyle, STATIONS_MAX, STATIONS_MIN,
+    SettingsSection, TrainingSettings, filter_capacity,
 };
 use dioxus::prelude::*;
 
+use crate::ui::format::counted;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch,
     control_id,
@@ -27,20 +28,25 @@ struct Band {
     /// past the slider, and its shape decides how much noise it lets in.
     receiver_width_hz: f64,
     noise_bandwidth_hz: f64,
-    /// A contest run of single callers, the only run style until pile-ups
-    /// come: the stations are the band around it, and there is no wanted
-    /// station for a pile-up to spread around or sit under.
-    single_callers: bool,
+    /// In Contest mode, how the run goes; none in group training. A run of
+    /// single callers has the band around it and no pile-up; a pile-up has
+    /// its callers, spread as far as the spread and the filter let them,
+    /// with no wanted station for them to sit under.
+    run: Option<RunStyle>,
+    /// How many pile-up callers the receiver has room for at once.
+    fits: usize,
 }
 
 impl Band {
     fn of(settings: &TrainingSettings) -> Self {
         let receiver = FilterDesign::from_settings(settings);
+        let contest = settings.curriculum.char_set_mode == CharSetMode::Contest;
         Self {
             band: settings.band.clone(),
             receiver_width_hz: receiver.width_hz(),
             noise_bandwidth_hz: receiver.noise_bandwidth_hz(),
-            single_callers: settings.curriculum.char_set_mode == CharSetMode::Contest,
+            run: contest.then_some(settings.contest.contest_style),
+            fits: filter_capacity(settings),
         }
     }
 }
@@ -72,18 +78,34 @@ pub fn BandConditionsCard(
             b.filter_width_hz, view.receiver_width_hz
         )
     });
-    // A run of single callers has the band around it, and no pile-up.
-    let (stations, stations_hint) = if view.single_callers {
-        (
+    // A run of single callers has the band around it, and no pile-up; a
+    // pile-up's range is its callers.
+    let (stations, unit, stations_hint) = match view.run {
+        Some(RunStyle::Single) => (
             "Band activity",
+            "at once",
             "How busy the band is around your run, your caller counted. At 1 there is nobody on it but your caller; above that other stations work each other at their own pitches and speeds, never more of them keying at once than the rest of the count.",
-        )
-    } else {
-        (
+        ),
+        Some(RunStyle::Pileup) => (
+            "Callers at once",
+            if b.stations_max == STATIONS_MIN {
+                "caller"
+            } else {
+                "callers"
+            },
+            "How many call you after each CQ or TU, drawn afresh each time; those you do not work keep calling while their patience lasts. Hold both ends together for the same number every time; at 1 there is no pile-up, only one caller at a time.",
+        ),
+        None => (
             "Stations calling",
+            "at once",
             "How many call at once, yours included, drawn afresh for each group. At 1 the band is just your station; above that the others call across it, and the band has its own traffic around it — never more than the rest of the count keying at once. Hold both ends together for the same number every time, or open them up so you never know what you are walking into.",
-        )
+        ),
     };
+    let fits = format!("Your filter fits {}", counted(view.fits, "caller"));
+    // Pile-up callers spread out around your pitch, and so do a group's
+    // others around the station you want, which they sit under too.
+    let pileup = view.run == Some(RunStyle::Pileup);
+    let group_pileup = view.run.is_none() && b.stations_max > STATIONS_MIN;
     rsx! {
         div { class: "card stack-sm",
             CardHead {
@@ -171,16 +193,23 @@ pub fn BandConditionsCard(
                 settings,
                 which: RangeSetting::Stations,
                 label: stations,
-                unit: "at once",
+                unit,
                 min_bound: f64::from(STATIONS_MIN),
                 max_bound: f64::from(STATIONS_MAX),
                 step: 1.0,
                 hint: stations_hint,
             }
-            if !view.single_callers && b.stations_max > STATIONS_MIN {
+            if pileup {
+                p { id: "filter-fits", class: "muted", style: "margin: 0;",
+                    "{fits}: they sit either side of your pitch, as far out as the spread, at least 60 Hz apart, and only where your filter passes them. Narrow it and fewer fit; the rest wait their turn."
+                }
+            }
+            if group_pileup {
                 p { class: "muted", style: "margin: 0;",
                     "The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them, out onto its skirts — copy the strongest, and narrow the filter until the rest drop away. A narrow filter leaves them little room, so it thins the pile-up: not everyone who calls gets through. Between groups the band carries on: other stations working each other at their own pitches and speeds, coming and going."
                 }
+            }
+            if pileup || group_pileup {
                 div { class: "field-grid",
                     SliderField {
                         label: "Pile-up spread".to_string(),
@@ -192,15 +221,17 @@ pub fn BandConditionsCard(
                         disabled: false,
                         onchange: move |v| settings.write().band.pileup_spread_hz = v,
                     }
-                    SliderField {
-                        label: "Pile-up is weaker by".to_string(),
-                        value_label: format!("{:.0} dB", b.pileup_level_db),
-                        value: b.pileup_level_db,
-                        min: PILEUP_LEVEL_MIN_DB,
-                        max: PILEUP_LEVEL_MAX_DB,
-                        step: 1.0,
-                        disabled: false,
-                        onchange: move |v| settings.write().band.pileup_level_db = v,
+                    if group_pileup {
+                        SliderField {
+                            label: "Pile-up is weaker by".to_string(),
+                            value_label: format!("{:.0} dB", b.pileup_level_db),
+                            value: b.pileup_level_db,
+                            min: PILEUP_LEVEL_MIN_DB,
+                            max: PILEUP_LEVEL_MAX_DB,
+                            step: 1.0,
+                            disabled: false,
+                            onchange: move |v| settings.write().band.pileup_level_db = v,
+                        }
                     }
                 }
             }

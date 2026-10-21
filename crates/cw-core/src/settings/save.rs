@@ -353,6 +353,24 @@ mod tests {
         assert_eq!(koch.curriculum.char_set_mode, CharSetMode::Koch);
     }
 
+    /// A pile-up is saved by its name and read back, and a run style this
+    /// build does not know reads as a single caller rather than costing the
+    /// rest of the save.
+    #[test]
+    fn a_run_style_reads_back_and_an_unknown_one_is_a_single_caller() {
+        let mut pileup = TrainingSettings::default();
+        pileup.contest.contest_style = crate::contest::RunStyle::Pileup;
+        let json = serde_json::to_value(&pileup).expect("settings serialize");
+        assert_eq!(json["contestStyle"], "pileup");
+        assert_eq!(load(json), pileup);
+        let unknown = load(serde_json::json!({ "contestStyle": "swarm", "contestMinutes": 25 }));
+        assert_eq!(
+            unknown.contest.contest_style,
+            crate::contest::RunStyle::Single
+        );
+        assert_eq!(unknown.contest.contest_minutes, 25, "the rest of the save");
+    }
+
     /// A build that knows no contests reads Contest as Callsigns at the same
     /// tier: the mode is one it knows, and `contestActive` a key it skips.
     #[test]

@@ -493,6 +493,16 @@ mod tests {
         runtime
     }
 
+    /// How many of the run's QSOs were dupes.
+    fn dupes(view: &crate::contest::ContestView) -> u32 {
+        let dupes = view
+            .log
+            .iter()
+            .filter(|row| matches!(&row.status, RowStatus::Checked(check) if check.dupe))
+            .count();
+        u32::try_from(dupes).unwrap_or(u32::MAX)
+    }
+
     /// The length of every turn played whole or in part, in milliseconds:
     /// the run's time, when the operator keys the moment the air falls
     /// quiet.
@@ -520,7 +530,12 @@ mod tests {
                 .and_then(|log| log.run(result.groups.len()));
             let run = run.expect("the log reads back");
             let score = run.score(&result.groups).expect("WPX scores");
-            assert_eq!(score.verified.qso_points, view.qsos, "seed {seed}");
+            // Every QSO scores, but a dupe, which scores nothing.
+            assert_eq!(
+                score.verified.qso_points + dupes(&view),
+                view.qsos,
+                "seed {seed}"
+            );
             // The rate the turns allow: nothing waits between them.
             let planned =
                 3_600_000.0 * f64::from(view.qsos) / air_time(&runtime, run.run_ms) as f64;
@@ -550,6 +565,109 @@ mod tests {
             );
             assert!(result.group_timings.iter().all(|timing| timing.sends == 1));
         }
+    }
+
+    /// A pile-up of one to three worked perfectly: every QSO logged clean,
+    /// and every one scoring but a dupe, at a rate near a single caller's,
+    /// though callers miss your exchange and call over you now and then.
+    #[test]
+    fn a_perfect_operator_works_a_pile_up_clean() {
+        for seed in [11, 12] {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_style = super::super::RunStyle::Pileup;
+            settings.band.stations_max = 3;
+            let settings = settings.clamp();
+            let sampler = Sampler::new(&[], &settings, seed);
+            let mut runtime = Runtime::start(seed, settings, sampler);
+            work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+            let view = runtime.machine.view();
+            assert!(view.qsos > 20, "seed {seed}: {} QSOs", view.qsos);
+            assert_eq!(view.clean, view.qsos, "seed {seed}");
+            let result = runtime.machine.result(0, "2026-10-20".into());
+            let run = result
+                .contest
+                .as_ref()
+                .and_then(|log| log.run(result.groups.len()))
+                .expect("the log reads back");
+            assert_eq!(run.style, "pileup");
+            let score = run.score(&result.groups).expect("WPX scores");
+            assert_eq!(score.verified.qso_points + dupes(&view), view.qsos);
+            // More than one called at once, as a pile-up does.
+            let most = runtime
+                .turns
+                .iter()
+                .map(|turn| {
+                    turn.segments
+                        .iter()
+                        .filter(|s| s.who != Sender::You)
+                        .count()
+                })
+                .max();
+            assert!(most.is_some_and(|most| most >= 2), "seed {seed}: {most:?}");
+        }
+    }
+
+    /// The dupe worker works every station that calls, dupes among them: a
+    /// dupe logged right is clean and no error, and scores nothing, raw or
+    /// verified, and owns no groups. Dupes come once five QSOs are logged.
+    #[test]
+    fn a_dupe_worker_scores_nothing_for_a_dupe_and_makes_no_error() {
+        let mut seen = 0;
+        for seed in 20..60 {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_style = super::super::RunStyle::Pileup;
+            settings.band.stations_max = 3;
+            let settings = settings.clamp();
+            let sampler = Sampler::new(&[], &settings, seed);
+            let mut runtime = Runtime::start(seed, settings, sampler);
+            work(&mut runtime, &mut Operator::new(Habit::Perfect), &[]);
+            let view = runtime.machine.view();
+            let dupes = dupes(&view);
+            if dupes == 0 {
+                continue;
+            }
+            seen += dupes;
+            for row in &view.log {
+                let RowStatus::Checked(check) = &row.status else {
+                    panic!("{row:?} is still waiting");
+                };
+                assert!(check.is_clean(), "seed {seed}: {row:?}");
+                if check.dupe {
+                    assert!(row.n > 5, "seed {seed}: a dupe after {} QSOs", row.n - 1);
+                    let first = view.log.iter().find(|other| other.call == row.call);
+                    assert!(first.is_some_and(|first| first.n < row.n
+                        && !matches!(
+                            &first.status,
+                            RowStatus::Checked(check) if check.dupe
+                        )));
+                }
+            }
+            let result = runtime.machine.result(0, "2026-10-20".into());
+            let run = result
+                .contest
+                .as_ref()
+                .and_then(|log| log.run(result.groups.len()))
+                .expect("the log reads back");
+            let score = run.score(&result.groups).expect("WPX scores");
+            assert_eq!(score.raw.qso_points, view.qsos - dupes, "seed {seed}");
+            assert_eq!(score.verified.qso_points, view.qsos - dupes, "seed {seed}");
+            let errors = run.errors(&result.groups).expect("its checks");
+            assert_eq!(errors.dupes, dupes);
+            assert_eq!((errors.busted_calls, errors.nils), (0, 0));
+            for (qso, row) in run
+                .qsos
+                .iter()
+                .filter(|qso| qso.k.is_empty())
+                .zip(&view.log)
+            {
+                let dupe = matches!(&row.status, RowStatus::Checked(check) if check.dupe);
+                assert_eq!(dupe, qso.g == 0, "seed {seed}: {qso:?}");
+            }
+            if seen >= 3 {
+                return;
+            }
+        }
+        panic!("only {seen} dupes across the seeds");
     }
 
     /// A Simple QSO run worked perfectly: every QSO logged clean, each with
@@ -700,7 +818,8 @@ mod tests {
         for qso in &run.qsos {
             let groups = &result.group_timings[at..at + qso.g as usize];
             at += qso.g as usize;
-            if !qso.k.is_empty() {
+            // A QSO lost, or a dupe, which owns no groups.
+            if !qso.k.is_empty() || groups.is_empty() {
                 continue;
             }
             assert_eq!(groups[0].sends, 2, "the call, asked for again");

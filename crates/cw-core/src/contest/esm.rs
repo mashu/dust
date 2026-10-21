@@ -120,7 +120,7 @@ pub enum MessagePart {
     B4,
     /// `NIL`: not in your log.
     Nil,
-    /// `NR?`: send your exchange again.
+    /// `NR?`, or the contest's own word for it: send your exchange again.
     NrQuery,
 }
 
@@ -334,7 +334,7 @@ pub fn message_text(
             MessagePart::MyCall => me.my_call.to_string(),
             MessagePart::B4 => "QSO B4".to_string(),
             MessagePart::Nil => "NIL".to_string(),
-            MessagePart::NrQuery => "NR?".to_string(),
+            MessagePart::NrQuery => rules.query.to_string(),
         })
         .collect();
     parts.join(" ")
@@ -752,6 +752,11 @@ mod tests {
             assert_eq!(message_text(&message, rules(), Side::Dx, &me()), text);
             assert_eq!(label(&message), key);
         }
+        // An exchange with no number in it is asked for again as AGN.
+        let simple = ContestKind::SimpleQso
+            .rules()
+            .expect("Simple QSO has shipped");
+        assert_eq!(message_text(&[NrQuery], simple, Side::Dx, &me()), "AGN");
     }
 
     #[test]
