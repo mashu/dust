@@ -180,6 +180,9 @@ pub(super) enum Says {
     Query,
     /// Its call, correcting yours: `DE K5XYZ`.
     Correction,
+    /// Its call, correcting yours, then its exchange, once it has yours:
+    /// `DE K5XYZ 5NN 214`.
+    CorrectionAndExchange,
     /// Its exchange.
     Exchange,
     /// What it sends after your TU, where the contest has it sign off:
@@ -194,8 +197,13 @@ pub(super) struct Reaction {
     pub(super) replies: bool,
     /// What it sends answers your asking for it again: `?`, `NR?`, a
     /// partial. A call sent again so is a send you pay for; an exchange
-    /// sent again is one whatever key drew it.
+    /// sent again is one whatever key drew it, but for one sent with its
+    /// call put right, which is one only after a `?` or `NR?`.
     pub(super) asked: bool,
+    /// What it sends answers your `?` or `NR?`: what it owes, sent again,
+    /// so an exchange it sends with its call put right is one you asked
+    /// for, as it is not after a partial or a slip, which ask for the call.
+    pub(super) again: bool,
     /// It took a call you sent for its own, exactly or close, or answered
     /// your partial or a piece of its call: you are working it now.
     pub(super) matched: bool,
@@ -215,6 +223,17 @@ const PATIENCE_BASE: u32 = 3;
 const PATIENCE_RAYLEIGH_SCALE: f64 = 3.0;
 const PATIENCE_MIN: u32 = 4;
 const PATIENCE_MAX: u32 = 14;
+
+/// The tries a caller has at least once it answers your partial: the full
+/// patience MorseRunner gives a station a near match of its call puts in a
+/// QSO (`DxOper.pas:496-498, 736`).
+const FULL_PATIENCE: u32 = 5;
+
+/// A caller keyed over, hearing only the tail of your message, takes two
+/// more tries, up to four, before it spends one on it, as MorseRunner's
+/// callers do on garbage (`DxOper.pas:412-427, 805-808`).
+const MORE_PATIENCE: u32 = 2;
+const MORE_PATIENCE_UPTO: u32 = 4;
 
 /// How many of its reply timeouts in a row the station you work sits
 /// through with nothing from you before it leaves, as MorseRunner's Caller
@@ -246,6 +265,11 @@ const FADE_OFFSET_MAX_SEC: f64 = 3_600.0;
 /// the contest's words for it rather than the second: `TU 5NN 214` rather
 /// than `R 5NN 214`.
 const FIRST_LEAD: f64 = 0.9;
+
+/// How many operators, putting your call right once they have your
+/// exchange, send their own with it, as MorseRunner's do five in six
+/// (`DxOper.pas:851-867`).
+const FIXES_WITH_EXCHANGE: f64 = 5.0 / 6.0;
 
 /// How often a caller waiting for your exchange asks with the first of the
 /// contest's queries rather than the second: `NR?` rather than `AGN`
@@ -296,6 +320,12 @@ pub(super) struct Caller {
     pileup: bool,
     /// It sends its call twice when it calls.
     twice: bool,
+    /// It puts your call right with `DE` in front, `DE K5XYZ`, rather than
+    /// its call twice; fixed for the operator, as MorseRunner's are.
+    de_first: bool,
+    /// Once it has your exchange, it sends its own with the call put
+    /// right: `DE K5XYZ 5NN 214`.
+    fixes_with_exchange: bool,
     /// Where on the band's fading it is at the start of the run, in
     /// seconds: its own path, faded apart from every other caller's.
     pub(super) fade_from_sec: f64,
@@ -326,6 +356,8 @@ impl Caller {
         let pileup = style == RunStyle::Pileup;
         let twice = pileup && rng.f64() < CALLS_TWICE;
         let fade_from_sec = rng.pick_in_range(0.0, FADE_OFFSET_MAX_SEC);
+        let de_first = rng.f64() < 0.5;
+        let fixes_with_exchange = rng.f64() < FIXES_WITH_EXCHANGE;
         Self {
             call,
             voice,
@@ -345,6 +377,8 @@ impl Caller {
             signs_off: false,
             pileup,
             twice,
+            de_first,
+            fixes_with_exchange,
             fade_from_sec,
             rng,
         }
@@ -394,18 +428,43 @@ impl Caller {
         self.pileup && self.state == CallerState::NeedQso && self.other_qso
     }
 
+    /// Whether, once it has your exchange, it sends its own with the call
+    /// put right: for a test to pick an operator of each kind.
+    #[cfg(test)]
+    pub(super) fn fixes_with_exchange(&self) -> bool {
+        self.fixes_with_exchange
+    }
+
     /// In a pile-up, it was still sending when you keyed over it, heard
     /// only your message's tail, and finished first: it sends again a
     /// moment after you, as MorseRunner's callers do on hearing garbage
-    /// (`DxStn.pas:249-253`). A caller spends a try on it; the station you
-    /// work stays, as you are keying. Whether it still sends.
+    /// (`DxStn.pas:249-253`). A caller takes more patience first, then
+    /// spends a try on it (`DxOper.pas:805-808`), so being keyed over never
+    /// sends it away; the station you work stays, as you are keying.
+    /// Whether it still sends.
     pub(super) fn keyed_over(&mut self) -> bool {
         match self.state {
-            CallerState::NeedQso => self.spend_try(),
+            CallerState::NeedQso => {
+                let more = (self.patience + MORE_PATIENCE).min(MORE_PATIENCE_UPTO);
+                self.patience = self.patience.max(more);
+                self.spend_try();
+            }
             state if state.worked() => self.silent = 0,
             _ => {}
         }
         self.state.active()
+    }
+
+    /// A pile-up caller that waited out your QSO with someone else comes
+    /// back to calling with fresh patience, as MorseRunner's
+    /// `osNeedPrevEnd` does on your CQ, NIL or `?` (`DxOper.pas:708, 719,
+    /// 793`). Whether it was waiting.
+    fn back_from_waiting(&mut self) -> bool {
+        let waited = self.waits();
+        if waited {
+            self.patience = draw_patience(&mut self.rng);
+        }
+        waited
     }
 
     /// In a pile-up, whether it misses the exchange it is waiting for, and
@@ -428,6 +487,9 @@ impl Caller {
         let mut reaction = Reaction::default();
         // Whether it replies, where a part decides; otherwise its state does.
         let mut replies = None;
+        // It came back from waiting out another QSO with fresh patience,
+        // and spends no try on coming back.
+        let mut rested = false;
         // Whether the last call in the message was its own: an exchange or
         // a `?` after someone else's call is not for it.
         let mut addressed = None;
@@ -444,6 +506,7 @@ impl Caller {
             };
             match part {
                 MessagePart::Cq => {
+                    rested |= self.back_from_waiting();
                     self.other_qso = false;
                     self.answered_partial = false;
                     match self.state {
@@ -509,9 +572,17 @@ impl Caller {
                         }
                         // A partial it fits best answers with its call: the
                         // single caller any it fits, as the only one there.
+                        // The first it answers while it calls gives it full
+                        // patience, as MorseRunner's near match puts it in a
+                        // QSO with (`DxOper.pas:736`), though here it is no
+                        // QSO yet: asking for the station you heard never
+                        // sends it away.
                         (CallMatch::Partial { .. }, state) => {
                             replies = Some(true);
                             reaction.asked = true;
+                            if state == NeedQso && !self.answered_partial {
+                                self.patience = self.patience.max(FULL_PATIENCE);
+                            }
                             self.answered_partial |= state == NeedQso;
                         }
                         (CallMatch::Exact, NeedQso | NeedCallNr) => self.state = NeedNr,
@@ -584,6 +655,7 @@ impl Caller {
                 {
                     replies = Some(true);
                     reaction.asked = true;
+                    reaction.again = true;
                 }
                 // Your call alone: a caller still calling, and not waiting
                 // on a QSO it heard you start, calls you again, as after a
@@ -595,8 +667,13 @@ impl Caller {
                 // rest of the pile-up among them, calls again, as
                 // MorseRunner's B4 and NIL put it back to calling
                 // (`DxOper.pas:716-724, 751-753`). B4 gives it fresh
-                // patience, then each costs the try any answer does.
+                // patience, then costs the try any answer does; a NIL costs
+                // that try too, but for a caller back from waiting out the
+                // QSO, which comes back with fresh patience instead.
                 MessagePart::B4 | MessagePart::Nil if self.state == NeedQso => {
+                    if *part == MessagePart::Nil {
+                        rested |= self.back_from_waiting();
+                    }
                     self.other_qso = false;
                     self.answered_partial = false;
                     if *part == MessagePart::B4 {
@@ -620,8 +697,9 @@ impl Caller {
         }
         // A caller still calling spends a try on each message it answers,
         // as on each timeout (`DxOper.pas:709, 825`): CQ after CQ moves the
-        // frequency on to someone else.
-        if self.state == NeedQso && replies == Some(true) {
+        // frequency on to someone else. One back from waiting out another
+        // QSO comes back with fresh patience instead.
+        if self.state == NeedQso && replies == Some(true) && !rested {
             self.spend_try();
         }
         reaction.replies = match self.state {
@@ -634,13 +712,16 @@ impl Caller {
             _ => false,
         };
         reaction.asked &= reaction.replies;
+        reaction.again &= reaction.replies;
         reaction
     }
 
     /// A `?` is coming with the Call field empty: whoever you worked, it is
     /// for anyone still calling, as MorseRunner's `osNeedPrevEnd` comes back
-    /// when the Call field is empty (`DxOper.pas:793`).
+    /// when the Call field is empty (`DxOper.pas:793`), with fresh patience,
+    /// before the try the `?` costs.
     pub(super) fn forget_other_qso(&mut self) {
+        self.back_from_waiting();
         self.other_qso = false;
     }
 
@@ -714,12 +795,21 @@ impl Caller {
                 (query.to_string(), Says::Query)
             }
             CallerState::NeedCall | CallerState::NeedCallNr => {
-                let correction = if self.rng.f64() < 0.5 {
+                let correction = if self.de_first {
                     format!("DE {call}")
                 } else {
                     format!("{call} {call}")
                 };
-                (correction, Says::Correction)
+                // With your exchange in hand, most send their own with the
+                // call put right, as MorseRunner's `osNeedCall` does
+                // (`DxOper.pas:851-867`), so you can log it as you fix it.
+                if self.state == CallerState::NeedCall && self.fixes_with_exchange {
+                    let body = self.exchange_text(rules, side, my_call, run_ms);
+                    self.exchanges_sent += 1;
+                    (format!("{correction} {body}"), Says::CorrectionAndExchange)
+                } else {
+                    (correction, Says::Correction)
+                }
             }
             CallerState::NeedEnd => {
                 let body = self.exchange_text(rules, side, my_call, run_ms);
@@ -868,6 +958,16 @@ mod tests {
 
     fn call(text: &str) -> MessagePart {
         HisCall(text.to_string())
+    }
+
+    /// What `caller` puts your call right with as it stands: its exchange
+    /// too, once it has yours, if its operator sends it so.
+    fn correction(caller: &Caller) -> Says {
+        if caller.state == CallerState::NeedCall && caller.fixes_with_exchange {
+            Says::CorrectionAndExchange
+        } else {
+            Says::Correction
+        }
     }
 
     #[test]
@@ -1113,11 +1213,15 @@ mod tests {
         let mut caller = caller(4);
         let reaction = caller.hear(&[call("K5XYW"), Exchange], &[]);
         assert!(reaction.replies && reaction.matched && !reaction.asked);
+        let corrects = correction(&caller);
         let (text, says) = caller
             .reply(rules(), Side::Dx, "DL1ABC", 0)
             .expect("a reply");
-        assert_eq!(says, Says::Correction);
-        assert!(text == "DE K5XYZ" || text == "K5XYZ K5XYZ", "{text}");
+        assert_eq!(says, corrects);
+        assert!(
+            text.starts_with("DE K5XYZ") || text.starts_with("K5XYZ K5XYZ"),
+            "{text}"
+        );
         caller.hear(&[call("K5XYZ"), Tu], &[]);
         assert_eq!(caller.state, CallerState::Done);
         // Close before your exchange, it waits for both.
@@ -1174,10 +1278,11 @@ mod tests {
             let reaction = caller.hear(&[call("K5X?")], &[]);
             assert!(reaction.replies && reaction.asked && reaction.matched);
             assert_eq!(caller.state, after);
+            let corrects = correction(&caller);
             let (text, says) = caller
                 .reply(rules(), Side::Dx, "DL1ABC", 0)
                 .expect("a reply");
-            assert_eq!(says, Says::Correction);
+            assert_eq!(says, corrects);
             assert!(text.contains("K5XYZ"), "{text}");
         }
     }
@@ -1279,9 +1384,10 @@ mod tests {
         let reaction = after.hear(&[Exchange], &[]);
         assert!(reaction.replies && reaction.took_exchange);
         assert_eq!(after.state, CallerState::NeedCall);
+        let corrects = correction(&after);
         assert_eq!(
             after.reply(rules(), Side::Dx, "DL1ABC", 0).map(|r| r.1),
-            Some(Says::Correction)
+            Some(corrects)
         );
         let mut moved = caller(1);
         moved.hear(&[call("K5?")], &[]);
@@ -1622,9 +1728,10 @@ mod tests {
             let reaction = slip.hear(&message, &[]);
             assert_eq!(slip.state, state, "{message:?}");
             assert!(reaction.replies);
+            let corrects = correction(&slip);
             assert_eq!(
                 slip.reply(rules(), Side::Dx, "DL1ABC", 0).map(|r| r.1),
-                Some(Says::Correction)
+                Some(corrects)
             );
         }
         let mut calling = caller(1);
@@ -1641,5 +1748,114 @@ mod tests {
         assert!(!caller.hear(&[Again], &[]).replies);
         caller.forget_other_qso();
         assert!(caller.hear(&[Again], &[]).replies);
+    }
+
+    /// A caller that has your exchange and puts your call right sends its
+    /// own exchange with the correction, five operators in six, as
+    /// MorseRunner's `osNeedCall` reply does; one still waiting for your
+    /// exchange sends the call alone. Each operator keeps its form.
+    #[test]
+    fn a_correction_with_your_exchange_in_hand_carries_its_own() {
+        let mut with = 0;
+        for seed in 0..3_000 {
+            let mut caller = caller(seed);
+            caller.hear(&[call("K5XYW")], &[]);
+            assert_eq!(caller.state, CallerState::NeedCallNr);
+            let (alone, says) = caller
+                .reply(rules(), Side::Dx, "DL1ABC", 0)
+                .expect("a reply");
+            assert_eq!(says, Says::Correction, "seed {seed}");
+            assert!(alone == "DE K5XYZ" || alone == "K5XYZ K5XYZ", "{alone}");
+            caller.hear(&[Exchange], &[]);
+            assert_eq!(caller.state, CallerState::NeedCall);
+            let (fix, says) = caller
+                .reply(rules(), Side::Dx, "DL1ABC", 0)
+                .expect("a reply");
+            let serial = caller.exchange(rules(), Side::Dx, 0)[0].1.clone();
+            if caller.fixes_with_exchange {
+                with += 1;
+                assert_eq!(says, Says::CorrectionAndExchange);
+                assert_eq!(fix, format!("{alone} 5NN {serial}"), "the same form");
+                // Its exchange is out: sent again, it goes without a word
+                // before it.
+                caller.hear(&[call("K5XYZ"), Again], &[]);
+                assert_eq!(
+                    caller.reply(rules(), Side::Dx, "DL1ABC", 0),
+                    Some((format!("5NN {serial}"), Says::Exchange))
+                );
+            } else {
+                assert_eq!((fix, says), (alone, Says::Correction), "seed {seed}");
+            }
+        }
+        let share = f64::from(with) / 3_000.0;
+        assert!((share - 5.0 / 6.0).abs() < 0.03, "{share:.3}");
+    }
+
+    /// A caller that answers your partial while it calls has five tries
+    /// at least, before the one it spends: the station you asked for is
+    /// never sent away by your asking. A second partial costs a try as any
+    /// answer does.
+    #[test]
+    fn a_partial_it_answers_gives_a_caller_full_patience() {
+        for seed in 0..200 {
+            let mut caller = caller(seed);
+            let tries = caller.patience;
+            caller.patience = 1;
+            assert!(caller.hear(&[call("K5?")], &[]).replies, "seed {seed}");
+            assert_eq!(caller.patience, FULL_PATIENCE - 1);
+            assert!(caller.hear(&[call("K5?")], &[]).replies);
+            assert_eq!(caller.patience, FULL_PATIENCE - 2);
+            // A patient caller keeps its patience.
+            let mut patient = self::caller(seed);
+            patient.hear(&[call("K5?")], &[]);
+            assert_eq!(patient.patience, tries.max(FULL_PATIENCE) - 1);
+        }
+    }
+
+    /// A pile-up caller you key over, done first, takes more patience
+    /// before the try it spends, as MorseRunner's callers do on garbage: on
+    /// its last try it stays, and a patient caller spends a try.
+    #[test]
+    fn a_caller_keyed_over_is_never_sent_away() {
+        for (before, after) in [(1, 2), (2, 3), (3, 3), (4, 3), (9, 8)] {
+            let mut caller = pileup_caller(1, "K5XYZ");
+            caller.patience = before;
+            assert!(caller.keyed_over(), "{before}");
+            assert_eq!(caller.patience, after, "{before}");
+            assert_eq!(caller.state, CallerState::NeedQso);
+        }
+    }
+
+    /// A pile-up caller that waited out your QSO with someone else comes
+    /// back with fresh patience: to your CQ or NIL with no try spent on
+    /// it, and to a `?` with the Call field empty before the try the `?`
+    /// costs. One that never waited spends a try as before.
+    #[test]
+    fn a_caller_back_from_waiting_has_fresh_patience() {
+        let waiting = || {
+            let mut caller = pileup_caller(1, "K5XYZ");
+            caller.hear(&[call("W1AW"), Exchange], &[]);
+            assert!(caller.waits());
+            caller.patience = 1;
+            caller
+        };
+        for part in [Cq, MessagePart::Nil] {
+            let mut caller = waiting();
+            assert!(
+                caller.hear(std::slice::from_ref(&part), &[]).replies,
+                "{part:?}"
+            );
+            assert!((PATIENCE_MIN..=PATIENCE_MAX).contains(&caller.patience));
+            assert!(!caller.waits());
+            // Not waiting now: the next costs a try.
+            let tries = caller.patience;
+            caller.hear(std::slice::from_ref(&part), &[]);
+            assert_eq!(caller.patience, tries - 1, "{part:?}");
+        }
+        let mut asked = waiting();
+        asked.forget_other_qso();
+        assert!(asked.hear(&[Again], &[]).replies);
+        assert!((PATIENCE_MIN - 1..PATIENCE_MAX).contains(&asked.patience));
+        assert_ne!(asked.state, CallerState::Gone);
     }
 }

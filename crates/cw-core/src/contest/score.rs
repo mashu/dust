@@ -3,8 +3,9 @@
 //!
 //! The score comes twice, as MorseRunner's does. Raw is what the log claims:
 //! every logged QSO that is not a dupe, NILs and busted calls included,
-//! times the multipliers as typed. Verified is what survives the check:
-//! clean QSOs only, a dupe scoring nothing. Verified is never above raw.
+//! times their multipliers as typed, and those of the QSOs verified counts.
+//! Verified is what survives the check: clean QSOs only, a dupe scoring
+//! nothing. Verified is never above raw.
 
 use std::collections::BTreeSet;
 
@@ -79,7 +80,11 @@ const RATE_WINDOW_MS: u64 = 5 * MS_PER_MINUTE;
 pub fn contest_score(scoring: &Scoring, qsos: &[ScoredQso<'_>], run_ms: u64) -> ContestScore {
     // Raw drops a call already logged, as a logger marks a dupe: by the
     // call as typed. Verified keeps clean QSOs that are not dupes, each
-    // station once, so it can only count calls raw counts.
+    // station once, so it can only count calls raw counts. Raw's
+    // multipliers are those of the QSOs it counts and of those verified
+    // counts: a clean QSO logged after a NIL with the same call is
+    // verified, and the state it sent counts there, so raw counts it too;
+    // a dupe's state counts in neither.
     let mut typed = BTreeSet::new();
     let raw: Vec<&ScoredQso<'_>> = qsos.iter().filter(|qso| typed.insert(qso.call)).collect();
     let mut clean = BTreeSet::new();
@@ -87,17 +92,19 @@ pub fn contest_score(scoring: &Scoring, qsos: &[ScoredQso<'_>], run_ms: u64) -> 
         .iter()
         .filter(|qso| qso.check.is_clean() && !qso.check.dupe && clean.insert(qso.call))
         .collect();
+    let claimed: Vec<&ScoredQso<'_>> = raw.iter().chain(&verified).copied().collect();
     let times: Vec<u64> = qsos.iter().map(|qso| qso.at_ms).collect();
     ContestScore {
-        raw: tally(scoring, &raw),
-        verified: tally(scoring, &verified),
+        raw: tally(scoring, &raw, &claimed),
+        verified: tally(scoring, &verified, &verified),
         rates: Rates::of(&times, run_ms),
     }
 }
 
-/// The points and multipliers of the QSOs that count.
-fn tally(scoring: &Scoring, counted: &[&ScoredQso<'_>]) -> Tally {
-    let mults: BTreeSet<String> = counted
+/// The points of the QSOs that count, `counted`, and the multipliers of
+/// those that count them, `mults_of`.
+fn tally(scoring: &Scoring, counted: &[&ScoredQso<'_>], mults_of: &[&ScoredQso<'_>]) -> Tally {
+    let mults: BTreeSet<String> = mults_of
         .iter()
         .filter_map(|qso| qso.multiplier(scoring.multiplier))
         .collect();
@@ -267,7 +274,8 @@ mod tests {
         assert_eq!(with.verified, without.verified);
     }
 
-    /// Verified never passes raw, whatever the log holds.
+    /// Verified never passes raw, whatever the log holds, in a contest
+    /// whose multipliers come from the call or from what was logged.
     #[test]
     fn verified_is_never_above_raw() {
         use crate::rng::{Rng, SplitMix64};
@@ -278,25 +286,77 @@ mod tests {
             clean(),
             wrong(),
             QsoCheck {
+                errors: vec![QsoError::Nil],
+                dupe: false,
+            },
+            QsoCheck {
                 errors: Vec::new(),
                 dupe: true,
             },
         ];
+        let places: Vec<Vec<(Field, String)>> = ["OR", "MA", "NM", "MD", "DX"]
+            .iter()
+            .map(|st| vec![(Field::St, (*st).to_string())])
+            .collect();
         let mut rng = SplitMix64::new(4);
-        for _ in 0..500 {
-            let log: Vec<ScoredQso<'_>> = (0..rng.usize_in(0, 12))
-                .map(|i| ScoredQso {
-                    at_ms: i as u64 * 40_000,
-                    call: calls[rng.usize_in(0, calls.len() - 1)],
-                    fields: &[],
-                    check: &checks[rng.usize_in(0, checks.len() - 1)],
-                })
-                .collect();
-            let score = contest_score(&wpx(), &log, 600_000);
-            assert!(score.verified.qso_points <= score.raw.qso_points);
-            assert!(score.verified.mults <= score.raw.mults);
-            assert!(score.verified.score <= score.raw.score);
+        for scoring in [wpx(), sprint()] {
+            for _ in 0..500 {
+                let log: Vec<ScoredQso<'_>> = (0..rng.usize_in(0, 12))
+                    .map(|i| ScoredQso {
+                        at_ms: i as u64 * 40_000,
+                        call: calls[rng.usize_in(0, calls.len() - 1)],
+                        fields: &places[rng.usize_in(0, places.len() - 1)],
+                        check: &checks[rng.usize_in(0, checks.len() - 1)],
+                    })
+                    .collect();
+                let score = contest_score(&scoring, &log, 600_000);
+                assert!(score.verified.qso_points <= score.raw.qso_points);
+                assert!(score.verified.mults <= score.raw.mults);
+                assert!(score.verified.score <= score.raw.score);
+            }
         }
+    }
+
+    /// A NIL logged with a call, then a clean QSO with the same call and
+    /// another state: raw counts the call once, and the clean QSO's state
+    /// among its multipliers, as verified counts that QSO, so verified
+    /// stays under it. The same call logged once more, a dupe with a third
+    /// state, adds a multiplier to neither, as a logger counts none for a
+    /// dupe.
+    #[test]
+    fn a_clean_qso_after_a_nil_with_its_call_keeps_verified_under_raw() {
+        let place = |st: &str| vec![(Field::St, st.to_string())];
+        let (nm, md, ma) = (place("NM"), place("MD"), place("MA"));
+        let (clean, nil, dupe) = (
+            clean(),
+            QsoCheck {
+                errors: vec![QsoError::Nil],
+                dupe: false,
+            },
+            QsoCheck {
+                errors: Vec::new(),
+                dupe: true,
+            },
+        );
+        let at = |at_ms: u64, call, fields, check| ScoredQso {
+            at_ms,
+            call,
+            fields,
+            check,
+        };
+        let log = [
+            at(20_000, "N5KGS", &nm, &clean),
+            at(40_000, "W3BRL", &nm, &nil),
+            at(60_000, "W3BRL", &md, &clean),
+            at(80_000, "W3BRL", &ma, &dupe),
+        ];
+        let score = contest_score(&sprint(), &log, 600_000);
+        let both = Tally {
+            qso_points: 2,
+            mults: 2,
+            score: 4,
+        };
+        assert_eq!((score.raw, score.verified), (both, both));
     }
 
     /// A Sprint run worked by hand: a point a QSO, times each state,

@@ -981,14 +981,19 @@ fn check_contest_effects(
                     if segment.who == Sender::You {
                         continue;
                     }
-                    match copy_of(&segment.text) {
-                        Some(Copied::Call(call) | Copied::Correction(call)) => {
-                            if seen.call != call {
-                                seen.previous = std::mem::replace(&mut seen.call, call.to_string());
-                            }
-                        }
-                        Some(Copied::Exchange(exch)) => seen.exch = exch,
-                        None => {}
+                    let (call, exch) = match copy_of(&segment.text) {
+                        Some(Copied::Call(call)) => (Some(call), None),
+                        Some(Copied::Correction(call, exch)) => (Some(call), exch),
+                        Some(Copied::Exchange(exch)) => (None, Some(exch)),
+                        None => (None, None),
+                    };
+                    if let Some(call) = call
+                        && seen.call != call
+                    {
+                        seen.previous = std::mem::replace(&mut seen.call, call.to_string());
+                    }
+                    if let Some(exch) = exch {
+                        seen.exch = exch;
                     }
                 }
             }
@@ -1115,15 +1120,17 @@ fn contest_run(
             }
         };
         let was_terminal = machine.is_terminal();
-        let lost = machine.lost_copies();
+        let lost = machine.nil_and_lost_copies();
         effects = machine.apply(event.clone(), at);
         // A station you left for another, or whose QSO ended with another
-        // station's call in the Call field, keeps the call you had for it:
-        // no copy lost now is a call another station took from you.
+        // station's call in the Call field, keeps the call you had for it,
+        // and a NIL logged for a station you left is no copy of the one you
+        // work: no copy lost or charged now is a call another station took
+        // from you.
         let crossed = machine.crossed_since(&lost);
         assert!(
             crossed.is_empty(),
-            "seed {seed} step {step}: lost copies that are another station's call: {crossed:?}"
+            "seed {seed} step {step}: lost or NIL copies that are another station's call: {crossed:?}"
         );
         if was_terminal {
             assert!(
@@ -1203,7 +1210,7 @@ fn soak_contest_runs(style: RunStyle) {
         } = contest_run(seed, &settings, None);
         let finished_at = ended.unwrap_or_else(|| {
             let end = events.last().map_or(0, |(_, at)| at.0) + 1;
-            let lost = machine.lost_copies();
+            let lost = machine.nil_and_lost_copies();
             let _ = machine.apply(ContestEvent::FinishNow, MonoMs(end));
             let crossed = machine.crossed_since(&lost);
             assert!(

@@ -329,6 +329,52 @@ mod tests {
         }
     }
 
+    /// The band makes room for the callers sounding at once, not for every
+    /// send in the turn: two calling over each other, then one of them
+    /// calling again once both are done, is two; a group's pile-up, all
+    /// calling over the wanted station, is all of them.
+    #[test]
+    fn the_band_makes_room_for_the_callers_sounding_at_once() {
+        let settings = settings();
+        let voice = resolve_station(&settings, &mut SplitMix64::new(3));
+        let first = segment(Sender::Caller(0), "K5XYZ", voice, 0.2);
+        let over = segment(Sender::Caller(1), "W7ABC", voice, 0.5);
+        let again = segment(Sender::Caller(0), "K5XYZ", voice, over.end_sec + 0.3);
+        let turn = Turn {
+            id: 1,
+            at_run_ms: 0,
+            segments: vec![first, over, again],
+        };
+        let planned = plan_turn(&turn, &settings);
+        assert_eq!(planned.others.len(), 3);
+        assert_eq!(planned.others_at_once(), 2);
+        let alone = Turn {
+            segments: turn.segments[..1].to_vec(),
+            ..turn.clone()
+        };
+        assert_eq!(plan_turn(&alone, &settings).others_at_once(), 1);
+        let cq = Turn {
+            segments: vec![segment(Sender::You, "CQ", your_voice(&settings, 30.0), 0.0)],
+            ..turn
+        };
+        assert_eq!(plan_turn(&cq, &settings).others_at_once(), 0);
+        let group = plan_transmission(
+            &Transmission {
+                text: "K5XYZ".to_string(),
+                voice,
+                others: (0..3)
+                    .map(|k| Interferer {
+                        text: "W7ABC".to_string(),
+                        voice,
+                        delay_sec: 0.1 * f64::from(k),
+                    })
+                    .collect(),
+            },
+            &settings,
+        );
+        assert_eq!(group.others_at_once(), 3);
+    }
+
     #[test]
     fn no_reply_is_cut() {
         let turn = turn();

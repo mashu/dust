@@ -44,6 +44,36 @@ pub struct PlannedTransmission {
     pub dry_wanted: bool,
 }
 
+impl PlannedTransmission {
+    /// The most of `others` sounding at one moment, each from its first
+    /// tone to the end of its last: how many stations the band's own
+    /// traffic makes room for while the send plays. A contest's turn plans
+    /// each call a caller sends in it as one of `others`, one after another
+    /// as often as not, so they are counted by when they sound, not by how
+    /// many there are.
+    pub fn others_at_once(&self) -> usize {
+        let spans: Vec<(f64, f64)> = self
+            .others
+            .iter()
+            .filter_map(|plan| {
+                let first = plan.events.first()?;
+                let last = plan.events.last()?;
+                Some((first.start_sec, last.start_sec + last.duration_sec))
+            })
+            .collect();
+        spans
+            .iter()
+            .map(|(start, _)| {
+                spans
+                    .iter()
+                    .filter(|(from, to)| from <= start && start < to)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+}
+
 /// Lay out every station's sound against one clock.
 ///
 /// The others are pushed back by their own delay and cut off at the end of the

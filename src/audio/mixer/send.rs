@@ -162,7 +162,7 @@ pub struct SendVoice {
     /// Where a stopped send began its release.
     released_at: Option<usize>,
     release_len: usize,
-    /// How many other stations are calling across this send.
+    /// The most other stations calling across this send at once.
     callers: usize,
     finished: Arc<AtomicBool>,
 }
@@ -202,7 +202,7 @@ impl SendVoice {
             tail_fade: samples(TAIL_FADE_SEC),
             released_at: None,
             release_len: samples(SEND_RELEASE_SEC),
-            callers: plan.others.len(),
+            callers: plan.others_at_once(),
             finished: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -538,11 +538,26 @@ mod tests {
         );
     }
 
+    /// The band makes room for the callers sounding at once across a send,
+    /// not for every call in it: two short calls one after the other are
+    /// one, two long ones over each other two.
+    #[test]
+    fn a_send_makes_room_for_the_callers_sounding_at_once() {
+        let apart = planned("TTTTT", &["E", "E"]);
+        assert_eq!(apart.others.len(), 2);
+        let voice = SendVoice::new(&apart, &receiver(), None, SR, 0.0);
+        assert_eq!(voice.callers_now(), 1);
+        let over = planned("TTTTT", &["TTT", "TTT"]);
+        let voice = SendVoice::new(&over, &receiver(), None, SR, 0.0);
+        assert_eq!(voice.callers_now(), 2);
+    }
+
     /// A send is over when it has been heard, not when it has been played:
-    /// the speaker is a buffer or more behind the callback.
+    /// the speaker is a buffer or more behind the callback. Its one caller,
+    /// heard across it, is off the air with it.
     #[test]
     fn a_send_is_finished_once_it_has_been_heard() {
-        let plan = planned("E", &["T"]);
+        let plan = planned("TTT", &["E"]);
         let mut voice = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
         let finished = voice.finished_flag();
         assert_eq!(voice.callers_now(), 1);

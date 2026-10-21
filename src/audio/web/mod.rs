@@ -257,7 +257,7 @@ impl MorseBackend for MorsePlayer {
         self.send = Some(send);
         if let Some(stream) = &self.band {
             stream.reserve(Reservation::new(
-                plan.others.len(),
+                plan.others_at_once(),
                 start + plan.wanted.duration_sec,
             ));
         }

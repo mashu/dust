@@ -269,8 +269,9 @@ fn callers_text(turn: &Turn, into: f64) -> Vec<String> {
 pub(crate) enum Copied<'a> {
     /// A caller calling: its call alone, or `DL1ABC DE K5XYZ K5XYZ K`.
     Call(&'a str),
-    /// A call put right: `DE K5XYZ`, or `K5XYZ K5XYZ`.
-    Correction(&'a str),
+    /// A call put right, `DE K5XYZ` or `K5XYZ K5XYZ`, with the station's
+    /// exchange where it sends it after: `DE K5XYZ 5NN 214`.
+    Correction(&'a str, Option<String>),
     /// An exchange, as it goes in the Exchange field: a contest's serial,
     /// its last word; an everyday QSO's report and name, `579 BOB`; a
     /// Sprint's serial, name and state, `145 BOB OR`.
@@ -281,22 +282,34 @@ pub(crate) enum Copied<'a> {
 /// operators and the soak copy what they hear.
 pub(crate) fn copy_of(text: &str) -> Option<Copied<'_>> {
     let words: Vec<&str> = text.split_whitespace().collect();
+    match words.as_slice() {
+        ["DE", call] => Some(Copied::Correction(call, None)),
+        [one, two] if one == two && parse_callsign(one).is_some() => {
+            Some(Copied::Correction(one, None))
+        }
+        [call] if parse_callsign(call).is_some() => Some(Copied::Call(call)),
+        [_, "DE", call, again, "K"] if call == again => Some(Copied::Call(call)),
+        // The call put right, then the exchange.
+        ["DE", call, rest @ ..] => {
+            exchange_of(rest).map(|exch| Copied::Correction(call, Some(exch)))
+        }
+        [one, two, rest @ ..] if one == two && parse_callsign(one).is_some() => {
+            exchange_of(rest).map(|exch| Copied::Correction(one, Some(exch)))
+        }
+        _ => exchange_of(&words).map(Copied::Exchange),
+    }
+}
+
+/// The exchange in a caller's `words`, as it goes in the Exchange field.
+fn exchange_of(words: &[&str]) -> Option<String> {
     let after = |word: &str| {
         let at = words.iter().position(|said| *said == word)?;
         words.get(at + 1).copied()
     };
-    match words.as_slice() {
-        ["DE", call] => Some(Copied::Correction(call)),
-        [one, two] if one == two && parse_callsign(one).is_some() => Some(Copied::Correction(one)),
-        [call] if parse_callsign(call).is_some() => Some(Copied::Call(call)),
-        [_, "DE", call, again, "K"] if call == again => Some(Copied::Call(call)),
-        _ => match (after("UR"), after("NAME")) {
-            (Some(rst), Some(name)) => Some(Copied::Exchange(format!("{rst} {name}"))),
-            _ if words.contains(&"5NN") => words
-                .last()
-                .map(|serial| Copied::Exchange((*serial).to_string())),
-            _ => sprint_exchange(&words).map(Copied::Exchange),
-        },
+    match (after("UR"), after("NAME")) {
+        (Some(rst), Some(name)) => Some(format!("{rst} {name}")),
+        _ if words.contains(&"5NN") => words.last().map(|serial| (*serial).to_string()),
+        _ => sprint_exchange(words),
     }
 }
 
@@ -373,19 +386,27 @@ impl Operator {
                 let partial: String = call.chars().take(2).chain(['?']).collect();
                 self.type_call(&partial);
             }
-            Some(Copied::Call(call) | Copied::Correction(call)) => self.type_call(call),
-            Some(Copied::Exchange(exch)) => {
-                let exch = if self.habit == Habit::DigitOff {
-                    one_digit_off(&exch)
-                } else {
-                    exch
-                };
-                if self.exch != exch {
-                    self.typing += exch.len();
-                    self.exch = exch;
+            Some(Copied::Call(call)) => self.type_call(call),
+            Some(Copied::Correction(call, exch)) => {
+                self.type_call(call);
+                if let Some(exch) = exch {
+                    self.type_exch(exch);
                 }
             }
+            Some(Copied::Exchange(exch)) => self.type_exch(exch),
             None => {}
+        }
+    }
+
+    fn type_exch(&mut self, exch: String) {
+        let exch = if self.habit == Habit::DigitOff {
+            one_digit_off(&exch)
+        } else {
+            exch
+        };
+        if self.exch != exch {
+            self.typing += exch.len();
+            self.exch = exch;
         }
     }
 
@@ -855,8 +876,25 @@ mod tests {
             copy_of("DL1ABC DE K5XYZ K5XYZ K"),
             Some(Copied::Call("K5XYZ"))
         );
-        assert_eq!(copy_of("DE K5XYZ"), Some(Copied::Correction("K5XYZ")));
-        assert_eq!(copy_of("K5XYZ K5XYZ"), Some(Copied::Correction("K5XYZ")));
+        assert_eq!(copy_of("DE K5XYZ"), Some(Copied::Correction("K5XYZ", None)));
+        assert_eq!(
+            copy_of("K5XYZ K5XYZ"),
+            Some(Copied::Correction("K5XYZ", None))
+        );
+        // A call put right with the exchange after it, in each contest.
+        for (fix, exch) in [
+            ("DE K5XYZ 5NN 214", "214"),
+            ("K5XYZ K5XYZ 5NN 214", "214"),
+            ("DE K5XYZ UR 579 579 NAME BOB BOB BK", "579 BOB"),
+            ("DE K5XYZ K1ABC 145 BOB OR", "145 BOB OR"),
+            ("K5XYZ K5XYZ K1ABC 145 BOB OR", "145 BOB OR"),
+        ] {
+            assert_eq!(
+                copy_of(fix),
+                Some(Copied::Correction("K5XYZ", Some(exch.to_string()))),
+                "{fix}"
+            );
+        }
         assert_eq!(
             copy_of("TU 5NN 214"),
             Some(Copied::Exchange("214".to_string()))
