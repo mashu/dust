@@ -22,7 +22,12 @@ too: `contestStyle` and pile-ups (`contest/place.rs`, the callers' fades in
 `contest/turn.rs`), with collisions, best-match partials, missed exchanges,
 calling twice, dupes, and F4, F6, F8 and F12. Contest is in the mode
 picker from slice 2a on, ahead of the rest of phase 2, so it can be tried
-while Sprint and the learner aids are built (§14).
+while Sprint and the learner aids are built (§14). Fixes from an
+end-to-end test of the web build in a phone-sized browser followed: one
+press of Start or Listen after a refusal, each screen opening at its top,
+Discard's second question safe from a double tap, the cursor kept by
+Discard, Keep it and the theme button, and the run fitting a 360×640
+screen (§2, §7).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -133,7 +138,14 @@ minutes per run ("10 Minutes", or "Open, up to 60 min") and "Single caller"
 or "1–3 callers". Start reads "Start contest" (id `btn-start-training`); a
 start that `missing()` refuses says why in the hero, above Start, unless
 the line under the call field already says why the call will not do, and
-when the call is what is missing, Start moves the focus to its field. The
+when the call or the name is what is missing, Start moves the focus to its
+field once the hero has drawn it (an effect, `src/ui/home.rs`): in a Simple
+QSO with neither, the press that keeps the call swaps the call's field for
+the name's. While the hero holds a field, Start and Listen keep the cursor
+in it and keep what was typed there before they act, so a call typed after
+a refusal starts the run on one press: leaving the box on the press would
+keep the call then and redraw the hero, the button moved, under the finger
+before the click came (`StationDraft`, `src/ui/settings_station.rs`). The
 runtime keeps its message for the other ways in, such as Run again. Contest
 has its own first-session card ("Add your call, press Start contest; Enter
 sends what the QSO needs next"), and its own tips (`CONTEST_TIPS`: Enter, a
@@ -148,7 +160,7 @@ does the one fork in group generation (`sampling.rs:503-507`). Phase 2 adds
 
 **Navigation.** A run uses `Screen::Training` and `Screen::Results`
 (`src/state.rs:19-26`), with the hidden nav, the refused `go_to`
-(`state.rs:368-371`) and no settings saves mid-run. Three things change:
+(`state.rs:368-371`) and no settings saves mid-run. Four things change:
 
 - Exit and the tour's Discard send a `SessionEvent` (`app.rs:184`,
   `tour.rs:222`) that only a group `LiveSession` receives
@@ -158,6 +170,8 @@ does the one fork in group generation (`sampling.rs:503-507`). Phase 2 adds
   screen (`keep_awake.rs:17-27`), so a paused run lets the screen sleep.
 - The tour targets group inputs (`tour.rs:231-240`), so its button is
   hidden in Contest mode until phase 5.
+- Every screen opens at its top (`src/app.rs`), so a run started from the
+  foot of its results begins with its clock and fields in sight.
 
 ## 3. Contest catalogue
 
@@ -1019,16 +1033,21 @@ in place of `current/total`.
   `corrected`.)
 - **The key bar's buttons** keep the cursor in its field, as the keypad's
   keys do: a click on CQ or + takes no focus, so the letters typed next and
-  Enter still reach the fields. Enter's chip keeps one width, cutting a long
-  label short, so the keys after it never change rows.
+  Enter still reach the fields. So do Discard and Keep it, and the header's
+  theme button on the training screen; Keep it and the theme button hand
+  the cursor back after a press, as the key bar's buttons do. Enter's chip
+  keeps one width, cutting a long label short, so the keys after it never
+  change rows.
 - **The log** is newest first, six rows tall. A row shows `…` until its
   station is done, then a word ("clean", "busted call, was K5ABC"), since
   icons are `aria-hidden` (`widgets.rs:277`). `?×1` counts asked repeats.
 
 **Phone, running** (keypad always shown). From header to keypad it fits one
-screen (`styles.css:2139-2175`); below 760 px height the keys shrink. Every
-line is a fixed one-line slot with an ellipsis (as `.train-hint`,
-`styles.css:1214-1224`), so the keypad never moves between turns.
+screen (`styles.css:2547-2572`); below 760 px height the keys shrink and
+the run's cards, and the lines in them, draw closer, so a 360×640 screen
+holds it down to the keypad's last row, Enter included. Every line is a
+fixed one-line slot with an ellipsis (as `.train-hint`,
+`styles.css:1259-1267`), so the keypad never moves between turns.
 
 ```
 ┌────────────────────────────────────┐
@@ -1091,7 +1110,9 @@ is silent so speech never covers the Morse.
 37", a full-width Resume and the log, with Discard and End run below, End
 run no longer primary, so Resume is the one thing to press. The pause sign
 is drawn as an icon, as `⏸` is missing from many a phone's fonts. Discard,
-paused or not, asks once more: "Discard this run? Its QSOs are not kept".
+paused or not, asks once more: "Discard this run? Its QSOs are not kept",
+with the confirming Discard first and Keep it last, where Discard stood,
+so the second tap of a double tap keeps the run.
 
 **Results** (a contest branch of `ResultsView`, `src/ui/results.rs:59-167`;
 the same view opens read-only from a History row, in the list's place, with
@@ -2202,7 +2223,9 @@ The user approved every recommended default on 2026-10-20:
 ## 16. Risks
 
 1. **Phone height.** *Mitigation:* fixed one-line slots, the log below the
-   fold, keys that shrink at 760 px, a 360 px render test, a small phone.
+   fold, keys and spacing that shrink below 760 px (a 360×640 screen fits
+   to the keypad's last row; a 320×568 one does not yet), a 360 px render
+   test, a small phone.
 2. **A continuation re-sends one character** until phase 5's timed splice.
    *Mitigation:* the message counts as sent whole; listen on each player.
 3. **Latency estimates** may be wrong. *Mitigation:* capped at 0.5 s

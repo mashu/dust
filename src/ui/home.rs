@@ -9,10 +9,10 @@ use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::settings_charset::{pileup_callers, pileup_count};
 use crate::ui::settings_station::{
-    CallField, CallReading, NameField, focus_call_field, focus_name_field,
+    CallField, CallReading, NameField, StationDraft, focus_call_field, focus_name_field,
 };
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
-use crate::ui::widgets::{CardHead, Icon, IconName, control_id, pretty_number};
+use crate::ui::widgets::{CardHead, Icon, IconName, control_id, keep_focus, pretty_number};
 
 /// Where the learner is, as Home says it: in the hero, and on the tile.
 #[derive(Debug, PartialEq)]
@@ -100,6 +100,11 @@ struct ContestHero {
     missing: Option<String>,
 }
 
+/// What the hero shows in Contest mode, and nothing in any other.
+fn contest_hero(settings: &TrainingSettings) -> Option<ContestHero> {
+    (settings.curriculum.char_set_mode == CharSetMode::Contest).then(|| ContestHero::of(settings))
+}
+
 impl ContestHero {
     fn of(settings: &TrainingSettings) -> Self {
         let contest = &settings.contest;
@@ -179,17 +184,48 @@ pub fn Home(
     on_name: EventHandler<String>,
 ) -> Element {
     let level = level_reading(&settings);
-    let contest = (settings.curriculum.char_set_mode == CharSetMode::Contest)
-        .then(|| ContestHero::of(&settings));
+    let contest = contest_hero(&settings);
     // A start the run would refuse says why here, rather than in a toast,
     // unless the line under the call field says it already; and when the
-    // call is what is missing, Start takes you to its field.
+    // call or the name is what is missing, Start takes you to its field.
     let mut refused = use_signal(|| false);
+    // It does so once the hero has drawn the field, from an effect: the
+    // press that kept a call may have swapped the call's field for the
+    // name's, which the page has only after the press.
+    let mut take_to = use_signal(|| None::<fn()>);
+    use_effect(move || {
+        if let Some(focus) = take_to() {
+            focus();
+        }
+    });
     let missing = contest.as_ref().and_then(|hero| hero.missing.clone());
     let needs_call = contest.as_ref().is_some_and(|hero| hero.needs_call);
     let needs_name = contest.as_ref().is_some_and(|hero| hero.needs_name);
     let call_flagged = contest.as_ref().is_some_and(|hero| hero.call_flagged);
-    let refusal = missing.clone().filter(|_| refused() && !call_flagged);
+    let refusal = missing.filter(|_| refused() && !call_flagged);
+    // While the hero holds a field, Start and Listen keep the cursor in it,
+    // and keep what was typed there before they act. Leaving the box would
+    // keep it on the press instead, and redraw the hero under the finger,
+    // the button moved, before the click came.
+    let draft = StationDraft::use_draft();
+    let asks = needs_call || needs_name;
+    let hold = move |e: MouseEvent| {
+        if asks {
+            keep_focus(e);
+        }
+    };
+    // What was typed and not kept yet, kept as leaving the box keeps it;
+    // and what it was, for Start to decide on.
+    let keep_typed = move || {
+        let typed = draft.take()?;
+        if needs_call {
+            on_call.call(typed.clone());
+        } else if needs_name {
+            on_name.call(typed.clone());
+        }
+        Some(typed)
+    };
+    let held = settings.clone();
     let acc = last_accuracy
         .map(|a| format!("{}%", (a * 100.0).round()))
         .unwrap_or_else(|| "—".into());
@@ -251,6 +287,7 @@ pub fn Home(
                                     refused.set(false);
                                     on_call.call(typed);
                                 },
+                                draft,
                             }
                             CallReading { call: settings.contest.my_call.clone() }
                         }
@@ -262,6 +299,7 @@ pub fn Home(
                                     refused.set(false);
                                     on_name.call(typed);
                                 },
+                                draft,
                             }
                         }
                     } else {
@@ -324,16 +362,31 @@ pub fn Home(
                     button {
                         id: control_id("btn", "start training"),
                         class: "btn btn-primary",
+                        onmousedown: hold,
                         onclick: move |_| {
-                            if missing.is_none() {
+                            // Decided on the settings as keeping what was
+                            // typed leaves them, which the hero shows from
+                            // the next render on. The run starts here, in
+                            // the press, as a browser lets sound start only
+                            // in one.
+                            let mut settings = held.clone();
+                            if let Some(typed) = keep_typed() {
+                                if needs_call {
+                                    settings.contest.set_my_call(&typed);
+                                } else {
+                                    settings.contest.set_my_name(&typed);
+                                }
+                            }
+                            let hero = contest_hero(&settings).filter(|hero| hero.missing.is_some());
+                            let Some(hero) = hero else {
                                 on_start.call(());
                                 return;
-                            }
+                            };
                             refused.set(true);
-                            if needs_call {
-                                focus_call_field();
-                            } else if needs_name {
-                                focus_name_field();
+                            if hero.needs_call {
+                                take_to.set(Some(focus_call_field));
+                            } else if hero.needs_name {
+                                take_to.set(Some(focus_name_field));
                             }
                         },
                         Icon { name: IconName::Play }
@@ -342,7 +395,11 @@ pub fn Home(
                     button {
                         id: control_id("btn", "listen to letters"),
                         class: "btn btn-hero",
-                        onclick: move |_| on_listen.call(()),
+                        onmousedown: hold,
+                        onclick: move |_| {
+                            keep_typed();
+                            on_listen.call(());
+                        },
                         Icon { name: IconName::Headphones }
                         "Listen"
                     }

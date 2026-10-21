@@ -74,6 +74,13 @@ input.focus({{ preventScroll: true }});"#
     )
 }
 
+/// A button that leaves the cursor where it is: a click would otherwise take
+/// it from the box being typed in, so that the letters typed next went
+/// nowhere and Enter pressed the button again.
+pub fn keep_focus(e: MouseEvent) {
+    e.prevent_default();
+}
+
 /// Emit a boolean HTML attribute only when it should apply.
 ///
 /// HTML treats the *presence* of `disabled` / `readonly` / `autofocus` as

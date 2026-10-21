@@ -551,10 +551,12 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
 /// Move the cursor to `field`, on the page and for the paddles.
 pub fn focus_field(ctx: AppCtx, field: EntryField) {
     ctx.entry.set_focus(field);
-    // Tests have no page to run it on.
+    let (id, _) = crate::ui::contest::field_name(field);
+    // Tests have no page to run it on: the harness looks for the field.
+    #[cfg(test)]
+    crate::testing::ask_focus(&id);
     #[cfg(not(test))]
     {
-        let (id, _) = crate::ui::contest::field_name(field);
         let script = crate::ui::widgets::focus_script(&id);
         spawn_forever(async move {
             let _ = document::eval(&script).await;

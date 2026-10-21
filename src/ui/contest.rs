@@ -22,7 +22,7 @@ use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
 use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow};
-use crate::ui::widgets::{Icon, IconName, ProgressHeader, control_id, html_bool};
+use crate::ui::widgets::{Icon, IconName, ProgressHeader, control_id, html_bool, keep_focus};
 
 /// How often the run's clock and the air are drawn again, which is also how
 /// often the run hears that the app is still running.
@@ -251,13 +251,6 @@ fn clock_text(view: &ContestView, open: bool, now: MonoMs) -> (String, String) {
     } else {
         (format!("{run} / {limit}"), String::new())
     }
-}
-
-/// A button of the run's leaves the cursor where it is: a click would
-/// otherwise take it from the field, so that the letters typed next went
-/// nowhere and Enter pressed the button again.
-fn keep_focus(e: MouseEvent) {
-    e.prevent_default();
 }
 
 /// A button of the run's pressed: what it does, then the cursor back in the
@@ -686,7 +679,9 @@ fn paused_why(why: PauseWhy) -> Option<&'static str> {
 }
 
 /// Pause, End run and Discard, which asks once more first: the QSOs it
-/// throws away are not kept anywhere.
+/// throws away are not kept anywhere. Asking, Keep it stands where Discard
+/// stood, so the second tap of a double tap keeps the run. Discard and Keep
+/// it leave the cursor in the field, so the run goes on as it was.
 #[component]
 fn RunActions(paused: bool) -> Element {
     let ctx = use_context::<AppCtx>();
@@ -696,17 +691,18 @@ fn RunActions(paused: bool) -> Element {
             div { class: "train-actions run-actions asking",
                 p { class: "run-ask", role: "alert", "Discard this run? Its QSOs are not kept" }
                 button {
-                    id: control_id("btn", "keep run"),
-                    class: "btn btn-secondary",
-                    onclick: move |_| asking.set(false),
-                    "Keep it"
-                }
-                button {
                     id: control_id("btn", "discard run"),
                     class: "btn btn-danger",
                     onclick: move |_| abort_run(ctx),
                     Icon { name: IconName::X }
                     "Discard"
+                }
+                button {
+                    id: control_id("btn", "keep run"),
+                    class: "btn btn-secondary",
+                    onmousedown: keep_focus,
+                    onclick: move |_| from_button(ctx, || asking.set(false)),
+                    "Keep it"
                 }
             }
         };
@@ -733,6 +729,7 @@ fn RunActions(paused: bool) -> Element {
             button {
                 id: control_id("btn", "discard"),
                 class: "btn btn-danger",
+                onmousedown: keep_focus,
                 onclick: move |_| asking.set(true),
                 Icon { name: IconName::X }
                 "Discard"
@@ -1492,6 +1489,49 @@ mod tests {
             ui.click("btn-discard");
             ui.click("btn-discard-run");
             assert_eq!(ui.screen(), "home");
+        });
+    }
+
+    /// Discard asks once more with Keep it last in the row, where Discard
+    /// stood, so the second tap of a double tap keeps the run. Neither
+    /// press takes the cursor from the field, and Keep it gives it back,
+    /// so the call typed carries on and Enter sends it.
+    #[test]
+    fn discard_asks_once_more_and_keep_it_carries_on() {
+        run(|| async {
+            let (mut ui, recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call[..2]);
+            let at = |ui: &Ui, id: &str| {
+                ui.html()
+                    .find(&format!(r#"id="{id}""#))
+                    .unwrap_or_else(|| panic!("no {id}"))
+            };
+            assert!(
+                at(&ui, "btn-end-run") < at(&ui, "btn-discard"),
+                "Discard ends the row"
+            );
+            assert!(!ui.mouse_down("btn-discard"), "Discard took the cursor");
+            ui.click("btn-discard");
+            assert!(
+                at(&ui, "btn-discard-run") < at(&ui, "btn-keep-run"),
+                "the confirming Discard stands where Discard stood"
+            );
+            assert!(!ui.mouse_down("btn-keep-run"), "Keep it took the cursor");
+            ui.take_focused();
+            ui.click("btn-keep-run");
+            assert_eq!(ui.screen(), "training");
+            assert_eq!(ui.take_focused(), ["field-call"], "the cursor stayed away");
+            ui.type_into("field-call", &call);
+            ui.press_enter("field-call");
+            let sent = recorder
+                .starts()
+                .last()
+                .map(|start| start.transcript.text.clone());
+            assert!(
+                sent.as_deref()
+                    .is_some_and(|sent| sent.starts_with(&format!("{call} 5NN"))),
+                "{sent:?}"
+            );
         });
     }
 

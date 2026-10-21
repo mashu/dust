@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 
+use crate::contest_runtime::focus_field;
 use crate::keep_awake::use_keep_awake;
 use crate::routes::Route;
 use crate::session_runtime::finish_run;
@@ -15,7 +16,7 @@ use crate::time::sleep_ms;
 use crate::ui::contest::RunAnnouncer;
 use crate::ui::paddle::use_paddle_keys;
 use crate::ui::tour::{TourButton, TourDock};
-use crate::ui::widgets::{Icon, IconName, control_id};
+use crate::ui::widgets::{Icon, IconName, control_id, keep_focus};
 
 // Desktop inlines this in the window head. Web loads it through `asset!` so
 // `dx bundle` copies the file; compiling the sheet into wasm would ship it
@@ -114,6 +115,13 @@ pub fn App() -> Element {
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
     use_keep_awake(screen, ctx.contest);
+    // Each screen opens at its top, wherever the one before it was scrolled
+    // to: a run started from the foot of its results would otherwise begin
+    // with its clock and its fields out of sight.
+    use_effect(move || {
+        let _ = screen();
+        scroll_to_top();
+    });
     #[cfg(feature = "desktop")]
     crate::ui::floating::use_floating_window(ctx);
 
@@ -164,6 +172,15 @@ pub fn App() -> Element {
                             class: "icon-btn",
                             title: "{theme().label()}",
                             aria_label: "{theme().label()}",
+                            // On the training screen a click on it leaves
+                            // the cursor in the box being typed in, so that
+                            // Enter goes on sending or answering rather than
+                            // pressing this again.
+                            onmousedown: move |e| {
+                                if screen_now == Screen::Training {
+                                    keep_focus(e);
+                                }
+                            },
                             // Theme is a data-theme attribute on the app root,
                             // not a JS write to <html>. Both the desktop
                             // webview and the web build key CSS off that.
@@ -171,6 +188,11 @@ pub fn App() -> Element {
                                 let next = theme().next();
                                 theme.set(next);
                                 ctx.app().store.save_theme(next.key());
+                                // A run's fields take the cursor back, as
+                                // after any of the run's own buttons.
+                                if screen_now == Screen::Training && ctx.contest.peek().is_some() {
+                                    focus_field(ctx, ctx.entry.focus());
+                                }
                             },
                             Icon { name: theme().icon() }
                         }
@@ -298,6 +320,15 @@ fn use_stored_settings(ctx: AppCtx) {
     });
 }
 
+/// Scroll the page back to its top.
+fn scroll_to_top() {
+    // Tests have no page to run it on.
+    #[cfg(not(test))]
+    spawn(async {
+        let _ = document::eval("window.scrollTo(0, 0);").await;
+    });
+}
+
 fn toggle_fullscreen() {
     #[cfg(feature = "desktop")]
     {
@@ -328,7 +359,7 @@ mod ui_tests {
     use crate::persist::Store;
     use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
-    use dioxus::prelude::{Code, Key};
+    use dioxus::prelude::{Code, Key, ReadableExt};
 
     fn short_session() -> TrainingSettings {
         let mut settings = test_settings();
@@ -392,6 +423,46 @@ mod ui_tests {
                 assert!(ui.has(shown));
                 assert_eq!(ui.store.load_theme(), key);
             }
+        });
+    }
+
+    /// On the training screen the theme button never takes the cursor from
+    /// the box being typed in, so Enter goes on reaching the session or the
+    /// run, and a run's fields take it back after a press. Anywhere else it
+    /// is an ordinary button.
+    #[test]
+    fn the_theme_button_leaves_the_cursor_where_it_is_in_training() {
+        run(|| async {
+            let (mut ui, _recorder) = awaiting_answer(short_session()).await;
+            assert!(!ui.mouse_down("btn-theme"), "it took a session's cursor");
+            ui.take_focused();
+            ui.click("btn-theme");
+            assert_eq!(ui.take_focused(), Vec::<String>::new());
+
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            assert!(
+                ui.mouse_down("btn-theme"),
+                "on Home it is an ordinary button"
+            );
+            ui.click("btn-start-training");
+            ui.advance(8_000).await;
+            let call = recorder.starts()[0].transcript.others[0].text.clone();
+            ui.type_into("field-call", &call);
+            assert!(!ui.mouse_down("btn-theme"), "it took the run's cursor");
+            ui.take_focused();
+            ui.click("btn-theme");
+            assert!(ui.has("Theme: light"));
+            assert_eq!(ui.take_focused(), ["field-call"], "the cursor stayed away");
+            ui.press_enter("field-call");
+            let sent = recorder
+                .starts()
+                .last()
+                .map(|start| start.transcript.text.clone());
+            assert!(
+                sent.as_deref()
+                    .is_some_and(|sent| sent.starts_with(&format!("{call} 5NN"))),
+                "{sent:?}"
+            );
         });
     }
 
@@ -1589,6 +1660,99 @@ mod ui_tests {
 
             ui.click("btn-start-training");
             assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+        });
+    }
+
+    /// After a refused start, the call typed into the hero is kept by one
+    /// press of Start, which keeps the cursor in the field: leaving the box
+    /// would keep the call on the press and redraw the hero, Start moved,
+    /// under the finger before its click came. So is a name, and what is
+    /// still missing is said as before, the cursor going to its field once
+    /// the hero has drawn it.
+    #[test]
+    fn one_press_of_start_keeps_what_was_typed_and_starts() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            assert!(ui.shows("home-missing"));
+            assert_eq!(ui.take_focused(), ["field-your-callsign"]);
+            ui.type_into("field-your-callsign", "dl1abc");
+            assert!(
+                !ui.mouse_down("btn-start-training"),
+                "Start took the cursor"
+            );
+            assert!(ui.shows("home-missing") && ui.shows("field-your-callsign"));
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            let kept = ui.with_app(|ctx| ctx.settings.peek().contest.my_call.clone());
+            assert_eq!(kept, "DL1ABC");
+
+            // A Simple QSO with neither: the call is kept, and the start is
+            // refused for the name, which is asked for next.
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into("field-your-callsign", "dl1abc");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your name to start a Simple QSO"));
+            assert_eq!(
+                ui.take_focused(),
+                ["field-your-name"],
+                "the name's field, drawn by the same press, has no cursor"
+            );
+            ui.type_into("field-your-name", "mat");
+            assert!(!ui.mouse_down("btn-start-training"));
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            let kept = ui.with_app(|ctx| ctx.settings.peek().contest.clone());
+            assert_eq!(
+                (kept.my_call.as_str(), kept.my_name.as_str()),
+                ("DL1ABC", "MAT")
+            );
+
+            // A call typed that does not read is kept, and said under the
+            // field rather than above Start. With nothing to type, Start is
+            // an ordinary button.
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into("field-your-callsign", "abc");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Not a callsign yet: needs a digit"));
+            assert!(!ui.shows("home-missing"));
+            assert_eq!(ui.take_focused(), ["field-your-callsign"]);
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            assert!(ui.mouse_down("btn-start-training"));
+        });
+    }
+
+    /// Listen, beside Start, keeps the cursor and what was typed the same
+    /// way, so one press of it after a refused start keeps the call and
+    /// opens Listen.
+    #[test]
+    fn one_press_of_listen_keeps_what_was_typed() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.type_into("field-your-callsign", "dl1abc");
+            assert!(
+                !ui.mouse_down("btn-listen-to-letters"),
+                "Listen took the cursor"
+            );
+            ui.click("btn-listen-to-letters");
+            assert_eq!(ui.screen(), "listen");
+            let kept = ui.with_app(|ctx| ctx.settings.peek().contest.my_call.clone());
+            assert_eq!(kept, "DL1ABC");
+            // With nothing to type, it is an ordinary button.
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            assert!(ui.mouse_down("btn-listen-to-letters"));
         });
     }
 

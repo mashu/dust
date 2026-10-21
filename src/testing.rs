@@ -40,6 +40,19 @@ const NESTED_DISCLOSURES: usize = 8;
 /// said never to settle. Real chains are a handful deep.
 const SETTLE_PASSES: usize = 32;
 
+thread_local! {
+    /// The fields the page has asked to give the cursor to, by id, that no
+    /// page has looked for yet.
+    static FOCUS_ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The page asks for the field with this id to have the cursor. In a
+/// browser that is a script, which runs at once, on the page as drawn so
+/// far; here the [`Ui`] runs it when the page next settles.
+pub fn ask_focus(id: &str) {
+    FOCUS_ASKED.with_borrow_mut(|asked| asked.push(id.to_string()));
+}
+
 pub struct Harness {
     dom: VirtualDom,
     /// The app's state, as every screen sees it.
@@ -442,6 +455,10 @@ pub struct Ui {
     ids: Vec<(String, ElementId)>,
     /// Mutations since the last time anybody asked.
     work: usize,
+    /// The fields given the cursor since the last time anybody asked, by
+    /// id. A focus script finds only a field that is drawn when it runs, so
+    /// one asked for before the page has it is not among them.
+    focused: Vec<String>,
     /// What the app on the page has stored.
     pub store: Rc<MemoryStore>,
 }
@@ -549,10 +566,13 @@ impl Ui {
     }
 
     fn from_dom(dom: VirtualDom, store: Rc<MemoryStore>) -> Self {
+        // What an earlier page asked for is not this one's to do.
+        FOCUS_ASKED.take();
         let mut ui = Self {
             dom,
             ids: Vec::new(),
             work: 0,
+            focused: Vec::new(),
             store,
         };
         let mut log = IdLog::default();
@@ -585,7 +605,9 @@ impl Ui {
     /// it between two of its passes.
     pub fn settle(&mut self) {
         for _ in 0..SETTLE_PASSES {
-            if !self.has_work() {
+            let work = self.has_work();
+            self.run_focus_scripts();
+            if !work {
                 return;
             }
             let mut log = IdLog::default();
@@ -593,6 +615,23 @@ impl Ui {
             self.apply(log);
         }
         panic!("the page never settled: something keeps waking itself");
+    }
+
+    /// Run the focus scripts the page has asked for, on the page as it is
+    /// drawn now: before the render an event or a callback sets off, and
+    /// after the one an effect follows.
+    fn run_focus_scripts(&mut self) {
+        for id in FOCUS_ASKED.take() {
+            if self.shows(&id) {
+                self.focused.push(id);
+            }
+        }
+    }
+
+    /// The fields the page gave the cursor to since this was last called,
+    /// by id, in order.
+    pub fn take_focused(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.focused)
     }
 
     /// Whether anything is ready to run: a task woken, an effect queued, a
@@ -769,15 +808,19 @@ impl Ui {
     }
 
     /// Deliver an event the way a renderer does: a platform payload that the
-    /// html crate turns into the typed data the listener expects.
-    fn fire(&mut self, event: &str, id: &str, data: Box<dyn std::any::Any>) {
+    /// html crate turns into the typed data the listener expects. Whether
+    /// the page left the browser to do what it would do next.
+    fn fire(&mut self, event: &str, id: &str, data: Box<dyn std::any::Any>) -> bool {
         install_event_converter();
         let element = self.element(id);
-        let payload = std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
+        let payload: std::rc::Rc<dyn std::any::Any> =
+            std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
+        let delivered = dioxus::core::Event::new(payload, true);
         self.dom
             .runtime()
-            .handle_event(event, dioxus::core::Event::new(payload, true), element);
+            .handle_event(event, delivered.clone(), element);
         self.settle();
+        delivered.default_action_enabled()
     }
 
     /// Open every panel the page keeps behind a toggle, and keep going until
@@ -824,6 +867,17 @@ impl Ui {
             id,
             Box::new(dioxus::html::SerializedMouseData::default()),
         );
+    }
+
+    /// Press a mouse button down on the control with this id, and nothing
+    /// after it: whether the browser would move the focus there, from the
+    /// field being typed in, as it does unless the page stops it.
+    pub fn mouse_down(&mut self, id: &str) -> bool {
+        self.fire(
+            "mousedown",
+            id,
+            Box::new(dioxus::html::SerializedMouseData::default()),
+        )
     }
 
     /// A pointer of `kind` ("mouse", "touch") at `at` in the window, which is

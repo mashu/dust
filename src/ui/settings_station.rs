@@ -16,16 +16,19 @@ const CALL_LABEL: &str = "Your callsign";
 const NAME_LABEL: &str = "Your name";
 
 /// Give the field called `label` the focus, as a start refused for want of
-/// what it holds does.
+/// what it holds does. The script looks for the field at once, so it has to
+/// be drawn already: a field the same press brings in is focused from an
+/// effect, which runs once the page has the render.
 fn focus_field(label: &'static str) {
-    // Tests have no page to run it on.
+    let id = control_id("field", label);
+    // Tests have no page to run it on: the harness looks for the field.
+    #[cfg(test)]
+    crate::testing::ask_focus(&id);
     #[cfg(not(test))]
     spawn(async move {
-        let script = crate::ui::widgets::focus_script(&control_id("field", label));
+        let script = crate::ui::widgets::focus_script(&id);
         let _ = document::eval(&script).await;
     });
-    #[cfg(test)]
-    let _ = label;
 }
 
 /// Give the callsign field the focus, as a start refused for want of a
@@ -63,40 +66,81 @@ fn call_reading(call: &str) -> Option<(String, bool)> {
     })
 }
 
+/// What is typed into one of your station's fields and not kept yet, which
+/// the field shares with the buttons that keep the cursor in it: Home's
+/// Start and Listen, pressed with a call just typed, keep that call before
+/// they act, so that nothing above them changes under the finger between
+/// the press and the click.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct StationDraft {
+    typed: CopyValue<Option<String>>,
+    repaint: Signal<u64>,
+}
+
+impl StationDraft {
+    pub(crate) fn use_draft() -> Self {
+        Self {
+            typed: use_hook(|| CopyValue::new(None)),
+            repaint: use_signal(|| 0),
+        }
+    }
+
+    /// What was typed and not kept yet, taken: from then on the box shows
+    /// what the setting keeps, as it does once it is left.
+    pub(crate) fn take(mut self) -> Option<String> {
+        let typed = self.typed.write().take();
+        if typed.is_some() {
+            self.repaint += 1;
+        }
+        typed
+    }
+}
+
 /// Your callsign, typed in, kept as a call can be written: upper case,
 /// letters, digits and single slashes.
 #[component]
-pub(crate) fn CallField(value: String, on_commit: EventHandler<String>) -> Element {
+pub(crate) fn CallField(
+    value: String,
+    on_commit: EventHandler<String>,
+    #[props(default)] draft: Option<StationDraft>,
+) -> Element {
     rsx! {
-        StationText { label: CALL_LABEL, placeholder: "e.g. DL1ABC", value, on_commit }
+        StationText { label: CALL_LABEL, placeholder: "e.g. DL1ABC", value, on_commit, draft }
     }
 }
 
 /// Your name, typed in, kept as a name is sent: letters only, upper case.
 #[component]
-pub(crate) fn NameField(value: String, on_commit: EventHandler<String>) -> Element {
+pub(crate) fn NameField(
+    value: String,
+    on_commit: EventHandler<String>,
+    #[props(default)] draft: Option<StationDraft>,
+) -> Element {
     rsx! {
-        StationText { label: NAME_LABEL, placeholder: "e.g. MAT", value, on_commit }
+        StationText { label: NAME_LABEL, placeholder: "e.g. MAT", value, on_commit, draft }
     }
 }
 
 /// One of your station's fields, typed in.
 ///
 /// What is typed stays as typed until it is committed, on Enter or on
-/// leaving the box, and only then is it kept as the setting keeps it. A key
-/// does not redraw the box, which on the desktop and phone builds would
-/// reach it a frame late, over what was typed since; each commit does, so
-/// the box shows what was kept even when that is what it held already.
+/// leaving the box, or by a button given its `draft`, and only then is it
+/// kept as the setting keeps it. A key does not redraw the box, which on the
+/// desktop and phone builds would reach it a frame late, over what was typed
+/// since; each commit does, so the box shows what was kept even when that is
+/// what it held already.
 #[component]
 fn StationText(
     label: &'static str,
     placeholder: &'static str,
     value: String,
     on_commit: EventHandler<String>,
+    draft: Option<StationDraft>,
 ) -> Element {
-    let mut typed = use_hook(|| CopyValue::new(None::<String>));
-    let mut repaint = use_signal(|| 0u64);
-    let _ = repaint.read();
+    let own = StationDraft::use_draft();
+    let draft = draft.unwrap_or(own);
+    let mut typed = draft.typed;
+    let _ = draft.repaint.read();
     let shown = typed.peek().clone().unwrap_or(value);
     let id = control_id("field", label);
     rsx! {
@@ -112,8 +156,7 @@ fn StationText(
                 spellcheck: false,
                 oninput: move |e| typed.set(Some(e.value())),
                 onchange: move |e| {
-                    typed.set(None);
-                    repaint += 1;
+                    draft.take();
                     on_commit.call(e.value());
                 },
             }
