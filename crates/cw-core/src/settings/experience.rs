@@ -112,7 +112,7 @@ impl Experience {
 
 /// Set a range to run from `min` to `max`: fixed when they are one number,
 /// drawn afresh for each group when they are not.
-fn put(settings: &mut TrainingSettings, which: RangeSetting, min: f64, max: f64) {
+pub(super) fn put(settings: &mut TrainingSettings, which: RangeSetting, min: f64, max: f64) {
     settings.set_range_linked(which, min == max);
     // The lower end first: it carries the upper one up with it if it has to,
     // and the upper end then goes where it should.
@@ -121,7 +121,7 @@ fn put(settings: &mut TrainingSettings, which: RangeSetting, min: f64, max: f64)
 }
 
 /// Whether a range is the one [`put`] makes.
-fn holds(range: RangeValues, min: f64, max: f64) -> bool {
+pub(super) fn holds(range: RangeValues, min: f64, max: f64) -> bool {
     let same = |a: f64, b: f64| (a - b).abs() < 1e-9;
     if min == max {
         range.linked && same(range.min, min)

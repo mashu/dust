@@ -1,7 +1,7 @@
 //! The shell every screen sits in: the header, the navigation, the toasts,
 //! and the state they all share.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
 use dioxus::prelude::*;
@@ -114,7 +114,7 @@ pub fn App() -> Element {
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
-    use_keep_awake(screen, ctx.contest);
+    use_keep_awake(screen, ctx.contest, ctx.preview);
     // Each screen opens at its top, wherever the one before it was scrolled
     // to: a run started from the foot of its results would otherwise begin
     // with its clock and its fields out of sight.
@@ -278,7 +278,6 @@ pub fn App() -> Element {
 /// are stored already are not stored again: moving between screens writes
 /// nothing.
 fn use_stored_settings(ctx: AppCtx) {
-    let stored = use_hook(|| Rc::new(RefCell::new(ctx.settings.peek().clone().clamp())));
     let edits = use_hook(|| Rc::new(Cell::new(0u64)));
     use_effect(move || {
         let AppCtx {
@@ -292,30 +291,21 @@ fn use_stored_settings(ctx: AppCtx) {
         }
         let persist = settings.read().clone().clamp();
         if screen != Screen::Settings && persist != *settings.peek() {
-            settings.set(persist.clone());
+            settings.set(persist);
         }
         // Whatever edit was still waiting, this one replaces it.
         let edit = edits.get() + 1;
         edits.set(edit);
-        let store = {
-            let stored = stored.clone();
-            move || {
-                if *stored.borrow() != persist {
-                    ctx.app().store.save_settings(&persist);
-                    *stored.borrow_mut() = persist;
-                }
-            }
-        };
         if screen == Screen::Settings {
             let edits = edits.clone();
             spawn(async move {
                 sleep_ms(SETTINGS_SAVE_DELAY_MS).await;
                 if edits.get() == edit {
-                    store();
+                    ctx.store_settings();
                 }
             });
         } else {
-            store();
+            ctx.store_settings();
         }
     });
 }
@@ -907,6 +897,243 @@ mod ui_tests {
             }
             ui.click("btn-stop");
             assert!(ui.store.load_sessions().is_empty());
+        });
+    }
+
+    /// The QSO the page shows, line by line: who sent each, and what, the
+    /// sends of callers calling at once side by side.
+    fn qso_lines(ui: &Ui) -> Vec<String> {
+        let html = ui.html();
+        html.split("<li class=\"qso-line ")
+            .skip(1)
+            .map(|line| {
+                let line = line.split("</li>").next().unwrap_or_default();
+                let who = if line.starts_with("you") {
+                    "You"
+                } else {
+                    "They"
+                };
+                let sends: Vec<&str> = line
+                    .split("<span class=\"call\">")
+                    .skip(1)
+                    .filter_map(|rest| rest.split("</span>").next())
+                    .collect();
+                format!("{who} {}", sends.join(" "))
+            })
+            .collect()
+    }
+
+    /// How far into its turn the last tone of a send's `plan` ends, in
+    /// milliseconds.
+    fn tones_end_ms(plan: &cw_core::PlaybackPlan) -> u64 {
+        let last = plan.events.last().expect("a send has tones");
+        ((last.start_sec + last.duration_sec) * 1_000.0) as u64
+    }
+
+    /// Hear a QSO, from Listen in Contest mode: a few QSOs played turn by
+    /// turn as a run plays them, your message dry and the callers through
+    /// the receiver, each line shown once its send has been heard whole and
+    /// not before, to the TU of the third. The lines stay once it ends, and
+    /// nothing is kept: no session, nothing stored.
+    #[test]
+    fn hear_a_qso_plays_a_few_qsos_and_shows_each_line_as_it_ends() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("btn-listen-to-letters");
+            assert!(ui.has("Hear a few QSOs of CQ WPX"), "{}", ui.html());
+            ui.click("btn-hear-a-qso");
+            assert!(ui.has(">QSO 1 of 3"));
+            assert!(ui.has("Listening — each line shows once it has been sent."));
+            assert_eq!(recorder.starts().len(), 1, "the first CQ at once");
+            let first = recorder.starts()[0].clone();
+            assert!(first.plan.dry_wanted, "your message dry, as in a run");
+            assert_eq!(first.qsb, None, "the callers' fading is in their tones");
+            assert_eq!(first.transcript.text, "CQ DL1ABC TEST");
+            let call = first.transcript.others[0].text.clone();
+            // The CQ shows once it has gone out, and not while it sounds;
+            // the answer likewise. The fake clock moves in steps of 4 ms.
+            let mut now = 0;
+            for (ends, shown) in [
+                (tones_end_ms(&first.plan.wanted), 1),
+                (tones_end_ms(&first.plan.others[0]), 2),
+            ] {
+                let almost = (ends - 40).div_ceil(4) * 4;
+                ui.advance(almost - now).await;
+                now = almost;
+                assert_eq!(qso_lines(&ui).len(), shown - 1, "{:?}", qso_lines(&ui));
+                while qso_lines(&ui).len() < shown && now < ends + 1_000 {
+                    ui.advance(4).await;
+                    now += 4;
+                }
+                assert_eq!(qso_lines(&ui).len(), shown, "{:?}", qso_lines(&ui));
+            }
+            assert_eq!(
+                qso_lines(&ui),
+                ["You CQ DL1ABC TEST".to_string(), format!("They {call}")]
+            );
+            assert!(ui.run_until(240_000, |ui| ui.has("QSOs heard")).await);
+            // Every send of every turn, in order, and the third TU last.
+            let sent: Vec<String> = recorder
+                .starts()
+                .iter()
+                .flat_map(|start| {
+                    let yours = &start.transcript.text;
+                    let yours = (!yours.is_empty()).then(|| format!("You {yours}"));
+                    let theirs = start.transcript.others.iter();
+                    yours
+                        .into_iter()
+                        .chain(theirs.map(|other| format!("They {}", other.text)))
+                })
+                .collect();
+            let lines = qso_lines(&ui);
+            assert_eq!(lines, sent);
+            let tus = lines.iter().filter(|line| *line == "You TU").count();
+            assert_eq!(tus, 3, "{lines:?}");
+            assert_eq!(lines.last().map(String::as_str), Some("You TU"));
+            // Each QSO after the first set apart where its caller comes in.
+            let html = ui.html();
+            assert_eq!(html.matches("qso-next").count(), 2, "{lines:?}");
+            assert!(ui.has("btn-hear-a-qso"), "it can be heard again");
+            assert!(ui.has("not scored, not saved to History"));
+            assert_eq!(ui.screen(), "listen");
+            assert!(ui.with_app(|ctx| ctx.sessions.peek().is_empty()));
+            assert!(ui.store.load_sessions().is_empty());
+            // A character picked puts the lines away.
+            ui.click("chip-b");
+            assert!(qso_lines(&ui).is_empty());
+            assert!(ui.has("Play B"));
+            ui.click("btn-hear-a-qso");
+            assert!(ui.run_until(10_000, |ui| !qso_lines(ui).is_empty()).await);
+            // Leaving the screen lets the lines go.
+            ui.click("btn-listen-back");
+            assert!(ui.with_app(|ctx| ctx.dialogue.peek().is_none()));
+        });
+    }
+
+    /// Stop ends Hear a QSO where it is: nothing more plays, the lines
+    /// heard so far stay, and another sound played puts them away. Stopped
+    /// before a line was heard, it leaves the stage as it was.
+    #[test]
+    fn hear_a_qso_stops_on_stop() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("btn-listen-to-letters");
+            ui.click("btn-hear-a-qso");
+            assert!(ui.run_until(10_000, |ui| qso_lines(ui).len() >= 2).await);
+            ui.click("btn-stop");
+            let played = recorder.starts().len();
+            let shown = qso_lines(&ui);
+            ui.advance(30_000).await;
+            assert_eq!(recorder.starts().len(), played, "nothing more played");
+            assert_eq!(qso_lines(&ui), shown);
+            assert!(ui.has("QSOs heard"));
+            assert!(ui.has("btn-hear-a-qso"));
+            ui.click("btn-play");
+            assert!(qso_lines(&ui).is_empty());
+            assert!(ui.store.load_sessions().is_empty());
+
+            ui.click("btn-stop");
+            ui.click("btn-hear-a-qso");
+            ui.advance(200).await;
+            ui.click("btn-stop");
+            assert!(!ui.has("Listening — each line"), "{}", ui.html());
+            assert!(!ui.has("QSOs heard"));
+            assert!(ui.has("listen-glyph"));
+        });
+    }
+
+    /// Hear a QSO on the Character set card: the card's QSO gives way to
+    /// the QSOs as they are heard, with Stop where Hear a QSO was, and
+    /// Stop stops them. Stopped before a line, the card's QSO comes back.
+    #[test]
+    fn hear_a_qso_plays_from_the_character_set_card() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("nav-settings");
+            assert!(ui.has(">A QSO<"), "{}", ui.html());
+            let example = qso_lines(&ui);
+            assert_eq!(example[0], "You CQ DL1ABC TEST");
+            ui.click("btn-hear-a-qso");
+            assert!(ui.has(">QSO 1 of 3"));
+            assert!(ui.run_until(10_000, |ui| qso_lines(ui).len() >= 2).await);
+            assert!(recorder.starts().iter().all(|start| start.plan.dry_wanted));
+            ui.click("btn-stop-hearing");
+            assert!(ui.has("QSOs heard"));
+            let played = recorder.starts().len();
+            ui.advance(20_000).await;
+            assert_eq!(recorder.starts().len(), played);
+            assert!(ui.store.load_sessions().is_empty());
+
+            ui.click("btn-hear-a-qso");
+            ui.advance(200).await;
+            ui.click("btn-stop-hearing");
+            assert!(ui.has(">A QSO<"), "{}", ui.html());
+            assert_eq!(qso_lines(&ui), example);
+        });
+    }
+
+    /// Hear a QSO is of the contest it was started from: picking another
+    /// contest, or another mode, while it plays stops it and puts its lines
+    /// away, so the card never shows one contest while another sounds, nor
+    /// leaves it playing with no Stop on the screen.
+    #[test]
+    fn hear_a_qso_stops_when_the_contest_or_the_mode_changes() {
+        run(|| async {
+            for pick in ["contest-simple-qso", "seg-koch"] {
+                let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+                ui.click("nav-settings");
+                ui.click("btn-hear-a-qso");
+                assert!(ui.run_until(10_000, |ui| qso_lines(ui).len() >= 2).await);
+                ui.click(pick);
+                assert!(
+                    ui.with_app(|ctx| !ctx.preview.peek().is_qsos()),
+                    "{pick}: stopped"
+                );
+                assert!(ui.with_app(|ctx| ctx.dialogue.peek().is_none()), "{pick}");
+                let played = recorder.starts().len();
+                ui.advance(20_000).await;
+                assert_eq!(recorder.starts().len(), played, "{pick}");
+                assert!(!ui.has("QSOs heard"), "{pick}");
+            }
+            // The first contest picked again shows its own QSO, not the
+            // lines heard before.
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("nav-settings");
+            ui.click("btn-hear-a-qso");
+            assert!(ui.run_until(10_000, |ui| qso_lines(ui).len() >= 2).await);
+            ui.click("contest-simple-qso");
+            assert!(qso_lines(&ui)[0].starts_with("You CQ CQ DE DL1ABC"));
+            ui.click("contest-cq-wpx");
+            assert!(ui.has(">A QSO<"));
+            assert_eq!(qso_lines(&ui)[0], "You CQ DL1ABC TEST");
+        });
+    }
+
+    /// The press of Start that keeps what was typed into Home's hero, and
+    /// starts the run with it, stores it then: the run stores no settings
+    /// while it is on, so a reload mid-run used to lose it.
+    #[test]
+    fn what_start_keeps_from_the_hero_is_stored_as_the_run_starts() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into("field-your-callsign", "dl1abc");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            assert_eq!(ui.store.load_settings().contest.my_call, "DL1ABC");
+
+            // And a name, the last a Simple QSO asks for.
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into("field-your-name", "mat");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            assert_eq!(ui.store.load_settings().contest.my_name, "MAT");
+            let saves = ui.store.settings_saves.get();
+            ui.advance(5_000).await;
+            assert_eq!(ui.store.settings_saves.get(), saves, "nothing more mid-run");
         });
     }
 

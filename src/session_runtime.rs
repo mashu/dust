@@ -227,6 +227,10 @@ pub fn start_session(ctx: AppCtx) {
     if *settings.peek() != fitted {
         settings.set(fitted.clone());
     }
+    // Stored now, with whatever the press that starts it kept, a call typed
+    // into Home's hero among it: nothing is stored while the session runs,
+    // so a reload mid-run would lose them otherwise.
+    ctx.store_settings();
     // A contest is a run, with a machine of its own.
     if fitted.curriculum.char_set_mode == CharSetMode::Contest {
         start_run(ctx, fitted);

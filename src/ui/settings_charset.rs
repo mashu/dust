@@ -1,13 +1,16 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, Fill, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL,
-    PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender, SequenceChoice,
-    SettingsSection, Side, TrainingSettings, WORD_LIST_MAX, WordList, compute_char_pool,
-    current_practice_window, parse_callsign, tier_examples, unlocked_practice_count,
+    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, Fill, GROUP_SIZE_MAX, LevelAxis,
+    MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
+    SequenceChoice, SettingsSection, Side, TrainingSettings, WORD_LIST_MAX, WordList,
+    compute_char_pool, current_practice_window, parse_callsign, tier_examples,
+    unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
+use crate::playback::Dialogue;
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
+use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::home::range_label;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id,
@@ -147,6 +150,8 @@ struct ContestCard {
     simplified: Option<&'static str>,
     /// Who sends each line of the QSO, and what.
     qso: Vec<(Sender, String)>,
+    /// The preset the settings are on, if any.
+    preset: Option<ContestPreset>,
 }
 
 impl ContestCard {
@@ -158,6 +163,7 @@ impl ContestCard {
         let side = Side::of_call(&contest.my_call);
         let style = contest.contest_style;
         let callers = pileup_callers(settings);
+        let preset = ContestPreset::of(settings);
         let Some(rules) = kind.rules() else {
             return Self {
                 kind,
@@ -167,6 +173,7 @@ impl ContestCard {
                 copies: String::new(),
                 simplified: None,
                 qso: Vec::new(),
+                preset,
             };
         };
         let copies: Vec<&str> = rules
@@ -190,6 +197,7 @@ impl ContestCard {
                     ..Fill::default()
                 },
             ),
+            preset,
         }
     }
 }
@@ -276,8 +284,49 @@ impl Charset {
     }
 }
 
+/// What a preset sets, in a line: "15–18 WPM · tier 1 calls · one caller
+/// at a time · no fading or static", the band in the Band card's own words.
+fn preset_summary(preset: ContestPreset) -> String {
+    let (slowest, fastest) = preset.char_wpm();
+    let (fewest, most) = preset.stations();
+    let callers = match preset.style() {
+        RunStyle::Single => "one caller at a time".to_string(),
+        RunStyle::Pileup => format!(
+            "{} callers",
+            range_label(f64::from(fewest), f64::from(most))
+        ),
+    };
+    let band = match preset {
+        ContestPreset::FirstQso => "no fading or static",
+        ContestPreset::Club => "QSB fading and QRN static",
+        ContestPreset::Contester => "deep fading, strong static",
+    };
+    let parts = [
+        format!("{} WPM", range_label(slowest, fastest)),
+        format!("tier {} calls", preset.tier()),
+        callers,
+        band.to_string(),
+    ];
+    // One piece each, and the dot at the end of a line, not the start of
+    // the next, where a narrow line breaks.
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|part| part.replace(' ', "\u{a0}"))
+        .collect();
+    parts.join("\u{a0}· ")
+}
+
+/// The character set card. In Contest mode it also plays Hear a QSO:
+/// `hearing` while it plays, `dialogue` what it has played, `on_hear` to
+/// start it and `on_stop` to stop it.
 #[component]
-pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
+pub fn CharsetCard(
+    settings: Signal<TrainingSettings>,
+    #[props(default)] hearing: bool,
+    #[props(default)] dialogue: Option<Dialogue>,
+    #[props(default)] on_hear: EventHandler<()>,
+    #[props(default)] on_stop: EventHandler<()>,
+) -> Element {
     let charset = use_memo(move || Charset::of(&settings.read()));
     let c = charset.read();
     let callsigns = c.callsigns;
@@ -303,7 +352,14 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
             if let Some(contest) = c.contest.clone() {
-                ContestBody { settings, contest }
+                ContestBody {
+                    settings,
+                    contest,
+                    hearing,
+                    dialogue,
+                    on_hear,
+                    on_stop,
+                }
             }
             if has_unlock_order {
                 div { class: "eyebrow", "Unlock order" }
@@ -418,9 +474,25 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
 }
 
 /// A contest in place of an alphabet: a pill for each that has shipped,
-/// what you send and copy, and a first QSO of it, line by line.
+/// what you send and copy, and a first QSO of it, line by line, with a few
+/// to hear (Hear a QSO); then where to start from, a preset.
 #[component]
-fn ContestBody(settings: Signal<TrainingSettings>, contest: ContestCard) -> Element {
+fn ContestBody(
+    settings: Signal<TrainingSettings>,
+    contest: ContestCard,
+    hearing: bool,
+    dialogue: Option<Dialogue>,
+    on_hear: EventHandler<()>,
+    on_stop: EventHandler<()>,
+) -> Element {
+    // What Hear a QSO played, while it is of the contest chosen now: kept
+    // once it ends, but not when it stopped before a line was heard.
+    let heard = dialogue
+        .filter(|dialogue| dialogue.kind == contest.kind)
+        .filter(|dialogue| hearing || !dialogue.lines.is_empty());
+    let eyebrow = heard
+        .as_ref()
+        .map_or_else(|| "A QSO".to_string(), |heard| heard_label(heard, hearing));
     rsx! {
         div { class: "eyebrow", "Contest" }
         div { class: "mode-pills",
@@ -445,24 +517,62 @@ fn ContestBody(settings: Signal<TrainingSettings>, contest: ContestCard) -> Elem
             if let Some(simplified) = contest.simplified {
                 p { class: "muted", style: "margin: 0;", "{simplified}" }
             }
-            div { class: "eyebrow", "A QSO" }
-            ol { class: "qso",
-                for (who, text) in contest.qso.iter() {
-                    {
-                        let (class, said) = match who {
-                            Sender::You => ("qso-line you", "You"),
-                            Sender::Caller(_) => ("qso-line they", "They"),
-                        };
-                        rsx! {
-                            li { class,
-                                span { class: "qso-who tiny", "{said}" }
-                                span { class: "call", "{text}" }
-                            }
-                        }
+            QsoHead { label: eyebrow,
+                if hearing {
+                    button {
+                        id: control_id("btn", "stop hearing"),
+                        class: "btn btn-secondary btn-sm",
+                        r#type: "button",
+                        onclick: move |_| on_stop.call(()),
+                        Icon { name: IconName::Stop }
+                        "Stop"
+                    }
+                } else {
+                    button {
+                        id: control_id("btn", "hear a qso"),
+                        class: "btn btn-secondary btn-sm",
+                        r#type: "button",
+                        onclick: move |_| on_hear.call(()),
+                        Icon { name: IconName::Signal }
+                        "Hear a QSO"
                     }
                 }
             }
+            if let Some(heard) = heard {
+                HeardDialogue { dialogue: heard, hearing }
+            } else {
+                QsoLines { lines: contest.qso.clone() }
+            }
         }
+        PresetPicker { settings, preset: contest.preset }
+    }
+}
+
+/// Where a run starts from: a preset for a first QSO, a club operator or a
+/// contester, each setting the callers' speed and calls, the run style and
+/// how many call, and the band. The settings read Custom once any of that
+/// is changed, as the Experience presets do.
+#[component]
+fn PresetPicker(settings: Signal<TrainingSettings>, preset: Option<ContestPreset>) -> Element {
+    let line = match preset {
+        Some(preset) => preset_summary(preset),
+        None => "Custom · a preset sets the callers' speed and calls, how many call, and the band"
+            .to_string(),
+    };
+    rsx! {
+        div { class: "eyebrow", "Preset" }
+        div { class: "mode-pills",
+            for each in ContestPreset::ALL {
+                Seg {
+                    label: each.name(),
+                    id: control_id("preset", each.name()),
+                    pill: true,
+                    active: preset == Some(each),
+                    onclick: move |_| each.apply(&mut settings.write()),
+                }
+            }
+        }
+        p { id: "preset-line", class: "muted", style: "margin: 0;", "{line}" }
     }
 }
 

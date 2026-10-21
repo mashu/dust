@@ -15,6 +15,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{change_speed, focus_field, pause_run, press_key, resume_run, tick};
+use crate::page_hidden::{RUN_HIDDEN, use_page_hidden};
 use crate::session_runtime::{abort_run, finish_run};
 use crate::state::AppCtx;
 use crate::time::{mono_ms, sleep_ms};
@@ -46,7 +47,7 @@ pub fn ContestRunView() -> Element {
     // and a key takes a letter keyed in full with it.
     keys.use_answer_box(running, move |letter| entry.push(letter));
     entry.use_letters(move || keys.finish_letter());
-    use_hidden_page(ctx);
+    use_pause_when_hidden(ctx);
     use_run_keys(ctx);
     let now = use_ticks(ctx);
     // The fields take the cursor back as they open: the run starting, or
@@ -877,75 +878,9 @@ pub fn RunAnnouncer() -> Element {
 /// a tab left, a phone locked, a window minimised. A run paused so never
 /// carries on by itself. A process frozen whole, which hears neither, is
 /// caught by the clock's ticks instead ([`tick`]).
-fn use_hidden_page(ctx: AppCtx) {
-    listen_visibility(ctx);
-    listen_minimised(ctx);
+fn use_pause_when_hidden(ctx: AppCtx) {
+    use_page_hidden(RUN_HIDDEN, move || pause_run(ctx, PauseWhy::Hidden));
 }
-
-/// The script that tells the run whether the page is hidden, each time that
-/// changes. A listener left by a run before is taken off first.
-fn visibility_script() -> String {
-    format!(
-        r#"{STOP_WATCHING}
-const tell = () => dioxus.send(document.hidden);
-document.addEventListener("visibilitychange", tell);
-window.__dustRunHidden = () => document.removeEventListener("visibilitychange", tell);"#
-    )
-}
-
-/// The script that takes the listener off again.
-const STOP_WATCHING: &str = r#"if (window.__dustRunHidden) {
-    window.__dustRunHidden();
-    window.__dustRunHidden = null;
-}"#;
-
-fn listen_visibility(ctx: AppCtx) {
-    // Tests have no page to run it on.
-    #[cfg(not(test))]
-    {
-        use_hook(move || {
-            spawn(async move {
-                let mut page = document::eval(&visibility_script());
-                while let Ok(hidden) = page.recv::<bool>().await {
-                    if hidden {
-                        pause_run(ctx, PauseWhy::Hidden);
-                    }
-                }
-            })
-        });
-        use_drop(|| {
-            dioxus::core::spawn_forever(async {
-                let _ = document::eval(STOP_WATCHING).await;
-            });
-        });
-    }
-    #[cfg(test)]
-    let _ = ctx;
-}
-
-/// A minimised window is never hidden as a page, so the desktop build asks
-/// the window itself whenever it is resized or loses the focus.
-#[cfg(all(feature = "desktop", not(test)))]
-fn listen_minimised(ctx: AppCtx) {
-    let desktop = use_hook(dioxus::desktop::window);
-    dioxus::desktop::use_wry_event_handler(move |event, _| {
-        use dioxus::desktop::tao::event::{Event, WindowEvent};
-        let Event::WindowEvent {
-            window_id,
-            event: WindowEvent::Resized(_) | WindowEvent::Focused(_),
-            ..
-        } = event
-        else {
-            return;
-        };
-        if *window_id == desktop.window.id() && desktop.window.is_minimized() {
-            pause_run(ctx, PauseWhy::Hidden);
-        }
-    });
-}
-
-#[cfg(not(all(feature = "desktop", not(test))))]
-fn listen_minimised(_ctx: AppCtx) {}
 
 #[cfg(test)]
 mod tests {
@@ -1706,27 +1641,6 @@ mod tests {
             let (ui, _recorder) = Ui::app();
             assert!(ui.shows("btn-guided-setup"));
         });
-    }
-
-    /// The harness never mounts anything on a page, so the script is the
-    /// part a test can see: the page tells the run each time it is hidden or
-    /// shown, and the listener comes off again, a run before's first.
-    #[test]
-    fn the_page_says_when_it_is_hidden_until_the_run_is_over() {
-        let script = visibility_script();
-        assert!(script.contains("dioxus.send(document.hidden)"), "{script}");
-        assert!(
-            script.contains(r#"document.addEventListener("visibilitychange", tell)"#),
-            "{script}"
-        );
-        assert!(
-            script.contains(r#"document.removeEventListener("visibilitychange", tell)"#),
-            "{script}"
-        );
-        let off = script.find("window.__dustRunHidden();").expect("taken off");
-        let on = script.find("addEventListener").expect("put on");
-        assert!(off < on, "{script}");
-        assert!(STOP_WATCHING.contains("window.__dustRunHidden = null;"));
     }
 
     fn view(phase: ContestPhase, clock: Option<RunClock>) -> ContestView {

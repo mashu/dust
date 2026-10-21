@@ -595,6 +595,7 @@ pub struct TrainingSettings {
 
 mod clamp;
 mod contest;
+mod contest_preset;
 mod curriculum;
 mod experience;
 mod ranges;
@@ -602,6 +603,7 @@ mod reset;
 mod save;
 
 pub use contest::{CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX, MY_NAME_MAX, state_code};
+pub use contest_preset::ContestPreset;
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
 pub use curriculum::LevelAxis;
 pub use experience::Experience;

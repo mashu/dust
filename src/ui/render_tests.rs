@@ -672,8 +672,8 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
         r#"<div class="eyebrow">Contest</div><div class="mode-pills">"#,
         r#"id="contest-cq-wpx" class="pill active""#,
         "You send 5NN + serial\u{a0}· You\u{a0}copy\u{a0}NR",
-        r#"<li class="qso-line you"><span class="qso-who tiny">You</span><span class="call">CQ DL1ABC TEST</span>"#,
-        r#"<li class="qso-line they"><span class="qso-who tiny">They</span><span class="call">K5XYZ</span>"#,
+        r#"<li class="qso-line you"><span class="qso-who tiny">You</span><span class="qso-sends"><span class="call">CQ DL1ABC TEST</span>"#,
+        r#"<li class="qso-line they"><span class="qso-who tiny">They</span><span class="qso-sends"><span class="call">K5XYZ</span>"#,
         ">K5XYZ 5NN TT1<",
         ">TU 5NN 214<",
         ">TU<",
@@ -1274,6 +1274,126 @@ fn every_listen_chip_has_an_id_of_its_own() {
         .filter(|id| id.starts_with("chip-"))
         .count();
     assert!(chips > 36, "{chips} chips");
+}
+
+/// Listen in Contest mode offers Hear a QSO first, and shows what it has
+/// played line by line, You and They, callers calling at once on one line
+/// and each QSO set apart, with where your station stood in and which QSO
+/// is playing, Stop above the lines while it plays; no character is
+/// picked meanwhile. A dialogue of a contest other than the one chosen
+/// stays out of sight, and so does one stopped before a line was heard.
+#[test]
+fn listen_in_contest_mode_offers_hear_a_qso_and_shows_its_lines() {
+    use crate::playback::{Dialogue, DialogueLine};
+    use cw_core::{ContestKind, Sender};
+    let shown = |dialogue: Option<Dialogue>, hearing: bool| {
+        render_props(
+            |props: (Option<Dialogue>, bool)| {
+                let (dialogue, hearing) = props;
+                let mut settings = TrainingSettings::default();
+                settings.curriculum.char_set_mode = CharSetMode::Contest;
+                rsx! {
+                    ListenView {
+                        settings,
+                        playing: false,
+                        on_play: move |_: String| {},
+                        on_stop: move |_| {},
+                        on_back: move |_| {},
+                        hearing,
+                        dialogue,
+                    }
+                }
+            },
+            (dialogue, hearing),
+        )
+    };
+    let idle = shown(None, false);
+    assert!(idle.contains("Hear a few QSOs of CQ WPX"), "{idle}");
+    assert!(
+        idle.contains("or a stream of groups."),
+        "as the button says"
+    );
+    let hear = idle.find("id=\"btn-hear-a-qso\"").expect("Hear a QSO");
+    let play = idle.find("id=\"btn-play\"").expect("Play");
+    assert!(hear < play, "Hear a QSO comes first");
+    assert!(idle.contains("listen-glyph"));
+    assert!(idle.contains("letter-chip active"));
+    let line = |who, sends: &[&str], qso| DialogueLine {
+        who,
+        sends: sends.iter().map(|send| (*send).to_string()).collect(),
+        qso,
+    };
+    let dialogue = Dialogue {
+        kind: ContestKind::Wpx,
+        stand_in: Some("DL1ABC".to_string()),
+        qsos: 3,
+        lines: vec![
+            line(Sender::You, &["CQ DL1ABC TEST"], 1),
+            line(Sender::Caller(0), &["K5XYZ"], 1),
+            line(Sender::You, &["TU"], 1),
+            line(Sender::Caller(1), &["G4ABC", "W7XC"], 2),
+        ],
+    };
+    let hearing = shown(Some(dialogue.clone()), true);
+    assert!(hearing.contains(">QSO 2 of 3 · CQ WPX<"), "{hearing}");
+    assert!(
+        hearing
+            .contains(">You</span><span class=\"qso-sends\"><span class=\"call\">CQ DL1ABC TEST<")
+    );
+    assert!(hearing.contains(">They</span><span class=\"qso-sends\"><span class=\"call\">K5XYZ<"));
+    assert!(
+        hearing.contains("<span class=\"call\">G4ABC</span><span class=\"call\">W7XC</span>"),
+        "callers at once side by side"
+    );
+    assert_eq!(
+        hearing.matches("qso-next").count(),
+        1,
+        "the second QSO apart"
+    );
+    assert!(hearing.contains("Your station is sent as DL1ABC until you add yours."));
+    assert!(hearing.contains("not scored, not saved to History"));
+    let stop = hearing.find("id=\"btn-stop\"").expect("Stop");
+    let lines = hearing.find("qso-line").expect("lines");
+    assert!(stop < lines, "Stop above the lines");
+    assert_eq!(hearing.matches("id=\"btn-stop\"").count(), 1);
+    assert!(!hearing.contains("btn-hear-a-qso"), "Stop in its place");
+    assert!(!hearing.contains("listen-glyph"));
+    assert!(!hearing.contains("letter-chip active"), "nothing picked");
+    let heard = shown(Some(dialogue.clone()), false);
+    assert!(heard.contains("QSOs heard · CQ WPX"));
+    assert!(heard.contains("btn-hear-a-qso"));
+    assert!(!heard.contains("letter-chip active"));
+    let other = shown(
+        Some(Dialogue {
+            kind: ContestKind::SimpleQso,
+            ..dialogue.clone()
+        }),
+        false,
+    );
+    assert!(!other.contains("qso-line"), "{other}");
+    // Stopped before a line was heard: the stage as it was.
+    let none = Dialogue {
+        lines: Vec::new(),
+        ..dialogue
+    };
+    let stopped = shown(Some(none.clone()), false);
+    assert!(stopped.contains("listen-glyph"), "{stopped}");
+    assert!(!stopped.contains("Listening"));
+    let waiting = shown(Some(none), true);
+    assert!(waiting.contains("Listening — each line shows once it has been sent."));
+    // Outside Contest mode there is no QSO to hear.
+    let koch = render(|| {
+        rsx! {
+            ListenView {
+                settings: TrainingSettings::default(),
+                playing: false,
+                on_play: move |_: String| {},
+                on_stop: move |_| {},
+                on_back: move |_| {},
+            }
+        }
+    });
+    assert!(!koch.contains("btn-hear-a-qso"));
 }
 
 #[test]

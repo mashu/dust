@@ -18,7 +18,7 @@ use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
 use crate::callsign::{GeneratedCall, parse_callsign};
 use crate::rng::{Rng, SplitMix64};
-use crate::settings::TrainingSettings;
+use crate::settings::{TrainingSettings, WPM_MIN};
 use crate::timing::{StationVoice, resolve_station};
 
 /// Where a caller is in its QSO with you, as MorseRunner's operators are
@@ -276,6 +276,22 @@ const FIXES_WITH_EXCHANGE: f64 = 5.0 / 6.0;
 /// (`DxOper.pas`, `GetReply`).
 const FIRST_QUERY: f64 = 0.3;
 
+/// After this many incomplete tries — a slip or a partial of its call, or a
+/// `?` while it waits for its call put right or for your TU — a caller
+/// slows down for you, as MorseRunner's do once QRS After a Few Incomplete
+/// Calls is on (`DxOper.pas:343-376`); a skilled one, of skill 3, only
+/// after one more. An `NR?` counts as a `?` does, as it asks as one does
+/// here, where MorseRunner counts only the `?`. Every caller does so while
+/// callers' habits are easy, which they all are until that setting comes.
+const QRS_AFTER: u32 = 3;
+const QRS_AFTER_SKILLED: u32 = 4;
+
+/// How much slower a caller of skill 1, 2 and 3 sends once it slows down,
+/// and how much slower still from its fourth incomplete try on.
+const QRS_DROP: [f64; 3] = [0.20, 0.16, 0.12];
+const QRS_MORE_FROM: u32 = 4;
+const QRS_MORE: f64 = 0.02;
+
 /// One station calling you.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Caller {
@@ -329,6 +345,12 @@ pub(super) struct Caller {
     /// Where on the band's fading it is at the start of the run, in
     /// seconds: its own path, faded apart from every other caller's.
     pub(super) fade_from_sec: f64,
+    /// Its incomplete tries ([`QRS_AFTER`]), counted afresh as its QSO
+    /// moves on, as MorseRunner's `FIncompleteCallCount`.
+    incomplete: u32,
+    /// How much slower than its own speed it sends now: nothing until it
+    /// slows down for you, and nothing again once its QSO is back on track.
+    qrs: f64,
     rng: SplitMix64,
 }
 
@@ -380,6 +402,8 @@ impl Caller {
             de_first,
             fixes_with_exchange,
             fade_from_sec,
+            incomplete: 0,
+            qrs: 0.0,
             rng,
         }
     }
@@ -399,6 +423,8 @@ impl Caller {
         self.silent = 0;
         self.exchanges_sent = 0;
         self.signs_off = false;
+        self.incomplete = 0;
+        self.qrs = 0.0;
         let Some((before, at)) = self.serial_sent else {
             return;
         };
@@ -409,6 +435,55 @@ impl Caller {
         let fields = self.exchange.iter_mut().flatten();
         for (_, token) in fields.filter(|(field, _)| *field == Field::Nr) {
             *token = send_serial(serial, CallerHabits::Easy, &mut self.rng);
+        }
+    }
+
+    /// How it sounds in its next send: its own voice, slowed down while it
+    /// slows down for you.
+    pub(super) fn sending_voice(&self) -> StationVoice {
+        slowed(self.voice, self.qrs)
+    }
+
+    /// Where it stands as MorseRunner counts incomplete tries: one that
+    /// answered your partial while it called waits for its call put right
+    /// and for your exchange, as MorseRunner's near match puts a station in
+    /// `osNeedCallNr` (`DxOper.pas:734-742`). None while it waits out your
+    /// QSO with someone else, as `osNeedPrevEnd`.
+    fn qso_state(&self) -> Option<CallerState> {
+        if self.waits() {
+            None
+        } else if self.state == CallerState::NeedQso && self.answered_partial {
+            Some(CallerState::NeedCallNr)
+        } else {
+            Some(self.state)
+        }
+    }
+
+    /// What one part of your message did to its incomplete tries, its state
+    /// having been `was` before it, and whether the part was one. A QSO
+    /// moved on counts them afresh, as MorseRunner's `SetState` does
+    /// (`DxOper.pas:448-472`), but where its call put right is still to come;
+    /// and one back on track, its call heard right before your exchange or
+    /// itself calling you again on your CQ, TU, B4, NIL or `?`, sends at its
+    /// own speed again. Left to wait out your QSO with someone else, it
+    /// keeps both, as MorseRunner sets `osNeedPrevEnd` without `SetState`:
+    /// a partial that brings it back finds it as slow as it was. A QSO over
+    /// is left as it was: all it sends after is its sign-off.
+    fn count_try(&mut self, was: Option<CallerState>, incomplete: bool) {
+        use CallerState::{Done, Gone, NeedCall, NeedCallNr, NeedEnd};
+        let moved = self
+            .qso_state()
+            .filter(|now| Some(*now) != was && !matches!(now, Done | Gone));
+        if let Some(now) = moved {
+            if !(matches!(was, Some(NeedCallNr | NeedEnd)) && now == NeedCall) {
+                self.incomplete = 0;
+            }
+            if !matches!(now, NeedCall | NeedCallNr | NeedEnd) {
+                self.qrs = 0.0;
+            }
+        }
+        if incomplete {
+            self.incomplete += 1;
         }
     }
 
@@ -493,6 +568,11 @@ impl Caller {
         // Whether the last call in the message was its own: an exchange or
         // a `?` after someone else's call is not for it.
         let mut addressed = None;
+        // A call in the message, a piece of one or a partial among them: a
+        // `?` with one is no try of its own (`DxOper.pas:790-803`).
+        let names_call = message.iter().any(
+            |part| matches!(part, MessagePart::HisCall(sent) if sent.chars().any(|c| c != '?')),
+        );
         for (at, part) in message.iter().enumerate() {
             let part = match part {
                 // A call with no character in it, `?` or `??`, asks as the
@@ -504,6 +584,10 @@ impl Caller {
                 }
                 part => part,
             };
+            let was = self.qso_state();
+            // Whether this part left its QSO incomplete: you asked for its
+            // call, or sent it wrong, or asked again for what it sent.
+            let mut incomplete = false;
             match part {
                 MessagePart::Cq => {
                     rested |= self.back_from_waiting();
@@ -549,6 +633,9 @@ impl Caller {
                         .flatten()
                         .is_some_and(|best| own.is_none_or(|own| own < best));
                     let found = if beaten { CallMatch::No } else { heard };
+                    // A slip, a piece or a partial of its call, as
+                    // MorseRunner's `mcAlmost` (`DxOper.pas:741`).
+                    incomplete = matches!(found, CallMatch::Close | CallMatch::Partial { .. });
                     addressed = Some(found != CallMatch::No);
                     reaction.matched |= found != CallMatch::No;
                     reaction.called |= matches!(found, CallMatch::Exact | CallMatch::Close);
@@ -625,27 +712,28 @@ impl Caller {
                         }
                         reaction.missed_exchange = true;
                         replies = Some(true);
-                        continue;
-                    }
-                    reaction.took_exchange |= self.state.worked();
-                    match self.state {
-                        NeedNr => self.state = NeedEnd,
-                        NeedCallNr => self.state = NeedCall,
-                        // Sent after a partial it answered, your exchange is
-                        // for it: it has your exchange, and puts its call
-                        // right, as MorseRunner's `osNeedCallNr` hearing
-                        // your number (`DxOper.pas:768-776`).
-                        NeedQso if addressed == Some(true) || self.answered_partial => {
-                            self.state = NeedCall;
-                            reaction.took_exchange = true;
-                            replies = Some(true);
+                    } else {
+                        reaction.took_exchange |= self.state.worked();
+                        match self.state {
+                            NeedNr => self.state = NeedEnd,
+                            NeedCallNr => self.state = NeedCall,
+                            // Sent after a partial it answered, your
+                            // exchange is for it: it has your exchange, and
+                            // puts its call right, as MorseRunner's
+                            // `osNeedCallNr` hearing your number
+                            // (`DxOper.pas:768-776`).
+                            NeedQso if addressed == Some(true) || self.answered_partial => {
+                                self.state = NeedCall;
+                                reaction.took_exchange = true;
+                                replies = Some(true);
+                            }
+                            // Your exchange went to someone: it falls silent.
+                            NeedQso => {
+                                replies = Some(false);
+                                self.other_qso = true;
+                            }
+                            _ => {}
                         }
-                        // Your exchange went to someone: it falls silent.
-                        NeedQso => {
-                            replies = Some(false);
-                            self.other_qso = true;
-                        }
-                        _ => {}
                     }
                 }
                 MessagePart::Again | MessagePart::NrQuery
@@ -656,6 +744,10 @@ impl Caller {
                     replies = Some(true);
                     reaction.asked = true;
                     reaction.again = true;
+                    // Asked again while it waits for its call put right or
+                    // for your TU, with no call to go on.
+                    incomplete =
+                        !names_call && matches!(was, Some(NeedCall | NeedCallNr | NeedEnd));
                 }
                 // Your call alone: a caller still calling, and not waiting
                 // on a QSO it heard you start, calls you again, as after a
@@ -694,6 +786,7 @@ impl Caller {
                 }
                 _ => {}
             }
+            self.count_try(was, incomplete);
         }
         // A caller still calling spends a try on each message it answers,
         // as on each timeout (`DxOper.pas:709, 825`): CQ after CQ moves the
@@ -701,6 +794,13 @@ impl Caller {
         // QSO comes back with fresh patience instead.
         if self.state == NeedQso && replies == Some(true) && !rested {
             self.spend_try();
+        }
+        // Tried often enough without getting its QSO through, it slows down
+        // for you, as long as the QSO is on (`DxOper.pas:343-376`).
+        if self.qso_state().is_some_and(CallerState::worked)
+            && let Some(drop) = qrs_drop(self.skill, self.incomplete)
+        {
+            self.qrs = drop;
         }
         reaction.replies = match self.state {
             NeedQso => replies.unwrap_or(false),
@@ -719,10 +819,12 @@ impl Caller {
     /// A `?` is coming with the Call field empty: whoever you worked, it is
     /// for anyone still calling, as MorseRunner's `osNeedPrevEnd` comes back
     /// when the Call field is empty (`DxOper.pas:793`), with fresh patience,
-    /// before the try the `?` costs.
+    /// before the try the `?` costs, and at its own speed.
     pub(super) fn forget_other_qso(&mut self) {
+        let was = self.qso_state();
         self.back_from_waiting();
         self.other_qso = false;
+        self.count_try(was, false);
     }
 
     /// One try spent while it calls; the last sends it away.
@@ -908,6 +1010,36 @@ impl Caller {
     pub(super) fn draw_delay_sec(&mut self) -> f64 {
         self.rng.pick_in_range(REPLY_DELAY_SEC.0, REPLY_DELAY_SEC.1)
     }
+}
+
+/// How much slower a caller of `skill` sends after `incomplete` incomplete
+/// tries, once that is enough for it to slow down at all.
+fn qrs_drop(skill: u32, incomplete: u32) -> Option<f64> {
+    let after = if skill >= 3 {
+        QRS_AFTER_SKILLED
+    } else {
+        QRS_AFTER
+    };
+    if incomplete < after {
+        return None;
+    }
+    let drop = QRS_DROP[skill.clamp(1, 3) as usize - 1];
+    let more = if incomplete >= QRS_MORE_FROM {
+        QRS_MORE
+    } else {
+        0.0
+    };
+    Some(drop + more)
+}
+
+/// `voice`, its characters and its spacing alike `drop` slower, never
+/// slower than the Speed card's lowest speed, as MorseRunner keeps a
+/// floor under its callers' (`DxStn.pas:166-168`).
+fn slowed(mut voice: StationVoice, drop: f64) -> StationVoice {
+    let slow = |wpm: f64| (wpm * (1.0 - drop)).max(WPM_MIN).min(wpm);
+    voice.char_wpm = slow(voice.char_wpm);
+    voice.effective_wpm = slow(voice.effective_wpm).min(voice.char_wpm);
+    voice
 }
 
 /// How many tries a caller makes, from `rng`.
@@ -1857,5 +1989,178 @@ mod tests {
         assert!(asked.hear(&[Again], &[]).replies);
         assert!((PATIENCE_MIN - 1..PATIENCE_MAX).contains(&asked.patience));
         assert_ne!(asked.state, CallerState::Gone);
+    }
+
+    /// How much slower than its own `caller` sends now, its characters and
+    /// its spacing alike.
+    fn slowed_by(caller: &Caller) -> (f64, f64) {
+        let (own, now) = (caller.voice, caller.sending_voice());
+        (
+            1.0 - now.char_wpm / own.char_wpm,
+            1.0 - now.effective_wpm / own.effective_wpm,
+        )
+    }
+
+    /// After three incomplete tries a caller slows down by 20, 16 or 12% as
+    /// its skill is 1, 2 or 3, and 2% more from the fourth on; a skilled
+    /// one, of skill 3, only from its fourth, as MorseRunner's do
+    /// (`DxOper.pas:343-376`). A slip of its call, a piece of it or a
+    /// partial is a try, and so is a `?` while it waits for its call put
+    /// right or for your TU, but not one while it waits for your exchange.
+    #[test]
+    fn a_caller_slows_down_after_three_incomplete_tries() {
+        for (skill, drops) in [
+            (1, [0.0, 0.0, 0.20, 0.22, 0.22]),
+            (2, [0.0, 0.0, 0.16, 0.18, 0.18]),
+            (3, [0.0, 0.0, 0.0, 0.14, 0.14]),
+        ] {
+            for tries in [
+                [
+                    call("K5XYW"),
+                    call("K5XY"),
+                    call("K5?"),
+                    call("XYZ"),
+                    call("K5XYW"),
+                ],
+                [
+                    call("K5?"),
+                    call("K5X?"),
+                    call("?5XYZ"),
+                    call("K5?"),
+                    call("K5?"),
+                ],
+            ] {
+                let mut caller = caller(1);
+                caller.skill = skill;
+                caller.hear(&[Cq], &[]);
+                for (at, (sent, drop)) in tries.iter().zip(drops).enumerate() {
+                    assert!(caller.hear(std::slice::from_ref(sent), &[]).replies);
+                    let (chars, spacing) = slowed_by(&caller);
+                    assert!(
+                        (chars - drop).abs() < 1e-9 && (spacing - drop).abs() < 1e-9,
+                        "skill {skill}, try {}: {chars:.3} {spacing:.3}",
+                        at + 1
+                    );
+                }
+            }
+            // A `?` while it waits for your TU, its exchange sent.
+            let mut waits_tu = caller(1);
+            waits_tu.skill = skill;
+            waits_tu.hear(&[call("K5XYZ"), Exchange], &[]);
+            for drop in drops {
+                assert!(waits_tu.hear(&[Again], &[]).replies);
+                assert!(
+                    (slowed_by(&waits_tu).0 - drop).abs() < 1e-9,
+                    "skill {skill}"
+                );
+            }
+            // Nor is your call alone and a `?` after it, for your exchange.
+            let mut waits_nr = caller(1);
+            waits_nr.skill = skill;
+            waits_nr.hear(&[call("K5XYZ")], &[]);
+            for _ in 0..6 {
+                waits_nr.hear(&[Again], &[]);
+            }
+            assert_eq!(waits_nr.sending_voice(), waits_nr.voice, "skill {skill}");
+        }
+    }
+
+    /// Back on track, its call heard right before your exchange, it sends
+    /// at its own speed again, as MorseRunner's (`DxOper.pas:462-471`); its
+    /// call put right after your exchange, it keeps the slower speed for
+    /// the exchange it sends then; and a dupe calling again starts at its
+    /// own.
+    #[test]
+    fn a_caller_back_on_track_sends_at_its_own_speed() {
+        let mut caller = caller(1);
+        caller.skill = 1;
+        let own = caller.voice;
+        caller.hear(&[Cq], &[]);
+        for _ in 0..3 {
+            caller.hear(&[call("K5X?")], &[]);
+        }
+        assert!(caller.sending_voice().char_wpm < own.char_wpm);
+        caller.hear(&[call("K5XYZ"), Exchange], &[]);
+        assert_eq!(caller.state, CallerState::NeedEnd);
+        assert_eq!(caller.sending_voice(), own, "its call heard right");
+
+        let mut fixed = self::caller(1);
+        fixed.skill = 1;
+        fixed.hear(&[call("K5XYZ"), Exchange], &[]);
+        for _ in 0..3 {
+            fixed.hear(&[call("K5XYW")], &[]);
+        }
+        assert_eq!(fixed.state, CallerState::NeedCall);
+        let slow = fixed.sending_voice();
+        assert!(slow.char_wpm < own.char_wpm);
+        fixed.hear(&[call("K5XYZ")], &[]);
+        assert_eq!(fixed.state, CallerState::NeedEnd);
+        assert_eq!(fixed.sending_voice(), slow, "it keeps it for its exchange");
+        fixed.hear(&[Tu], &[]);
+        fixed.call_again(own.tone_hz, 60_000);
+        assert_eq!(fixed.sending_voice(), own);
+    }
+
+    /// A pile-up caller slowed down for you that hears you go on to someone
+    /// else waits that QSO out as slow as it was, as MorseRunner's
+    /// `osNeedPrevEnd` keeps its speed (`DxOper.pas:744-748, 461-471`): a
+    /// partial that brings it back has it answer slowly, its tries counted
+    /// afresh; your CQ, TU, NIL or `?` with the Call field empty, or its
+    /// call, bring it back at its own speed.
+    #[test]
+    fn a_pile_up_caller_waits_out_another_qso_as_slow_as_it_was() {
+        let slowed = || {
+            let mut caller = pileup_caller(1, "K5XYZ");
+            caller.skill = 1;
+            caller.hear(&[Cq], &[]);
+            for _ in 0..3 {
+                caller.hear(&[call("K5X?")], &[]);
+            }
+            let slow = caller.sending_voice();
+            assert!(slow.char_wpm < caller.voice.char_wpm);
+            assert!(!caller.hear(&[call("G4ABC")], &[]).replies);
+            assert!(caller.waits());
+            assert_eq!(caller.sending_voice(), slow, "it waits as slow");
+            (caller, slow)
+        };
+        let (mut partial, slow) = slowed();
+        assert!(partial.hear(&[call("K5?")], &[]).replies);
+        assert_eq!(partial.sending_voice(), slow, "a partial finds it slow");
+        assert_eq!(partial.incomplete, 1, "its tries counted afresh");
+        for (what, back) in [
+            ("CQ", vec![Cq]),
+            ("TU", vec![Tu]),
+            ("NIL", vec![MessagePart::Nil]),
+            ("its call", vec![call("K5XYZ")]),
+        ] {
+            let (mut caller, _) = slowed();
+            caller.hear(&back, &[]);
+            assert_eq!(caller.sending_voice(), caller.voice, "{what}");
+            assert_eq!(caller.incomplete, 0, "{what}");
+        }
+        let (mut asked, _) = slowed();
+        asked.forget_other_qso();
+        assert_eq!(asked.sending_voice(), asked.voice, "a ? with no call");
+    }
+
+    /// However slow a caller is, slowing down never takes it below the
+    /// slowest speed the Speed card offers.
+    #[test]
+    fn a_caller_never_slows_below_the_slowest_speed() {
+        let mut caller = caller(1);
+        caller.skill = 1;
+        caller.voice.char_wpm = 6.0;
+        caller.voice.effective_wpm = 5.5;
+        caller.hear(&[Cq], &[]);
+        for _ in 0..4 {
+            caller.hear(&[call("K5XYW")], &[]);
+        }
+        let voice = caller.sending_voice();
+        assert_eq!((voice.char_wpm, voice.effective_wpm), (WPM_MIN, WPM_MIN));
+        // One a little faster slows by its share, down to the floor.
+        caller.voice.char_wpm = 6.5;
+        let voice = caller.sending_voice();
+        assert!((voice.char_wpm - 6.5 * 0.78).abs() < 1e-9, "{voice:?}");
+        assert_eq!(voice.effective_wpm, WPM_MIN);
     }
 }

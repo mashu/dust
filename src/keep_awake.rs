@@ -2,7 +2,8 @@
 //! send and every answer. A phone that dims and locks part way through a
 //! group loses the group, and the screen is where the answer goes. A contest
 //! run holds it while it is live, counting down or running; paused, it lets
-//! the screen sleep, and a run is never lost to that.
+//! the screen sleep, and a run is never lost to that. Hear a QSO holds it
+//! while it plays, its lines on the screen: a page out of sight stops it.
 //!
 //! Android sets its window's own keep-screen-on flag, which the system holds
 //! for as long as the window is in front and lets go of with it. Everywhere
@@ -14,17 +15,22 @@
 use cw_core::{ContestPhase, ContestView};
 use dioxus::prelude::*;
 
+use crate::playback::Preview;
 use crate::state::Screen;
 
 /// Hold the screen on for exactly as long as the training screen is up with
-/// a session on it, or a contest run on it is live.
-pub fn use_keep_awake(screen: Signal<Screen>, contest: Signal<Option<ContestView>>) {
+/// a session on it, or a contest run on it is live, or Hear a QSO plays.
+pub fn use_keep_awake(
+    screen: Signal<Screen>,
+    contest: Signal<Option<ContestView>>,
+    preview: Signal<Preview>,
+) {
     let wanted = use_memo(move || match contest.read().as_ref() {
         Some(run) => matches!(
             run.phase,
             ContestPhase::Countdown { .. } | ContestPhase::Running
         ),
-        None => screen() == Screen::Training,
+        None => screen() == Screen::Training || preview.read().is_qsos(),
     });
     // What was last asked for, so starting up off asks for nothing.
     let mut held = use_hook(|| CopyValue::new(false));
@@ -192,6 +198,23 @@ pub(crate) mod tests {
             ui.click("btn-end-run");
             assert_eq!(ui.screen(), "results", "nobody was worked: nothing kept");
             assert_eq!(asked(), vec![true, false, true, false]);
+        });
+    }
+
+    /// Hear a QSO holds the screen on while it plays, as its lines are on
+    /// the screen and a page out of sight stops it, and lets it go when it
+    /// stops.
+    #[test]
+    fn the_screen_stays_on_while_hear_a_qso_plays() {
+        run(|| async {
+            ASKED.with(|asked| asked.borrow_mut().clear());
+            let (mut ui, _recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-listen-to-letters");
+            ui.click("btn-hear-a-qso");
+            assert_eq!(asked(), vec![true]);
+            ui.advance(2_000).await;
+            ui.click("btn-stop");
+            assert_eq!(asked(), vec![true, false]);
         });
     }
 

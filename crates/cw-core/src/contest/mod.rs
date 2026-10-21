@@ -17,8 +17,9 @@
 //!   caller fading on a path of its own.
 //! - [`machine`]: the run itself, as a pure state machine.
 //! - [`data`]: the values callers' exchanges are drawn from.
+//! - [`bot`]: operators that work a run as a person would, and the QSOs
+//!   Hear a QSO plays.
 
-#[cfg(test)]
 pub(crate) mod bot;
 mod caller;
 mod check;
@@ -41,6 +42,7 @@ use crate::callsign::{CallSpec, GeneratedCall};
 use crate::session::Answered;
 use crate::settings::TrainingSettings;
 
+pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
 pub use data::places::place_name;

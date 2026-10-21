@@ -52,13 +52,13 @@ pub use callsign::{
 pub use contest::{
     AirView, CallSource, CallerHabits, ContestEffect, ContestEvent, ContestKind, ContestLog,
     ContestMachine, ContestPhase, ContestRules, ContestRun, ContestScore, ContestView, EntryField,
-    Esm, ExchangeState, Fade, Field, Fields, Fill, LogRow, MONITOR_LEVEL, MessagePart, Multiplier,
-    OpKey, PauseWhy, PerSide, QsoCheck, QsoError, QsoRecord, QsoState, QsoText, Rates, ReadField,
-    Reading, RowStatus, RunClock, RunErrors, RunQso, RunStyle, RunSummary, SPRINT_SERIALS,
-    ScoredQso, Scoring, Segment, Sender, SerialFit, SerialModel, Side, StoredLog, Tally, Turn,
-    WPX_SERIALS, check_qso, contest_score, cut_serial, esm, filter_capacity, keyed_token, loggable,
-    message_text, normalize_call, parse_exchange, place_name, plan_turn, rate_at, read_number,
-    send_report, send_serial,
+    Esm, ExchangeState, Fade, Field, Fields, Fill, HeardQsos, HeardTurn, LogRow, MONITOR_LEVEL,
+    MessagePart, Multiplier, OpKey, PauseWhy, PerSide, QsoCheck, QsoError, QsoRecord, QsoState,
+    QsoText, Rates, ReadField, Reading, RowStatus, RunClock, RunErrors, RunQso, RunStyle,
+    RunSummary, SPRINT_SERIALS, ScoredQso, Scoring, Segment, Sender, SerialFit, SerialModel, Side,
+    StoredLog, Tally, Turn, WPX_SERIALS, check_qso, contest_score, cut_serial, esm,
+    filter_capacity, hear_qsos, keyed_token, loggable, message_text, normalize_call,
+    parse_exchange, place_name, plan_turn, rate_at, read_number, send_report, send_serial,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
@@ -84,7 +84,7 @@ pub use session::{
 pub use settings::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, Aim, AutoLevelSettings,
     BandSettings, CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode,
-    ContestSettings, CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX,
+    ContestPreset, ContestSettings, CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX,
     EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN,
     FilterShape, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX,
     GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, LevelAxis, MY_CALL_MAX, MY_NAME_MAX, MixedAutoLevelAxis,

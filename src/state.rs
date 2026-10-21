@@ -128,6 +128,9 @@ pub struct AppCtx {
     pub preview: Signal<Preview>,
     /// The groups the stream has sent, newest last.
     pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
+    /// What Hear a QSO has played, as far as it has been heard: kept once it
+    /// ends, until something else plays or the screen is left.
+    pub dialogue: Signal<Option<crate::playback::Dialogue>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
     /// The run's Call and Exchange fields, as typed.
@@ -142,6 +145,9 @@ pub struct AppCtx {
     /// The history and settings as they stood before the last restore, for
     /// Undo to put back.
     before_restore: Signal<Option<(Vec<SessionResult>, TrainingSettings)>>,
+    /// The settings as they were stored last, so that settings stored
+    /// already are not stored again.
+    stored_settings: CopyValue<TrainingSettings>,
     app: CopyValue<AppState>,
 }
 
@@ -150,6 +156,7 @@ impl AppCtx {
     /// scope that owns the app, as everything in it lives as long as that.
     pub fn new(app: AppState, settings: TrainingSettings, sessions: Vec<SessionResult>) -> Self {
         let last_backup = app.store.last_backup();
+        let stored_settings = CopyValue::new(settings.clone().clamp());
         Self {
             screen: Signal::new(Screen::Home),
             settings: Signal::new(settings),
@@ -162,12 +169,14 @@ impl AppCtx {
             toasts: Toasts::new(),
             preview: Signal::new(Preview::Idle),
             stream_heard: Signal::new(Vec::new()),
+            dialogue: Signal::new(None),
             answer: AnswerOutbox::new(),
             entry: ContestEntry::new(),
             tour: Signal::new(None),
             last_backup: Signal::new(last_backup),
             trash: Signal::new(Vec::new()),
             before_restore: Signal::new(None),
+            stored_settings,
             app: CopyValue::new(app),
         }
     }
@@ -182,6 +191,17 @@ impl AppCtx {
         matches!(*self.screen.peek(), Screen::Training)
             || self.runtime.peek().is_some()
             || self.contest.peek().is_some()
+    }
+
+    /// Store the settings as they are now, clamped, unless they are stored
+    /// so already.
+    pub fn store_settings(self) {
+        let persist = self.settings.peek().clone().clamp();
+        let mut stored = self.stored_settings;
+        if *stored.peek() != persist {
+            self.app().store.save_settings(&persist);
+            stored.set(persist);
+        }
     }
 
     /// Stop whatever is playing outside a session.
@@ -395,6 +415,7 @@ impl AppCtx {
         self.app().player.release();
         self.preview.set(Preview::Idle);
         self.stream_heard.set(Vec::new());
+        self.dialogue.set(None);
         self.screen.set(to);
     }
 }

@@ -40,7 +40,15 @@ another QSO, and a correction after your exchange carries the station's
 own (§4.3); Enter and the screen follow what of the turn has reached you,
 and a check shows once your TU is out (§4.2, §4.4, §4.8); the band makes
 room only for the callers sounding at once (§5.6); and a QSO logged for a
-station you left is no NIL of the one you work (§9.1).
+station you left is no NIL of the one you work (§9.1). Slice 2c has
+landed: Hear a QSO, three QSOs of the chosen contest worked by the perfect
+operator, on Listen and on the Character set card (§2, `hear_qsos` in
+`contest/bot.rs`); the First QSO, Club and Contester presets (§8,
+`settings/contest_preset.rs`); and QRS, a caller slowing down after a few
+incomplete tries (§4.3). With them, two fixes from browser tests: what
+Start keeps from Home's hero is stored as the run starts (§2), and the TU
+that logs after a TU without logging asks no caller to call again (§4.6,
+§9.1).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -118,7 +126,10 @@ still means what it says; the note (`settings_charset.rs:123-142`) reads
   which shapes the callers' calls;
 - from phase 2, the run style (Single caller or Pile-up, "1–3 callers · set
   on the Band card"; as built, Single caller says "One station calls at a
-  time") and presets (§8).
+  time") and presets (§8);
+- as built (2c), "Hear a QSO" beside the QSO's eyebrow, and the presets
+  after the QSO, above the tier, so what a preset sets shows right under
+  it.
 
 The alphabet controls are not drawn: the `if` blocks at
 `settings_charset.rs:171-275` gain a Contest arm.
@@ -160,7 +171,11 @@ name swaps it for the state's. While the hero holds a field, Start and Listen ke
 in it and keep what was typed there before they act, so a call typed after
 a refusal starts the run on one press: leaving the box on the press would
 keep the call then and redraw the hero, the button moved, under the finger
-before the click came (`StationDraft`, `src/ui/settings_station.rs`). The
+before the click came (`StationDraft`, `src/ui/settings_station.rs`). As
+built (2c), the settings are stored as a session starts
+(`AppCtx::store_settings`, from `start_session`), so a call, name or state
+the press of Start kept is stored before the run, which stores no settings
+while it is on: a reload mid-run used to lose it. The
 runtime keeps its message for the other ways in, such as Run again. Contest
 has its own first-session card ("Add your call, press Start contest; Enter
 sends what the QSO needs next"), and its own tips (`CONTEST_TIPS`: Enter, a
@@ -173,6 +188,45 @@ hidden, as for Words (`auto_level_progress` is `None` in Contest,
 does the one fork in group generation (`sampling.rs:503-507`). Phase 2 adds
 "Hear a QSO".
 
+**Hear a QSO** (as built, 2c) is offered where a learner meets the
+contest: first on Listen in Contest mode ("Hear a few QSOs of CQ WPX, or
+play one character, the pool, or a stream of groups"), and beside the
+QSO's eyebrow on the Character set card. It plays three QSOs of the chosen
+contest, in its run style, speeds and band, worked by the perfect operator
+(`hear_qsos`, `contest/bot.rs`), which hears the turns only, as in a run.
+They are worked through before the first plays, on a run clock of their
+own, from a sampler built from the history as a run's is and let go of
+after: nothing is stored, no stat hears of them, and History has no row
+("Played for you to hear: not scored, not saved to History").
+The turns go out through a run's player path (`plan_turn`, `send_planned`,
+your message dry and the callers through the receiver, the send's own
+fading off as a run's), each after the quiet the operator left before it,
+and the dialogue shows each send as a line, You or They as the card's QSO
+reads, once it has been heard whole (the attempt's lead and latency, then
+the segment's end); callers sending at once for the same QSO share a line,
+side by side, as a pile-up's do, and each QSO after the first is set apart
+by a rule where its caller comes in (a QSO closes with your TU and its
+sign-off). The eyebrow says which QSO plays ("QSO 2 of 3 · CQ
+WPX"), with Stop beside it, and the lines scroll in a box of their own
+kept on the newest, so neither Stop nor the line just heard is pushed
+under a phone's navigation as lines come. They end on the third QSO's TU,
+with its sign-off where the contest has one; every caller that TU brings
+is left out, once or twice as it calls, as it would start a QSO not heard.
+Stop ends it; a run's pause has no place in it, so a page out of sight
+stops it too (a listener of its own on Listen and on Settings, beside the
+run's, `src/page_hidden.rs`), and so, on Settings, does picking another
+contest or another mode, whose card would no longer show it or its Stop.
+While it plays it keeps the screen awake, as a live run does, so a phone
+left to it does not lock and stop it. The lines stay once it ends, "QSOs
+heard", until another sound plays, a character is picked on Listen, the
+contest changes or the screen is left; stopped before a line was heard,
+it leaves the stage or the card's QSO as it was. While the lines are up,
+Listen's character strip picks none.
+Where your station is not given, it stands in, and a line says so ("Your
+station is sent as K1ABC MIKE MA until you add yours"): `DL1ABC`, or
+`K1ABC` for a contest that sends your state, `MIKE` and `MA`
+(`ContestSettings::stand_in`, beside `missing`, which it answers).
+
 **Navigation.** A run uses `Screen::Training` and `Screen::Results`
 (`src/state.rs:19-26`), with the hidden nav, the refused `go_to`
 (`state.rs:368-371`) and no settings saves mid-run. Four things change:
@@ -182,7 +236,8 @@ does the one fork in group generation (`sampling.rs:503-507`). Phase 2 adds
   (`session_runtime.rs:232-241`). Both go through new `finish_run(ctx)` and
   `abort_run(ctx)`, which reach whichever machine is live.
 - Keep-awake follows "a run is live" (countdown or running) instead of the
-  screen (`keep_awake.rs:17-27`), so a paused run lets the screen sleep.
+  screen (`keep_awake.rs:17-27`), so a paused run lets the screen sleep; as
+  built (2c), Hear a QSO playing holds it too.
 - The tour targets group inputs (`tour.rs:231-240`), so its button is
   hidden in Contest mode until phase 5.
 - Every screen opens at its top (`src/app.rs`), so a run started from the
@@ -470,7 +525,38 @@ contest; MRCE's sources are the reference for the numbers below.
   silent timeouts in a row, as MRCE's Caller Stays (`DxOper.pas:319-335`).
 - **QRS** (phase 2, habits `easy`). After 3 incomplete tries (4 for a skilled
   caller) a caller slows by 12–20% by skill, 2% more from the fourth
-  (`DxOper.pas:343-375`).
+  (`DxOper.pas:343-375`). As built (2c), as MRCE's QRS After a Few
+  Incomplete Calls: an incomplete try is a slip, a piece or a partial of
+  its call that reaches it (`mcAlmost`), or a `?` with no call in the
+  message while it waits for its call put right or for your TU
+  (`DxOper.pas:741, 790-803`). An `NR?` counts as a `?` does: Dust's own
+  choice, as Dust's `NR?` asks as `?` does, where MRCE counts only the `?`
+  (it has no case for `msgNrQm` there). A caller that answered your
+  partial while it called counts as waiting for its call put right, as
+  MRCE's near match puts it in `osNeedCallNr`. Its QSO moving on counts the tries
+  afresh, but for the call put right still to come (`osNeedCallNr` or
+  `osNeedEnd` to `osNeedCall`), as MRCE's `SetState` does. Once the tries
+  reach 3, or 4 for skill 3, while its QSO is on, it sends 20%, 16% or
+  12% slower as its skill is 1, 2 or 3, and 2% slower still from the
+  fourth try, so a skilled caller slows by 14%: characters and spacing
+  alike, never below the Speed card's lowest speed (5 WPM, MRCE's floor
+  too, `DxStn.pas:166-168`), and only in its own sends; a send already
+  sounding goes on at the speed it began at. Back on track, its call
+  heard right before your exchange, it sends at its own speed; its call
+  put right after your exchange, it keeps the slower speed for the
+  exchange it sends with it, as MRCE's. A pile-up caller left to wait out
+  your QSO with someone else keeps its speed and its tries, as MRCE sets
+  `osNeedPrevEnd` without `SetState` (`DxOper.pas:744-748`): a partial or
+  a slip that brings it back finds it as slow as it was, its tries counted
+  afresh, as `SetState(osNeedCallNr)` does; your CQ, TU, B4, NIL, a `?`
+  with the Call field empty, or its exact call bring it back at its own
+  speed (`SetState` to `osNeedQso` or `osNeedNr`). A dupe calling again
+  starts at its own speed. Each of its groups is credited at the slowest
+  a send of it began to reach you at: its call at its slowest call, its
+  exchange at its slowest exchange, so an exchange heard only at its own
+  speed is credited at that, and a slow reply you keyed over before it
+  began credits nothing (9.1). Every caller does so while callers' habits
+  are easy, which they all are until that setting comes.
 - **Calling twice.** 10% of pile-up callers send their call twice; single
   callers never do (`DxOper.pas:500-502`). As built, a caller that calls
   twice sends its call twice where the contest's answer has it once
@@ -695,7 +781,12 @@ it: `?`, `NR?`, your exchange again (F2) or its call again (F5). One it
 sends with its call put right (4.3) costs it only when your `?` or `NR?`
 drew it: a partial or a slip asked for the call, and the exchange came
 with the correction unasked. A single caller's call brought again by CQ
-or TU, once it had begun to reach you, is a `?` by another key. Re-sends you did not ask for (timeouts, calling
+or TU, once it had begun to reach you, is a `?` by another key, but for
+the TU of a key that logs: after your TU without logging (F3), Enter or
+`.` on that call sends the TU again and logs, as MRCE's does, and the
+caller F3's TU brought calls again on it, which you keyed to log, not to
+hear it again, so it costs only time (as built, 2c; the browser test had
+it charged, `?×1`). Re-sends you did not ask for (timeouts, calling
 twice, corrections, pile-up calls before you picked the station, a send a
 hidden page or a failed sound cut short and sent again after Resume) cost
 only time (9.1).
@@ -1098,7 +1189,8 @@ flight, which Dust's "a logged QSO is final" rule covers.
   send at the middle of the shifted character range. − / + moves the offset
   by 2 WPM, MRCE's step (`Ini.pas:238`), within the Speed card's bounds, for
   your next message and callers who arrive later; callers already calling
-  keep their speed (`DxOper.pas:235-262`). The offset lasts for the run and
+  keep their speed (`DxOper.pas:235-262`), but for slowing down for you
+  (QRS, 4.3). The offset lasts for the run and
   is not saved.
 
 ## 7. Screen layout
@@ -1347,6 +1439,42 @@ alphabet controls.
 Each writes shared fields (speed ranges, tier, stations, QSB, QRN, later
 Caller habits) and reads "Custom" once any is edited, as Experience does
 (`experience.rs:83, 98-110`, `settings.rs:135-177`). No level is stored.
+
+As built (2c), `ContestPreset` (`settings/contest_preset.rs`) applies
+through the calls the screens make, as `Experience` does, and the card is
+on a preset exactly while every field it set still holds; a fading or
+static switched off holds whatever its depth or level, which the band does
+not hear then. It writes the run style too, the one field it sets that is
+the contest's own. The pills sit under the card's QSO, a line under them
+saying what the preset sets in the Band card's words ("15–18 WPM · tier 1
+calls · one caller at a time · no fading or static", each part kept whole
+where a narrow line breaks), or, on none, what a preset would set
+("Custom · a preset sets the callers' speed and calls, how many call, and
+the band"), as Experience's note does on none. They are pills, not
+Experience's dropdown in a card head: they sit inside the Character set
+card between the Contest and Run style pills, three short names that fit
+on a phone's line, and the Run style pill a preset flips shows at once
+what it set.
+
+| Preset | Callers' speed | Tier | Run style | Stations | QSB depth | QRN level |
+|---|---|---|---|---|---|---|
+| First QSO | 15–18 WPM | 1 | Single caller | 1 | off | off |
+| Club | 20–26 WPM | 3 | Pile-up | 1–3 | 0.35 | 0.25 |
+| Contester | 28–36 WPM | 6 | Pile-up | 2–5 | 0.5 | 0.4 |
+
+First QSO is a beginner's first contest QSO: one caller at a time, a
+little faster than a Koch learner's 15 WPM, with the plainest calls
+(K5XY-shaped, tier 1), on an empty, quiet band. Club is a club operator's
+few contests a year: everyday contest speed, calls from anywhere (two-letter
+prefixes, tier 3), the small pile-up MRCE starts a pile-up at, and the band
+as it ships. Contester is a contester's: callers at 28–36 WPM, every shape
+of call with portables and stations abroad (tier 6), up to five at once,
+and a band that fades deep and crackles. You send at the middle of the
+speed range, and callers space at the speed they key, as contest callers
+do: the character range is written, and with the speeds tied the spacing
+follows it; with Farnsworth spacing set, the same range goes in the
+spacing's range too (the switch is left as it is), and a spacing changed
+after reads Custom.
 
 **New fields.** One flattened struct, `ContestSettings`
 (`settings/contest.rs`), joins `TrainingSettings`, `SettingsSave` and its
@@ -1602,7 +1730,8 @@ exactly as it was while the run went on.
   dropped. Empty is a miss.
 - **`sends`** is 1 plus the repeats you drew while the item was owed: a
   call you asked for again (`?`, a partial or a piece of the call, `AGN`,
-  `NR?`, or a CQ or TU that brings a single caller's call again), alone or
+  `NR?`, or a CQ or TU that brings a single caller's call again, but for
+  the TU of a key that logs, 4.6), alone or
   as its answer putting yours right, before you sent it with your
   exchange, and in a pile-up within the QSO it was asked in: once a QSO
   with another station is over, logged or left, a caller still calling
@@ -1632,7 +1761,11 @@ exactly as it was while the run went on.
   sends. `Fields` carries both stamps; the 100 ms a character floor
   applies (`session.rs:26, 177`). Both ends are in run time, so a pause
   between the edit and the key neither shortens nor lengthens a copy.
-- **Speeds.** Each group carries the caller's speeds to 0.1 WPM; the
+- **Speeds.** Each group carries the caller's speeds to 0.1 WPM, as of
+  the slowest a send of it began to reach you at, so a caller that slowed
+  down for you (QRS, 4.3) credits the copy at the speed it may have been
+  copied from: its call at the slowest call it sent, its exchange at the
+  slowest exchange; the log row's WPM is the slower of the two. The
   session's are their mean, as `GroupSession::result` does
   (`session.rs:478-491`), never `my_wpm`. `digits_level` comes from the
   settings, `level` is the callsign tier, `score` is `points()`, and the
@@ -2084,11 +2217,12 @@ whichever is live.
 | `exchange.rs`, `parse.rs` | canonical forms, cut numbers, keyed tokens; `parse_exchange` |
 | `serial.rs`, `check.rs`, `score.rs` | serials; `QsoCheck`; `contest_score`, rates |
 | `record.rs` | `ContestLog`, `ContestRun`, `QsoRecord`, `result()` |
-| `bot.rs` | operators that hear the turns; Hear a QSO uses the perfect one |
+| `bot.rs` | operators that hear the turns; Hear a QSO uses the perfect one (as built, 2c: shipped, `hear_qsos` and `HeardQsos`; the test operators, scripted calls and run settings kept to tests in `bot/script.rs`) |
 | `data/` | `names`, `reports` (1c); `places`, `zones`, `sections`, `fd`, `power` |
 
 **Changed in cw-core:** `Cargo.toml` (`serde_json`); `settings/mod.rs`,
-`contest.rs` (new), `save.rs`, `reset.rs`, `clamp.rs` (`Contest`, `ALL` of 6,
+`contest.rs` (new), `contest_preset.rs` (new, 2c), `save.rs`, `reset.rs`,
+`clamp.rs` (`Contest`, `ALL` of 6,
 `draws_characters`, `sends_callsigns`, `ContestSettings`, `contestActive` on
 disk, `Station`, `wild`); `settings/curriculum.rs` (Contest → `LevelAxis::Callsign`,
 `:49-56`); `session.rs` (`StoredSession`, `mode_on_disk`, `recorded_mode`,
@@ -2103,8 +2237,11 @@ evidence, no adaptive path); `timing/pileup.rs` (reach helpers
 **New in the app:** `src/contest_runtime.rs` (`LiveContest`, start,
 dispatch, effects, `play_turn`, finish, the heartbeat check);
 `src/ui/contest.rs` (run bar, hint, air line, fields, key bar, log, paused
-panel, the visibility listener and the minimise handler); `src/ui/contest_keys.rs`; `src/ui/contest_results.rs`;
-`src/ui/settings_station.rs`; `src/ui/scores/runs.rs` (phase 4);
+panel, the pause on a hidden page, whose visibility listener and minimise
+handler are in `src/page_hidden.rs` as built); `src/ui/contest_keys.rs`; `src/ui/contest_results.rs`;
+`src/ui/settings_station.rs`; `src/page_hidden.rs` (the page going out of
+sight, for the run and for Hear a QSO, 2c); `src/ui/hear_qso.rs` (the dialogue of
+Hear a QSO, 2c); `src/ui/scores/runs.rs` (phase 4);
 `scripts/contest-data.py` (counted shares).
 
 **Changed in the app:** `src/session_runtime.rs` (`Live::{Groups, Contest}`,
@@ -2145,7 +2282,22 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   the call asks, and a bare `?` is nobody's call; a partial it answers
   gives a caller full patience; a caller keyed over is never sent away; a
   caller back from waiting has fresh patience; a correction with your
-  exchange in hand carries its own, five operators in six.
+  exchange in hand carries its own, five operators in six; from 2c, a
+  caller slows down after three incomplete tries, or four of skill 3, by
+  its skill's share and 2% more from the fourth, for slips, partials and
+  a `?` while it waits for its call put right or your TU but not for your
+  exchange; back on track it sends at its own speed, its call put right
+  after your exchange keeping the slower one; a pile-up caller waiting
+  out another QSO keeps its speed, a partial bringing it back slow and
+  its CQ, TU, NIL, `?` with no call or own call at its own speed; and
+  never below the Speed card's lowest speed. Hear a QSO's stand-ins leave
+  nothing a run needs (`missing()` is none) for any station given.
+- **Presets** (2c): each sets what it says and lands whole from any
+  other; the rest of the settings, your station and the other levels
+  among them, are left alone; a change to anything it set reads Custom,
+  but a depth or level under a switch it turned off; with Farnsworth
+  spacing set, it writes the spacing's range too; the defaults are on
+  none.
 - **Calls:** a golden list keeps `generate_callsign` unchanged;
   `parse_callsign` reads 10,000 generated calls per tier; each `CallSpec`
   gives only its countries; every WPX prefix case in 11.1.
@@ -2256,7 +2408,13 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   at once; a QSO logged for a station you left, a slip and all, is no
   copy of the one you work; a NIL while a dupe calls is charged to no
   older caller, and one while you work a dupe to no one but the caller it
-  fits; a station goes on with one send when the sound is tried again.
+  fits; a station goes on with one send when the sound is tried again;
+- from 2c: a log after a TU without logging asks the caller its TU
+  brought nothing, by Enter or `.`; a caller asked for its call again and
+  again slows down from the third partial, or the fourth, its exchange
+  back at its own speed once its call is heard right, its call credited
+  at its slowest and its exchange at its own; a slow reply keyed over
+  before it began credits nothing slower.
 
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
@@ -2265,7 +2423,10 @@ about 230 at 25 WPM for WPX. Human-paced (1.5 s per character typed, and
 per key pressed): 60–150 an hour.
 One digit off: verified 0. Unsure: asks `K5?` first, its call points
 halve. Pauser: the clock equals the unpaused time. Dupe worker: 0 points,
-no error.
+no error. Hear a QSO (2c): three QSOs of each contest in each style, 24
+seeds each, from the first CQ to the third TU and its sign-off, nobody
+calling after it, a pile-up caller calling twice among them, the same
+seed hearing the same QSOs; your station stands in until given.
 
 **Soak** (`soak.rs`, seeds of its own: as built, 3,000 runs of single
 callers and 4,500 of pile-ups, 14, shared among the contests that have
@@ -2312,7 +2473,17 @@ group session; a cancel never pauses, a failure does;
 heartbeat gap both credit the gap as paused; a bad own call refuses to
 start; a turn waiting out a retry never starts over a newer one, and an
 Esc before a turn's task runs stops it. A unit test drives
-`audio::silent::MorsePlayer` through a stretched turn and a cancel. Native
+`audio::silent::MorsePlayer` through a stretched turn and a cancel. Hear
+a QSO (2c): on Listen it plays turn by turn through the run's path, dry and
+fading off, each line shown once its send ends and not before, to the
+third TU, each QSO after the first set apart, and nothing is stored; Stop
+ends it and keeps the lines; another sound, a character picked or leaving
+the screen puts them away; stopped before a line, the stage and the
+card's QSO are as they were; the card plays it too, and another contest
+or mode picked while it plays stops it and puts its lines away; it holds
+the screen awake while it plays. What Start
+keeps from Home's hero is stored as the run starts, and nothing more is
+stored while it runs. Native
 mixer tests (1b): your message a kilohertz off the narrowest filter still
 peaks at the monitor's level; a weak reply right after it plays exactly as
 it would alone, where through the receiver it was ducked; a stretched turn
@@ -2326,7 +2497,10 @@ group, Experience or Auto level controls; Your station's fields and
 reading; the run screen in countdown, running, corrected and paused; hint
 and Enter label per ESM row; the keypad without `=`, `+`, `,` and `.`; the
 longest Simple QSO and Sprint lines at 360 px; log rows with text; results,
-"Points", History rows; the 3 + 3 grid.
+"Points", History rows; the 3 + 3 grid; Listen in Contest with Hear a QSO
+first, its lines, callers at once side by side, each QSO apart, which QSO
+plays with Stop above the lines, no character picked meanwhile, its
+stand-in, and none of another contest's or of one stopped before a line.
 
 ## 14. Phased build plan
 
@@ -2411,6 +2585,11 @@ ships a release before phase 1.
   a lone number, the soak's seeds rose by half to keep each kind of QSO
   over its floor.
 - **2c Learner aids.** Hear a QSO with the perfect operator; presets; QRS.
+  Landed: `hear_qsos` works the QSOs through in cw-core, and the app
+  plays them as a preview on Listen and on the Character set card (§2);
+  `ContestPreset` (§8); QRS in `contest/caller.rs` (§4.3). With them the
+  hero's kept fields are stored as the run starts (§2), and the TU that
+  logs after F3 charges no caller (§4.6).
 - The Contest segment joined `CHAR_SET_MODES` right after 2a, at the
   user's request, so Contest can be tried while 2b and 2c are built; at
   600 px and below the six segments sit three and three.

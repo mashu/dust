@@ -24,6 +24,14 @@ pub const MY_NAME_MAX: usize = 10;
 /// gives a pile-up (§8).
 const PILEUP_CALLERS_MAX: u32 = 3;
 
+/// Your call where Hear a QSO plays one and none a contest can read is
+/// given yet: a North American one for a contest that sends your state, as
+/// its callers are there.
+const STAND_IN_CALL: (&str, &str) = ("DL1ABC", "K1ABC");
+/// Your name and state, where a contest sends them and none is given yet.
+const STAND_IN_NAME: &str = "MIKE";
+const STAND_IN_STATE: &str = "MA";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ContestSettings {
@@ -131,6 +139,40 @@ impl ContestSettings {
             return Some(format!("Add your state or province to start {a_run}"));
         }
         None
+    }
+
+    /// Fill in with stand-ins what of your station a run still needs, as
+    /// Hear a QSO plays it before you have given it, and say what your
+    /// station is then, if any of it stands in: `DL1ABC`, `K1ABC MIKE MA`.
+    /// It answers each thing [`Self::missing`] asks for, beside it so that
+    /// the two change together; nothing for a contest not ready yet.
+    pub(crate) fn stand_in(&mut self) -> Option<String> {
+        let rules = self.contest_kind.rules()?;
+        let mut stood_in = false;
+        if parse_callsign(&self.my_call).is_none() {
+            let (dx, home) = STAND_IN_CALL;
+            self.my_call = if rules.sends_state() { home } else { dx }.to_string();
+            stood_in = true;
+        }
+        if rules.sends_name() && self.my_name.is_empty() {
+            self.my_name = STAND_IN_NAME.to_string();
+            stood_in = true;
+        }
+        if rules.sends_state() && self.state_sent().is_empty() {
+            self.my_state = STAND_IN_STATE.to_string();
+            stood_in = true;
+        }
+        if !stood_in {
+            return None;
+        }
+        let mut station = vec![self.my_call.clone()];
+        if rules.sends_name() {
+            station.push(self.my_name.clone());
+        }
+        if rules.sends_state() {
+            station.push(self.state_sent().to_string());
+        }
+        Some(station.join(" "))
     }
 }
 
@@ -371,6 +413,41 @@ mod tests {
             settings.missing().as_deref(),
             Some("CQ WW is not ready yet")
         );
+    }
+
+    /// Whatever of your station is given, the stand-ins leave nothing a
+    /// run of a contest that has shipped still needs, and stand in only
+    /// where it needed something.
+    #[test]
+    fn a_station_stood_in_for_has_all_a_run_needs() {
+        for kind in ContestKind::shipped() {
+            for call in ["", "ABC", "DL1ABC", "K1ABC", "VE3ABC/P"] {
+                for name in ["", "ANN"] {
+                    for state in ["", "OR"] {
+                        let given = ContestSettings {
+                            contest_kind: kind,
+                            my_call: call.to_string(),
+                            my_name: name.to_string(),
+                            my_state: state.to_string(),
+                            ..ContestSettings::default()
+                        };
+                        let mut stood = given.clone();
+                        let stand_in = stood.stand_in();
+                        let case = format!("{kind:?} {call:?} {name:?} {state:?}");
+                        assert_eq!(stood.missing(), None, "{case}");
+                        assert_eq!(stand_in.is_some(), given.missing().is_some(), "{case}");
+                        if stand_in.is_none() {
+                            assert_eq!(stood, given, "{case}");
+                        }
+                    }
+                }
+            }
+        }
+        let mut not_ready = ContestSettings {
+            contest_kind: ContestKind::Cqww,
+            ..ContestSettings::default()
+        };
+        assert_eq!(not_ready.stand_in(), None);
     }
 
     #[test]

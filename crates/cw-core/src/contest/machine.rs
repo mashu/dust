@@ -390,6 +390,12 @@ struct Heard {
     /// The call last sent that it took for its own or answered, without
     /// `?`: what a message of yours with no call in it goes with.
     call_sent: String,
+    /// The slowest a send of its call, and of its exchange, began to reach
+    /// you at: a caller that slowed down for you (QRS, §4.3 of the design)
+    /// credits each copy at the speed it may have come from, and one sent
+    /// only at its own speed at that.
+    call_voice: Option<StationVoice>,
+    exch_voice: Option<StationVoice>,
 }
 
 impl Heard {
@@ -406,6 +412,33 @@ impl Heard {
     fn call_repeats(&self, copy: &str) -> u32 {
         let asks = self.call_asks.iter().filter(|then| *then != copy).count();
         u32::try_from(asks).unwrap_or(u32::MAX)
+    }
+
+    /// A send of `says` began to reach you in `voice`.
+    fn note_voice(&mut self, says: Says, voice: StationVoice) {
+        let slowest = |kept: &mut Option<StationVoice>| {
+            if kept.is_none_or(|kept| slower(voice, kept)) {
+                *kept = Some(voice);
+            }
+        };
+        match says {
+            Says::Call | Says::Correction => slowest(&mut self.call_voice),
+            Says::Exchange => slowest(&mut self.exch_voice),
+            Says::CorrectionAndExchange => {
+                slowest(&mut self.call_voice);
+                slowest(&mut self.exch_voice);
+            }
+            Says::Query | Says::Signoff => {}
+        }
+    }
+
+    /// What its call, and its exchange, are credited at: the slowest a send
+    /// of each began to reach you at, or `own` where none did.
+    fn voices(&self, own: StationVoice) -> (StationVoice, StationVoice) {
+        (
+            self.call_voice.unwrap_or(own),
+            self.exch_voice.unwrap_or(own),
+        )
     }
 
     /// The repeats of its call and of its exchange you asked for and heard.
@@ -697,6 +730,9 @@ struct Overlapping {
     reply: Replying,
     says: Says,
     text: String,
+    /// How it was sending: a caller that slowed down for you since goes on
+    /// at the speed its send began at.
+    voice: StationVoice,
 }
 
 /// A logged QSO, as the log shows it.
@@ -1497,7 +1533,7 @@ impl<S: CallSource> ContestMachine<S> {
         }
         let worked = self.working;
         self.note_sent(&message);
-        let (mut replying, took) = self.hear(&message, fields, edited_run, &deaf);
+        let (mut replying, took) = self.hear(&message, fields, edited_run, &deaf, logs);
         self.went_on(worked, took, fields, true);
         let (mut text, mut parts) = (carried.text, carried.parts);
         // A TU that greets the station by name greets it as you copied it.
@@ -1588,10 +1624,7 @@ impl<S: CallSource> ContestMachine<S> {
         let done_first: Vec<usize> = callers
             .iter()
             .filter(|over| deaf.contains(&over.reply.station))
-            .filter(|over| {
-                let voice = &self.stations[over.reply.station].caller.voice;
-                sending_sec(&over.text, &self.settings, voice) < your_end
-            })
+            .filter(|over| sending_sec(&over.text, &self.settings, &over.voice) < your_end)
             .map(|over| over.reply.station)
             .collect();
         done_first
@@ -1698,13 +1731,15 @@ impl<S: CallSource> ContestMachine<S> {
     /// Enter's. A call goes only to the stations it fits best
     /// ([`Likeness`]), among all on the frequency, those still sending too,
     /// as MorseRunner ranks them (`StnColl.pas:171-194`): a call keyed over
-    /// its own station is no near call's.
+    /// its own station is no near call's. A message that `logs` asks no
+    /// caller to call again.
     fn hear(
         &mut self,
         message: &[MessagePart],
         fields: &Fields,
         edited_run: u64,
         deaf: &[usize],
+        logs: bool,
     ) -> (Vec<Replying>, bool) {
         let keyed = Keyed {
             call: normalize_call(&fields.call).replace('?', ""),
@@ -1716,8 +1751,12 @@ impl<S: CallSource> ContestMachine<S> {
         });
         // A single caller still calling that answers your CQ or TU, or
         // your call alone, brings its call again, as a `?` would; pile-up
-        // callers, calling anyway, do not.
+        // callers, calling anyway, do not. The TU of a key that logs is
+        // there to log: after your TU without logging (F3), Enter's TU and
+        // log brings the caller that TU brought again, which you did not
+        // ask for, so it costs only time (§4.6 of the design).
         let calls = self.style == RunStyle::Single
+            && !logs
             && (self.calls(message) || message.contains(&MessagePart::MyCall));
         let hears = |index: &usize| !deaf.contains(index);
         // In a pile-up a call that is not the station you work's own ends
@@ -1880,11 +1919,11 @@ impl<S: CallSource> ContestMachine<S> {
         for over in mine.callers {
             let station = over.reply.station;
             let caller = &self.stations[station].caller;
-            let end_sec = sending_sec(&over.text, &self.settings, &caller.voice);
+            let end_sec = sending_sec(&over.text, &self.settings, &over.voice);
             segments.push(Segment {
                 who: sender(station),
                 text: over.text,
-                voice: caller.voice,
+                voice: over.voice,
                 start_sec: 0.0,
                 end_sec,
                 fade: self.fade(caller, run_ms, 0.0),
@@ -1904,12 +1943,13 @@ impl<S: CallSource> ContestMachine<S> {
                 .filter(|(station, _)| *station == replying.station)
                 .fold(your_end, |free, (_, end)| free.max(*end));
             let start_sec = free_sec + caller.draw_delay_sec();
-            let end_sec = start_sec + sending_sec(&said, &self.settings, &caller.voice);
+            let voice = caller.sending_voice();
+            let end_sec = start_sec + sending_sec(&said, &self.settings, &voice);
             let caller = &self.stations[replying.station].caller;
             segments.push(Segment {
                 who: sender(replying.station),
                 text: said,
-                voice: caller.voice,
+                voice,
                 start_sec,
                 end_sec,
                 fade: self.fade(caller, run_ms, start_sec),
@@ -2071,7 +2111,8 @@ impl<S: CallSource> ContestMachine<S> {
                 break;
             };
             let start_sec = at as f64 / 1_000.0 + caller.draw_delay_sec();
-            let end_sec = start_sec + sending_sec(&said, &self.settings, &caller.voice);
+            let voice = caller.sending_voice();
+            let end_sec = start_sec + sending_sec(&said, &self.settings, &voice);
             due[index] = Some(whole_ms(end_sec) + caller.draw_timeout_ms());
             sets[index] = true;
             pending[index] += 1;
@@ -2079,7 +2120,7 @@ impl<S: CallSource> ContestMachine<S> {
             segments.push(Segment {
                 who: sender(index),
                 text: said,
-                voice: caller.voice,
+                voice,
                 start_sec,
                 end_sec,
                 fade: self.fade(caller, run_ms, start_sec),
@@ -2172,6 +2213,7 @@ impl<S: CallSource> ContestMachine<S> {
                         reply: reply.clone(),
                         says: *says,
                         text: segment.text.clone(),
+                        voice: segment.voice,
                     });
                 }
                 if start >= run_now || end <= run_now {
@@ -2184,6 +2226,7 @@ impl<S: CallSource> ContestMachine<S> {
                     reply: reply.clone(),
                     says: *says,
                     text: segment.text[from..].to_string(),
+                    voice: segment.voice,
                 })
             })
             .filter(|over| going_on.insert(over.reply.station))
@@ -2265,6 +2308,7 @@ impl<S: CallSource> ContestMachine<S> {
                         heard.exch_asks.push(keyed.exch.clone());
                     }
                 }
+                heard.note_voice(*says, segment.voice);
                 match says {
                     Says::Call | Says::Correction => heard.call_begun = true,
                     Says::Exchange => heard.exch_begun = true,
@@ -2408,7 +2452,14 @@ impl<S: CallSource> ContestMachine<S> {
             self.qso = qso;
             self.note_sent(sent);
         }
-        let (_, took) = self.hear(sent, &unheard.fields, unheard.edited_run, &unheard.deaf);
+        // Esc takes back only a message that logged nothing.
+        let (_, took) = self.hear(
+            sent,
+            &unheard.fields,
+            unheard.edited_run,
+            &unheard.deaf,
+            false,
+        );
         self.went_on(unheard.working, took, &unheard.fields, notes);
         self.thank(unheard.working, sent, &unheard.fields, notes);
         self.close_finished(run_ms);
@@ -2842,7 +2893,7 @@ impl<S: CallSource> ContestMachine<S> {
         };
         let check = check_qso(logged, Some(&sent), |call| clean.iter().any(|c| c == call));
         let heard = &station.heard;
-        let voice = station.caller.voice;
+        let (call_voice, exch_voice) = heard.voices(station.caller.voice);
         // Never sent with your exchange: the call as logged, timed as last
         // sent, or as typed for the log.
         let (first_call, call_ms) = heard.first_call.clone().unwrap_or_else(|| {
@@ -2858,9 +2909,9 @@ impl<S: CallSource> ContestMachine<S> {
                 &first_call,
                 call_ms,
                 1 + heard.call_repeats(&first_call),
-                &voice,
+                &call_voice,
             ));
-            groups.extend(heard.field_groups(&sent.fields, logged, reading, done_run, &voice));
+            groups.extend(heard.field_groups(&sent.fields, logged, reading, done_run, &exch_voice));
         }
         let copies_fields = !again && heard.exch_begun;
         let by_field = |text: &QsoText| -> Vec<String> {
@@ -2896,7 +2947,7 @@ impl<S: CallSource> ContestMachine<S> {
             row: Some(Row {
                 call: logged.call.clone(),
                 fields: values(reading),
-                wpm: Some(tenth(voice.char_wpm)),
+                wpm: Some(row_wpm(call_voice, exch_voice)),
                 asked: heard.asked(),
                 check,
                 pending: true,
@@ -2994,16 +3045,22 @@ impl<S: CallSource> ContestMachine<S> {
                 let exchange = station.caller.exchange(rules, side, run_ms).to_vec();
                 let heard = &station.heard;
                 let took = copy_ms(&heard.call_ends, edited_run);
-                let voice = station.caller.voice;
+                let (call_voice, exch_voice) = heard.voices(station.caller.voice);
                 let mut groups = vec![group(
                     &station.caller.call.text,
                     &logged.call,
                     took,
                     1 + heard.call_repeats(&logged.call),
-                    &voice,
+                    &call_voice,
                 )];
-                groups.extend(heard.field_groups(&exchange, logged, reading, done_run, &voice));
-                (groups, heard.first, Some(tenth(voice.char_wpm)))
+                groups.extend(heard.field_groups(
+                    &exchange,
+                    logged,
+                    reading,
+                    done_run,
+                    &exch_voice,
+                ));
+                (groups, heard.first, Some(row_wpm(call_voice, exch_voice)))
             }
             None => (Vec::new(), None, None),
         };
@@ -3062,14 +3119,15 @@ impl<S: CallSource> ContestMachine<S> {
             Some((call, ms)) => (call, *ms),
             None => (&heard.typed, heard.call_ms.unwrap_or(0)),
         };
+        let (call_voice, exch_voice) = heard.voices(station.caller.voice);
         let mut groups = vec![group(
             &station.caller.call.text,
             received,
             call_ms,
             1 + heard.call_repeats(received),
-            &station.caller.voice,
+            &call_voice,
         )];
-        groups.extend(misses(&exchange, &station.caller.voice));
+        groups.extend(misses(&exchange, &exch_voice));
         self.entries.push(Entry {
             record: QsoRecord {
                 t: run_ms,
@@ -3295,6 +3353,17 @@ fn group(
     )
 }
 
+/// Whether `voice` sends slower than `than`.
+fn slower(voice: StationVoice, than: StationVoice) -> bool {
+    (voice.char_wpm, voice.effective_wpm) < (than.char_wpm, than.effective_wpm)
+}
+
+/// A log row's speed, to 0.1 WPM: the slower of what its call and its
+/// exchange are credited at.
+fn row_wpm(call: StationVoice, exch: StationVoice) -> f64 {
+    tenth(if slower(exch, call) { exch } else { call }.char_wpm)
+}
+
 /// A missed group for each field of `exchange`, sent at `voice`: what a
 /// station's copy holds of an exchange logged before it was heard, as a
 /// guess is no copy, or never logged at all, as walking away is none.
@@ -3383,7 +3452,8 @@ fn tenth(value: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::contest::QsoError;
-    use crate::contest::bot::{Copied, Runtime, ScriptCalls, copy_of, run_settings};
+    use crate::contest::bot::script::{ScriptCalls, run_settings};
+    use crate::contest::bot::{Copied, Runtime, copy_of};
     use crate::contest::turn::sending_sec;
 
     /// A run worked by hand, its callers sending `calls` in turn.
@@ -5617,6 +5687,136 @@ mod tests {
         assert_eq!(kinds, [("lost", "K"), ("", "G")]);
         assert_eq!(result.groups[0].received, "K5XYZ");
         assert_eq!(view(&moved_on).clean, 1);
+    }
+
+    /// Enter or TU and log after your TU without logging (F3) sends the TU
+    /// again and logs, as MorseRunner's does; the next caller, brought by
+    /// the first TU, calls again on the second, which you keyed to log and
+    /// not to hear it again: re-sends you did not ask for cost only time,
+    /// so worked then its call costs one send, and no `?×1` (§4.6).
+    #[test]
+    fn a_log_after_a_tu_without_logging_asks_the_next_caller_nothing() {
+        for key in [OpKey::Esm, OpKey::TuAndLog] {
+            let mut runtime = runtime(&["K5XYZ", "G4ABC"]);
+            let exchange = to_its_exchange(&mut runtime);
+            let nr = serial(&exchange);
+            runtime.key(OpKey::Tu, "K5XYZ", &nr);
+            assert_eq!(replies(runtime.last_turn()), ["G4ABC"], "{key:?}");
+            runtime.finish_turn();
+            runtime.key(key, "K5XYZ", &nr);
+            assert_eq!(yours(runtime.last_turn()), "TU", "{key:?}");
+            assert_eq!(replies(runtime.last_turn()), ["G4ABC"], "{key:?}");
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "G4ABC", "");
+            let theirs = replies(runtime.last_turn())[0].to_string();
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "G4ABC", &serial(&theirs));
+            runtime.finish_turn();
+            let asked: Vec<u32> = view(&runtime).log.iter().map(|row| row.asked).collect();
+            assert_eq!(asked, [0, 0], "{key:?}");
+            runtime.apply(ContestEvent::FinishNow);
+            let (result, run) = result(&runtime);
+            assert!(run.qsos.iter().all(|qso| qso.a == 0), "{key:?}");
+            assert!(
+                result.group_timings.iter().all(|timing| timing.sends == 1),
+                "{key:?}: {:?}",
+                result.group_timings
+            );
+        }
+    }
+
+    /// A caller asked for its call again and again slows down for you from
+    /// the third partial, or the fourth if it is a skilled operator, as
+    /// MorseRunner's (§4.3): its own sends only, never yours. Its call heard
+    /// right, its exchange comes at its own speed again. Its call is
+    /// credited at the slowest it began to reach you at, as it may have
+    /// been copied from that send, and its exchange, heard only at its own
+    /// speed, at that; the log row reads the slower.
+    #[test]
+    fn a_caller_asked_for_its_call_again_and_again_slows_down() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let own = runtime.last_turn().segments[1].voice;
+        runtime.finish_turn();
+        let mut speeds = Vec::new();
+        for _ in 0..4 {
+            runtime.key(OpKey::Esm, "K5?", "");
+            let turn = runtime.last_turn().clone();
+            assert_eq!(turn.segments[0].voice.char_wpm, 25.0, "you send as before");
+            speeds.push(turn.segments[1].voice.char_wpm);
+            runtime.finish_turn();
+        }
+        assert_eq!(speeds[..2], [own.char_wpm; 2], "{speeds:?}");
+        assert!(speeds[3] < own.char_wpm, "{speeds:?}");
+        assert!(speeds[3] <= speeds[2], "{speeds:?}");
+        assert!(speeds[3] >= own.char_wpm * 0.78 - 1e-9, "{speeds:?}");
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        let exchange = runtime.last_turn().clone();
+        assert_eq!(exchange.segments[1].voice, own, "back on track");
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", &serial(&exchange.segments[1].text));
+        runtime.finish_turn();
+        assert_eq!(view(&runtime).log[0].wpm, Some(tenth(speeds[3])));
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
+        let credited: Vec<Option<f64>> = result
+            .group_timings
+            .iter()
+            .map(|timing| timing.char_wpm)
+            .collect();
+        assert_eq!(
+            credited,
+            [Some(tenth(speeds[3])), Some(tenth(own.char_wpm))],
+            "the call at its slowest, the number at its own"
+        );
+    }
+
+    /// A slow reply you keyed over before it began never reached you: the
+    /// QSO is credited at the speed of the sends that did, its own.
+    #[test]
+    fn a_slow_reply_keyed_over_before_it_began_is_not_credited() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let own = runtime.last_turn().segments[1].voice;
+        runtime.finish_turn();
+        let at = runtime.now;
+        let slow = loop {
+            let at = runtime.now;
+            runtime.key(OpKey::Esm, "K5?", "");
+            let turn = runtime.last_turn().clone();
+            if turn.segments[1].voice != own {
+                break (at, turn);
+            }
+            runtime.finish_turn();
+        };
+        let (keyed, turn) = slow;
+        assert!(keyed > at, "two partials answered at its own speed first");
+        let (yours, reply) = (&turn.segments[0], &turn.segments[1]);
+        assert!(yours.end_sec < reply.start_sec, "{turn:?}");
+        // Keyed over in the quiet between your partial and its reply.
+        runtime.run_to(keyed + ms((yours.end_sec + reply.start_sec) / 2.0));
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        let exchange = runtime.last_turn().clone();
+        assert!(
+            exchange
+                .segments
+                .iter()
+                .all(|segment| segment.voice.char_wpm == 25.0 || segment.voice == own),
+            "{exchange:?}"
+        );
+        runtime.finish_turn();
+        let nr = serial(replies(&exchange)[0]);
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        assert_eq!(view(&runtime).log[0].wpm, Some(tenth(own.char_wpm)));
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
+        assert!(
+            result
+                .group_timings
+                .iter()
+                .all(|timing| timing.char_wpm == Some(tenth(own.char_wpm))),
+            "{:?}",
+            result.group_timings
+        );
     }
 
     /// Esc takes back the TU of F3 only while it had not gone out whole:

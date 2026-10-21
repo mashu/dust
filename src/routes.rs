@@ -8,9 +8,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use cw_core::band::{FilterDesign, agc_knee};
-use cw_core::{SessionEvent, TrainingSettings, compute_char_pool};
+use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
+use crate::page_hidden::{LISTEN_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
 use crate::playback;
 use crate::session_runtime::{send_event, start_session};
@@ -101,7 +102,10 @@ fn SettingsRoute() -> Element {
     let on_preview_band = use_callback(move |()| playback::start_band_preview(ctx));
     let on_stop_band = use_callback(move |()| ctx.stop_audio());
     let on_play_sample = use_callback(move |text| playback::start_sample(ctx, text));
+    let on_hear_qsos = use_callback(move |()| playback::start_qsos(ctx));
     use_band_follow(ctx);
+    use_qsos_follow(ctx);
+    use_qsos_stop_when_hidden(ctx, SETTINGS_HIDDEN);
     let preview = ctx.preview.read();
     rsx! {
         SettingsView {
@@ -111,8 +115,44 @@ fn SettingsRoute() -> Element {
             on_preview_band,
             on_stop_band,
             on_play_sample,
+            hearing: preview.is_qsos(),
+            dialogue: ctx.dialogue.read().clone(),
+            on_hear_qsos,
         }
     }
+}
+
+/// Hear a QSO is of the contest it was started from: once the settings
+/// move off it, to another contest or out of Contest mode, it stops and its
+/// lines go, so what plays is always the contest the card shows, and Stop
+/// is never left off the screen while it plays.
+fn use_qsos_follow(ctx: AppCtx) {
+    use_effect(move || {
+        let chosen = {
+            let settings = ctx.settings.read();
+            (settings.curriculum.char_set_mode == CharSetMode::Contest)
+                .then_some(settings.contest.contest_kind)
+        };
+        let mut dialogue = ctx.dialogue;
+        let of = dialogue.peek().as_ref().map(|dialogue| dialogue.kind);
+        if of.is_some_and(|kind| Some(kind) != chosen) {
+            if ctx.preview.peek().is_qsos() {
+                ctx.stop_audio();
+            }
+            dialogue.set(None);
+        }
+    });
+}
+
+/// While a screen that plays Hear a QSO is up, the page going out of sight
+/// stops it, as it pauses a run: QSOs played to nobody are only to be heard
+/// again, and stopping is all a demonstration needs.
+fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
+    use_page_hidden(slot, move || {
+        if ctx.preview.peek().is_qsos() {
+            ctx.stop_audio();
+        }
+    });
 }
 
 /// While the band preview runs, the band follows the settings: the latest
@@ -231,8 +271,12 @@ fn ListenRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     let on_play = use_callback(move |chars| playback::start_letters(ctx, chars));
     let on_stream = use_callback(move |()| playback::start_stream(ctx));
+    let on_hear = use_callback(move |()| playback::start_qsos(ctx));
+    let mut dialogue = ctx.dialogue;
+    let on_put_away = use_callback(move |()| dialogue.set(None));
     let on_stop = use_callback(move |()| ctx.stop_audio());
     let on_back = use_callback(move |()| ctx.go_to(Screen::Home));
+    use_qsos_stop_when_hidden(ctx, LISTEN_HIDDEN);
     let preview = ctx.preview.read();
     #[cfg(feature = "desktop")]
     let floating = use_context::<crate::ui::floating::FloatingWindow>();
@@ -263,8 +307,12 @@ fn ListenRoute() -> Element {
             playing: preview.is_letters(),
             streaming: preview.is_stream(),
             heard: ctx.stream_heard.read().clone(),
+            hearing: preview.is_qsos(),
+            dialogue: ctx.dialogue.read().clone(),
             on_play,
             on_stream,
+            on_hear,
+            on_put_away,
             on_stop,
             on_back,
         }

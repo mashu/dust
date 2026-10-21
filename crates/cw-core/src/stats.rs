@@ -545,7 +545,8 @@ mod tests {
     /// include waiting and typing, leave the average time alone.
     #[test]
     fn contest_times_stay_out_of_the_letters_times() {
-        use crate::contest::bot::{Habit, Operator, Runtime, run_settings, work};
+        use crate::contest::bot::script::{Habit, run_settings, work};
+        use crate::contest::bot::{Operator, Runtime};
         let mut calls = SessionResult::empty_for_test();
         calls.char_set_mode = CharSetMode::Callsign;
         for _ in 0..10 {

@@ -19,6 +19,7 @@ mod app;
 mod audio;
 mod contest_runtime;
 mod keep_awake;
+mod page_hidden;
 mod persist;
 mod playback;
 mod player;

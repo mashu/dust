@@ -6,83 +6,22 @@
 //! segment, once that segment has been heard whole. The [`Runtime`] does
 //! what the app's runtime does with effects: it plays each turn for exactly
 //! its planned length, fires each timer when it is due, and says when a turn
-//! started, ended or was cancelled. The machine's tests drive runs through
-//! it too, and the soak copies callers as the operators do ([`copy_of`]).
+//! started, ended or was cancelled. Hear a QSO is a few QSOs the perfect
+//! operator works so ([`hear_qsos`]), for a learner to hear before working
+//! one. The machine's tests drive runs through it too, and the soak copies
+//! callers as the operators do ([`copy_of`]).
 
 use std::collections::VecDeque;
 
 use super::machine::{ContestEffect, ContestEvent, ContestMachine, OpKey, PauseWhy};
 use super::turn::{Sender, Turn, plan_turn};
 use super::{CallSource, Field, Fields};
-use crate::callsign::{CallSpec, GeneratedCall, country_of, parse_callsign};
-use crate::session::{Answered, MonoMs};
+use crate::callsign::parse_callsign;
+use crate::session::MonoMs;
 use crate::settings::{CharSetMode, TrainingSettings};
 
-/// Hands out the calls it is given, then `W1AW`, `W2AW`… for ever, and
-/// remembers what it was taught.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ScriptCalls {
-    calls: VecDeque<String>,
-    handed: u32,
-    pub(crate) learned: Vec<(String, String)>,
-}
-
-impl ScriptCalls {
-    pub(crate) fn new(calls: &[&str]) -> Self {
-        Self {
-            calls: calls.iter().map(|call| (*call).to_string()).collect(),
-            ..Self::default()
-        }
-    }
-}
-
-impl CallSource for ScriptCalls {
-    fn next_call(
-        &mut self,
-        _: &TrainingSettings,
-        _: CallSpec,
-        _: &dyn Fn(&str) -> bool,
-    ) -> GeneratedCall {
-        self.handed += 1;
-        let text = self
-            .calls
-            .pop_front()
-            .unwrap_or_else(|| format!("W{}AW", self.handed % 10));
-        GeneratedCall {
-            country: country_of(&text).unwrap_or_default(),
-            digit: text.chars().rfind(char::is_ascii_digit).unwrap_or('0'),
-            host: None,
-            marker: None,
-            text,
-        }
-    }
-
-    fn learn(&mut self, answered: Answered<'_>) {
-        self.learned
-            .push((answered.sent.to_string(), answered.received.to_string()));
-    }
-}
-
-/// Settings for a run: WPX as DL1ABC, called MAT, ten minutes, no
-/// countdown, the speed ranges as they come.
-pub(crate) fn default_run_settings() -> TrainingSettings {
-    let mut settings = TrainingSettings::default();
-    settings.curriculum.char_set_mode = CharSetMode::Contest;
-    settings.contest.my_call = "DL1ABC".to_string();
-    settings.contest.my_name = "MAT".to_string();
-    settings.playback.countdown_sec = 0;
-    settings.clamp()
-}
-
-/// The same, every speed `wpm`.
-pub(crate) fn run_settings(wpm: f64) -> TrainingSettings {
-    let mut settings = default_run_settings();
-    settings.playback.char_wpm_min = wpm;
-    settings.playback.char_wpm_max = wpm;
-    settings.playback.effective_wpm_min = wpm;
-    settings.playback.effective_wpm_max = wpm;
-    settings.clamp()
-}
+#[cfg(test)]
+pub(crate) mod script;
 
 /// What the app's runtime does with a machine's effects, on a clock of its
 /// own: each turn plays for its planned length, each timer fires when due.
@@ -98,6 +37,7 @@ pub(crate) struct Runtime<S> {
     /// Every turn put on the air, in order.
     pub(crate) turns: Vec<Turn>,
     /// Every effect, in order.
+    #[cfg(test)]
     pub(crate) effects: Vec<ContestEffect>,
     /// Callers' texts heard whole, for an operator to read.
     pub(crate) heard: Vec<String>,
@@ -117,6 +57,7 @@ impl<S: CallSource> Runtime<S> {
             due: Vec::new(),
             playing: None,
             turns: Vec::new(),
+            #[cfg(test)]
             effects: Vec::new(),
             heard: Vec::new(),
             cleared: false,
@@ -137,18 +78,6 @@ impl<S: CallSource> Runtime<S> {
         let effects = self.machine.apply(event, MonoMs(self.now));
         self.carry_out(effects.clone());
         effects
-    }
-
-    /// Press `key` now, with `call` and `exch` in the fields, both typed
-    /// just now.
-    pub(crate) fn key(&mut self, key: OpKey, call: &str, exch: &str) -> Vec<ContestEffect> {
-        let fields = Fields {
-            call: call.to_string(),
-            exch: exch.to_string(),
-            call_edited: MonoMs(self.now),
-            exch_complete: (!exch.is_empty()).then_some(MonoMs(self.now)),
-        };
-        self.apply(ContestEvent::Key { key, fields })
     }
 
     /// When the next thing owed is due.
@@ -178,19 +107,9 @@ impl<S: CallSource> Runtime<S> {
         self.now = self.now.max(at);
     }
 
-    /// Deliver everything owed until the turn on the air has ended.
-    pub(crate) fn finish_turn(&mut self) {
-        while self.playing.is_some() && !self.over && self.step() {}
-    }
-
     /// The id of the turn on the air.
     pub(crate) fn playing_id(&self) -> Option<u64> {
         self.playing.as_ref().map(|(_, turn)| turn.id)
-    }
-
-    /// The last turn played.
-    pub(crate) fn last_turn(&self) -> &Turn {
-        self.turns.last().expect("a turn has been played")
     }
 
     /// Everything heard whole since the last look, taken.
@@ -229,6 +148,7 @@ impl<S: CallSource> Runtime<S> {
                 | ContestEffect::ShowNothingKept
                 | ContestEffect::AbortToHome => self.over = true,
             }
+            #[cfg(test)]
             self.effects.push(effect);
         }
     }
@@ -325,23 +245,17 @@ fn sprint_exchange(words: &[&str]) -> Option<String> {
     }
 }
 
-/// How an operator works.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Habit {
-    /// Copies everything, keys at once.
-    Perfect,
-    /// Copies everything, a second and a half for each key typed.
-    HumanPaced,
-    /// Copies everything but types one digit of each number wrong.
-    DigitOff,
-    /// Asks for each call with a partial first: `K5?`.
-    Unsure,
-}
-
-/// One operator: what it has typed, and what it means to press next.
+/// One operator: how it works, what it has typed, and what it means to
+/// press next.
 #[derive(Clone, Debug)]
 pub(crate) struct Operator {
-    habit: Habit,
+    /// How long it takes over each key it types: nothing for one that keys
+    /// at once.
+    per_key_ms: u64,
+    /// It types one digit of each number wrong.
+    digit_off: bool,
+    /// It asks for each call with a partial first.
+    unsure: bool,
     call: String,
     exch: String,
     /// Characters typed since the last key.
@@ -352,13 +266,14 @@ pub(crate) struct Operator {
     unanswered: u32,
 }
 
-/// How long a human-paced operator takes over each key it types.
-const HUMAN_KEY_MS: u64 = 1_500;
-
 impl Operator {
-    pub(crate) fn new(habit: Habit) -> Self {
+    /// The operator who copies every character and keys the moment the air
+    /// falls quiet: the one Hear a QSO plays.
+    pub(crate) fn perfect() -> Self {
         Self {
-            habit,
+            per_key_ms: 0,
+            digit_off: false,
+            unsure: false,
             call: String::new(),
             exch: String::new(),
             typing: 0,
@@ -378,9 +293,7 @@ impl Operator {
     fn hear(&mut self, text: &str) {
         self.unanswered = 0;
         match copy_of(text) {
-            Some(Copied::Call(call))
-                if self.habit == Habit::Unsure && self.asked.as_deref() != Some(call) =>
-            {
+            Some(Copied::Call(call)) if self.unsure && self.asked.as_deref() != Some(call) => {
                 // Not sure of it: ask for it again with what it is sure of.
                 self.asked = Some(call.to_string());
                 let partial: String = call.chars().take(2).chain(['?']).collect();
@@ -399,7 +312,7 @@ impl Operator {
     }
 
     fn type_exch(&mut self, exch: String) {
-        let exch = if self.habit == Habit::DigitOff {
+        let exch = if self.digit_off {
             one_digit_off(&exch)
         } else {
             exch
@@ -413,11 +326,7 @@ impl Operator {
     /// Its next key, with the fields as typed, pressed `at` once it has
     /// typed them.
     fn next_key(&mut self, now: u64) -> (u64, OpKey, Fields) {
-        let per_key = if self.habit == Habit::HumanPaced {
-            HUMAN_KEY_MS
-        } else {
-            0
-        };
+        let per_key = self.per_key_ms;
         let typed_at = now + per_key * self.typing as u64;
         self.typing = 0;
         self.unanswered += 1;
@@ -450,20 +359,24 @@ fn one_digit_off(exch: &str) -> String {
     digits.into_iter().collect()
 }
 
-/// Let `operator` work the run until it is over: each time the air falls
-/// quiet it reads what it heard and keys what comes next. With `pauses`, it
-/// pauses at each first time and resumes at each second.
-pub(crate) fn work<S: CallSource>(
+/// Let `operator` work the run until it is over, or until `done` says it
+/// has done enough, looked at before each key it would press: each time the
+/// air falls quiet it reads what it heard and keys what comes next. With
+/// `pauses`, it pauses at each first time and resumes at each second.
+/// Whether it got there: a run that keeps it busy far longer than any run
+/// can last gives up.
+pub(crate) fn work_until<S: CallSource>(
     runtime: &mut Runtime<S>,
     operator: &mut Operator,
     pauses: &[(u64, u64)],
-) {
+    done: impl Fn(&Runtime<S>) -> bool,
+) -> bool {
     let mut pauses: VecDeque<(u64, u64)> = pauses.iter().copied().collect();
     let mut paused_until: Option<u64> = None;
     let mut pending: Option<(u64, OpKey, Fields)> = None;
     for _ in 0..100_000 {
         if runtime.over {
-            return;
+            return true;
         }
         if runtime.cleared {
             runtime.cleared = false;
@@ -475,6 +388,9 @@ pub(crate) fn work<S: CallSource>(
             operator.hear(&text);
         }
         if pending.is_none() && paused_until.is_none() && runtime.playing_id().is_none() {
+            if done(runtime) {
+                return true;
+            }
             pending = Some(operator.next_key(runtime.now));
         }
         let key_at = pending.as_ref().map(|(at, _, _)| *at);
@@ -484,7 +400,7 @@ pub(crate) fn work<S: CallSource>(
             .flatten()
             .min();
         let Some(next) = next else {
-            return;
+            return true;
         };
         if pause_at == Some(next) {
             runtime.run_to(next);
@@ -507,11 +423,87 @@ pub(crate) fn work<S: CallSource>(
             runtime.step();
         }
     }
-    panic!("the run never ended");
+    false
+}
+
+/// What QSOs heard went out as, one turn after another.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeardQsos {
+    /// Every turn that went on the air, in order, each after the quiet the
+    /// operator left before it.
+    pub turns: Vec<HeardTurn>,
+    /// Your station as they send it, where some of it stands in for yours,
+    /// not given yet: `DL1ABC`, `K1ABC MIKE MA`. Nothing when all of it is
+    /// yours.
+    pub stand_in: Option<String>,
+}
+
+/// One turn of QSOs heard.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeardTurn {
+    /// The quiet before it, after the turn before had ended, in
+    /// milliseconds.
+    pub quiet_ms: u64,
+    pub turn: Turn,
+}
+
+/// `qsos` QSOs of the contest `settings` choose, its run style, speeds and
+/// band, worked by the perfect operator, for a learner to hear before
+/// working one: every turn that went on the air, from the first CQ to the
+/// TU that closed the last of them, with its sign-off where the contest has
+/// one. Callers that TU brings are left out, so what is heard ends on the
+/// last QSO, not on a station calling for one to come. The operator hears
+/// the turns and never peeks, as it does in a run.
+///
+/// Nothing of it is a run: no result is made, and only `source` hears what
+/// the operator copied, a source the caller keeps or lets go of. Your
+/// station is yours where `settings` give enough of it for a run, and
+/// stands in for yours where they do not ([`HeardQsos::stand_in`]).
+pub fn hear_qsos<S: CallSource>(
+    seed: u64,
+    settings: &TrainingSettings,
+    source: S,
+    qsos: u32,
+) -> HeardQsos {
+    let mut heard = settings.clone();
+    heard.curriculum.char_set_mode = CharSetMode::Contest;
+    // The first CQ at once, and never the run's end before the last QSO.
+    heard.playback.countdown_sec = 0;
+    heard.contest.contest_minutes = 0;
+    let stand_in = heard.contest.stand_in();
+    let heard = heard.clamp();
+    let mut runtime = Runtime::start(seed, heard.clone(), source);
+    // However it stops, what went on the air is what is heard.
+    work_until(&mut runtime, &mut Operator::perfect(), &[], |runtime| {
+        runtime.machine.view().qsos >= qsos
+    });
+    let mut turns = Vec::new();
+    let mut ended_ms = 0;
+    for turn in runtime.turns {
+        let quiet_ms = turn.at_run_ms.saturating_sub(ended_ms);
+        let planned = plan_turn(&turn, &heard).wanted.duration_sec;
+        ended_ms = turn.at_run_ms + (planned * 1_000.0).ceil() as u64;
+        turns.push(HeardTurn { quiet_ms, turn });
+    }
+    // Whoever the last TU brings to call is for a QSO not heard: of the
+    // last turn, only your TU and the sign-off of the station it logged
+    // are kept, however the callers it brought call, once or twice.
+    let signoff = heard
+        .contest
+        .contest_kind
+        .rules()
+        .and_then(|rules| rules.signoff);
+    if let Some(last) = turns.last_mut() {
+        last.turn
+            .segments
+            .retain(|segment| segment.who == Sender::You || Some(segment.text.as_str()) == signoff);
+    }
+    HeardQsos { turns, stand_in }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::script::{Habit, default_run_settings, run_settings, work};
     use super::*;
     use crate::contest::RowStatus;
     use crate::rng::SplitMix64;
@@ -864,6 +856,124 @@ mod tests {
                         !segment.text.starts_with("TU ") && !segment.text.starts_with("R ")
                     })
             }));
+        }
+    }
+
+    /// Hear a QSO: three QSOs of each contest that has shipped, in either
+    /// run style, worked by the perfect operator from the first CQ to the
+    /// TU of the third, with its sign-off where the contest has one, and
+    /// nobody calling after it, a pile-up caller that calls twice among
+    /// them (seed 3 brings one in a WPX and a Sprint pile-up). The turns
+    /// follow one another as they went out, and the same seed hears the
+    /// same QSOs.
+    #[test]
+    fn hear_a_qso_plays_a_few_qsos_from_the_first_cq_to_the_last_tu() {
+        use super::super::{ContestKind, RunStyle};
+        for kind in ContestKind::shipped() {
+            let signoff = kind.rules().and_then(|rules| rules.signoff);
+            for style in RunStyle::ALL {
+                let mut settings = TrainingSettings::default();
+                settings.contest.contest_kind = kind;
+                settings.set_contest_style(style);
+                let hear = |seed| hear_qsos(seed, &settings, Sampler::new(&[], &settings, seed), 3);
+                assert_eq!(hear(5), hear(5), "{kind:?} {style:?}");
+                for seed in 0..24 {
+                    let case = format!("{kind:?} {style:?} seed {seed}");
+                    let heard = hear(seed);
+                    let yours: Vec<&str> = heard
+                        .turns
+                        .iter()
+                        .flat_map(|heard| heard.turn.segments.iter())
+                        .filter(|segment| segment.who == Sender::You)
+                        .map(|segment| segment.text.as_str())
+                        .collect();
+                    assert!(yours[0].starts_with("CQ "), "{case}: {yours:?}");
+                    let tus = yours
+                        .iter()
+                        .filter(|text| text.split_whitespace().any(|word| word == "TU"))
+                        .count();
+                    assert_eq!(tus, 3, "{case}: {yours:?}");
+                    let last = &heard.turns.last().expect("turns").turn;
+                    assert!(yours.last().is_some_and(|text| text.contains("TU")));
+                    let theirs: Vec<&str> = last
+                        .segments
+                        .iter()
+                        .filter(|segment| segment.who != Sender::You)
+                        .map(|segment| segment.text.as_str())
+                        .collect();
+                    assert_eq!(theirs, Vec::from_iter(signoff), "{case}");
+                    // One after another: the first at once, and none after a
+                    // long wait.
+                    assert_eq!(heard.turns[0].quiet_ms, 0, "{case}");
+                    assert!(
+                        heard.turns.iter().all(|heard| heard.quiet_ms < 2_000),
+                        "{case}"
+                    );
+                    let ats: Vec<u64> = heard
+                        .turns
+                        .iter()
+                        .map(|heard| heard.turn.at_run_ms)
+                        .collect();
+                    assert!(ats.windows(2).all(|pair| pair[0] < pair[1]), "{ats:?}");
+                }
+            }
+        }
+    }
+
+    /// Hear a QSO plays your station where enough of it is given for a run,
+    /// and stands in for what is not: a call, and a name and a state where
+    /// the contest sends them, a North American call where it sends a
+    /// state.
+    #[test]
+    fn hear_a_qso_stands_in_for_your_station_until_you_give_it() {
+        use super::super::ContestKind;
+        let cq = |heard: &HeardQsos| heard.turns[0].turn.segments[0].text.clone();
+        for (kind, call, name, stand_in, sent) in [
+            (ContestKind::Wpx, "", "", Some("DL1ABC"), "CQ DL1ABC TEST"),
+            (ContestKind::Wpx, "G4ABC", "", None, "CQ G4ABC TEST"),
+            (
+                ContestKind::SimpleQso,
+                "",
+                "",
+                Some("DL1ABC MIKE"),
+                "CQ CQ DE DL1ABC DL1ABC K",
+            ),
+            (
+                ContestKind::SimpleQso,
+                "G4ABC",
+                "ANN",
+                None,
+                "CQ CQ DE G4ABC G4ABC K",
+            ),
+            (
+                ContestKind::Sprint,
+                "",
+                "",
+                Some("K1ABC MIKE MA"),
+                "CQ NA K1ABC",
+            ),
+            (
+                ContestKind::Sprint,
+                "DL1ABC",
+                "",
+                Some("DL1ABC MIKE DX"),
+                "CQ NA DL1ABC",
+            ),
+            (
+                ContestKind::Sprint,
+                "W7ABC",
+                "BOB",
+                Some("W7ABC BOB MA"),
+                "CQ NA W7ABC",
+            ),
+        ] {
+            let mut settings = TrainingSettings::default();
+            settings.contest.contest_kind = kind;
+            settings.contest.my_call = call.to_string();
+            settings.contest.my_name = name.to_string();
+            let heard = hear_qsos(1, &settings, Sampler::new(&[], &settings, 1), 1);
+            assert_eq!(heard.stand_in.as_deref(), stand_in, "{kind:?} {call}");
+            assert_eq!(cq(&heard), sent, "{kind:?} {call}");
         }
     }
 

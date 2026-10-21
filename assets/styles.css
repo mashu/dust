@@ -1437,6 +1437,18 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .qso-who { flex: none; width: 2.6rem; }
 .qso-line.you .call { border-color: var(--copper); color: var(--ink); }
 .qso-line .call { white-space: normal; overflow-wrap: anywhere; }
+/* Callers calling at once share a line, side by side. */
+.qso-sends { display: flex; flex-wrap: wrap; gap: 0.3rem; min-width: 0; }
+/* Each QSO heard set apart from the one before. */
+.qso-line.qso-next { border-top: 1px dashed var(--line-strong); padding-top: 0.45rem; margin-top: 0.15rem; }
+/* The eyebrow over a QSO, with Hear a QSO or Stop beside it. */
+.qso-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.4rem 0.75rem; }
+/* QSOs heard scroll in a box of their own, kept on the newest line: a
+   reversed column starts at its end and stays there as lines come. */
+.qso-scroll { display: flex; flex-direction: column-reverse; max-height: 12rem; overflow-y: auto; }
+/* A taller screen has room for more of them. */
+@media (min-height: 800px) { .qso-scroll { max-height: 18rem; } }
+.qso-waiting, .qso-stand-in, .qso-note { margin: 0; font-size: 0.85rem; }
 /* A callsign is a dozen characters at most: its box is no wider. */
 .call-field input { max-width: 16rem; text-transform: uppercase; }
 /* The example in an empty box reads as written: "e.g.", not "E.G.". */
@@ -1986,6 +1998,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
     var(--surface);
 }
 .listen-glyph { font-size: 4.4rem; line-height: 1; margin: 0; letter-spacing: -0.03em; }
+/* QSOs heard read line by line, from the left, as the card's QSO does. */
+.listen-qsos { text-align: left; display: grid; gap: 0.6rem; }
 .listen-speed { margin: 0.45rem 0 0; font-size: 0.85rem; letter-spacing: 0.08em; color: var(--copper-deep); }
 .listen-morse {
   display: flex;

@@ -15,6 +15,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::playback::Dialogue;
 use crate::ui::band::BandConditionsCard;
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::home::range_label;
@@ -89,6 +90,13 @@ pub fn SettingsView(
     on_preview_band: EventHandler<()>,
     on_stop_band: EventHandler<()>,
     on_play_sample: EventHandler<String>,
+    /// Hear a QSO is playing, from the Character set card in Contest mode.
+    #[props(default)]
+    hearing: bool,
+    /// What Hear a QSO has played, kept once it ends.
+    #[props(default)]
+    dialogue: Option<Dialogue>,
+    #[props(default)] on_hear_qsos: EventHandler<()>,
 ) -> Element {
     // A contest has a station of its own, and no level to move or groups to
     // set a preset for.
@@ -103,7 +111,13 @@ pub fn SettingsView(
             if !contest {
                 ExperienceCard { settings }
             }
-            CharsetCard { settings }
+            CharsetCard {
+                settings,
+                hearing,
+                dialogue,
+                on_hear: on_hear_qsos,
+                on_stop: on_stop_band,
+            }
             if contest {
                 StationCard { settings }
             }

@@ -11,6 +11,7 @@ pub mod file_pick;
 #[cfg(feature = "desktop")]
 pub mod floating;
 pub mod format;
+pub mod hear_qso;
 pub mod heatmap;
 pub mod home;
 pub mod listen;

@@ -255,7 +255,8 @@ pub fn score_timeline(sessions: &[SessionResult], of: BoardOf) -> Vec<TimelinePo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contest::bot::{Runtime, ScriptCalls, run_settings};
+    use crate::contest::bot::Runtime;
+    use crate::contest::bot::script::{ScriptCalls, run_settings};
     use crate::contest::{ContestEvent, OpKey, Sender};
     use crate::session::GroupResult;
 
@@ -324,7 +325,8 @@ mod tests {
     /// this build reads. It is placed among runs of its own contest.
     #[test]
     fn a_contest_run_is_placed_only_as_a_whole_run() {
-        use crate::contest::bot::{Habit, Operator, work};
+        use crate::contest::bot::Operator;
+        use crate::contest::bot::script::{Habit, work};
         let worked = |minutes: u32, habit: Habit, timestamp: u64| {
             let mut settings = run_settings(25.0);
             settings.contest.contest_minutes = minutes;

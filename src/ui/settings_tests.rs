@@ -769,3 +769,58 @@ fn a_session_on_words_sends_the_words_of_the_list() {
         assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Words);
     });
 }
+
+/// The contest card's presets each put the settings where they say, as
+/// the card and the cards below it show them, and the card reads Custom
+/// once anything a preset set is changed, wherever it is changed.
+#[test]
+fn a_contest_preset_sets_its_fields_and_reads_custom_once_one_changes() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.has("Custom · a preset sets the callers"));
+        ui.click("preset-first-qso");
+        assert!(ui.input_tag("preset-first-qso").contains("active"));
+        assert!(
+            ui.has("15–18\u{a0}WPM\u{a0}· tier\u{a0}1\u{a0}calls\u{a0}· one\u{a0}caller\u{a0}at\u{a0}a\u{a0}time\u{a0}· no\u{a0}fading\u{a0}or\u{a0}static"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(value_of(&ui, "field-level"), "1");
+        assert!(ui.has("One station calls at a time"));
+        let settings = ui.with_app(|ctx| {
+            use dioxus::prelude::ReadableExt;
+            ctx.settings.peek().clone()
+        });
+        assert_eq!(
+            cw_core::ContestPreset::of(&settings),
+            Some(cw_core::ContestPreset::FirstQso)
+        );
+        assert!(!settings.band.qsb_enabled && !settings.band.qrn_enabled);
+
+        ui.click("preset-contester");
+        assert!(ui.has("28–36\u{a0}WPM\u{a0}· tier\u{a0}6\u{a0}calls\u{a0}· 2–5\u{a0}callers\u{a0}· deep\u{a0}fading,\u{a0}strong\u{a0}static"));
+        assert_eq!(value_of(&ui, "field-level"), "6");
+        assert!(
+            ui.has("2–5 callers · set on the Band card"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(
+            ui.stored_settings().await.band.stations_max,
+            5,
+            "stored as any edit is"
+        );
+
+        // The tier moved by hand: the settings are your own.
+        ui.commit("field-level", "5");
+        ui.advance(50).await;
+        assert!(ui.has("Custom · a preset sets the callers"));
+        assert!(!ui.input_tag("preset-contester").contains("active"));
+        // Back on Club, then a single caller picked: your own again.
+        ui.click("preset-club");
+        assert!(ui.has("20–26\u{a0}WPM\u{a0}· tier\u{a0}3\u{a0}calls\u{a0}· 1–3\u{a0}callers\u{a0}· QSB\u{a0}fading\u{a0}and\u{a0}QRN\u{a0}static"));
+        ui.click("style-single-caller");
+        assert!(ui.has("Custom · a preset sets the callers"));
+    });
+}
