@@ -23,7 +23,9 @@ use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
 use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow};
-use crate::ui::widgets::{Icon, IconName, ProgressHeader, control_id, html_bool, keep_focus};
+use crate::ui::widgets::{
+    Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool, keep_focus,
+};
 
 /// How often the run's clock and the air are drawn again, which is also how
 /// often the run hears that the app is still running.
@@ -167,10 +169,15 @@ fn RunBar(now: Signal<MonoMs>, phase: ContestPhase, qsos: u32, clean: u32, my_wp
         phase,
         ContestPhase::Countdown { .. } | ContestPhase::Running
     );
+    let dot = if phase == ContestPhase::Running {
+        StatusDot::Live
+    } else {
+        StatusDot::Ready
+    };
     rsx! {
         ProgressHeader {
             status,
-            live: phase == ContestPhase::Running,
+            dot,
             figure,
             figure_note,
             pct,

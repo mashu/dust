@@ -25,7 +25,7 @@ use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
-use crate::ui::training::{TrainingProgress, TrainingView};
+use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
 
 /// How often the band follows the settings while it is being previewed:
 /// often enough to sound live, seldom enough that a slider dragged across
@@ -348,12 +348,14 @@ fn TrainingRoute() -> Element {
         return rsx! { p { class: "muted", "Starting…" } };
     };
     let view = session.view();
+    let open = focused_box_open(view.current, view.focused, &view.confirmed);
     rsx! {
         div { class: "stack train",
             TrainingProgress {
                 focused: view.focused,
                 total: view.sent.len(),
                 playing: view.playing,
+                open,
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
                 countdown: view.countdown,

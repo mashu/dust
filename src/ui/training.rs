@@ -6,7 +6,7 @@ use crate::session_runtime::AnswerOutbox;
 use crate::time::sleep_ms;
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
-    CharacterComparison, Icon, IconName, ProgressHeader, control_id, html_bool,
+    CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool,
 };
 
 /// Incomplete answers wait this long before the session sees them. Short
@@ -16,12 +16,22 @@ pub(crate) const INPUT_COMMIT_DEBOUNCE_MS: u32 = 48;
 
 const _: () = assert!(INPUT_COMMIT_DEBOUNCE_MS < cw_core::AUTO_CONFIRM_DELAY_MS);
 
+/// Whether the box in focus is the one being answered: the current group's,
+/// not answered yet. Between two groups it is not, for the focus has moved on
+/// to the next group, which is still to be sent, while the current group is
+/// the one just answered.
+pub(crate) fn focused_box_open(current: usize, focused: usize, confirmed: &[bool]) -> bool {
+    current == focused && !confirmed.get(focused).copied().unwrap_or(false)
+}
+
 /// The progress header, kept out of the view that updates on every key.
 #[component]
 pub fn TrainingProgress(
     focused: usize,
     total: usize,
     playing: bool,
+    /// The box in focus is the one being answered ([`focused_box_open`]).
+    open: bool,
     repeat_total: u32,
     repeat_done: u32,
     /// Seconds left before the first group, while the session counts down.
@@ -34,8 +44,20 @@ pub fn TrainingProgress(
         format!("Sending {send_index} of {repeat_total}")
     } else if playing {
         "Sending".to_string()
-    } else {
+    } else if open {
         "Your turn".to_string()
+    } else {
+        // Between two groups, for a word space and the pause after a group:
+        // the box below waits for the next one and takes no typing, so it is
+        // nobody's turn yet.
+        "Next group…".to_string()
+    };
+    let dot = if playing {
+        StatusDot::Live
+    } else if open {
+        StatusDot::Ready
+    } else {
+        StatusDot::Waiting
     };
     let pct = if total == 0 {
         0.0
@@ -46,7 +68,7 @@ pub fn TrainingProgress(
         div { style: "display: contents;",
             ProgressHeader {
                 status,
-                live: playing,
+                dot,
                 figure: format!("{} / {total}", focused + 1),
                 pct,
             }
@@ -613,7 +635,7 @@ pub fn TrainingView(
     // answered, or, between two groups, the one about to be sent.
     let open = focused;
     let open_done = confirmed.get(open).copied().unwrap_or(false);
-    let is_active = current == open && !open_done;
+    let is_active = focused_box_open(current, focused, &confirmed);
     let awaiting_play = !is_active && !open_done;
     let input_locked = (locked && is_active) || awaiting_play;
     let live = is_active && !input_locked;
@@ -757,6 +779,7 @@ mod speed_tests {
 mod tests {
     use super::{PAD_LAST, PAD_ROWS, pad_name};
     use crate::testing::{Ui, run, test_settings};
+    use cw_core::CharSetMode;
 
     /// Every character a group can be sent in has a key, once, and every key
     /// a name of its own.
@@ -805,5 +828,59 @@ mod tests {
             );
             assert_eq!(html.matches("inputmode=\"none\"").count(), 1, "{html}");
         });
+    }
+
+    /// In every group mode, with no pause after a group or one, Enter leaves
+    /// the header saying the next group is coming, beside the plain dot, for
+    /// as long as the box waits for it; "Your turn" comes back with the green
+    /// dot once the next group's box opens.
+    #[test]
+    fn between_groups_the_header_waits_with_the_box() {
+        const YOUR_TURN: &str = r#"class="progress-status">Your turn<"#;
+        const NEXT_GROUP: &str = r#"class="progress-status">Next group…<"#;
+        const READY: &str = r#"class="status-dot ready""#;
+        const PLAIN: &str = r#"class="status-dot""#;
+        for mode in [
+            CharSetMode::Koch,
+            CharSetMode::Digits,
+            CharSetMode::Mixed,
+            CharSetMode::Callsign,
+            CharSetMode::Words,
+        ] {
+            for pause in [0.0, 2.0] {
+                run(|| async move {
+                    let case = format!("{mode:?}, a pause of {pause} s");
+                    let mut settings = test_settings();
+                    settings.curriculum.char_set_mode = mode;
+                    settings.playback.group_pause_sec = pause;
+                    let (mut ui, recorder) = Ui::app_with_settings(settings);
+                    ui.click("btn-start-training");
+                    assert!(ui.run_until(5_000, |ui| ui.has(YOUR_TURN)).await, "{case}");
+                    assert!(ui.has(READY), "{case}");
+                    let sent = recorder.texts().first().cloned().expect("a group was sent");
+                    ui.type_into("group-input-0", &sent);
+                    ui.press_enter("group-input-0");
+                    let between = |ui: &Ui| {
+                        ui.has(NEXT_GROUP)
+                            && ui.has(PLAIN)
+                            && !ui.has(YOUR_TURN)
+                            && !ui.has(READY)
+                            && ui.input_tag("group-input-1").contains("Waiting…")
+                    };
+                    assert!(between(&ui), "{case}: {}", ui.html());
+                    if pause > 0.0 {
+                        ui.advance(1_000).await;
+                        assert!(between(&ui), "{case}: {}", ui.html());
+                    }
+                    assert!(ui.run_until(5_000, |ui| ui.has(YOUR_TURN)).await, "{case}");
+                    assert!(ui.has(READY), "{case}");
+                    assert!(!ui.has(NEXT_GROUP), "{case}");
+                    assert!(
+                        ui.input_tag("group-input-1").contains("Type the group"),
+                        "{case}"
+                    );
+                });
+            }
+        }
     }
 }

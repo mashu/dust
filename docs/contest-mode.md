@@ -93,7 +93,12 @@ the pile-up waits on that QSO in silence, but clears the fields, or calls
 CQ while nobody calls, as it does for the station you work once it has
 gone, and so does Enter on a partial or a slip of it once that has gone
 out to nobody and nobody calls; a caller that gives up on your partial
-is said to have gone, as one is on its timeouts (§4.4, §7).
+is said to have gone, as one is on its timeouts (§4.4, §7). A review of
+group training against the main branch followed, as Contest must leave
+group training as it was: Callsigns mode and the band's traffic draw
+KG4 with two letters again, which only a contest's callers leave out
+(§11.1, §11.2), and between two groups the training screen's header says
+"Next group…" beside a plain dot while the box waits, not "Your turn".
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -2347,11 +2352,17 @@ files written by scripts, each naming its source and year.
   province to send). As built (3b), Field Day draws from `FieldDay`:
   `NorthAmerica`, and 0.9% of its callers from `OutsideNorthAmerica`, every
   other country, who send DX (§3, §11.5).
-  A station abroad is in its host's country. A contest spec uses contest
-  shares for portables (4%) and abroad calls (3%) in place of the tiers'
-  25% and 12% (`callsign.rs:44-47`). With the default
-  spec it draws exactly as `generate_callsign` does, which a golden list
-  pins.
+  A station abroad is in its host's country. A contest spec
+  (`CallSpec::contest`) uses contest shares for portables (4%) and abroad
+  calls (3%) in place of the tiers' 25% and 12% (`callsign.rs:44-47`), and
+  never draws Guantanamo Bay's KG4 with two letters (§11.2). With the
+  default spec, which Callsigns mode and the band's traffic use, it draws
+  exactly as `generate_callsign` always has, KG4 with two letters among its
+  calls, which a golden list pins, with a case at a seed where it draws one.
+  As built, after a review of group training: slice 3a's filter applied to
+  every spec, so Callsigns mode never sent those calls (a few in 20,000 at
+  tiers 3–6) and a seeded stream shifted after the first; it is the contest
+  spec's alone now.
 - **Parsing.** `parse_callsign` (`callsign.rs:376-377`), with `CallsignParts`
   (`:358`) and `parse_base` (`:393`), loses `#[cfg(test)]`; `parse_base`
   stays a private helper. When both sides of a slash read as a call (hosts
@@ -2428,9 +2439,13 @@ files written by scripts, each naming its source and year.
   US); and else the table's. CQ WW's points and multipliers, your own
   country and continent kept with a run, and the line under your call all
   use it, so they agree with the side and the zone. The generator never
-  draws KG4 with two letters, as the table counts KG's two-letter suffixes
-  from its other digits; a test pins that every call a contest draws is in
-  the country the generator labels it with.
+  draws KG4 with two letters for a contest's callers (`CallSpec::contest`),
+  as the table counts KG's two-letter suffixes from its other digits and
+  would label such a call the US's; a test pins that every call a contest
+  draws is in the country the generator labels it with. Practice draws
+  them as it always has (§11.1): in Callsigns mode and the band's traffic a
+  call is scored in no country, and the calls Callsigns mode sends never
+  change under it.
 
 ### 11.3 CQ zones and continents
 
@@ -2907,9 +2922,10 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   but a depth or level under a switch it turned off; with Farnsworth
   spacing set, it writes the spacing's range too; the defaults are on
   none.
-- **Calls:** a golden list keeps `generate_callsign` unchanged;
-  `parse_callsign` reads 10,000 generated calls per tier; each `CallSpec`
-  gives only its countries; every WPX prefix case in 11.1.
+- **Calls:** a golden list keeps `generate_callsign` unchanged, with a
+  case at a seed where it draws KG4 with two letters, while no contest
+  spec draws one; `parse_callsign` reads 10,000 generated calls per tier;
+  each `CallSpec` gives only its countries; every WPX prefix case in 11.1.
 - **Data and scoring:** the NA zone and province tables, LB, DC and the
   Sprint list pinned; 85 sections, named by list version; hand-worked logs
   per contest; verified ≤ raw, where a logged field is the multiplier
@@ -3329,11 +3345,11 @@ against the published rules and pinned before it ships.
   the table misreads as the countries they are, or as none where it holds
   none (KH2); European Turkey is in Europe; ARRL DX
   gives nothing for a QSO on your own side; Guantanamo Bay's KG4 with two
-  letters is DX and never drawn; your state settles your zone for a
-  Canadian call whose digit names no place; callers' zones and power have
-  their real-habits path (§11.6); Home asks for a zone in a field of its
-  own; and the card and Your station say your side, your call's reading
-  and your zone in the words §2, §3 and §8 give.
+  letters is DX and never drawn for a contest (§11.1, §11.2); your state
+  settles your zone for a Canadian call whose digit names no place;
+  callers' zones and power have their real-habits path (§11.6); Home asks
+  for a zone in a field of its own; and the card and Your station say your
+  side, your call's reading and your zone in the words §2, §3 and §8 give.
 - **3b Field Day.** Landed: the Field Day row, its pill, its dialogue
   from the row and its simplification line; the 85 sections, YT read as
   TER; the class, section-by-place and DX shares counted by

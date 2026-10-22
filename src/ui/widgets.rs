@@ -347,12 +347,24 @@ pub fn GroupResultRow(index: usize, group: GroupResult) -> Element {
     }
 }
 
+/// The dot before a training screen's status, which says at a glance whose
+/// move it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusDot {
+    /// Something is going out: copper, pulsing.
+    Live,
+    /// Yours: green.
+    Ready,
+    /// Neither: the next thing is on its way, and the dot is plain.
+    Waiting,
+}
+
 /// The head of a training screen: what is going on, how far it has come as
 /// a figure and a bar, and anything the screen adds under the bar.
 #[component]
 pub fn ProgressHeader(
     status: String,
-    live: bool,
+    dot: StatusDot,
     /// How far it has come: "3 / 20", or a run's clock.
     figure: String,
     /// Said after the figure where there is room for it: an open run's
@@ -368,10 +380,10 @@ pub fn ProgressHeader(
     #[props(default)] children: Element,
 ) -> Element {
     let pct = pct.clamp(0.0, 100.0);
-    let dot = if live {
-        "status-dot live"
-    } else {
-        "status-dot ready"
+    let dot = match dot {
+        StatusDot::Live => "status-dot live",
+        StatusDot::Ready => "status-dot ready",
+        StatusDot::Waiting => "status-dot",
     };
     rsx! {
         div { class: "card",

@@ -25,7 +25,7 @@ use super::paddle::{PaddlePad, use_paddle_keys};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
-use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView};
+use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView, focused_box_open};
 use crate::audio::fake::Recorder;
 use crate::session_runtime::AnswerOutbox;
 use crate::state::{AppState, Screen};
@@ -103,6 +103,7 @@ fn TrainingScreen(
     countdown: Option<u32>,
 ) -> Element {
     let answer = use_hook(AnswerOutbox::new);
+    let open = focused_box_open(current, focused, &confirmed);
     rsx! {
         Keyed { screen: Screen::Training, keyer_mode,
             div { class: "stack",
@@ -110,6 +111,7 @@ fn TrainingScreen(
                     focused,
                     total,
                     playing,
+                    open,
                     repeat_total,
                     repeat_done,
                     countdown,
@@ -2017,6 +2019,86 @@ fn a_confirmed_group_moves_up_and_leaves_no_box() {
         "the next group's box waits for its send: {tag}"
     );
     assert!(html.contains("Waiting…"), "{html}");
+}
+
+/// Between two groups, once Enter has answered one, the box below waits for
+/// the next and takes no typing: the header says the next group is coming,
+/// beside the plain dot, not "Your turn" beside the green one, which wait
+/// for the box to open.
+#[test]
+fn between_groups_the_header_says_the_next_group_is_coming() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec!["KM".to_string(), String::new()],
+                confirmed: vec![true, false],
+                focused: 1,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(
+        html.contains(r#"class="progress-status">Next group…<"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="status-dot"></span>"#),
+        "{html}"
+    );
+    assert!(!html.contains("Your turn"), "{html}");
+    assert!(!html.contains("status-dot ready"), "{html}");
+    assert!(!html.contains("status-dot live"), "{html}");
+    // In the words the box and the hint below it use.
+    assert!(html.contains("Next group on its way."), "{html}");
+    assert!(
+        input_open_tag(&html, "group-input-1").contains("Waiting…"),
+        "{html}"
+    );
+}
+
+/// The box open on a group that has been sent: the header says it is your
+/// turn, beside the green dot.
+#[test]
+fn an_open_box_is_your_turn() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 1,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec!["KM".to_string(), String::new()],
+                confirmed: vec![true, false],
+                focused: 1,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(
+        html.contains(r#"class="progress-status">Your turn<"#),
+        "{html}"
+    );
+    assert!(html.contains(r#"class="status-dot ready""#), "{html}");
+    assert!(!html.contains("Next group"), "{html}");
+    let tag = input_open_tag(&html, "group-input-1");
+    assert!(!tag.contains("answer locked"), "{tag}");
+    assert!(tag.contains("Type the group"), "{tag}");
 }
 
 /// Components that own state, driven through their own controls.

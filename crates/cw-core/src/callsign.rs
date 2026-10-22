@@ -114,13 +114,17 @@ impl Countries {
     }
 }
 
-/// Which calls to draw: from which countries, and whether portables and
-/// stations abroad come as often as a contest hears them or as often as the
-/// tier offers them for practice. The default is the tier's own draw.
+/// Which calls to draw: from which countries, and whether for a contest or
+/// for practice. The default is the tier's own draw, which Callsigns mode
+/// and the band send, and which never changes under them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CallSpec {
     pub countries: Countries,
-    pub contest_shares: bool,
+    /// A contest's callers: portables and stations abroad come as often as
+    /// a contest hears them, not as often as the tier offers them for
+    /// practice, and no call is drawn that a contest would score in another
+    /// country than the one it is labelled with (Guantanamo Bay's).
+    pub contest: bool,
 }
 
 impl CallSpec {
@@ -128,7 +132,7 @@ impl CallSpec {
     pub const fn contest(countries: Countries) -> Self {
         Self {
             countries,
-            contest_shares: true,
+            contest: true,
         }
     }
 }
@@ -485,14 +489,22 @@ fn separator(prefix: &Prefix, rng: &mut impl Rng) -> char {
 pub(crate) const GUANTANAMO: (&str, char, usize) = ("KG", '4', 2);
 
 /// A suffix length both the tier and the country allow after `prefix` and
-/// `digit`, as often as real calls of the prefix have it; never one that
-/// would make the call another country's, as KG4 with two letters would be
-/// Guantanamo Bay's.
-fn suffix_len(tier: &Tier, prefix: &Prefix, digit: char, rng: &mut impl Rng) -> usize {
+/// `digit`, as often as real calls of the prefix have it. For a `contest`,
+/// never one that would make the call another country's, as KG4 with two
+/// letters would be Guantanamo Bay's, which a contest scores apart from the
+/// US it is labelled with. Practice keeps them: a call is a call there, and
+/// Callsigns mode sends what it always sent.
+fn suffix_len(
+    tier: &Tier,
+    prefix: &Prefix,
+    digit: char,
+    contest: bool,
+    rng: &mut impl Rng,
+) -> usize {
     let lengths: Vec<(usize, f64)> = prefix
         .lengths_in(tier)
         .into_iter()
-        .filter(|(len, _)| (prefix.prefix, digit, *len) != GUANTANAMO)
+        .filter(|(len, _)| !contest || (prefix.prefix, digit, *len) != GUANTANAMO)
         .collect();
     pick_weighted(&lengths, rng)
         .copied()
@@ -524,10 +536,10 @@ pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> Generated
         host: None,
         marker: None,
     };
-    for _ in 0..suffix_len(tier, prefix, digit, rng) {
+    for _ in 0..suffix_len(tier, prefix, digit, spec.contest, rng) {
         call.text.push(LETTERS[rng.usize_in(0, LETTERS.len() - 1)]);
     }
-    let (portable_share, abroad_share) = if spec.contest_shares {
+    let (portable_share, abroad_share) = if spec.contest {
         (CONTEST_PORTABLE_SHARE, CONTEST_ABROAD_SHARE)
     } else {
         (PORTABLE_SHARE, ABROAD_SHARE)
@@ -1414,6 +1426,23 @@ mod tests {
                 .collect();
             assert_eq!(drawn, expected, "tier {tier}");
         }
+        // KG4 with two letters is Guantanamo Bay's, which only a contest
+        // leaves out (`no_contest_call_is_guantanamo_bays`): practice draws
+        // it where it always did, a few times in 20,000, and the calls after
+        // it as they always came.
+        for (tier, at, expected) in [
+            (3, 7_277, ["KG4SC", "AF2LY", "SQ5ZL"]),
+            (4, 3_785, ["KG4ID", "W8TD", "OP5K"]),
+        ] {
+            let mut rng = SplitMix64::new(0xABCD ^ u64::from(tier));
+            for _ in 0..at {
+                generate_callsign(tier, &mut rng);
+            }
+            let drawn: Vec<String> = (0..expected.len())
+                .map(|_| generate_callsign(tier, &mut rng))
+                .collect();
+            assert_eq!(drawn, expected, "tier {tier}");
+        }
     }
 
     fn generated(tier: u32, spec: CallSpec, count: usize) -> Vec<GeneratedCall> {
@@ -1504,11 +1533,12 @@ mod tests {
         assert!(Countries::FieldDay.admits("DL") && Countries::FieldDay.admits("K"));
     }
 
-    /// KG4 with two letters is Guantanamo Bay's, so no US call is drawn
-    /// that way, though KG4 has one- and three-letter suffixes and KG's
-    /// other digits two-letter ones.
+    /// KG4 with two letters is Guantanamo Bay's, so no contest's US caller
+    /// is drawn that way, though KG4 has one- and three-letter suffixes and
+    /// KG's other digits two-letter ones. Practice still draws them
+    /// (`generate_callsign_draws_what_it_always_drew`).
     #[test]
-    fn no_us_call_is_guantanamo_bays() {
+    fn no_contest_call_is_guantanamo_bays() {
         let kg: Vec<GeneratedCall> = generated(3, CallSpec::contest(Countries::WVe), 60_000)
             .into_iter()
             .filter(|call| call.text.starts_with("KG"))
