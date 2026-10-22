@@ -99,6 +99,11 @@ group training as it was: Callsigns mode and the band's traffic draw
 KG4 with two letters again, which only a contest's callers leave out
 (§11.1, §11.2), and between two groups the training screen's header says
 "Next group…" beside a plain dot while the box waits, not "Your turn".
+A browser test of group training on a 360×640 phone followed, which found
+the keypad's last row ending 16 px under the screen's foot, on the main
+branch too: the run's rule for phones under 760 px tall is a session's as
+well now, its groups drawn closer with its cards, and a long group
+answered keeps to its slot (§7).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -1598,11 +1603,31 @@ in place of `current/total`.
   icons are `aria-hidden` (`widgets.rs:277`). `?×1` counts asked repeats.
 
 **Phone, running** (keypad always shown). From header to keypad it fits one
-screen (`styles.css:2547-2572`); below 760 px height the keys shrink and
+screen (`styles.css:2606-2657`); below 760 px height the keys shrink and
 the run's cards, and the lines in them, draw closer, so a 360×640 screen
 holds it down to the keypad's last row, Enter included. Every line is a
 fixed one-line slot with an ellipsis (as `.train-hint`,
 `styles.css:1259-1267`), so the keypad never moves between turns.
+
+As built, after a browser test of group training, the rule is written for
+`.train`, which a session of groups and a run share, so a session draws
+its cards closer the same way, and its groups with them, and a 360×640
+screen holds it down to Next and ⌫ in every group mode, through the
+countdown, a group sent more than once (its "Send 1/3" badge and "3× per
+group" chip, beside adaptive speed's) and every hint: the last row ended
+at 656 px of 640, and ends at 631. The run's values are as they were. A
+long group answered keeps to its slot there as a short one does: what was
+sent, which the top row spells out already, is cut short beside its mark,
+and the two rows of its comparison stay a row each, laid on one set of
+columns (`.comparison`, `widgets.rs:302`), so a copied character stays
+under the one sent there however many were typed past the end. The
+columns narrow to fit, 11 px for a group of 20 at 360 px, and stop at
+10 px, which still holds a letter inside its box: past that, from 22
+boxes at 360 px, the two rows scroll sideways together, the next box
+showing at the card's edge. Before, what was sent wrapped onto a line of
+its own and the comparison onto four rows, or more with characters typed
+past the end, pushing the last row to 728 px, and to 776 px with 20 typed
+past a group of 20. Wider or taller screens draw a session as before.
 
 ```
 ┌────────────────────────────────────┐
@@ -3229,6 +3254,13 @@ longest Simple QSO and Sprint lines at 360 px; log rows with text; results,
 first, its lines, callers at once side by side, each QSO apart, which QSO
 plays with Stop above the lines, no character picked meanwhile, its
 stand-in, and none of another contest's or of one stopped before a line.
+After the browser test of group training, a style test reads the rule for
+phones under 760 px tall: the keys and every space of the training screen
+it tightens, a run's and a session's, closer than a phone's, and a long
+group answered kept to its slot, what it sent cut short and its
+comparison's two rows on one set of columns that stop narrowing at a
+letter's width; a session drawn on the app has the markup the rule names,
+a `.train` root and the answered group's top row and comparison.
 
 ## 14. Phased build plan
 
@@ -3463,8 +3495,9 @@ The user approved every recommended default on 2026-10-20:
 
 1. **Phone height.** *Mitigation:* fixed one-line slots, the log below the
    fold, keys and spacing that shrink below 760 px (a 360×640 screen fits
-   to the keypad's last row; a 320×568 one does not yet), a 360 px render
-   test, a small phone.
+   a run, and a session of groups, to the keypad's last row; a 320×568 one
+   does not yet), a 360 px render test, a style test of the rule, a small
+   phone.
 2. **A continuation re-sends one character** until phase 5's timed splice.
    *Mitigation:* the message counts as sent whole; listen on each player.
 3. **Latency estimates** may be wrong. *Mitigation:* capped at 0.5 s

@@ -671,3 +671,181 @@ fn only_group_characters_slash_their_zero() {
         "the slashed zero is for group characters only"
     );
 }
+
+/// The value the last rule naming `selector` gives `property`, a padding's
+/// top or bottom read from its shorthand too.
+fn last_value(
+    rules: &[(&str, Vec<(&str, &str)>)],
+    selector: &str,
+    property: &str,
+) -> Option<String> {
+    rules
+        .iter()
+        .rev()
+        .filter(|(list, _)| selector_list(list).contains(&selector))
+        .find_map(|(_, declarations)| {
+            declarations.iter().rev().find_map(|(name, value)| {
+                if *name == property {
+                    return Some(value.to_string());
+                }
+                // A padding's sides go top, right, bottom, left, and one
+                // that names fewer than three takes its bottom from its top.
+                let sides: Vec<&str> = value.split_whitespace().collect();
+                let side = match (*name, property) {
+                    ("padding", "padding-top") => 0,
+                    ("padding", "padding-bottom") if sides.len() > 2 => 2,
+                    ("padding", "padding-bottom") => 0,
+                    _ => return None,
+                };
+                sides.get(side).map(|side| side.to_string())
+            })
+        })
+}
+
+/// A length as its number and its unit: `(2.55, "rem")` for `2.55rem`, and
+/// no unit for a plain number such as a line height.
+fn length(value: &str) -> (f64, &str) {
+    let unit = value.trim_start_matches(|ch: char| ch.is_ascii_digit() || ch == '.');
+    let number = value[..value.len() - unit.len()]
+        .parse()
+        .unwrap_or_else(|_| panic!("{value} is no length"));
+    (number, unit)
+}
+
+/// On a phone 640 px tall a session fits from the header to the keypad's
+/// last row, Next and ⌫ included, as a run does: below 760 px of height the
+/// keys, the training screen's cards and the lines and groups in them sit
+/// closer than a phone's usual spacing, which left the last row 16 px under
+/// the foot of a 360×640 screen, so the first tap on Next scrolled the page.
+/// The run is a `.train` too, so those are the run's as well, with spaces
+/// of its own besides. A long group answered keeps to its slot as a short
+/// one does: what was sent is cut short beside its mark, and the two rows
+/// of its comparison never wrap. They share one set of columns, so the
+/// copy's boxes narrow with the sent group's and each stays under its own,
+/// and past the narrowest a letter fits they scroll together, so no group
+/// pushes the keypad down. The HTML tests never paint, so the rule itself
+/// is read.
+#[test]
+fn a_session_fits_a_small_phone_down_to_the_keypads_last_row() {
+    let css = without_comments(CSS);
+    let small_phone = "@media (max-width: 640px) and (max-height: 760px)";
+    let small = rules(block(&css, small_phone));
+    let at = css.find(small_phone).expect("a rule for short phones");
+    // What every rule before it sets: the base, and a phone's.
+    let usual = rules(&css[..at]);
+    for (selector, property, usual_selector) in [
+        (".key", "min-height", ".key"),
+        (".train", "gap", ".train"),
+        (".train .card", "padding-top", ".train .card"),
+        (".train .card", "padding-bottom", ".train .card"),
+        (".train .progress-head", "margin-bottom", ".progress-head"),
+        (".train .train-groups", "margin-top", ".train .train-groups"),
+        (".train .train-groups", "gap", ".train-groups"),
+        (".run-counts", "margin-top", ".run-counts"),
+        (".run-entry", "gap", ".run-entry"),
+        (".run-fields .field", "gap", ".field"),
+        (".run-keys .btn", "min-height", ".btn"),
+        (".run.shows-copy .key", "min-height", ".key"),
+        (
+            ".run.shows-copy .run-air .run-line",
+            "min-height",
+            ".run-line",
+        ),
+        (
+            ".run.shows-copy .run-air .run-line",
+            "line-height",
+            ".run-line",
+        ),
+    ] {
+        let tight = last_value(&small, selector, property)
+            .unwrap_or_else(|| panic!("a short phone leaves {selector} its {property}"));
+        let usual = last_value(&usual, usual_selector, property)
+            .unwrap_or_else(|| panic!("{usual_selector} has no {property}"));
+        let ((tight_number, tight_unit), (usual_number, usual_unit)) =
+            (length(&tight), length(&usual));
+        assert!(
+            tight_unit == usual_unit && tight_number < usual_number,
+            "{selector} keeps a {property} of {tight} on a short phone, where a phone has {usual}"
+        );
+    }
+    for (selector, property, value, why) in [
+        (
+            ".train .group.done > .row-between",
+            "flex-wrap",
+            "nowrap",
+            "what a long group sent takes a line of its own",
+        ),
+        (
+            ".train .group.done .row",
+            "flex-wrap",
+            "nowrap",
+            "what a long group sent drops under its mark",
+        ),
+        (
+            ".train .group.done .sent",
+            "white-space",
+            "nowrap",
+            "what a long group sent wraps",
+        ),
+        (
+            ".train .group.done .sent",
+            "overflow",
+            "hidden",
+            "what a long group sent spills out of its pill",
+        ),
+        (
+            ".train .group.done .sent",
+            "text-overflow",
+            "ellipsis",
+            "what a long group sent is not cut short",
+        ),
+        (
+            ".train .group.done .comparison",
+            "display",
+            "grid",
+            "a long group's comparison has no columns for its rows to share",
+        ),
+        (
+            ".train .group.done .comparison .chars",
+            "display",
+            "contents",
+            "each row of a long group's comparison sizes its boxes by itself",
+        ),
+        (
+            ".train .group.done .comparison .ch",
+            "width",
+            "auto",
+            "a box keeps its own width, not its column's",
+        ),
+        (
+            ".train .group.done .comparison .ch.sent-row",
+            "grid-row",
+            "1",
+            "the sent group leaves the top row",
+        ),
+        (
+            ".train .group.done .comparison .ch",
+            "grid-row",
+            "2",
+            "the copy leaves the row under the sent group",
+        ),
+        (
+            ".train .group.done .comparison",
+            "grid-auto-columns",
+            "minmax(10px, 21px)",
+            "a column narrows past a letter, or widens past a box",
+        ),
+        (
+            ".train .group.done .comparison",
+            "overflow-x",
+            "auto",
+            "a long copy runs out of the card",
+        ),
+    ] {
+        assert_eq!(
+            last_value(&small, selector, property).as_deref(),
+            Some(value),
+            "on a short phone {why}"
+        );
+    }
+}

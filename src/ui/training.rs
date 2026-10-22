@@ -830,6 +830,48 @@ mod tests {
         });
     }
 
+    /// A session is drawn as the stylesheet's rule for short phones names it
+    /// (`styles_tests.rs`): its root is a `.train`, and the group answered a
+    /// `.group.done` with what was sent in its top row beside the mark, then
+    /// its comparison, the sent group over the copy, a box for every
+    /// character typed past the end. A class renamed, or a wrapper put in,
+    /// would leave the keypad's last row under the foot of a 360×640 phone.
+    #[test]
+    fn a_session_is_drawn_as_the_rule_for_short_phones_names_it() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            ui.click("btn-start-training");
+            let your_turn = r#"class="progress-status">Your turn<"#;
+            assert!(ui.run_until(5_000, |ui| ui.has(your_turn)).await);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &format!("{sent}XY"));
+            ui.press_enter("group-input-0");
+            let html = ui.html();
+            assert!(html.contains(r#"<div class="stack train">"#), "{html}");
+            let top_row = format!(
+                r#"<div id="group-card-0" class="group done"><div class="row-between"><span class="badge">1</span><div class="row" style="gap: 0.4rem;"><span class="sent">{sent}</span>"#
+            );
+            assert!(html.contains(&top_row), "{html}");
+            let sent_row: String = sent
+                .chars()
+                .map(|ch| format!(r#"<span class="ch sent-row">{ch}</span>"#))
+                .collect();
+            let comparison = format!(
+                r#"<div class="stack-sm comparison" style="gap: 3px;"><div class="chars">{sent_row}</div><div class="chars">"#
+            );
+            assert!(html.contains(&comparison), "{html}");
+            let copy = html[html.find(&comparison).expect("the comparison") + comparison.len()..]
+                .split("</div>")
+                .next()
+                .unwrap_or_default();
+            assert_eq!(
+                copy.matches("<span").count(),
+                sent.chars().count() + 2,
+                "{copy}"
+            );
+        });
+    }
+
     /// In every group mode, with no pause after a group or one, Enter leaves
     /// the header saying the next group is coming, beside the plain dot, for
     /// as long as the box waits for it; "Your turn" comes back with the green

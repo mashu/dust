@@ -299,7 +299,7 @@ pub fn CharacterComparison(sent: String, received: String) -> Element {
     let recv_up = received.to_ascii_uppercase();
     let alignment = align_group(&sent_up, &recv_up);
     rsx! {
-        div { class: "stack-sm", style: "gap: 3px;",
+        div { class: "stack-sm comparison", style: "gap: 3px;",
             div { class: "chars",
                 for ch in sent_up.chars() {
                     span { class: "ch sent-row", "{ch}" }
