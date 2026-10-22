@@ -41,7 +41,8 @@ impl ContestPreset {
     }
 
     /// The callers' speed, slowest and fastest, in words a minute, their
-    /// characters and their spacing alike; you send at the middle of it.
+    /// characters and their spacing alike; you send at the middle of it,
+    /// your own speed set back to follow it.
     pub fn char_wpm(self) -> (f64, f64) {
         match self {
             Self::FirstQso => (15.0, 18.0),
@@ -107,16 +108,19 @@ impl ContestPreset {
         }
     }
 
-    /// Put the settings on this preset: the callers' speed, their calls
-    /// and their habits, the run style and how many call, and the band's
-    /// fading and static, the way the settings screen sets each. The
-    /// spacing goes with the characters: tied, it follows them; with
+    /// Put the settings on this preset: the callers' speed and yours,
+    /// their calls and their habits, the run style and how many call, and
+    /// the band's fading and static, the way the settings screen sets each.
+    /// The spacing goes with the characters: tied, it follows them; with
     /// Farnsworth spacing set, the same range goes there, as callers in a
-    /// contest space at the speed they key.
+    /// contest space at the speed they key. Your speed goes back to the
+    /// middle of the callers' range, no speed of your own: so the settings
+    /// a preset left before your speed was a setting are on it still.
     pub fn apply(self, settings: &mut TrainingSettings) {
         let (slowest, fastest) = self.char_wpm();
         put(settings, RangeSetting::CharWpm, slowest, fastest);
         put(settings, RangeSetting::EffectiveWpm, slowest, fastest);
+        settings.contest.my_wpm = 0;
         settings.set_level(LevelAxis::Callsign, self.tier());
         settings.set_contest_style(self.style());
         settings.contest.contest_habits = self.habits();
@@ -146,6 +150,7 @@ impl ContestPreset {
             let (slowest, fastest) = preset.char_wpm();
             holds(settings.range(RangeSetting::CharWpm), slowest, fastest)
                 && holds(settings.range(RangeSetting::EffectiveWpm), slowest, fastest)
+                && settings.contest.my_wpm == 0
                 && settings.level(LevelAxis::Callsign) == preset.tier()
                 && settings.contest.contest_style == preset.style()
                 && settings.contest.contest_habits == preset.habits()
@@ -210,8 +215,11 @@ mod tests {
         ];
         for (preset, speed, tier, style, habits, stations, qsb, qrn) in cases {
             let mut settings = contest();
+            settings.contest.my_wpm = 40;
             preset.apply(&mut settings);
             assert_eq!(settings.range(RangeSetting::CharWpm), speed, "{preset:?}");
+            assert_eq!(settings.contest.my_wpm, 0, "{preset:?}: your speed follows");
+            assert_eq!(settings.my_wpm(), (speed.min + speed.max) / 2.0);
             assert_eq!(settings.level(LevelAxis::Callsign), tier, "{preset:?}");
             assert_eq!(settings.active_level(), tier, "the tier is Contest's level");
             assert_eq!(settings.contest.contest_style, style, "{preset:?}");
@@ -309,8 +317,9 @@ mod tests {
         assert_eq!(ContestPreset::of(&settings), Some(ContestPreset::Club));
         // Each a change made as a screen makes it.
         type Change = fn(&mut TrainingSettings);
-        let changes: [(&str, Change); 11] = [
+        let changes: [(&str, Change); 12] = [
             ("speed", |s| s.set_range_min(RangeSetting::CharWpm, 21.0)),
+            ("your speed", |s| s.contest.my_wpm = 23),
             ("fixed speed", |s| {
                 s.set_range_linked(RangeSetting::CharWpm, true)
             }),

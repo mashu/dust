@@ -6,12 +6,12 @@
 
 use cw_core::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, Aim, AutoLevelSettings,
-    CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ERROR_WEIGHT_MAX,
-    EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC, GROUP_REPEAT_MAX,
-    GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, KeyerMode,
-    NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
-    SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
-    adapts_group_size, adapts_speed, aim_section,
+    CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ContestSettings,
+    ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC,
+    GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
+    KeyerMode, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting,
+    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX,
+    VOLUME_MIN, WPM_MAX, WPM_MIN, adapts_group_size, adapts_speed, aim_section,
 };
 use dioxus::prelude::*;
 
@@ -518,12 +518,17 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
             contest: all.curriculum.char_set_mode == CharSetMode::Contest,
         }
     })();
+    let note = if speed.contest {
+        "The callers' speeds, Farnsworth spacing, and yours"
+    } else {
+        "Character speed and Farnsworth spacing"
+    };
     rsx! {
         div { class: "card stack-sm",
             SectionHead {
                 icon: IconName::Gauge,
                 title: "Speed",
-                note: "Character speed and Farnsworth spacing",
+                note,
                 settings,
                 section: SettingsSection::Speed,
             }
@@ -550,8 +555,9 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
             }
             if speed.contest {
                 p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                    "Callers come at speeds drawn from these ranges, and you send at their middle. − and + shift both during a run."
+                    "Callers come at speeds drawn from these ranges."
                 }
+                YourSpeed { settings }
             } else {
                 Switch {
                     title: "Adapt speed to me",
@@ -616,8 +622,94 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
     }
 }
 
-/// Nothing but ranges, which read their own values: this card itself never
-/// redraws for a setting.
+/// Your speed in a run, in whole words a minute: one of your own, kept from
+/// run to run as − and + leave it, or until you set one the middle of the
+/// callers' range, which follows the range, rounded as the run bar shows
+/// it. Set, a press puts it back to the middle. It reads its own values, so
+/// the card around it never redraws for them.
+#[component]
+fn YourSpeed(settings: Signal<TrainingSettings>) -> Element {
+    let (my_wpm, shown) = use_memo(move || {
+        let all = settings.read();
+        (all.contest.my_wpm, all.my_wpm().round())
+    })();
+    rsx! {
+        NumberField {
+            label: "Your speed",
+            value: shown,
+            min: WPM_MIN,
+            max: WPM_MAX,
+            step: 1.0,
+            unit: "WPM",
+            onchange: move |v: f64| settings.write().contest.my_wpm = v.round() as u32,
+        }
+        if my_wpm == 0 {
+            p { id: "your-speed-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                "The middle of the callers' range until you set it. The run screen's − and + move it, and it is kept for the next run."
+            }
+        } else {
+            p { id: "your-speed-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                "Yours from run to run: the run screen's − and + move it, and it is kept for the next run."
+            }
+            div {
+                button {
+                    id: control_id("btn", "callers middle"),
+                    class: "btn btn-secondary btn-sm",
+                    r#type: "button",
+                    onclick: move |_| settings.write().contest.my_wpm = 0,
+                    "Send at the callers' middle"
+                }
+            }
+        }
+    }
+}
+
+/// What your sending reads as: "−9 dB", or "Off" at the bottom.
+fn sending_label(db: i32) -> String {
+    if db <= MY_SENDING_OFF_DB {
+        "Off".to_string()
+    } else if db < 0 {
+        format!("\u{2212}{} dB", -db)
+    } else {
+        format!("{db} dB")
+    }
+}
+
+/// How loud you hear your own messages in a run, in Contest mode only: from
+/// off to the loudest, in decibels as MorseRunner's self-monitor reads,
+/// whatever the volume range above says. It reads its own value, so the
+/// card around it never redraws for it.
+#[component]
+fn SendingLevel(settings: Signal<TrainingSettings>) -> Element {
+    let sending = use_memo(move || {
+        let all = settings.read();
+        (all.curriculum.char_set_mode == CharSetMode::Contest).then_some(all.contest.my_sending_db)
+    })();
+    let Some(db) = sending else {
+        return rsx! {};
+    };
+    // Where it starts, which cw-core keeps.
+    let start = sending_label(ContestSettings::default().my_sending_db);
+    rsx! {
+        SliderField {
+            label: "Your sending",
+            value_label: sending_label(db),
+            value: f64::from(db),
+            min: f64::from(MY_SENDING_OFF_DB),
+            max: f64::from(MY_SENDING_MAX_DB),
+            step: 3.0,
+            disabled: false,
+            onchange: move |v: f64| settings.write().contest.my_sending_db = v.round() as i32,
+        }
+        p { id: "sending-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+            "Your own messages in a run, apart from the volume above: 0 dB is the loudest, {start} about level with an average caller, and Off silent, the run keeping its time."
+        }
+    }
+}
+
+/// Nothing but ranges, which read their own values, and in Contest mode
+/// your sending, which reads its own: this card itself never redraws for a
+/// setting.
 #[component]
 fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
     rsx! {
@@ -648,6 +740,7 @@ fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
                 max_bound: VOLUME_MAX,
                 step: 0.05,
             }
+            SendingLevel { settings }
         }
     }
 }

@@ -174,6 +174,9 @@ fn RunBar(now: Signal<MonoMs>, phase: ContestPhase, qsos: u32, clean: u32, my_wp
     } else {
         StatusDot::Ready
     };
+    // Rounded as the Speed card rounds it and − / + move it, half away from
+    // zero: 16.5 reads 17, and a press moves what is shown by 2.
+    let wpm = my_wpm.round();
     rsx! {
         ProgressHeader {
             status,
@@ -206,7 +209,7 @@ fn RunBar(now: Signal<MonoMs>, phase: ContestPhase, qsos: u32, clean: u32, my_wp
                         onclick: move |_| from_button(ctx, || change_speed(ctx, -SPEED_STEP_WPM)),
                         "−"
                     }
-                    span { class: "run-wpm-value", "{my_wpm:.0}" }
+                    span { class: "run-wpm-value", "{wpm}" }
                     button {
                         id: control_id("more", "wpm"),
                         class: "step",
@@ -320,18 +323,22 @@ fn exchange_label(copies: &[Field]) -> String {
 
 /// One line on what to do next: what Enter does, read from the fields as
 /// typed, so it follows every edit while the fields themselves are never
-/// drawn for one. Before the first CQ, the seconds to it, where the eye is:
-/// on a phone the log's place, where the countdown stands, is below the
-/// keypad.
+/// drawn for one, and with a correction to put right, that Space goes back
+/// to the call where it does. Before the first CQ, the seconds to it, where
+/// the eye is: on a phone the log's place, where the countdown stands, is
+/// below the keypad.
 #[component]
 fn HintLine(qso: QsoState, countdown: Option<u32>) -> Element {
     let ctx = use_context::<AppCtx>();
     let (hint, more) = if let Some(left) = countdown {
         (format!("Your first CQ goes out in {left} s"), String::new())
     } else {
-        ctx.entry
-            .enter(&qso)
-            .map(|enter| (enter.hint, enter.hint_more))
+        // Read for every edit, which can change what Space does, as the
+        // cursor moving can.
+        let enter = ctx.entry.enter(&qso);
+        let space_back = space_goes_to(ctx, ctx.entry.focused()) == Some(EntryField::Call);
+        enter
+            .map(|enter| enter.hint_for(space_back))
             .unwrap_or_default()
     };
     rsx! {
@@ -497,13 +504,29 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
                 if e.key() == Key::Enter && !e.modifiers().intersects(held) {
                     e.prevent_default();
                     press_key(ctx, OpKey::Esm);
-                } else if field == EntryField::Call && e.code() == Code::Space {
-                    // A call has no spaces: Space moves on to Exchange.
+                } else if e.code() == Code::Space
+                    && let Some(to) = space_goes_to(ctx, field)
+                {
+                    // The cursor moves, and no space is typed.
                     e.prevent_default();
-                    focus_field(ctx, EntryField::Exchange);
+                    focus_field(ctx, to);
                 }
             },
         }
+    }
+}
+
+/// Where Space in `field` takes the cursor, the keyboard's, the keypad's
+/// ␣ Field and the key bar's alike: from Call on to Exchange, as a call has
+/// no spaces; from Exchange back to Call, as MorseRunner's and N1MM's space
+/// bar goes, so a call is put right with one key, but where it separates
+/// the exchange's next item
+/// ([`crate::contest_runtime::ContestEntry::space_to_call`]): nowhere, and
+/// it is a space. Moved, the cursor lands at the end of the field.
+fn space_goes_to(ctx: AppCtx, field: EntryField) -> Option<EntryField> {
+    match field {
+        EntryField::Call => Some(EntryField::Exchange),
+        EntryField::Exchange => ctx.entry.space_to_call().then_some(EntryField::Call),
     }
 }
 
@@ -589,7 +612,8 @@ fn KeyBar(qso: QsoState, live: bool) -> Element {
     let query = ctx.settings.peek().contest.contest_kind.rules().query;
     rsx! {
         div { class: "run-keys", role: "group", aria_label: "Messages",
-            EnterChip { qso, live }
+            EnterChip { qso: qso.clone(), live }
+            SpaceKey { qso, live }
             for (key, keyboard, label, touch) in KEY_BAR {
                 {
                     // Logging without Enter needs a QSO to log.
@@ -657,6 +681,46 @@ fn EnterChip(qso: QsoState, live: bool) -> Element {
     }
 }
 
+/// Space, saying what it does now ([`space_goes_to`]): the cursor to the
+/// field it goes to, named as a place so it never reads as a message key
+/// beside F2 Exch, or the space before the exchange's next item. A click
+/// does the same. Lit, as Enter's own keys are, where it takes the cursor
+/// back to a call to put right, as Enter's `Fix call` does. A finger has
+/// the keypad's ␣ Field instead.
+#[component]
+fn SpaceKey(qso: QsoState, live: bool) -> Element {
+    let ctx = use_context::<AppCtx>();
+    // Read for every edit, which can change what Space does, as the cursor
+    // moving can.
+    let corrected = ctx.entry.enter(&qso).is_some_and(|enter| enter.corrected);
+    let to = space_goes_to(ctx, ctx.entry.focused());
+    let (label, says) = match to {
+        Some(EntryField::Call) => ("→ Call", "Space: the cursor back to the Call field"),
+        Some(EntryField::Exchange) => ("→ Exch", "Space: the cursor on to the Exchange field"),
+        None => (
+            "Next item",
+            "Space: a space before the exchange's next item",
+        ),
+    };
+    let class = key_class(false, corrected && to == Some(EntryField::Call), false);
+    rsx! {
+        button {
+            id: control_id("btn", "space"),
+            class: "{class} run-key-space",
+            r#type: "button",
+            aria_label: says,
+            disabled: html_bool(!live),
+            onmousedown: keep_focus,
+            onclick: move |_| match space_goes_to(ctx, ctx.entry.focus()) {
+                Some(to) => focus_field(ctx, to),
+                None => from_button(ctx, || ctx.entry.push(' ')),
+            },
+            kbd { "Space" }
+            span { class: "run-key-label", "{label}" }
+        }
+    }
+}
+
 /// The keypad, as a run has it: the characters a call or an exchange can
 /// hold, ⌫, the next field, and Enter named for what it sends.
 #[component]
@@ -670,9 +734,9 @@ fn RunKeypad(qso: QsoState, open: bool) -> Element {
     let on_key = use_callback(move |pressed: PadKey| match pressed {
         PadKey::Char(ch) => entry.push(ch),
         PadKey::Back => entry.pop(),
-        PadKey::Field => match entry.focus() {
-            EntryField::Call => focus_field(ctx, EntryField::Exchange),
-            EntryField::Exchange => entry.push(' '),
+        PadKey::Field => match space_goes_to(ctx, entry.focus()) {
+            Some(to) => focus_field(ctx, to),
+            None => entry.push(' '),
         },
         PadKey::Send(_) | PadKey::Next => press_key(ctx, OpKey::Esm),
     });
@@ -937,6 +1001,7 @@ mod tests {
     use crate::audio::fake::Recorder;
     use crate::persist::Store;
     use crate::testing::{Ui, contest_settings, run};
+    use crate::ui::widgets::focus_end_script;
     use cw_core::{QsoCheck, QsoError, RunClock};
 
     /// The text of the first element whose class list starts with `class`,
@@ -1207,8 +1272,16 @@ mod tests {
         ui.type_into("field-call", &his);
         ui.press_enter("field-call");
         ui.advance(300).await;
+        // What is still to go: their call from the character sounding, as
+        // a call that starts with E or T has a character out by now, then
+        // your exchange.
         let tx = text_of(&ui, "run-line run-tx");
-        assert!(tx.contains(&format!("{his} {yours}")), "{kind:?}: {tx}");
+        let rest = tx.strip_prefix("TX ▸").unwrap_or(&tx);
+        let (call_rest, exchange) = rest.split_once(' ').unwrap_or_default();
+        assert!(
+            !call_rest.is_empty() && his.ends_with(call_rest) && exchange == yours,
+            "{kind:?}: {tx}"
+        );
         assert_eq!(
             text_of(&ui, "run-line run-hint"),
             format!("Copy their {copy}, then TU & log")
@@ -1342,9 +1415,9 @@ mod tests {
     }
 
     /// The key bar has a button for every key, named by its key on a
-    /// keyboard, and lights those Enter would press; the keys that log
-    /// without Enter wait for a QSO to log. A finger keeps CQ, Again and
-    /// Wipe only.
+    /// keyboard, Space by the field it goes to, and lights those Enter
+    /// would press; the keys that log without Enter wait for a QSO to log.
+    /// A finger keeps CQ, Again and Wipe only.
     #[test]
     fn the_key_bar_names_every_key_and_lights_what_enter_presses() {
         run(|| async {
@@ -1375,6 +1448,19 @@ mod tests {
                 let finger = ["btn-cq", "btn-again", "btn-wipe"].contains(&id);
                 assert_eq!(!tag.contains("run-key-desk"), finger, "{id}");
             }
+            // Space says where it takes the cursor, never by a message's
+            // name: F2 sends your exchange, Space goes to its field.
+            assert_eq!(button_label(&ui, "btn-space"), "Space→ Exch");
+            assert!(ui.input_tag("btn-space").contains("run-key-desk"));
+            assert!(
+                ui.input_tag("btn-space")
+                    .contains(r#"aria-label="Space: the cursor on to the Exchange field""#)
+            );
+            let label = |id: &str, key: &str| {
+                let text = button_label(&ui, id);
+                text.strip_prefix(key).unwrap_or(&text).trim().to_string()
+            };
+            assert_ne!(label("btn-space", "Space"), label("btn-exch", "F2"));
             let lit = |ui: &Ui| -> Vec<String> {
                 ["btn-cq", "btn-exch", "btn-his", "btn-again", "btn-tu-log"]
                     .iter()
@@ -1423,10 +1509,12 @@ mod tests {
             ui.press_enter("field-call");
             // Your call and exchange, then the correction, heard whole.
             assert!(ui.run_until(15_000, |ui| enter(ui).1 == "Fix call").await);
+            // The cursor went on to Exchange with your exchange: a wider
+            // screen says Space goes back to the call.
             assert_eq!(
                 enter(&ui),
                 (
-                    "They corrected you: fix the call, then Enter".into(),
+                    "They corrected you: fix the call, then Enter. Space goes back to it".into(),
                     "Fix call".into()
                 )
             );
@@ -1896,9 +1984,8 @@ mod tests {
             assert!(ui.has(r#"<span class="key-return">↵</span>"#));
             ui.tap("key-field");
             ui.tap("key-1");
-            ui.tap("key-field");
             ui.tap("key-2");
-            assert!(ui.input_tag("field-exchange").contains(r#"value="1 2""#));
+            assert!(ui.input_tag("field-exchange").contains(r#"value="12""#));
             // Enter sends the call and your exchange: the station has not
             // sent its own yet, so what was typed is no copy of it.
             ui.tap("key-enter");
@@ -1932,20 +2019,311 @@ mod tests {
         });
     }
 
+    /// A run of `kind` started on the app as `call`, from `state` and
+    /// `section`, as MIKE: its fields ready to type in.
+    fn run_of(kind: cw_core::ContestKind, call: &str, state: &str, section: &str) -> Ui {
+        let mut settings = contest_settings();
+        settings.contest.contest_kind = kind;
+        settings.contest.my_call = call.to_string();
+        settings.contest.my_name = "MIKE".to_string();
+        settings.contest.my_state = state.to_string();
+        settings.contest.my_section = section.to_string();
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("btn-start-training");
+        assert!(ui.shows("field-exchange"), "{kind:?}");
+        ui
+    }
+
+    /// Press Space in the field `id`: whether a space is typed, and the
+    /// fields the cursor was given since the last press, each with the
+    /// cursor put at the end of what it holds, nothing selected, so ⌫ takes
+    /// its last character at once.
+    fn press_space(ui: &mut Ui, id: &str) -> (bool, Vec<String>) {
+        ui.take_focused();
+        let typed = ui.press_key(id, Key::Character(" ".into()), Code::Space);
+        let given = ui.take_focus_scripts();
+        for (field, script) in &given {
+            assert_eq!(script, &focus_end_script(field), "{field}: at its end");
+        }
+        (typed, given.into_iter().map(|(field, _)| field).collect())
+    }
+
     /// Space in the Call field moves on to Exchange, as a call has no
-    /// spaces, and types nothing.
+    /// spaces, and types nothing; Space in the Exchange field of a WPX run,
+    /// whose exchange has one item to type, goes back to Call whatever it
+    /// holds, and types nothing either: the cursor at the call's end, the
+    /// call and the exchange as they were.
     #[test]
-    fn space_in_the_call_moves_on_to_the_exchange() {
+    fn space_moves_between_the_call_and_the_exchange() {
         run(|| async {
             let (mut ui, _recorder, call) = first_caller().await;
             ui.type_into("field-call", &call);
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
-            ui.press_key("field-call", Key::Character(" ".into()), Code::Space);
+            let (typed, focused) = press_space(&mut ui, "field-call");
+            assert!(!typed, "no space in a call");
+            assert_eq!(focused, ["field-exchange"]);
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
             assert_eq!(ui.with_app(|ctx| ctx.entry.shown(EntryField::Call)), call);
-            // A space in Exchange is a space.
-            ui.press_key("field-exchange", Key::Character(" ".into()), Code::Space);
+            for exch in ["", "21", "5NN 214"] {
+                ui.type_into("field-exchange", exch);
+                ui.with_app(|ctx| focus_field(ctx, EntryField::Exchange));
+                let (typed, focused) = press_space(&mut ui, "field-exchange");
+                assert!(!typed, "{exch:?}: Space typed a space");
+                assert_eq!(focused, ["field-call"], "{exch:?}");
+                assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
+                assert_eq!(ui.with_app(|ctx| ctx.entry.shown(EntryField::Call)), call);
+                assert_eq!(
+                    ui.with_app(|ctx| ctx.entry.shown(EntryField::Exchange)),
+                    exch
+                );
+            }
+        });
+    }
+
+    /// Space in the Exchange field as each contest has it: where the
+    /// exchange has one item to type (WPX, CQ WW, ARRL DX from either side)
+    /// back to Call whatever is typed; where it has more (the Sprint, Field
+    /// Day, Simple QSO), back to Call once what is typed reads whole, or is
+    /// nothing, or ends in a space, and otherwise a space, the cursor
+    /// staying for the next item.
+    #[test]
+    fn space_in_the_exchange_follows_each_contests_exchange() {
+        use cw_core::ContestKind::{ArrlDx, Cqww, FieldDay, SimpleQso, Sprint, Wpx};
+        run(|| async {
+            let back = |ui: &mut Ui, exch: &str| {
+                ui.type_into("field-exchange", exch);
+                ui.with_app(|ctx| focus_field(ctx, EntryField::Exchange));
+                let (typed, focused) = press_space(ui, "field-exchange");
+                let back = focused == ["field-call"];
+                assert_eq!(typed, !back, "{exch:?}: a space, or the call, never both");
+                assert_eq!(
+                    ui.with_app(|ctx| ctx.entry.focus()) == EntryField::Call,
+                    back,
+                    "{exch:?}"
+                );
+                back
+            };
+            for (kind, call, state, typed) in [
+                (Wpx, "DL1ABC", "", "21"),
+                (Cqww, "DL1ABC", "", "1"),
+                (ArrlDx, "DL1ABC", "", "M"),
+                (ArrlDx, "K1ABC", "MA", "1"),
+            ] {
+                let mut ui = run_of(kind, call, state, "");
+                for exch in ["", typed] {
+                    assert!(back(&mut ui, exch), "{kind:?} as {call}: {exch:?}");
+                }
+            }
+            for (kind, call, state, section, partly, whole) in [
+                (Sprint, "K1ABC", "MA", "", "145 BOB", "145 BOB OR"),
+                (FieldDay, "K1ABC", "", "EMA", "1D", "1D EMA"),
+                (SimpleQso, "DL1ABC", "", "", "579", "579 BOB"),
+            ] {
+                let mut ui = run_of(kind, call, state, section);
+                assert!(!back(&mut ui, partly), "{kind:?}: {partly:?} wants more");
+                assert!(back(&mut ui, &format!("{partly} ")), "{kind:?}: spaced");
+                assert!(back(&mut ui, whole), "{kind:?}: {whole:?} reads whole");
+                assert!(back(&mut ui, ""), "{kind:?}: nothing typed");
+            }
+        });
+    }
+
+    /// The keypad's ␣ Field does as Space does: on to Exchange from Call;
+    /// back to Call from a WPX exchange, typing nothing; in a Sprint, a
+    /// space between its exchange's items until it reads whole or already
+    /// ends in one, then back to Call, the cursor at the call's end.
+    #[test]
+    fn the_keypads_field_key_follows_the_space_rule() {
+        run(|| async {
+            let (mut ui, _recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            ui.tap("key-field");
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
+            ui.tap("key-1");
+            ui.take_focused();
+            ui.tap("key-field");
+            // The cursor at the end of the call, nothing selected.
+            assert_eq!(
+                ui.take_focus_scripts(),
+                [("field-call".to_string(), focus_end_script("field-call"))]
+            );
+            assert!(ui.input_tag("field-exchange").contains(r#"value="1""#));
+            assert!(
+                ui.input_tag("field-call")
+                    .contains(&format!(r#"value="{call}""#))
+            );
+            // The keypad's ⌫ then works on the call.
+            ui.tap("key-delete");
+            let shorter = &call[..call.len() - 1];
+            assert!(
+                ui.input_tag("field-call")
+                    .contains(&format!(r#"value="{shorter}""#))
+            );
+
+            let mut ui = run_of(cw_core::ContestKind::Sprint, "K1ABC", "MA", "");
+            ui.with_app(|ctx| focus_field(ctx, EntryField::Exchange));
+            for key in [
+                "key-1",
+                "key-4",
+                "key-5",
+                "key-field",
+                "key-b",
+                "key-o",
+                "key-b",
+            ] {
+                ui.tap(key);
+            }
+            assert!(
+                ui.input_tag("field-exchange")
+                    .contains(r#"value="145 BOB""#)
+            );
+            ui.tap("key-field");
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
+            assert!(
+                ui.input_tag("field-exchange")
+                    .contains(r#"value="145 BOB ""#)
+            );
+            ui.tap("key-field");
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Call);
+            assert!(
+                ui.input_tag("field-exchange")
+                    .contains(r#"value="145 BOB ""#),
+                "no space typed and dropped"
+            );
+            ui.with_app(|ctx| focus_field(ctx, EntryField::Exchange));
+            for key in ["key-o", "key-r"] {
+                ui.tap(key);
+            }
+            ui.tap("key-field");
+            assert_eq!(
+                ui.with_app(|ctx| ctx.entry.focus()),
+                EntryField::Call,
+                "145 BOB OR reads whole"
+            );
+        });
+    }
+
+    /// A correction to put right with the cursor in Exchange: a wider
+    /// screen's hint says Space goes back to the call, the part a phone's
+    /// line leaves out, and the key bar lights Space, named for the Call
+    /// field it goes to; in Call, the hint is as ever and Space is named for
+    /// Exchange.
+    #[test]
+    fn a_correction_says_space_goes_back_to_the_call() {
+        run(|| async {
+            let (mut ui, _recorder, call) = first_caller().await;
+            let space = |ui: &Ui| (button_label(ui, "btn-space"), ui.input_tag("btn-space"));
+            let (label, tag) = space(&ui);
+            assert_eq!(label, "Space→ Exch");
+            assert!(tag.contains("run-key-desk") && !tag.contains("run-key-next"));
+            let base = call.split('/').next().unwrap_or(&call);
+            let (at, letter) = base
+                .char_indices()
+                .rfind(|(_, ch)| ch.is_ascii_alphabetic())
+                .expect("a suffix");
+            let other = if letter == 'Q' { "X" } else { "Q" };
+            let slip = format!("{}{other}{}", &call[..at], &call[at + 1..]);
+            ui.type_into("field-call", &slip);
+            ui.press_enter("field-call");
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
+            assert!(ui.run_until(15_000, |ui| enter(ui).1 == "Fix call").await);
+            assert_eq!(
+                text_of(&ui, "run-line run-hint"),
+                "They corrected you: fix the call, then Enter. Space goes back to it"
+            );
+            assert!(ui.has(r#"<span class="run-hint-more">. Space goes back to it</span>"#));
+            let (label, tag) = space(&ui);
+            assert_eq!(label, "Space→ Call");
+            assert!(tag.contains("run-key-next"), "lit, as Enter goes there too");
+            ui.take_focused();
+            ui.click("btn-space");
+            assert_eq!(ui.take_focused(), ["field-call"]);
+            assert_eq!(
+                text_of(&ui, "run-line run-hint"),
+                "They corrected you: fix the call, then Enter"
+            );
+            let (label, tag) = space(&ui);
+            assert_eq!(label, "Space→ Exch");
+            assert!(!tag.contains("run-key-next"));
+        });
+    }
+
+    /// A Sprint's correction with its exchange copied partly: Space types
+    /// the space before the next item, so neither the hint nor the key bar
+    /// says it goes back to the call; the bar names it for the item, and a
+    /// click on it types the space as the key does. Once the exchange ends
+    /// in a space, Space goes back, and both say so.
+    #[test]
+    fn space_cues_follow_the_space_rule_in_a_sprint_exchange_typed_partly() {
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+            settings.contest.my_call = "K1ABC".into();
+            settings.contest.my_name = "MIKE".into();
+            settings.contest.my_state = "MA".into();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.advance(10_000).await;
+            let call = recorder.starts().last().unwrap().transcript.others[0]
+                .text
+                .clone();
+            let call = call.split_whitespace().last().unwrap().to_string();
+            let base = call.split('/').next().unwrap_or(&call);
+            let (at, letter) = base
+                .char_indices()
+                .rfind(|(_, ch)| ch.is_ascii_alphabetic())
+                .expect("a suffix");
+            let other = if letter == 'Q' { "X" } else { "Q" };
+            let slip = format!("{}{other}{}", &call[..at], &call[at + 1..]);
+            ui.type_into("field-call", &slip);
+            ui.press_enter("field-call");
+            assert!(ui.run_until(20_000, |ui| enter(ui).1 == "Fix call").await);
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
+            ui.type_into("field-exchange", "70");
+            assert_eq!(
+                text_of(&ui, "run-line run-hint"),
+                "They corrected you: fix the call, then Enter"
+            );
+            assert_eq!(button_label(&ui, "btn-space"), "SpaceNext item");
+            assert!(!ui.input_tag("btn-space").contains("run-key-next"));
+            let (typed, focused) = press_space(&mut ui, "field-exchange");
+            assert!(typed && focused.is_empty(), "a space, the cursor kept");
+            // The click types it as the key does, the cursor kept there.
+            ui.type_into("field-exchange", "70 CAROL");
+            ui.take_focused();
+            ui.click("btn-space");
+            assert!(
+                ui.input_tag("field-exchange")
+                    .contains(r#"value="70 CAROL ""#)
+            );
+            assert_eq!(ui.take_focused(), ["field-exchange"]);
+            assert_eq!(button_label(&ui, "btn-space"), "Space→ Call");
+            assert!(ui.input_tag("btn-space").contains("run-key-next"));
+            assert!(text_of(&ui, "run-line run-hint").ends_with(". Space goes back to it"));
+        });
+    }
+
+    /// − and + move the speed the run bar shows by 2 from what it shows,
+    /// from a middle of the callers' range that falls on a half too: it
+    /// reads 17 for 16.5, as the Speed card does.
+    #[test]
+    fn plus_and_minus_move_two_from_what_the_run_bar_shows() {
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.playback.char_wpm_min = 15.0;
+            settings.playback.effective_wpm_min = 15.0;
+            settings.playback.char_wpm_max = 18.0;
+            settings.playback.effective_wpm_max = 18.0;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.advance(8_000).await;
+            let shown = |ui: &Ui| -> String { text_of(ui, "run-wpm-value") };
+            assert_eq!(shown(&ui), "17");
+            ui.tap("more-wpm");
+            assert_eq!(shown(&ui), "19");
+            ui.tap("less-wpm");
+            ui.tap("less-wpm");
+            assert_eq!(shown(&ui), "15");
         });
     }
 
@@ -1964,6 +2342,28 @@ mod tests {
             ui.tap("more-wpm");
             assert!(ui.has(r#"run-wpm-value">32<"#), "{}", ui.html());
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
+        });
+    }
+
+    /// − and + move your speed for the rest of the run and keep it: once
+    /// the run is over, the settings stored hold it, and the Speed card
+    /// shows it as your own.
+    #[test]
+    fn your_speed_is_stored_once_the_run_is_over() {
+        run(|| async {
+            let (mut ui, _recorder, _call) = first_caller().await;
+            ui.tap("more-wpm");
+            ui.tap("more-wpm");
+            ui.tap("less-wpm");
+            assert!(ui.has(r#"run-wpm-value">32<"#), "{}", ui.html());
+            assert_eq!(
+                ui.stored_settings().await.contest.my_wpm,
+                0,
+                "nothing is stored mid-run"
+            );
+            ui.click("btn-end-run");
+            assert_eq!(ui.screen(), "results");
+            assert_eq!(ui.stored_settings().await.contest.my_wpm, 32);
         });
     }
 

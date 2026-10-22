@@ -3,10 +3,11 @@ use super::{
     COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
     EXTRA_WORD_SPACE_MIN, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, GROUP_PAUSE_MAX_SEC,
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    LETTER_LEVEL_CEILING, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
-    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, SIDE_TONE_MAX_HZ,
-    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
-    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    LETTER_LEVEL_CEILING, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN,
+    NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
+    PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
+    STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX,
+    VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 use crate::callsign::{CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN};
 use crate::level::LEVEL_MIN;
@@ -112,12 +113,18 @@ impl TrainingSettings {
             .char_sampling_coverage_strength
             .clamp(0.0, COVERAGE_STRENGTH_MAX);
 
-        // The contest, its run style and its callers' habits need nothing:
-        // each can hold only what it names, and a name read back that this
-        // build does not know is the default already. Show copy is a
-        // switch, on or off, and needs nothing either.
+        // The contest, its run style, its callers' habits and how often
+        // your TU signs need nothing: each can hold only what it names, and
+        // a name read back that this build does not know is the default
+        // already. Show copy is a switch, on or off, and needs nothing
+        // either.
         let k = &mut self.contest;
         k.contest_minutes = k.contest_minutes.min(CONTEST_MINUTES_MAX);
+        // Zero is no speed of your own: the middle of the callers' range.
+        if k.my_wpm != 0 {
+            k.my_wpm = k.my_wpm.clamp(MY_WPM_MIN, MY_WPM_MAX);
+        }
+        k.my_sending_db = k.my_sending_db.clamp(MY_SENDING_OFF_DB, MY_SENDING_MAX_DB);
         k.my_call = super::contest::clean_call(&k.my_call);
         k.my_name = super::contest::clean_name(&k.my_name);
         k.my_state = super::contest::clean_state(&k.my_state);

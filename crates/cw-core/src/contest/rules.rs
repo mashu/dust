@@ -1,11 +1,11 @@
 //! Each contest as one row of a table: what you send, what you copy, who
 //! calls and how it scores. A new contest is a row and its data.
 
-use super::ContestKind;
 use super::data::places::{fold_labrador, w_ve};
 use super::exchange::{self, Field, cut_power, cut_serial, cut_zone};
 use super::serial::{SPRINT_SERIALS, SerialFit, WPX_SERIALS};
 use super::turn::Sender;
+use super::{ContestKind, RunStyle, TuCall};
 use crate::callsign::{CallSpec, Countries};
 
 /// Your side of the ARRL DX contest, from your call: W/VE works only DX, and
@@ -226,6 +226,10 @@ pub struct Fill<'a> {
     /// The name you copied of the station you work, as the Exchange field
     /// reads it, for a TU that greets it by name. Empty for none.
     pub his_name: &'a str,
+    /// Your TU signs with your call, though the contest's does not by its
+    /// own rules: a pile-up's, as often as you choose
+    /// ([`ContestRules::tu_adds_call`]).
+    pub tu_signed: bool,
 }
 
 /// Every contest that can be run. The others join as their phase ships.
@@ -574,6 +578,22 @@ impl ContestRules {
         self.tu.contains("{my}")
     }
 
+    /// Whether your TU signs with your call in a pile-up as you choose
+    /// ([`TuCall`]): a TU that brings the next caller and does not sign by
+    /// the contest's own rules. The Sprint's always signs, and Simple QSO's
+    /// greets the station by name and brings nobody.
+    pub fn tu_call_chosen(&self) -> bool {
+        self.tu_calls && !self.tu_signs()
+    }
+
+    /// Whether the TU that closes your `number`th QSO in a run of `style`
+    /// adds your call, as [`Fill::tu_signed`] has it: in a pile-up, as often
+    /// as `choice` says, where the rules leave it to you. A single caller's
+    /// never does, as MorseRunner's single calls never sign.
+    pub fn tu_adds_call(&self, style: RunStyle, choice: TuCall, number: u32) -> bool {
+        style == RunStyle::Pileup && self.tu_call_chosen() && choice.signs(number)
+    }
+
     /// Whether callers send the report prefilled, never checked: a report
     /// is part of the exchange, and you do not copy it.
     pub(super) fn prefills_report(&self, side: Side) -> bool {
@@ -591,9 +611,15 @@ impl ContestRules {
         self.fill(self.cq, me)
     }
 
-    /// Your TU, as sent.
+    /// Your TU, as sent: signed with your call after it where `me` says
+    /// so ([`Self::tu_adds_call`]).
     pub fn tu_text(&self, me: &Fill<'_>) -> String {
-        self.fill(self.tu, me)
+        let tu = self.fill(self.tu, me);
+        if me.tu_signed && !me.my_call.is_empty() {
+            format!("{tu} {}", me.my_call)
+        } else {
+            tu
+        }
     }
 
     /// Your exchange as sent.
@@ -843,6 +869,7 @@ mod tests {
             my_section: "DX",
             serial,
             his_name,
+            tu_signed: false,
         }
     }
 
@@ -859,6 +886,7 @@ mod tests {
             my_section: "EMA",
             serial,
             his_name: "BOB",
+            tu_signed: false,
         }
     }
 
@@ -1254,6 +1282,43 @@ mod tests {
                 assert_eq!(copied, rules.copied(side), "{:?}", rules.kind);
             }
         }
+    }
+
+    /// Your call in TU is yours to choose in every contest whose TU works
+    /// as a CQ and does not sign by its own rules: not the Sprint's, which
+    /// always signs, nor Simple QSO's, which brings nobody. Chosen, a
+    /// pile-up's TU adds it as often as you choose, and the TU sent, the
+    /// example's too, reads `TU K1ABC`; a single caller's never does.
+    #[test]
+    fn your_call_in_tu_is_chosen_where_the_rules_leave_it() {
+        for kind in ContestKind::ALL {
+            let chosen = !matches!(kind, ContestKind::Sprint | ContestKind::SimpleQso);
+            let rules = kind.rules();
+            assert_eq!(rules.tu_call_chosen(), chosen, "{kind:?}");
+            for number in 1..=3 {
+                assert_eq!(
+                    rules.tu_adds_call(RunStyle::Pileup, TuCall::Every, number),
+                    chosen,
+                    "{kind:?}"
+                );
+                assert!(!rules.tu_adds_call(RunStyle::Single, TuCall::Every, number));
+                assert!(!rules.tu_adds_call(RunStyle::Pileup, TuCall::Never, number));
+            }
+        }
+        let rules = wpx();
+        assert!(!rules.tu_adds_call(RunStyle::Pileup, TuCall::Third, 2));
+        assert!(rules.tu_adds_call(RunStyle::Pileup, TuCall::Third, 3));
+        let signed = Fill {
+            tu_signed: true,
+            ..k1abc(7)
+        };
+        assert_eq!(rules.tu_text(&signed), "TU K1ABC");
+        assert_eq!(rules.example_qso(Side::WVe, &signed)[4].1, "TU K1ABC");
+        let nameless = Fill {
+            my_call: "",
+            ..signed
+        };
+        assert_eq!(rules.tu_text(&nameless), "TU", "no call to sign with");
     }
 
     /// The flags say what the templates send, so neither can drift from the

@@ -41,19 +41,22 @@ const NESTED_DISCLOSURES: usize = 8;
 const SETTLE_PASSES: usize = 32;
 
 thread_local! {
-    /// The fields the page has asked to give the cursor to, by id, that no
-    /// page has looked for yet.
-    static FOCUS_ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The fields the page has asked to give the cursor to, by id, each
+    /// with the script a browser would run for it, that no page has looked
+    /// for yet.
+    static FOCUS_ASKED: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
     /// How many times the page has asked to be scrolled to its top since a
     /// test last looked.
     static SCROLLS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The page asks for the field with this id to have the cursor. In a
-/// browser that is a script, which runs at once, on the page as drawn so
-/// far; here the [`Ui`] runs it when the page next settles.
-pub fn ask_focus(id: &str) {
-    FOCUS_ASKED.with_borrow_mut(|asked| asked.push(id.to_string()));
+/// The page asks for the field with this id to have the cursor, by
+/// `script`. In a browser the script runs at once, on the page as drawn so
+/// far; here the [`Ui`] runs it when the page next settles, keeping the
+/// script to say where in the field the cursor went
+/// ([`Ui::take_focus_scripts`]).
+pub fn ask_focus(id: &str, script: &str) {
+    FOCUS_ASKED.with_borrow_mut(|asked| asked.push((id.to_string(), script.to_string())));
 }
 
 /// The page asks to be scrolled back to its top. In a browser that is a
@@ -500,9 +503,10 @@ pub struct Ui {
     /// Mutations since the last time anybody asked.
     work: usize,
     /// The fields given the cursor since the last time anybody asked, by
-    /// id. A focus script finds only a field that is drawn when it runs, so
-    /// one asked for before the page has it is not among them.
-    focused: Vec<String>,
+    /// id, each with its focus script. A focus script finds only a field
+    /// that is drawn when it runs, so one asked for before the page has it
+    /// is not among them.
+    focused: Vec<(String, String)>,
     /// What the app on the page has stored.
     pub store: Rc<MemoryStore>,
 }
@@ -666,16 +670,25 @@ impl Ui {
     /// drawn now: before the render an event or a callback sets off, and
     /// after the one an effect follows.
     fn run_focus_scripts(&mut self) {
-        for id in FOCUS_ASKED.take() {
+        for (id, script) in FOCUS_ASKED.take() {
             if self.shows(&id) {
-                self.focused.push(id);
+                self.focused.push((id, script));
             }
         }
     }
 
-    /// The fields the page gave the cursor to since this was last called,
-    /// by id, in order.
+    /// The fields the page gave the cursor to since this or
+    /// [`Self::take_focus_scripts`] was last called, by id, in order.
     pub fn take_focused(&mut self) -> Vec<String> {
+        self.take_focus_scripts()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The same, each with the script that gave it the cursor: whether it
+    /// went to the end of what the field holds, say.
+    pub fn take_focus_scripts(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.focused)
     }
 
@@ -1025,18 +1038,22 @@ impl Ui {
         self.press_key(id, Key::Enter, dioxus::prelude::Code::Enter);
     }
 
-    pub fn press_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) {
-        self.press_key_held(id, key, code, dioxus::prelude::Modifiers::empty());
+    /// Press `key` in the element `id`: whether the page left the key to
+    /// do what it would, a character typed among it, rather than keeping
+    /// it.
+    pub fn press_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) -> bool {
+        self.press_key_held(id, key, code, dioxus::prelude::Modifiers::empty())
     }
 
-    /// Press `key` with `held`, Shift or Ctrl and the like, held down.
+    /// Press `key` with `held`, Shift or Ctrl and the like, held down:
+    /// whether the page left the key to do what it would.
     pub fn press_key_held(
         &mut self,
         id: &str,
         key: Key,
         code: dioxus::prelude::Code,
         held: dioxus::prelude::Modifiers,
-    ) {
+    ) -> bool {
         self.fire(
             "keydown",
             id,
@@ -1048,7 +1065,7 @@ impl Ui {
                 held,
                 false,
             )),
-        );
+        )
     }
 
     pub fn release_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) {

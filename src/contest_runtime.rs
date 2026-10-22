@@ -12,7 +12,7 @@
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestRules, EntryField, Esm,
     Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, Side, TrainingSettings,
-    Turn, esm, loggable, normalize_call, parse_exchange, plan_turn,
+    Turn, esm, loggable, normalize_call, parse_exchange, plan_turn, space_to_call,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -58,7 +58,9 @@ pub struct ContestEntry {
     /// Both fields, with when the call was last edited and when the
     /// exchange first read complete.
     fields: CopyValue<Fields>,
-    focus: CopyValue<EntryField>,
+    /// Which field has the cursor. Only what says how to get back to the
+    /// call reads it as it moves; the inputs never do.
+    focus: Signal<EntryField>,
     /// What the fields are read by: the run's contest, from your side.
     reads: CopyValue<Option<(&'static ContestRules, Side)>>,
     /// Moved on by every edit. Only what reads the fields reads it.
@@ -73,7 +75,7 @@ impl ContestEntry {
     pub fn new() -> Self {
         Self {
             fields: CopyValue::new(Fields::default()),
-            focus: CopyValue::new(EntryField::Call),
+            focus: Signal::new(EntryField::Call),
             reads: CopyValue::new(None),
             typed: Signal::new(0),
             repaint: Signal::new(0),
@@ -151,9 +153,27 @@ impl ContestEntry {
         *self.focus.peek()
     }
 
+    /// The same, for what follows the cursor from field to field: the hint
+    /// and the key that say how to get back to the call. Reading it
+    /// subscribes the caller to the cursor moving.
+    pub fn focused(self) -> EntryField {
+        *self.focus.read()
+    }
+
     /// `field` has the cursor: a tap, a click, or the run moving it.
     pub fn set_focus(mut self, field: EntryField) {
-        self.focus.set(field);
+        if *self.focus.peek() != field {
+            self.focus.set(field);
+        }
+    }
+
+    /// Whether Space in the Exchange field takes the cursor back to Call,
+    /// as the exchange typed stands ([`space_to_call`]), rather than typing
+    /// the space before its next item.
+    pub fn space_to_call(self) -> bool {
+        self.reads
+            .peek()
+            .is_some_and(|(rules, side)| space_to_call(&self.fields.peek().exch, rules, side))
     }
 
     /// The fields as they are now, for a key to carry.
@@ -299,14 +319,25 @@ pub fn press_key(ctx: AppCtx, key: OpKey) {
     apply(ctx, Some(ContestEvent::Key { key, fields }));
 }
 
-/// − / +: your speed, and later callers', moved by `delta` WPM for the rest
-/// of the run. The player is woken inside the press, as for a key.
+/// − / +: your speed, moved by `delta` WPM from your next message on, and
+/// kept as your speed for the next run. The player is woken inside the
+/// press, as for a key. The setting is stored once the run screen is left,
+/// as nothing is stored while a run is on.
 pub fn change_speed(ctx: AppCtx, delta: i32) {
     let Some(lease) = run_lease(ctx) else {
         return;
     };
     lease.wake();
     apply(ctx, Some(ContestEvent::Speed { delta }));
+    let moved = ctx.contest.peek().as_ref().map(|view| view.my_wpm);
+    if let Some(wpm) = moved {
+        // Whole already: − / + move it from the whole speed nearest it.
+        let wpm = wpm.round() as u32;
+        let mut settings = ctx.settings;
+        if settings.peek().contest.my_wpm != wpm {
+            settings.write().contest.my_wpm = wpm;
+        }
+    }
 }
 
 /// Pause the run, from now: you pressed Pause, or the page went out of
@@ -550,20 +581,20 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     });
 }
 
-/// Move the cursor to `field`, on the page and for the paddles.
+/// Move the cursor to `field`, on the page and for the paddles: to the end
+/// of what it holds, with nothing selected, so the next key goes after it
+/// and ⌫ takes its last character.
 pub fn focus_field(ctx: AppCtx, field: EntryField) {
     ctx.entry.set_focus(field);
     let (id, _) = crate::ui::contest::field_name(field);
+    let script = crate::ui::widgets::focus_end_script(&id);
     // Tests have no page to run it on: the harness looks for the field.
     #[cfg(test)]
-    crate::testing::ask_focus(&id);
+    crate::testing::ask_focus(&id, &script);
     #[cfg(not(test))]
-    {
-        let script = crate::ui::widgets::focus_script(&id);
-        spawn_forever(async move {
-            let _ = document::eval(&script).await;
-        });
-    }
+    spawn_forever(async move {
+        let _ = document::eval(&script).await;
+    });
 }
 
 /// The run, taken out of the app, with the audio given back. Its sound has
@@ -856,12 +887,16 @@ mod tests {
     }
 
     /// Your message in a run goes around the receiver: every turn the player
-    /// is handed is planned dry, your tones at the monitor's level. A session
-    /// of groups never is: the station you copy is one the receiver hears.
+    /// is handed is planned dry, your tones at your sending's level, the
+    /// monitor's turned down. A session of groups never is: the station you
+    /// copy is one the receiver hears.
     #[test]
     fn a_runs_turns_are_planned_dry_and_a_sessions_groups_never() {
         run(|| async {
-            let mut h = Harness::with_settings(contest_settings());
+            let settings = contest_settings();
+            let level = settings.contest.sending_level();
+            assert!(level > 0.0 && level < MONITOR_LEVEL);
+            let mut h = Harness::with_settings(settings);
             h.start_training();
             work(&mut h, 60_000, Some(1)).await;
             let starts = h.recorder.starts();
@@ -869,7 +904,7 @@ mod tests {
             assert!(starts.iter().all(|start| start.plan.dry_wanted));
             let cq = &starts[0].plan.wanted.events;
             assert!(!cq.is_empty(), "your CQ was not played");
-            assert!(cq.iter().all(|tone| tone.target_gain == MONITOR_LEVEL));
+            assert!(cq.iter().all(|tone| tone.target_gain == level));
 
             let mut h = Harness::new();
             h.start_training();
@@ -878,6 +913,88 @@ mod tests {
             let starts = h.recorder.starts();
             assert!(!starts.is_empty(), "no group was sent");
             assert!(starts.iter().all(|start| !start.plan.dry_wanted));
+        });
+    }
+
+    /// With your sending off, your messages are silent and nothing else
+    /// changes: each turn the player is handed has no tones of yours and
+    /// lasts as long, the air line shows your message going out, the heard
+    /// timer brings the caller's call to Enter as ever, and a QSO is worked
+    /// and logged clean.
+    #[test]
+    fn your_sending_off_is_silent_and_the_run_keeps_its_time() {
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.contest.my_sending_db = cw_core::MY_SENDING_OFF_DB;
+            let mut loud = settings.clone();
+            loud.contest.my_sending_db = 0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.advance(300).await;
+            let air = view(&h).and_then(|view| view.air).expect("your CQ");
+            assert!(air.still_sending(MonoMs(mono_ms())).starts_with("CQ"));
+            assert!(h.run_until(10_000, quiet).await);
+            work(&mut h, 60_000, Some(1)).await;
+            let starts = h.recorder.starts();
+            assert!(starts.len() >= 3, "{} turns", starts.len());
+            for start in &starts {
+                assert!(start.plan.dry_wanted && start.plan.wanted.events.is_empty());
+                // As long as it would be heard at the loudest.
+                let turn_sec =
+                    plan_morse_playback_for(&start.transcript.text, &loud, &start.transcript.voice)
+                        .duration_sec;
+                assert!(start.plan.wanted.duration_sec + 1e-9 >= turn_sec);
+            }
+            let clean = |h: &Harness| {
+                let Some(row) = view(h).and_then(|view| view.log.first().cloned()) else {
+                    return false;
+                };
+                matches!(&row.status, cw_core::RowStatus::Checked(check) if check.is_clean())
+            };
+            assert!(h.run_until(15_000, clean).await, "logged and checked clean");
+        });
+    }
+
+    /// − and + move your speed, and it is kept: written to the settings as
+    /// it moves, though nothing is stored mid-run, and the next run sends
+    /// at it, storing it as it starts. Callers keep the Speed card's speeds.
+    #[test]
+    fn your_speed_is_kept_for_the_next_run() {
+        run(|| async {
+            let settings = contest_settings();
+            assert_eq!(settings.contest.my_wpm, 0, "the callers' middle, 30");
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            let ctx = h.ctx;
+            h.in_app(|| change_speed(ctx, 2));
+            h.in_app(|| change_speed(ctx, 2));
+            assert_eq!(view(&h).map(|view| view.my_wpm), Some(34.0));
+            assert_eq!(h.ctx.settings.peek().contest.my_wpm, 34);
+            assert_eq!(
+                h.store.load_settings().contest.my_wpm,
+                0,
+                "not stored mid-run"
+            );
+            h.in_app(|| crate::session_runtime::abort_run(ctx));
+            h.pump();
+            assert_eq!(h.screen(), Screen::Home);
+            h.start_training();
+            assert_eq!(h.store.load_settings().contest.my_wpm, 34);
+            assert_eq!(view(&h).map(|view| view.my_wpm), Some(34.0));
+            let cq = h
+                .recorder
+                .starts()
+                .last()
+                .expect("the next run's CQ")
+                .clone();
+            assert_eq!(cq.transcript.voice.char_wpm, 34.0);
+            assert!(
+                cq.transcript
+                    .others
+                    .iter()
+                    .all(|caller| caller.voice.char_wpm == 30.0),
+                "the callers keep the Speed card's"
+            );
         });
     }
 

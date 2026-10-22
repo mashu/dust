@@ -6,9 +6,9 @@
 //! send TU and log, and Enter held with Shift, Ctrl or Alt logs without
 //! sending. Esc or Alt+S stops sending, Alt+W wipes the fields, PgUp and
 //! PgDn move your speed, Alt+P pauses and carries on, Alt+E ends the run.
-//! Enter alone, and Space in the Call field, are the fields' own; Tab moves
-//! on as on any page. F11 stays the app's fullscreen and `[` `]` the
-//! paddles.
+//! Enter alone, and Space, which takes the cursor between Call and
+//! Exchange, are the fields' own; Tab moves on as on any page. F11 stays
+//! the app's fullscreen and `[` `]` the paddles.
 //!
 //! While the run screen is up, a listener on the document hears these keys
 //! wherever the focus is, nowhere at all included, and keeps the browser
@@ -282,7 +282,9 @@ mod tests {
         ] {
             assert_eq!(action_for(name), Some(action), "{name}");
         }
-        // A letter alone is typing, and F11 and the paddles are the app's.
+        // A letter alone is typing, Space the fields' own (it moves the
+        // cursor between them, or types the space between an exchange's
+        // items), and F11 and the paddles are the app's.
         for name in [
             "KeyS",
             "KeyP",

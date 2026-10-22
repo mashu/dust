@@ -20,9 +20,11 @@ use crate::timing::{
     plan_morse_playback_at, plan_morse_playback_for,
 };
 
-/// How loud you hear your own message, as a peak of full scale. It is
-/// played past the receiver, as a rig's sidetone is, so no band setting
-/// moves its level or takes any of it away.
+/// The loudest you hear your own message, as a peak of full scale: your
+/// sending at 0 dB, which the Tone and volume card turns down from here
+/// ([`crate::ContestSettings::sending_level`]). It is played past the
+/// receiver, as a rig's sidetone is, so no band setting moves its level or
+/// takes any of it away.
 ///
 /// Half of full scale: about 3 dB under the paddle's sidetone at the default
 /// volume floor (0.7), so a message sounds like your own keying; 4.4 dB over
@@ -150,8 +152,8 @@ impl Turn {
 
 /// The voice you send in: the receiver's centre pitch, your speed with no
 /// Farnsworth spacing, and a keyer's fist. Its volume is full, but
-/// [`plan_turn`] plays it at [`MONITOR_LEVEL`] whatever the volume says:
-/// you hear your message as you send it, not through the receiver.
+/// [`plan_turn`] plays it at your sending's level whatever the volume
+/// says: you hear your message as you send it, not through the receiver.
 pub(super) fn your_voice(settings: &TrainingSettings, wpm: f64) -> StationVoice {
     StationVoice {
         tone_hz: settings.side_tone_center(),
@@ -205,23 +207,33 @@ pub(super) fn sounding_at(spans: &[(usize, f64, f64)], at_sec: f64) -> Option<us
 
 /// The sound of `turn`. `wanted` is your message, stretched to end with the
 /// last reply, because both players play a send for as long as `wanted`
-/// lasts. It is dry: played past the receiver at [`MONITOR_LEVEL`], so the
-/// filter never shapes it and the AGC never ducks a reply for it. `others`
-/// are the replies, through the receiver, each after its delay and never
-/// cut, which is why [`crate::plan_transmission`], which cuts them where
-/// `wanted` ends, is not used. A turn of callers alone has a `wanted` with
-/// no tones in it.
+/// lasts. It is dry: played past the receiver at your sending's level
+/// ([`crate::ContestSettings::sending_level`]), so the filter never shapes
+/// it and the AGC never ducks a reply for it; with your sending off it has
+/// no tones, and lasts as long all the same, so the turn keeps its time and
+/// the heard timer with it. `others` are the replies, through the
+/// receiver, each after its delay and never cut, which is why
+/// [`crate::plan_transmission`], which cuts them where `wanted` ends, is
+/// not used. A turn of callers alone has a `wanted` with no tones in it.
 ///
 /// A caller's fade is laid into its tones' envelopes ([`fade_tones`]), as
 /// both players play a tone at its envelope; the send itself carries no
 /// fading, so none reaches your message.
 pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmission {
+    let level = settings.contest.sending_level();
     let mut wanted: Option<PlaybackPlan> = None;
     let mut others = Vec::new();
     for segment in &turn.segments {
         let mut plan = match segment.who {
             Sender::You => {
-                plan_morse_playback_at(&segment.text, settings, &segment.voice, MONITOR_LEVEL)
+                let mut plan =
+                    plan_morse_playback_at(&segment.text, settings, &segment.voice, level);
+                // Silent, a tone is only work for the player: its time is
+                // kept in the plan's length.
+                if level <= 0.0 {
+                    plan.events.clear();
+                }
+                plan
             }
             Sender::Caller(_) | Sender::Qrm => {
                 let mut plan = plan_morse_playback_for(&segment.text, settings, &segment.voice);
@@ -423,12 +435,16 @@ mod tests {
         }
     }
 
-    /// Your tones are a keyer's at the monitor's level: every one the same
+    /// Your tones are a keyer's at your sending's level: every one the same
     /// gain, its envelope never above it, nothing faded.
     #[test]
     fn your_tones_are_unfaded() {
         let planned = plan_turn(&turn(), &settings());
-        let gain = MONITOR_LEVEL;
+        let gain = settings().contest.sending_level();
+        assert!(
+            gain > 0.0 && gain < MONITOR_LEVEL,
+            "turned down from the top"
+        );
         assert!(!planned.wanted.events.is_empty());
         for tone in &planned.wanted.events {
             assert!((tone.target_gain - gain).abs() < 1e-12);
@@ -532,7 +548,7 @@ mod tests {
     }
 
     /// Faded callers or not, your message is never faded: your tones keep
-    /// the monitor's level and share their envelopes, as a keyer's do.
+    /// your sending's level and share their envelopes, as a keyer's do.
     #[test]
     fn your_tones_stay_unfaded_beside_faded_callers() {
         let mut turn = faded(12.0);
@@ -544,13 +560,13 @@ mod tests {
         let unfaded = plan_turn(&self::turn(), &settings());
         assert_eq!(planned.wanted.events.len(), unfaded.wanted.events.len());
         for (tone, base) in planned.wanted.events.iter().zip(&unfaded.wanted.events) {
-            assert_eq!(tone.target_gain, MONITOR_LEVEL);
+            assert_eq!(tone.target_gain, settings().contest.sending_level());
             assert_eq!(&tone.envelope[..], &base.envelope[..]);
         }
     }
 
     /// Your message is played past the receiver, and only yours: `wanted`
-    /// holds your tones alone, at the monitor's level, and each caller comes
+    /// holds your tones alone, at your sending's level, and each caller comes
     /// through the receiver at its own, as a group session's every station
     /// does.
     #[test]
@@ -602,6 +618,53 @@ mod tests {
 
         callers.segments.clear();
         assert_eq!(callers.transcript(), None);
+    }
+
+    /// Your sending, from the loudest down to off: your tones at its level,
+    /// their envelopes peaking there; off, none at all, and the turn as
+    /// long as ever, the replies where they were.
+    #[test]
+    fn your_tones_play_at_your_sendings_level_and_none_when_off() {
+        let turn = turn();
+        let mut settings = settings();
+        for db in [0, -9, -30] {
+            settings.contest.my_sending_db = db;
+            let level = settings.contest.sending_level();
+            let planned = plan_turn(&turn, &settings);
+            assert!(!planned.wanted.events.is_empty(), "{db} dB");
+            for tone in &planned.wanted.events {
+                assert!((tone.target_gain - level).abs() < 1e-12, "{db} dB");
+                let peak = tone.envelope.iter().fold(0.0f32, |a, v| a.max(*v));
+                assert!((f64::from(peak) - level).abs() < 1e-3, "{db} dB: {peak}");
+            }
+        }
+        settings.contest.my_sending_db = 0;
+        let loudest = plan_turn(&turn, &settings);
+        assert!((loudest.wanted.events[0].target_gain - MONITOR_LEVEL).abs() < 1e-12);
+        settings.contest.my_sending_db = crate::settings::MY_SENDING_OFF_DB;
+        let off = plan_turn(&turn, &settings);
+        assert!(off.dry_wanted && off.wanted.events.is_empty());
+        assert!((off.wanted.duration_sec - loudest.wanted.duration_sec).abs() < 1e-12);
+        assert!((off.wanted.duration_sec - turn.duration_sec()).abs() < 1e-9);
+        assert_eq!(off.others.len(), loudest.others.len());
+        assert_eq!(off.others[0].events.len(), loudest.others[0].events.len());
+        assert_eq!(
+            off.others[0].events[0].start_sec,
+            loudest.others[0].events[0].start_sec
+        );
+        // A CQ nobody answers still lasts as long as it is sent.
+        let cq = Turn {
+            segments: vec![segment(
+                Sender::You,
+                "CQ DL1ABC TEST",
+                your_voice(&settings, 30.0),
+                0.0,
+            )],
+            ..turn
+        };
+        let alone = plan_turn(&cq, &settings);
+        assert!(alone.wanted.events.is_empty());
+        assert!((alone.wanted.duration_sec - cq.duration_sec()).abs() < 1e-9);
     }
 
     #[test]

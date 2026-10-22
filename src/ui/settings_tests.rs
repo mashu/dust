@@ -923,3 +923,173 @@ fn show_copy_is_a_session_shape_switch_in_contest_mode() {
         assert!(!ui.stored_settings().await.contest.contest_show_copy);
     });
 }
+
+/// Your speed is on the Speed card in Contest mode only: until you set
+/// one, the middle of the callers' range, which it says; set, it is yours,
+/// stored, with a press back to the middle; a preset and the card's reset
+/// put it back to the middle too.
+#[test]
+fn your_speed_is_on_the_speed_card_in_contest_mode() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(!ui.shows("number-your-speed"), "not outside Contest");
+
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert_eq!(value_of(&ui, "number-your-speed"), "30");
+        assert!(
+            ui.has("The middle of the callers&#39; range until you set it. The run screen&#39;s − and + move it"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.shows("btn-callers-middle"));
+        assert!(ui.has("Callers come at speeds drawn from these ranges."));
+        // It sits on the Speed card, after the callers' ranges.
+        let html = ui.html();
+        let card = html.find(">Speed<").expect("the card");
+        let range = html.find("Character speed").expect("the callers' range");
+        let yours = html.find(r#"id="number-your-speed""#).expect("your speed");
+        assert!(card < range && range < yours);
+
+        ui.commit("number-your-speed", "34");
+        assert_eq!(ui.stored_settings().await.contest.my_wpm, 34);
+        assert_eq!(value_of(&ui, "number-your-speed"), "34");
+        assert!(ui.has("Yours from run to run"));
+        ui.click("btn-callers-middle");
+        assert_eq!(ui.stored_settings().await.contest.my_wpm, 0);
+        assert!(!ui.shows("btn-callers-middle"));
+
+        ui.click("more-number-your-speed");
+        assert_eq!(ui.stored_settings().await.contest.my_wpm, 31);
+        ui.click("preset-club");
+        assert_eq!(ui.stored_settings().await.contest.my_wpm, 0, "a preset");
+        assert_eq!(value_of(&ui, "number-your-speed"), "23");
+        // A middle on a half reads as the run bar reads it: 16.5 as 17.
+        ui.click("preset-first-qso");
+        assert_eq!(value_of(&ui, "number-your-speed"), "17");
+        ui.click("preset-club");
+        assert!(ui.input_tag("preset-club").contains("active"));
+        ui.commit("number-your-speed", "40");
+        ui.advance(50).await;
+        assert!(!ui.input_tag("preset-club").contains("active"), "your own");
+        ui.click("reset-speed");
+        assert_eq!(ui.stored_settings().await.contest.my_wpm, 0, "the reset");
+    });
+}
+
+/// Your sending is on the Tone and volume card in Contest mode only, in
+/// decibels from the loudest down to off, at -9 dB until you set it; it
+/// is stored, a preset leaves it alone, and the card's reset puts it back.
+#[test]
+fn your_sending_is_on_the_tone_card_in_contest_mode() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(!ui.shows("slider-your-sending"), "not outside Contest");
+
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.shows("slider-your-sending"));
+        assert!(
+            ui.has(r#"<span class="slider-value">−9 dB</span>"#),
+            "{}",
+            ui.html()
+        );
+        // Apart from the volume, and level with an average caller where it
+        // starts, as cw-core keeps that.
+        assert!(ui.has(
+            "Your own messages in a run, apart from the volume above: 0 dB is the loudest, −9 dB about level with an average caller, and Off silent"
+        ));
+        // It sits on Tone and volume, after the volume.
+        let html = ui.html();
+        let card = html
+            .find(">Tone &amp; volume<")
+            .or_else(|| html.find(">Tone &#38; volume<"))
+            .expect("the card");
+        let volume = html.find(r#"id="link-volume""#).expect("the volume");
+        let sending = html
+            .find(r#"id="slider-your-sending""#)
+            .expect("your sending");
+        assert!(card < volume && volume < sending);
+
+        ui.click("less-slider-your-sending");
+        assert_eq!(ui.stored_settings().await.contest.my_sending_db, -12);
+        assert!(ui.has(r#"<span class="slider-value">−12 dB</span>"#));
+        ui.type_into("slider-your-sending", "-60");
+        assert_eq!(ui.stored_settings().await.contest.my_sending_db, -60);
+        assert!(ui.has(r#"<span class="slider-value">Off</span>"#));
+        assert!(
+            ui.input_tag("less-slider-your-sending")
+                .contains("disabled")
+        );
+        ui.type_into("slider-your-sending", "0");
+        assert!(ui.has(r#"<span class="slider-value">0 dB</span>"#));
+        ui.click("preset-contester");
+        assert_eq!(
+            ui.stored_settings().await.contest.my_sending_db,
+            0,
+            "a preset leaves it alone"
+        );
+        ui.click("reset-tone-volume");
+        assert_eq!(ui.stored_settings().await.contest.my_sending_db, -9);
+    });
+}
+
+/// Your call in TU is on the contest card in a pile-up, where the
+/// contest's TU leaves it to you: every QSO, every third (as it starts)
+/// or never, each saying what it does, and the card's example QSO, your
+/// first, signing its TU as that QSO would. Not for a single caller, the
+/// Sprint, whose TU always signs, or Simple QSO, whose TU is its own; the
+/// card's reset puts every third back.
+#[test]
+fn your_call_in_tu_is_on_the_contest_card_in_a_pile_up() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(!ui.shows("tu-every-third"), "a single caller's never signs");
+        ui.click("style-pile-up");
+        assert!(ui.input_tag("tu-every-third").contains("active"));
+        assert!(ui.has("Your call in TU"));
+        assert!(ui.has(
+            "Every third QSO&#39;s TU signs with your call, so a station tuning in hears who is running"
+        ));
+        ui.click("tu-never");
+        assert_eq!(
+            ui.stored_settings().await.contest.contest_tu_call,
+            cw_core::TuCall::Never
+        );
+        assert!(ui.has("No TU signs with your call; the callers still call after each"));
+        assert!(ui.has(">TU<") && !ui.has(">TU DL1ABC<"), "the example's TU");
+        ui.click("tu-every-qso");
+        assert!(ui.has("Every TU signs with your call"));
+        // The example QSO is your first: every QSO's TU signs it.
+        assert!(ui.has(">TU DL1ABC<"), "the example's TU signs");
+        ui.click("tu-every-third");
+        assert!(!ui.has(">TU DL1ABC<"), "your first QSO is not your third");
+        ui.click("tu-every-qso");
+        for (contest, shown) in [
+            ("contest-na-sprint", false),
+            ("contest-simple-qso", false),
+            ("contest-field-day", true),
+            ("contest-cq-ww", true),
+            ("contest-arrl-dx", true),
+            ("contest-cq-wpx", true),
+        ] {
+            ui.click(contest);
+            assert_eq!(ui.shows("tu-every-qso"), shown, "{contest}");
+        }
+        ui.click("style-single-caller");
+        assert!(!ui.shows("tu-every-qso"));
+        assert_eq!(
+            ui.stored_settings().await.contest.contest_tu_call,
+            cw_core::TuCall::Every,
+            "kept while it is not shown"
+        );
+        ui.click("reset-character-set");
+        assert_eq!(
+            ui.stored_settings().await.contest.contest_tu_call,
+            cw_core::TuCall::Third
+        );
+    });
+}

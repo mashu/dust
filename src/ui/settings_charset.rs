@@ -1,8 +1,9 @@
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, Fill, GROUP_SIZE_MAX, LevelAxis,
     MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
-    SequenceChoice, SettingsSection, TrainingSettings, WORD_LIST_MAX, WordList, compute_char_pool,
-    current_practice_window, parse_callsign, tier_examples, unlocked_practice_count,
+    SequenceChoice, SettingsSection, TrainingSettings, TuCall, WORD_LIST_MAX, WordList,
+    compute_char_pool, current_practice_window, parse_callsign, tier_examples,
+    unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
@@ -77,6 +78,14 @@ const RUN_STYLES: [(RunStyle, &str); 2] = [
     (RunStyle::Pileup, "Pile-up"),
 ];
 
+/// How often your TU signs with your call, in the order the card offers
+/// it.
+const TU_CALLS: [(TuCall, &str); 3] = [
+    (TuCall::Every, "Every QSO"),
+    (TuCall::Third, "Every third"),
+    (TuCall::Never, "Never"),
+];
+
 /// How many call at once in a pile-up of `settings`, from the Band card's
 /// stations range, and the noun that counts them: "1–3" callers, "1" caller.
 pub(crate) fn pileup_count(settings: &TrainingSettings) -> (String, &'static str) {
@@ -135,6 +144,9 @@ struct ContestCard {
     /// One caller at a time, or a pile-up, and how many call in one.
     style: RunStyle,
     callers: String,
+    /// How often your TU signs with your call, where the contest's TU
+    /// leaves it to you; none where its rules decide.
+    tu_call: Option<TuCall>,
     /// What you send: `5NN + serial`.
     sends: String,
     /// What you copy, as the log heads it: `NR`.
@@ -170,6 +182,7 @@ impl ContestCard {
             kind,
             style,
             callers,
+            tu_call: rules.tu_call_chosen().then_some(contest.contest_tu_call),
             sends: rules.sends(side),
             copies: copies.join("\u{a0}"),
             side_note: rules.side_note(side, parse_callsign(&contest.my_call).is_some()),
@@ -184,6 +197,9 @@ impl ContestCard {
                     my_power: &contest.my_power,
                     my_class: &contest.my_class,
                     my_section: or_stand_in(contest.section_sent(), "<your section>"),
+                    // The QSO is your first: its TU signs as a run's
+                    // first would, with your call in TU every QSO.
+                    tu_signed: rules.tu_adds_call(style, contest.contest_tu_call, 1),
                     ..Fill::default()
                 },
             ),
@@ -406,6 +422,11 @@ pub fn CharsetCard(
             }
             if let Some(contest) = c.contest.clone() {
                 RunStylePicker { settings, style: contest.style, callers: contest.callers }
+                // A single caller's TU never signs, as MorseRunner's single
+                // calls never do.
+                if let (RunStyle::Pileup, Some(tu_call)) = (contest.style, contest.tu_call) {
+                    TuCallPicker { settings, tu_call }
+                }
             }
             if c.mode == CharSetMode::Mixed {
                 NumberField {
@@ -589,6 +610,35 @@ fn RunStylePicker(settings: Signal<TrainingSettings>, style: RunStyle, callers: 
             }
         }
         p { id: "run-style-line", class: "muted", style: "margin: 0;", "{line}" }
+    }
+}
+
+/// How often your TU signs with your call in a pile-up: every QSO, every
+/// third, as MorseRunner's station ID rate has it, or never. The callers
+/// call after your TU whichever it is.
+#[component]
+fn TuCallPicker(settings: Signal<TrainingSettings>, tu_call: TuCall) -> Element {
+    let line = match tu_call {
+        TuCall::Every => "Every TU signs with your call",
+        TuCall::Third => {
+            "Every third QSO's TU signs with your call, so a station tuning in hears who is running"
+        }
+        TuCall::Never => "No TU signs with your call; the callers still call after each",
+    };
+    rsx! {
+        div { class: "eyebrow", "Your call in TU" }
+        div { class: "mode-pills",
+            for (each, label) in TU_CALLS {
+                Seg {
+                    label,
+                    id: control_id("tu", label),
+                    pill: true,
+                    active: tu_call == each,
+                    onclick: move |_| settings.write().contest.contest_tu_call = each,
+                }
+            }
+        }
+        p { id: "tu-call-line", class: "muted", style: "margin: 0;", "{line}" }
     }
 }
 

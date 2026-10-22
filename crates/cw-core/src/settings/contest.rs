@@ -1,20 +1,41 @@
 //! What Contest mode adds to the settings: which contest a run is, whether
 //! one station calls at a time or a pile-up, how its callers operate, how
-//! long a run lasts, and your station. Everything else a run uses is shared
-//! with group training.
+//! long a run lasts, how often your TU signs, how fast and how loud you
+//! send, and your station. Everything else a run uses is shared with group
+//! training.
 
 use serde::{Deserialize, Serialize};
 
-use super::{STATIONS_MIN, TrainingSettings};
+use super::{STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
 use crate::callsign::parse_callsign;
 use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{CallerHabits, ContestKind, Field, RunStyle, Side};
+use crate::contest::{CallerHabits, ContestKind, Field, MONITOR_LEVEL, RunStyle, Side, TuCall};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
+
+/// Your speed, in whole words a minute, inside the Speed card's bounds: 0
+/// below them sends at the middle of the callers' character speed range
+/// ([`TrainingSettings::my_wpm`]).
+pub const MY_WPM_MIN: u32 = WPM_MIN as u32;
+pub const MY_WPM_MAX: u32 = WPM_MAX as u32;
+
+/// How loud you hear your own messages, in decibels from the loudest, as
+/// MorseRunner's self-monitor level is set (`MonLevel`, -60 to 0 dB): at the
+/// top, [`MONITOR_LEVEL`]; at the bottom, nothing at all.
+pub const MY_SENDING_MAX_DB: i32 = 0;
+pub const MY_SENDING_OFF_DB: i32 = -60;
+
+/// Your sending until you set it: level with an average caller as you hear
+/// it. The loudest stands about 6 dB over an average caller before the
+/// receiver's AGC, which ducks that caller some 4 dB more, so a caller is
+/// heard about 10 dB under it (§5.3 of the design); 9 dB down, your message
+/// sits a decibel over the caller, as a rig's sidetone set to the receiver's
+/// audio does, and still stands well clear of the default band's noise.
+const MY_SENDING_DEFAULT_DB: i32 = -9;
 
 /// The longest callsign kept: room for a host and a marker around a call,
 /// `VP2E/DL1ABC/P` aside.
@@ -77,6 +98,21 @@ pub struct ContestSettings {
     /// on the board.
     #[serde(deserialize_with = "forgiving_bool")]
     pub contest_show_copy: bool,
+    /// How often your TU signs with your call in a pile-up, where the
+    /// contest's TU does not sign by its own rules: every QSO, every third,
+    /// or never. Set on the contest card, with the run style.
+    pub contest_tu_call: TuCall,
+    /// Your speed, in words a minute, kept from run to run as − and + leave
+    /// it. Zero, until you set it, sends at the middle of the callers'
+    /// character speed range ([`TrainingSettings::my_wpm`]). Set on the
+    /// Speed card.
+    #[serde(deserialize_with = "forgiving_wpm")]
+    pub my_wpm: u32,
+    /// How loud you hear your own messages, in decibels from the loudest,
+    /// [`MONITOR_LEVEL`]; [`MY_SENDING_OFF_DB`] is silent. Set on the Tone
+    /// and volume card.
+    #[serde(deserialize_with = "forgiving_sending")]
+    pub my_sending_db: i32,
     /// Your callsign: upper case, letters, digits and single slashes inside
     /// it. Empty until you give one.
     pub my_call: String,
@@ -112,6 +148,9 @@ impl Default for ContestSettings {
             contest_habits: CallerHabits::Easy,
             contest_minutes: 10,
             contest_show_copy: false,
+            contest_tu_call: TuCall::Third,
+            my_wpm: 0,
+            my_sending_db: MY_SENDING_DEFAULT_DB,
             my_call: String::new(),
             my_name: String::new(),
             my_state: String::new(),
@@ -131,7 +170,47 @@ fn forgiving_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<b
     Ok(value.as_bool().unwrap_or(false))
 }
 
+/// A whole number saved as one, as `whole` reads it; anything else, a save
+/// edited by hand, is `fallback` rather than costing the rest of the save.
+/// A number past what `whole` holds is held at its end, for
+/// [`TrainingSettings::clamp`](super::TrainingSettings::clamp) to bound.
+fn forgiving_number<'de, D: serde::Deserializer<'de>, T>(
+    deserializer: D,
+    whole: fn(f64) -> T,
+    fallback: T,
+) -> Result<T, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .filter(|number| number.is_finite())
+        .map_or(fallback, |number| whole(number.round())))
+}
+
+/// Your speed as saved: a speed of your own, or 0 for the middle of the
+/// callers' range, which is what anything but a number reads as.
+fn forgiving_wpm<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    // A float cast to an integer saturates at its ends.
+    forgiving_number(deserializer, |wpm| wpm as u32, 0)
+}
+
+/// Your sending as saved, in decibels; anything but a number is the
+/// level it starts at.
+fn forgiving_sending<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
+    forgiving_number(deserializer, |db| db as i32, MY_SENDING_DEFAULT_DB)
+}
+
 impl ContestSettings {
+    /// How loud your own messages play, as a peak of full scale: the
+    /// monitor's level, [`MONITOR_LEVEL`], turned down by your sending's
+    /// decibels, and nothing at all at [`MY_SENDING_OFF_DB`].
+    pub fn sending_level(&self) -> f64 {
+        if self.my_sending_db <= MY_SENDING_OFF_DB {
+            return 0.0;
+        }
+        let db = f64::from(self.my_sending_db.min(MY_SENDING_MAX_DB));
+        MONITOR_LEVEL * 10f64.powf(db / 20.0)
+    }
+
     /// How long a run lasts at most, in minutes: what it was set to, or the
     /// longest for a run left open.
     pub fn limit_minutes(&self) -> u32 {
@@ -357,6 +436,16 @@ impl ContestSettings {
 }
 
 impl TrainingSettings {
+    /// The speed you send at in a run, in words a minute: the one you set,
+    /// or else the middle of the callers' character speed range, as before
+    /// you set one.
+    pub fn my_wpm(&self) -> f64 {
+        match self.contest.my_wpm {
+            0 => (self.playback.char_wpm_min + self.playback.char_wpm_max) / 2.0,
+            wpm => f64::from(wpm.clamp(MY_WPM_MIN, MY_WPM_MAX)),
+        }
+    }
+
     /// Run contests in `style`. A pile-up of one caller is none at all, so
     /// picking one while the Band card's stations range holds a single
     /// station opens the range to one to three callers, as MorseRunner's
@@ -931,6 +1020,106 @@ mod tests {
             ..ContestSettings::default()
         };
         assert_eq!(hawaii.stand_in(), None, "its call tells its section");
+    }
+
+    /// Your sending is the monitor's level turned down by its decibels:
+    /// the loudest at 0 dB, half as loud in amplitude 6 dB down, and
+    /// nothing at all at the bottom.
+    #[test]
+    fn your_sending_turns_the_monitor_down() {
+        let mut settings = ContestSettings::default();
+        assert_eq!(settings.my_sending_db, -9);
+        let level = |db: i32| {
+            ContestSettings {
+                my_sending_db: db,
+                ..ContestSettings::default()
+            }
+            .sending_level()
+        };
+        assert!((level(0) - MONITOR_LEVEL).abs() < 1e-12);
+        assert!((level(-6) / MONITOR_LEVEL - 0.501).abs() < 1e-3);
+        assert!((level(-9) / MONITOR_LEVEL - 0.355).abs() < 1e-3);
+        assert!(level(-57) > 0.0, "quiet, but heard");
+        assert_eq!(level(MY_SENDING_OFF_DB), 0.0);
+        assert_eq!(level(-200), 0.0);
+        assert!(
+            (level(12) - MONITOR_LEVEL).abs() < 1e-12,
+            "never past the top"
+        );
+        settings.my_sending_db = MY_SENDING_OFF_DB;
+        assert_eq!(settings.sending_level(), 0.0);
+    }
+
+    /// Your speed is the one you set; until then, the middle of the
+    /// callers' character speed range, which follows the range.
+    #[test]
+    fn your_speed_is_yours_or_the_callers_middle() {
+        let mut settings = TrainingSettings::default();
+        settings.playback.char_wpm_min = 18.0;
+        settings.playback.char_wpm_max = 25.0;
+        assert_eq!(settings.contest.my_wpm, 0);
+        assert_eq!(settings.my_wpm(), 21.5);
+        settings.playback.char_wpm_max = 31.0;
+        assert_eq!(settings.my_wpm(), 24.5, "it follows the range");
+        settings.contest.my_wpm = 35;
+        assert_eq!(settings.my_wpm(), 35.0);
+        settings.playback.char_wpm_max = 40.0;
+        assert_eq!(settings.my_wpm(), 35.0, "set, it stays");
+        settings.contest.my_wpm = 900;
+        assert_eq!(
+            settings.my_wpm(),
+            WPM_MAX,
+            "held in the Speed card's bounds"
+        );
+    }
+
+    /// Read back, your speed and your sending take any number, held to
+    /// their ends later by the clamp, and anything else, a save edited by
+    /// hand, as their defaults, costing the rest of the save nothing; your
+    /// call in TU reads a name this build does not know as every third.
+    #[test]
+    fn your_speed_sending_and_tu_call_read_back_forgiving() {
+        let read = |json: serde_json::Value| -> ContestSettings {
+            serde_json::from_value(json).expect("the save reads")
+        };
+        let missing = read(serde_json::json!({ "myCall": "DL1ABC" }));
+        assert_eq!(
+            (
+                missing.my_wpm,
+                missing.my_sending_db,
+                missing.contest_tu_call
+            ),
+            (0, -9, TuCall::Third)
+        );
+        assert_eq!(missing.my_call, "DL1ABC");
+        let set = read(serde_json::json!({
+            "myWpm": 32,
+            "mySendingDb": -21,
+            "contestTuCall": "never",
+        }));
+        assert_eq!(
+            (set.my_wpm, set.my_sending_db, set.contest_tu_call),
+            (32, -21, TuCall::Never)
+        );
+        let odd = read(serde_json::json!({
+            "myWpm": "fast",
+            "mySendingDb": null,
+            "contestTuCall": "sometimes",
+            "myCall": "K1ABC",
+        }));
+        assert_eq!(
+            (odd.my_wpm, odd.my_sending_db, odd.contest_tu_call),
+            (0, -9, TuCall::Third)
+        );
+        assert_eq!(odd.my_call, "K1ABC", "the rest of the save is kept");
+        let wild = read(serde_json::json!({ "myWpm": -4.6, "mySendingDb": 1e12 }));
+        assert_eq!((wild.my_wpm, wild.my_sending_db), (0, i32::MAX));
+        let rounded = read(serde_json::json!({ "myWpm": 29.6, "mySendingDb": -8.6 }));
+        assert_eq!((rounded.my_wpm, rounded.my_sending_db), (30, -9));
+        let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
+        assert_eq!(json["contestTuCall"], "third");
+        assert_eq!(json["myWpm"], 0);
+        assert_eq!(json["mySendingDb"], -9);
     }
 
     #[test]
