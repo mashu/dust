@@ -1507,8 +1507,11 @@ mod tests {
             ui.type_into("field-call", &slip);
             assert!(!ui.has("field corrected"));
             ui.press_enter("field-call");
-            // Your call and exchange, then the correction, heard whole.
-            assert!(ui.run_until(15_000, |ui| enter(ui).1 == "Fix call").await);
+            // Your call and exchange, then the correction, heard whole: the
+            // slip with your exchange, about 5 s at 30 WPM; the caller up to
+            // 0.6 s to answer; and its call twice with a serial of up to four
+            // digits, about 10 s more.
+            assert!(ui.run_until(25_000, |ui| enter(ui).1 == "Fix call").await);
             // The cursor went on to Exchange with your exchange: a wider
             // screen says Space goes back to the call.
             assert_eq!(
@@ -2226,7 +2229,9 @@ mod tests {
             ui.type_into("field-call", &slip);
             ui.press_enter("field-call");
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
-            assert!(ui.run_until(15_000, |ui| enter(ui).1 == "Fix call").await);
+            // The correction counts once it is heard whole: about 16 s at
+            // most, as in a_correction_marks_the_call_until_it_is_put_right.
+            assert!(ui.run_until(25_000, |ui| enter(ui).1 == "Fix call").await);
             assert_eq!(
                 text_of(&ui, "run-line run-hint"),
                 "They corrected you: fix the call, then Enter. Space goes back to it"
@@ -2256,6 +2261,10 @@ mod tests {
     #[test]
     fn space_cues_follow_the_space_rule_in_a_sprint_exchange_typed_partly() {
         run(|| async {
+            // One caller, the same every run, so what is checked never rests
+            // on a lucky draw: this seed's caller puts the call right the
+            // slow way, twice and with its exchange.
+            crate::time::pin_seeds(Some(1111));
             let mut settings = contest_settings();
             settings.contest.contest_kind = cw_core::ContestKind::Sprint;
             settings.contest.my_call = "K1ABC".into();
@@ -2277,7 +2286,12 @@ mod tests {
             let slip = format!("{}{other}{}", &call[..at], &call[at + 1..]);
             ui.type_into("field-call", &slip);
             ui.press_enter("field-call");
-            assert!(ui.run_until(20_000, |ui| enter(ui).1 == "Fix call").await);
+            // The correction counts once it is heard whole, and a Sprint's
+            // lines are long: at 30 WPM the slip with your call, serial,
+            // name and state takes about 8.5 s; the caller up to 0.6 s to
+            // answer; and its call twice with your call and its serial,
+            // name and state up to about 16 s more.
+            assert!(ui.run_until(30_000, |ui| enter(ui).1 == "Fix call").await);
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
             ui.type_into("field-exchange", "70");
             assert_eq!(

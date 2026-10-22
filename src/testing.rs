@@ -476,9 +476,11 @@ impl Harness {
     }
 }
 
-/// Run a test body on a paused clock.
+/// Run a test body on a paused clock, its seeds fresh unless it pins them
+/// ([`crate::time::pin_seeds`]).
 pub fn run<F: std::future::Future<Output = ()>>(body: impl FnOnce() -> F) {
     crate::time::reset_mono_clock();
+    crate::time::pin_seeds(None);
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .start_paused(true)
