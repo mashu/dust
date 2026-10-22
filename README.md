@@ -54,12 +54,14 @@ same terms, with its source.
 ### App stores
 
 As an additional permission under section 7 of the GNU General Public License
-version 3, you may convey Dust, or a work based on it, through an app store or
-a similar distribution service, such as Apple's App Store or Google Play, even
-when the service's terms or technical measures (usage rules, device limits,
-digital rights management) add restrictions that the GNU General Public
-License would otherwise not allow, provided that
+version 3, you may package Dust, or a work based on it, for iOS, Android or any
+other platform, and convey it through an app store or a similar distribution
+service, such as Apple's App Store or Google Play, even when the service's
+terms or technical measures (usage rules, device limits, digital rights
+management) add restrictions that the GNU General Public License would
+otherwise not allow, provided that
 
+- it stays free: you offer it free of charge, with nothing in it sold;
 - the Corresponding Source of what you convey is also available under the GNU
   General Public License, with or without this permission, from a place free
   of those restrictions; and

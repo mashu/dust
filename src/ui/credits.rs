@@ -201,7 +201,7 @@ pub fn CreditsCard(
                         }
                     }
                     p { class: "muted",
-                        "Dust {version} is free software, under the GNU General Public License version 3 or later, with permission to publish it in app stores: share it and change it, and what is built from it stays free. "
+                        "Dust {version} is free software, under the GNU General Public License version 3 or later, with permission to publish it in app stores for iOS, Android or any other platform as long as it stays free of charge and its source stays available: share it and change it, and what is built from it stays free. "
                         a {
                             class: "credit-link",
                             href: SOURCE_URL,
@@ -370,6 +370,7 @@ mod tests {
         assert!(html.contains(SOURCE_URL));
         assert!(html.contains("GNU General Public License version 3"));
         assert!(html.contains("permission to publish it in app stores"));
+        assert!(html.contains("stays free of charge and its source stays available"));
         assert!(!html.contains("MIT"), "no other licence: {html}");
     }
 }
