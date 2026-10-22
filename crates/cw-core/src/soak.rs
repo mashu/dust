@@ -15,14 +15,14 @@ use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
 use crate::session::MIN_RESPONSE_MS_PER_CHAR;
 use crate::timing::resolve_pileup;
 use crate::{
-    Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode,
-    ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
+    Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CallerHabits, CharSamplingState,
+    CharSetMode, ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Fields, MonoMs, OpKey, PILEUP_LEVEL_MAX_DB,
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError, Rng, RowStatus,
     RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso, Sender, SessionId, SessionPhase,
     SessionResult, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
-    contest_score, evaluate_auto_level, generate_training_group, plan_morse_playback_for,
-    plan_transmission, plan_turn, resolve_station,
+    contest_score, evaluate_auto_level, generate_training_group, parse_exchange,
+    plan_morse_playback_for, plan_transmission, plan_turn, read_number, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -793,11 +793,27 @@ fn a_pile_up_is_always_something_you_could_copy() {
     }
 }
 
+/// How often, at least, the contest soak hears what the callers' habits
+/// bring, in each run style, under rough habits; real ones bring the
+/// numbers cut and `ENN` alone ([`HabitsHeard::floors`]). The rarer come
+/// seldom by design: `ENN` in one message in twenty that sends a report
+/// nobody copies, a fumble once from one careless caller in ten, in the two
+/// contests with serials, and an early exchange from one operator in twenty
+/// whose call you sent wrong or asked for with a partial.
+const HABIT_FLOORS: HabitsHeard = HabitsHeard {
+    cut: 200,
+    enn: 15,
+    fumbled: 10,
+    early: 10,
+    qrm: 150,
+};
+
 /// Settings from anywhere, in Contest mode, of run `style`: any contest, a
 /// call from a few that read in different ways and are on either side of
 /// ARRL DX, none among them, a name or none, a state or none, Labrador among
 /// them, a zone or none, any power, a Field Day class and a section or none,
-/// Yukon's among them, and runs short enough to reach their end.
+/// Yukon's among them, callers of any habits, and runs short enough to
+/// reach their end.
 fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
     const CALLS: [&str; 8] = [
         "DL1ABC",
@@ -822,6 +838,7 @@ fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
     s.contest.my_class = ["1D", "3A", "12F"][rng.usize_in(0, 2)].to_string();
     s.contest.my_section = ["EMA", "", "DX", "YT"][rng.usize_in(0, 3)].to_string();
     s.contest.contest_minutes = [1, 2, 3, 4, 0][rng.usize_in(0, 4)];
+    s.contest.contest_habits = CallerHabits::ALL[rng.usize_in(0, CallerHabits::ALL.len() - 1)];
     s.clamp()
 }
 
@@ -934,14 +951,66 @@ struct Seen {
     call: String,
     exch: String,
     previous: String,
+    heard: HabitsHeard,
+}
+
+/// What a contest soak run has heard of its callers' habits: numbers sent
+/// cut, reports sent as `ENN`, serials fumbled and put right, exchanges
+/// sent early with a call put right, and messages of QRM.
+#[derive(Debug, Default, Clone, Copy)]
+struct HabitsHeard {
+    cut: u32,
+    enn: u32,
+    fumbled: u32,
+    early: u32,
+    qrm: u32,
+}
+
+impl HabitsHeard {
+    fn add(&mut self, other: Self) {
+        self.cut += other.cut;
+        self.enn += other.enn;
+        self.fumbled += other.fumbled;
+        self.early += other.early;
+        self.qrm += other.qrm;
+    }
+
+    /// How much of each the soak hears at least under `habits`: nothing
+    /// under easy ones, numbers cut and `ENN` under real ones, and all of
+    /// [`HABIT_FLOORS`] under rough ones.
+    fn floors(habits: CallerHabits) -> Self {
+        match habits {
+            CallerHabits::Easy => Self::default(),
+            CallerHabits::Real => Self {
+                cut: HABIT_FLOORS.cut,
+                enn: HABIT_FLOORS.enn,
+                ..Self::default()
+            },
+            CallerHabits::Rough => HABIT_FLOORS,
+        }
+    }
+
+    /// Each count, with what it counts.
+    fn counts(self) -> [(&'static str, u32); 5] {
+        [
+            ("cut numbers", self.cut),
+            ("ENN", self.enn),
+            ("fumbled serials", self.fumbled),
+            ("early exchanges", self.early),
+            ("QRM messages", self.qrm),
+        ]
+    }
 }
 
 /// Every effect a contest run hands back has to be one the runtime can act
 /// on: an id never handed out before, a timer that runs, a turn with
 /// something in it, no station sending over itself and no reply past your
-/// message; and in a pile-up, its callers sixty hertz apart or more.
+/// message; and in a pile-up, its callers sixty hertz apart or more. What
+/// the callers' habits bring is tallied, `machine` as the effects left it
+/// telling an exchange sent early.
 fn check_contest_effects(
     effects: &[ContestEffect],
+    machine: &ContestMachine<Sampler>,
     settings: &TrainingSettings,
     seed: u64,
     step: usize,
@@ -972,14 +1041,17 @@ fn check_contest_effects(
                 for (at, caller) in callers.iter().enumerate() {
                     for other in &callers[..at] {
                         // A caller keyed over sends again only once its rest
-                        // is done.
+                        // is done, and so does QRM.
                         let apart_in_time =
                             caller.start_sec >= other.end_sec || other.start_sec >= caller.end_sec;
                         assert!(
                             caller.who != other.who || apart_in_time,
                             "seed {seed} step {step}: a station sends over itself"
                         );
+                        // QRM may sit anywhere the filter passes it.
                         if caller.who != other.who
+                            && caller.who.is_caller()
+                            && other.who.is_caller()
                             && settings.contest.contest_style == RunStyle::Pileup
                         {
                             let apart = (caller.voice.tone_hz - other.voice.tone_hz).abs();
@@ -990,13 +1062,48 @@ fn check_contest_effects(
                         }
                     }
                 }
+                let rough = settings.contest.contest_habits == CallerHabits::Rough;
+                let easy = settings.contest.contest_habits == CallerHabits::Easy;
                 for segment in &turn.segments {
+                    if segment.who == Sender::Qrm {
+                        // QRM comes only with rough habits, and is heard by
+                        // nobody as a caller.
+                        assert!(rough, "seed {seed} step {step}: QRM under easier habits");
+                        seen.heard.qrm += 1;
+                        continue;
+                    }
                     if segment.who == Sender::You {
                         continue;
                     }
+                    let words: Vec<&str> = segment.text.split_whitespace().collect();
+                    let fumbled = words.iter().any(|word| word.ends_with("EEEEE"));
+                    let enn = words.contains(&"ENN");
+                    assert!(
+                        !fumbled || rough,
+                        "seed {seed} step {step}: a fumbled serial under easier habits: {}",
+                        segment.text
+                    );
+                    assert!(
+                        !enn || !easy,
+                        "seed {seed} step {step}: ENN under easy habits: {}",
+                        segment.text
+                    );
+                    seen.heard.fumbled += u32::from(fumbled);
+                    seen.heard.enn += u32::from(enn);
                     let (call, exch) = match copy_of(&segment.text) {
                         Some(Copied::Call(call)) => (Some(call), None),
-                        Some(Copied::Correction(call, exch)) => (Some(call), exch),
+                        Some(Copied::Correction(call, exch)) => {
+                            // A correction carrying an exchange from a station
+                            // still waiting for yours: a careless operator's,
+                            // under rough habits alone.
+                            let early = exch.is_some() && machine.sends_exchange_early(segment.who);
+                            assert!(
+                                !early || rough,
+                                "seed {seed} step {step}: an early exchange under easier habits"
+                            );
+                            seen.heard.early += u32::from(early);
+                            (Some(call), exch)
+                        }
                         Some(Copied::Exchange(exch)) => (None, Some(exch)),
                         None => (None, None),
                     };
@@ -1006,6 +1113,22 @@ fn check_contest_effects(
                         seen.previous = std::mem::replace(&mut seen.call, call.to_string());
                     }
                     if let Some(exch) = exch {
+                        // Callers with easy habits send their numbers in
+                        // plain digits: a report is all that goes cut.
+                        let rules = settings.contest.contest_kind.rules();
+                        let reading = parse_exchange(rules, settings.contest.side(), &exch);
+                        // A kilowatt is written with a letter, and is no
+                        // number cut.
+                        let cut = reading.fields.iter().any(|read| {
+                            read.field.numeric()
+                                && read.token.chars().any(|c| c.is_ascii_alphabetic())
+                                && read_number(&read.token).is_some()
+                        });
+                        assert!(
+                            !cut || !easy,
+                            "seed {seed} step {step}: a number sent cut under easy habits: {exch}"
+                        );
+                        seen.heard.cut += u32::from(cut);
                         seen.exch = exch;
                     }
                 }
@@ -1097,6 +1220,7 @@ struct SoakRun {
     machine: ContestMachine<Sampler>,
     started: Option<u64>,
     ended: Option<u64>,
+    heard: HabitsHeard,
 }
 
 /// Soak a run of seed `seed`, on events of its own or those of `replay`.
@@ -1119,7 +1243,7 @@ fn contest_run(
     let mut effects = first;
     let steps = replay.map_or(400, <[_]>::len);
     for step in 0..steps {
-        check_contest_effects(&effects, settings, seed, step, &mut seen);
+        check_contest_effects(&effects, &machine, settings, seed, step, &mut seen);
         let (event, at) = match replay {
             Some(events) => events[step].clone(),
             None => {
@@ -1186,6 +1310,7 @@ fn contest_run(
         machine,
         started,
         ended,
+        heard: seen.heard,
     }
 }
 
@@ -1207,8 +1332,11 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
 /// them, so a failure's seed says which.
 fn soak_contest_runs(style: RunStyle) {
     let mut outcomes = Outcomes::default();
-    // QSOs logged in each contest, so every one is seen to be soaked.
+    // QSOs logged in each contest, so every one is seen to be soaked, and
+    // under each of the callers' habits, with what was heard of them.
     let mut logged_in: std::collections::BTreeMap<&str, u32> = Default::default();
+    let mut logged_with: std::collections::BTreeMap<&str, u32> = Default::default();
+    let mut heard_with: std::collections::BTreeMap<&str, HabitsHeard> = Default::default();
     let seeds = match style {
         RunStyle::Single => 0..CONTEST_SEEDS,
         RunStyle::Pileup => CONTEST_SEEDS..CONTEST_SEEDS + PILEUP_SEEDS,
@@ -1221,8 +1349,11 @@ fn soak_contest_runs(style: RunStyle) {
             mut machine,
             started,
             ended,
+            heard,
             ..
         } = contest_run(seed, &settings, None);
+        let with = settings.contest.contest_habits.name();
+        heard_with.entry(with).or_default().add(heard);
         let finished_at = ended.unwrap_or_else(|| {
             let end = events.last().map_or(0, |(_, at)| at.0) + 1;
             let lost = machine.nil_and_lost_copies();
@@ -1313,6 +1444,7 @@ fn soak_contest_runs(style: RunStyle) {
         }
         assert_eq!(logged, view.qsos, "seed {seed}");
         *logged_in.entry(rules.kind.name()).or_default() += logged;
+        *logged_with.entry(with).or_default() += logged;
         let checks: Vec<ScoredQso<'_>> = view
             .log
             .iter()
@@ -1407,5 +1539,24 @@ fn soak_contest_runs(style: RunStyle) {
             "{style:?}: only {count} QSOs logged in {} across the seeds",
             kind.label()
         );
+    }
+    // Every habit of the callers was soaked, and what each brings came up:
+    // numbers cut and `ENN` under real and rough habits, and under rough
+    // ones serials fumbled and put right, exchanges sent early, and QRM.
+    for habits in CallerHabits::ALL {
+        let name = habits.name();
+        let count = logged_with.get(name).copied().unwrap_or(0);
+        assert!(
+            count >= 100,
+            "{style:?}: only {count} QSOs logged under {name} habits"
+        );
+        let heard = heard_with.get(name).copied().unwrap_or_default();
+        let floors = HabitsHeard::floors(habits).counts();
+        for ((what, count), (_, floor)) in heard.counts().into_iter().zip(floors) {
+            assert!(
+                count >= floor,
+                "{style:?}: only {count} {what} under {name} habits"
+            );
+        }
     }
 }

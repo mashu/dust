@@ -27,6 +27,9 @@ fn qso_line(who: Sender, sends: &[String], next: bool) -> Element {
         (Sender::You, true) => ("qso-line you qso-next", "You"),
         (Sender::Caller(_), false) => ("qso-line they", "They"),
         (Sender::Caller(_), true) => ("qso-line they qso-next", "They"),
+        // A station on your frequency that is not calling you: muted, and
+        // never the start of a QSO.
+        (Sender::Qrm, _) => ("qso-line qrm", "QRM"),
     };
     rsx! {
         li { class,

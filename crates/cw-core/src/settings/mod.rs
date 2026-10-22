@@ -533,7 +533,8 @@ pub enum SettingsSection {
     CharacterSet,
     /// Pitch and level of the station you are copying.
     ToneAndVolume,
-    /// Fading, static, the noise floor, the filter and who else is calling.
+    /// Fading, static, the noise floor, the filter, who else is calling,
+    /// and in a contest how the callers operate.
     BandConditions,
     /// Whether the trainer moves your level for you, and on what evidence.
     AutoLevel,
@@ -899,6 +900,7 @@ mod tests {
         s.auto_level.auto_adjust_below_threshold_count = 900;
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
+        s.contest.contest_habits = crate::contest::CallerHabits::Rough;
         s.contest.contest_minutes = 9_000;
         s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
         s.contest.my_name = " jean-luc maximilian ".to_string();
@@ -1502,6 +1504,7 @@ mod tests {
         s.auto_level.char_sampling_thompson = false;
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
+        s.contest.contest_habits = crate::contest::CallerHabits::Real;
         s.contest.contest_minutes = 25;
         s.contest.my_call = "DL1ABC".to_string();
         s.contest.my_name = "MAT".to_string();
@@ -1550,6 +1553,22 @@ mod tests {
         }
     }
 
+    /// The callers' habits are the Band card's: its reset puts them back
+    /// to easy, and no other section's touches them.
+    #[test]
+    fn the_callers_habits_belong_to_the_band() {
+        for section in SettingsSection::ALL {
+            let mut s = wildly_different();
+            s.reset_section(section);
+            let easy = s.contest.contest_habits == crate::contest::CallerHabits::Easy;
+            assert_eq!(
+                easy,
+                section == SettingsSection::BandConditions,
+                "{section:?}"
+            );
+        }
+    }
+
     #[test]
     fn contest_settings_default_to_ten_minutes_of_wpx_with_no_call() {
         let s = TrainingSettings::default();
@@ -1559,6 +1578,7 @@ mod tests {
         let json = serde_json::to_value(&s).expect("serialize");
         assert_eq!(json["contestKind"], "wpx");
         assert_eq!(json["contestStyle"], "single");
+        assert_eq!(json["contestHabits"], "easy");
         assert_eq!(json["contestMinutes"], 10);
         assert_eq!(json["myCall"], "");
         assert_eq!(json["myName"], "");

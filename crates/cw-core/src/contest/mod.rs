@@ -13,6 +13,8 @@
 //!   or newer, reads it back as practice and keeps what it does not know.
 //! - [`caller`]: the stations that answer.
 //! - [`place`]: where callers sit against the receiver, and how loud.
+//! - [`qrm`]: under rough habits, stations on your frequency that are not
+//!   calling you.
 //! - [`turn`]: each thing you send and every reply to it, as one send, each
 //!   caller fading on a path of its own.
 //! - [`machine`]: the run itself, as a pure state machine.
@@ -30,6 +32,7 @@ pub(crate) mod exchange;
 mod machine;
 mod parse;
 mod place;
+mod qrm;
 mod record;
 mod rules;
 mod score;

@@ -142,6 +142,11 @@ pub struct ContestRules {
     pub cq: &'static str,
     /// What ends a QSO.
     pub tu: &'static str,
+    /// A long CQ, as a station that is not calling you sends one on your
+    /// frequency, `{his}` its call: the QRM of rough habits, as
+    /// MorseRunner's QRM stations send theirs (`Contest.pas:491`,
+    /// `ArrlFd.pas:444`).
+    pub long_cq: &'static str,
     /// What you ask for the station's exchange again with (F12): `NR?` in
     /// a contest, as MorseRunner's F12 sends it, `AGN` in an everyday QSO,
     /// whose exchange holds no number.
@@ -156,8 +161,9 @@ pub struct ContestRules {
     pub rst: bool,
     /// Whether your serial is part of it.
     pub serial: bool,
-    /// Whether your serial goes out cut, `TT7`, as MorseRunner sends yours,
-    /// rather than in plain digits, `7`, as the NA Sprint's goes.
+    /// Whether serials go out cut, `TT7`, as MorseRunner sends yours and
+    /// callers with real habits send theirs, rather than in plain digits,
+    /// `7`, as the NA Sprint's go, yours and the callers' alike.
     pub serial_cut: bool,
     /// What you copy from each caller, in the order a log lists it.
     pub copied: PerSide<&'static [Field]>,
@@ -232,6 +238,7 @@ pub(super) const RULES: &[ContestRules] = &[
         kind: ContestKind::Wpx,
         cq: "CQ {my} TEST",
         tu: "TU",
+        long_cq: "CQ CQ TEST {his} {his} TEST",
         query: "NR?",
         exchange: PerSide::both("{rst} {nr}"),
         report: "5NN",
@@ -273,6 +280,7 @@ pub(super) const RULES: &[ContestRules] = &[
         kind: ContestKind::Sprint,
         cq: "CQ NA {my}",
         tu: "TU {my}",
+        long_cq: "CQ CQ NA {his} {his} NA",
         query: "NR?",
         exchange: PerSide::both("{my} {nr} {myname} {mystate}"),
         report: "",
@@ -310,6 +318,7 @@ pub(super) const RULES: &[ContestRules] = &[
         kind: ContestKind::Cqww,
         cq: "CQ {my} TEST",
         tu: "TU",
+        long_cq: "CQ CQ TEST {his} {his} TEST",
         query: "NR?",
         exchange: PerSide::both("{rst} {myzone}"),
         report: "5NN",
@@ -346,6 +355,7 @@ pub(super) const RULES: &[ContestRules] = &[
         kind: ContestKind::ArrlDx,
         cq: "CQ {my} TEST",
         tu: "TU",
+        long_cq: "CQ CQ TEST {his} {his} TEST",
         query: "NR?",
         exchange: PerSide {
             wve: "{rst} {mystate}",
@@ -398,6 +408,7 @@ pub(super) const RULES: &[ContestRules] = &[
         kind: ContestKind::FieldDay,
         cq: "CQ FD {my}",
         tu: "TU",
+        long_cq: "CQ CQ FD {his} {his} FD",
         query: "NR?",
         exchange: PerSide::both("{myclass} {mysec}"),
         report: "",
@@ -432,6 +443,7 @@ pub(super) const RULES: &[ContestRules] = &[
         kind: ContestKind::SimpleQso,
         cq: "CQ CQ DE {my} {my} K",
         tu: "TU {hisname} 73 EE",
+        long_cq: "CQ CQ CQ DE {his} {his} K",
         query: "AGN",
         exchange: PerSide::both("DE {my} UR {rst} {rst} NAME {myname} {myname} BK"),
         report: "599",
@@ -568,6 +580,12 @@ impl ContestRules {
         self.rst && !self.copied(side).contains(&Field::Rst)
     }
 
+    /// A long CQ from `his_call`, a station on your frequency that is not
+    /// calling you.
+    pub(super) fn long_cq_text(&self, his_call: &str) -> String {
+        squeeze(&self.long_cq.replace("{his}", his_call))
+    }
+
     /// Your CQ, as sent.
     pub fn cq_text(&self, me: &Fill<'_>) -> String {
         self.fill(self.cq, me)
@@ -603,6 +621,55 @@ impl ContestRules {
         parts.sort_unstable();
         let parts: Vec<&str> = parts.into_iter().map(|(_, part)| part).collect();
         parts.join(" + ")
+    }
+
+    /// How callers with real habits send the numbers you hear from them on
+    /// `side`, in a learner's words: the letters their digits are cut to,
+    /// an example of each number you copy cut, and what comes now and then
+    /// (`T for 0, N for 9 (TT7 for 7), now and then O for 0 and ENN for
+    /// 5NN`). None where real habits cut nothing you hear, as in Field Day
+    /// and the Sprint, whose serials go plain (§11.6 of the design).
+    pub fn real_numbers(&self, side: Side) -> Option<String> {
+        let copied = self.copied(side);
+        let serial = self.serial_cut && copied.contains(&Field::Nr);
+        let zone = copied.contains(&Field::Zn);
+        let power = copied.contains(&Field::Pwr);
+        let report = copied.contains(&Field::Rst);
+        let letters: Vec<&str> = [
+            (serial || zone || power, "T for 0"),
+            (zone || power, "A for 1"),
+            (serial || zone || power || report, "N for 9"),
+        ]
+        .into_iter()
+        .filter_map(|(cut, letter)| cut.then_some(letter))
+        .collect();
+        let examples: Vec<&str> = copied
+            .iter()
+            .filter_map(|field| match field {
+                Field::Nr if serial => Some("TT7 for 7"),
+                Field::Zn => Some("A4 for 14"),
+                Field::Pwr => Some("ATT for 100"),
+                Field::Rst => Some("57N for 579"),
+                _ => None,
+            })
+            .collect();
+        let enn = if report { "ENN for 599" } else { "ENN for 5NN" };
+        let now_and_then: Vec<&str> = [(serial || power, "O for 0"), (self.rst, enn)]
+            .into_iter()
+            .filter_map(|(sent, form)| sent.then_some(form))
+            .collect();
+        if letters.is_empty() && now_and_then.is_empty() {
+            return None;
+        }
+        let mut said = letters.join(", ");
+        if !examples.is_empty() {
+            said = format!("{said} ({})", examples.join(", "));
+        }
+        if !now_and_then.is_empty() {
+            let sep = if said.is_empty() { "" } else { ", " };
+            said = format!("{said}{sep}now and then {}", now_and_then.join(" and "));
+        }
+        Some(said)
     }
 
     /// How a caller signing `his_call` answers your CQ, as `my_call`. One
@@ -1230,6 +1297,15 @@ mod tests {
             }
             assert!(rules.cq.contains("{my}"), "{:?}", rules.kind);
             assert!(rules.answer.contains("{his}"), "{:?}", rules.kind);
+            // A long CQ is someone else's: its own call, twice, and no
+            // call of yours.
+            assert_eq!(
+                rules.long_cq.matches("{his}").count(),
+                2,
+                "{:?}",
+                rules.kind
+            );
+            assert!(!rules.long_cq.contains("{my}"), "{:?}", rules.kind);
             // The card says who you work exactly where sides change it.
             assert_eq!(rules.works.is_some(), rules.sided(), "{:?}", rules.kind);
         }
@@ -1278,5 +1354,54 @@ mod tests {
         }
         assert_eq!(Side::from_name(""), Side::Dx);
         assert_eq!((Side::WVe.label(), Side::Dx.label()), ("W/VE", "DX"));
+    }
+
+    /// What the Band card says callers with real habits cut follows the
+    /// numbers you copy: a serial where serials go cut, a zone, a power, a
+    /// report, and `ENN` wherever a report goes; nothing in Field Day or
+    /// the Sprint, whose serials go plain. Each example is a form those
+    /// callers send.
+    #[test]
+    fn real_habits_are_said_by_the_numbers_you_copy() {
+        use crate::contest::CallerHabits::Real;
+        use crate::contest::exchange::{send_power, send_report, send_serial, send_zone};
+        use crate::rng::SplitMix64;
+        let said = |kind: ContestKind, side| kind.rules().real_numbers(side);
+        assert_eq!(
+            said(ContestKind::Wpx, Side::Dx).as_deref(),
+            Some("T for 0, N for 9 (TT7 for 7), now and then O for 0 and ENN for 5NN")
+        );
+        assert_eq!(
+            said(ContestKind::Cqww, Side::Dx).as_deref(),
+            Some("T for 0, A for 1, N for 9 (A4 for 14), now and then ENN for 5NN")
+        );
+        assert_eq!(
+            said(ContestKind::ArrlDx, Side::WVe).as_deref(),
+            Some("T for 0, A for 1, N for 9 (ATT for 100), now and then O for 0 and ENN for 5NN")
+        );
+        assert_eq!(
+            said(ContestKind::ArrlDx, Side::Dx).as_deref(),
+            Some("now and then ENN for 5NN")
+        );
+        assert_eq!(
+            said(ContestKind::SimpleQso, Side::Dx).as_deref(),
+            Some("N for 9 (57N for 579), now and then ENN for 599")
+        );
+        for side in [Side::WVe, Side::Dx] {
+            assert_eq!(said(ContestKind::Sprint, side), None);
+            assert_eq!(said(ContestKind::FieldDay, side), None);
+        }
+        let mut rng = SplitMix64::new(2);
+        let mut sent = std::collections::BTreeSet::new();
+        for _ in 0..500 {
+            sent.insert(send_serial(7, Real, true, &mut rng));
+            sent.insert(send_zone(14, Real, &mut rng));
+            sent.insert(send_power("100", Real, &mut rng));
+            sent.insert(send_report(579, Real, &mut rng));
+            sent.insert(send_report(599, Real, &mut rng));
+        }
+        for form in ["TT7", "A4", "ATT", "57N", "ENN"] {
+            assert!(sent.contains(form), "{form} is never sent");
+        }
     }
 }

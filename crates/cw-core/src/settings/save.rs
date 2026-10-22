@@ -371,6 +371,24 @@ mod tests {
         assert_eq!(unknown.contest.contest_minutes, 25, "the rest of the save");
     }
 
+    /// The callers' habits are saved by their name and read back, and
+    /// habits this build does not know, or none at all, read as easy rather
+    /// than costing the rest of the save.
+    #[test]
+    fn callers_habits_read_back_and_unknown_ones_are_easy() {
+        use crate::contest::CallerHabits;
+        let mut rough = TrainingSettings::default();
+        rough.contest.contest_habits = CallerHabits::Rough;
+        let json = serde_json::to_value(&rough).expect("settings serialize");
+        assert_eq!(json["contestHabits"], "rough");
+        assert_eq!(load(json), rough);
+        let unknown = load(serde_json::json!({ "contestHabits": "lids", "contestMinutes": 25 }));
+        assert_eq!(unknown.contest.contest_habits, CallerHabits::Easy);
+        assert_eq!(unknown.contest.contest_minutes, 25, "the rest of the save");
+        let older = load(serde_json::json!({ "contestMinutes": 25 }));
+        assert_eq!(older.contest.contest_habits, CallerHabits::Easy);
+    }
+
     /// A build that knows no contests reads Contest as Callsigns at the same
     /// tier: the mode is one it knows, and `contestActive` a key it skips.
     #[test]

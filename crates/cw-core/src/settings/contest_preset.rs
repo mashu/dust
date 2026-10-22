@@ -1,29 +1,31 @@
 //! Starting points for three kinds of operator in Contest mode: how fast
-//! the callers come, what calls they have, how many call at once, and what
-//! the band does to them.
+//! the callers come, what calls they have, how they operate, how many call
+//! at once, and what the band does to them.
 //!
 //! As with the Experience presets ([`super::Experience`]), a preset is
 //! applied once, through the same calls the settings screen makes, and no
 //! level of it is stored: the settings are on a preset for exactly as long
 //! as everything it set is still what it set. All it sets is shared with
-//! the other modes but the run style, which is the contest's own.
+//! the other modes but the run style and the callers' habits, which are the
+//! contest's own.
 
 use super::experience::{holds, put};
 use super::{LevelAxis, RangeSetting, TrainingSettings};
-use crate::contest::RunStyle;
+use crate::contest::{CallerHabits, RunStyle};
 
 /// A kind of operator, and the contest settings that suit them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContestPreset {
     /// A first contest QSO: one caller at a time, slow and with a plain
-    /// call, on a quiet band.
+    /// call and plain numbers, on a quiet band.
     FirstQso,
     /// A club operator's few contests a year: callers at an everyday
-    /// speed, a small pile-up, calls from anywhere, and the band as it
-    /// usually is.
+    /// speed, sending numbers as contesters do, a small pile-up, calls from
+    /// anywhere, and the band as it usually is.
     Club,
-    /// A contester's: callers fast and with every shape of call, a pile-up
-    /// of up to five, and a band that fades deep and crackles.
+    /// A contester's: callers fast and with every shape of call, careless
+    /// ones among them, a pile-up of up to five, stations on your frequency
+    /// that are not calling you, and a band that fades deep and crackles.
     Contester,
 }
 
@@ -65,6 +67,17 @@ impl ContestPreset {
         }
     }
 
+    /// How the callers operate: plain numbers for a first QSO, as
+    /// contesters send them at a club's pace, and with careless operators
+    /// and QRM on your frequency for a contester.
+    pub fn habits(self) -> CallerHabits {
+        match self {
+            Self::FirstQso => CallerHabits::Easy,
+            Self::Club => CallerHabits::Real,
+            Self::Contester => CallerHabits::Rough,
+        }
+    }
+
     /// The Band card's stations range, fewest and most: the callers at once
     /// in a pile-up, the band's own traffic for a single caller, where one
     /// station leaves the band empty.
@@ -94,18 +107,19 @@ impl ContestPreset {
         }
     }
 
-    /// Put the settings on this preset: the callers' speed, their calls,
-    /// the run style and how many call, and the band's fading and static,
-    /// the way the settings screen sets each. The spacing goes with the
-    /// characters: tied, it follows them; with Farnsworth spacing set, the
-    /// same range goes there, as callers in a contest space at the speed
-    /// they key.
+    /// Put the settings on this preset: the callers' speed, their calls
+    /// and their habits, the run style and how many call, and the band's
+    /// fading and static, the way the settings screen sets each. The
+    /// spacing goes with the characters: tied, it follows them; with
+    /// Farnsworth spacing set, the same range goes there, as callers in a
+    /// contest space at the speed they key.
     pub fn apply(self, settings: &mut TrainingSettings) {
         let (slowest, fastest) = self.char_wpm();
         put(settings, RangeSetting::CharWpm, slowest, fastest);
         put(settings, RangeSetting::EffectiveWpm, slowest, fastest);
         settings.set_level(LevelAxis::Callsign, self.tier());
         settings.set_contest_style(self.style());
+        settings.contest.contest_habits = self.habits();
         // Both ends at once: the stations range has no link of its own, its
         // bounds alone saying whether it is fixed, so moving one end at a
         // time could carry the other with it.
@@ -134,6 +148,7 @@ impl ContestPreset {
                 && holds(settings.range(RangeSetting::EffectiveWpm), slowest, fastest)
                 && settings.level(LevelAxis::Callsign) == preset.tier()
                 && settings.contest.contest_style == preset.style()
+                && settings.contest.contest_habits == preset.habits()
                 && (band.stations_min, band.stations_max) == preset.stations()
                 && level(band.qsb_enabled, band.qsb_depth, preset.qsb_depth())
                 && level(band.qrn_enabled, band.qrn_level, preset.qrn_level())
@@ -144,7 +159,7 @@ impl ContestPreset {
 #[cfg(test)]
 mod tests {
     use super::ContestPreset;
-    use crate::contest::{ContestKind, RunStyle};
+    use crate::contest::{CallerHabits, ContestKind, RunStyle};
     use crate::settings::{CharSetMode, LevelAxis, RangeSetting, RangeValues, TrainingSettings};
 
     /// Settings in Contest mode, as a learner would find them.
@@ -167,6 +182,7 @@ mod tests {
                 range(15.0, 18.0),
                 1,
                 RunStyle::Single,
+                CallerHabits::Easy,
                 (1, 1),
                 None,
                 None,
@@ -176,6 +192,7 @@ mod tests {
                 range(20.0, 26.0),
                 3,
                 RunStyle::Pileup,
+                CallerHabits::Real,
                 (1, 3),
                 Some(0.35),
                 Some(0.25),
@@ -185,18 +202,20 @@ mod tests {
                 range(28.0, 36.0),
                 6,
                 RunStyle::Pileup,
+                CallerHabits::Rough,
                 (2, 5),
                 Some(0.5),
                 Some(0.4),
             ),
         ];
-        for (preset, speed, tier, style, stations, qsb, qrn) in cases {
+        for (preset, speed, tier, style, habits, stations, qsb, qrn) in cases {
             let mut settings = contest();
             preset.apply(&mut settings);
             assert_eq!(settings.range(RangeSetting::CharWpm), speed, "{preset:?}");
             assert_eq!(settings.level(LevelAxis::Callsign), tier, "{preset:?}");
             assert_eq!(settings.active_level(), tier, "the tier is Contest's level");
             assert_eq!(settings.contest.contest_style, style, "{preset:?}");
+            assert_eq!(settings.contest.contest_habits, habits, "{preset:?}");
             let band = &settings.band;
             assert_eq!((band.stations_min, band.stations_max), stations);
             assert_eq!(
@@ -290,13 +309,19 @@ mod tests {
         assert_eq!(ContestPreset::of(&settings), Some(ContestPreset::Club));
         // Each a change made as a screen makes it.
         type Change = fn(&mut TrainingSettings);
-        let changes: [(&str, Change); 9] = [
+        let changes: [(&str, Change); 11] = [
             ("speed", |s| s.set_range_min(RangeSetting::CharWpm, 21.0)),
             ("fixed speed", |s| {
                 s.set_range_linked(RangeSetting::CharWpm, true)
             }),
             ("tier", |s| s.set_active_level(4)),
             ("style", |s| s.set_contest_style(RunStyle::Single)),
+            ("easier habits", |s| {
+                s.contest.contest_habits = CallerHabits::Easy;
+            }),
+            ("rougher habits", |s| {
+                s.contest.contest_habits = CallerHabits::Rough;
+            }),
             ("stations", |s| s.band.stations_max = 4),
             ("fading off", |s| s.band.qsb_enabled = false),
             ("fading depth", |s| s.band.qsb_depth = 0.36),

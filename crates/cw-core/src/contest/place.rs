@@ -102,6 +102,31 @@ pub(super) fn place_contest_caller(
     Some(Placement { tone_hz, volume })
 }
 
+/// How far either side of the receiver's centre a station sending QRM on
+/// your frequency strays, at most, as MorseRunner's do (`QrmStn.pas`):
+/// nearer the centre more often than not.
+const QRM_PITCH_SPREAD_HZ: f64 = 300.0;
+
+/// A place for a station sending QRM on your frequency: near your pitch,
+/// within what the filter passes plainly, so it is heard as callers are,
+/// and anywhere across the volume range, as MorseRunner draws a QRM
+/// station's strength evenly (`QrmStn.pas`).
+pub(super) fn place_qrm(settings: &TrainingSettings, rng: &mut impl Rng) -> Placement {
+    let receiver = FilterDesign::from_settings(settings);
+    let centre = settings.side_tone_center();
+    let (reach_low, reach_high) = receiver.edges_at(PILEUP_SKIRT_DB);
+    let reach = QRM_PITCH_SPREAD_HZ
+        .min(centre - reach_low)
+        .min(reach_high - centre)
+        .max(0.0);
+    let tone_hz = rng
+        .normal_within(centre, reach)
+        .clamp(SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ);
+    let range = settings.volume_range();
+    let volume = rng.pick_in_range(*range.start(), *range.end());
+    Placement { tone_hz, volume }
+}
+
 /// A pile-up caller's pitch, somewhere in the room the callers at `taken`
 /// leave, and never where it would leave too little for the filter's
 /// capacity: placed at random, callers would otherwise wedge the room shut
@@ -265,5 +290,34 @@ mod tests {
         s.band.link_volume = true;
         let linked = place_contest_caller(&s.clamp(), RunStyle::Single, &[], &mut rng);
         assert_eq!(linked.map(|placed| placed.volume), Some(0.2));
+    }
+
+    /// A station sending QRM sits near your pitch, within what the filter
+    /// passes plainly, more often near than far, and anywhere across the
+    /// volume range.
+    #[test]
+    fn qrm_sits_near_your_pitch_inside_the_reach() {
+        for width in [FILTER_WIDTH_MIN, DEFAULT_FILTER_WIDTH_HZ, FILTER_WIDTH_MAX] {
+            let s = settings(width);
+            let (low, high) = FilterDesign::from_settings(&s).edges_at(PILEUP_SKIRT_DB);
+            let centre = s.side_tone_center();
+            let range = s.volume_range();
+            let mut rng = SplitMix64::new(11);
+            let placed: Vec<Placement> = (0..2_000).map(|_| place_qrm(&s, &mut rng)).collect();
+            for at in &placed {
+                assert!(
+                    (low - 1e-6..=high + 1e-6).contains(&at.tone_hz),
+                    "{width}: {at:?}"
+                );
+                assert!((at.tone_hz - centre).abs() <= QRM_PITCH_SPREAD_HZ + 1e-6);
+                assert!(range.contains(&at.volume), "{width}: {at:?}");
+            }
+            let reach = (centre - low).min(high - centre).min(QRM_PITCH_SPREAD_HZ);
+            let near = placed
+                .iter()
+                .filter(|at| (at.tone_hz - centre).abs() < reach / 2.0)
+                .count();
+            assert!(near > 1_200, "{width}: only {near} of 2000 near your pitch");
+        }
     }
 }

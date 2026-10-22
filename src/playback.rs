@@ -75,7 +75,7 @@ impl Dialogue {
 /// a pile-up's callers do.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DialogueLine {
-    /// Who sent it: you, or the first of the callers.
+    /// Who sent it: you, the first of the callers, or QRM.
     pub who: Sender,
     /// What was sent, a send each, in the order they ended.
     pub sends: Vec<String>,
@@ -324,7 +324,9 @@ struct HeardSend {
 
 /// The sends of each of `turns`, in the order they end. A QSO closes with
 /// your TU, and with its station's `signoff` where the contest has one;
-/// the next caller to send begins the next QSO.
+/// the next caller to send begins the next QSO. QRM, a station on your
+/// frequency that is not calling you, is heard as it comes, but begins no
+/// QSO.
 fn sends_of(turns: &[HeardTurn], signoff: Option<&str>) -> Vec<Vec<HeardSend>> {
     let mut qso = 1;
     let mut closed = false;
@@ -339,7 +341,7 @@ fn sends_of(turns: &[HeardTurn], signoff: Option<&str>) -> Vec<Vec<HeardSend>> {
                     let text = &segment.text;
                     if segment.who == Sender::You {
                         closed |= text.split_whitespace().any(|word| word == "TU");
-                    } else if closed && Some(text.as_str()) != signoff {
+                    } else if segment.who.is_caller() && closed && Some(text.as_str()) != signoff {
                         qso += 1;
                         closed = false;
                     }
@@ -357,16 +359,17 @@ fn sends_of(turns: &[HeardTurn], signoff: Option<&str>) -> Vec<Vec<HeardSend>> {
 }
 
 /// `sends` as lines: each its own, but callers sending at once for the
-/// same QSO, one starting before another has ended, share one.
+/// same QSO, one starting before another has ended, share one. QRM is a
+/// line of its own.
 fn lines_of(sends: &[HeardSend]) -> Vec<DialogueLine> {
     let mut lines: Vec<DialogueLine> = Vec::new();
     let mut ended_sec = 0.0;
     for send in sends {
-        let at_once = send.who != Sender::You
+        let at_once = send.who.is_caller()
             && send.start_sec < ended_sec
             && lines
                 .last()
-                .is_some_and(|line| line.who != Sender::You && line.qso == send.qso);
+                .is_some_and(|line| line.who.is_caller() && line.qso == send.qso);
         match lines.last_mut() {
             Some(line) if at_once => line.sends.push(send.text.clone()),
             _ => lines.push(DialogueLine {
@@ -583,6 +586,89 @@ mod tests {
             .player
             .claim(&test_settings())
             .expect("the fake always opens")
+    }
+
+    /// QRM is heard as it comes, a line of its own that no caller shares,
+    /// and begins no QSO after your TU: the next caller does.
+    #[test]
+    fn qrm_is_a_line_of_its_own_and_begins_no_qso() {
+        use cw_core::{HeardTurn, Segment, Sender, SplitMix64, Turn, resolve_station};
+        let voice = resolve_station(&test_settings(), &mut SplitMix64::new(1));
+        let segment = |who, text: &str, start_sec, end_sec| Segment {
+            who,
+            text: text.to_string(),
+            voice,
+            start_sec,
+            end_sec,
+            fade: None,
+        };
+        let turn = |segments| HeardTurn {
+            quiet_ms: 0,
+            turn: Turn {
+                id: 1,
+                at_run_ms: 0,
+                segments,
+            },
+        };
+        let turns = [
+            turn(vec![
+                segment(Sender::You, "K5XYZ 5NN TT1", 0.0, 2.0),
+                segment(Sender::Qrm, "QRL?", 0.0, 1.0),
+                segment(Sender::Caller(0), "TU 5NN 214", 2.3, 4.0),
+            ]),
+            turn(vec![
+                segment(Sender::You, "TU", 0.0, 0.5),
+                segment(Sender::Qrm, "CQ CQ TEST K5ABC K5ABC TEST", 1.0, 6.0),
+                segment(Sender::Caller(1), "W7AB", 0.8, 1.5),
+            ]),
+        ];
+        let sends = sends_of(&turns, None);
+        let said: Vec<Vec<&str>> = sends
+            .iter()
+            .map(|sends| sends.iter().map(|send| send.text.as_str()).collect())
+            .collect();
+        assert_eq!(
+            said,
+            [
+                vec!["QRL?", "K5XYZ 5NN TT1", "TU 5NN 214"],
+                vec!["TU", "W7AB", "CQ CQ TEST K5ABC K5ABC TEST"]
+            ]
+        );
+        let lines: Vec<(Sender, u32)> = sends
+            .iter()
+            .flat_map(|sends| lines_of(sends))
+            .map(|line| (line.who, line.qso))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (Sender::Qrm, 1),
+                (Sender::You, 1),
+                (Sender::Caller(0), 1),
+                (Sender::You, 1),
+                (Sender::Caller(1), 2),
+                (Sender::Qrm, 2),
+            ],
+            "W7AB begins the next, the QRM none"
+        );
+        // A caller sending while QRM does shares no line with it.
+        let at_once = [
+            HeardSend {
+                start_sec: 0.0,
+                end_sec: 2.0,
+                who: Sender::Caller(0),
+                text: "K5XYZ".to_string(),
+                qso: 1,
+            },
+            HeardSend {
+                start_sec: 0.5,
+                end_sec: 2.5,
+                who: Sender::Qrm,
+                text: "QRL?".to_string(),
+                qso: 1,
+            },
+        ];
+        assert_eq!(lines_of(&at_once).len(), 2);
     }
 
     /// A wait is one timer, not a run of short ones.

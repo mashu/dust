@@ -45,15 +45,44 @@ pub enum Sender {
     You,
     /// A caller, by its number in the run.
     Caller(u32),
+    /// A station on your frequency that is not calling you, heard through
+    /// the receiver as a caller is: the QRM of rough habits (§5.6 of the
+    /// design). It never answers, and is no caller and no part of a QSO.
+    Qrm,
 }
 
-/// How a caller's segment fades: the band's fading, as the Band card sets
-/// it, read from `from_sec` on its clock where the segment starts. Each
-/// caller reads it from a point of its own, so no two fade together.
+impl Sender {
+    /// Whether it is a caller: a station that may answer you.
+    pub fn is_caller(self) -> bool {
+        matches!(self, Self::Caller(_))
+    }
+}
+
+/// How a caller's segment fades, or QRM's: the band's fading, as the Band
+/// card sets it, read from `from_sec` on its clock where the segment
+/// starts. Each station reads it from a point of its own, so no two fade
+/// together.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fade {
     pub qsb: Qsb,
     pub from_sec: f64,
+}
+
+impl Fade {
+    /// How a segment starting `start_sec` into a turn keyed at `run_ms`
+    /// fades, sent by a station whose path through the band's fading `qsb`
+    /// starts `path_sec` in; none with the band's fading off.
+    pub(super) fn along(
+        qsb: Option<Qsb>,
+        path_sec: f64,
+        run_ms: u64,
+        start_sec: f64,
+    ) -> Option<Self> {
+        qsb.map(|qsb| Self {
+            qsb,
+            from_sec: path_sec + run_ms as f64 / 1_000.0 + start_sec,
+        })
+    }
 }
 
 /// One station's part of a turn.
@@ -88,7 +117,8 @@ impl Turn {
     }
 
     /// What the turn says, as a send is written down: your message from your
-    /// voice, and each reply as a station calling across it after its delay.
+    /// voice, and each reply, and any QRM, as a station calling across it
+    /// after its delay.
     /// A turn of callers alone is written from the first caller's voice, with
     /// no text of yours. The players play [`plan_turn`]'s plan; this is the
     /// words, for a player that keeps them. None for a turn with nothing in
@@ -193,7 +223,7 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
             Sender::You => {
                 plan_morse_playback_at(&segment.text, settings, &segment.voice, MONITOR_LEVEL)
             }
-            Sender::Caller(_) => {
+            Sender::Caller(_) | Sender::Qrm => {
                 let mut plan = plan_morse_playback_for(&segment.text, settings, &segment.voice);
                 if let Some(fade) = segment.fade {
                     fade_tones(&mut plan.events, fade);
@@ -211,7 +241,7 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
                 yours.duration_sec = yours.duration_sec.max(plan.duration_sec);
             }
             (Sender::You, None) => wanted = Some(plan),
-            (Sender::Caller(_), _) => others.push(plan),
+            (Sender::Caller(_) | Sender::Qrm, _) => others.push(plan),
         }
     }
     let ends = others

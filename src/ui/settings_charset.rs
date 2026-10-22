@@ -7,6 +7,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::playback::Dialogue;
+use crate::ui::band::habits_label;
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
@@ -274,7 +275,8 @@ impl Charset {
 }
 
 /// What a preset sets, in a line: "15–18 WPM · tier 1 calls · one caller
-/// at a time · no fading or static", the band in the Band card's own words.
+/// at a time · easy habits · no fading or static", the callers' habits and
+/// the band in the Band card's own words.
 fn preset_summary(preset: ContestPreset) -> String {
     let (slowest, fastest) = preset.char_wpm();
     let (fewest, most) = preset.stations();
@@ -294,6 +296,7 @@ fn preset_summary(preset: ContestPreset) -> String {
         format!("{} WPM", range_label(slowest, fastest)),
         format!("tier {} calls", preset.tier()),
         callers,
+        format!("{} habits", habits_label(preset.habits()).to_lowercase()),
         band.to_string(),
     ];
     // One piece each, and the dot at the end of a line, not the start of
@@ -537,14 +540,14 @@ fn ContestBody(
 }
 
 /// Where a run starts from: a preset for a first QSO, a club operator or a
-/// contester, each setting the callers' speed and calls, the run style and
-/// how many call, and the band. The settings read Custom once any of that
-/// is changed, as the Experience presets do.
+/// contester, each setting the callers' speed, calls and habits, the run
+/// style and how many call, and the band. The settings read Custom once
+/// any of that is changed, as the Experience presets do.
 #[component]
 fn PresetPicker(settings: Signal<TrainingSettings>, preset: Option<ContestPreset>) -> Element {
     let line = match preset {
         Some(preset) => preset_summary(preset),
-        None => "Custom · a preset sets the callers' speed and calls, how many call, and the band"
+        None => "Custom · a preset sets the callers' speed, calls and habits, how many call, and the band"
             .to_string(),
     };
     rsx! {

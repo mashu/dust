@@ -72,7 +72,11 @@ into `contest/data/counted.rs` (§11.5), the section a call tells by itself
 them, and `myClass` and `mySection` on Your station, which Home asks for
 as it asks for a state (§2, §8). Every contest of the card has shipped;
 two checks stay open, Yukon's section code and the FCC licence counts
-(§14).
+(§14). Slice 4a has landed, the first part of phase 4: `contestHabits`,
+easy, real or rough, on the Band card in Contest mode and written by the
+presets (§8); real habits sending numbers as MorseRunner's callers do,
+checked against its `Station.pas` (§11.6); and rough habits adding
+careless callers and on-frequency QRM (`contest/qrm.rs`, §4.3, §5.6).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -348,7 +352,9 @@ kind replacing an earlier one (11.7).
   callsign, name.
 - **As built.** Your report goes out as `599`, as the template writes it,
   not cut. The caller's report is drawn from §11.5's shares and copied, and
-  goes out in plain digits until Caller habits come (phase 4). Asked again,
+  goes out as its habits send it (§11.6): plain digits under easy habits,
+  599 as `5NN` or now and then `ENN` and any other with its nines cut
+  (`57N`) under real and rough ones (as built, 4a). Asked again,
   the caller sends its exchange without `R TNX`; a correction is `DE K5XYZ`
   or `K5XYZ K5XYZ`, as in WPX. Your TU greets it by the name the Exchange
   field reads (`TU 73 EE` with none). Its `73 EE` comes in the TU's turn and
@@ -394,7 +400,9 @@ North American Sprint.
   first, as the card lists the contests (`ContestKind::shipped` keeps
   that order), and a line under "You send" states the simplifications.
   The dialogue's caller is `W7XYZ`, as the state it sends is Oregon.
-  A QSO logged with `DX` counts a point and no multiplier.
+  A QSO logged with `DX` counts a point and no multiplier. As built (4a),
+  callers send their serials plain under every habit, as yours goes, so
+  Real cuts nothing you copy here (§11.6).
 
 ### CQ WW (`cqww`)
 
@@ -408,11 +416,11 @@ North American Sprint.
 - **Your fields.** Callsign; your zone comes from your call (and state or
   province in North America), with an override.
 - **As built (3a).** Your zone goes out cut and unpadded (`A4` for 14, `5`
-  for 5), as MRCE sends yours; callers send theirs in plain digits under
-  easy habits, the only ones until the Caller habits setting comes (phase
-  4), and the real habits are built and tested already (`send_zone`,
-  §11.6). F12 sends `NR?`, as MRCE's does in every contest. A QSO's points
-  and country go by the call logged, placed where it is at home
+  for 5), as MRCE sends yours; callers send theirs as their habits have
+  them (`send_zone`, §11.6): plain digits under easy habits, and under
+  real and rough ones cut by most callers and now and then padded (as
+  built, 4a). F12 sends `NR?`, as MRCE's does in every contest. A QSO's
+  points and country go by the call logged, placed where it is at home
   (`home_country`, §11.2), its continent by its prefix (European Turkey is
   in Europe): a call Dust cannot place is worth no points and no country,
   and from a call of yours it cannot place every placed station is on
@@ -644,9 +652,9 @@ contest; MRCE's sources are the reference for the numbers below.
   `osNeedNr` station does once its patience is spent, which `DecPatience`
   never sends away: a learner slow to send it again after `NR?` loses no
   QSO for it. Anything you send it brings it back to asking.
-- **QRS** (phase 2, habits `easy`). After 3 incomplete tries (4 for a skilled
-  caller) a caller slows by 12–20% by skill, 2% more from the fourth
-  (`DxOper.pas:343-375`). As built (2c), as MRCE's QRS After a Few
+- **QRS** (phase 2, habits `easy`). After 3 incomplete tries (4 for a
+  skilled caller) a caller slows by 12–20% by skill, 2% more from the
+  fourth (`DxOper.pas:343-375`). As built (2c), as MRCE's QRS After a Few
   Incomplete Calls: an incomplete try is a slip, a piece or a partial of
   its call that reaches it (`mcAlmost`), or a `?` with no call in the
   message while it waits for its call put right or for your TU
@@ -676,12 +684,38 @@ contest; MRCE's sources are the reference for the numbers below.
   a send of it began to reach you at: its call at its slowest call, its
   exchange at its slowest exchange, so an exchange heard only at its own
   speed is credited at that, and a slow reply you keyed over before it
-  began credits nothing (9.1). Every caller does so while callers' habits
-  are easy, which they all are until that setting comes.
+  began credits nothing (9.1). As built (4a), callers do so under easy
+  habits only, a courtesy to a learner; under real and rough habits they
+  keep their speed, as contesters do.
 - **Calling twice.** 10% of pile-up callers send their call twice; single
   callers never do (`DxOper.pas:500-502`). As built, a caller that calls
   twice sends its call twice where the contest's answer has it once
   (`K5XYZ K5XYZ`); Simple QSO's answer sends it twice already.
+- **Careless operators** (phase 4, habits `rough`), as MRCE's LIDs
+  (`DxStn.pas:73`, `Station.pas:509-521`, `DxOper.pas:651-671, 879-886`).
+  As built (4a): one caller in ten, in a contest whose callers send a
+  serial, fumbles a digit of the first serial it sends, its last digit
+  from 2 to 7 or else the one before it, one more or one less, then sends
+  `EEEEE` and the serial right (`TT8EEEEE TT7`); what it sent, for the
+  copy and the check, is the serial right, and it sends it right ever
+  after. One operator in about twenty (MRCE's 0.88 − 5/6) sends its
+  exchange with its call put right before it has yours, each time it puts
+  the call right (`DE K5XYZ 5NN 214` after a slip, a piece or a partial of
+  its call): a correction carrying its exchange, as `NeedCall`'s is, its
+  exchange a copy once it begins to reach you. One still calling takes a
+  partial it fits best as its call sent wrong, as MRCE's near match puts
+  it in `osNeedCallNr` (`DxOper.pas:736`), so it is in a QSO with you, and
+  your TU completes it, as MRCE's does once that exchange is out
+  (`DxOper.pas:784-786`). The exchange it sends for yours after is owed,
+  no repeat you asked for (4.6). And a caller takes a slip of its call for
+  its own one time in 25 (MRCE's 4%), a call of four characters or more:
+  it answers as if you had sent its call, so your log holds the slip and
+  the check shows the call busted with its own (`busted call, was K5XYZ`),
+  as MRCE's `CALL` does. MRCE's early exchange is one word of call (`K5XYZ
+  5NN 214`); Dust's keeps a correction's two words, so where its exchange
+  starts is read alike. MRCE's other LID habits (refusing its right call
+  one time in a hundred, a report other than 599 now and then, no extra
+  patience on garbage) are not built.
 
 | You send | A caller still calling | The station you work |
 |---|---|---|
@@ -923,7 +957,9 @@ exchange the station you work sends again costs its send whatever key drew
 it: `?`, `NR?`, your exchange again (F2) or its call again (F5). One it
 sends with its call put right (4.3) costs it only when your `?` or `NR?`
 drew it: a partial or a slip asked for the call, and the exchange came
-with the correction unasked. A single caller's call brought again by CQ
+with the correction unasked. Nor does the exchange your own first draws
+from a careless operator that sent its exchange early (as built, 4a): it
+owes that one for yours. A single caller's call brought again by CQ
 or TU, once it had begun to reach you, is a `?` by another key, but for
 the TU of a key that logs: after your TU without logging (F3), Enter or
 `.` on that call sends the TU again and logs, as MRCE's does, and the
@@ -1255,6 +1291,43 @@ On-frequency QRM comes with Caller habits `rough` (phase 4): a scripted
 station at 30–50 WPM sending `QRL?`, a long CQ or `<you> QSY QSY`
 (`Contest.pas:783`, `QrmStn.pas`).
 
+As built (4a, `contest/qrm.rs`), a station starts up on average every
+232 s of run time, each start an exponential wait after the one before
+whether or not a station still sends, as MRCE starts one in 0.0002 of its
+blocks of 512 samples at 11,025 Hz, whatever is on the air: 15.5 an hour,
+46.5 messages. It sends one to five messages, four seconds apart give or
+take two, and goes. One that starts up while another still sends waits for
+it to finish and a gap more, where MRCE's would send over it, so no two
+are ever heard at once; of those that start up while the frequency is
+quiet, only the last is still there as the next turn starts, so a long
+silence brings one station, not a queue of them. Its first is `QRL?` one
+time in seven, `QRL? QRL?` two, a long CQ three and your call with `QSY
+QSY` one; the rest are long CQs. It sends at 30 to 49 WPM, its spacing as
+its characters; its call is one of the contest's callers' at your tier,
+its pitch near yours and within what the filter passes plainly (Gaussian,
+out to ±300 Hz), its strength anywhere in the volume range, and it fades
+on a path of its own. The long CQ is the rules row's `long_cq`: `CQ CQ
+TEST K5ABC K5ABC TEST` in WPX, CQ WW and ARRL DX (`Contest.pas:491`),
+`CQ CQ FD … FD` in Field Day (`ArrlFd.pas:444`), and Dust's
+`CQ CQ NA … NA` in the Sprint and `CQ CQ CQ DE … K` in Simple QSO. The
+players hold one send, so QRM is heard inside a turn, as segments of its
+own (`Sender::Qrm`) through the receiver as a caller's are: a message due
+during a turn goes in at its time, one due while the frequency was quiet
+as the next turn starts, and none is cut, so a long CQ late in a turn runs
+the turn on, the callers' timeouts planned with it. A key while it sends
+carries its rest into the next turn from the character sounding, as a
+pile-up caller's, as it never stops for you, and nothing more of QRM goes
+until a gap after that rest, which may run on past where its message was
+planned to end (a start retried, or a lead): no station sends over itself.
+Esc, a pause or a failed sound drops it. It never hears you nor answers,
+is in no QSO and is no station: RX counts callers only
+(`AirView::calling`), Enter and its hint never hear of it, the operators
+and the soak leave it (as a listener knows it by its pitch and speed), the
+copies and timing of §9.1 never look at it, and Hear a QSO shows it as it
+plays, a muted line of its own headed QRM that begins no QSO. Its draws
+come from a stream of its own, so a run under easier habits draws as it
+always has.
+
 ### 5.7 Native, web and silent
 
 The silent player completes a turn at its planned length; the app's tests
@@ -1412,9 +1485,9 @@ in place of `current/total`.
   3 s"), as a phone shows the log's place, where the countdown stands, only
   below the keypad.
 - **The air line** shows only your own message, the part still being sent.
-  RX counts the stations sending but never shows what they send (Show copy,
-  phase 4, is the exception). Each says "—" when it has nothing, as
-  "Reads as" does.
+  RX counts the callers sending, QRM none of them (as built, 4a), but
+  never shows what they send (Show copy, phase 4, is the exception).
+  Each says "—" when it has nothing, as "Reads as" does.
 - **A correction** turns the Call border to `--warn` and fills the field,
   with a "corrected" tag by its label, so it never reads as the focus ring:
   "They corrected you: fix the call, then Enter." (`esm()` says so with
@@ -1608,31 +1681,33 @@ needs a wanted station; Adapt speed to me, until phase 5; Auto level; the
 alphabet controls.
 
 **Presets** (phase 2): First QSO, Club and Contester on the contest card.
-Each writes shared fields (speed ranges, tier, stations, QSB, QRN, later
-Caller habits) and reads "Custom" once any is edited, as Experience does
-(`experience.rs:83, 98-110`, `settings.rs:135-177`). No level is stored.
+Each writes shared fields (speed ranges, tier, stations, QSB, QRN) and
+the contest's run style and Caller habits (as built, 4a), and reads
+"Custom" once any is edited, as Experience does (`experience.rs:83,
+98-110`, `settings.rs:135-177`). No level is stored.
 
 As built (2c), `ContestPreset` (`settings/contest_preset.rs`) applies
 through the calls the screens make, as `Experience` does, and the card is
 on a preset exactly while every field it set still holds; a fading or
 static switched off holds whatever its depth or level, which the band does
-not hear then. It writes the run style too, the one field it sets that is
-the contest's own. The pills sit under the card's QSO, a line under them
-saying what the preset sets in the Band card's words ("15–18 WPM · tier 1
-calls · one caller at a time · no fading or static", each part kept whole
-where a narrow line breaks), or, on none, what a preset would set
-("Custom · a preset sets the callers' speed and calls, how many call, and
-the band"), as Experience's note does on none. They are pills, not
-Experience's dropdown in a card head: they sit inside the Character set
-card between the Contest and Run style pills, three short names that fit
-on a phone's line, and the Run style pill a preset flips shows at once
-what it set.
+not hear then. It writes the run style too, and from 4a the callers'
+habits, the fields it sets that are the contest's own. The pills sit under
+the card's QSO, a line under them saying what the preset sets in the Band
+card's words ("15–18 WPM · tier 1 calls · one caller at a time · easy
+habits · no fading or static", each part kept whole where a narrow line
+breaks, the habit as the Band card names it), or, on none, what a preset
+would set ("Custom · a preset sets the callers' speed, calls and habits,
+how many call, and the band"), as Experience's note does on none. They are
+pills, not Experience's dropdown in a card head: they sit inside the
+Character set card between the Contest and Run style pills, three short
+names that fit on a phone's line, and the Run style pill a preset flips
+shows at once what it set.
 
-| Preset | Callers' speed | Tier | Run style | Stations | QSB depth | QRN level |
-|---|---|---|---|---|---|---|
-| First QSO | 15–18 WPM | 1 | Single caller | 1 | off | off |
-| Club | 20–26 WPM | 3 | Pile-up | 1–3 | 0.35 | 0.25 |
-| Contester | 28–36 WPM | 6 | Pile-up | 2–5 | 0.5 | 0.4 |
+| Preset | Callers' speed | Tier | Run style | Habits | Stations | QSB depth | QRN level |
+|---|---|---|---|---|---|---|---|
+| First QSO | 15–18 WPM | 1 | Single caller | easy | 1 | off | off |
+| Club | 20–26 WPM | 3 | Pile-up | real | 1–3 | 0.35 | 0.25 |
+| Contester | 28–36 WPM | 6 | Pile-up | rough | 2–5 | 0.5 | 0.4 |
 
 First QSO is a beginner's first contest QSO: one caller at a time, a
 little faster than a Koch learner's 15 WPM, with the plainest calls
@@ -1641,7 +1716,10 @@ few contests a year: everyday contest speed, calls from anywhere (two-letter
 prefixes, tier 3), the small pile-up MRCE starts a pile-up at, and the band
 as it ships. Contester is a contester's: callers at 28–36 WPM, every shape
 of call with portables and stations abroad (tier 6), up to five at once,
-and a band that fades deep and crackles. You send at the middle of the
+and a band that fades deep and crackles. As built (4a), First QSO's
+callers send plain numbers (easy), Club's numbers as contesters send
+them (real), and Contester's add careless operators and QRM (rough), the
+hardest preset taking the hardest habits. You send at the middle of the
 speed range, and callers space at the speed they key, as contest callers
 do: the character range is written, and with the speeds tied the spacing
 follows it; with Farnsworth spacing set, the same range goes in the
@@ -1666,11 +1744,28 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `myClass` | String | `1D` | `[1-9][0-9]?[A-F]`, else `1D` (as built, leading zeros dropped: `03A` is `3A`) | Station | 3 |
 | `mySection` | String | `""` | a listed section, `YT`, or `DX`; else `""` (as built, `YT` kept and sent as `TER`) | Station | 3 |
 | `myPower` | String | `100` | 1..=1500 (leading zeros dropped), `K`, `KW` or `1K` as written; else `100` | Station | 3 |
-| `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 |
+| `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 (as built, 4a) |
 | `contestShowCopy` | bool | false | — | Session shape | 4 |
 
 - **Caller habits.** `easy`: plain digits, no LIDs. `real`: numbers as
-  MRCE's callers send them (11.6). `rough`: LIDs and on-frequency QRM.
+  MRCE's callers send them (11.6). `rough`: LIDs and on-frequency QRM. As
+  built (4a), the Band card shows them in Contest mode only, after the
+  pile-up's spread, as "Caller habits" with Easy, Real and Rough and a
+  sentence for each that follows the contest and your side, the numbers
+  you copy cut as its callers cut them (`ContestRules::real_numbers`). In
+  WPX: "Easy: plain digits, nobody slips, and callers slow down for you
+  when you struggle. Real: numbers as contesters send them, T for 0, N for
+  9 (TT7 for 7), now and then O for 0 and ENN for 5NN; nobody slows down
+  for you. Rough: real, with careless callers who fumble a serial, send
+  their exchange too soon or take a wrong call, and now and then a station
+  on your frequency that is not calling you." CQ WW's example is `A4` for
+  14, ARRL DX's from W/VE `ATT` for 100, Simple QSO's `57N` for 579; Field
+  Day and the Sprint cut nothing, and say that Real plays as Easy but for
+  nobody slowing down; a fumble is named only where callers send a serial.
+  The card's note names the callers' habits in Contest mode, and under
+  Rough habits a single caller's Band activity hint says QRM comes even at
+  1. Its reset puts easy back. `clamp()` has nothing to bound: like the
+  contest and its run style, the field holds only what it names.
 - **On disk, Contest is written like a session (9.1):** `"charSetMode":
   "callsign"` plus `"contestActive": true`, a key that exists only on disk
   and that `From<SettingsSave>` reads back as Contest. An older build opens
@@ -2354,17 +2449,34 @@ digit above.
   padded to three with the leading zeros as `TT` (`Station.pas:493-494,
   536-537`), 98% of other zeros as T, 9 as N 97% of the time (`:538-539,
   564-565`), zones and power cut to T, A, N for 70% of callers
-  (`:555-562`), and `ENN` in 5% of messages (`:527-528`).
+  (`:555-562`), and `ENN` in 5% of messages (`:527-528`). As built (4a),
+  checked against `Station.pas`: a serial is padded and cut only where
+  the contest cuts yours, as WPX does (`serial_cut`), as MRCE pads and
+  cuts only WPX's; a Sprint caller's goes in plain digits under every
+  habit, as yours does, since a serial of nines and zeros cut would be
+  letters alone (`NT` for 90), read as a state beside the name. Padded,
+  every run of zeros is `T`s
+  (`TT7`, `1TT`), as `000` and `00` always are, whatever else is cut; a
+  zero alone is `T` 98% of the time, else `O` 40% of the time and `T` 97%
+  of the rest, so `T` 99.2%, `O` 0.8% and a plain 0 hardly ever; nines are
+  `N` 97% of the time. A power's zero alone is `O` 40% of the time and
+  `T` 97% of the rest, with no first draw, and 70% of callers cut its
+  ones and nines too. 599 is `5NN`, or `ENN` in one message in twenty:
+  where the report is prefilled, drawn for each message, as MRCE draws
+  it; where it is copied (Simple QSO), once, with the exchange. The cut
+  forms of the copied fields are drawn once, as a caller's exchange is
+  first fixed, so a QSO keeps one token for what was sent. `rough` sends
+  as `real`, and adds the careless operators of §4.3.
 - **Your numbers** are always cut, except your Sprint serial and Simple
   QSO's `599`, as its template writes it.
 - **As built (3a),** a caller's zone and power go through `send_zone` and
   `send_power` beside `send_serial`, with the habits the caller is given
-  (easy until the setting comes): easy sends plain digits and power as
+  (from 4a, the setting's): easy sends plain digits and power as
   written; real pads a zone below 9 with a zero 5% of the time, as MRCE's
   CQ WW does (`CqWW.pas:305-307`), and cuts its zeros, ones and nines for
   70% of callers; a power's run of zeros is always `TT` (`1TT`), a zero
-  alone `T` 98% of the time (MRCE sends `O` for some of them), and 70% of
-  callers cut its ones and nines too (`ATT`). A kilowatt goes as written.
+  alone `O` or `T` as above, and 70% of callers cut its ones and nines too
+  (`ATT`). A kilowatt goes as written.
   The three cuts share one helper (`cut` in `exchange.rs`).
 
 | Field | Canonical | Equal when |
@@ -2545,7 +2657,8 @@ whichever is live.
 | `machine.rs` | `ContestMachine`, events, effects, `ContestView` |
 | `caller.rs` | caller states, patience, matching, replies, collisions, QRS |
 | `turn.rs` | `Turn`, segments, continuations, `plan_turn`, `MONITOR_LEVEL`, per-caller fades |
-| `place.rs` | `place_contest_caller`, `filter_capacity` (phase 2) |
+| `place.rs` | `place_contest_caller`, `filter_capacity` (phase 2); `place_qrm` (4a) |
+| `qrm.rs` | the QRM of rough habits: when a station starts up, what it sends and where in a turn (as built, 4a) |
 | `exchange.rs`, `parse.rs` | canonical forms, cut numbers, keyed tokens; `parse_exchange` |
 | `serial.rs`, `check.rs`, `score.rs` | serials; `QsoCheck`; `contest_score`, rates |
 | `record.rs` | `ContestLog`, `ContestRun`, `QsoRecord`, `result()` |
@@ -2624,6 +2737,24 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   its CQ, TU, NIL, `?` with no call or own call at its own speed; and
   never below the Speed card's lowest speed. Hear a QSO's stand-ins leave
   nothing a run needs (`missing()` is none) for any station given.
+- **Habits** (4a): each habit's number forms and shares, seeded (a
+  serial's padding and runs of zeros always `T`s, a zero alone `T` 99.2%
+  and `O` 0.8%, nines `N` 97%, 70% of zones and powers cut, a power's zero
+  alone `O` 40%, `ENN` in 5% of messages, plain digits under easy); one
+  caller in ten fumbling its first serial under rough habits and none
+  under easier ones, the fumble a digit off by one and the serial right
+  what was sent; one operator in about twenty sending its exchange early,
+  after a slip or answering a partial or a piece while it calls, and a TU
+  then completing its QSO; a slip taken for a call one time in 25, never
+  a call of three characters; QRS under easy habits only; QRM stations
+  starting up 15.5 an hour of run time, 46.5 messages, one to five each,
+  never over itself, in turns as it comes due or as the next starts, and
+  a long silence bringing one station, not a queue; a caller's exchange
+  owed only the first time it takes yours in its QSO; the presets writing
+  their habits; the callers' habits Band conditions', read back
+  forgiving; Real's words on the Band card following the numbers each
+  contest has you copy, and none in Field Day and the Sprint; a Sprint
+  caller's serial plain under every habit.
 - **Presets** (2c): each sets what it says and lands whole from any
   other; the rest of the settings, your station and the other levels
   among them, are left alone; a change to anything it set reads Custom,
@@ -2776,6 +2907,19 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   station has gone, or clears it once someone calls; a correction's
   exchange starts after its two words.
 
+- from 4a: under rough habits QRM sends in a turn, from its start when
+  it came due while all was quiet, through the receiver, never answering
+  nor a station, out of RX's count and Enter's hint, the QSO going on as
+  without it; QRM still sending goes on over your next message from where
+  it was; a fumbled serial logged as put right is clean, its group the
+  serial right, and logged as fumbled a wrong number; a slip a careless
+  caller took logs busted with its own call; an exchange sent early,
+  after a slip or a partial, reads as a correction, and the QSO logs
+  clean with no repeat charged for the exchange it owed for yours; QRM
+  carried over a key from a start retried six seconds late never sends
+  over its rest; under real habits a cut serial copied in digits is
+  clean.
+
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
 verified, at 3600·n / Σ(planned turns and drawn delays) an hour within 5%,
@@ -2786,20 +2930,33 @@ halve. Pauser: the clock equals the unpaused time. Dupe worker: 0 points,
 no error. Hear a QSO (2c): three QSOs of each contest in each style, 24
 seeds each, from the first CQ to the third TU and its sign-off, nobody
 calling after it, a pile-up caller calling twice among them, the same
-seed hearing the same QSOs; your station stands in until given.
+seed hearing the same QSOs; your station stands in until given. From 4a,
+the perfect operator works callers of every habit clean in every contest
+and style, reading cut numbers and `ENN` by value, a fumbled serial as
+put right, and leaving QRM, which it hears but knows for no caller; Hear
+a QSO stays clean under every habit, 24 seeds each, its last turn holding
+no QRM, which it shows as a line of its own; and in the Sprint, 120 seeds
+of each habit and style log three clean QSOs in under 40 turns.
 
 **Soak** (`soak.rs`, seeds of its own: as built, 3,000 runs of single
 callers and 4,500 of pile-ups, 14, shared among the contests that have
-shipped, each held to a floor of QSOs logged of its own). Keys carry
-fields 40% as heard (a quarter of them with the call heard before the
-last, as when logging a QSO left after F3), 20% one edit off, 10% empty,
-10% partial and 20% junk,
-among stale and current turn events, timers by any id, pause, resume, hide
-and finish.
+shipped, each held to a floor of QSOs logged of its own; from 4a, callers
+of any habits, each habit held to a floor of QSOs logged, and in each
+style numbers cut and `ENN` heard often enough under real and rough
+habits, and fumbled serials, exchanges sent early and messages of QRM
+under rough ones). Keys carry fields 40% as heard (a quarter of them with
+the call heard before the last, as when logging a QSO left after F3), 20%
+one edit off, 10% empty, 10% partial and 20% junk, among stale and
+current turn events, timers by any id, pause, resume, hide and finish.
 
 - Every step: no panic, fresh ids, a clock that never goes back, but for
   the retries a failed send gives back as paused (4.2); no station sends
-  over itself in a turn, and pile-up callers sit 60 Hz apart or more.
+  over itself in a turn, QRM among them, and pile-up callers sit 60 Hz
+  apart or more; from 4a, QRM, `EEEEE`, `ENN` and exchanges sent early
+  only under the habits that bring them, and callers' numbers in plain
+  digits under easy ones. As built, a widened run on seeds of its own
+  (9,000 single from seed 50,000 and 13,500 pile-up from seed 90,000)
+  passed with QRM held to it too.
 - The end: serial = QSOs logged + 1; QSO times rise and stay within
   `run_ms` ≤ the limit; `run_ms + paused_ms` is the wall-clock span, or at
   most that when time ran out, as a run noticed past its limit ends at the
@@ -3000,7 +3157,10 @@ against the published rules and pinned before it ships.
 - `contestHabits`: numbers as MRCE's callers send them (`real`); LIDs and
   QRM (`rough`). LIDs send a wrong digit then `EEEEE`, send their exchange
   early, or accept a wrong call 4% of the time (`Station.pas:509-521`,
-  `DxOper.pas:651-671, 879-886`).
+  `DxOper.pas:651-671, 879-886`). Landed as slice 4a: the setting on the
+  Band card and in the presets (§8), real numbers checked against
+  `Station.pas` (§11.6), careless operators (§4.3) and QRM inside turns
+  (`contest/qrm.rs`, §5.6); the soak runs callers of every habit.
 - `contestShowCopy`, the screenshot's Preview Mode: each caller's text shows
   once its send ends. An item's stats copy is frozen when its text appears
   (received = the field text then; the reveal counts as a send); later
@@ -3053,7 +3213,8 @@ keying with the paddles, a contest level, and more contests.
 | Keys | Tab as on any page; `;`; Alt+S, Alt+E | MRCE's Tab cycle, Insert | no trapped focus; screen readers keep Insert |
 | Difficulty | presets writing shared fields | a contest level | a level would own stations and tier |
 | Your call in a run | not stored; side, country, continent, zone are | stored | no score needs it |
-| Numbers | yours cut (Sprint's serial and Simple QSO's 599 plain); callers' by habits | always cut | what operators send; learners start plain |
+| Numbers | yours cut (Sprint's serial and Simple QSO's 599 plain); callers' by habits, the Sprint's serials plain under every habit | always cut | what operators send; learners start plain; a Sprint serial cut to letters alone reads as a state |
+| QRM (4a) | inside the turns on the air, carried over a key, never a station; one station at a time, starting as often as MRCE's | turns of its own; stations over one another, as MRCE's | the players hold one send; QRM is nothing to answer, so nothing to plan a turn for; one at a time, no station sends over itself |
 
 ### 15.2 Decisions taken with the user
 

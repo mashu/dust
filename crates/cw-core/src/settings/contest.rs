@@ -1,6 +1,7 @@
 //! What Contest mode adds to the settings: which contest a run is, whether
-//! one station calls at a time or a pile-up, how long a run lasts, and your
-//! station. Everything else a run uses is shared with group training.
+//! one station calls at a time or a pile-up, how its callers operate, how
+//! long a run lasts, and your station. Everything else a run uses is shared
+//! with group training.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +11,7 @@ use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_can
 use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{ContestKind, Field, RunStyle, Side};
+use crate::contest::{CallerHabits, ContestKind, Field, RunStyle, Side};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -64,6 +65,10 @@ pub struct ContestSettings {
     /// One caller at a time, or a pile-up of as many as the Band card's
     /// stations range draws.
     pub contest_style: RunStyle,
+    /// How the callers operate: plain digits and no mistakes, numbers as
+    /// contesters send them, or that with careless operators and stations
+    /// on your frequency that are not calling you. Set on the Band card.
+    pub contest_habits: CallerHabits,
     /// How long a run lasts, in minutes. Zero runs until you stop it, and
     /// ends at [`CONTEST_MINUTES_MAX`] all the same.
     pub contest_minutes: u32,
@@ -99,6 +104,7 @@ impl Default for ContestSettings {
         Self {
             contest_kind: ContestKind::Wpx,
             contest_style: RunStyle::Single,
+            contest_habits: CallerHabits::Easy,
             contest_minutes: 10,
             my_call: String::new(),
             my_name: String::new(),

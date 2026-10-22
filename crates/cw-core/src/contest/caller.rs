@@ -13,7 +13,7 @@ use super::data::power::draw_power;
 use super::data::reports::draw_report;
 use super::data::zones::draw_zone;
 use super::esm::MessagePart;
-use super::exchange::{Field, send_power, send_report, send_serial, send_zone};
+use super::exchange::{Field, send_5nn, send_power, send_report, send_serial, send_zone};
 use super::place::Placement;
 use super::rules::{ContestRules, Side};
 use super::serial::SerialModel;
@@ -215,6 +215,11 @@ pub(super) struct Reaction {
     pub(super) called: bool,
     /// It took your exchange as sent to it, while you work it.
     pub(super) took_exchange: bool,
+    /// It took your exchange for the first time in its QSO: the exchange
+    /// it sends for it is owed, not a repeat, though a careless operator's
+    /// sent early with its call put right reached you already. One that
+    /// had yours, went back to calling and takes it again owes nothing.
+    pub(super) first_exchange: bool,
     /// Your exchange was for it, but it missed it and asks for it again.
     pub(super) missed_exchange: bool,
 }
@@ -266,7 +271,7 @@ const MISSES_EXCHANGE: f64 = 0.1;
 
 /// How far into its fading a caller starts, at most, in seconds: each is on
 /// a path of its own, so no two fade together.
-const FADE_OFFSET_MAX_SEC: f64 = 3_600.0;
+pub(super) const FADE_OFFSET_MAX_SEC: f64 = 3_600.0;
 
 /// How often the first exchange a caller sends starts with the first of
 /// the contest's words for it rather than the second: `TU 5NN 214` rather
@@ -288,8 +293,9 @@ const FIRST_QUERY: f64 = 0.3;
 /// slows down for you, as MorseRunner's do once QRS After a Few Incomplete
 /// Calls is on (`DxOper.pas:343-376`); a skilled one, of skill 3, only
 /// after one more. An `NR?` counts as a `?` does, as it asks as one does
-/// here, where MorseRunner counts only the `?`. Every caller does so while
-/// callers' habits are easy, which they all are until that setting comes.
+/// here, where MorseRunner counts only the `?`. Callers do so only under
+/// easy habits, a courtesy to a learner: under real and rough ones they
+/// keep their speed, as contesters do.
 const QRS_AFTER: u32 = 3;
 const QRS_AFTER_SKILLED: u32 = 4;
 
@@ -298,6 +304,26 @@ const QRS_AFTER_SKILLED: u32 = 4;
 const QRS_DROP: [f64; 3] = [0.20, 0.16, 0.12];
 const QRS_MORE_FROM: u32 = 4;
 const QRS_MORE: f64 = 0.02;
+
+/// Under rough habits, how many callers fumble a digit of the first serial
+/// they send, then send `EEEEE` and the serial right, as MorseRunner's LIDs
+/// do (`DxStn.pas:73`, `Station.pas:509-521`).
+const LID_FUMBLES: f64 = 0.1;
+
+/// Under rough habits, how many operators send their exchange with their
+/// call put right before they have yours, as MorseRunner's LIDs do in
+/// 0.88 − 5/6 of operators (`DxOper.pas:879-886`).
+const LID_EARLY: f64 = 0.88 - 5.0 / 6.0;
+
+/// Under rough habits, how often a caller takes a slip of its call for its
+/// own, as MorseRunner's LIDs accept a wrong call (`DxOper.pas:651-671`),
+/// and how long the call you sent must be for it to: a call of more than
+/// three characters.
+const LID_TAKES_SLIP: f64 = 0.04;
+const LID_SLIP_LEN_MIN: usize = 4;
+
+/// What a fumbled digit is followed by before the serial is sent right.
+const FUMBLE_MARK: &str = "EEEEE";
 
 /// One station calling you.
 #[derive(Clone, Debug, PartialEq)]
@@ -329,8 +355,26 @@ pub(super) struct Caller {
     serial_sent: Option<(u32, u64)>,
     /// Its exchange as it sends it, fixed the first time it is needed.
     exchange: Option<Vec<(Field, String)>>,
+    /// How it operates: how it sends its numbers, and under rough habits
+    /// whether it is careless.
+    habits: CallerHabits,
+    /// Its serials go out padded and cut under real habits, as a WPX
+    /// serial does, rather than plain, as the Sprint's do.
+    cuts_serial: bool,
+    /// A careless operator that fumbles a digit of its first serial, then
+    /// sends `EEEEE` and the serial right ([`LID_FUMBLES`]); none once it
+    /// has sent its first exchange.
+    fumbles: bool,
+    /// A careless operator that sends its exchange with its call put right
+    /// before it has yours ([`LID_EARLY`]), and takes a partial while it
+    /// calls as its call sent wrong.
+    early: bool,
     /// How many times it has sent its exchange.
     exchanges_sent: u32,
+    /// It has had your exchange in this QSO, though it may have gone back
+    /// to calling since: the exchange it sends when it takes yours again
+    /// is then no longer owed, but a repeat.
+    had_exchange: bool,
     /// Whether your TU works as a CQ for it, as in a contest; in an
     /// everyday QSO it does not.
     tu_calls: bool,
@@ -363,8 +407,8 @@ pub(super) struct Caller {
 
 impl Caller {
     /// A station calling with `call` in a run of `style`, where `placed`
-    /// puts it, its voice and habits drawn from `rng`, its speed from
-    /// `settings` (the run's, shifted by − / +).
+    /// puts it, its voice and ways drawn from `rng`, its speed (the run's,
+    /// shifted by − / +) and the callers' habits from `settings`.
     pub(super) fn arrive(
         call: GeneratedCall,
         settings: &TrainingSettings,
@@ -387,6 +431,12 @@ impl Caller {
         let fade_from_sec = rng.pick_in_range(0.0, FADE_OFFSET_MAX_SEC);
         let de_first = rng.f64() < 0.5;
         let fixes_with_exchange = rng.f64() < FIXES_WITH_EXCHANGE;
+        // Drawn only under rough habits, so a run under easier ones draws
+        // as it always has.
+        let habits = settings.contest.contest_habits;
+        let rough = habits == CallerHabits::Rough;
+        let fumbles = rough && rng.f64() < LID_FUMBLES;
+        let early = rough && rng.f64() < LID_EARLY;
         Self {
             call,
             voice,
@@ -400,7 +450,12 @@ impl Caller {
             serial,
             serial_sent: None,
             exchange: None,
+            habits,
+            cuts_serial: rules.serial_cut,
+            fumbles,
+            early,
             exchanges_sent: 0,
+            had_exchange: false,
             tu_calls: rules.tu_calls,
             signoff: rules.signoff,
             signs_off: false,
@@ -429,6 +484,7 @@ impl Caller {
         self.answered_partial = false;
         self.silent = 0;
         self.exchanges_sent = 0;
+        self.had_exchange = false;
         self.signs_off = false;
         self.incomplete = 0;
         self.qrs = 0.0;
@@ -441,7 +497,7 @@ impl Caller {
         self.serial_sent = Some((serial, run_ms));
         let fields = self.exchange.iter_mut().flatten();
         for (_, token) in fields.filter(|(field, _)| *field == Field::Nr) {
-            *token = send_serial(serial, CallerHabits::Easy, &mut self.rng);
+            *token = send_serial(serial, self.habits, self.cuts_serial, &mut self.rng);
         }
     }
 
@@ -533,6 +589,20 @@ impl Caller {
         self.fixes_with_exchange
     }
 
+    /// Whether it is a careless operator that fumbles its first serial:
+    /// for a test to pick one.
+    #[cfg(test)]
+    pub(super) fn fumbles(&self) -> bool {
+        self.fumbles
+    }
+
+    /// Whether it is a careless operator that sends its exchange early:
+    /// for a test to pick one.
+    #[cfg(test)]
+    pub(super) fn sends_early(&self) -> bool {
+        self.early
+    }
+
     /// It heard only garbage of a message of yours: in a pile-up, the tail
     /// of one you keyed over it while it was still sending, and it finished
     /// first; or, in any run, one Esc cut short while it listened. It sends
@@ -565,6 +635,15 @@ impl Caller {
             self.patience = draw_patience(&mut self.rng);
         }
         waited
+    }
+
+    /// Under rough habits, whether it takes `sent`, a slip of its call, for
+    /// its own this time, as MorseRunner's careless operators accept a
+    /// wrong call: a call of four characters or more, one time in 25.
+    fn takes_slip(&mut self, sent: &str) -> bool {
+        self.habits == CallerHabits::Rough
+            && sent.chars().count() >= LID_SLIP_LEN_MIN
+            && self.rng.f64() < LID_TAKES_SLIP
     }
 
     /// In a pile-up, whether it misses the exchange it is waiting for, and
@@ -657,7 +736,14 @@ impl Caller {
                         .copied()
                         .flatten()
                         .is_some_and(|best| own.is_none_or(|own| own < best));
-                    let found = if beaten { CallMatch::No } else { heard };
+                    let found = match (beaten, heard) {
+                        (true, _) => CallMatch::No,
+                        // A careless operator now and then takes a slip of
+                        // its call for its own, and answers as if you had
+                        // sent it right: your log then holds the slip.
+                        (false, CallMatch::Close) if self.takes_slip(sent) => CallMatch::Exact,
+                        (false, heard) => heard,
+                    };
                     // A slip, a piece or a partial of its call, as
                     // MorseRunner's `mcAlmost` (`DxOper.pas:741`).
                     incomplete = matches!(found, CallMatch::Close | CallMatch::Partial { .. });
@@ -679,6 +765,16 @@ impl Caller {
                         }
                         (CallMatch::Partial { .. }, NeedEnd) => {
                             self.state = NeedCall;
+                            replies = Some(true);
+                            reaction.asked = true;
+                        }
+                        // A careless operator takes a partial it fits best
+                        // while it calls as its call sent wrong, as
+                        // MorseRunner's near match puts it in `osNeedCallNr`
+                        // (`DxOper.pas:736`), and puts it right with its
+                        // exchange, before it has yours (`DxOper.pas:879-886`).
+                        (CallMatch::Partial { .. }, NeedQso) if self.early => {
+                            self.state = NeedCallNr;
                             replies = Some(true);
                             reaction.asked = true;
                         }
@@ -739,6 +835,8 @@ impl Caller {
                         replies = Some(true);
                     } else {
                         reaction.took_exchange |= self.state.worked();
+                        reaction.first_exchange |= waits && !self.had_exchange;
+                        self.had_exchange |= waits;
                         match self.state {
                             NeedNr => self.state = NeedEnd,
                             NeedCallNr => self.state = NeedCall,
@@ -822,7 +920,8 @@ impl Caller {
         }
         // Tried often enough without getting its QSO through, it slows down
         // for you, as long as the QSO is on (`DxOper.pas:343-376`).
-        if self.qso_state().is_some_and(CallerState::worked)
+        if self.habits == CallerHabits::Easy
+            && self.qso_state().is_some_and(CallerState::worked)
             && let Some(drop) = qrs_drop(self.skill, self.incomplete)
         {
             self.qrs = drop;
@@ -932,8 +1031,13 @@ impl Caller {
                 };
                 // With your exchange in hand, most send their own with the
                 // call put right, as MorseRunner's `osNeedCall` does
-                // (`DxOper.pas:851-867`), so you can log it as you fix it.
-                if self.state == CallerState::NeedCall && self.fixes_with_exchange {
+                // (`DxOper.pas:851-867`), so you can log it as you fix it; a
+                // careless operator sends it before it has yours.
+                let with_exchange = match self.state {
+                    CallerState::NeedCall => self.fixes_with_exchange,
+                    _ => self.early,
+                };
+                if with_exchange {
                     let body = self.exchange_text(rules, side, my_call, run_ms);
                     self.exchanges_sent += 1;
                     (format!("{correction} {body}"), Says::CorrectionAndExchange)
@@ -974,8 +1078,7 @@ impl Caller {
         run_ms: u64,
     ) -> &[(Field, String)] {
         if self.exchange.is_none() {
-            // Plain digits until the Caller habits setting comes (phase 4).
-            let habits = CallerHabits::Easy;
+            let habits = self.habits;
             // A field with no value to send, as a zone for a station Dust
             // cannot place, is not sent.
             let fields = rules
@@ -986,7 +1089,7 @@ impl Caller {
                         Field::Nr => {
                             let serial = self.serial.serial_at(run_ms);
                             self.serial_sent = Some((serial, run_ms));
-                            send_serial(serial, habits, &mut self.rng)
+                            send_serial(serial, habits, self.cuts_serial, &mut self.rng)
                         }
                         Field::Rst => {
                             send_report(draw_report(&mut self.rng), habits, &mut self.rng)
@@ -1031,7 +1134,20 @@ impl Caller {
         my_call: &str,
         run_ms: u64,
     ) -> String {
-        let fields = self.exchange(rules, side, run_ms).to_vec();
+        let mut fields = self.exchange(rules, side, run_ms).to_vec();
+        // The report every caller sends and nobody copies: under real
+        // habits now and then `ENN`, message by message.
+        if rules.prefills_report(side) {
+            fields.push((Field::Rst, send_5nn(self.habits, &mut self.rng).to_string()));
+        }
+        // A careless operator's first serial: a digit off, `EEEEE`, and
+        // the serial right, which is what it sent for your copy.
+        if std::mem::take(&mut self.fumbles)
+            && let Some((_, token)) = fields.iter_mut().find(|(field, _)| *field == Field::Nr)
+            && let Some(wrong) = fumble(token, &mut self.rng)
+        {
+            *token = format!("{wrong}{FUMBLE_MARK} {token}");
+        }
         rules.their_exchange_text(side, my_call, &self.call.text, &fields)
     }
 
@@ -1039,10 +1155,7 @@ impl Caller {
     /// drawn afresh for each wait.
     pub(super) fn draw_timeout_ms(&mut self) -> u64 {
         let mean = TIMEOUT_BASE_SEC - f64::from(self.skill);
-        let spread = mean * TIMEOUT_SPREAD;
-        // Half the spread is one standard deviation; the tails are cut at
-        // the whole of it.
-        let seconds = (mean + self.rng.normal() * spread / 2.0).clamp(mean - spread, mean + spread);
+        let seconds = self.rng.normal_within(mean, mean * TIMEOUT_SPREAD);
         (seconds * 1000.0).round() as u64
     }
 
@@ -1057,6 +1170,27 @@ impl Caller {
 /// two words that put the call right, `DE K5XYZ` or `K5XYZ K5XYZ`.
 pub(super) fn exchange_at(text: &str) -> Option<usize> {
     text.match_indices(' ').nth(1).map(|(at, _)| at + 1)
+}
+
+/// `serial`, as a caller sends it, with a digit off: its last, if that is a
+/// 2 to 7, or else the one before it, if that is, one more or one less, as
+/// MorseRunner's careless operators fumble one (`Station.pas:509-521`).
+/// None when neither is: cut letters and the digits around them are never
+/// fumbled.
+fn fumble(serial: &str, rng: &mut impl Rng) -> Option<String> {
+    let mut chars: Vec<char> = serial.chars().collect();
+    let at = (0..chars.len())
+        .rev()
+        .take(2)
+        .find(|at| ('2'..='7').contains(&chars[*at]))?;
+    let digit = chars[at].to_digit(10)?;
+    let off = if rng.f64() < 0.5 {
+        digit - 1
+    } else {
+        digit + 1
+    };
+    chars[at] = char::from_digit(off, 10)?;
+    Some(chars.into_iter().collect())
 }
 
 /// How much slower a caller of `skill` sends after `incomplete` incomplete
@@ -1105,26 +1239,21 @@ mod tests {
     use super::*;
     use crate::callsign::{CallSpec, generate_call};
     use crate::contest::ContestKind;
+    use crate::contest::exchange::read_number;
     use MessagePart::{Again, Cq, Exchange, HisCall, Tu};
 
     fn rules() -> &'static ContestRules {
         ContestKind::Wpx.rules()
     }
 
+    /// A single caller signing K5XYZ, from `seed`, with easy habits.
     fn caller(seed: u64) -> Caller {
-        let mut rng = SplitMix64::new(seed);
-        let mut call = generate_call(3, CallSpec::default(), &mut rng);
-        call.text = "K5XYZ".to_string();
-        let settings = TrainingSettings::default().clamp();
-        Caller::arrive(
-            call,
-            &settings,
-            rules(),
-            10,
-            RunStyle::Single,
-            centre(),
-            rng.fork(1),
-        )
+        caller_with(seed, CallerHabits::Easy)
+    }
+
+    /// A single caller signing K5XYZ, from `seed`, with `habits`.
+    fn caller_with(seed: u64, habits: CallerHabits) -> Caller {
+        caller_as(seed, "K5XYZ", RunStyle::Single, habits)
     }
 
     /// A place at the centre, at full strength.
@@ -1623,12 +1752,15 @@ mod tests {
         assert_eq!(worked.state, CallerState::NeedNr, "nothing to put right");
     }
 
-    /// A caller of a run of `style` signing `call`, from `seed`.
-    fn caller_as(seed: u64, call: &str, style: RunStyle) -> Caller {
+    /// A caller of a run of `style` signing `call`, from `seed`, with
+    /// `habits`.
+    fn caller_as(seed: u64, call: &str, style: RunStyle, habits: CallerHabits) -> Caller {
         let mut rng = SplitMix64::new(seed);
         let mut generated = generate_call(3, CallSpec::default(), &mut rng);
         generated.text = call.to_string();
-        let settings = TrainingSettings::default().clamp();
+        let mut settings = TrainingSettings::default();
+        settings.contest.contest_habits = habits;
+        let settings = settings.clamp();
         Caller::arrive(
             generated,
             &settings,
@@ -1641,7 +1773,7 @@ mod tests {
     }
 
     fn pileup_caller(seed: u64, call: &str) -> Caller {
-        caller_as(seed, call, RunStyle::Pileup)
+        caller_as(seed, call, RunStyle::Pileup, CallerHabits::Easy)
     }
 
     /// Only the best match answers: a partial goes to the callers whose
@@ -1678,7 +1810,9 @@ mod tests {
             let mut callers: Vec<Caller> = calls
                 .iter()
                 .enumerate()
-                .map(|(seed, call)| caller_as(seed as u64, call, RunStyle::Single))
+                .map(|(seed, call)| {
+                    caller_as(seed as u64, call, RunStyle::Single, CallerHabits::Easy)
+                })
                 .collect();
             let sent = "K5XYW";
             let best = callers
@@ -1713,7 +1847,7 @@ mod tests {
                 .map(|(seed, call)| pileup_caller(seed as u64, call))
                 .collect();
             // Callers that never miss your exchange, to see who takes it.
-            callers[0] = caller_as(0, calls[0], RunStyle::Single);
+            callers[0] = caller_as(0, calls[0], RunStyle::Single, CallerHabits::Easy);
             callers[0].hear(&[call(calls[0]), MessagePart::Exchange], &[]);
             let message = [call(sent)];
             let best = callers
@@ -2229,5 +2363,276 @@ mod tests {
         let voice = caller.sending_voice();
         assert!((voice.char_wpm - 6.5 * 0.78).abs() < 1e-9, "{voice:?}");
         assert_eq!(voice.effective_wpm, WPM_MIN);
+    }
+
+    /// What `caller` sends once your exchange has brought its own.
+    fn its_exchange(caller: &mut Caller) -> String {
+        caller.hear(&[call("K5XYZ"), Exchange], &[]);
+        caller
+            .reply(rules(), Side::Dx, "DL1ABC", 60_000)
+            .map(|(text, _)| text)
+            .expect("its exchange")
+    }
+
+    /// Callers with easy habits send their serial in plain digits and
+    /// `5NN`; with real ones, padded and cut as MorseRunner's are, and now
+    /// and then `ENN`, message by message. Neither fumbles a serial.
+    #[test]
+    fn a_callers_numbers_go_out_as_its_habits_have_them() {
+        let (mut enn, mut cut, mut sends) = (0, 0, 0);
+        for seed in 0..2_000 {
+            let mut easy = caller_with(seed, CallerHabits::Easy);
+            let text = its_exchange(&mut easy);
+            let serial = easy.exchange(rules(), Side::Dx, 0)[0].1.clone();
+            assert!(serial.chars().all(|c| c.is_ascii_digit()), "{serial}");
+            assert!(text.ends_with(&format!(" 5NN {serial}")), "{text}");
+            let mut real = caller_with(seed, CallerHabits::Real);
+            let text = its_exchange(&mut real);
+            let serial = real.exchange(rules(), Side::Dx, 0)[0].1.clone();
+            assert!(serial.len() >= 3, "{serial}: padded");
+            assert!(!text.contains("EEEEE"), "{text}");
+            cut += usize::from(serial.chars().any(|c| c.is_ascii_alphabetic()));
+            // Sent again, each message draws its report afresh.
+            for _ in 0..5 {
+                real.hear(&[Again], &[]);
+                let (again, _) = real
+                    .reply(rules(), Side::Dx, "DL1ABC", 60_000)
+                    .expect("its exchange again");
+                assert!(again.ends_with(&serial), "{again}: the same serial");
+                enn += usize::from(again.starts_with("ENN"));
+                sends += 1;
+            }
+        }
+        let enn = enn as f64 / f64::from(sends);
+        assert!((enn - 0.05).abs() < 0.01, "{enn:.3} ENN");
+        assert!(
+            cut > 1_000,
+            "{cut} of 2000 serials padded or cut with a letter"
+        );
+    }
+
+    /// Under rough habits one caller in ten fumbles a digit of its first
+    /// serial, then sends `EEEEE` and the serial right, which is what it
+    /// sent for your copy; it sends it right ever after. No caller under
+    /// easier habits does.
+    #[test]
+    fn a_careless_caller_fumbles_its_first_serial_and_puts_it_right() {
+        let mut fumbled = 0;
+        for seed in 0..3_000 {
+            let mut rough = caller_with(seed, CallerHabits::Rough);
+            let fumbles = rough.fumbles;
+            let text = its_exchange(&mut rough);
+            let serial = rough.exchange(rules(), Side::Dx, 0)[0].1.clone();
+            if let Some((wrong, right)) = text
+                .split_whitespace()
+                .find_map(|word| word.strip_suffix(FUMBLE_MARK))
+                .map(|wrong| (wrong.to_string(), serial.clone()))
+            {
+                assert!(fumbles, "seed {seed}");
+                fumbled += 1;
+                assert!(text.ends_with(&format!("{wrong}EEEEE {right}")), "{text}");
+                let (wrong, right) = (read_number(&wrong), read_number(&right));
+                let off = wrong.zip(right).map(|(w, r)| w.abs_diff(r));
+                assert!(matches!(off, Some(1 | 10)), "{text}: a digit off by one");
+                rough.hear(&[Again], &[]);
+                let (again, _) = rough
+                    .reply(rules(), Side::Dx, "DL1ABC", 60_000)
+                    .expect("its exchange again");
+                assert!(!again.contains("EEEEE"), "{again}: once only");
+            }
+            assert!(!rough.fumbles, "seed {seed}: its first serial is sent");
+            for habits in [CallerHabits::Easy, CallerHabits::Real] {
+                let mut caller = caller_with(seed, habits);
+                assert!(!its_exchange(&mut caller).contains("EEEEE"));
+            }
+        }
+        // A tenth of callers, less those whose serial ends in no digit from
+        // 2 to 7 in its last two.
+        let share = f64::from(fumbled) / 3_000.0;
+        assert!((0.05..0.1).contains(&share), "{share:.3} fumbled");
+    }
+
+    /// A serial is fumbled in its last digit from 2 to 7, else the one
+    /// before it, by one either way, as MorseRunner's careless operators
+    /// fumble one; one with no such digit in its last two is not.
+    #[test]
+    fn a_fumble_puts_one_digit_off_by_one() {
+        let mut rng = SplitMix64::new(4);
+        for _ in 0..200 {
+            let off = fumble("TT7", &mut rng).expect("7 is fumbled");
+            assert!(["TT6", "TT8"].contains(&off.as_str()), "{off}");
+            let off = fumble("2TN", &mut rng);
+            assert_eq!(off, None, "nothing from 2 to 7 in its last two");
+            let off = fumble("13N", &mut rng).expect("3 is fumbled");
+            assert!(["12N", "14N"].contains(&off.as_str()), "{off}");
+            let off = fumble("1N5", &mut rng).expect("5 is fumbled");
+            assert!(["1N4", "1N6"].contains(&off.as_str()), "{off}");
+            assert_eq!(fumble("1TT", &mut rng), None);
+        }
+    }
+
+    /// Under rough habits about one operator in twenty sends its exchange
+    /// with its call put right before it has yours, each time it puts it
+    /// right; the rest send the call alone until they have your exchange.
+    #[test]
+    fn a_careless_caller_sends_its_exchange_early() {
+        let mut early = 0;
+        for seed in 0..4_000 {
+            let mut caller = caller_with(seed, CallerHabits::Rough);
+            caller.hear(&[call("K5XYW")], &[]);
+            // A careless one may take the slip for its call.
+            if caller.state == CallerState::NeedNr {
+                continue;
+            }
+            assert_eq!(caller.state, CallerState::NeedCallNr);
+            let (text, says) = caller
+                .reply(rules(), Side::Dx, "DL1ABC", 0)
+                .expect("its call put right");
+            if caller.early {
+                early += 1;
+                assert_eq!(says, Says::CorrectionAndExchange, "seed {seed}");
+                let serial = caller.exchange(rules(), Side::Dx, 0)[0].1.clone();
+                assert!(text.ends_with(&serial), "{text}");
+                let exchange = exchange_at(&text).map(|at| &text[at..]);
+                assert!(
+                    exchange.is_some_and(|exchange| exchange.starts_with("5NN")
+                        || exchange.starts_with("ENN")
+                        || exchange.contains("EEEEE")),
+                    "{text}"
+                );
+            } else {
+                assert_eq!(says, Says::Correction, "seed {seed}: {text}");
+            }
+            let mut easier = caller_with(seed, CallerHabits::Real);
+            easier.hear(&[call("K5XYW")], &[]);
+            let (_, says) = easier
+                .reply(rules(), Side::Dx, "DL1ABC", 0)
+                .expect("a reply");
+            assert_eq!(says, Says::Correction);
+        }
+        let share = f64::from(early) / 4_000.0 / (1.0 - LID_TAKES_SLIP);
+        assert!((share - LID_EARLY).abs() < 0.012, "{share:.3} early");
+    }
+
+    /// A careless operator still calling takes a partial or a piece of its
+    /// call as its call sent wrong, as MorseRunner's near match puts it in
+    /// `osNeedCallNr` (`DxOper.pas:736`), and puts it right with its
+    /// exchange before it has yours (`DxOper.pas:879-886`); your TU then
+    /// completes its QSO, as MorseRunner's does once that exchange is out.
+    /// Any other operator answers with its call alone and stays calling.
+    #[test]
+    fn a_careless_caller_answers_a_partial_with_its_exchange_early() {
+        let seed = (0..4_000)
+            .find(|seed| caller_with(*seed, CallerHabits::Rough).early)
+            .expect("a careless operator");
+        for partial in ["K5X?", "K5?", "?XYZ", "5XY"] {
+            let mut caller = caller_with(seed, CallerHabits::Rough);
+            caller.hear(&[call(partial)], &[]);
+            assert_eq!(caller.state, CallerState::NeedCallNr, "{partial}");
+            let (text, says) = caller
+                .reply(rules(), Side::Dx, "DL1ABC", 0)
+                .expect("an answer");
+            assert_eq!(says, Says::CorrectionAndExchange, "{partial}: {text}");
+            let serial = caller.exchange(rules(), Side::Dx, 0)[0].1.clone();
+            assert!(text.ends_with(&serial), "{text}");
+            caller.hear(&[Tu], &[]);
+            assert_eq!(caller.state, CallerState::Done, "{partial}");
+            let mut careful = caller_with(seed, CallerHabits::Real);
+            careful.hear(&[call(partial)], &[]);
+            assert_eq!(careful.state, CallerState::NeedQso, "{partial}");
+            let (_, says) = careful
+                .reply(rules(), Side::Dx, "DL1ABC", 0)
+                .expect("an answer");
+            assert_eq!(says, Says::Call, "{partial}");
+        }
+    }
+
+    /// The exchange a caller sends for yours is owed the first time it
+    /// takes yours in its QSO; one that had it, went back to calling when
+    /// you sent another call, and takes it again owes nothing, so what it
+    /// sends then is a repeat.
+    #[test]
+    fn a_caller_owes_its_exchange_only_the_first_time_it_takes_yours() {
+        let mut checked = 0;
+        for seed in 0..40 {
+            let mut caller = pileup_caller(seed, "K5XYZ");
+            let first = caller.hear(&[call("K5XYZ"), Exchange], &[]);
+            if first.missed_exchange {
+                continue;
+            }
+            assert!(first.first_exchange, "seed {seed}");
+            caller.hear(&[call("K5XYW")], &[]);
+            assert_eq!(caller.state, CallerState::NeedCall, "seed {seed}");
+            caller.hear(&[call("W1AW")], &[]);
+            assert_eq!(caller.state, CallerState::NeedQso, "seed {seed}");
+            let again = caller.hear(&[call("K5XYZ"), Exchange], &[]);
+            if again.missed_exchange {
+                continue;
+            }
+            assert!(again.took_exchange, "seed {seed}");
+            assert!(!again.first_exchange, "seed {seed}: a repeat");
+            checked += 1;
+        }
+        assert!(checked > 20, "only {checked} seeds checked");
+    }
+
+    /// Under rough habits a caller takes a slip of its call for its own
+    /// one time in 25, a call of four characters or more, and goes on as if
+    /// you had sent it right; under easier habits it always puts it right.
+    #[test]
+    fn a_careless_caller_now_and_then_takes_a_slip_for_its_call() {
+        let mut taken = 0;
+        for seed in 0..5_000 {
+            let mut caller = caller_with(seed, CallerHabits::Rough);
+            let reaction = caller.hear(&[call("K5XYW"), Exchange], &[]);
+            if caller.state == CallerState::NeedEnd {
+                taken += 1;
+                assert!(reaction.called && reaction.took_exchange, "seed {seed}");
+                let (text, says) = caller
+                    .reply(rules(), Side::Dx, "DL1ABC", 0)
+                    .expect("its exchange");
+                assert_eq!(says, Says::Exchange, "no correction: {text}");
+            } else {
+                assert_eq!(caller.state, CallerState::NeedCall, "seed {seed}");
+            }
+            for habits in [CallerHabits::Easy, CallerHabits::Real] {
+                let mut caller = caller_with(seed, habits);
+                caller.hear(&[call("K5XYW"), Exchange], &[]);
+                assert_eq!(caller.state, CallerState::NeedCall, "{habits:?}");
+            }
+        }
+        let share = f64::from(taken) / 5_000.0;
+        assert!((share - LID_TAKES_SLIP).abs() < 0.01, "{share:.3} taken");
+        // A call too short to be taken: a three-character one, its slip.
+        let mut short = caller_with(1, CallerHabits::Rough);
+        short.call.text = "K5X".to_string();
+        for _ in 0..500 {
+            short.state = CallerState::NeedQso;
+            short.hear(&[call("K5Y")], &[]);
+            assert_ne!(short.state, CallerState::NeedNr, "never taken");
+        }
+    }
+
+    /// Callers slow down for you only under easy habits; under real and
+    /// rough ones they keep their speed, as contesters do.
+    #[test]
+    fn only_under_easy_habits_do_callers_slow_down() {
+        for (habits, slows) in [
+            (CallerHabits::Easy, true),
+            (CallerHabits::Real, false),
+            (CallerHabits::Rough, false),
+        ] {
+            let mut caller = caller_with(3, habits);
+            caller.skill = 1;
+            caller.hear(&[Cq], &[]);
+            for _ in 0..4 {
+                caller.hear(&[call("K5XY?")], &[]);
+            }
+            caller.hear(&[call("K5XYZ")], &[]);
+            for _ in 0..4 {
+                caller.hear(&[call("K5XYW")], &[]);
+            }
+            assert_eq!(caller.sending_voice() != caller.voice, slows, "{habits:?}");
+        }
     }
 }

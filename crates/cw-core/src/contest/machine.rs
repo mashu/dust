@@ -34,11 +34,12 @@ use super::esm::{EntryField, Fields, MessagePart, QsoState, esm, loggable, messa
 use super::exchange::Field;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
+use super::qrm::Qrm;
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
 use super::rules::{ContestRules, Fill, Side};
 use super::score::rate_at;
 use super::turn::{Fade, Segment, Sender, Turn, char_spans, sending_sec, sounding_at, your_voice};
-use super::{CallSource, MS_PER_MINUTE, RunStyle};
+use super::{CallSource, CallerHabits, MS_PER_MINUTE, RunStyle};
 use crate::alignment::CopyTally;
 use crate::band::Qsb;
 use crate::callsign::parse_callsign;
@@ -220,13 +221,13 @@ impl AirView {
             .map_or("", |(at, _)| &self.my_text[*at..])
     }
 
-    /// How many stations are sending at `now`. What they send is never
-    /// shown.
+    /// How many callers are sending at `now`: a station on your frequency
+    /// that is not calling you is none. What they send is never shown.
     pub fn calling(&self, now: MonoMs) -> usize {
         let at_sec = self.heard_sec(now);
         self.spans
             .iter()
-            .filter(|(who, start, end)| *who != Sender::You && *start <= at_sec && at_sec < *end)
+            .filter(|(who, start, end)| who.is_caller() && *start <= at_sec && at_sec < *end)
             .count()
     }
 }
@@ -341,6 +342,11 @@ const TU_SIGNS_EVERY: u32 = 3;
 /// come from: how many call, and who calls again. The callers' streams are
 /// forked by their numbers, which never reach it.
 const RUN_STREAM: u64 = u64::MAX;
+
+/// The stream, forked off the run's generator, that the run's QRM draws
+/// from under rough habits, apart from every other, so the rest of a run
+/// draws the same whatever its habits.
+const QRM_STREAM: u64 = u64::MAX - 1;
 
 /// The rate shows once the run is a minute old.
 const RATE_AFTER_MS: u64 = MS_PER_MINUTE;
@@ -552,6 +558,10 @@ struct Replying {
     /// exchange it sends with its call put right is a repeat you asked for
     /// only then.
     again: bool,
+    /// It answers your exchange, which it took for the first time: the
+    /// exchange it sends is owed, no repeat, though a careless operator
+    /// sent it early with its call put right.
+    first_exchange: bool,
     /// A key of yours drew it, with the fields as read then; none for a
     /// send on its timeout, or one sent again after Resume that had begun
     /// to reach you.
@@ -570,6 +580,7 @@ impl Replying {
             station,
             asked: false,
             again: false,
+            first_exchange: false,
             keyed: None,
             on_time_out: false,
         }
@@ -687,7 +698,7 @@ impl Air {
             .turn
             .segments
             .iter()
-            .filter(|segment| segment.who != Sender::You);
+            .filter(|segment| segment.who.is_caller());
         callers
             .zip(self.replies.iter().zip(&self.counted))
             .filter_map(|(segment, ((reply, _), counted))| {
@@ -714,7 +725,7 @@ impl Air {
             .turn
             .segments
             .iter()
-            .filter(|segment| segment.who != Sender::You);
+            .filter(|segment| segment.who.is_caller());
         callers
             .zip(&self.replies)
             .filter(|(segment, _)| heard_run + whole_ms(segment.start_sec) < run_now)
@@ -741,14 +752,15 @@ impl Air {
 }
 
 /// What a turn taken off the air leaves to send: the rest of your message
-/// and its parts, the log rows that wait on it, and in a pile-up the
-/// callers still sending.
+/// and its parts, the log rows that wait on it, in a pile-up the callers
+/// still sending, and any QRM still sending, which never stops for you.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Carried {
     text: String,
     parts: Vec<(MessagePart, usize)>,
     pending: Vec<usize>,
     callers: Vec<Overlapping>,
+    qrm: Option<Segment>,
 }
 
 /// A pile-up caller still sending when you key over it: it goes on from the
@@ -829,6 +841,9 @@ pub struct ContestMachine<S> {
     rng: SplitMix64,
     /// The run's own draws: how many call, and who calls again.
     draws: SplitMix64,
+    /// The stations on your frequency that are not calling you, under
+    /// rough habits; none under easier ones.
+    qrm: Option<Qrm>,
     phase: ContestPhase,
     /// None until the countdown is over.
     clock: Option<RunClock>,
@@ -885,8 +900,12 @@ impl<S: CallSource> ContestMachine<S> {
         let countdown = settings.playback.countdown_sec;
         let pileup = settings.contest.contest_style == RunStyle::Pileup;
         let rng = SplitMix64::new(seed);
+        let side = Side::of_call(&my_call);
+        let qrm = (settings.contest.contest_habits == CallerHabits::Rough)
+            .then(|| Qrm::new(&settings, rules, side, &my_call, rng.fork(QRM_STREAM)));
         let mut machine = Self {
-            side: Side::of_call(&my_call),
+            side,
+            qrm,
             limit_ms: u64::from(settings.contest.limit_minutes()) * MS_PER_MINUTE,
             style: settings.contest.contest_style,
             qsb: Qsb::of(&settings.band),
@@ -1170,6 +1189,20 @@ impl<S: CallSource> ContestMachine<S> {
             }
         }
         copies
+    }
+
+    /// Whether `who` is a careless operator waiting for its call put right
+    /// and for your exchange, which puts the call right with its own
+    /// exchange: what it sends as its state stands is an exchange sent
+    /// early.
+    #[cfg(test)]
+    pub(crate) fn sends_exchange_early(&self, who: Sender) -> bool {
+        let Sender::Caller(index) = who else {
+            return false;
+        };
+        self.stations.get(index as usize).is_some_and(|station| {
+            station.caller.sends_early() && station.caller.state == CallerState::NeedCallNr
+        })
     }
 
     /// Each copy lost or charged as a NIL, with its station, as the call it
@@ -1695,6 +1728,7 @@ impl<S: CallSource> ContestMachine<S> {
             parts,
             pending,
             callers: carried.callers,
+            qrm: carried.qrm,
         };
         let unheard = (!logs).then_some(before);
         effects.extend(self.play(mine, unheard, replying, garbled, run_ms, now));
@@ -1928,6 +1962,7 @@ impl<S: CallSource> ContestMachine<S> {
                     station: index,
                     asked: reaction.asked || calls_again,
                     again: reaction.again,
+                    first_exchange: reaction.first_exchange,
                     keyed: Some(keyed.clone()),
                     on_time_out: false,
                 });
@@ -2063,6 +2098,22 @@ impl<S: CallSource> ContestMachine<S> {
             self.resolve(&mine.pending, &mut effects);
             effects.extend(self.arm_patience(run_ms, &[]));
             return effects;
+        }
+        // QRM sends in the turn as it comes due, over whoever is sending,
+        // and runs on to its end, as it never stops for you; the callers'
+        // waits are planned with it, so it never cuts the turn short. A rest
+        // of it carried over your key goes on first, and nothing more of it
+        // sends over that rest.
+        if let Some(qrm) = self.qrm.as_mut() {
+            if let Some(rest) = &mine.qrm {
+                qrm.carried(run_ms, rest.end_sec);
+            }
+            segments.extend(mine.qrm);
+            let length_sec = segments
+                .iter()
+                .map(|segment| segment.end_sec)
+                .fold(0.0, f64::max);
+            segments.extend(qrm.sends(run_ms, length_sec, &self.settings));
         }
         let message_end = heard_you.then_some(your_end);
         let waits = self.time_outs(
@@ -2253,6 +2304,7 @@ impl<S: CallSource> ContestMachine<S> {
         } else {
             Vec::new()
         };
+        let qrm = self.qrm_going_on(&air, run_now);
         let Air {
             turn,
             parts,
@@ -2286,7 +2338,41 @@ impl<S: CallSource> ContestMachine<S> {
             parts,
             pending,
             callers,
+            qrm,
         }
+    }
+
+    /// What is left at `run_now` of the QRM sending in `air`, from the
+    /// character sounding then, sent again whole, as a pile-up caller's
+    /// rest is: a station on your frequency that is not calling you does
+    /// not stop for you. One at the start of the turn whose sound has not
+    /// reached the ear yet goes on whole; one that had not begun is gone
+    /// with the turn.
+    fn qrm_going_on(&self, air: &Air, run_now: u64) -> Option<Segment> {
+        let heard_run = air.heard_run();
+        let segment = air.turn.segments.iter().find(|segment| {
+            segment.who == Sender::Qrm && {
+                let start = heard_run + whole_ms(segment.start_sec);
+                let end = heard_run + whole_ms(segment.end_sec);
+                end > run_now && (start < run_now || segment.start_sec == 0.0)
+            }
+        })?;
+        let start = heard_run + whole_ms(segment.start_sec);
+        let at_sec = run_now.saturating_sub(start) as f64 / 1_000.0;
+        let spans = char_spans(&segment.text, &self.settings, &segment.voice);
+        let from = sounding_at(&spans, at_sec)?;
+        let text = segment.text[from..].to_string();
+        Some(Segment {
+            who: Sender::Qrm,
+            end_sec: sending_sec(&text, &self.settings, &segment.voice),
+            text,
+            voice: segment.voice,
+            start_sec: 0.0,
+            fade: segment.fade.map(|fade| Fade {
+                from_sec: fade.from_sec + at_sec,
+                ..fade
+            }),
+        })
     }
 
     /// The callers in `air` still sending at `run_now`, each with what is
@@ -2301,7 +2387,7 @@ impl<S: CallSource> ContestMachine<S> {
             .turn
             .segments
             .iter()
-            .filter(|segment| segment.who != Sender::You);
+            .filter(|segment| segment.who.is_caller());
         let mut going_on = BTreeSet::new();
         callers
             .zip(air.replies.iter().zip(&air.counted))
@@ -2347,10 +2433,7 @@ impl<S: CallSource> ContestMachine<S> {
     /// turn keyed at `run_ms`: the band's, read from the caller's own point
     /// in it.
     fn fade(&self, caller: &Caller, run_ms: u64, start_sec: f64) -> Option<Fade> {
-        self.qsb.map(|qsb| Fade {
-            qsb,
-            from_sec: caller.fade_from_sec + run_ms as f64 / 1_000.0 + start_sec,
-        })
+        Fade::along(self.qsb, caller.fade_from_sec, run_ms, start_sec)
     }
 
     /// Count what was heard of the callers in `air` and not counted yet:
@@ -2381,7 +2464,7 @@ impl<S: CallSource> ContestMachine<S> {
         let callers = turn
             .segments
             .iter()
-            .filter(|segment| segment.who != Sender::You);
+            .filter(|segment| segment.who.is_caller());
         for ((segment, (reply, says)), counted) in callers.zip(replies.iter()).zip(counted) {
             let start = heard_run + whole_ms(segment.start_sec);
             let end = heard_run + whole_ms(segment.end_sec);
@@ -2406,9 +2489,11 @@ impl<S: CallSource> ContestMachine<S> {
                     if call && reply.asked && heard.call_begun && heard.first_call.is_none() {
                         heard.call_asks.push(keyed.call.clone());
                     }
-                    // Its exchange, whatever key drew it; one sent with the
-                    // call put right counts once it begins, below.
-                    if *says == Says::Exchange && heard.exch_begun {
+                    // Its exchange, whatever key drew it, but the one your
+                    // exchange drew as it first took it, which it owes, a
+                    // careless operator's sent early before it; one sent
+                    // with the call put right counts once it begins, below.
+                    if *says == Says::Exchange && heard.exch_begun && !reply.first_exchange {
                         heard.exch_asks.push(keyed.exch.clone());
                     }
                 }
@@ -3603,7 +3688,7 @@ fn checks_at_sec(
         .unwrap_or(your_end);
     segments
         .iter()
-        .filter(|segment| segment.who != Sender::You)
+        .filter(|segment| segment.who.is_caller())
         .zip(replies)
         .filter(|(_, (_, says))| *says == Says::Signoff)
         .map(|(segment, _)| segment.end_sec)
@@ -3641,8 +3726,9 @@ mod tests {
     use crate::contest::QsoError;
     use crate::contest::bot::script::{ScriptCalls, run_settings};
     use crate::contest::bot::{Copied, Runtime, copy_of};
+    use crate::contest::exchange::read_number;
     use crate::contest::rules::RULES;
-    use crate::contest::turn::sending_sec;
+    use crate::contest::turn::{plan_turn, sending_sec};
 
     /// A run worked by hand, its callers sending `calls` in turn.
     fn runtime(calls: &[&str]) -> Runtime<ScriptCalls> {
@@ -3653,7 +3739,7 @@ mod tests {
     fn replies(turn: &Turn) -> Vec<&str> {
         turn.segments
             .iter()
-            .filter(|segment| segment.who != Sender::You)
+            .filter(|segment| segment.who.is_caller())
             .map(|segment| segment.text.as_str())
             .collect()
     }
@@ -6592,7 +6678,7 @@ mod tests {
             .iter()
             .filter_map(|segment| match segment.who {
                 Sender::Caller(station) => Some(station),
-                Sender::You => None,
+                Sender::You | Sender::Qrm => None,
             })
             .collect()
     }
@@ -6665,7 +6751,7 @@ mod tests {
         let mut pitches: Vec<f64> = cq
             .segments
             .iter()
-            .filter(|segment| segment.who != Sender::You)
+            .filter(|segment| segment.who.is_caller())
             .map(|segment| segment.voice.tone_hz)
             .collect();
         pitches.sort_by(f64::total_cmp);
@@ -9098,5 +9184,326 @@ mod tests {
             let copied = if begun { nr.as_str() } else { "" };
             assert_eq!(result.groups[1].received, copied, "begun: {begun}");
         }
+    }
+
+    /// A WPX run worked by hand from `seed`, its callers sending `calls`
+    /// in turn, with the callers' `habits`.
+    fn habits_runtime(seed: u64, calls: &[&str], habits: CallerHabits) -> Runtime<ScriptCalls> {
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_habits = habits;
+        Runtime::start(seed, settings, ScriptCalls::new(calls))
+    }
+
+    /// The QRM in `turn`.
+    fn qrm_in(turn: &Turn) -> Vec<&Segment> {
+        turn.segments
+            .iter()
+            .filter(|segment| segment.who == Sender::Qrm)
+            .collect()
+    }
+
+    /// Under rough habits a station that is not calling you sends on your
+    /// frequency in a turn, from its start when it came due while the
+    /// frequency was quiet: heard through the receiver as a caller is, but
+    /// no caller. It never answers nor is answered, the count of stations
+    /// calling and Enter's hint leave it out, and the QSO goes on as
+    /// without it. Under easier habits there is none.
+    #[test]
+    fn qrm_sends_in_a_turn_and_is_never_a_caller() {
+        for habits in [CallerHabits::Easy, CallerHabits::Real] {
+            assert!(habits_runtime(1, &[], habits).machine.qrm.is_none());
+        }
+        let mut runtime = habits_runtime(1, &["K5XYZ"], CallerHabits::Rough);
+        runtime.finish_turn();
+        let qrm = runtime
+            .machine
+            .qrm
+            .as_mut()
+            .expect("rough habits bring QRM");
+        qrm.start_at(0);
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        let turn = runtime.last_turn().clone();
+        let sent = qrm_in(&turn);
+        assert!(!sent.is_empty(), "{turn:?}");
+        assert_eq!(sent[0].start_sec, 0.0, "it came due while all was quiet");
+        let text = sent[0].text.clone();
+        assert!(
+            text.starts_with("QRL?") || text.starts_with("CQ CQ TEST ") || text == "DL1ABC QSY QSY",
+            "{text}"
+        );
+        assert!((30.0..=49.0).contains(&sent[0].voice.char_wpm));
+        // Through the receiver, as the replies go.
+        let planned = plan_turn(&turn, &runtime.machine.settings);
+        assert_eq!(
+            planned.others.len(),
+            1 + sent.len(),
+            "the reply and the QRM"
+        );
+        // The station you work answers as ever, and is the only station.
+        assert_eq!(replies(&turn).len(), 1);
+        assert_eq!(runtime.machine.stations.len(), 1);
+        // With only the QRM sounding beside your message, nobody calls.
+        let air = view(&runtime).air.expect("on the air");
+        let early = air.heard_from.plus_sec(0.05);
+        assert_eq!(air.calling(early), 0);
+        assert!(!view(&runtime).qso.nobody_calling, "the station you work");
+        let nr = serial(replies(&turn)[0]);
+        runtime.finish_turn();
+        let fields = Fields {
+            call: "K5XYZ".into(),
+            exch: nr.clone(),
+            ..Fields::default()
+        };
+        let enter = esm(&view(&runtime).qso, &fields, &RULES[0], Side::Dx);
+        assert_eq!(enter.label, "TU & log", "the hint knows nothing of it");
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        assert_eq!(view(&runtime).clean, 1);
+    }
+
+    /// QRM still sending when you key goes on in the next turn from the
+    /// character sounding then, as a station on your frequency does not
+    /// stop for you; one done before you key is gone with its turn.
+    #[test]
+    fn qrm_goes_on_over_your_next_message() {
+        let mut runtime = habits_runtime(1, &["K5XYZ"], CallerHabits::Rough);
+        runtime.finish_turn();
+        let qrm = runtime
+            .machine
+            .qrm
+            .as_mut()
+            .expect("rough habits bring QRM");
+        qrm.start_at(0);
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        let first = qrm_in(runtime.last_turn())[0].clone();
+        runtime.run_to(runtime.now + 600);
+        runtime.key(OpKey::Again, "K5XYZ", "");
+        let next = runtime.last_turn().clone();
+        let going_on = qrm_in(&next);
+        assert_eq!(going_on.len(), 1, "{next:?}");
+        assert_eq!(going_on[0].start_sec, 0.0);
+        assert!(
+            first.text.ends_with(&going_on[0].text),
+            "{first:?} {going_on:?}"
+        );
+        assert!(
+            going_on[0].text.len() < first.text.len(),
+            "from where it was"
+        );
+        assert_eq!(going_on[0].voice, first.voice);
+    }
+
+    /// QRM carried over your key, its rest timed from where it was heard,
+    /// never sends over itself: here its sound started six seconds late, a
+    /// retried start, so its rest runs on well past where it was planned to
+    /// end, and its next message, or the next station's, waits for it.
+    #[test]
+    fn qrm_carried_over_a_key_never_sends_over_itself() {
+        let mut carried = 0;
+        for seed in 1..34 {
+            let mut runtime = habits_runtime(seed, &["K5XYZ"], CallerHabits::Rough);
+            runtime.finish_turn();
+            let qrm = runtime
+                .machine
+                .qrm
+                .as_mut()
+                .expect("rough habits bring QRM");
+            qrm.start_at(0);
+            runtime.key(OpKey::Esm, "K5XYZ", "");
+            let id = runtime.last_turn().id;
+            let keyed = runtime.now;
+            runtime.run_to(keyed);
+            runtime.apply(ContestEvent::TurnStarted {
+                id,
+                heard_from: MonoMs(keyed + 6_000),
+            });
+            runtime.now = keyed + 7_000;
+            runtime.key(OpKey::Again, "K5XYZ", "");
+            runtime.finish_turn();
+            for turn in &runtime.turns {
+                let sent = qrm_in(turn);
+                for (at, one) in sent.iter().enumerate() {
+                    for other in &sent[..at] {
+                        assert!(
+                            one.start_sec >= other.end_sec || other.start_sec >= one.end_sec,
+                            "seed {seed}: {other:?} and {one:?}"
+                        );
+                    }
+                }
+            }
+            carried += usize::from(qrm_in(runtime.last_turn()).len() > 1);
+        }
+        assert!(
+            carried > 5,
+            "only {carried} turns with a rest and more after it"
+        );
+    }
+
+    /// Under rough habits a caller now and then fumbles a digit of its
+    /// serial, sends `EEEEE` and the serial right: what it sent is the
+    /// serial right, so logged so the QSO is clean, its group keeping the
+    /// token sent right; logged as fumbled, its number is wrong.
+    #[test]
+    fn a_fumbled_serial_is_copied_as_put_right() {
+        let fumbling = |seed: &u64| {
+            let runtime = habits_runtime(*seed, &["K5XYZ"], CallerHabits::Rough);
+            runtime.machine.stations[0].caller.fumbles()
+        };
+        let seeds: Vec<u64> = (1..400).filter(fumbling).take(8).collect();
+        let mut fumbled = 0;
+        for seed in seeds {
+            for logged_right in [true, false] {
+                let mut runtime = habits_runtime(seed, &["K5XYZ"], CallerHabits::Rough);
+                let exchange = to_its_exchange(&mut runtime);
+                let Some(wrong) = exchange
+                    .split_whitespace()
+                    .find_map(|word| word.strip_suffix("EEEEE"))
+                else {
+                    // Its serial had no digit to fumble in its last two.
+                    continue;
+                };
+                fumbled += 1;
+                let right = serial(&exchange);
+                let logged = if logged_right {
+                    right.clone()
+                } else {
+                    wrong.to_string()
+                };
+                runtime.key(OpKey::Esm, "K5XYZ", &logged);
+                runtime.finish_turn();
+                let check = match &view(&runtime).log[0].status {
+                    RowStatus::Checked(check) => check.clone(),
+                    RowStatus::Pending => panic!("seed {seed}: still waiting"),
+                };
+                if logged_right {
+                    assert!(check.is_clean(), "seed {seed}: {exchange} {check:?}");
+                } else {
+                    assert_eq!(check.errors, [QsoError::Field(Field::Nr)], "seed {seed}");
+                }
+                runtime.now += 1_000;
+                let _ = runtime.apply(ContestEvent::FinishNow);
+                let (result, _) = result(&runtime);
+                assert_eq!(
+                    result.groups[1].sent, right,
+                    "seed {seed}: sent is the serial right"
+                );
+            }
+        }
+        assert!(fumbled >= 4, "only {fumbled} fumbled");
+    }
+
+    /// Under rough habits a caller now and then takes a slip of its call
+    /// for its own: it sends its exchange with no correction, so Enter logs
+    /// the slip, and the check shows the call busted, with the station's
+    /// own, as MorseRunner's does.
+    #[test]
+    fn a_slip_a_careless_caller_took_is_logged_busted() {
+        let mut taken = 0;
+        for seed in 1..300 {
+            let mut runtime = habits_runtime(seed, &["K5XYZ"], CallerHabits::Rough);
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "K5XYW", "");
+            let answer = replies(runtime.last_turn())[0].to_string();
+            if answer.contains("K5XYZ") {
+                continue;
+            }
+            taken += 1;
+            runtime.finish_turn();
+            let nr = serial(&answer);
+            let fields = Fields {
+                call: "K5XYW".into(),
+                exch: nr.clone(),
+                ..Fields::default()
+            };
+            let enter = esm(&view(&runtime).qso, &fields, &RULES[0], Side::Dx);
+            assert_eq!(enter.label, "TU & log", "seed {seed}: {answer}");
+            assert!(!enter.corrected);
+            runtime.key(OpKey::Esm, "K5XYW", &nr);
+            runtime.finish_turn();
+            let row = &view(&runtime).log[0];
+            assert_eq!(row.call, "K5XYW");
+            assert_eq!(
+                row.status,
+                RowStatus::Checked(QsoCheck {
+                    errors: vec![QsoError::Call {
+                        correct: "K5XYZ".to_string()
+                    }],
+                    dupe: false,
+                }),
+                "seed {seed}"
+            );
+            if taken == 3 {
+                break;
+            }
+        }
+        assert_eq!(taken, 3, "only {taken} slips taken");
+    }
+
+    /// Under rough habits a careless operator sends its exchange with its
+    /// call put right before it has yours, after a slip of its call or a
+    /// partial: heard, it reads as a correction, the exchange in it a copy
+    /// once it begins to reach you; your call and exchange then bring the
+    /// exchange again, which it owed and you did not ask for, and the QSO
+    /// logs clean, with no repeat of it charged: only the call a partial
+    /// asked for.
+    #[test]
+    fn an_exchange_sent_early_is_heard_and_the_qso_logs_clean() {
+        let early = |seed: &u64| {
+            let runtime = habits_runtime(*seed, &["K5XYZ"], CallerHabits::Rough);
+            runtime.machine.stations[0].caller.sends_early()
+        };
+        let seeds: Vec<u64> = (1..4_000).filter(early).take(5).collect();
+        assert_eq!(seeds.len(), 5, "careless operators");
+        for seed in seeds {
+            for (key, sent, asked) in [(OpKey::HisCall, "K5XYW", 0), (OpKey::Esm, "K5X?", 1)] {
+                let case = format!("seed {seed}, {sent}");
+                let mut runtime = habits_runtime(seed, &["K5XYZ"], CallerHabits::Rough);
+                runtime.finish_turn();
+                runtime.key(key, sent, "");
+                let fix = replies(runtime.last_turn())[0].to_string();
+                let Some(Copied::Correction(call, Some(exch))) = copy_of(&fix) else {
+                    // It took the slip for its call, as one in 25 does.
+                    assert_eq!(sent, "K5XYW", "{case}: {fix}");
+                    continue;
+                };
+                assert_eq!(call, "K5XYZ", "{case}");
+                runtime.finish_turn();
+                runtime.key(OpKey::Esm, "K5XYZ", &exch);
+                assert_eq!(yours(runtime.last_turn()), "K5XYZ 5NN TT1", "{case}");
+                runtime.finish_turn();
+                runtime.key(OpKey::Esm, "K5XYZ", &exch);
+                runtime.finish_turn();
+                let log = &view(&runtime).log;
+                assert_eq!(view(&runtime).clean, 1, "{case}: {log:?}");
+                assert_eq!(log[0].asked, asked, "{case}");
+                runtime.now += 1_000;
+                let _ = runtime.apply(ContestEvent::FinishNow);
+                let (result, run) = result(&runtime);
+                let summary = run.summary(&result.groups).expect("its own groups");
+                assert_eq!(summary.clean, 1, "{case}");
+                assert_eq!(summary.repeated, asked as usize, "{case}");
+                // Its exchange was copied as first sent, never asked for.
+                let nr = result.group_timings.last().expect("its serial");
+                assert_eq!(nr.sends, 1, "{case}");
+            }
+        }
+    }
+
+    /// Under real habits callers send their numbers cut, and a copy typed
+    /// in plain digits is read by its value: a logger's 7 for `TT7`.
+    #[test]
+    fn a_cut_serial_copied_in_digits_is_clean() {
+        let mut cut = 0;
+        for seed in 1..40 {
+            let mut runtime = habits_runtime(seed, &["K5XYZ"], CallerHabits::Real);
+            let exchange = to_its_exchange(&mut runtime);
+            let sent = serial(&exchange);
+            let value = read_number(&sent).expect("a number").to_string();
+            cut += usize::from(sent != value);
+            runtime.key(OpKey::Esm, "K5XYZ", &value);
+            runtime.finish_turn();
+            assert_eq!(view(&runtime).clean, 1, "seed {seed}: {sent} as {value}");
+        }
+        assert!(cut > 10, "only {cut} cut");
     }
 }

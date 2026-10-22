@@ -81,6 +81,7 @@ impl TrainingSettings {
                 self.band.stations_max = d.band.stations_max;
                 self.band.pileup_spread_hz = d.band.pileup_spread_hz;
                 self.band.pileup_level_db = d.band.pileup_level_db;
+                self.contest.contest_habits = d.contest.contest_habits;
             }
             SettingsSection::AutoLevel => {
                 self.auto_level.auto_adjust_level = d.auto_level.auto_adjust_level;

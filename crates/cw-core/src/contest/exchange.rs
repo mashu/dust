@@ -289,35 +289,75 @@ pub fn cut_power(power: &str) -> String {
     cut(power, &SERIAL_CUTS)
 }
 
-/// How often a caller with real habits cuts a zero that is not padding, and
-/// a nine.
+/// How a caller with real habits sends a zero that is not in a run of them,
+/// in a message, as MorseRunner's callers do (`Station.pas:538-551`): in a
+/// serial, as `T` 98% of the time; otherwise, and in a power, as `O` 40% of
+/// the time and as `T` 97% of the rest, so a serial's is hardly ever a
+/// plain 0, and a power's is `T` or `O`.
 const REAL_CUT_ZERO: f64 = 0.98;
+const REAL_ZERO_AS_O: f64 = 0.4;
+const REAL_CUT_ZERO_AFTER: f64 = 0.97;
+
+/// How often a caller with real habits cuts the nines of a serial or a
+/// report other than 599 (`Station.pas:564-565`).
 const REAL_CUT_NINE: f64 = 0.97;
 
 /// How many callers with real habits cut a zone's or a power's zeros, ones
-/// and nines, each keeping to it for the QSO; and how often one pads a
-/// zone below 9 with a zero, as MorseRunner's do.
+/// and nines, each keeping to it for the QSO (`Station.pas:555-562`); and
+/// how often one pads a zone below 9 with a zero, as MorseRunner's do
+/// (`CqWW.pas:305-307`).
 const REAL_CUT_ZONE: f64 = 0.70;
 const REAL_PAD_ZONE: f64 = 0.05;
 const REAL_PAD_BELOW: u32 = 9;
 
-/// A caller's serial as it sends it. Easy habits send plain digits (`7`);
-/// real ones send as MorseRunner's callers do: padded to three with the
-/// padding as `TT`, other zeros as `T` almost always and nines as `N`
-/// nearly as often.
-pub fn send_serial(serial: u32, habits: CallerHabits, rng: &mut impl Rng) -> String {
-    if habits == CallerHabits::Easy {
+/// How often a caller with real habits sends its 599 as `ENN` rather than
+/// `5NN`, message by message (`Station.pas:527-528`).
+const REAL_ENN: f64 = 0.05;
+
+/// A report of 599, and the two ways a caller with real habits sends it.
+const REPORT_599: u32 = 599;
+pub(super) const CUT_599: &str = "5NN";
+pub(super) const ENN: &str = "ENN";
+
+/// `digits` with each run of zeros as `T`s, as MorseRunner's callers send
+/// one whatever else they cut (`Station.pas:536-537`): the padding of a
+/// serial (`TT7`) and the zeros of a power (`1TT`).
+fn cut_zero_runs(digits: &str) -> String {
+    digits.replace("000", "TTT").replace("00", "TT")
+}
+
+/// What a caller with real habits sends a zero alone as, in one message:
+/// in a `serial` almost always `T`, and otherwise `O` or `T`, seldom a
+/// plain 0.
+fn lone_zero(serial: bool, rng: &mut impl Rng) -> char {
+    if serial && rng.f64() < REAL_CUT_ZERO {
+        'T'
+    } else if rng.f64() < REAL_ZERO_AS_O {
+        'O'
+    } else if rng.f64() < REAL_CUT_ZERO_AFTER {
+        'T'
+    } else {
+        '0'
+    }
+}
+
+/// A caller's serial as it sends it. Easy habits send plain digits (`7`),
+/// and so does a contest whose serials go plain (`cut` false), as the
+/// Sprint's do: there a serial cut to letters alone (`NT` for 90) would
+/// read as a state or a name. Real habits elsewhere send as MorseRunner's
+/// callers do: padded to three digits, as WPX's are, the padding as `TT`;
+/// every run of zeros as `T`s, a zero alone as `T` almost always (now and
+/// then `O`), and nines as `N` nearly as often.
+pub fn send_serial(serial: u32, habits: CallerHabits, cut: bool, rng: &mut impl Rng) -> String {
+    if habits == CallerHabits::Easy || !cut {
         return serial.to_string();
     }
-    let cut_zero = rng.f64() < REAL_CUT_ZERO;
+    let zero = lone_zero(true, rng);
     let cut_nine = rng.f64() < REAL_CUT_NINE;
-    let padded = format!("{serial:03}");
-    let padding = padded.len() - padded.trim_start_matches('0').len();
-    padded
+    cut_zero_runs(&format!("{serial:03}"))
         .chars()
-        .enumerate()
-        .map(|(at, c)| match c {
-            '0' if at < padding || cut_zero => 'T',
+        .map(|c| match c {
+            '0' => zero,
             '9' if cut_nine => 'N',
             c => c,
         })
@@ -347,20 +387,16 @@ pub fn send_zone(zone: u32, habits: CallerHabits, rng: &mut impl Rng) -> String 
 
 /// A caller's power as it sends it. Easy habits send it as written (`100`,
 /// `KW`); real ones as MorseRunner's callers do: a run of zeros always as
-/// `TT` (`1TT`), a zero alone as `T` almost always, and most callers cut
-/// ones and nines too (`ATT`). A kilowatt goes as written.
+/// `T`s (`1TT`), a zero alone as `O` or `T` (`5O`, `5T`), and most callers
+/// cut ones and nines too (`ATT`). A kilowatt goes as written.
 pub fn send_power(power: &str, habits: CallerHabits, rng: &mut impl Rng) -> String {
     if habits == CallerHabits::Easy || !power.chars().all(|c| c.is_ascii_digit()) {
         return power.to_string();
     }
-    let cut_zero = rng.f64() < REAL_CUT_ZERO;
-    let zeros = |at: usize| power[at..].starts_with("00") || power[..at].ends_with('0');
-    let sent: String = power
-        .char_indices()
-        .map(|(at, c)| match c {
-            '0' if cut_zero || zeros(at) => 'T',
-            c => c,
-        })
+    let zero = lone_zero(false, rng);
+    let sent: String = cut_zero_runs(power)
+        .chars()
+        .map(|c| if c == '0' { zero } else { c })
         .collect();
     if rng.f64() < REAL_CUT_ZONE {
         cut(&sent, &ZONE_CUTS)
@@ -370,18 +406,32 @@ pub fn send_power(power: &str, habits: CallerHabits, rng: &mut impl Rng) -> Stri
 }
 
 /// A caller's report as it sends it, where the report is copied: plain
-/// digits under easy habits (`579`), and under real ones each nine as `N`
-/// nearly always, as they cut a serial's (`57N`, `5NN`).
+/// digits under easy habits (`579`), and under real ones as MorseRunner's
+/// callers send one: 599 as `5NN`, or `ENN` now and then, and the nines of
+/// any other cut nearly always (`57N`).
 pub fn send_report(report: u32, habits: CallerHabits, rng: &mut impl Rng) -> String {
     let plain = report.to_string();
     if habits == CallerHabits::Easy {
         return plain;
+    }
+    if report == REPORT_599 {
+        return send_5nn(habits, rng).to_string();
     }
     let cut_nine = rng.f64() < REAL_CUT_NINE;
     plain
         .chars()
         .map(|c| if c == '9' && cut_nine { 'N' } else { c })
         .collect()
+}
+
+/// A report of 599 as a caller sends it in one message: `5NN`, as every
+/// caller cuts it, or under real habits `ENN` in one message in twenty.
+pub(super) fn send_5nn(habits: CallerHabits, rng: &mut impl Rng) -> &'static str {
+    if habits != CallerHabits::Easy && rng.f64() < REAL_ENN {
+        ENN
+    } else {
+        CUT_599
+    }
 }
 
 /// A field as a session's group keeps it, so Letters and Mistakes see what
@@ -614,53 +664,103 @@ mod tests {
         }
     }
 
+    /// The share of `draws` that `count` is, for the tests of how often
+    /// callers send a form.
+    fn share(count: usize, draws: usize) -> f64 {
+        count as f64 / draws as f64
+    }
+
+    /// A serial goes out in plain digits under easy habits, and in a
+    /// contest whose serials go plain, as the Sprint's do. Under real ones
+    /// elsewhere it goes as MorseRunner's callers send it: padded to three,
+    /// every run of zeros as `T`s, a zero alone as `T` but for about one in
+    /// a hundred, which is `O` or, hardly ever, a plain 0, and nines as `N`
+    /// 97% of the time; each read back as the serial it is.
     #[test]
     fn callers_send_their_serial_as_their_habits_have_it() {
+        use CallerHabits::{Easy, Real, Rough};
         let mut rng = SplitMix64::new(5);
-        assert_eq!(send_serial(7, CallerHabits::Easy, &mut rng), "7");
-        assert_eq!(send_serial(190, CallerHabits::Easy, &mut rng), "190");
-        let mut cut_zeros = 0;
-        let mut cut_nines = 0;
-        for _ in 0..1_000 {
-            let sent = send_serial(90, CallerHabits::Real, &mut rng);
-            assert_eq!(read_number(&sent), Some(90), "{sent}");
-            assert!(sent.starts_with('T'), "{sent}: padding is always cut");
-            cut_zeros += usize::from(sent.ends_with('T'));
-            cut_nines += usize::from(sent.contains('N'));
+        for cut in [true, false] {
+            assert_eq!(send_serial(7, Easy, cut, &mut rng), "7");
+            assert_eq!(send_serial(190, Easy, cut, &mut rng), "190");
         }
-        assert!(
-            cut_zeros > 950 && cut_zeros < 1_000,
-            "{cut_zeros} zeros cut"
-        );
-        assert!(
-            cut_nines > 930 && cut_nines < 1_000,
-            "{cut_nines} nines cut"
-        );
-        for habits in [CallerHabits::Real, CallerHabits::Rough] {
-            for serial in [1, 9, 10, 99, 100, 214, 1_000] {
-                let sent = send_serial(serial, habits, &mut rng);
+        // A run of zeros is always cut: the padding of a serial below 10,
+        // and the zeros of 100 and 1000.
+        for _ in 0..500 {
+            assert_eq!(send_serial(7, Real, true, &mut rng), "TT7");
+            assert_eq!(send_serial(100, Real, true, &mut rng), "1TT");
+            assert_eq!(send_serial(1_000, Real, true, &mut rng), "1TTT");
+        }
+        const DRAWS: usize = 20_000;
+        let (mut cut, mut o, mut nines) = (0, 0, 0);
+        for _ in 0..DRAWS {
+            // Padded, 90 is 090: two zeros alone, sent alike.
+            let sent = send_serial(90, Real, true, &mut rng);
+            assert_eq!(read_number(&sent), Some(90), "{sent}");
+            let first = sent.chars().next().unwrap_or_default();
+            assert_eq!(sent.chars().last(), Some(first), "{sent}: zeros alike");
+            cut += usize::from(first == 'T');
+            o += usize::from(first == 'O');
+            nines += usize::from(sent.contains('N'));
+        }
+        // T: 98%, and 97% of the 60% of the rest not sent as O.
+        let t = 0.98 + 0.02 * 0.6 * 0.97;
+        assert!((share(cut, DRAWS) - t).abs() < 0.003, "{cut} cut to T");
+        assert!((share(o, DRAWS) - 0.008).abs() < 0.003, "{o} sent as O");
+        assert!((share(nines, DRAWS) - 0.97).abs() < 0.006, "{nines} N");
+        for habits in [Real, Rough] {
+            for serial in [1, 9, 10, 90, 99, 100, 214, 1_000, 9_999] {
+                let sent = send_serial(serial, habits, true, &mut rng);
                 assert_eq!(read_number(&sent), Some(serial), "{sent}");
-                assert!(sent.len() >= 3, "{sent} is padded");
+                assert!(sent.len() >= 3, "{sent}: padded");
+                // Where serials go plain, no serial is cut, so none is
+                // letters alone beside a name and a state.
+                assert_eq!(
+                    send_serial(serial, habits, false, &mut rng),
+                    serial.to_string()
+                );
             }
         }
     }
 
-    /// A copied report goes out plain under easy habits, and with its nines
-    /// cut under real ones, read back as the report it is.
+    /// A copied report goes out plain under easy habits. Under real ones
+    /// 599 goes as `5NN`, or `ENN` one time in twenty, and any other has
+    /// its nines cut 97% of the time; each read back as the report it is.
     #[test]
     fn callers_send_their_report_as_their_habits_have_it() {
         let mut rng = SplitMix64::new(6);
         assert_eq!(send_report(579, CallerHabits::Easy, &mut rng), "579");
         assert_eq!(send_report(599, CallerHabits::Easy, &mut rng), "599");
         assert_eq!(send_report(449, CallerHabits::Easy, &mut rng), "449");
-        let mut cut = 0;
-        for _ in 0..1_000 {
+        const DRAWS: usize = 10_000;
+        let (mut enn, mut cut) = (0, 0);
+        for _ in 0..DRAWS {
             let sent = send_report(599, CallerHabits::Real, &mut rng);
+            assert!(["5NN", "ENN"].contains(&sent.as_str()), "{sent}");
             assert!(Field::Rst.same(&sent, "599"), "{sent}");
-            cut += usize::from(sent == "5NN");
+            enn += usize::from(sent == "ENN");
+            let sent = send_report(579, CallerHabits::Real, &mut rng);
+            assert!(["57N", "579"].contains(&sent.as_str()), "{sent}");
+            cut += usize::from(sent == "57N");
         }
-        assert!(cut > 930 && cut < 1_000, "{cut} cut");
+        assert!((share(enn, DRAWS) - 0.05).abs() < 0.01, "{enn} ENN");
+        assert!((share(cut, DRAWS) - 0.97).abs() < 0.01, "{cut} cut");
         assert!(Field::Rst.same(&send_report(579, CallerHabits::Rough, &mut rng), "579"));
+    }
+
+    /// The report every caller sends prefilled is `5NN`, and under real
+    /// habits `ENN` in one message in twenty, drawn message by message.
+    #[test]
+    fn callers_send_5nn_and_now_and_then_enn() {
+        let mut rng = SplitMix64::new(9);
+        assert!((0..1_000).all(|_| send_5nn(CallerHabits::Easy, &mut rng) == "5NN"));
+        const DRAWS: usize = 10_000;
+        for habits in [CallerHabits::Real, CallerHabits::Rough] {
+            let enn = (0..DRAWS)
+                .filter(|_| send_5nn(habits, &mut rng) == "ENN")
+                .count();
+            assert!((share(enn, DRAWS) - 0.05).abs() < 0.01, "{habits:?}: {enn}");
+        }
     }
 
     /// A zone goes out plain under easy habits; under real ones most
@@ -696,25 +796,32 @@ mod tests {
         assert!((0..500).all(|_| send_zone(25, CallerHabits::Real, &mut rng).len() == 2));
     }
 
-    /// Power goes out as written under easy habits; under real ones a run
-    /// of zeros is always cut, a zero alone almost always, and most callers
-    /// cut ones and nines too; a kilowatt goes as written, and each reads
-    /// back as the power it is.
+    /// Power goes out as written under easy habits. Under real ones a run
+    /// of zeros is always `T`s, a zero alone `O` 40% of the time and `T`
+    /// most of the rest, and 70% of callers cut ones and nines too; a
+    /// kilowatt goes as written, and each reads back as the power it is.
     #[test]
     fn callers_send_their_power_as_their_habits_have_it() {
         let mut rng = SplitMix64::new(8);
         for power in ["100", "5", "KW", "K", "1K"] {
             assert_eq!(send_power(power, CallerHabits::Easy, &mut rng), power);
         }
-        let mut cut = 0;
-        for _ in 0..2_000 {
+        const DRAWS: usize = 10_000;
+        let (mut ones, mut o, mut t) = (0, 0, 0);
+        for _ in 0..DRAWS {
             let sent = send_power("100", CallerHabits::Real, &mut rng);
             assert!(["1TT", "ATT"].contains(&sent.as_str()), "{sent}");
-            cut += usize::from(sent == "ATT");
+            ones += usize::from(sent == "ATT");
             let sent = send_power("50", CallerHabits::Real, &mut rng);
-            assert!(["5T", "50"].contains(&sent.as_str()), "{sent}");
+            assert!(["5O", "5T", "50"].contains(&sent.as_str()), "{sent}");
+            o += usize::from(sent == "5O");
+            t += usize::from(sent == "5T");
         }
-        assert!(cut > 1_300 && cut < 1_500, "{cut} of 2000 cut");
+        assert!((share(ones, DRAWS) - 0.70).abs() < 0.015, "{ones} cut");
+        assert!((share(o, DRAWS) - 0.40).abs() < 0.015, "{o} as O");
+        // T as drawn, or a plain 0 the 70% cut after.
+        let as_t = 0.6 * 0.97 + 0.6 * 0.03 * 0.7;
+        assert!((share(t, DRAWS) - as_t).abs() < 0.015, "{t} as T");
         for habits in [CallerHabits::Real, CallerHabits::Rough] {
             for power in ["5", "10", "99", "100", "150", "500", "750", "1500"] {
                 let sent = send_power(power, habits, &mut rng);

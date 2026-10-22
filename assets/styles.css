@@ -1437,6 +1437,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .qso-who { flex: none; width: 2.6rem; }
 .qso-line.you .call { border-color: var(--copper); color: var(--ink); }
 .qso-line .call { white-space: normal; overflow-wrap: anywhere; }
+/* QRM, a station on your frequency that is not calling you, is heard but
+   kept back: no QSO of its own. */
+.qso-line.qrm .call { border-style: dashed; background: transparent; font-weight: 500; }
 /* Callers calling at once share a line, side by side. */
 .qso-sends { display: flex; flex-wrap: wrap; gap: 0.3rem; min-width: 0; }
 /* Each QSO heard set apart from the one before. */

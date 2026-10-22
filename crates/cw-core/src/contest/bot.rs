@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 
+use super::exchange::{CUT_599, ENN};
 use super::machine::{ContestEffect, ContestEvent, ContestMachine, OpKey, PauseWhy};
 use super::turn::{Sender, Turn, plan_turn};
 use super::{CallSource, Field, Fields};
@@ -175,11 +176,12 @@ impl<S: CallSource> Runtime<S> {
 }
 
 /// What callers sent in `turn` that had been heard whole `into` seconds
-/// after it started.
+/// after it started. QRM is heard too, but an operator knows it is no
+/// caller, as it would by its pitch and its speed, and leaves it.
 fn callers_text(turn: &Turn, into: f64) -> Vec<String> {
     turn.segments
         .iter()
-        .filter(|segment| segment.who != Sender::You && segment.end_sec <= into)
+        .filter(|segment| segment.who.is_caller() && segment.end_sec <= into)
         .map(|segment| segment.text.clone())
         .collect()
 }
@@ -229,7 +231,11 @@ fn exchange_of(words: &[&str]) -> Option<String> {
     };
     match (after("UR"), after("NAME")) {
         (Some(rst), Some(name)) => Some(format!("{rst} {name}")),
-        _ if words.contains(&"5NN") => words.last().map(|serial| (*serial).to_string()),
+        // After the report every caller sends, `5NN` or now and then
+        // `ENN`: a serial, a zone or a power, its last word.
+        _ if words.iter().any(|word| [CUT_599, ENN].contains(word)) => {
+            words.last().map(|serial| (*serial).to_string())
+        }
         _ => sprint_exchange(words).or_else(|| field_day_exchange(words)),
     }
 }
@@ -479,18 +485,7 @@ pub fn hear_qsos<S: CallSource>(
     source: S,
     qsos: u32,
 ) -> HeardQsos {
-    let mut heard = settings.clone();
-    heard.curriculum.char_set_mode = CharSetMode::Contest;
-    // The first CQ at once, and never the run's end before the last QSO.
-    heard.playback.countdown_sec = 0;
-    heard.contest.contest_minutes = 0;
-    let stand_in = heard.contest.stand_in();
-    let heard = heard.clamp();
-    let mut runtime = Runtime::start(seed, heard.clone(), source);
-    // However it stops, what went on the air is what is heard.
-    work_until(&mut runtime, &mut Operator::perfect(), &[], |runtime| {
-        runtime.machine.view().qsos >= qsos
-    });
+    let (runtime, heard, stand_in) = worked_to_hear(seed, settings, source, qsos);
     let mut turns = Vec::new();
     let mut ended_ms = 0;
     for turn in runtime.turns {
@@ -509,6 +504,30 @@ pub fn hear_qsos<S: CallSource>(
             .retain(|segment| segment.who == Sender::You || Some(segment.text.as_str()) == signoff);
     }
     HeardQsos { turns, stand_in }
+}
+
+/// The run [`hear_qsos`] plays, worked by the perfect operator until
+/// `qsos` QSOs are in its log: the runtime it went through, the settings it
+/// ran on, and your station where some of it stands in for yours.
+fn worked_to_hear<S: CallSource>(
+    seed: u64,
+    settings: &TrainingSettings,
+    source: S,
+    qsos: u32,
+) -> (Runtime<S>, TrainingSettings, Option<String>) {
+    let mut heard = settings.clone();
+    heard.curriculum.char_set_mode = CharSetMode::Contest;
+    // The first CQ at once, and never the run's end before the last QSO.
+    heard.playback.countdown_sec = 0;
+    heard.contest.contest_minutes = 0;
+    let stand_in = heard.contest.stand_in();
+    let heard = heard.clamp();
+    let mut runtime = Runtime::start(seed, heard.clone(), source);
+    // However it stops, what went on the air is what is heard.
+    work_until(&mut runtime, &mut Operator::perfect(), &[], |runtime| {
+        runtime.machine.view().qsos >= qsos
+    });
+    (runtime, heard, stand_in)
 }
 
 #[cfg(test)]
@@ -862,7 +881,26 @@ mod tests {
         crate::session::SessionResult,
         Vec<String>,
     ) {
+        let habits = super::super::CallerHabits::Easy;
+        perfect_run_with(habits, kind, style, call, (state, section), seed)
+    }
+
+    /// The same, with the callers' `habits`.
+    fn perfect_run_with(
+        habits: super::super::CallerHabits,
+        kind: super::super::ContestKind,
+        style: super::super::RunStyle,
+        call: &str,
+        (state, section): (&str, &str),
+        seed: u64,
+    ) -> (
+        Runtime<Sampler>,
+        crate::contest::ContestRun,
+        crate::session::SessionResult,
+        Vec<String>,
+    ) {
         let mut settings = run_settings(25.0);
+        settings.contest.contest_habits = habits;
         settings.contest.contest_kind = kind;
         settings.contest.contest_style = style;
         settings.contest.my_call = call.to_string();
@@ -1441,5 +1479,122 @@ mod tests {
         assert_eq!(run.paused_ms, paused);
         assert_eq!(run.run_ms + run.paused_ms, runtime.now);
         assert!(run.qsos.iter().all(|qso| qso.t <= run.run_ms));
+    }
+
+    /// Callers of every habit are worked clean by the perfect operator, in
+    /// every contest and both run styles: it reads numbers cut and `ENN`
+    /// by their value, a fumbled serial as it was put right, and leaves the
+    /// QRM of rough habits alone, as no caller of its.
+    #[test]
+    fn a_perfect_operator_works_callers_of_every_habit_clean() {
+        use super::super::{CallerHabits, ContestKind, RunStyle};
+        let mut qrm = 0;
+        for (at, habits) in CallerHabits::ALL.into_iter().enumerate() {
+            for kind in ContestKind::ALL {
+                for style in RunStyle::ALL {
+                    let home = matches!(kind, ContestKind::Sprint | ContestKind::FieldDay);
+                    let call = if home { "K1ABC" } else { "DL1ABC" };
+                    let seed = 70 + at as u64;
+                    let (runtime, ..) =
+                        perfect_run_with(habits, kind, style, call, ("MA", "EMA"), seed);
+                    let case = format!("{habits:?} {kind:?} {style:?}");
+                    let view = runtime.machine.view();
+                    assert!(view.qsos >= 3, "{case}: {} QSOs", view.qsos);
+                    assert_eq!(view.clean, view.qsos, "{case}: {:?}", view.log);
+                    let sent = runtime
+                        .turns
+                        .iter()
+                        .flat_map(|turn| turn.segments.iter())
+                        .filter(|segment| segment.who == Sender::Qrm)
+                        .count();
+                    assert!(sent == 0 || habits == CallerHabits::Rough, "{case}");
+                    qrm += sent;
+                }
+            }
+        }
+        assert!(qrm > 20, "only {qrm} messages of QRM in the rough runs");
+    }
+
+    /// Hear a QSO under each of the callers' habits still plays three
+    /// clean QSOs, from the first CQ to the third TU and its sign-off, with
+    /// nobody calling after it and no QRM in its last turn, on as many
+    /// seeds as Hear a QSO is held to under easy habits.
+    #[test]
+    fn hear_a_qso_stays_clean_under_every_habit() {
+        use super::super::{CallerHabits, ContestKind, RunStyle};
+        for habits in CallerHabits::ALL {
+            for kind in ContestKind::ALL {
+                let signoff = kind.rules().signoff;
+                for style in RunStyle::ALL {
+                    let mut settings = TrainingSettings::default();
+                    settings.contest.contest_kind = kind;
+                    settings.contest.contest_habits = habits;
+                    settings.set_contest_style(style);
+                    for seed in 0..24 {
+                        let case = format!("{habits:?} {kind:?} {style:?} seed {seed}");
+                        let source = || Sampler::new(&[], &settings, seed);
+                        let (runtime, ..) = worked_to_hear(seed, &settings, source(), 3);
+                        let view = runtime.machine.view();
+                        assert!(view.qsos >= 3, "{case}");
+                        assert_eq!(view.clean, view.qsos, "{case}: {:?}", view.log);
+                        let heard = hear_qsos(seed, &settings, source(), 3);
+                        let last = &heard.turns.last().expect("turns").turn;
+                        let theirs: Vec<&str> = last
+                            .segments
+                            .iter()
+                            .filter(|segment| segment.who != Sender::You)
+                            .map(|segment| segment.text.as_str())
+                            .collect();
+                        assert_eq!(theirs, Vec::from_iter(signoff), "{case}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// In the Sprint, whose serials go plain, callers of every habit send
+    /// theirs in plain digits: cut, a serial of nines and zeros would be
+    /// letters alone (`NT` for 90), read as a state beside the name, or the
+    /// name `ANNE` read as the serial, and the QSO would never log. So Hear
+    /// a QSO reaches its three clean QSOs, quickly, on every seed (seeds 68
+    /// and 97 once brought a caller sending `NT`).
+    #[test]
+    fn sprint_callers_send_plain_serials_and_every_qso_logs() {
+        use super::super::{CallerHabits, ContestKind, RunStyle};
+        for habits in CallerHabits::ALL {
+            for style in RunStyle::ALL {
+                let mut settings = TrainingSettings::default();
+                settings.contest.contest_kind = ContestKind::Sprint;
+                settings.contest.contest_habits = habits;
+                settings.set_contest_style(style);
+                for seed in 0..120 {
+                    let case = format!("{habits:?} {style:?} seed {seed}");
+                    let source = Sampler::new(&[], &settings, seed);
+                    let (runtime, ..) = worked_to_hear(seed, &settings, source, 3);
+                    let view = runtime.machine.view();
+                    assert!(view.qsos >= 3, "{case}: {} QSOs", view.qsos);
+                    assert_eq!(view.clean, view.qsos, "{case}: {:?}", view.log);
+                    assert!(
+                        runtime.turns.len() < 40,
+                        "{case}: {} turns",
+                        runtime.turns.len()
+                    );
+                    let sent = runtime
+                        .turns
+                        .iter()
+                        .flat_map(|turn| turn.segments.iter())
+                        .filter(|segment| segment.who.is_caller());
+                    let mut exchanges = 0;
+                    for segment in sent {
+                        let words: Vec<&str> = segment.text.split_whitespace().collect();
+                        exchanges += usize::from(sprint_exchange(&words).is_some());
+                    }
+                    assert!(
+                        exchanges >= 3,
+                        "{case}: {exchanges} exchanges in plain digits"
+                    );
+                }
+            }
+        }
     }
 }
