@@ -2,6 +2,11 @@
 name = "dust"
 
 [web.app]
+# `dx bundle` writes this into index.html's <title> in place of
+# {app_title}. With no placeholder there it adds the title to whatever the
+# <title> holds, so a "Dust" of index.html's own read "DustDust". The
+# desktop window and the app at run time name themselves (src/main.rs,
+# src/app.rs).
 title = "Dust"
 
 [web.watcher]

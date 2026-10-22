@@ -86,7 +86,14 @@ listed greyed, never placed, on the board (§10); and the Runs card, every
 run of a contest on Stats → Scores under the Contest pill (§10). With them,
 two fixes from a browser test on a 360×640 phone: Pause keeps its place in
 the row while paused, inert, so a double tap on it never ends the run, and
-Resume brings the run screen back to its top (§2, §7).
+Resume brings the run screen back to its top (§2, §7). A fix from a third
+browser test followed: Enter on the call of a caller that gave up before
+you worked it, typed late, no longer sends it to nobody while the rest of
+the pile-up waits on that QSO in silence, but clears the fields, or calls
+CQ while nobody calls, as it does for the station you work once it has
+gone, and so does Enter on a partial or a slip of it once that has gone
+out to nobody and nobody calls; a caller that gives up on your partial
+is said to have gone, as one is on its timeouts (§4.4, §7).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -586,7 +593,7 @@ The machine needs the fields only at a key press. The runtime maps
 |---|---|---|
 | Countdown n | TimerFired | 1 s → n−1. At 0 the clock and run-end timer start and your first CQ goes out → Running |
 | Countdown | Pause | timers forgotten, `ReleaseAudio`, "Paused" announced → Paused; Resume restarts the countdown, "Resumed" announced |
-| Running, Silent | Key | ESM (4.4) or the key picks the message; a logging key logs (4.8); replies are decided, and the calls of callers whose wait runs out before the turn is over (4.3) → `PlayTurn` (new id) |
+| Running, Silent | Key | ESM (4.4) or the key picks the message; a logging key logs (4.8); replies are decided, and the calls of callers whose wait runs out before the turn is over (4.3); a caller that answered your partial leaving on its last try, spent on your message, or a station gone whose call Enter clears, unsaid till then, is announced (4.4) → `PlayTurn` (new id) |
 | Running, Turn | Key but StopTx | what of the turn has reached you counts first, so Enter decides on what you have heard; a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing |
 | Running, Turn | TimerFired (heard) | what of the turn has reached you counts, a look at the clock (6.3): Enter's QSO and the screen follow the audio, a correction is said, and the checks whose TU is out show; the timer runs on to the next end of a send of the station you work, or to those checks → Turn |
 | Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange of the message keyed last not fully sent (`Main.pas:884-891`), not for one carried from an earlier key, heard then; the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it; your message cut short, the callers listening answer what they heard of it as garbage (5.2) → a turn of their replies, or Silent |
@@ -780,7 +787,12 @@ typed is not for it; your CQ, TU, B4 or NIL, its own call, or a `?` with
 the Call field empty brings it back, all but its own call with fresh
 patience. So once the station you work has gone, nobody calls until you
 CQ, and Enter's hint says so (7), and with a call the fields still hold
-for it, Enter calls CQ in its place (4.4). The station
+for it, Enter calls CQ in its place (4.4). So too for the call of a caller
+that gave up before you worked it, typed late: sent, it would go to
+nobody and leave the rest waiting on that QSO, so Enter clears it while
+they call, and calls CQ once nobody does; a partial or a slip of it goes
+out as typed, and once nobody calls, Enter calls CQ in its place (as
+built, third browser test, 4.4). The station
 you work hearing another call is over its QSO as the table says. A single
 caller calls again on its timeout, and stays in its QSO when you send
 another call, kinder to a learner.
@@ -833,7 +845,7 @@ is part of E.
 |---|---|---|
 | Call empty | CQ | `CQ` |
 | your TU without logging (F3) went to this call, V, E Complete | TU, and logs that QSO, as MRCE's C and N still hold after F3 | `TU & log` |
-| the call, without `?`, is one the fields could still hold for a station that has gone (as built, third pile-up audit) | with nobody calling, CQ; with someone calling, nothing, but for a partial, which asks as below; either way the fields clear | `CQ`, or `Wipe` |
+| the call, without `?`, is one the fields could still hold for a station that has gone (as built, third pile-up audit), or the call of any station gone, heard from it, that no station on the frequency would take (third browser test); or C, and the call sent, a partial or a slip, fits a station gone and none on the frequency, with nobody calling (third browser test) | with nobody calling, CQ; with someone calling, nothing, but for a partial, which asks as below; either way the fields clear | `CQ`, or `Wipe` |
 | C, V, and the station corrected that call, unasked or in answer to `?` | nothing; focus to Call, as a `?` would only bring the correction again | `Fix call` |
 | not C, or not V, or (not N and E Empty) | his call as typed, then… | `Send K5XYZ`, or `Ask K5?` |
 | …not N and V | …your exchange | `Send K5XYZ + exch` |
@@ -865,11 +877,45 @@ Enter sends nothing and clears the fields for the call you hear ("K5XYZ
 has gone: Enter clears the fields"), but for a partial, which asks the
 callers as typed. The calls stay through a CQ or a TU sent meanwhile, and
 through the same call sent again (B4 pressed again, or F5), until another
-call goes out or the Call field is emptied. F3 keeps only the
-call it went to, so Enter or `.` on that
-call sends the TU alone and logs the QSO it closed, as MRCE's TU and log
-does while that call still counts as sent, and any other call starts
-afresh. Its call sent in
+call goes out or the Call field is emptied. The station leaving is said
+as it goes, by the hint's name for it ("K5XYZ has gone", or "The station
+has gone" for a partial): on its timeouts, and as built (third browser
+test) on its last try spent, as a caller that had only answered your
+partial spends it on your next `?`. Sent away by your B4, NIL or CQ, it
+leaves by your own doing, and nothing says that. As built (third browser
+test), Enter does the same with the call of every station that has gone
+once its call had reached you, a caller that gave up before you worked
+it among them, while no station still on the frequency would take it for
+its own (`QsoState`'s `heard_gone`). In a pile-up of five left to call,
+the browser test typed the call of one that had just given up: it went
+out with the exchange to nobody, the callers still calling fell silent
+to wait on that QSO, and Enter offered the call again for as long as it
+was pressed. Enter does with such a call as above, whatever QSO it is
+in, and as the fields clear the screen reader hears the hint's words,
+"W7ST has gone", as nothing said this station leaving. These calls stay
+through any call sent and an emptied field, as the station has left for
+good, until a station calling takes the call again, a new caller drawn
+with it: then it goes out as ever, as does any call that fits a caller
+still calling, a slip of its call included. Only the call as heard is
+one of them: a partial or a slip of it names no station, and goes out as
+typed, as a call that fits nobody there does, the rest of a pile-up
+waiting on it. Once it has gone out to nobody and nobody calls, the
+silence has told what the hint would (`QsoState`'s `sent_fits_gone`: the
+call last sent fits a station gone, and none on the frequency), so Enter
+on it calls CQ, the fields cleared, and the hint and the screen reader
+say "The station has gone", naming none. A single caller that gave up is
+the same: nobody calls, so Enter calls CQ in place of its call at once,
+and a partial of it goes out once, into the silence, before Enter calls
+CQ in its place. A call that fits no station heard goes out as ever. Nor
+is a station logged and off the frequency one that has gone: its call is
+in the log, the B4 tag and button show for it (4.7), and Enter sends it
+as typed, the rest of a pile-up waiting on that QSO until B4 or a CQ
+ends it. Taken for gone, it would be said to have gone though you logged
+it, and Enter on the call your TU without logging went to, its exchange
+not copied yet, would clear a QSO waiting to be logged. F3 keeps only
+the call it went to, so Enter or `.` on that call sends the TU alone and
+logs the QSO it closed, as MRCE's TU and log does while that call still
+counts as sent, and any other call starts afresh. Its call sent in
 answer to your partial, or to a piece of its call, is no correction: you
 asked for it. A station that corrects you again after you sent its call
 right never heard that call, sent over its correction in a pile-up: Enter's
@@ -1041,7 +1087,9 @@ answer to a message of yours Esc cut short) cost only time (9.1).
   never heard it, the B4 alone would be the rest of the pile-up's cue to
   call again, the dupe among them, with fresh patience, every time. It
   leaves, Enter starts afresh, and the rest of the pile-up calls again
-  (4.3). A
+  (4.3). A call already logged, typed again while its station is off the
+  frequency, goes out as typed, B4 then telling the rest that QSO is over
+  (4.4). A
   slip that is close to a caller's call goes to that caller, which puts its
   call right and stays, as MRCE's does.
 
@@ -1498,7 +1546,12 @@ in place of `current/total`.
   pile-up audit, with a call the fields could still hold for a station
   that has gone, "K5XYZ has gone: Enter calls CQ", or once someone calls
   "K5XYZ has gone: Enter clears the fields", from `QsoState`'s `gone`, so
-  the screen says what the screen reader's "K5XYZ has gone" says), one line, as
+  the screen says what the screen reader's "K5XYZ has gone" says; as built,
+  third browser test, the same for the call of any station gone that you
+  heard and no station on the frequency would take, from `heard_gone`, and
+  once nobody calls, "The station has gone: Enter calls CQ" for a partial
+  or a slip sent to nobody that fits a station gone, from
+  `sent_fits_gone`), one line, as
   group training's (`training.rs:566-585`), and in its type. The hints are
   short enough for a phone's line ("Copy their number, then TU & log").
   Before the first CQ it says the seconds to it ("Your first CQ goes out in
@@ -2697,7 +2750,7 @@ pub struct Fields { pub call: String, pub exch: String,
 pub struct ContestView {
     pub phase: ContestPhase, pub clock: Option<RunClock> /* None in the countdown */,
     pub limit_ms: u64, pub my_wpm: f64,
-    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up, a gone station's calls
+    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up, a gone station's calls, the calls heard of stations gone, the call sent fitting only one
     pub air: Option<AirView>,  // heard from, your text and where each character ends, segment spans
     pub shown: Vec<ShownText>, // with Show copy on (4b): each station's text and when it shows
     pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked
@@ -2999,6 +3052,25 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   timeouts and takes it late; Enter calls CQ in place of a call whose
   station has gone, or clears it once someone calls; a correction's
   exchange starts after its two words.
+- from the third browser test: in a CQ WW pile-up of five left to call,
+  the call of one that has just given up, typed late, sends nothing over
+  the callers still calling: the fields clear, the hint and the screen
+  reader say it has gone, and the rest call on, none waiting on a QSO with
+  nobody; its call stays gone, and once all have given up, Enter calls CQ
+  in its place, which the pile-up answers. A call that fits a caller still
+  calling goes to it, a slip and all, and a call nobody was heard to send
+  goes out as typed; a partial and a slip of the call gone go out as typed
+  while the rest call, and once nobody does, Enter calls CQ in their
+  place, the hint and the screen reader saying the station has gone; a
+  caller calling with the call gone again takes it; a dupe that gives up
+  is gone too, while a station logged and off the frequency is sent its
+  call as typed, B4 bringing the rest back; a single caller that gave up
+  is answered with a CQ, and its call cleared once the next one calls; a
+  caller that answered your partial and gives up on your `?` is said to
+  have gone, and not again at Enter, as one worked that leaves on its
+  timeouts. Unit tests: Enter never sends the call of a caller that gave
+  up, whatever QSO it is in, a partial or a slip of it aside; Enter calls
+  CQ for a partial sent to a station gone once nobody calls.
 
 - from 4a: under rough habits QRM sends in a turn, from its start when
   it came due while all was quiet, through the receiver, never answering
@@ -3334,7 +3406,7 @@ keying with the paddles, a contest level, and more contests.
 | A send a pause you chose cut | owed on the caller's timeout | sent again a moment after Resume | a pause is no free `?`; a hidden page or failed sound is no choice, and does send it again |
 | Esc on your message | the callers listening answer what they heard as garbage, at once | silence for a reply timeout | MRCE's callers do (`AbortSend`); the quiet was thinking time MRCE never gives |
 | The station you work, waiting for your exchange, hears nothing from you | stops asking after 3 silent timeouts, stays, and takes it late; in any other worked state it leaves after 3 | leaving after 3 | MRCE's `osNeedNr` stays; a slow learner keeps the QSO. MRCE's others leave on the fourth; Dust keeps three |
-| Enter on the call of a station that has gone | CQ, the fields cleared, the hint saying why; once someone calls, the fields cleared alone | its call and your exchange | nobody would answer it, a pile-up waits on that QSO in silence, and a CQ over a caller only costs it |
+| Enter on the call of a station that has gone: the one you work, or (as built, third browser test) any you heard that no station on the frequency would take, or a partial or a slip of it sent to nobody, once nobody calls | CQ, the fields cleared, the hint saying why; once someone calls, the fields cleared alone (a partial or a slip goes out as typed till nobody calls) | its call and your exchange | nobody would answer it, a pile-up waits on that QSO in silence, and a CQ over a caller only costs it |
 | F3, then log | checked against the station F3 closed | a NIL | MRCE's log finds a station done with you (`Log.pas:745-755`) |
 | Stored tokens | as keyed | canonical | Letters and Mistakes see what was heard |
 | Copy speed | calls and numbers only | every group | closed lists are guessed, not copied |
