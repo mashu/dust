@@ -5,16 +5,17 @@
 //! A US call's digit is its FCC call district (`W7` is one of the eight
 //! western states), and Alaska and Hawaii sign prefixes of their own, KL7
 //! and KH6. Within a district a caller's state is drawn by its people, from
-//! the 2020 US Census counts, as the shares of licences each holds are not
-//! counted yet: the design (§11.2) has them counted from the FCC's licence
-//! data in phase 3. A Canadian call's digit is its province, for VE and the
-//! other prefixes Canada issues, but VO and VY, whose own digits name
-//! Newfoundland and Labrador, the territories and Prince Edward Island; a
-//! call-area digit after the slash is a province by VE's digits whatever
-//! the prefix. A special-event prefix's digit means what it means
-//! under the prefix it stands in for, which can change from one event to
-//! the next: CH and CI stood in for VO and VY in 2017, so Dust reads no
-//! place from their digits, only that they are Canada's.
+//! the 2020 US Census counts. The design (§11.2) has the shares of licences
+//! each state holds counted from the FCC's licence data in phase 3, but the
+//! FCC's download was refused where the tables are made (October 2026), so
+//! the census shares stay until it can be fetched. A Canadian call's digit
+//! is its province, for VE and the other prefixes Canada issues, but VO and
+//! VY, whose own digits name Newfoundland and Labrador, the territories and
+//! Prince Edward Island; a call-area digit after the slash is a province by
+//! VE's digits whatever the prefix. A special-event prefix's digit means
+//! what it means under the prefix it stands in for, which can change from
+//! one event to the next: CH and CI stood in for VO and VY in 2017, so Dust
+//! reads no place from their digits, only that they are Canada's.
 //!
 //! The call table holds only some of these prefixes, and reads Hawaii's KH
 //! and Puerto Rico's KP for every digit, so where a station is at home is
@@ -26,6 +27,10 @@
 //!
 //! Labrador, VO2, is part of Newfoundland and Labrador, NL, as the NA
 //! Sprint counts it; the ARRL DX contest counts it apart, as LB.
+//!
+//! Some calls tell their ARRL section by themselves ([`call_section`]):
+//! Alaska's, Hawaii's and the Pacific and Caribbean islands', Sable and St
+//! Paul Islands', and every call outside the sections, which sends DX.
 
 use crate::callsign::{CallArea, GUANTANAMO, call_area, country_of, parse_callsign, pick_weighted};
 use crate::rng::Rng;
@@ -130,6 +135,15 @@ const HAWAII: [&str; 4] = ["AH", "KH", "NH", "WH"];
 /// Islands' 2. The table holds neither Navassa's 1 nor Desecheo's 5.
 const CARIBBEAN: [&str; 3] = ["KP", "NP", "WP"];
 const CARIBBEAN_DIGITS: [(char, &str); 3] = [('2', "KP2"), ('3', "KP4"), ('4', "KP4")];
+
+/// The digits of Hawaii's prefixes for the Pacific islands ARRL's Pacific
+/// section covers with Hawaii: the Northern Marianas, Guam and American
+/// Samoa.
+const PACIFIC_DIGITS: [char; 3] = ['0', '2', '8'];
+
+/// Sable and St Paul Islands' prefix and digits: islands of Nova Scotia,
+/// whose ARRL section they are in, which the call table does not hold.
+const NOVA_SCOTIA_ISLANDS: (&str, [char; 2]) = ("CY", ['0', '9']);
 
 /// The province or territory each digit of [`CANADA`]'s prefixes names,
 /// and each call-area digit after a Canadian call's slash; 0 names none.
@@ -296,6 +310,35 @@ pub(crate) fn w_ve(call: &str) -> bool {
     call_area(call)
         .and_then(|area| home(call, &area))
         .is_some_and(|home| matches!(home, Home::Us | Home::Canada))
+}
+
+/// The ARRL or RAC section a station signing `call` is in by its call
+/// alone, where that tells it: Alaska's prefixes are AK; Hawaii's, and the
+/// Pacific islands' with a 0, 2 or 8, PAC; the Caribbean islands' Puerto
+/// Rico's PR with a 3 or a 4, and the Virgin Islands' VI with a 2; Sable and
+/// St Paul Islands' CY0 and CY9 Nova Scotia's NS; and any other call outside
+/// the US's districts and Canada DX, the US's other islands and Guantanamo
+/// Bay among it. None for a call in them, whose section goes by where in
+/// them the station is, or one Dust cannot place.
+pub(crate) fn call_section(call: &str) -> Option<&'static str> {
+    let area = call_area(call)?;
+    let (cy, digits) = NOVA_SCOTIA_ISLANDS;
+    if area.prefix == cy && area.digit.is_some_and(|digit| digits.contains(&digit)) {
+        return Some("NS");
+    }
+    let pacific = HAWAII.contains(&area.prefix)
+        && area
+            .digit
+            .is_some_and(|digit| PACIFIC_DIGITS.contains(&digit));
+    Some(match home(call, &area)? {
+        Home::Us | Home::Canada => return None,
+        Home::Alaska => "AK",
+        Home::Hawaii => "PAC",
+        Home::Possession(_) if pacific => "PAC",
+        Home::Possession(Some("KP4")) => "PR",
+        Home::Possession(Some("KP2")) => "VI",
+        Home::Possession(_) | Home::Abroad => DX,
+    })
 }
 
 /// Where a station is, as far as its call says.
@@ -562,6 +605,66 @@ mod tests {
                 let call = generate_call(6, CallSpec::contest(countries), &mut rng);
                 assert_eq!(home_country(&call.text), Some(call.country), "{call:?}");
             }
+        }
+    }
+
+    /// The section a call gives by itself, for every prefix and digit the
+    /// design names: Alaska's, Hawaii's and the Pacific islands', Puerto
+    /// Rico's and the Virgin Islands', Sable and St Paul Islands'; DX for a
+    /// call outside the sections; and none for a call in the US's districts
+    /// or Canada, or one Dust cannot place.
+    #[test]
+    fn a_call_gives_its_section_where_it_alone_tells_it() {
+        for prefix in ALASKA {
+            for digit in '0'..='9' {
+                let call = format!("{prefix}{digit}AB");
+                assert_eq!(call_section(&call), Some("AK"), "{call}");
+            }
+        }
+        for prefix in HAWAII {
+            for digit in '0'..='9' {
+                let call = format!("{prefix}{digit}AB");
+                let section = if matches!(digit, '6' | '7' | '0' | '2' | '8') {
+                    "PAC"
+                } else {
+                    DX
+                };
+                assert_eq!(call_section(&call), Some(section), "{call}");
+            }
+        }
+        for prefix in CARIBBEAN {
+            for digit in '0'..='9' {
+                let call = format!("{prefix}{digit}AB");
+                let section = match digit {
+                    '3' | '4' => "PR",
+                    '2' => "VI",
+                    _ => DX,
+                };
+                assert_eq!(call_section(&call), Some(section), "{call}");
+            }
+        }
+        for (call, section) in [
+            ("CY0AA", Some("NS")),
+            ("CY9AA", Some("NS")),
+            ("W1AW/KH6", Some("PAC")),
+            ("W1AW/KP4", Some("PR")),
+            ("DL1ABC", Some(DX)),
+            ("DL/K1ABC", Some(DX)),
+            ("XE1ABC", Some(DX)),
+            ("KG4AB", Some(DX)),
+            ("K1ABC", None),
+            ("KG4ABC", None),
+            ("W1AW/4", None),
+            ("VE3ABC", None),
+            ("VG3ABC", None),
+            ("VO2AB", None),
+            ("VY1AB", None),
+            ("CH1ABC", None),
+            ("C31AB", None),
+            ("ABC", None),
+            ("", None),
+        ] {
+            assert_eq!(call_section(call), section, "{call:?}");
         }
     }
 

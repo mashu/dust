@@ -63,7 +63,16 @@ exchange, falls silent and stays rather than leave (§4.3); Enter calls CQ
 in place of any call the fields still hold for a station that has gone,
 or clears it once someone calls, and the hint says so (§4.4, §7); and the results read each QSO at the speed its live row
 showed, while a correction's exchange is a copy only once it begins to
-reach you (§9.1).
+reach you (§9.1). Slice 3b has landed, the rest of phase 3: Field Day (§3),
+with the 85 ARRL and RAC sections (`contest/data/sections.rs`, §11.4),
+the class, section and power shares counted by `scripts/contest-data.py`
+into `contest/data/counted.rs` (§11.5), the section a call tells by itself
+(`call_section`, `contest/data/places.rs`), a caller's class and section
+(`contest/data/fd.rs`), a score of QSO points with nothing to multiply
+them, and `myClass` and `mySection` on Your station, which Home asks for
+as it asks for a state (§2, §8). Every contest of the card has shipped;
+two checks stay open, Yukon's section code and the FCC licence counts
+(§14).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -170,7 +179,15 @@ takes it from your call: zone 14, sent A4", or "from your call and state:
 zone 3 in California"; "Sends 1TT: 100 W"). The errors are `call_fault`'s,
 the reasons `parse_callsign` refuses a call ("Not a callsign yet: needs a
 digit", "needs a prefix before the digit", "needs letters after the last
-digit", "one slash at most"). A call that reads but that Dust cannot place
+digit", "one slash at most"). As built (3b), Field Day's class and section
+are fields of their own too, each with its line: "Sends 1D: 1 transmitter,
+a home station on commercial power", or why what was typed is none ("1G is
+not a class: type the number of transmitters, 1 to 99, and a letter A to
+F, as 1D or 3A; 1D is sent"); "Reads as Eastern Massachusetts",
+"Sends PAC from your call: Pacific" while you give none and your call
+tells it, "Sends TER: ARRL contests count Yukon in the Territories" for
+YT, or why what was typed is none ("MASS is not a section: type its code,
+as EMA or ONS, or DX"). A call that reads but that Dust cannot place
 says "unknown prefix, so no country" (and its WPX prefix in WPX), and
 still starts a run unless the contest needs a zone or a state the call
 cannot tell: CQ WW then asks for your zone, and the Sprint, or ARRL DX from
@@ -190,18 +207,24 @@ minutes per run ("10 Minutes", or "Open, up to 60 min") and "Single caller"
 or "1–3 callers". Start reads "Start contest" (id `btn-start-training`); a
 start that `missing()` refuses says why in the hero, above Start, unless
 the line under the call field already says why the call will not do, and
-when the call, the name, the state or the zone is what is missing, Start
-moves the focus to its field once the hero has drawn it (an effect,
-`src/ui/home.rs`). Home asks for them in that order, one field at a time
-(`StationAsk`): in a Simple QSO with neither call nor name, the press that
-keeps the call swaps the call's field for the name's, and in a Sprint the
-press that keeps the name swaps it for the state's. As built (3a), CQ WW
-asks for your zone, "Your CQ zone", only for a call that does not say it,
-and keeps 1 to 40 (anything else is 0, your call's), with its own first
-step on the first contest's card ("Add your CQ zone, press Start
-contest; …"). While the hero holds a field, Start and Listen keep the cursor
-in it and keep what was typed there before they act, so a call typed after
-a refusal starts the run on one press: leaving the box on the press would
+when the call, the name, the state, the zone or the section is what is
+missing, Start moves the focus to its field once the hero has drawn it (an
+effect, `src/ui/home.rs`). Home asks for them in that order, one field at
+a time (`StationAsk`): in a Simple QSO with neither call nor name, the
+press that keeps the call swaps the call's field for the name's, and in a
+Sprint the press that keeps the name swaps it for the state's. As built
+(3a), CQ WW asks for your zone, "Your CQ zone", only for a call that does
+not say it, and keeps 1 to 40 (anything else is 0, your call's), with its
+own first step on the first contest's card ("Add your CQ zone, press Start
+contest; …"). As built (3b), Field Day asks for your section, "Your
+section", only for a call that does not tell it (a call in the US's
+districts or Canada), after the zone's place in the order, with its own
+first step ("Add your section, press Start contest; …") and, under the
+field until a section is given, a line saying what one is ("Your ARRL or
+RAC section, as EMA for Eastern Massachusetts; DX outside them"). While
+the hero holds a field, Start and Listen keep the cursor in it and keep
+what was typed there before they act, so a call typed after a refusal
+starts the run on one press: leaving the box on the press would
 keep the call then and redraw the hero, the button moved, under the finger
 before the click came (`StationDraft`, `src/ui/settings_station.rs`). As
 built (2c), the settings are stored as a session starts
@@ -256,7 +279,8 @@ it leaves the stage or the card's QSO as it was. While the lines are up,
 Listen's character strip picks none.
 Where your station is not given, it stands in, and a line says so ("Your
 station is sent as K1ABC MIKE MA until you add yours"): `DL1ABC`, or
-`K1ABC` for a contest that sends your state, `MIKE` and `MA`
+`K1ABC` for a contest that sends your state or your section, `MIKE`, `MA`
+and, for the section, `EMA` ("K1ABC 1D EMA")
 (`ContestSettings::stand_in`, beside `missing`, which it answers).
 
 **Navigation.** A run uses `Screen::Training` and `Screen::Results`
@@ -447,6 +471,23 @@ later contests, is the world-wide one.
   and no bonus points: those score the entry, not the copying.
 - **Your fields.** Class (default `1D`) and section, defaulted from your call
   (§11.4).
+- **As built (3b).** Callers are North American, KL7, KH6, KP4 and KP2
+  among them at the call table's shares, and 0.9% DX, the share of
+  Field Day's entries that send DX (`Countries::FieldDay`, which draws a
+  call outside North America, `Countries::OutsideNorthAmerica`, that
+  often). After review, the choice is made once per caller, before the six
+  candidates (§11.1): made for each, the most wanted of them came out DX
+  about 3% of the time, more for a learner weak at its rarer characters.
+  A caller's class is drawn from the counted classes, and its
+  section from where its call puts it (§11.4). They lead their first
+  exchange with `R` nine times in ten, as MRCE's callers do, and `TU`
+  otherwise; F12 sends `NR?`, as MRCE's does in every contest. The score
+  is the QSO points, two a QSO: nothing multiplies them
+  (`Multiplier::Nothing`, which counts the log as one multiplier, as MRCE's
+  `ExtractMultiplier` returns `'1'`), and the results' Mults read `—`. The
+  card says "Simplified: one band, so a station counts once; and no power
+  multiplier or bonus points, which score the entry, not the copying."
+  With no call yet, Hear a QSO stands in as K1ABC in EMA ("K1ABC 1D EMA").
 
 **Later contests,** in order of value: K1USN SST (with Farnsworth), CWops
 CWT, NAQP, IARU HF, Sweepstakes, and an HST-style preset with fixed
@@ -1518,7 +1559,9 @@ card gives the character accuracy of the calls and of each field over the
 run, lost copies included (`ContestRun::accuracy_by_field`), with the
 checks' line under it. Its run bar reads "Pace 1.2 min/QSO" once a QSO is
 logged (`ContestView::minutes_per_qso`); which contests score is
-`ContestKind::scored`. In the results' log nothing is cut short: the call,
+`ContestKind::scored`. Field Day's score is its QSO points, nothing
+multiplying them, so its Mults read `—` (as built, 3b;
+`Scoring::multiplied`). In the results' log nothing is cut short: the call,
 the exchange and the check wrap within their tracks, and on a phone the
 exchange and the check each take a line under the call. A History row reads "2026-10-20 · Contest · CQ WPX · 11/12 QSOs · 72/h · 97% ·
 496 pts", and a Simple QSO's "… · Simple QSO · 8/9 QSOs · 1.2 min/QSO · …".
@@ -1620,8 +1663,8 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `contestStyle` | `single` `pileup` | `single` | forgiving | Character set | 2 |
 | `myState` | String | `""` | a state, DC, province, territory or `DX` (`PQ` read as `QC`, `NF` as `NL`); else `""`; `LB` joins with ARRL DX (as built, kept in any contest and sent as `NL` but in ARRL DX) | Station | 2 |
 | `myZone` | u32 | 0 | 0..=40 (0 = from your call, and your state in North America) | Station | 3 |
-| `myClass` | String | `1D` | `[1-9][0-9]?[A-F]`, else `1D` | Station | 3 |
-| `mySection` | String | `""` | a listed section, `YT`, or `DX`; else `""` | Station | 3 |
+| `myClass` | String | `1D` | `[1-9][0-9]?[A-F]`, else `1D` (as built, leading zeros dropped: `03A` is `3A`) | Station | 3 |
+| `mySection` | String | `""` | a listed section, `YT`, or `DX`; else `""` (as built, `YT` kept and sent as `TER`) | Station | 3 |
 | `myPower` | String | `100` | 1..=1500 (leading zeros dropped), `K`, `KW` or `1K` as written; else `100` | Station | 3 |
 | `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 |
 | `contestShowCopy` | bool | false | — | Session shape | 4 |
@@ -1671,7 +1714,14 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   DX asks for a state only from the W/VE side, and CQ WW for your zone
   only where your call does not say it ("Add your CQ zone to start a CQ
   WW"), which Home says above Start, with a field of its own in the hero
-  that Start takes the cursor to. Your power is always given. Your station
+  that Start takes the cursor to. Your power is always given. As built
+  (3b), so is your class, `1D` until you give one: one typed with leading
+  zeros keeps its number (`03A` is `3A`), and anything else is `1D`. Your
+  section is the one you give, a listed section, `YT` (sent as `TER`) or
+  `DX`, or else the one your call tells (`ContestSettings::section_sent`,
+  §11.4); a call in the US's districts or Canada, or one Dust cannot
+  place, needs it given ("Add your section to start a Field Day"), which
+  Home asks for after the zone's place in the order. Your station
   says a power typed that is none ("MAX is not a power: …; 100 W is
   sent") until anything else of your station changes, its reset among
   them, as it says a state. Your zone follows your state too where you
@@ -2045,13 +2095,19 @@ files written by scripts, each naming its source and year.
 - **The source.** `Sampler` implements `CallSource` (§12) with the
   `most_wanted` choice among 6 candidates that Callsigns mode uses
   (`sampling.rs:384-406`), so calls lean to your weak characters, at the
-  shared `callsignLevel`.
+  shared `callsignLevel`. As built (3b), a mix of countries (Field Day's)
+  is settled once per caller, before the candidates (`for_one_call` in
+  `wanted_call`), so the lean picks among calls of one side and leaves the
+  mix at its counted share.
 - **The generator.** `generate_call(tier, spec, rng) -> GeneratedCall
   { text, country, digit, host, marker }` in `callsign.rs`. A `CallSpec`
   filters countries (`Any`, `WVe` = K and VE, `NotWVe`, `NorthAmerica` = W/VE
-  plus Alaska, Hawaii, Puerto Rico and the US Virgin Islands, who call in
-  Field Day, and, as built (2b), `UsAndCanada` = W/VE plus Alaska and
-  Hawaii, who call in the Sprint, each with a state or province to send).
+  plus Alaska, Hawaii, Puerto Rico and the US Virgin Islands, the stations
+  an ARRL or RAC section covers, and, as built (2b), `UsAndCanada` = W/VE
+  plus Alaska and Hawaii, who call in the Sprint, each with a state or
+  province to send). As built (3b), Field Day draws from `FieldDay`:
+  `NorthAmerica`, and 0.9% of its callers from `OutsideNorthAmerica`, every
+  other country, who send DX (§3, §11.5).
   A station abroad is in its host's country. A contest spec uses contest
   shares for portables (4%) and abroad calls (3%) in place of the tiers'
   25% and 12% (`callsign.rs:44-47`). With the default
@@ -2085,6 +2141,10 @@ files written by scripts, each naming its source and year.
   UT WA WY · 8 MI OH WV · 9 IL IN WI · 0 CO IA KS MN MO ND NE SD · KL7 AK,
   KH6 HI. P(state | digit) is counted from the FCC's ULS data (a US
   Government work, counts only) in phase 3; until then, population shares.
+  As built (3b), the FCC's download (the ULS amateur licence file) was
+  refused from the build's network, so the 2020 Census shares stay, and
+  `places.rs` says so in its header; a script counting the ULS file can
+  replace them.
 - **Canada by digit, for every prefix** (VA, VB, VC, VE, VG, CF–CK, XJ–XO;
   the table holds VE, VA, VC, CK and VB, `prefixes.rs:203-209`): 1 NS, 2 QC, 3 ON, 4 MB, 5 SK, 6 AB, 7 BC, 8 NT,
   9 NB. VO1 NL; VO2 LB in ARRL DX, NL elsewhere; VY0 NU, VY1 YT, VY2 PE.
@@ -2191,7 +2251,7 @@ one stray `MD`), as of
 RAC's 1 January 2023 changes (MAR became NB and NS, NT became TER, GTA
 became GH). RAC's YT (1 July 2025) is not in ARRL contests: callers send
 TER; the parser and `mySection` accept YT. Sources disagree on Yukon's code
-(YT or YUK), so it is checked against ARRL's list before phase 3 ships. The
+(YT or YUK), so the choice is to be checked against ARRL's list (§14). The
 list is versioned data.
 
 - 1 CT EMA ME NH RI VT WMA · 2 ENY NLI NNJ NNY SNJ WNY · 3 DE EPA MDC WPA
@@ -2205,6 +2265,36 @@ P(section | state) (TX's three sections under TX; DC under MDC). AK, PAC,
 PR and VI callers come from KL, KH and KP at their counted shares.
 `mySection` defaults from your call: KL → AK; KH6/7 and KH0/2/8 → PAC;
 KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
+
+As built (3b), `contest/data/sections.rs` holds the list by call area,
+each section named (as its place is, where the code is a place's, else in
+the file: "Eastern Massachusetts"), and reads a section's code
+(`listed_section`); YT reads as itself and an ARRL contest counts it as TER
+(`fold_yukon`), and nothing else is read, NFL being Northern Florida and
+the old codes (MAR, NT, GTA, NF) none. Yukon's code: what the build could
+reach disagrees. A map of the sections kept up with RAC's announcements
+gives YT, and says the YUK of the first report (*The Canadian Amateur*,
+July/August 2025) was a mistake; news reports of the change give YUK;
+ARRL's and RAC's own lists could not be fetched, and searches after
+review found both codes again, in summaries that could not be opened and
+checked. Dust reads YT, as this section has it, and the file's header
+records the doubt, so the choice is to be checked against ARRL's
+contest-sections list, and RAC's, once they can be reached. The 2026
+Field Day entries have Yukon stations sending TER, as callers here do.
+Where a call tells its section by itself is read in `places.rs`
+(`call_section`): every prefix the US gives Alaska is AK; Hawaii's with a
+6 or a 7, and with a 0, 2 or 8 (the Marianas, Guam, American Samoa), PAC;
+the Caribbean islands' with a 3 or a 4 PR, and with a 2 VI; CY0 and CY9
+NS; and every other call outside the US's districts and Canada DX, KH's
+other digits, Navassa's KP1,
+Desecheo's KP5 and Guantanamo Bay's KG4 with two letters among it, as no
+section lists them. A call in the districts or Canada, or one Dust cannot
+place, tells none. A caller (`contest/data/fd.rs`) sends the section its
+call tells, or else one of the sections of the place `draw_place` draws
+for it, as often as that place's entries are in each; so AK, PAC, PR and
+VI callers come as often as the call table draws KL, KH6, KP4 and KP2
+calls, which are counted from real calls. A test pins every prefix and
+digit above.
 
 ### 11.5 Exchange values
 
@@ -2224,12 +2314,23 @@ KP3/4 → PR; KP2 → VI; CY0/CY9 → NS; DX outside W/VE.
   by their station's country.
 - **Field Day class,** from 13,709 rows of `FDGOTA.txt`: 1D 41.9%, 1E 14.0%,
   1B 13.1%, 2A 6.7%, 3A 6.7%, 4A 3.5%, 1A 2.9%, 5A 1.8%; 1C, 2D, 2F, 2B, 2E
-  about 1% each; the rest 4%.
+  about 1% each; the rest 4%. As built (3b), `scripts/contest-data.py`
+  counts them, from the 13,708 rows left once the one row whose section is
+  no section (`MD`) is dropped, into `contest/data/counted.rs`: the shares
+  above, then each class that rounds to at least 0.1% (3F, 6A, 1F, 4F, 7A,
+  3E, 3D, 8A, 5F, 9A, 2C, 4D, 6F, 4E). DX rows are 0.9% of them, the share
+  of Field Day callers that are DX, through the sampler too (§11.1). Each
+  place's sections are counted from the same rows and rounded by largest
+  remainder, so each place's add up to exactly 100%.
 - **Power,** from 3,779 DX rows of `ARRLDXCW_USDX.txt`: 100 34.7%, KW 25.0%,
   500 12.8%, K 10.9%, 400 4.6%, 200 3.0%, 5 2.4%, others 6.6%. As built
   (`contest/data/power.rs`), the others are the next counted values at
   their shares (300 and 50 at 1.2%, 700 at 1.0%, then 99, 600, 750, 150,
-  1K, 800, 80 and a tail at 0.1% each), each sent as written.
+  1K, 800, 80 and a tail at 0.1% each), each sent as written. As built
+  (3b), `scripts/contest-data.py` counts them too, leaving out what is no
+  power Dust reads (`5W`); it reproduces the table slice 3a wrote by hand
+  exactly, value for value and in the same order, which now lives in
+  `counted.rs` beside the Field Day shares.
 - **Reports** (Simple QSO), Dust's estimate: 599 40%, 579 20%, 589 15%,
   569 10%, 559 8%, 449 4%, 339 3%.
 
@@ -2333,6 +2434,11 @@ LB apart, and every other contest reads it as NL, so the Sprint still
 reads `7 MIKE LB` as NL and logs it right for a station that sent NL.
 Power is a closed list that never takes what reads as the report
 (`5NN KW` is a kilowatt, `5NN` alone no power), as no station runs 599 W.
+As built (3b), Field Day's class and section are both closed lists: every
+class has a digit and no section has one, so neither takes the other's
+token, and with no number copied a section that would read as cut digits
+(`ONE`, `TN`) is a section; YT reads as TER, and `3A WA` is Invalid, WA
+being no section (Washington's are EWA and WWA).
 The hint names every field
 still to copy; where that and what Enter then does would not fit a
 phone's line, it leaves the second to a wider screen ("Copy their
@@ -2353,6 +2459,12 @@ The repository is GPL-3.0-or-later (`Cargo.toml:9`).
 | Names | SSA baby names; written by hand for Dust until they can be fetched (§11.5) | public domain; GPL-3.0-or-later |
 | DX names, reports, Sprint fit | written for Dust | GPL-3.0-or-later |
 | Caller behaviour | modelled on MRCE (MPL-2.0) | written for Dust; no code taken |
+
+The counted shares are written by `scripts/contest-data.py`, whose inputs
+are used where the table is made and never committed, so no test can run
+it: `scripts/contest-data.py --check FDGOTA.txt ARRLDXCW_USDX.txt` says
+whether the committed `contest/data/counted.rs` is what the files give,
+and fails if it is not (as built, 3b, it is).
 
 Dust is its own work: its sampling, noise model, signal processing,
 envelopes and training parameters were built from scratch. Contest mode
@@ -2438,7 +2550,7 @@ whichever is live.
 | `serial.rs`, `check.rs`, `score.rs` | serials; `QsoCheck`; `contest_score`, rates |
 | `record.rs` | `ContestLog`, `ContestRun`, `QsoRecord`, `result()` |
 | `bot.rs` | operators that hear the turns; Hear a QSO uses the perfect one (as built, 2c: shipped, `hear_qsos` and `HeardQsos`; the test operators, scripted calls and run settings kept to tests in `bot/script.rs`) |
-| `data/` | `names`, `reports` (1c); `places` (2b, the ARRL DX side and Labrador 3a), `zones` and `power` (3a); `sections`, `fd` |
+| `data/` | `names`, `reports` (1c); `places` (2b, the ARRL DX side and Labrador 3a), `zones` and `power` (3a); `sections`, `fd`, and `counted`, the shares `scripts/contest-data.py` writes (3b) |
 
 **Changed in cw-core:** `Cargo.toml` (`serde_json`); `settings/mod.rs`,
 `contest.rs` (new), `contest_preset.rs` (new, 2c), `save.rs`, `reset.rs`,
@@ -2527,6 +2639,16 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   too, and with a clean QSO after a NIL with its call, a dupe's state
   counting in neither; a dupe scores 0, is no error, counts clean; KL7
   and KH6 are CQ WW countries.
+- **Field Day** (as built, 3b): the 85 sections, by call area, and RAC's
+  2023 changes; YT equal to TER and no other alias; every place's section
+  shares adding up to 100% and covering every section but PR and VI; the
+  class shares; the section your call tells for every special prefix and
+  digit, and `mySection` defaulting from it; `CL` and `SEC` equalities and
+  `OR 3A` and its kin parsed; a hand-worked log scoring its QSO points;
+  callers' DX share; the perfect operator working Field Day clean in both
+  styles, from the US, Hawaii and abroad, and a QSO worked on the screen;
+  the soak over all six contests. The counted table is checked against
+  the script's output with `scripts/contest-data.py --check` (§11.8).
 - **Turns:** `wanted` ends last; no reply is cut; your tones are unfaded,
   at the monitor's level; your message is dry and the callers are not;
   callers fade independently and smoothly; a continuation keeps every
@@ -2860,7 +2982,18 @@ against the published rules and pinned before it ships.
   their real-habits path (§11.6); Home asks for a zone in a field of its
   own; and the card and Your station say your side, your call's reading
   and your zone in the words §2, §3 and §8 give.
-- **3b Field Day** comes next.
+- **3b Field Day.** Landed: the Field Day row, its pill, its dialogue
+  from the row and its simplification line; the 85 sections, YT read as
+  TER; the class, section-by-place and DX shares counted by
+  `scripts/contest-data.py`, which also reproduces 3a's power table
+  exactly; the section a call tells by itself; a caller's class and
+  section; the score of QSO points; `myClass` and `mySection` on Your
+  station, with Home asking for the section. The FCC licence counts could
+  not be fetched (§11.2), so the census shares stay; and ARRL's and RAC's
+  lists could not be reached to settle Yukon's code, YT or YUK (§11.4),
+  which stays open. The soak shares its
+  seeds among all six contests, each over its floor, Field Day's stations
+  with a section, none, DX or YT.
 
 **Phase 4: realism and aids.**
 

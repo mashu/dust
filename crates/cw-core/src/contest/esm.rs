@@ -453,7 +453,7 @@ mod tests {
     use MessagePart::{Again, Cq, Exchange, HisCall, Tu};
 
     fn rules() -> &'static ContestRules {
-        ContestKind::Wpx.rules().expect("WPX has shipped")
+        ContestKind::Wpx.rules()
     }
 
     /// Enter for a QSO where `call_sent` went out, with your exchange if
@@ -566,9 +566,7 @@ mod tests {
     /// come, and every hint keeps to a phone's line.
     #[test]
     fn a_simple_qso_copies_its_report_and_name() {
-        let rules = ContestKind::SimpleQso
-            .rules()
-            .expect("Simple QSO has shipped");
+        let rules = ContestKind::SimpleQso.rules();
         let enter = |exch: &str| {
             let qso = QsoState {
                 call_sent: "K5XYZ".to_string(),
@@ -613,12 +611,72 @@ mod tests {
         }
     }
 
+    /// In Field Day you copy a class and a section, in either order: the
+    /// hint names what is still to come, and Enter sends TU once both read.
+    #[test]
+    fn field_day_copies_its_class_and_section() {
+        let rules = ContestKind::FieldDay.rules();
+        let enter = |exch: &str| {
+            let qso = QsoState {
+                call_sent: "W7XYZ".to_string(),
+                exchange_sent: true,
+                ..QsoState::default()
+            };
+            let fields = Fields {
+                call: "W7XYZ".to_string(),
+                exch: exch.to_string(),
+                ..Fields::default()
+            };
+            esm(&qso, &fields, rules, Side::WVe)
+        };
+        assert_eq!(
+            enter("").hint,
+            "Copy their class and section, then TU & log"
+        );
+        assert_eq!(enter("").message, [Again]);
+        assert_eq!(
+            enter("3A").hint,
+            "Still to copy: their section. Enter asks again"
+        );
+        assert_eq!(
+            enter("OR").hint,
+            "Still to copy: their class. Enter asks again"
+        );
+        for exch in ["3A OR", "OR 3A", "03a or", "1B YT"] {
+            let done = enter(exch);
+            assert_eq!(done.message, [Tu], "{exch}");
+            assert_eq!(done.label, "TU & log", "{exch}");
+        }
+        assert_eq!(enter("3A ORE").label, "Fix exchange");
+        // Their call and your class and section, before their exchange.
+        let qso = QsoState::default();
+        let fields = Fields {
+            call: "W7XYZ".to_string(),
+            ..Fields::default()
+        };
+        let first = esm(&qso, &fields, rules, Side::WVe);
+        let me = Fill {
+            my_call: "K1ABC",
+            my_class: "1D",
+            my_section: "EMA",
+            ..Fill::default()
+        };
+        assert_eq!(
+            message_text(&first.message, rules, Side::WVe, &me),
+            "W7XYZ 1D EMA"
+        );
+        for exch in ["", "3", "3A", "OR", "3A OR", "3A ORE"] {
+            let hint = enter(exch).hint;
+            assert!(hint.chars().count() <= HINT_LEN_MAX, "{hint:?}");
+        }
+    }
+
     /// In the Sprint you copy a number, a name and a state: the hint says
     /// which are still to come in a phone's line, leaving what Enter then
     /// does to a wider screen where all of them do not fit beside it.
     #[test]
     fn a_sprint_copies_its_number_name_and_state() {
-        let rules = ContestKind::Sprint.rules().expect("Sprint has shipped");
+        let rules = ContestKind::Sprint.rules();
         let enter = |exch: &str| {
             let qso = QsoState {
                 call_sent: "W7XYZ".to_string(),
@@ -964,9 +1022,7 @@ mod tests {
             assert_eq!(label(&message), key);
         }
         // An exchange with no number in it is asked for again as AGN.
-        let simple = ContestKind::SimpleQso
-            .rules()
-            .expect("Simple QSO has shipped");
+        let simple = ContestKind::SimpleQso.rules();
         assert_eq!(message_text(&[NrQuery], simple, Side::Dx, &me()), "AGN");
     }
 

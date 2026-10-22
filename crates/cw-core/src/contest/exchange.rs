@@ -9,6 +9,7 @@
 
 use super::CallerHabits;
 use super::data::places::place_code;
+use super::data::sections::{fold_yukon, listed_section};
 use crate::alignment::align_group;
 use crate::rng::Rng;
 
@@ -131,7 +132,8 @@ impl Field {
     /// `token` written the one way this field compares it, or `None` if it
     /// cannot be this field: a serial with no leading zeros (`TT1` is `1`),
     /// a report as three digits (`5NN` is `599`), power as watts or `KW`, a
-    /// class without leading zeros (`03A` is `3A`). Tokens are upper case.
+    /// class without leading zeros (`03A` is `3A`), Yukon's section as the
+    /// Territories' (`YT` is `TER`). Tokens are upper case.
     pub fn canonical(self, token: &str) -> Option<String> {
         match self {
             Self::Nr => read_number(token).map(|n| n.to_string()),
@@ -148,9 +150,9 @@ impl Field {
             // counts Labrador as part of NL, as the Sprint does, reads LB as
             // NL (`ContestRules::canonical`).
             Self::St => place_code(token).map(str::to_string),
-            // Sections are read off their list, which comes with Field Day.
-            // Until then nothing reads as one.
-            Self::Sec => None,
+            // An ARRL or RAC section by its code, or DX. Yukon's own code is
+            // the Territories', which ARRL contests count it in.
+            Self::Sec => listed_section(token).map(|code| fold_yukon(code).to_string()),
         }
     }
 
@@ -480,6 +482,21 @@ mod tests {
         assert!(Field::St.same("DX", "DX"));
         assert!(!Field::St.same("OR", "WA"));
         assert!(!Field::St.same("NL", "NS"));
+        // SEC: a code, equal as it is, Yukon's YT the Territories' TER;
+        // and no other alias: NFL is Northern Florida, not Newfoundland.
+        assert!(Field::Sec.same("EMA", "EMA"));
+        assert!(Field::Sec.same("YT", "TER"));
+        assert!(Field::Sec.same("DX", "DX"));
+        assert!(!Field::Sec.same("NFL", "NL"));
+        assert!(!Field::Sec.same("EMA", "WMA"));
+        assert!(!Field::Sec.same("ONS", "ON"));
+        assert_eq!(canonical(Field::Sec, "YT").as_deref(), Some("TER"));
+        assert_eq!(canonical(Field::Sec, "NFL").as_deref(), Some("NFL"));
+        // CL: leading zeros go.
+        assert!(Field::Cl.same("03A", "3A"));
+        assert!(!Field::Cl.same("3A", "3B"));
+        assert!(!Field::Cl.same("13A", "3A"));
+        assert_eq!(canonical(Field::Cl, "001D").as_deref(), Some("1D"));
         // NAME: letters, equal as they are.
         assert!(Field::Name.same("BOB", "BOB"));
         assert!(!Field::Name.same("BOB", "ROB"));
@@ -512,8 +529,9 @@ mod tests {
         for bad in ["", "XX", "ORE", "or", "TN?", "1", "LBX"] {
             assert_eq!(canonical(Field::St, bad), None, "{bad:?}");
         }
-        // Sections have no list yet, so nothing is one.
-        assert_eq!(canonical(Field::Sec, "EMA"), None);
+        for bad in ["", "MAR", "NT", "GTA", "YUK", "NF", "MD", "ema", "3A"] {
+            assert_eq!(canonical(Field::Sec, bad), None, "{bad:?}");
+        }
     }
 
     /// A cut letter is a digit only in a numeric field: `TN` stays
@@ -533,6 +551,8 @@ mod tests {
         assert_eq!(canonical(Field::Name, "TONE").as_deref(), Some("TONE"));
         assert_eq!(canonical(Field::St, "TN").as_deref(), Some("TN"));
         assert_eq!(canonical(Field::St, "NE").as_deref(), Some("NE"));
+        assert_eq!(canonical(Field::Sec, "ONE").as_deref(), Some("ONE"));
+        assert_eq!(canonical(Field::Sec, "TN").as_deref(), Some("TN"));
         assert_eq!(canonical(Field::Cl, "1A").as_deref(), Some("1A"));
         assert_eq!(canonical(Field::Cl, "TA"), None, "no cut digits in a class");
         assert_eq!(canonical(Field::Cl, "1T"), None);
@@ -757,14 +777,8 @@ mod tests {
             assert_eq!(Field::from_name(field.name()), Some(field));
             assert_eq!(field.label(), field.name().to_ascii_uppercase());
             assert!(!field.noun().is_empty());
-            // What the card shows a station sending is a value it could send,
-            // once the field's list has come with its contest.
-            let listed = field == Field::Sec;
-            assert_eq!(
-                field.canonical(field.example()).is_some(),
-                !listed,
-                "{field:?}"
-            );
+            // What the card shows a station sending is a value it could send.
+            assert!(field.canonical(field.example()).is_some(), "{field:?}");
         }
         assert_eq!(Field::from_name("NR"), None);
     }

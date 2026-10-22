@@ -31,11 +31,10 @@ use crate::{
 const SEEDS: u64 = 2_000;
 
 /// The contest soak's seeds of single callers, half as many again as
-/// [`SEEDS`]: the runs are shared among the contests that have shipped, and
-/// a Sprint's exchange, three fields long, is put wrong by a slip or junk
-/// more often than a lone number, so fewer of its QSOs reach the log with a
-/// slip in the call, and the floor of each kind needs more runs to stand
-/// on.
+/// [`SEEDS`]: the runs are shared among the contests, and a Sprint's
+/// exchange, three fields long, is put wrong by a slip or junk more often
+/// than a lone number, so fewer of its QSOs reach the log with a slip in the
+/// call, and the floor of each kind needs more runs to stand on.
 const CONTEST_SEEDS: u64 = SEEDS + SEEDS / 2;
 
 /// The contest soak's pile-up seeds, half as many again as
@@ -794,11 +793,11 @@ fn a_pile_up_is_always_something_you_could_copy() {
     }
 }
 
-/// Settings from anywhere, in Contest mode, of run `style`: any contest that
-/// has shipped, a call from a few that read in different ways and are on
-/// either side of ARRL DX, none among them, a name or none, a state or
-/// none, Labrador among them, a zone or none, any power, and runs short
-/// enough to reach their end.
+/// Settings from anywhere, in Contest mode, of run `style`: any contest, a
+/// call from a few that read in different ways and are on either side of
+/// ARRL DX, none among them, a name or none, a state or none, Labrador among
+/// them, a zone or none, any power, a Field Day class and a section or none,
+/// Yukon's among them, and runs short enough to reach their end.
 fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
     const CALLS: [&str; 8] = [
         "DL1ABC",
@@ -813,13 +812,15 @@ fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
     let mut s = wild_settings(rng);
     s.curriculum.char_set_mode = CharSetMode::Contest;
     s.contest.contest_style = style;
-    let shipped: Vec<ContestKind> = ContestKind::shipped().collect();
-    s.contest.contest_kind = shipped[rng.usize_in(0, shipped.len() - 1)];
+    let kinds = ContestKind::ALL;
+    s.contest.contest_kind = kinds[rng.usize_in(0, kinds.len() - 1)];
     s.contest.my_call = CALLS[rng.usize_in(0, CALLS.len() - 1)].to_string();
     s.contest.my_name = ["MAT", ""][rng.usize_in(0, 1)].to_string();
     s.contest.my_state = ["MA", "", "DX", "LB"][rng.usize_in(0, 3)].to_string();
     s.contest.my_zone = [0, 0, 14, 40][rng.usize_in(0, 3)];
     s.contest.my_power = ["100", "KW", "5", "1K"][rng.usize_in(0, 3)].to_string();
+    s.contest.my_class = ["1D", "3A", "12F"][rng.usize_in(0, 2)].to_string();
+    s.contest.my_section = ["EMA", "", "DX", "YT"][rng.usize_in(0, 3)].to_string();
     s.contest.contest_minutes = [1, 2, 3, 4, 0][rng.usize_in(0, 4)];
     s.clamp()
 }
@@ -1206,8 +1207,7 @@ fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
 /// them, so a failure's seed says which.
 fn soak_contest_runs(style: RunStyle) {
     let mut outcomes = Outcomes::default();
-    // QSOs logged in each contest, so every one that has shipped is seen to
-    // be soaked.
+    // QSOs logged in each contest, so every one is seen to be soaked.
     let mut logged_in: std::collections::BTreeMap<&str, u32> = Default::default();
     let seeds = match style {
         RunStyle::Single => 0..CONTEST_SEEDS,
@@ -1276,7 +1276,7 @@ fn soak_contest_runs(style: RunStyle) {
         let run = log
             .run(result.groups.len())
             .unwrap_or_else(|| panic!("seed {seed}: the log does not read back"));
-        let rules = settings.contest.contest_kind.rules().expect("shipped");
+        let rules = settings.contest.contest_kind.rules();
         assert_eq!(run.kind, rules.kind.name(), "seed {seed}");
         let owned: u32 = run.qsos.iter().map(|qso| qso.g).sum();
         assert_eq!(owned as usize, result.groups.len(), "seed {seed}");
@@ -1400,7 +1400,7 @@ fn soak_contest_runs(style: RunStyle) {
             "{style:?}: only {count} {kind} QSOs across the seeds"
         );
     }
-    for kind in ContestKind::shipped() {
+    for kind in ContestKind::ALL {
         let count = logged_in.get(kind.name()).copied().unwrap_or(0);
         assert!(
             count >= 100,

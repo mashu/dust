@@ -46,6 +46,7 @@ pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
 pub use data::places::{home_country, place_name};
+pub use data::sections::section_name;
 pub use data::zones::home_continent;
 pub use esm::{EntryField, Esm, Fields, MessagePart, QsoState, esm, loggable, message_text};
 pub use exchange::{
@@ -70,8 +71,8 @@ pub use turn::{Fade, MONITOR_LEVEL, Segment, Sender, Turn, plan_turn};
 const MS_PER_MINUTE: u64 = 60_000;
 const MS_PER_HOUR: u64 = 60 * MS_PER_MINUTE;
 
-/// The contests Dust knows, in the order the card lists them. Only those in
-/// [`ContestKind::shipped`] can be run; the others join as their phase ships.
+/// The contests Dust knows, in the order the card lists them, each with its
+/// row of rules ([`ContestKind::rules`]). A contest joins with its row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ContestKind {
     /// The NCJ North American Sprint.
@@ -136,22 +137,18 @@ impl ContestKind {
         }
     }
 
-    /// Its rules, once its phase has shipped.
-    pub fn rules(self) -> Option<&'static ContestRules> {
-        rules::RULES.iter().find(|rules| rules.kind == self)
+    /// Its rules: every contest on the card has its row, as a test checks.
+    pub fn rules(self) -> &'static ContestRules {
+        rules::RULES
+            .iter()
+            .find(|rules| rules.kind == self)
+            .expect("every contest has its row of rules")
     }
 
     /// Whether a run of it has a contest score, as every contest but Simple
-    /// QSO does, which is told by its pace and its copy instead. One still
-    /// to ship counts as scored: each of them is.
+    /// QSO does, which is told by its pace and its copy instead.
     pub fn scored(self) -> bool {
-        self.rules().is_none_or(|rules| rules.scoring.is_some())
-    }
-
-    /// The contests that can be run, those with a row of rules, in the
-    /// order the card lists them.
-    pub fn shipped() -> impl Iterator<Item = Self> {
-        Self::ALL.into_iter().filter(|kind| kind.rules().is_some())
+        self.rules().scoring.is_some()
     }
 }
 
@@ -301,7 +298,7 @@ mod tests {
         );
     }
 
-    /// Every contest scores but Simple QSO, those still to ship among them.
+    /// Every contest scores but Simple QSO.
     #[test]
     fn every_contest_but_simple_qso_is_scored() {
         for kind in ContestKind::ALL {
@@ -323,21 +320,12 @@ mod tests {
         assert_eq!(ContestKind::from_name("cwt"), None);
     }
 
+    /// Every contest on the card has its row of rules, and one only.
     #[test]
-    fn every_contest_but_field_day_has_shipped_so_far() {
-        let shipped: Vec<ContestKind> = ContestKind::shipped().collect();
-        assert_eq!(
-            shipped,
-            [
-                ContestKind::Sprint,
-                ContestKind::ArrlDx,
-                ContestKind::Wpx,
-                ContestKind::Cqww,
-                ContestKind::SimpleQso
-            ]
-        );
+    fn every_contest_has_its_rules() {
+        assert_eq!(rules::RULES.len(), ContestKind::ALL.len());
         for kind in ContestKind::ALL {
-            assert_eq!(kind.rules().is_some(), shipped.contains(&kind), "{kind:?}");
+            assert_eq!(kind.rules().kind, kind);
             assert!(!kind.label().is_empty());
         }
         assert_eq!(ContestKind::default(), ContestKind::Wpx);

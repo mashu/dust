@@ -1,14 +1,15 @@
 //! Your station: the callsign you sign in a contest, and the fields of the
-//! exchange you send, given once: your name, your state, your CQ zone and
-//! your power, for a contest that sends them. The card shows in Contest
-//! mode only, under the character set whose contest it serves, and Home
-//! asks for the call, then the name, then the state, then the zone, in the
-//! same words while it has none.
+//! exchange you send, given once: your name, your state, your CQ zone, your
+//! power, and your Field Day class and section, for a contest that sends
+//! them. The card shows in Contest mode only, under the character set whose
+//! contest it serves, and Home asks for the call, then the name, then the
+//! state, then the zone, then the section, in the same words while it has
+//! none.
 
 use cw_core::{
     ContestKind, ContestRules, MY_ZONE_MAX, SettingsSection, Side, TrainingSettings, call_fault,
-    continent_name, country_name, cut_power, cut_zone, home_continent, home_country,
-    parse_callsign, place_name, power_reading, state_code, wpx_prefix,
+    class_reading, continent_name, country_name, cut_power, cut_zone, home_continent, home_country,
+    parse_callsign, place_name, power_reading, section_code, section_name, state_code, wpx_prefix,
 };
 use dioxus::prelude::*;
 
@@ -21,6 +22,8 @@ const NAME_LABEL: &str = "Your name";
 const STATE_LABEL: &str = "Your state or province";
 const ZONE_LABEL: &str = "Your CQ zone (0–40)";
 const POWER_LABEL: &str = "Your power";
+const CLASS_LABEL: &str = "Your class";
+const SECTION_LABEL: &str = "Your section";
 /// What Home's zone field is called, where only a zone of 1 to 40 will do.
 const ZONE_ENTRY_LABEL: &str = "Your CQ zone";
 
@@ -62,6 +65,12 @@ pub(crate) fn focus_state_field() {
 /// does.
 pub(crate) fn focus_zone_field() {
     focus_field(ZONE_ENTRY_LABEL);
+}
+
+/// Give the section field the focus, as a start refused for want of a
+/// section does.
+pub(crate) fn focus_section_field() {
+    focus_field(SECTION_LABEL);
 }
 
 /// A CQ zone as the lines under your call and your zone name it: "zone 3",
@@ -491,9 +500,158 @@ fn PowerReading(power: String, rejected: Option<String>) -> Element {
     }
 }
 
+/// What typing `typed` as your class leaves for the line under the field to
+/// say ([`rejected`]): what is no class, kept as 1D.
+fn class_rejected(typed: &str) -> Option<String> {
+    rejected(typed, |typed| class_reading(typed).is_some())
+}
+
+/// What the letter of a Field Day class says of the station: "a home
+/// station on commercial power" for D.
+fn class_letter(letter: char) -> &'static str {
+    match letter {
+        'A' => "a club or group in the field",
+        'B' => "one or two operators in the field",
+        'C' => "a mobile station",
+        'D' => "a home station on commercial power",
+        'E' => "a home station on emergency power",
+        _ => "an Emergency Operations Center",
+    }
+}
+
+/// What your class reads as, in a line under it: how many transmitters and
+/// what kind of station, or why what was typed is none.
+fn class_line(class: &str, rejected: Option<&str>) -> (String, bool) {
+    if let Some(typed) = rejected {
+        return (
+            format!(
+                "{typed} is not a class: type the number of transmitters, 1 to 99, and a letter A to F, as 1D or 3A; 1D is sent"
+            ),
+            false,
+        );
+    }
+    let count = class.trim_end_matches(|c: char| c.is_ascii_uppercase());
+    let transmitters = if count == "1" {
+        "1 transmitter".to_string()
+    } else {
+        format!("{count} transmitters")
+    };
+    let kind = class.chars().last().map_or("", class_letter);
+    (format!("Sends {class}: {transmitters}, {kind}"), true)
+}
+
+/// The line under your class.
+#[component]
+fn ClassReading(class: String, rejected: Option<String>) -> Element {
+    let (line, read) = class_line(&class, rejected.as_deref());
+    rsx! {
+        p {
+            id: control_id("reading", "your class"),
+            class: if read { "call-reading" } else { "call-reading bad" },
+            aria_live: "polite",
+            "{line}"
+        }
+    }
+}
+
+/// What typing `typed` as your section leaves for the line under the field
+/// to say ([`rejected`]): what is no code, kept as none.
+pub(crate) fn section_rejected(typed: &str) -> Option<String> {
+    rejected(typed, |typed| section_code(typed).is_some())
+}
+
+/// What your section reads as, in a line under it: the section its code
+/// names, Yukon's as the Territories', DX; the one your call tells while
+/// you give none; why what was typed is none; or else `missing`, what a run
+/// is missing once that is the section, or what a section is, for a
+/// learner who has not met ARRL's word for it.
+fn section_reading(
+    section: &str,
+    sent: &str,
+    rejected: Option<&str>,
+    missing: Option<&str>,
+) -> (String, bool) {
+    if let Some(typed) = rejected.filter(|_| section.is_empty()) {
+        return (
+            format!("{typed} is not a section: type its code, as EMA or ONS, or DX"),
+            false,
+        );
+    }
+    let outside = "stations outside the ARRL and RAC sections send DX";
+    if !section.is_empty() {
+        let line = if section != sent {
+            // Yukon's, which ARRL contests count in the Territories.
+            format!("Sends {sent}: ARRL contests count Yukon in the Territories")
+        } else if let Some(name) = section_name(section) {
+            format!("Reads as {name}")
+        } else {
+            format!("Reads as DX: {outside}")
+        };
+        return (line, true);
+    }
+    if let Some(name) = section_name(sent) {
+        return (format!("Sends {sent} from your call: {name}"), true);
+    }
+    if !sent.is_empty() {
+        return (format!("Sends DX from your call: {outside}"), true);
+    }
+    let line = missing
+        .unwrap_or("Your ARRL or RAC section, as EMA for Eastern Massachusetts; DX outside them");
+    (line.to_string(), true)
+}
+
+/// The line under your section.
+#[component]
+fn SectionReading(
+    section: String,
+    sent: String,
+    rejected: Option<String>,
+    missing: Option<String>,
+) -> Element {
+    let (line, read) = section_reading(&section, &sent, rejected.as_deref(), missing.as_deref());
+    rsx! {
+        p {
+            id: control_id("reading", "your section"),
+            class: if read { "call-reading" } else { "call-reading bad" },
+            aria_live: "polite",
+            "{line}"
+        }
+    }
+}
+
+/// Your ARRL or RAC section, typed in and kept as its code (`EMA`, `ONS`,
+/// or `DX`), and the line under it, as Your station and Home both ask for
+/// it. What is no code is kept as none: the one asking keeps what was typed
+/// of it ([`section_rejected`]) as `rejected`, for as long as that is what
+/// the field was last left with, for the line to say so.
+#[component]
+pub(crate) fn SectionEntry(
+    value: String,
+    /// What your exchange sends: the section, or the one your call tells
+    /// where none is given; nothing where neither is, as on Home, which asks
+    /// only then.
+    #[props(default)]
+    sent: String,
+    #[props(default)] missing: Option<String>,
+    rejected: Option<String>,
+    on_commit: EventHandler<String>,
+    #[props(default)] draft: Option<StationDraft>,
+) -> Element {
+    rsx! {
+        StationText {
+            label: SECTION_LABEL,
+            placeholder: "e.g. EMA, ONS or DX",
+            value: value.clone(),
+            on_commit,
+            draft,
+        }
+        SectionReading { section: value, sent, rejected, missing }
+    }
+}
+
 /// What Your station shows: the call, whether a contest can read it, your
-/// name, state, zone and power where the contest sends them, and what a run
-/// is missing.
+/// name, state, zone, power, class and section where the contest sends
+/// them, and what a run is missing.
 #[derive(Clone, PartialEq)]
 struct Station {
     my_call: String,
@@ -513,6 +671,10 @@ struct Station {
     my_zone: Option<u32>,
     /// Your power, where the contest sends it.
     my_power: Option<String>,
+    /// Your class, where the contest sends it.
+    my_class: Option<String>,
+    /// Your section as given, and as sent, where the contest sends one.
+    my_section: Option<(String, String)>,
     missing: Option<String>,
 }
 
@@ -522,11 +684,15 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
     // of your station changes: your call, your name, the contest, or the
     // card's reset.
     let mut state_said = use_signal(|| None::<String>);
-    // And a power typed that is none, the same way.
+    // And a power, a class or a section typed that is none, the same way.
     let mut power_said = use_signal(|| None::<String>);
+    let mut class_said = use_signal(|| None::<String>);
+    let mut section_said = use_signal(|| None::<String>);
     let mut unsay = move || {
         state_said.set(None);
         power_said.set(None);
+        class_said.set(None);
+        section_said.set(None);
     };
     let around = use_memo(move || {
         let contest = &settings.read().contest;
@@ -544,9 +710,8 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
         let contest = &settings.read().contest;
         let rules = contest.contest_kind.rules();
         let side = contest.side();
-        let sends =
-            |sends: fn(&ContestRules, Side) -> bool| rules.is_some_and(|rules| sends(rules, side));
-        let sends_name = rules.is_some_and(|rules| rules.sends_name());
+        let sends = |sends: fn(&ContestRules, Side) -> bool| sends(rules, side);
+        let sends_name = rules.sends_name();
         Station {
             readable: parse_callsign(&contest.my_call).is_some(),
             my_call: contest.my_call.clone(),
@@ -559,6 +724,13 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
                 .then(|| (contest.my_state.clone(), contest.state_sent().to_string())),
             my_zone: sends(ContestRules::sends_zone).then_some(contest.my_zone),
             my_power: sends(ContestRules::sends_power).then(|| contest.my_power.clone()),
+            my_class: sends(ContestRules::sends_class).then(|| contest.my_class.clone()),
+            my_section: sends(ContestRules::sends_section).then(|| {
+                (
+                    contest.my_section.clone(),
+                    contest.section_sent().to_string(),
+                )
+            }),
             missing: contest.missing(),
         }
     });
@@ -567,7 +739,7 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
     let zone = s.my_zone.and(s.zone);
     let note = if s.readable {
         // What you sign with, as far as it is given: "K1ABC · MIKE · MA",
-        // "DL1ABC · zone 14", "DL1ABC · 100 W".
+        // "DL1ABC · zone 14", "DL1ABC · 100 W", "K1ABC · 1D · EMA".
         let name = s.my_name.iter().filter(|name| !name.is_empty()).cloned();
         let state = s
             .my_state
@@ -579,11 +751,18 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
             .my_power
             .iter()
             .map(|power| watts_text(power).unwrap_or_else(|| power.clone()));
+        let section = s
+            .my_section
+            .iter()
+            .map(|(_, sent)| sent.clone())
+            .filter(|sent| !sent.is_empty());
         let signing: Vec<String> = std::iter::once(s.my_call.clone())
             .chain(name)
             .chain(state)
             .chain(zone)
             .chain(power)
+            .chain(s.my_class.clone())
+            .chain(section)
             .collect();
         format!("Signing {}", signing.join(" · "))
     } else {
@@ -593,6 +772,8 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
         asks.extend(s.my_state.as_ref().map(|_| "state"));
         asks.extend(s.my_zone.map(|_| "CQ zone"));
         asks.extend(s.my_power.as_ref().map(|_| "power"));
+        asks.extend(s.my_class.as_ref().map(|_| "class"));
+        asks.extend(s.my_section.as_ref().map(|_| "section"));
         let asks = match asks.split_last() {
             Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
             _ => asks.join(""),
@@ -616,6 +797,12 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
     let zone_missing = s
         .my_zone
         .filter(|_| zone.is_none() && s.readable)
+        .and(s.missing.clone());
+    // And under the section once only the section is.
+    let section_missing = s
+        .my_section
+        .as_ref()
+        .filter(|(_, sent)| sent.is_empty() && s.readable)
         .and(s.missing.clone());
     rsx! {
         div { class: "card stack-sm",
@@ -695,6 +882,31 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
                 }
                 PowerReading { power, rejected: power_said() }
             }
+            if let Some(class) = s.my_class.clone() {
+                StationText {
+                    label: CLASS_LABEL,
+                    placeholder: "e.g. 1D or 3A",
+                    value: class.clone(),
+                    on_commit: move |typed: String| {
+                        class_said.set(class_rejected(&typed));
+                        settings.write().contest.set_my_class(&typed);
+                    },
+                    draft: None,
+                }
+                ClassReading { class, rejected: class_said() }
+            }
+            if let Some((section, sent)) = s.my_section.clone() {
+                SectionEntry {
+                    value: section,
+                    sent,
+                    missing: section_missing,
+                    rejected: section_said(),
+                    on_commit: move |typed: String| {
+                        section_said.set(section_rejected(&typed));
+                        settings.write().contest.set_my_section(&typed);
+                    },
+                }
+            }
         }
     }
 }
@@ -702,7 +914,8 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        call_reading, power_line, power_rejected, state_reading, state_rejected, zone_reading,
+        call_reading, class_line, class_rejected, power_line, power_rejected, section_reading,
+        section_rejected, state_reading, state_rejected, zone_reading,
     };
     use cw_core::ContestKind;
 
@@ -872,6 +1085,90 @@ mod tests {
         );
         let missing = "Add your CQ zone to start a CQ\u{a0}WW";
         assert_eq!(zone_reading(0, None, None, Some(missing)), missing);
+    }
+
+    /// The line under your class: how many transmitters and what kind of
+    /// station, or why what was typed is none.
+    #[test]
+    fn a_class_reads_as_what_is_sent() {
+        assert_eq!(
+            class_line("1D", None),
+            (
+                "Sends 1D: 1 transmitter, a home station on commercial power".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            class_line("3A", None),
+            (
+                "Sends 3A: 3 transmitters, a club or group in the field".to_string(),
+                true
+            )
+        );
+        assert_eq!(
+            class_line("12F", None).0,
+            "Sends 12F: 12 transmitters, an Emergency Operations Center"
+        );
+        assert_eq!(
+            class_line("1D", Some("1G")),
+            (
+                "1G is not a class: type the number of transmitters, 1 to 99, and a letter A to F, as 1D or 3A; 1D is sent"
+                    .to_string(),
+                false
+            )
+        );
+        assert_eq!(class_rejected(" 1g "), Some("1G".to_string()));
+        for kept in ["1d", "03A", " 2 B ", ""] {
+            assert_eq!(class_rejected(kept), None, "{kept:?}");
+        }
+    }
+
+    /// The line under your section: the section it names, Yukon's as the
+    /// Territories', DX, the one your call tells while you give none, why
+    /// what was typed is none, what a run is missing, or what a section is.
+    #[test]
+    fn a_section_reads_as_what_is_sent() {
+        let read =
+            |section, sent, rejected, missing| section_reading(section, sent, rejected, missing).0;
+        assert_eq!(
+            read("EMA", "EMA", None, None),
+            "Reads as Eastern Massachusetts"
+        );
+        assert_eq!(read("OR", "OR", None, None), "Reads as Oregon");
+        assert_eq!(
+            read("YT", "TER", None, None),
+            "Sends TER: ARRL contests count Yukon in the Territories"
+        );
+        assert_eq!(
+            read("DX", "DX", None, None),
+            "Reads as DX: stations outside the ARRL and RAC sections send DX"
+        );
+        assert_eq!(
+            read("", "PAC", None, None),
+            "Sends PAC from your call: Pacific"
+        );
+        assert_eq!(
+            read("", "DX", None, None),
+            "Sends DX from your call: stations outside the ARRL and RAC sections send DX"
+        );
+        assert_eq!(
+            section_reading("", "", Some("MASS"), None),
+            (
+                "MASS is not a section: type its code, as EMA or ONS, or DX".to_string(),
+                false
+            )
+        );
+        let missing = "Add your section to start a Field\u{a0}Day";
+        assert_eq!(read("", "", None, Some(missing)), missing);
+        // On Home, which asks only while it is missing, it says what one is.
+        assert_eq!(
+            read("", "", None, None),
+            "Your ARRL or RAC section, as EMA for Eastern Massachusetts; DX outside them"
+        );
+        assert_eq!(section_rejected(" Mass "), Some("MASS".to_string()));
+        for kept in ["ema", "yt", "dx", "  ", ""] {
+            assert_eq!(section_rejected(kept), None, "{kept:?}");
+        }
     }
 
     /// The line under your power: how it goes out, or why what was typed

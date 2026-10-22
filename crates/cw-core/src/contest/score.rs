@@ -60,8 +60,9 @@ impl ScoredQso<'_> {
     /// prefix; the state, province or territory logged, as the Sprint
     /// counts them, or as a DX station in ARRL DX counts a W/VE call's; the
     /// country of its call, as a W/VE station in ARRL DX counts a DX call's;
-    /// or its zone and its country, as CQ WW counts them. Nothing for what
-    /// counts for none.
+    /// or its zone and its country, as CQ WW counts them; or the one the log
+    /// is, where nothing multiplies the points, as in Field Day. Nothing for
+    /// what counts for none.
     fn multipliers(&self, multiplier: Multiplier) -> Vec<String> {
         let country = || home_country(self.call).map(str::to_string);
         match multiplier {
@@ -84,6 +85,9 @@ impl ScoredQso<'_> {
                 .into_iter()
                 .chain(country())
                 .collect(),
+            // Every QSO counts the one multiplier, the log, so the score
+            // is the points.
+            Multiplier::Nothing => vec![String::new()],
         }
     }
 
@@ -244,24 +248,22 @@ mod tests {
     use crate::contest::{ContestKind, QsoError};
 
     fn wpx() -> Scoring {
-        ContestKind::Wpx
-            .rules()
-            .and_then(|rules| rules.scoring)
-            .expect("WPX scores")
+        ContestKind::Wpx.rules().scoring.expect("WPX scores")
     }
 
     fn cqww() -> Scoring {
-        ContestKind::Cqww
-            .rules()
-            .and_then(|rules| rules.scoring)
-            .expect("CQ WW scores")
+        ContestKind::Cqww.rules().scoring.expect("CQ WW scores")
     }
 
     fn arrl_dx() -> Scoring {
-        ContestKind::ArrlDx
+        ContestKind::ArrlDx.rules().scoring.expect("ARRL DX scores")
+    }
+
+    fn field_day() -> Scoring {
+        ContestKind::FieldDay
             .rules()
-            .and_then(|rules| rules.scoring)
-            .expect("ARRL DX scores")
+            .scoring
+            .expect("Field Day scores")
     }
 
     /// You as DL1ABC, in Germany, in Europe, DX.
@@ -304,7 +306,7 @@ mod tests {
     fn sprint() -> Scoring {
         ContestKind::Sprint
             .rules()
-            .and_then(|rules| rules.scoring)
+            .scoring
             .expect("the Sprint scores")
     }
 
@@ -426,7 +428,7 @@ mod tests {
             })
             .collect();
         let mut rng = SplitMix64::new(4);
-        for scoring in [wpx(), sprint(), cqww(), arrl_dx()] {
+        for scoring in [wpx(), sprint(), cqww(), arrl_dx(), field_day()] {
             for _ in 0..500 {
                 let log: Vec<ScoredQso<'_>> = (0..rng.usize_in(0, 12))
                     .map(|i| ScoredQso {
@@ -754,6 +756,74 @@ mod tests {
         let own_side = [logged_with(20, "VE3XYZ", &hundred, &busted)];
         let score = contest_score(&arrl_dx(), &K1, &own_side, 600_000);
         assert_eq!(score.raw, Tally::default());
+    }
+
+    /// Field Day worked by hand: two points a QSO, nothing to multiply
+    /// them, so the score is the points; a dupe scores nothing, and raw
+    /// claims a busted call or a wrong section that verified drops. DX and
+    /// W/VE are worth the same, from either side.
+    #[test]
+    fn a_hand_worked_field_day_log_scores_its_points() {
+        let fd =
+            |cl: &str, sec: &str| vec![(Field::Cl, cl.to_string()), (Field::Sec, sec.to_string())];
+        let (or, ema, dx, pac, ter) = (
+            fd("3A", "OR"),
+            fd("1D", "EMA"),
+            fd("1D", "DX"),
+            fd("2A", "PAC"),
+            fd("1B", "YT"),
+        );
+        let clean = clean();
+        let busted = QsoCheck {
+            errors: vec![QsoError::Call {
+                correct: "W1ABC".into(),
+            }],
+            dupe: false,
+        };
+        let wrong_sec = QsoCheck {
+            errors: vec![QsoError::Field(Field::Sec)],
+            dupe: false,
+        };
+        let dupe = QsoCheck {
+            errors: Vec::new(),
+            dupe: true,
+        };
+        let log = [
+            logged_with(20, "W7XYZ", &or, &clean),
+            logged_with(40, "W1ABC", &ema, &clean),
+            logged_with(60, "DL1ABC", &dx, &clean),
+            logged_with(80, "KH6AB", &pac, &clean),
+            logged_with(100, "VY1AB", &ter, &clean),
+            // Claimed raw, dropped verified.
+            logged_with(120, "W1ABD", &ema, &busted),
+            logged_with(140, "K7ABC", &or, &wrong_sec),
+            // A dupe scores nothing.
+            logged_with(160, "W7XYZ", &or, &dupe),
+        ];
+        for me in [K1, DL] {
+            let score = contest_score(&field_day(), &me, &log, 600_000);
+            assert_eq!(
+                score.raw,
+                Tally {
+                    qso_points: 14,
+                    mults: 1,
+                    score: 14
+                }
+            );
+            assert_eq!(
+                score.verified,
+                Tally {
+                    qso_points: 10,
+                    mults: 1,
+                    score: 10
+                }
+            );
+        }
+        let empty = contest_score(&field_day(), &K1, &[], 600_000);
+        assert_eq!(
+            (empty.raw, empty.verified),
+            (Tally::default(), Tally::default())
+        );
     }
 
     #[test]

@@ -9,8 +9,9 @@ use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::settings_charset::{pileup_callers, pileup_count};
 use crate::ui::settings_station::{
-    CallField, CallReading, NameField, StateEntry, StationDraft, ZoneField, focus_call_field,
-    focus_name_field, focus_state_field, focus_zone_field, state_rejected,
+    CallField, CallReading, NameField, SectionEntry, StateEntry, StationDraft, ZoneField,
+    focus_call_field, focus_name_field, focus_section_field, focus_state_field, focus_zone_field,
+    section_rejected, state_rejected,
 };
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, keep_focus, pretty_number};
@@ -113,6 +114,9 @@ enum StationAsk {
     /// The rest is there, but the contest sends your CQ zone and your call
     /// does not say it.
     Zone,
+    /// The rest is there, but the contest sends your ARRL or RAC section
+    /// and your call does not tell it.
+    Section,
 }
 
 impl StationAsk {
@@ -122,16 +126,14 @@ impl StationAsk {
         let rules = contest.contest_kind.rules();
         if parse_callsign(&contest.my_call).is_none() {
             Some(Self::Call)
-        } else if rules.is_some_and(|rules| rules.sends_name()) && contest.my_name.is_empty() {
+        } else if rules.sends_name() && contest.my_name.is_empty() {
             Some(Self::Name)
-        } else if rules.is_some_and(|rules| rules.sends_state(contest.side()))
-            && contest.state_sent().is_empty()
-        {
+        } else if rules.sends_state(contest.side()) && contest.state_sent().is_empty() {
             Some(Self::State)
-        } else if rules.is_some_and(|rules| rules.sends_zone(contest.side()))
-            && contest.zone().is_none()
-        {
+        } else if rules.sends_zone(contest.side()) && contest.zone().is_none() {
             Some(Self::Zone)
+        } else if rules.sends_section(contest.side()) && contest.section_sent().is_empty() {
+            Some(Self::Section)
         } else {
             None
         }
@@ -144,6 +146,7 @@ impl StationAsk {
             Self::Name => contest.set_my_name(typed),
             Self::State => contest.set_my_state(typed),
             Self::Zone => contest.set_my_zone(typed),
+            Self::Section => contest.set_my_section(typed),
         }
     }
 
@@ -154,6 +157,7 @@ impl StationAsk {
             Self::Name => focus_name_field,
             Self::State => focus_state_field,
             Self::Zone => focus_zone_field,
+            Self::Section => focus_section_field,
         }
     }
 
@@ -172,6 +176,9 @@ impl StationAsk {
             Self::Zone => {
                 "Add your CQ zone, press Start contest; Enter sends what the QSO needs next."
             }
+            Self::Section => {
+                "Add your section, press Start contest; Enter sends what the QSO needs next."
+            }
         }
     }
 }
@@ -187,15 +194,9 @@ impl ContestHero {
         let rules = contest.contest_kind.rules();
         let side = contest.side();
         let fields = std::iter::once("CALL")
-            .chain(
-                rules
-                    .into_iter()
-                    .flat_map(|rules| rules.copied(side).iter().map(|field| field.label())),
-            )
+            .chain(rules.copied(side).iter().map(|field| field.label()))
             .collect();
-        let sends = rules.map_or_else(String::new, |rules| {
-            format!("You send {}, as {}", rules.sends(side), contest.my_call)
-        });
+        let sends = format!("You send {}, as {}", rules.sends(side), contest.my_call);
         let limit = contest.limit_minutes();
         let length = match contest.contest_minutes {
             0 => ("Open".to_string(), format!("Up to {limit} min")),
@@ -264,13 +265,17 @@ pub fn Home(
     /// none your call says.
     #[props(default)]
     on_zone: EventHandler<String>,
+    /// Your section, typed into the hero while a contest that sends it has
+    /// none your call tells.
+    #[props(default)]
+    on_section: EventHandler<String>,
 ) -> Element {
     let level = level_reading(&settings);
     let contest = contest_hero(&settings);
     // A start the run would refuse says why here, rather than in a toast,
     // unless the line under the call field says it already; and when the
-    // call, the name, the state or the zone is what is missing, Start takes
-    // you to its field.
+    // call, the name, the state, the zone or the section is what is missing,
+    // Start takes you to its field.
     let mut refused = use_signal(|| false);
     // It does so once the hero has drawn the field, from an effect: the
     // press that kept a call may have swapped the call's field for the
@@ -285,9 +290,10 @@ pub fn Home(
     let asks = contest.as_ref().and_then(|hero| hero.asks);
     let call_flagged = contest.as_ref().is_some_and(|hero| hero.call_flagged);
     let refusal = missing.filter(|_| refused() && !call_flagged);
-    // A state typed that is no code is kept as none, and the line under the
-    // field says so, however it was kept.
+    // A state or a section typed that is no code is kept as none, and the
+    // line under the field says so, however it was kept.
     let state_said = use_signal(|| None::<String>);
+    let section_said = use_signal(|| None::<String>);
     // While the hero holds a field, Start and Listen keep the cursor in it,
     // and keep what was typed there before they act. Leaving the box would
     // keep it on the press instead, and redraw the hero under the finger,
@@ -308,6 +314,11 @@ pub fn Home(
             on_state.call(typed);
         }
         StationAsk::Zone => on_zone.call(typed),
+        StationAsk::Section => {
+            let mut said = section_said;
+            said.set(section_rejected(&typed));
+            on_section.call(typed);
+        }
     };
     // What was typed and not kept yet, kept as leaving the box keeps it;
     // and what it was, for Start to decide on.
@@ -419,6 +430,18 @@ pub fn Home(
                                 on_commit: move |typed| {
                                     refused.set(false);
                                     keep(StationAsk::Zone, typed);
+                                },
+                                draft,
+                            }
+                        }
+                    } else if hero.asks == Some(StationAsk::Section) {
+                        div { class: "hero-call",
+                            SectionEntry {
+                                value: settings.contest.my_section.clone(),
+                                rejected: section_said(),
+                                on_commit: move |typed| {
+                                    refused.set(false);
+                                    keep(StationAsk::Section, typed);
                                 },
                                 draft,
                             }

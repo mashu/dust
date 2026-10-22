@@ -113,24 +113,11 @@ fn call_or_stand_in(my_call: &str) -> &str {
     }
 }
 
-/// Your name where an example of a QSO sends it, or a stand-in until you
-/// give one.
-fn name_or_stand_in(my_name: &str) -> &str {
-    if my_name.is_empty() {
-        "<your name>"
-    } else {
-        my_name
-    }
-}
-
-/// Your state where an example of a QSO sends it: the one you gave, DX for
-/// a call outside the US and Canada, or a stand-in until then.
-fn state_or_stand_in(sent: &str) -> &str {
-    if sent.is_empty() {
-        "<your state>"
-    } else {
-        sent
-    }
+/// Your name, state or section where an example of a QSO sends it: what
+/// you gave or your call tells (DX for a call outside the US and Canada),
+/// or `stand_in` until then.
+fn or_stand_in<'a>(sent: &'a str, stand_in: &'a str) -> &'a str {
+    if sent.is_empty() { stand_in } else { sent }
 }
 
 /// Your CQ zone where an example of a QSO sends it: the one you gave or
@@ -163,8 +150,7 @@ struct ContestCard {
 }
 
 impl ContestCard {
-    /// The card for the contest `settings` choose. One that has not shipped,
-    /// which only a save edited by hand can name, has no exchange to show.
+    /// The card for the contest `settings` choose.
     fn of(settings: &TrainingSettings) -> Self {
         let contest = &settings.contest;
         let kind = contest.contest_kind;
@@ -172,19 +158,7 @@ impl ContestCard {
         let style = contest.contest_style;
         let callers = pileup_callers(settings);
         let preset = ContestPreset::of(settings);
-        let Some(rules) = kind.rules() else {
-            return Self {
-                kind,
-                style,
-                callers,
-                sends: String::new(),
-                copies: String::new(),
-                side_note: None,
-                simplified: None,
-                qso: Vec::new(),
-                preset,
-            };
-        };
+        let rules = kind.rules();
         let copies: Vec<&str> = rules
             .copied(side)
             .iter()
@@ -203,10 +177,12 @@ impl ContestCard {
                 side,
                 &Fill {
                     my_call: call_or_stand_in(&contest.my_call),
-                    my_name: name_or_stand_in(&contest.my_name),
-                    my_state: state_or_stand_in(contest.state_sent()),
+                    my_name: or_stand_in(&contest.my_name, "<your name>"),
+                    my_state: or_stand_in(contest.state_sent(), "<your state>"),
                     my_zone: &zone,
                     my_power: &contest.my_power,
+                    my_class: &contest.my_class,
+                    my_section: or_stand_in(contest.section_sent(), "<your section>"),
                     ..Fill::default()
                 },
             ),
@@ -486,9 +462,9 @@ pub fn CharsetCard(
     }
 }
 
-/// A contest in place of an alphabet: a pill for each that has shipped,
-/// what you send and copy, and a first QSO of it, line by line, with a few
-/// to hear (Hear a QSO); then where to start from, a preset.
+/// A contest in place of an alphabet: a pill for each contest, what you send
+/// and copy, and a first QSO of it, line by line, with a few to hear (Hear a
+/// QSO); then where to start from, a preset.
 #[component]
 fn ContestBody(
     settings: Signal<TrainingSettings>,
@@ -509,7 +485,7 @@ fn ContestBody(
     rsx! {
         div { class: "eyebrow", "Contest" }
         div { class: "mode-pills",
-            for kind in ContestKind::shipped() {
+            for kind in ContestKind::ALL {
                 Seg {
                     label: kind.label(),
                     id: control_id("contest", kind.label()),
@@ -519,46 +495,42 @@ fn ContestBody(
                 }
             }
         }
-        if contest.qso.is_empty() {
-            p { class: "muted", style: "margin: 0;", "{contest.kind.label()} is not ready yet." }
-        } else {
-            // What you copy keeps to one piece, after the dot where a narrow
-            // line breaks.
-            p { class: "muted", style: "margin: 0;",
-                "You send {contest.sends}\u{a0}· You\u{a0}copy\u{a0}{contest.copies}"
-            }
-            if let Some(side_note) = &contest.side_note {
-                p { id: "side-line", class: "muted", style: "margin: 0;", "{side_note}" }
-            }
-            if let Some(simplified) = contest.simplified {
-                p { class: "muted", style: "margin: 0;", "{simplified}" }
-            }
-            QsoHead { label: eyebrow,
-                if hearing {
-                    button {
-                        id: control_id("btn", "stop hearing"),
-                        class: "btn btn-secondary btn-sm",
-                        r#type: "button",
-                        onclick: move |_| on_stop.call(()),
-                        Icon { name: IconName::Stop }
-                        "Stop"
-                    }
-                } else {
-                    button {
-                        id: control_id("btn", "hear a qso"),
-                        class: "btn btn-secondary btn-sm",
-                        r#type: "button",
-                        onclick: move |_| on_hear.call(()),
-                        Icon { name: IconName::Signal }
-                        "Hear a QSO"
-                    }
+        // What you copy keeps to one piece, after the dot where a narrow
+        // line breaks.
+        p { class: "muted", style: "margin: 0;",
+            "You send {contest.sends}\u{a0}· You\u{a0}copy\u{a0}{contest.copies}"
+        }
+        if let Some(side_note) = &contest.side_note {
+            p { id: "side-line", class: "muted", style: "margin: 0;", "{side_note}" }
+        }
+        if let Some(simplified) = contest.simplified {
+            p { class: "muted", style: "margin: 0;", "{simplified}" }
+        }
+        QsoHead { label: eyebrow,
+            if hearing {
+                button {
+                    id: control_id("btn", "stop hearing"),
+                    class: "btn btn-secondary btn-sm",
+                    r#type: "button",
+                    onclick: move |_| on_stop.call(()),
+                    Icon { name: IconName::Stop }
+                    "Stop"
+                }
+            } else {
+                button {
+                    id: control_id("btn", "hear a qso"),
+                    class: "btn btn-secondary btn-sm",
+                    r#type: "button",
+                    onclick: move |_| on_hear.call(()),
+                    Icon { name: IconName::Signal }
+                    "Hear a QSO"
                 }
             }
-            if let Some(heard) = heard {
-                HeardDialogue { dialogue: heard, hearing }
-            } else {
-                QsoLines { lines: contest.qso.clone() }
-            }
+        }
+        if let Some(heard) = heard {
+            HeardDialogue { dialogue: heard, hearing }
+        } else {
+            QsoLines { lines: contest.qso.clone() }
         }
         PresetPicker { settings, preset: contest.preset }
     }

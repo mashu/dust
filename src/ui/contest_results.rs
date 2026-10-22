@@ -37,7 +37,7 @@ pub fn ContestResults(
     let kind = result.contest_kind().map_or("Contest", ContestKind::label);
     // A contest without a score is told by its pace and its copy.
     let scored = result.contest_kind().is_none_or(ContestKind::scored);
-    let rules = result.contest_kind().and_then(ContestKind::rules);
+    let rules = result.contest_kind().map(ContestKind::rules);
     let run = result.contest_run();
     let groups = &result.groups;
     let log = run
@@ -140,7 +140,15 @@ pub fn ContestResults(
                 }
             }
             if let Some(score) = score {
-                ScoreTable { score, errors }
+                ScoreTable {
+                    score,
+                    errors,
+                    // Field Day's score is its QSO points: nothing
+                    // multiplies them.
+                    multiplied: rules
+                        .and_then(|rules| rules.scoring)
+                        .is_none_or(|scoring| scoring.multiplied()),
+                }
             } else if !scored && !accuracy.is_empty() {
                 FieldTable { parts: accuracy, errors }
             }
@@ -192,9 +200,10 @@ pub fn ContestResults(
     }
 }
 
-/// The contest score, raw and verified, and what the checks found.
+/// The contest score, raw and verified, and what the checks found. Where
+/// nothing `multiplied` the points, the multipliers read `—`.
 #[component]
-fn ScoreTable(score: ContestScore, errors: RunErrors) -> Element {
+fn ScoreTable(score: ContestScore, errors: RunErrors, multiplied: bool) -> Element {
     rsx! {
         div { class: "card",
             CardHead {
@@ -216,7 +225,11 @@ fn ScoreTable(score: ContestScore, errors: RunErrors) -> Element {
                         tr {
                             th { scope: "row", "{name}" }
                             td { "{tally.qso_points}" }
-                            td { "{tally.mults}" }
+                            if multiplied {
+                                td { "{tally.mults}" }
+                            } else {
+                                td { "—" }
+                            }
                             td { "{tally.score}" }
                         }
                     }

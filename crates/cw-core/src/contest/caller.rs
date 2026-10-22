@@ -6,6 +6,7 @@
 //! of a few states; what it sends next follows from the state. Which
 //! of your calls it takes for its own is [`match_call`].
 
+use super::data::fd::{draw_class, draw_section};
 use super::data::names::draw_name;
 use super::data::places::{DX, draw_place};
 use super::data::power::draw_power;
@@ -975,8 +976,8 @@ impl Caller {
         if self.exchange.is_none() {
             // Plain digits until the Caller habits setting comes (phase 4).
             let habits = CallerHabits::Easy;
-            // A field this build has no values for is not sent; only those
-            // of the contests that have shipped are copied.
+            // A field with no value to send, as a zone for a station Dust
+            // cannot place, is not sent.
             let fields = rules
                 .copied(side)
                 .iter()
@@ -1007,7 +1008,11 @@ impl Caller {
                         }
                         // As DX stations send it.
                         Field::Pwr => send_power(draw_power(&mut self.rng), habits, &mut self.rng),
-                        _ => return None,
+                        // As Field Day stations send it.
+                        Field::Cl => draw_class(&mut self.rng).to_string(),
+                        // Where its call puts it, or DX outside the
+                        // sections.
+                        Field::Sec => draw_section(&self.call.text, &mut self.rng).to_string(),
                     };
                     Some((*field, token))
                 })
@@ -1103,7 +1108,7 @@ mod tests {
     use MessagePart::{Again, Cq, Exchange, HisCall, Tu};
 
     fn rules() -> &'static ContestRules {
-        ContestKind::Wpx.rules().expect("WPX has shipped")
+        ContestKind::Wpx.rules()
     }
 
     fn caller(seed: u64) -> Caller {
@@ -1264,9 +1269,7 @@ mod tests {
     /// your TU, and takes no TU for a CQ.
     #[test]
     fn a_simple_qso_caller_sends_an_everyday_qsos_lines() {
-        let rules = ContestKind::SimpleQso
-            .rules()
-            .expect("Simple QSO has shipped");
+        let rules = ContestKind::SimpleQso.rules();
         let mut rng = SplitMix64::new(4);
         let mut generated = generate_call(3, CallSpec::default(), &mut rng);
         generated.text = "K5XYZ".to_string();
@@ -1831,9 +1834,7 @@ mod tests {
         let again = caller.exchange(rules(), Side::Dx, 180_000)[0].1.clone();
         let (first, again): (u32, u32) = (first.parse().unwrap(), again.parse().unwrap());
         assert!(again > first, "{first} then {again}");
-        let simple = ContestKind::SimpleQso
-            .rules()
-            .expect("Simple QSO has shipped");
+        let simple = ContestKind::SimpleQso.rules();
         for seed in 0..50 {
             let mut rng = SplitMix64::new(seed);
             let mut generated = generate_call(3, CallSpec::default(), &mut rng);

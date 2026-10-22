@@ -208,7 +208,7 @@ pub enum StoredLog {
     /// An older version dropped it: the run's mark alone is left.
     Dropped,
     /// It is one this version cannot read: a later layout, or a contest
-    /// that has not shipped here.
+    /// this version does not know.
     Unreadable,
 }
 
@@ -250,13 +250,12 @@ impl SessionResult {
 
 impl ContestLog {
     /// The run, when this build can read its log: the layout is
-    /// [`LAYOUT`], the contest is one that has shipped, the style and every
-    /// field are known, and its QSOs own exactly the session's `groups`.
+    /// [`LAYOUT`], the contest, the style and every field are known, and its QSOs own exactly the session's `groups`.
     /// Otherwise none, and the log stays as it was read.
     pub fn run(&self, groups: usize) -> Option<ContestRun> {
         let run = ContestRun::deserialize(&self.0).ok()?;
         let known = run.v == LAYOUT
-            && ContestKind::from_name(&run.kind).is_some_and(|kind| kind.rules().is_some())
+            && ContestKind::from_name(&run.kind).is_some()
             && RunStyle::from_name(&run.style).is_some()
             && run
                 .fields
@@ -353,9 +352,9 @@ impl ContestRun {
         }
     }
 
-    /// The rules of the run's contest, when this build has them.
+    /// The rules of the run's contest, when this build knows it.
     fn rules(&self) -> Option<&'static ContestRules> {
-        ContestKind::from_name(&self.kind)?.rules()
+        ContestKind::from_name(&self.kind).map(ContestKind::rules)
     }
 
     /// How many of the run's QSOs were logged clean, a dupe copied right
@@ -750,10 +749,8 @@ mod tests {
         let unreadable = [
             changed("v", json!(2)),
             changed("v", json!(0)),
-            // A kind this build has never heard of, and one whose phase has
-            // not shipped here.
+            // A kind this build has never heard of.
             changed("kind", json!("cwt")),
-            changed("kind", json!("fieldDay")),
             changed("style", json!("swarm")),
             changed("fields", json!(["nr", "cwtNumber"])),
             changed("myWpm", json!(null)),

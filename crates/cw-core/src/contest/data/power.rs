@@ -1,25 +1,13 @@
 //! The power DX stations send in the ARRL DX contest's exchange, as they
 //! send it: `100`, `KW`, `K`.
 //!
-//! The shares were counted from contest-log summaries of 3,779 DX stations,
-//! as last edited in March 2025 (§11.5 of the design): counts only, no
-//! calls, rounded to a tenth of a percent. A hundred watts and a kilowatt are most of them; `KW` and `K`
-//! are each kept as stations send them, as are the odd powers in the tail.
+//! The shares are counted (`counted.rs`). A hundred watts and a kilowatt
+//! are most of them; `KW` and `K` are each kept as stations send them, as
+//! are the odd powers in the tail.
 
+use super::counted::POWERS;
 use crate::callsign::pick_weighted;
 use crate::rng::Rng;
-
-/// Each power as it is sent, with its share of DX stations, in percent.
-#[rustfmt::skip]
-const POWERS: &[(&str, f64)] = &[
-    ("100", 34.7), ("KW", 25.0), ("500", 12.8), ("K", 10.9), ("400", 4.6),
-    ("200", 3.0), ("5", 2.4),
-    // The others, 6.6% between them.
-    ("300", 1.2), ("50", 1.2), ("700", 1.0), ("99", 0.4), ("600", 0.4),
-    ("750", 0.4), ("150", 0.3), ("1K", 0.3), ("800", 0.2), ("80", 0.2),
-    ("70", 0.1), ("10", 0.1), ("90", 0.1), ("75", 0.1), ("250", 0.1),
-    ("25", 0.1), ("20", 0.1), ("95", 0.1),
-];
 
 /// The power a DX caller sends, from `rng`.
 pub(in crate::contest) fn draw_power(rng: &mut impl Rng) -> &'static str {

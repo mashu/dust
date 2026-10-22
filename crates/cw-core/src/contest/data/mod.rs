@@ -8,9 +8,16 @@
 //!   ARRL DX contest's sides.
 //! - [`zones`]: the CQ zones stations are in.
 //! - [`power`]: the power DX stations send in the ARRL DX contest.
+//! - [`sections`]: the ARRL and RAC sections Field Day stations send.
+//! - [`fd`]: the class and section a Field Day caller sends.
+//! - [`counted`]: the shares counted from contest-log summaries that the
+//!   others draw from.
 
+pub(crate) mod counted;
+pub(super) mod fd;
 pub(crate) mod names;
 pub(crate) mod places;
 pub(super) mod power;
 pub(super) mod reports;
+pub(crate) mod sections;
 pub(crate) mod zones;

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::CopyTally;
-use crate::callsign::{CallSpec, Countries, GeneratedCall, generate_call};
+use crate::callsign::{CallSpec, GeneratedCall, generate_call};
 use crate::contest::{CallSource, Side};
 use crate::machine::GroupSource;
 use crate::pool::compute_char_pool;
@@ -452,13 +452,7 @@ pub(crate) fn generate_contest_call(
     rng: &mut impl Rng,
 ) -> String {
     let side = Side::of_call(&settings.contest.my_call);
-    let spec = settings
-        .contest
-        .contest_kind
-        .rules()
-        .map_or(CallSpec::contest(Countries::Any), |rules| {
-            rules.callers(side)
-        });
+    let spec = settings.contest.contest_kind.rules().callers(side);
     let call = wanted_call(settings, state, config, rng, spec).text;
     state.count_sent(&call);
     call
@@ -475,6 +469,13 @@ fn wanted_call(
     spec: CallSpec,
 ) -> GeneratedCall {
     let tier = settings.level(LevelAxis::Callsign);
+    // Field Day's mix of North America and DX is settled once per caller,
+    // before the candidates: with a chance each, the most wanted of them
+    // would be DX far more often than Field Day's callers are.
+    let spec = CallSpec {
+        countries: spec.countries.for_one_call(rng),
+        ..spec
+    };
     most_wanted(settings, state, config, rng, CALLSIGN_CANDIDATES, |rng| {
         generate_call(tier, spec, rng)
     })
@@ -631,6 +632,41 @@ mod tests {
                 matches!(country_of(&call.text), Some("K" | "VE")),
                 "{call:?}"
             );
+        }
+    }
+
+    /// Field Day's callers are DX as often as its entries are, however the
+    /// sampler leans: the mix is settled once per caller, so the most wanted
+    /// of the candidates cannot pick the DX one out of six chances, nor a
+    /// learner weak at its rarer characters draw more of it.
+    #[test]
+    fn field_days_dx_share_holds_through_the_sampler() {
+        use crate::callsign::Countries;
+        use crate::contest::ContestKind;
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        settings.contest.contest_kind = ContestKind::FieldDay;
+        let settings = settings.clamp();
+        let spec = CallSpec::contest(Countries::FieldDay);
+        let mut weak = Sampler::new(&[], &settings, 6);
+        for _ in 0..20 {
+            CallSource::learn(
+                &mut weak,
+                Answered {
+                    sent: "JQZXY",
+                    received: "",
+                    copied: &CopyTally::of("JQZXY", ""),
+                    played: None,
+                },
+            );
+        }
+        for mut sampler in [Sampler::new(&[], &settings, 5), weak] {
+            let dx = (0..10_000)
+                .map(|_| sampler.next_call(&settings, spec, &|_| false))
+                .filter(|call| !Countries::NorthAmerica.admits(call.country))
+                .count();
+            // 0.9% of 10,000 is 90.
+            assert!(dx > 55 && dx < 130, "{dx} of 10000 DX");
         }
     }
 

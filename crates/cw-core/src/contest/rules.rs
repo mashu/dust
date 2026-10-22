@@ -99,6 +99,9 @@ pub enum Multiplier {
     /// territories logged, Labrador apart, 63 in all, as a DX station counts
     /// them in the ARRL DX contest.
     WVePlace,
+    /// Nothing multiplies the points: the log is one multiplier, as
+    /// MorseRunner counts Field Day's, so the score is the QSO points.
+    Nothing,
 }
 
 /// What a QSO is worth.
@@ -126,9 +129,10 @@ pub struct Scoring {
 
 /// One contest. In your texts, `{my}` stands for your call, `{myname}` for
 /// your name, `{mystate}` for your state, province or territory, `{myzone}`
-/// for your CQ zone, `{mypwr}` for your power, `{rst}` for your report,
-/// `{nr}` for your serial, and in your TU `{hisname}` for the name you
-/// copied of the station you work. In a caller's, `{my}` is your call,
+/// for your CQ zone, `{mypwr}` for your power, `{myclass}` for your Field
+/// Day class, `{mysec}` for your section, `{rst}` for your report, `{nr}`
+/// for your serial, and in your TU `{hisname}` for the name you copied of
+/// the station you work. In a caller's, `{my}` is your call,
 /// `{his}` its own, `{rst}` its report, and each field you copy its name in
 /// braces: `{nr}`, `{name}`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -207,6 +211,10 @@ pub struct Fill<'a> {
     /// Your power, where the exchange sends it: watts, or `K`, `KW` or `1K`
     /// for a kilowatt.
     pub my_power: &'a str,
+    /// Your Field Day class and your ARRL or RAC section, or DX, where the
+    /// exchange sends them.
+    pub my_class: &'a str,
+    pub my_section: &'a str,
     /// Your serial for the QSO; none in a contest without one.
     pub serial: u32,
     /// The name you copied of the station you work, as the Exchange field
@@ -379,6 +387,42 @@ pub(super) const RULES: &[ContestRules] = &[
         }),
         simplified: Some("Simplified: one band, so a station and a multiplier each count once."),
     },
+    // ARRL Field Day: `CQ FD K1ABC` · `W7XYZ` · `W7XYZ 1D EMA` (his call,
+    // your class, your section) · `R 3A OR` · `TU`. No report and no
+    // serial. Callers are North American, with a few DX among them, who
+    // send DX for their section. Two points a CW QSO; the power multiplier
+    // and the bonus points score the entry, not the copying, so Dust
+    // leaves them out and the score is the QSO points. One band, so a call
+    // is a dupe after one QSO.
+    ContestRules {
+        kind: ContestKind::FieldDay,
+        cq: "CQ FD {my}",
+        tu: "TU",
+        query: "NR?",
+        exchange: PerSide::both("{myclass} {mysec}"),
+        report: "",
+        rst: false,
+        serial: false,
+        serial_cut: false,
+        copied: PerSide::both(&[Field::Cl, Field::Sec]),
+        callers: PerSide::both(CallSpec::contest(Countries::FieldDay)),
+        answer: "{his}",
+        their_exchange: PerSide::both("{cl} {sec}"),
+        their_lead: ["R", "TU"],
+        their_query: ["NR?", "AGN"],
+        signoff: None,
+        tu_calls: true,
+        serials: None,
+        scoring: Some(Scoring {
+            points: Points::Each(2),
+            multiplier: PerSide::both(Multiplier::Nothing),
+        }),
+        labrador: false,
+        works: None,
+        simplified: Some(
+            "Simplified: one band, so a station counts once; and no power multiplier or bonus points, which score the entry, not the copying.",
+        ),
+    },
     // An everyday QSO, a first real one for a learner: `CQ CQ DE DL1ABC
     // DL1ABC K` · `DL1ABC DE K5XYZ K5XYZ K` · `K5XYZ DE DL1ABC UR 599 599
     // NAME MAT MAT BK` · `R TNX UR 579 579 NAME BOB BOB BK` · `TU BOB 73 EE`
@@ -409,6 +453,14 @@ pub(super) const RULES: &[ContestRules] = &[
         simplified: None,
     },
 ];
+
+impl Scoring {
+    /// Whether anything multiplies the points, on either side: all but
+    /// Field Day's do, whose score is its QSO points.
+    pub fn multiplied(&self) -> bool {
+        self.multiplier.wve != Multiplier::Nothing || self.multiplier.dx != Multiplier::Nothing
+    }
+}
 
 impl ContestRules {
     /// What you copy from each caller, on your side.
@@ -462,6 +514,17 @@ impl ContestRules {
     /// Whether your exchange on `side` sends your power.
     pub fn sends_power(&self, side: Side) -> bool {
         self.exchange.on(side).contains("{mypwr}")
+    }
+
+    /// Whether your exchange on `side` sends your Field Day class.
+    pub fn sends_class(&self, side: Side) -> bool {
+        self.exchange.on(side).contains("{myclass}")
+    }
+
+    /// Whether your exchange on `side` sends your ARRL or RAC section, so a
+    /// run needs one: DX, outside the sections.
+    pub fn sends_section(&self, side: Side) -> bool {
+        self.exchange.on(side).contains("{mysec}")
     }
 
     /// `token` as this contest reads `field` in it ([`Field::canonical`]):
@@ -531,6 +594,8 @@ impl ContestRules {
             ("{mystate}", "state"),
             ("{myzone}", "zone"),
             ("{mypwr}", "power"),
+            ("{myclass}", "class"),
+            ("{mysec}", "section"),
         ]
         .into_iter()
         .filter_map(|(held, part)| Some((exchange.find(held)?, part)))
@@ -593,8 +658,10 @@ impl ContestRules {
     pub fn example_qso(&self, side: Side, me: &Fill<'_>) -> Vec<(Sender, String)> {
         let caller = match self.callers(side).countries {
             Countries::NotWVe => "G4XYZ",
-            // In the seventh call district, where the example's state is.
+            // In the seventh call district, where the example's state or
+            // section is.
             _ if self.copied(side).contains(&Field::St) => "W7XYZ",
+            _ if self.copied(side).contains(&Field::Sec) => "W7XYZ",
             // In Japan, whose zone the example's is.
             _ if self.copied(side).contains(&Field::Zn) => "JA1XYZ",
             _ => "K5XYZ",
@@ -632,9 +699,9 @@ impl ContestRules {
     }
 
     /// `template`, one of your texts, filled in with `me`: your call, name,
-    /// state, zone, power, report and serial, and the name of the station
-    /// you work. A name not there leaves no gap. Your zone and power go out
-    /// cut, as MorseRunner sends yours.
+    /// state, zone, power, class, section, report and serial, and the name
+    /// of the station you work. A name not there leaves no gap. Your zone
+    /// and power go out cut, as MorseRunner sends yours.
     fn fill(&self, template: &str, me: &Fill<'_>) -> String {
         let serial = if self.serial_cut {
             cut_serial(me.serial)
@@ -648,6 +715,8 @@ impl ContestRules {
                 .replace("{mystate}", me.my_state)
                 .replace("{myzone}", &cut_zone_text(me.my_zone))
                 .replace("{mypwr}", &cut_power(me.my_power))
+                .replace("{myclass}", me.my_class)
+                .replace("{mysec}", me.my_section)
                 .replace("{hisname}", me.his_name)
                 .replace("{rst}", self.report)
                 .replace("{nr}", &serial),
@@ -671,25 +740,27 @@ mod tests {
     use super::*;
 
     fn wpx() -> &'static ContestRules {
-        ContestKind::Wpx.rules().expect("WPX has shipped")
+        ContestKind::Wpx.rules()
     }
 
     fn simple_qso() -> &'static ContestRules {
-        ContestKind::SimpleQso
-            .rules()
-            .expect("Simple QSO has shipped")
+        ContestKind::SimpleQso.rules()
     }
 
     fn sprint() -> &'static ContestRules {
-        ContestKind::Sprint.rules().expect("Sprint has shipped")
+        ContestKind::Sprint.rules()
     }
 
     fn cqww() -> &'static ContestRules {
-        ContestKind::Cqww.rules().expect("CQ WW has shipped")
+        ContestKind::Cqww.rules()
     }
 
     fn arrl_dx() -> &'static ContestRules {
-        ContestKind::ArrlDx.rules().expect("ARRL DX has shipped")
+        ContestKind::ArrlDx.rules()
+    }
+
+    fn field_day() -> &'static ContestRules {
+        ContestKind::FieldDay.rules()
     }
 
     /// You, as DL1ABC called MAT in zone 14 running 100 W, sending
@@ -701,6 +772,8 @@ mod tests {
             my_state: "DX",
             my_zone: "14",
             my_power: "100",
+            my_class: "1D",
+            my_section: "DX",
             serial,
             his_name,
         }
@@ -715,6 +788,8 @@ mod tests {
             my_state: "MA",
             my_zone: "5",
             my_power: "KW",
+            my_class: "1D",
+            my_section: "EMA",
             serial,
             his_name: "BOB",
         }
@@ -938,6 +1013,76 @@ mod tests {
         );
     }
 
+    /// Field Day on the air, as the design has it: your class and section
+    /// after their call, with no report and no serial; theirs led by R; a
+    /// TU that brings the next caller; two points a QSO and nothing to
+    /// multiply them.
+    #[test]
+    fn field_day_sends_what_the_contest_sends() {
+        let rules = field_day();
+        let k1 = k1abc(0);
+        assert_eq!(rules.cq_text(&k1), "CQ FD K1ABC");
+        assert_eq!(rules.exchange_text(Side::WVe, &k1), "1D EMA");
+        assert_eq!(rules.exchange_text(Side::Dx, &me(0, "")), "1D DX");
+        assert_eq!(rules.tu_text(&k1), "TU");
+        assert_eq!(rules.sends(Side::WVe), "class + section");
+        assert!(rules.sends_class(Side::Dx) && rules.sends_section(Side::WVe));
+        assert!(!rules.sends_state(Side::WVe) && !rules.sends_name());
+        assert!(!rules.sends_zone(Side::WVe) && !rules.sends_power(Side::Dx));
+        assert!(!rules.rst && !rules.serial && !rules.prefills_report(Side::WVe));
+        assert_eq!(rules.copied(Side::Dx), [Field::Cl, Field::Sec]);
+        assert_eq!(
+            rules.callers(Side::WVe),
+            CallSpec::contest(Countries::FieldDay)
+        );
+        assert_eq!(rules.answer_text("K1ABC", "W7XYZ", false), "W7XYZ");
+        let theirs = [
+            (Field::Cl, "3A".to_string()),
+            (Field::Sec, "OR".to_string()),
+        ];
+        let sent = rules.their_exchange_text(Side::WVe, "K1ABC", "W7XYZ", &theirs);
+        assert_eq!(sent, "3A OR");
+        assert_eq!(rules.their_first_exchange(0, &sent), "R 3A OR");
+        assert_eq!(rules.their_first_exchange(1, &sent), "TU 3A OR");
+        assert!(rules.tu_calls && rules.signoff.is_none() && rules.serials.is_none());
+        assert!(!rules.sided() && rules.side_note(Side::Dx, true).is_none());
+        assert_eq!(
+            rules.scoring,
+            Some(Scoring {
+                points: Points::Each(2),
+                multiplier: PerSide::both(Multiplier::Nothing)
+            })
+        );
+        assert!(rules.scoring.is_some_and(|scoring| !scoring.multiplied()));
+        assert!(
+            rules
+                .simplified
+                .is_some_and(|line| line.contains("one band") && line.contains("power multiplier"))
+        );
+        let you = Sender::You;
+        let they = Sender::Caller(0);
+        assert_eq!(
+            rules.example_qso(Side::WVe, &k1),
+            [
+                (you, "CQ FD K1ABC".to_string()),
+                (they, "W7XYZ".to_string()),
+                (you, "W7XYZ 1D EMA".to_string()),
+                (they, "R 3A OR".to_string()),
+                (you, "TU".to_string()),
+            ]
+        );
+        for rules in RULES
+            .iter()
+            .filter(|rules| rules.kind != ContestKind::FieldDay)
+        {
+            assert!(
+                rules.scoring.is_none_or(|scoring| scoring.multiplied()),
+                "{:?}",
+                rules.kind
+            );
+        }
+    }
+
     /// Labrador is LB in ARRL DX, a place of its own, and NL in the Sprint;
     /// every other value reads alike in every contest.
     #[test]
@@ -953,6 +1098,8 @@ mod tests {
             assert_eq!(rules.canonical(Field::St, "PQ").as_deref(), Some("QC"));
             assert!(rules.same(Field::Pwr, "K", "1000"));
             assert!(rules.same(Field::Zn, "A4", "14"));
+            assert!(rules.same(Field::Sec, "YT", "TER"));
+            assert!(rules.same(Field::Cl, "03A", "3A"));
         }
     }
 

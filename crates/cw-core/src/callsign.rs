@@ -37,6 +37,7 @@
 
 mod prefixes;
 
+use crate::contest::data::counted::FIELD_DAY_DX;
 use crate::rng::{Rng, SplitMix64};
 use prefixes::{CONTINENT_PREFIXES, COUNTRIES, PREFIXES, ZONE_PREFIXES};
 
@@ -72,11 +73,16 @@ pub enum Countries {
     /// Everyone else: who W/VE works in the ARRL DX contest.
     NotWVe,
     /// The USA with Alaska, Hawaii and its Caribbean islands, and Canada:
-    /// who calls in Field Day, whose sections cover the islands.
+    /// the stations an ARRL or RAC section covers.
     NorthAmerica,
     /// The USA with Alaska and Hawaii, and Canada: the stations whose state,
     /// province or territory the NA Sprint's exchange sends.
     UsAndCanada,
+    /// Who calls in Field Day: [`Self::NorthAmerica`], and now and then a
+    /// station anywhere else, as often as Field Day's entries send DX.
+    FieldDay,
+    /// Everyone outside [`Self::NorthAmerica`]: Field Day's DX.
+    OutsideNorthAmerica,
 }
 
 impl Countries {
@@ -85,12 +91,25 @@ impl Countries {
     pub fn admits(self, country: &str) -> bool {
         let w_ve = matches!(country, "K" | "VE");
         let states = w_ve || matches!(country, "KL" | "KH6");
+        let sections = states || matches!(country, "KP4" | "KP2");
         match self {
-            Self::Any => true,
+            Self::Any | Self::FieldDay => true,
             Self::WVe => w_ve,
             Self::NotWVe => !w_ve,
-            Self::NorthAmerica => states || matches!(country, "KP4" | "KP2"),
+            Self::NorthAmerica => sections,
             Self::UsAndCanada => states,
+            Self::OutsideNorthAmerica => !sections,
+        }
+    }
+
+    /// The countries one caller is drawn from: a Field Day caller is in
+    /// North America but as often as Field Day's entries send DX, when it is
+    /// anywhere else; every other choice is itself, and draws nothing.
+    pub(crate) fn for_one_call(self, rng: &mut impl Rng) -> Self {
+        match self {
+            Self::FieldDay if rng.f64() * 100.0 < FIELD_DAY_DX => Self::OutsideNorthAmerica,
+            Self::FieldDay => Self::NorthAmerica,
+            countries => countries,
         }
     }
 }
@@ -495,7 +514,8 @@ const AREA_DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9
 /// gives one prefix and digit to two countries (`R9`, `VP2`).
 pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> GeneratedCall {
     let tier = tier_at(tier);
-    let prefix = pick_prefix(tier, spec.countries, rng);
+    let countries = spec.countries.for_one_call(rng);
+    let prefix = pick_prefix(tier, countries, rng);
     let digit = separator(prefix, rng);
     let mut call = GeneratedCall {
         text: format!("{}{digit}", prefix.prefix),
@@ -515,7 +535,7 @@ pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> Generated
     // One of the two at most: abroad, or portable at home.
     if tier.abroad
         && rng.f64() < abroad_share
-        && let Some((host, country)) = pick_host(prefix.country, spec.countries, rng)
+        && let Some((host, country)) = pick_host(prefix.country, countries, rng)
     {
         call.text = format!("{host}/{}", call.text);
         call.host = Some(host);
@@ -1431,6 +1451,8 @@ mod tests {
             Countries::NotWVe,
             Countries::NorthAmerica,
             Countries::UsAndCanada,
+            Countries::FieldDay,
+            Countries::OutsideNorthAmerica,
         ];
         for countries in all {
             for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
@@ -1467,6 +1489,19 @@ mod tests {
         assert!(na.iter().any(|call| call.country == "KL"));
         assert!(na.iter().any(|call| call.country == "KH6"));
         assert!(na.iter().any(|call| call.country == "VE"));
+        // Field Day's callers are North American but for its DX, about one
+        // in a hundred, as its entries have them.
+        let field_day = generated(3, CallSpec::contest(Countries::FieldDay), 20_000);
+        let dx = field_day
+            .iter()
+            .filter(|call| !Countries::NorthAmerica.admits(call.country))
+            .count();
+        assert!(dx > 100 && dx < 300, "{dx} of 20000 DX");
+        for country in ["KP4", "KP2", "KL", "KH6", "K", "VE"] {
+            assert!(!Countries::OutsideNorthAmerica.admits(country), "{country}");
+        }
+        assert!(Countries::OutsideNorthAmerica.admits("XE"));
+        assert!(Countries::FieldDay.admits("DL") && Countries::FieldDay.admits("K"));
     }
 
     /// KG4 with two letters is Guantanamo Bay's, so no US call is drawn

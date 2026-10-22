@@ -646,7 +646,7 @@ fn settings_renders_every_card() {
 }
 
 /// In Contest mode the Character set card shows the contest in place of an
-/// alphabet: a pill for each that has shipped, what you send and copy, a
+/// alphabet: a pill for each contest, what you send and copy, a
 /// QSO with your call in it, and the tier its callers' calls come from.
 /// Your station follows, and no alphabet, group, preset or level control
 /// is drawn.
@@ -877,6 +877,8 @@ struct Station {
     state: &'static str,
     zone: u32,
     power: &'static str,
+    class: &'static str,
+    section: &'static str,
 }
 
 impl Default for Station {
@@ -887,6 +889,8 @@ impl Default for Station {
             state: "",
             zone: 0,
             power: "100",
+            class: "1D",
+            section: "",
         }
     }
 }
@@ -911,6 +915,8 @@ fn station_settings(kind: cw_core::ContestKind, station: Station) -> String {
             settings.contest.my_state = station.state.to_string();
             settings.contest.my_zone = station.zone;
             settings.contest.my_power = station.power.to_string();
+            settings.contest.my_class = station.class.to_string();
+            settings.contest.my_section = station.section.to_string();
             settings
         });
         rsx! {
@@ -1035,6 +1041,7 @@ fn arrl_dx_says_your_side_and_asks_for_what_it_sends() {
         "contest-arrl-dx",
         "contest-cq-wpx",
         "contest-cq-ww",
+        "contest-field-day",
         "contest-simple-qso",
     ]
     .iter()
@@ -1069,6 +1076,194 @@ fn arrl_dx_says_your_side_and_asks_for_what_it_sends() {
         },
     );
     for shown in ["Reads as Labrador", "Signing VO2AB · LB", ">G4XYZ 5NN LB<"] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+}
+
+/// Field Day has its pill, the sixth, and its dialogue from its row: you
+/// send their call, your class and your section, they send theirs led by
+/// R. Your station asks for your class and section, each with a line
+/// saying how it goes out; a call that tells its section sends it.
+#[test]
+fn field_day_shows_its_dialogue_your_class_and_section() {
+    let html = station_settings(
+        cw_core::ContestKind::FieldDay,
+        Station {
+            section: "EMA",
+            ..called("K1ABC")
+        },
+    );
+    for shown in [
+        "Contest · Field Day",
+        r#"id="contest-field-day" class="pill active""#,
+        "You send class + section\u{a0}· You\u{a0}copy\u{a0}CL\u{a0}SEC",
+        "Simplified: one band, so a station counts once; and no power multiplier or bonus points, which score the entry, not the copying.",
+        ">CQ FD K1ABC<",
+        ">W7XYZ<",
+        ">W7XYZ 1D EMA<",
+        ">R 3A OR<",
+        r#"for="field-your-class""#,
+        "Sends 1D: 1 transmitter, a home station on commercial power",
+        r#"for="field-your-section""#,
+        "Reads as Eastern Massachusetts",
+        "Signing K1ABC · 1D · EMA",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in [
+        "field-your-name",
+        "field-your-state",
+        "field-your-power",
+        "field-your-cq-zone",
+        "side-line",
+    ] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // Six contests, a pill each.
+    assert_eq!(html.matches(r#"id="contest-"#).count(), 6, "{html}");
+    // A W/VE call with no section given is asked for one.
+    let html = station_settings(
+        cw_core::ContestKind::FieldDay,
+        Station {
+            class: "3A",
+            ..called("K1ABC")
+        },
+    );
+    for shown in [
+        "Add your section to start a Field\u{a0}Day",
+        ">W7XYZ 3A &#60;your section&#62;<",
+        "Sends 3A: 3 transmitters, a club or group in the field",
+        "Signing K1ABC · 3A",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // Hawaii's call tells its section: PAC.
+    let html = station_settings(cw_core::ContestKind::FieldDay, called("KH6XYZ"));
+    for shown in [
+        "Sends PAC from your call: Pacific",
+        ">W7XYZ 1D PAC<",
+        "Signing KH6XYZ · 1D · PAC",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // Yukon's section goes out as the Territories'.
+    let html = station_settings(
+        cw_core::ContestKind::FieldDay,
+        Station {
+            section: "YT",
+            ..called("VY1AB")
+        },
+    );
+    for shown in [
+        "Sends TER: ARRL contests count Yukon in the Territories",
+        ">W7XYZ 1D TER<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+}
+
+/// Home in Contest mode for Field Day as `my_call`, in the section
+/// `my_section`, and no history.
+fn field_day_home(my_call: &'static str, my_section: &'static str) -> String {
+    #[component]
+    fn FieldDayHome(my_call: &'static str, my_section: &'static str) -> Element {
+        let mut settings = crate::testing::contest_settings();
+        settings.contest.contest_kind = cw_core::ContestKind::FieldDay;
+        settings.contest.my_call = my_call.to_string();
+        settings.contest.my_section = my_section.to_string();
+        rsx! {
+            Home {
+                settings,
+                last_accuracy: None,
+                session_count: 0,
+                pool: String::new(),
+                sessions: Vec::new(),
+                today: "2026-10-22".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    }
+    render_props(
+        FieldDayHome,
+        FieldDayHomeProps {
+            my_call,
+            my_section,
+        },
+    )
+}
+
+/// With a W/VE call, Field Day's hero asks for your section where the
+/// fields will show, as it asks for a state, and says what a section is;
+/// with it, or with a call that tells it, it shows what a run copies and
+/// sends.
+#[test]
+fn home_asks_for_your_section_before_field_day() {
+    let html = field_day_home("K1ABC", "");
+    for shown in [
+        "Field Day",
+        r#"id="field-your-section""#,
+        "Your section",
+        "e.g. EMA, ONS or DX",
+        "Your ARRL or RAC section, as EMA for Eastern Massachusetts; DX outside them",
+        "Add your section, press Start contest; Enter sends what the QSO needs next.",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in ["field-your-callsign", "field-your-class", "field-chip"] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    for (call, section) in [("K1ABC", "EMA"), ("KL7AB", ""), ("DL1ABC", "")] {
+        let html = field_day_home(call, section);
+        for shown in [
+            r#"class="pool-chip field-chip">CL<"#,
+            r#"class="pool-chip field-chip">SEC<"#,
+            &format!("You send class + section, as {call}"),
+            "Press Start contest; Enter sends what the QSO needs next.",
+        ] {
+            assert!(html.contains(shown), "{call}: no {shown:?} in {html}");
+        }
+        assert!(!html.contains("field-your-section"), "{call}: {html}");
+    }
+}
+
+/// A Field Day run's results: two points a QSO and nothing to multiply
+/// them, so the multipliers read a dash and the score is the points; raw
+/// as logged, verified as sent, with what the checks found.
+#[test]
+fn a_field_day_run_has_results_with_its_points() {
+    let html = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_field_day_run(
+                    "2026-10-22",
+                    &[
+                        [("W7XYZ", "W7XYZ"), ("3A", "3A"), ("OR", "OR")],
+                        [("VE3ABC", "VE3ABC"), ("1D", "1D"), ("ONS", "ONS")],
+                        [("KH6AB", "KH6AB"), ("2A", "2A"), ("PAC", "PAC")],
+                        [("W1ABC", "W1ABC"), ("1E", "1E"), ("EMA", "WMA")],
+                    ],
+                ),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    for shown in [
+        "Run complete",
+        "Field Day · 10:00",
+        "4 QSOs, 24 an hour. One SEC was wrong.",
+        ">3/4<",
+        "Contest score",
+        ">Mults<",
+        r#"<th scope="row">Raw</th><td>8</td><td>—</td><td>8</td>"#,
+        r#"<th scope="row">Verified</th><td>6</td><td>—</td><td>6</td>"#,
+        "0\u{a0}busted\u{a0}calls\u{a0}· 0\u{a0}wrong\u{a0}CL\u{a0}· 1\u{a0}wrong\u{a0}SEC\u{a0}· 0\u{a0}NIL\u{a0}· 0\u{a0}dupes",
+        "WMA→EMA",
+        "wrong SEC",
+    ] {
         assert!(html.contains(shown), "no {shown:?} in {html}");
     }
 }

@@ -116,7 +116,7 @@ mod tests {
         sent: Option<&QsoText>,
         logged_clean: impl Fn(&str) -> bool,
     ) -> QsoCheck {
-        let rules = ContestKind::Wpx.rules().expect("WPX has shipped");
+        let rules = ContestKind::Wpx.rules();
         super::check_qso(rules, logged, sent, logged_clean)
     }
 
@@ -224,8 +224,8 @@ mod tests {
             call: "VO2AB".into(),
             fields: vec![(Field::St, st.to_string())],
         };
-        let sprint = ContestKind::Sprint.rules().expect("shipped");
-        let arrl_dx = ContestKind::ArrlDx.rules().expect("shipped");
+        let sprint = ContestKind::Sprint.rules();
+        let arrl_dx = ContestKind::ArrlDx.rules();
         let check = |rules, logged, sent| {
             super::check_qso(rules, &qso(logged), Some(&qso(sent)), nothing_logged)
         };

@@ -119,6 +119,8 @@ impl TrainingSettings {
         k.my_state = super::contest::clean_state(&k.my_state);
         k.my_zone = k.my_zone.min(super::contest::MY_ZONE_MAX);
         k.my_power = super::contest::clean_power(&k.my_power);
+        k.my_class = super::contest::clean_class(&k.my_class);
+        k.my_section = super::contest::clean_section(&k.my_section);
         self
     }
 

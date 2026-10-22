@@ -250,7 +250,7 @@ pub fn start_qsos(ctx: AppCtx) {
             qsos: HEAR_QSOS,
             lines: Vec::new(),
         }));
-        let signoff = kind.rules().and_then(|rules| rules.signoff);
+        let signoff = kind.rules().signoff;
         let sends = sends_of(&heard.turns, signoff);
         // Played as a run plays: each caller's fading is in its tones, so
         // the send itself has none.

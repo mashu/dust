@@ -104,6 +104,8 @@ impl TrainingSettings {
                 self.contest.my_state = d.contest.my_state;
                 self.contest.my_zone = d.contest.my_zone;
                 self.contest.my_power = d.contest.my_power;
+                self.contest.my_class = d.contest.my_class;
+                self.contest.my_section = d.contest.my_section;
             }
         }
         *self = std::mem::take(self).clamp();

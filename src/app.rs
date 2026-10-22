@@ -29,7 +29,7 @@ pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
 pub(crate) const SETTINGS_SAVE_DELAY_MS: u32 = 250;
 
 /// The type faces, from Google Fonts. Every build links the same sheet.
-pub(crate) const FONT_CSS_URL: &str = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional";
+pub(crate) const FONT_CSS_URL: &str = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional";
 
 // The web stylesheet, written into the page's `<head>` by `dx bundle`.
 //
@@ -340,6 +340,32 @@ fn toggle_fullscreen() {
         }
         if let Some(element) = document.document_element() {
             let _ = element.request_fullscreen();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FONT_CSS_URL;
+
+    /// Each face the font sheet asks for gives a value for every axis its
+    /// family names (`opsz,wght@9..144,600`): Google Fonts refuses the whole
+    /// sheet for one face that leaves an axis out, and no face loads.
+    #[test]
+    fn every_face_of_the_font_sheet_names_each_axis() {
+        let (_, query) = FONT_CSS_URL.split_once('?').expect("a query");
+        let families: Vec<&str> = query
+            .split('&')
+            .filter_map(|part| part.strip_prefix("family="))
+            .collect();
+        assert_eq!(families.len(), 3, "{query}");
+        for family in families {
+            let (_, axes) = family.split_once(':').expect("its axes");
+            let (names, faces) = axes.split_once('@').expect("its faces");
+            let axes = names.split(',').count();
+            for face in faces.split(';') {
+                assert_eq!(face.split(',').count(), axes, "{family}: {face}");
+            }
         }
     }
 }
@@ -2490,6 +2516,56 @@ mod ui_tests {
             ui.advance(10_000).await;
             let first = &recorder.starts()[0].transcript;
             assert!(first.text.starts_with("CQ C31AB TEST"), "{}", first.text);
+        });
+    }
+
+    /// Field Day from a call that does not tell its section: Home asks for
+    /// it in a field of its own and says what one is, Start takes the cursor
+    /// there, a section written out is no code and is said so, and a section
+    /// typed and kept by the press of Start starts the run, sent after your
+    /// class.
+    #[test]
+    fn home_asks_for_your_section_before_field_day_from_a_call_that_does_not_tell_it() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::FieldDay;
+            settings.contest.my_call = "K1ABC".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            assert!(ui.shows("field-your-section"));
+            assert!(ui.has("Add your section, press Start contest"));
+            assert!(ui.has("Your ARRL or RAC section, as EMA for Eastern Massachusetts"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your section to start a Field\u{a0}Day"));
+            assert_eq!(ui.take_focused(), ["field-your-section"]);
+            ui.commit("field-your-section", "Mass");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_section, "");
+            assert!(ui.has("MASS is not a section"), "{}", ui.html());
+            ui.type_into("field-your-section", "ema");
+            assert!(
+                !ui.mouse_down("btn-start-training"),
+                "Start took the cursor"
+            );
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            assert_eq!(ui.stored_settings().await.contest.my_section, "EMA");
+            ui.advance(10_000).await;
+            let first = recorder.starts()[0].transcript.clone();
+            assert!(first.text.starts_with("CQ FD K1ABC"), "{}", first.text);
+            let his = first.others[0].text.clone();
+            ui.type_into("field-call", &his);
+            ui.press_enter("field-call");
+            ui.advance(300).await;
+            let yours = format!("{his} 1D EMA");
+            assert!(
+                recorder
+                    .starts()
+                    .iter()
+                    .any(|start| start.transcript.text == yours),
+                "no {yours:?}"
+            );
         });
     }
 

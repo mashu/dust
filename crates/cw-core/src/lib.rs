@@ -60,7 +60,7 @@ pub use contest::{
     SerialModel, Side, StoredLog, Tally, Turn, WPX_SERIALS, check_qso, contest_score, cut_power,
     cut_serial, cut_zone, esm, filter_capacity, hear_qsos, home_continent, home_country,
     keyed_token, loggable, message_text, normalize_call, parse_exchange, place_name, plan_turn,
-    rate_at, read_number, send_power, send_report, send_serial, send_zone,
+    rate_at, read_number, section_name, send_power, send_report, send_serial, send_zone,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
@@ -94,8 +94,8 @@ pub use settings::{
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow,
     QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
     SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
-    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, power_reading,
-    state_code,
+    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, class_reading,
+    power_reading, section_code, state_code,
 };
 pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};

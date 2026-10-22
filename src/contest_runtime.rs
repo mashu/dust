@@ -234,10 +234,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
         ctx.toasts.show(missing);
         return;
     }
-    // A contest with nothing missing has its rules.
-    let Some(rules) = settings.contest.contest_kind.rules() else {
-        return;
-    };
+    let rules = settings.contest.contest_kind.rules();
     let side = settings.contest.side();
     let AppCtx {
         mut screen,

@@ -327,8 +327,7 @@ fn history_sub(row: &SessionHistoryRow) -> String {
 
 /// Whether a row opens its run's results: a contest run whose log reads.
 fn opens(row: &SessionHistoryRow) -> bool {
-    matches!(row.log, Some(StoredLog::Read(_)))
-        && row.contest.is_some_and(|kind| kind.rules().is_some())
+    matches!(row.log, Some(StoredLog::Read(_))) && row.contest.is_some()
 }
 
 /// The script that brings the results of a run opened from History into

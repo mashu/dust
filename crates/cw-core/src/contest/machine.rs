@@ -35,7 +35,7 @@ use super::exchange::Field;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
 use super::record::{ContestRun, LAYOUT, LOST, NIL, QsoRecord};
-use super::rules::{ContestRules, Fill, RULES, Side};
+use super::rules::{ContestRules, Fill, Side};
 use super::score::rate_at;
 use super::turn::{Fade, Segment, Sender, Turn, char_spans, sending_sec, sounding_at, your_voice};
 use super::{CallSource, MS_PER_MINUTE, RunStyle};
@@ -815,6 +815,10 @@ pub struct ContestMachine<S> {
     my_zone: u32,
     /// Your power, for a contest whose exchange sends it.
     my_power: String,
+    /// Your Field Day class and your section, or DX, for a contest whose
+    /// exchange sends them.
+    my_class: String,
+    my_section: String,
     /// One caller at a time, or a pile-up.
     style: RunStyle,
     /// The band's fading, which each caller follows from a point of its
@@ -870,14 +874,14 @@ impl<S: CallSource> ContestMachine<S> {
         settings: TrainingSettings,
         source: S,
     ) -> (Self, Vec<ContestEffect>) {
-        // A contest whose phase has not shipped runs as the first that has;
-        // no screen starts one.
-        let rules = settings.contest.contest_kind.rules().unwrap_or(&RULES[0]);
+        let rules = settings.contest.contest_kind.rules();
         let my_call = settings.contest.my_call.clone();
         let my_name = settings.contest.my_name.clone();
         let my_state = settings.contest.state_sent().to_string();
         let my_zone = settings.contest.zone().unwrap_or(0);
         let my_power = settings.contest.my_power.clone();
+        let my_class = settings.contest.my_class.clone();
+        let my_section = settings.contest.section_sent().to_string();
         let countdown = settings.playback.countdown_sec;
         let pileup = settings.contest.contest_style == RunStyle::Pileup;
         let rng = SplitMix64::new(seed);
@@ -893,6 +897,8 @@ impl<S: CallSource> ContestMachine<S> {
             my_state,
             my_zone,
             my_power,
+            my_class,
+            my_section,
             source,
             draws: rng.fork(RUN_STREAM),
             rng,
@@ -1630,6 +1636,8 @@ impl<S: CallSource> ContestMachine<S> {
             my_state: &self.my_state,
             my_zone: &self.my_zone.to_string(),
             my_power: &self.my_power,
+            my_class: &self.my_class,
+            my_section: &self.my_section,
             serial,
             his_name: &his_name,
         };
@@ -3633,6 +3641,7 @@ mod tests {
     use crate::contest::QsoError;
     use crate::contest::bot::script::{ScriptCalls, run_settings};
     use crate::contest::bot::{Copied, Runtime, copy_of};
+    use crate::contest::rules::RULES;
     use crate::contest::turn::sending_sec;
 
     /// A run worked by hand, its callers sending `calls` in turn.

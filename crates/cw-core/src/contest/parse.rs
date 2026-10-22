@@ -278,7 +278,7 @@ mod tests {
     use crate::rng::{Rng, SplitMix64};
 
     fn wpx(text: &str) -> Reading {
-        let rules = ContestKind::Wpx.rules().expect("WPX has shipped");
+        let rules = ContestKind::Wpx.rules();
         parse_exchange(rules, Side::Dx, text)
     }
 
@@ -302,9 +302,7 @@ mod tests {
     }
 
     fn simple_qso(text: &str) -> Reading {
-        let rules = ContestKind::SimpleQso
-            .rules()
-            .expect("Simple QSO has shipped");
+        let rules = ContestKind::SimpleQso.rules();
         parse_exchange(rules, Side::Dx, text)
     }
 
@@ -345,7 +343,7 @@ mod tests {
     }
 
     fn sprint(text: &str) -> Reading {
-        let rules = ContestKind::Sprint.rules().expect("Sprint has shipped");
+        let rules = ContestKind::Sprint.rules();
         parse_exchange(rules, Side::WVe, text)
     }
 
@@ -408,7 +406,7 @@ mod tests {
     }
 
     fn cqww(text: &str) -> Reading {
-        let rules = ContestKind::Cqww.rules().expect("CQ WW has shipped");
+        let rules = ContestKind::Cqww.rules();
         parse_exchange(rules, Side::Dx, text)
     }
 
@@ -438,7 +436,7 @@ mod tests {
     }
 
     fn arrl_dx(side: Side, text: &str) -> Reading {
-        let rules = ContestKind::ArrlDx.rules().expect("ARRL DX has shipped");
+        let rules = ContestKind::ArrlDx.rules();
         parse_exchange(rules, side, text)
     }
 
@@ -479,6 +477,59 @@ mod tests {
         }
         assert_eq!(arrl_dx(Side::Dx, "5NN").state, ExchangeState::Missing);
         assert_eq!(arrl_dx(Side::Dx, "KW").state, ExchangeState::Invalid);
+    }
+
+    fn field_day(text: &str) -> Reading {
+        let rules = ContestKind::FieldDay.rules();
+        parse_exchange(rules, Side::WVe, text)
+    }
+
+    /// The Field Day row of the design's table, and more like it: the
+    /// class and the section are each the last token on its list, in either
+    /// order, a class's leading zeros dropped and Yukon's section read as
+    /// the Territories'.
+    #[test]
+    fn field_day_reads_as_the_table_says() {
+        for (typed, cl, sec, unused) in [
+            ("OR 3A", "3A", "OR", &[][..]),
+            ("3A OR", "3A", "OR", &[]),
+            ("1d ema", "1D", "EMA", &[]),
+            ("03A EMA", "3A", "EMA", &[]),
+            ("1B YT", "1B", "TER", &[]),
+            ("2A DX", "2A", "DX", &[]),
+            // Sections that read as cut digits elsewhere are sections.
+            ("ONE 1A", "1A", "ONE", &[]),
+            ("TN 2F", "2F", "TN", &[]),
+            // NFL is Northern Florida.
+            ("NFL 1E", "1E", "NFL", &[]),
+            // A correction typed last wins.
+            ("3A OR 2A", "2A", "OR", &["3A"]),
+            ("3A OR WWA", "3A", "WWA", &["OR"]),
+        ] {
+            let reading = field_day(typed);
+            assert_eq!(reading.value(Field::Cl), Some(cl), "{typed}");
+            assert_eq!(reading.value(Field::Sec), Some(sec), "{typed}");
+            assert_eq!(reading.unused, unused, "{typed}");
+            assert_eq!(reading.state, ExchangeState::Complete, "{typed}");
+            let order: Vec<Field> = reading.fields.iter().map(|read| read.field).collect();
+            assert_eq!(order, [Field::Cl, Field::Sec], "{typed}");
+        }
+        assert_eq!(field_day("3A").state, ExchangeState::Missing);
+        assert_eq!(field_day("OR").state, ExchangeState::Missing);
+        assert_eq!(field_day("").state, ExchangeState::Empty);
+        // No report in Field Day, no old code and no alias but Yukon's.
+        for typed in [
+            "3A ORE",
+            "5NN 3A OR",
+            "R 3A OR",
+            "3A NF",
+            "3A YUK",
+            "3A WA",
+            "3G OR",
+            "3A OR?",
+        ] {
+            assert_eq!(field_day(typed).state, ExchangeState::Invalid, "{typed}");
+        }
     }
 
     #[test]
@@ -532,9 +583,9 @@ mod tests {
             '/', ' ', ' ', ' ', 'é', 'n', '\t',
         ];
         let mut rng = SplitMix64::new(11);
-        let kinds: Vec<ContestKind> = ContestKind::shipped().collect();
+        let kinds = ContestKind::ALL;
         for round in 0..10_000 {
-            let rules = kinds[round % kinds.len()].rules().expect("shipped");
+            let rules = kinds[round % kinds.len()].rules();
             let side = [Side::Dx, Side::WVe][round / kinds.len() % 2];
             let len = rng.usize_in(0, 16);
             let text: String = (0..len)

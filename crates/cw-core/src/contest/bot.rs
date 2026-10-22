@@ -194,7 +194,8 @@ pub(crate) enum Copied<'a> {
     Correction(&'a str, Option<String>),
     /// An exchange, as it goes in the Exchange field: a contest's serial,
     /// its last word; an everyday QSO's report and name, `579 BOB`; a
-    /// Sprint's serial, name and state, `145 BOB OR`.
+    /// Sprint's serial, name and state, `145 BOB OR`; a Field Day class and
+    /// section, `3A OR`.
     Exchange(String),
 }
 
@@ -229,7 +230,20 @@ fn exchange_of(words: &[&str]) -> Option<String> {
     match (after("UR"), after("NAME")) {
         (Some(rst), Some(name)) => Some(format!("{rst} {name}")),
         _ if words.contains(&"5NN") => words.last().map(|serial| (*serial).to_string()),
-        _ => sprint_exchange(words),
+        _ => sprint_exchange(words).or_else(|| field_day_exchange(words)),
+    }
+}
+
+/// A Field Day exchange, after the word that leads it: its class and
+/// section.
+fn field_day_exchange(words: &[&str]) -> Option<String> {
+    match words {
+        [.., cl, sec]
+            if Field::Cl.canonical(cl).is_some() && Field::Sec.canonical(sec).is_some() =>
+        {
+            Some(format!("{cl} {sec}"))
+        }
+        _ => None,
     }
 }
 
@@ -488,11 +502,7 @@ pub fn hear_qsos<S: CallSource>(
     // Whoever the last TU brings to call is for a QSO not heard: of the
     // last turn, only your TU and the sign-off of the station it logged
     // are kept, however the callers it brought call, once or twice.
-    let signoff = heard
-        .contest
-        .contest_kind
-        .rules()
-        .and_then(|rules| rules.signoff);
+    let signoff = heard.contest.contest_kind.rules().signoff;
     if let Some(last) = turns.last_mut() {
         last.turn
             .segments
@@ -760,7 +770,7 @@ mod tests {
         use crate::callsign::Countries;
         for (seed, style) in [(31, RunStyle::Single), (32, RunStyle::Pileup)] {
             let (runtime, run, result, yours) =
-                perfect_run(ContestKind::Sprint, style, "K1ABC", "MA", seed);
+                perfect_run(ContestKind::Sprint, style, "K1ABC", ("MA", ""), seed);
             let view = runtime.machine.view();
             assert!(view.qsos > 15, "{style:?}: {} QSOs", view.qsos);
             assert_eq!(view.clean, view.qsos, "{style:?}");
@@ -836,15 +846,15 @@ mod tests {
         }
     }
 
-    /// A run of `kind` as `call`, called MIKE, from `state`, worked
-    /// perfectly in `style` from `seed`, with callers from every tier and
-    /// up to three at once: the runtime, its stored run and session, and
+    /// A run of `kind` as `call`, called MIKE, from `state` and `section`,
+    /// worked perfectly in `style` from `seed`, with callers from every tier
+    /// and up to three at once: the runtime, its stored run and session, and
     /// every message you sent.
     fn perfect_run(
         kind: super::super::ContestKind,
         style: super::super::RunStyle,
         call: &str,
-        state: &str,
+        (state, section): (&str, &str),
         seed: u64,
     ) -> (
         Runtime<Sampler>,
@@ -858,6 +868,7 @@ mod tests {
         settings.contest.my_call = call.to_string();
         settings.contest.my_name = "MIKE".to_string();
         settings.contest.my_state = state.to_string();
+        settings.contest.my_section = section.to_string();
         settings.curriculum.callsign_level = 6;
         settings.band.stations_max = 3;
         let settings = settings.clamp();
@@ -898,7 +909,7 @@ mod tests {
         ] {
             let case = format!("{call} {style:?}");
             let (runtime, run, result, yours) =
-                perfect_run(ContestKind::Cqww, style, call, "", seed);
+                perfect_run(ContestKind::Cqww, style, call, ("", ""), seed);
             let view = runtime.machine.view();
             assert!(view.qsos > 15, "{case}: {} QSOs", view.qsos);
             assert_eq!(view.clean, view.qsos, "{case}");
@@ -978,7 +989,7 @@ mod tests {
         ] {
             let case = format!("{call} {style:?}");
             let (runtime, run, result, yours) =
-                perfect_run(ContestKind::ArrlDx, style, call, state, seed);
+                perfect_run(ContestKind::ArrlDx, style, call, (state, ""), seed);
             let view = runtime.machine.view();
             assert!(view.qsos > 15, "{case}: {} QSOs", view.qsos);
             assert_eq!(view.clean, view.qsos, "{case}");
@@ -1029,18 +1040,70 @@ mod tests {
         }
     }
 
-    /// Hear a QSO: three QSOs of each contest that has shipped, in either
-    /// run style, worked by the perfect operator from the first CQ to the
-    /// TU of the third, with its sign-off where the contest has one, and
-    /// nobody calling after it, a pile-up caller that calls twice among
-    /// them (seed 3 brings one in a WPX and a Sprint pile-up). The turns
-    /// follow one another as they went out, and the same seed hears the
-    /// same QSOs.
+    /// Field Day worked perfectly, one caller at a time and in a pile-up,
+    /// from the US and from abroad: every QSO clean, your class and section
+    /// sent after the call, each caller's class one Field Day stations send
+    /// and its section one its call can be in; two points a QSO and nothing
+    /// to multiply them, so the score is the points.
+    #[test]
+    fn a_perfect_operator_works_field_day_clean() {
+        use super::super::data::fd::draw_section;
+        use super::super::{ContestKind, Field, RunStyle};
+        for (seed, style, call, section, ending) in [
+            (61, RunStyle::Single, "K1ABC", "EMA", " 1D EMA"),
+            (62, RunStyle::Pileup, "K1ABC", "EMA", " 1D EMA"),
+            (63, RunStyle::Single, "KH6XYZ", "", " 1D PAC"),
+            (64, RunStyle::Pileup, "DL1ABC", "", " 1D DX"),
+        ] {
+            let case = format!("{call} {style:?}");
+            let (runtime, run, result, yours) =
+                perfect_run(ContestKind::FieldDay, style, call, ("", section), seed);
+            let view = runtime.machine.view();
+            assert!(view.qsos > 20, "{case}: {} QSOs", view.qsos);
+            assert_eq!(view.clean, view.qsos, "{case}");
+            assert!(yours.contains(&format!("CQ FD {call}")), "{case}");
+            assert!(
+                yours.iter().any(|text| text.ends_with(ending)),
+                "{case}: {yours:?}"
+            );
+            assert_eq!(run.fields, ["cl", "sec"], "{case}");
+            let mut rng = SplitMix64::new(seed);
+            let mut at = 0;
+            let mut qsos = 0;
+            for qso in &run.qsos {
+                let owned = &result.groups[at..at + qso.g as usize];
+                at += qso.g as usize;
+                if qso.g == 0 {
+                    continue;
+                }
+                assert_eq!(qso.g, 3, "{case}: {qso:?}");
+                let (his, cl, sec) = (&owned[0].sent, &owned[1].sent, &owned[2].sent);
+                assert!(Field::Cl.canonical(cl).is_some(), "{case}: {his} sent {cl}");
+                let sections: std::collections::BTreeSet<&str> =
+                    (0..300).map(|_| draw_section(his, &mut rng)).collect();
+                assert!(sections.contains(sec.as_str()), "{case}: {his} sent {sec}");
+                if qso.k.is_empty() {
+                    qsos += 1;
+                }
+            }
+            let score = run.score(&result.groups).expect("Field Day scores");
+            assert_eq!(score.verified, score.raw, "{case}: all clean");
+            assert_eq!(score.verified.qso_points, 2 * qsos, "{case}");
+            assert_eq!(score.verified.score, score.verified.qso_points, "{case}");
+        }
+    }
+
+    /// Hear a QSO: three QSOs of each contest, in either run style, worked
+    /// by the perfect operator from the first CQ to the TU of the third,
+    /// with its sign-off where the contest has one, and nobody calling after
+    /// it, a pile-up caller that calls twice among them (seed 3 brings one
+    /// in a WPX and a Sprint pile-up). The turns follow one another as they
+    /// went out, and the same seed hears the same QSOs.
     #[test]
     fn hear_a_qso_plays_a_few_qsos_from_the_first_cq_to_the_last_tu() {
         use super::super::{ContestKind, RunStyle};
-        for kind in ContestKind::shipped() {
-            let signoff = kind.rules().and_then(|rules| rules.signoff);
+        for kind in ContestKind::ALL {
+            let signoff = kind.rules().signoff;
             for style in RunStyle::ALL {
                 let mut settings = TrainingSettings::default();
                 settings.contest.contest_kind = kind;
@@ -1162,6 +1225,24 @@ mod tests {
                 Some("K1ABC MA"),
                 "CQ K1ABC TEST",
             ),
+            // Field Day: your class is always given, and your section
+            // stands in where your call does not tell it.
+            (
+                ContestKind::FieldDay,
+                "",
+                "",
+                Some("K1ABC 1D EMA"),
+                "CQ FD K1ABC",
+            ),
+            (
+                ContestKind::FieldDay,
+                "W7ABC",
+                "",
+                Some("W7ABC 1D EMA"),
+                "CQ FD W7ABC",
+            ),
+            (ContestKind::FieldDay, "KL7AB", "", None, "CQ FD KL7AB"),
+            (ContestKind::FieldDay, "DL1ABC", "", None, "CQ FD DL1ABC"),
         ] {
             let mut settings = TrainingSettings::default();
             settings.contest.contest_kind = kind;
@@ -1194,6 +1275,8 @@ mod tests {
             ("DE K5XYZ UR 579 579 NAME BOB BOB BK", "579 BOB"),
             ("DE K5XYZ K1ABC 145 BOB OR", "145 BOB OR"),
             ("K5XYZ K5XYZ K1ABC 145 BOB OR", "145 BOB OR"),
+            ("DE K5XYZ 3A OR", "3A OR"),
+            ("K5XYZ K5XYZ 1D EMA", "1D EMA"),
         ] {
             assert_eq!(
                 copy_of(fix),
@@ -1226,7 +1309,18 @@ mod tests {
                 Some(Copied::Exchange("145 BOB OR".to_string()))
             );
         }
-        for nothing in ["73 EE", "AGN", "NR?", ""] {
+        // A Field Day class and section, led by R or TU or alone.
+        for exchange in ["R 3A OR", "TU 3A OR", "3A OR"] {
+            assert_eq!(
+                copy_of(exchange),
+                Some(Copied::Exchange("3A OR".to_string()))
+            );
+        }
+        assert_eq!(
+            copy_of("R 1D DX"),
+            Some(Copied::Exchange("1D DX".to_string()))
+        );
+        for nothing in ["73 EE", "AGN", "NR?", "", "R 3G OR"] {
             assert_eq!(copy_of(nothing), None, "{nothing:?}");
         }
     }

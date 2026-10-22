@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{STATIONS_MIN, TrainingSettings};
 use crate::callsign::parse_callsign;
-use crate::contest::data::places::{DX, fold_labrador, in_us_or_canada, place_code};
+use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
+use crate::contest::data::sections::{fold_yukon, listed_section};
 use crate::contest::data::zones::zone_of;
 use crate::contest::exchange::{KILOWATT_SPELLINGS, POWER_MAX, ZONE_MAX};
-use crate::contest::{ContestKind, RunStyle, Side};
+use crate::contest::{ContestKind, Field, RunStyle, Side};
 
 /// The longest run, in minutes, and where a run left open ends.
 pub const CONTEST_MINUTES_MAX: u32 = 60;
@@ -33,18 +34,24 @@ pub const MY_POWER_MAX: u32 = POWER_MAX;
 /// kept as.
 const MY_POWER_DEFAULT: &str = "100";
 
+/// The Field Day class sent until you give yours, and what a class that is
+/// none is kept as: one transmitter at home, the class most stations send.
+const MY_CLASS_DEFAULT: &str = "1D";
+
 /// The most callers at once a pile-up starts from, picked while the Band
 /// card's stations range holds one station: one to three, as the design
 /// gives a pile-up (§8).
 const PILEUP_CALLERS_MAX: u32 = 3;
 
 /// Your call where Hear a QSO plays one and none a contest can read is
-/// given yet: a North American one for a contest that sends your state, as
-/// its callers are there.
+/// given yet: a North American one for a contest that sends your state or
+/// your section, as its callers are there.
 const STAND_IN_CALL: (&str, &str) = ("DL1ABC", "K1ABC");
-/// Your name and state, where a contest sends them and none is given yet.
+/// Your name, state and section, where a contest sends them and none is
+/// given yet: the stand-in call's.
 const STAND_IN_NAME: &str = "MIKE";
 const STAND_IN_STATE: &str = "MA";
+const STAND_IN_SECTION: &str = "EMA";
 /// Your CQ zone, where a contest sends it and your call does not say: the
 /// stand-in call's.
 const STAND_IN_ZONE: u32 = 14;
@@ -78,6 +85,13 @@ pub struct ContestSettings {
     /// Your power, as you send it in ARRL DX from outside W/VE: watts from
     /// 1 to 1500, or `K`, `KW` or `1K` for a kilowatt.
     pub my_power: String,
+    /// Your Field Day class: how many transmitters, 1 to 99, and a letter
+    /// from A to F.
+    pub my_class: String,
+    /// Your ARRL or RAC section, by its code, Yukon's YT, or DX, as you send
+    /// it in Field Day. Empty until you give one, when a call that tells its
+    /// section by itself sends that one ([`Self::section_sent`]).
+    pub my_section: String,
 }
 
 impl Default for ContestSettings {
@@ -91,6 +105,8 @@ impl Default for ContestSettings {
             my_state: String::new(),
             my_zone: 0,
             my_power: MY_POWER_DEFAULT.to_string(),
+            my_class: MY_CLASS_DEFAULT.to_string(),
+            my_section: String::new(),
         }
     }
 }
@@ -142,6 +158,20 @@ impl ContestSettings {
         self.my_power = clean_power(typed);
     }
 
+    /// Your Field Day class, as typed: kept as
+    /// [`TrainingSettings::clamp`](super::TrainingSettings::clamp) keeps
+    /// it, and 1D for what is none.
+    pub fn set_my_class(&mut self, typed: &str) {
+        self.my_class = clean_class(typed);
+    }
+
+    /// Your section, as typed: kept as its code, as
+    /// [`TrainingSettings::clamp`](super::TrainingSettings::clamp) keeps
+    /// it, and nothing for what is none.
+    pub fn set_my_section(&mut self, typed: &str) {
+        self.my_section = clean_section(typed);
+    }
+
     /// Your side of the ARRL DX contest, from your call.
     pub fn side(&self) -> Side {
         Side::of_call(&self.my_call)
@@ -183,10 +213,7 @@ impl ContestSettings {
     /// place, which may be there, or no call reads.
     pub fn state_sent(&self) -> &str {
         if !self.my_state.is_empty() {
-            let apart = self
-                .contest_kind
-                .rules()
-                .is_some_and(|rules| rules.labrador);
+            let apart = self.contest_kind.rules().labrador;
             return if apart {
                 &self.my_state
             } else {
@@ -200,15 +227,28 @@ impl ContestSettings {
         }
     }
 
+    /// The section your exchange sends: the one you gave, Yukon's as the
+    /// Territories', which ARRL contests count it in; or else the one your
+    /// call tells by itself: AK for Alaska's prefixes, PAC for Hawaii's and
+    /// the Pacific islands', PR and VI for the Caribbean islands', NS for
+    /// Sable and St Paul Islands', and DX outside the sections. Empty while
+    /// a call in the US's districts or Canada has none, as its section goes
+    /// by where in them it is, or one Dust cannot place, or no call reads.
+    pub fn section_sent(&self) -> &str {
+        if self.my_section.is_empty() {
+            call_section(&self.my_call).unwrap_or_default()
+        } else {
+            fold_yukon(&self.my_section)
+        }
+    }
+
     /// What a run of these settings still needs before it can start, said
-    /// for the screen; None once it has everything: a contest whose phase has
-    /// shipped, a callsign Dust can read, and your name, your state and your
-    /// zone where the contest sends them. Your power is always given.
+    /// for the screen; None once it has everything: a callsign Dust can
+    /// read, and your name, your state, your zone and your section where the
+    /// contest sends them. Your power and your class are always given.
     pub fn missing(&self) -> Option<String> {
         let kind = self.contest_kind;
-        let Some(rules) = kind.rules() else {
-            return Some(format!("{} is not ready yet", kind.label()));
-        };
+        let rules = kind.rules();
         if self.my_call.is_empty() {
             return Some("Add your callsign to start a contest".to_string());
         }
@@ -227,23 +267,27 @@ impl ContestSettings {
         if rules.sends_zone(side) && self.zone().is_none() {
             return Some(format!("Add your CQ zone to start {a_run}"));
         }
+        if rules.sends_section(side) && self.section_sent().is_empty() {
+            return Some(format!("Add your section to start {a_run}"));
+        }
         None
     }
 
     /// Fill in with stand-ins what of your station a run still needs, as
     /// Hear a QSO plays it before you have given it, and say what your
     /// station is then, if any of it stands in: `DL1ABC`, `K1ABC MIKE MA`,
-    /// `C31AB zone 14`.
+    /// `C31AB zone 14`, `K1ABC 1D EMA`.
     /// It answers each thing [`Self::missing`] asks for, beside it so that
-    /// the two change together; nothing for a contest not ready yet.
+    /// the two change together.
     pub(crate) fn stand_in(&mut self) -> Option<String> {
-        let rules = self.contest_kind.rules()?;
+        let rules = self.contest_kind.rules();
         let mut stood_in = false;
         if parse_callsign(&self.my_call).is_none() {
             // A North American call for a contest whose every side sends
-            // your state, as its callers are there.
+            // your state or your section, as its callers are there.
             let (dx, home) = STAND_IN_CALL;
-            let home_only = rules.sends_state(Side::Dx) && rules.sends_state(Side::WVe);
+            let home_only = (rules.sends_state(Side::Dx) && rules.sends_state(Side::WVe))
+                || (rules.sends_section(Side::Dx) && rules.sends_section(Side::WVe));
             self.my_call = if home_only { home } else { dx }.to_string();
             stood_in = true;
         }
@@ -263,6 +307,12 @@ impl ContestSettings {
             self.my_zone = STAND_IN_ZONE;
             stood_in = true;
         }
+        // Your class is always given; your section stands in where your
+        // call does not tell it.
+        if rules.sends_section(side) && self.section_sent().is_empty() {
+            self.my_section = STAND_IN_SECTION.to_string();
+            stood_in = true;
+        }
         if !stood_in {
             return None;
         }
@@ -275,6 +325,12 @@ impl ContestSettings {
         }
         if zone_stood_in {
             station.push(format!("zone {STAND_IN_ZONE}"));
+        }
+        if rules.sends_class(side) {
+            station.push(self.my_class.clone());
+        }
+        if rules.sends_section(side) {
+            station.push(self.section_sent().to_string());
         }
         Some(station.join(" "))
     }
@@ -304,16 +360,28 @@ pub(super) fn clean_name(text: &str) -> String {
         .collect()
 }
 
+/// The letters of `text`, upper case, and nothing else: a code as typed,
+/// with dots, spaces and digits among it dropped.
+fn typed_letters(text: &str) -> String {
+    text.chars()
+        .map(|c| c.to_ascii_uppercase())
+        .filter(char::is_ascii_uppercase)
+        .collect()
+}
+
+/// `text`, upper case, without its spaces: a value as typed, `1 d` as `1D`.
+fn typed_compact(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
 /// What `text`, typed as your state, province or territory, reads as: its
 /// code, upper case, an old one as the new (PQ is QC, NF is NL), LB for
 /// Labrador, or DX. None for anything else, a name written out among it.
 pub fn state_code(text: &str) -> Option<&'static str> {
-    let letters: String = text
-        .chars()
-        .map(|c| c.to_ascii_uppercase())
-        .filter(char::is_ascii_uppercase)
-        .collect();
-    place_code(&letters)
+    place_code(&typed_letters(text))
 }
 
 /// `text` as a state, province or territory is kept: its code
@@ -322,15 +390,35 @@ pub(super) fn clean_state(text: &str) -> String {
     state_code(text).unwrap_or_default().to_string()
 }
 
+/// What `text`, typed as your Field Day class, reads as: a number of
+/// transmitters from 1 to 99 without leading zeros, and a letter from A to
+/// F (`03a` is `3A`). None for anything else.
+pub fn class_reading(text: &str) -> Option<String> {
+    Field::Cl.canonical(&typed_compact(text))
+}
+
+/// `text` as your class is kept: [`class_reading`], or 1D.
+pub(super) fn clean_class(text: &str) -> String {
+    class_reading(text).unwrap_or_else(|| MY_CLASS_DEFAULT.to_string())
+}
+
+/// What `text`, typed as your section, reads as: its code, upper case, one
+/// of the 85, Yukon's YT, or DX. None for anything else, a name written out
+/// among it.
+pub fn section_code(text: &str) -> Option<&'static str> {
+    listed_section(&typed_letters(text))
+}
+
+/// `text` as a section is kept: its code ([`section_code`]), or nothing.
+pub(super) fn clean_section(text: &str) -> String {
+    section_code(text).unwrap_or_default().to_string()
+}
+
 /// What `text`, typed as your power, reads as: watts from 1 to
 /// [`MY_POWER_MAX`], without leading zeros, or a kilowatt as written, `K`,
 /// `KW` or `1K`. None for anything else.
 pub fn power_reading(text: &str) -> Option<String> {
-    let typed: String = text
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
+    let typed = typed_compact(text);
     if KILOWATT_SPELLINGS.contains(&typed.as_str()) {
         return Some(typed);
     }
@@ -492,9 +580,8 @@ mod tests {
         assert_eq!(settings.state_sent(), "MA", "what you give is sent");
     }
 
-    /// A run starts only with a contest that has shipped, a call that reads
-    /// as one, and your name where the contest sends it, and otherwise says
-    /// what it is missing.
+    /// A run starts only with a call that reads as one, and your name where
+    /// the contest sends it, and otherwise says what it is missing.
     #[test]
     fn a_run_says_what_it_needs_before_it_can_start() {
         let mut settings = ContestSettings::default();
@@ -561,10 +648,133 @@ mod tests {
         assert_eq!(settings.missing(), None);
         settings.my_call = "KH6AB".to_string();
         assert_eq!(settings.missing(), None, "Hawaii is DX");
+        // Field Day sends your class, always given, and your section: a
+        // call in the US's districts or Canada asks for it, one that tells
+        // it does not.
         settings.contest_kind = ContestKind::FieldDay;
+        assert_eq!(settings.missing(), None, "Hawaii is PAC");
+        settings.my_call = "K1ABC".to_string();
+        settings.my_state = "MA".to_string();
         assert_eq!(
             settings.missing().as_deref(),
-            Some("Field Day is not ready yet")
+            Some("Add your section to start a Field\u{a0}Day")
+        );
+        settings.my_section = "EMA".to_string();
+        assert_eq!(settings.missing(), None);
+        settings.my_section.clear();
+        settings.my_call = "DL1ABC".to_string();
+        assert_eq!(settings.missing(), None, "DX");
+        settings.my_call = "C31AB".to_string();
+        assert!(settings.missing().is_some(), "a call Dust cannot place");
+    }
+
+    /// Your section is the one you give, Yukon's as the Territories'; or
+    /// else the one your call tells by itself, for every prefix that tells
+    /// one; and none for a call in the US's districts or Canada.
+    #[test]
+    fn your_section_is_given_or_told_by_your_call() {
+        let mut settings = ContestSettings::default();
+        for (call, sent) in [
+            ("KL7AB", "AK"),
+            ("AL7AB", "AK"),
+            ("NL7AB", "AK"),
+            ("WL7AB", "AK"),
+            ("KH6AB", "PAC"),
+            ("KH7AB", "PAC"),
+            ("NH6AB", "PAC"),
+            ("KH0AB", "PAC"),
+            ("KH2AB", "PAC"),
+            ("KH8AB", "PAC"),
+            ("AH2AB", "PAC"),
+            ("KP3AB", "PR"),
+            ("KP4AB", "PR"),
+            ("WP4AB", "PR"),
+            ("KP2AB", "VI"),
+            ("NP2AB", "VI"),
+            ("CY0AA", "NS"),
+            ("CY9AA", "NS"),
+            ("DL1ABC", "DX"),
+            ("VP2E/DL1ABC", "DX"),
+            ("XE1ABC", "DX"),
+            ("KH9AB", "DX"),
+            ("KP1AB", "DX"),
+            ("KG4AB", "DX"),
+            ("K1ABC", ""),
+            ("W1AW/4", ""),
+            ("VE3ABC", ""),
+            ("VY1AB", ""),
+            ("C31AB", ""),
+            ("ABC", ""),
+            ("", ""),
+        ] {
+            settings.my_call = call.to_string();
+            assert_eq!(settings.section_sent(), sent, "{call:?}");
+        }
+        settings.my_call = "KH6AB".to_string();
+        settings.my_section = "EMA".to_string();
+        assert_eq!(settings.section_sent(), "EMA", "what you give is sent");
+        settings.my_section = "YT".to_string();
+        assert_eq!(settings.section_sent(), "TER", "Yukon is the Territories");
+    }
+
+    /// A class is kept as a class: a number of transmitters and a letter,
+    /// leading zeros dropped, and anything else as 1D.
+    #[test]
+    fn a_class_is_kept_as_a_class() {
+        for (typed, kept) in [
+            ("1d", "1D"),
+            (" 3 A ", "3A"),
+            ("03A", "3A"),
+            ("99F", "99F"),
+            ("10a", "10A"),
+        ] {
+            assert_eq!(class_reading(typed).as_deref(), Some(kept), "{typed:?}");
+            assert_eq!(clean_class(typed), kept, "{typed:?}");
+        }
+        for none in ["", "D", "0D", "1G", "100A", "AD", "1", "1DD", "TA"] {
+            assert_eq!(class_reading(none), None, "{none:?}");
+            assert_eq!(clean_class(none), "1D", "{none:?}");
+        }
+        for text in ["1d", "03A", "1G"] {
+            let once = clean_class(text);
+            assert_eq!(clean_class(&once), once, "{text:?} settles in one pass");
+        }
+        let mut settings = ContestSettings::default();
+        assert_eq!(settings.my_class, "1D");
+        settings.set_my_class("2a");
+        assert_eq!(settings.my_class, "2A");
+    }
+
+    /// A section is kept as its code: one of the 85, Yukon's YT, DX, or
+    /// nothing; no other alias.
+    #[test]
+    fn a_section_is_kept_as_its_code() {
+        for (typed, kept) in [
+            ("ema", "EMA"),
+            (" o.r ", "OR"),
+            ("yt", "YT"),
+            ("dx", "DX"),
+            ("Ter", "TER"),
+            ("nfl", "NFL"),
+        ] {
+            assert_eq!(section_code(typed), Some(kept), "{typed:?}");
+            assert_eq!(clean_section(typed), kept, "{typed:?}");
+        }
+        for none in ["", "Mass", "NF", "YUK", "MAR", "GTA", "NT", "MD", "PQ"] {
+            assert_eq!(section_code(none), None, "{none:?}");
+            assert_eq!(clean_section(none), "", "{none:?}");
+        }
+        for text in ["ema", "Mass", "yt"] {
+            let once = clean_section(text);
+            assert_eq!(clean_section(&once), once, "{text:?} settles in one pass");
+        }
+        let mut settings = ContestSettings::default();
+        settings.set_my_section(" ons ");
+        assert_eq!(settings.my_section, "ONS");
+        settings.set_my_section("Ontario");
+        assert_eq!(
+            settings.my_section, "",
+            "no section, rather than a wrong one"
         );
     }
 
@@ -660,24 +870,25 @@ mod tests {
     }
 
     /// Whatever of your station is given, the stand-ins leave nothing a
-    /// run of a contest that has shipped still needs, and stand in only
-    /// where it needed something.
+    /// run of any contest still needs, and stand in only where it needed
+    /// something.
     #[test]
     fn a_station_stood_in_for_has_all_a_run_needs() {
-        for kind in ContestKind::shipped() {
-            for call in ["", "ABC", "DL1ABC", "K1ABC", "VE3ABC/P", "C31AB"] {
+        for kind in ContestKind::ALL {
+            for call in ["", "ABC", "DL1ABC", "K1ABC", "VE3ABC/P", "C31AB", "KH6AB"] {
                 for name in ["", "ANN"] {
-                    for state in ["", "OR"] {
+                    for (state, section) in [("", ""), ("OR", ""), ("", "OR"), ("OR", "OR")] {
                         let given = ContestSettings {
                             contest_kind: kind,
                             my_call: call.to_string(),
                             my_name: name.to_string(),
                             my_state: state.to_string(),
+                            my_section: section.to_string(),
                             ..ContestSettings::default()
                         };
                         let mut stood = given.clone();
                         let stand_in = stood.stand_in();
-                        let case = format!("{kind:?} {call:?} {name:?} {state:?}");
+                        let case = format!("{kind:?} {call:?} {name:?} {state:?} {section:?}");
                         assert_eq!(stood.missing(), None, "{case}");
                         assert_eq!(stand_in.is_some(), given.missing().is_some(), "{case}");
                         if stand_in.is_none() {
@@ -687,11 +898,19 @@ mod tests {
                 }
             }
         }
-        let mut not_ready = ContestSettings {
+        // Field Day stands in a North American call and its section.
+        let mut field_day = ContestSettings {
             contest_kind: ContestKind::FieldDay,
             ..ContestSettings::default()
         };
-        assert_eq!(not_ready.stand_in(), None);
+        assert_eq!(field_day.stand_in().as_deref(), Some("K1ABC 1D EMA"));
+        let mut hawaii = ContestSettings {
+            contest_kind: ContestKind::FieldDay,
+            my_call: "KH6AB".to_string(),
+            my_class: "2A".to_string(),
+            ..ContestSettings::default()
+        };
+        assert_eq!(hawaii.stand_in(), None, "its call tells its section");
     }
 
     #[test]

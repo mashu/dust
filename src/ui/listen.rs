@@ -79,10 +79,9 @@ pub fn ListenView(
     let all_chars: String = pool.iter().collect();
     let pool_empty = all_chars.is_empty();
     let busy = playing || streaming || hearing;
-    // In Contest mode, a few QSOs of the contest to hear, once it has shipped.
+    // In Contest mode, a few QSOs of the contest to hear.
     let contest = (settings.curriculum.char_set_mode == CharSetMode::Contest)
-        .then_some(settings.contest.contest_kind)
-        .filter(|kind| kind.rules().is_some());
+        .then_some(settings.contest.contest_kind);
     // What Hear a QSO played, while it is of the contest chosen now: kept
     // once it ends, but not when it stopped before a line was heard.
     let dialogue = dialogue

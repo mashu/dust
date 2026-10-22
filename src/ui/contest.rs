@@ -535,13 +535,7 @@ fn KeyBar(qso: QsoState, live: bool) -> Element {
         .collect();
     let dupe = worked_before(ctx).is_some();
     let loggable = ctx.entry.loggable();
-    let query = ctx
-        .settings
-        .peek()
-        .contest
-        .contest_kind
-        .rules()
-        .map_or("NR?", |rules| rules.query);
+    let query = ctx.settings.peek().contest.contest_kind.rules().query;
     rsx! {
         div { class: "run-keys", role: "group", aria_label: "Messages",
             EnterChip { qso, live }
@@ -1122,14 +1116,16 @@ mod tests {
         });
     }
 
-    /// A QSO of `kind` worked on the screen as `call` in `state`: the
-    /// caller's call heard and sent with your exchange, which goes out as
-    /// `yours`; the hint naming what to copy; its exchange copied as heard,
-    /// read as `reads`, then TU and logged clean.
+    /// A QSO of `kind` worked on the screen as `call` from `state` and
+    /// `section`: the caller's call heard and sent with your exchange, which
+    /// goes out as `yours`; the hint naming what to copy; as many words of
+    /// the end of its exchange as there are fields in `reads` copied as
+    /// heard into the field labelled with them, and read as them, then TU
+    /// and logged clean.
     async fn work_one_qso(
         kind: cw_core::ContestKind,
         call: &str,
-        state: &str,
+        (state, section): (&str, &str),
         yours: &str,
         copy: &str,
         reads: &str,
@@ -1138,6 +1134,7 @@ mod tests {
         settings.contest.contest_kind = kind;
         settings.contest.my_call = call.to_string();
         settings.contest.my_state = state.to_string();
+        settings.contest.my_section = section.to_string();
         let (mut ui, recorder) = Ui::app_with_settings(settings);
         ui.click("btn-start-training");
         ui.advance(8_000).await;
@@ -1166,13 +1163,19 @@ mod tests {
             .others[0]
             .text
             .clone();
-        let heard = exchange.split_whitespace().last().unwrap_or_default();
-        ui.type_into("field-exchange", heard);
-        assert!(
-            text_of(&ui, "run-line run-reads").starts_with(&format!("Reads as: {reads} ")),
-            "{kind:?}: {}",
-            text_of(&ui, "run-line run-reads")
-        );
+        let fields: Vec<&str> = reads.split(' ').collect();
+        let heard: Vec<&str> = exchange.split_whitespace().collect();
+        let heard = heard[heard.len().saturating_sub(fields.len())..].join(" ");
+        ui.type_into("field-exchange", &heard);
+        // Each field read, in order: "CL 1D · SEC OR".
+        let read = text_of(&ui, "run-line run-reads");
+        let read_as: Vec<&str> = read
+            .strip_prefix("Reads as: ")
+            .unwrap_or_default()
+            .split(" · ")
+            .filter_map(|part| part.split(' ').next())
+            .collect();
+        assert_eq!(read_as, fields, "{kind:?}: {read}");
         ui.press_enter("field-exchange");
         assert!(
             ui.run_until(15_000, |ui| text_of(ui, "log-check") == "clean")
@@ -1188,9 +1191,24 @@ mod tests {
     fn cqww_and_arrl_dx_are_worked_on_the_screen() {
         use cw_core::ContestKind;
         run(|| async {
-            work_one_qso(ContestKind::Cqww, "DL1ABC", "", "5NN A4", "zone", "ZN").await;
-            work_one_qso(ContestKind::ArrlDx, "DL1ABC", "", "5NN 1TT", "state", "ST").await;
-            work_one_qso(ContestKind::ArrlDx, "K1ABC", "MA", "5NN MA", "power", "PWR").await;
+            let (cqww, arrl_dx, unsaid) = (ContestKind::Cqww, ContestKind::ArrlDx, ("", ""));
+            work_one_qso(cqww, "DL1ABC", unsaid, "5NN A4", "zone", "ZN").await;
+            work_one_qso(arrl_dx, "DL1ABC", unsaid, "5NN 1TT", "state", "ST").await;
+            work_one_qso(arrl_dx, "K1ABC", ("MA", ""), "5NN MA", "power", "PWR").await;
+        });
+    }
+
+    /// Field Day worked on the screen: your class and section after their
+    /// call, theirs copied, from the section you give or the one your call
+    /// tells.
+    #[test]
+    fn field_day_is_worked_on_the_screen() {
+        use cw_core::ContestKind;
+        run(|| async {
+            let copy = "class and section";
+            let fd = ContestKind::FieldDay;
+            work_one_qso(fd, "K1ABC", ("", "EMA"), "1D EMA", copy, "CL SEC").await;
+            work_one_qso(fd, "KH6XYZ", ("", ""), "1D PAC", copy, "CL SEC").await;
         });
     }
 
