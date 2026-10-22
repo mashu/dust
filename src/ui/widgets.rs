@@ -60,6 +60,27 @@ pub fn control_id(prefix: &str, label: &str) -> String {
     }
 }
 
+/// The script that gives the input called `id` the focus, unless it has it.
+///
+/// Every build runs what it is given to eval as the body of a function, so the
+/// script may return early.
+pub fn focus_script(id: &str) -> String {
+    format!(
+        r#"const input = document.getElementById("{id}");
+if (!input || document.activeElement === input) {{
+    return;
+}}
+input.focus({{ preventScroll: true }});"#
+    )
+}
+
+/// A button that leaves the cursor where it is: a click would otherwise take
+/// it from the box being typed in, so that the letters typed next went
+/// nowhere and Enter pressed the button again.
+pub fn keep_focus(e: MouseEvent) {
+    e.prevent_default();
+}
+
 /// Emit a boolean HTML attribute only when it should apply.
 ///
 /// HTML treats the *presence* of `disabled` / `readonly` / `autofocus` as
@@ -87,6 +108,7 @@ pub enum IconName {
     Chart,
     Sliders,
     Play,
+    Pause,
     Stop,
     Headphones,
     Check,
@@ -118,11 +140,12 @@ pub enum IconName {
 impl IconName {
     /// Every icon, for the test that draws them all.
     #[cfg(test)]
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::Signal,
         Self::Chart,
         Self::Sliders,
         Self::Play,
+        Self::Pause,
         Self::Stop,
         Self::Headphones,
         Self::Check,
@@ -168,6 +191,7 @@ impl IconName {
                 "M16 17v4",
             ],
             Self::Play => &["M7 4.5l12 7.5-12 7.5z"],
+            Self::Pause => &["M8.5 5v14", "M15.5 5v14"],
             Self::Stop => &["M6.5 6.5h11v11h-11z"],
             Self::Headphones => &["M4 14v-2a8 8 0 0116 0v2", "M4 14h3v6H4z", "M17 14h3v6h-3z"],
             Self::Check => &["M4.5 12.5l5 5 10-11"],
@@ -323,32 +347,66 @@ pub fn GroupResultRow(index: usize, group: GroupResult) -> Element {
     }
 }
 
+/// The dot before a training screen's status, which says at a glance whose
+/// move it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusDot {
+    /// Something is going out: copper, pulsing.
+    Live,
+    /// Yours: green.
+    Ready,
+    /// Neither: the next thing is on its way, and the dot is plain.
+    Waiting,
+}
+
+/// The head of a training screen: what is going on, how far it has come as
+/// a figure and a bar, and anything the screen adds under the bar.
 #[component]
-pub fn ProgressHeader(current: usize, total: usize, status: String, live: bool) -> Element {
-    let pct = if total == 0 {
-        0.0
-    } else {
-        ((current + 1) as f64 / total as f64) * 100.0
-    };
-    let dot = if live {
-        "status-dot live"
-    } else {
-        "status-dot ready"
+pub fn ProgressHeader(
+    status: String,
+    dot: StatusDot,
+    /// How far it has come: "3 / 20", or a run's clock.
+    figure: String,
+    /// Said after the figure where there is room for it: an open run's
+    /// longest length. A phone leaves it out.
+    #[props(default)]
+    figure_note: String,
+    /// The bar's fill, in percent.
+    pct: f64,
+    /// The figure is a clock: a screen reader reads it when asked, and does
+    /// not read every tick out.
+    #[props(default)]
+    timer: bool,
+    #[props(default)] children: Element,
+) -> Element {
+    let pct = pct.clamp(0.0, 100.0);
+    let dot = match dot {
+        StatusDot::Live => "status-dot live",
+        StatusDot::Ready => "status-dot ready",
+        StatusDot::Waiting => "status-dot",
     };
     rsx! {
         div { class: "card",
-            div { class: "row-between", style: "margin-bottom: 0.65rem;",
+            div { class: "row-between progress-head",
                 div { class: "train-status",
                     span { class: dot }
-                    span { style: "font-weight: 700;", "{status}" }
+                    span { class: "progress-status", "{status}" }
                 }
-                span { class: "mono", style: "color: var(--ink-dim); font-size: 0.85rem;",
-                    "{current + 1} / {total}"
+                if timer {
+                    span { class: "mono progress-figure", role: "timer", aria_live: "off",
+                        "{figure}"
+                        if !figure_note.is_empty() {
+                            span { class: "progress-figure-note", "{figure_note}" }
+                        }
+                    }
+                } else {
+                    span { class: "mono progress-figure", "{figure}" }
                 }
             }
             div { class: "progress-bar",
                 span { style: "width: {pct}%;" }
             }
+            {children}
         }
     }
 }
@@ -808,9 +866,28 @@ mod tests {
     use dioxus::prelude::*;
 
     use super::{
-        NumberField, control_id, html_bool, nudge, parse_number_input, pct_between, pretty_number,
+        NumberField, control_id, focus_script, html_bool, nudge, parse_number_input, pct_between,
+        pretty_number,
     };
     use crate::testing::Ui;
+
+    /// The harness never mounts anything on a page, so the script is the one
+    /// part of an input taking the focus a test can see.
+    #[test]
+    fn an_input_takes_the_focus_unless_it_has_it() {
+        let script = focus_script("group-input-7");
+        assert!(
+            script.contains(r#"getElementById("group-input-7")"#),
+            "{script}"
+        );
+        let has = script
+            .find("document.activeElement === input")
+            .expect("an input with the focus is left alone");
+        let focus = script
+            .find("input.focus({ preventScroll: true })")
+            .expect("the input takes the focus where it is");
+        assert!(has < focus, "{script}");
+    }
 
     /// A number field whose unit can be changed under it, which redraws it
     /// without moving its value.

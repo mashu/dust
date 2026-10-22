@@ -80,9 +80,11 @@ pub enum HistorySaved {
     /// [`MAX_SESSIONS`].
     Stored { kept: usize },
     /// Stored, but the store had room for only the newest `kept`. Only a
-    /// browser runs out of room: files are kept to the count alone.
+    /// browser runs out of room: files are kept to the count alone. `runs`
+    /// says the history held a contest run, whose log takes more room than
+    /// a session of groups.
     #[cfg_attr(not(feature = "web"), allow(dead_code))]
-    Squeezed { kept: usize },
+    Squeezed { kept: usize, runs: bool },
     /// Not stored. The history already there could not be read, nor moved
     /// out of the way, so it is kept as it is rather than written over.
     Held,
@@ -95,7 +97,7 @@ impl HistorySaved {
     /// any.
     pub fn kept(&self) -> Option<usize> {
         match self {
-            Self::Stored { kept } | Self::Squeezed { kept } => Some(*kept),
+            Self::Stored { kept } | Self::Squeezed { kept, .. } => Some(*kept),
             Self::Held | Self::Failed(_) => None,
         }
     }
@@ -104,9 +106,16 @@ impl HistorySaved {
     pub fn problem(&self) -> Option<String> {
         match self {
             Self::Stored { .. } => None,
-            Self::Squeezed { kept } => Some(format!(
-                "Only your newest {kept} sessions fit in this browser's storage; older ones were let go."
-            )),
+            Self::Squeezed { kept, runs } => {
+                let why = if *runs {
+                    " Long contest runs take more room."
+                } else {
+                    ""
+                };
+                Some(format!(
+                    "Only your newest {kept} sessions fit in this browser's storage; older ones were let go.{why}"
+                ))
+            }
             Self::Held => Some(
                 "Your saved history could not be read, so it was left as it is and this session was not saved."
                     .into(),
@@ -256,19 +265,12 @@ mod tests {
         SessionResult {
             date: date.to_string(),
             timestamp: 1,
-            groups: Vec::new(),
-            group_timings: Vec::new(),
             accuracy: 1.0,
-            tally: Default::default(),
             avg_response_ms: 1.0,
-            total_chars: 1,
             score: 1.0,
-            level: 1,
-            digits_level: 1,
             char_set_mode: CharSetMode::Mixed,
             char_wpm: 20.0,
-            effective_wpm: 18.0,
-            alphabet_fingerprint: String::new(),
+            ..SessionResult::empty_for_test()
         }
     }
 
@@ -330,6 +332,26 @@ mod tests {
         assert!(back[0].score > 1.0, "{}", back[0].score);
     }
 
+    /// A contest run a later version wrote reads as a run, and goes back to
+    /// the store as it was written: a callsign session with its mark, and
+    /// the log this version cannot read yet.
+    #[test]
+    fn a_contest_run_from_a_later_version_is_kept_whole() {
+        let mut written = serde_json::to_value(session("2026-10-20")).unwrap();
+        written["charSetMode"] = serde_json::json!("callsign");
+        written["alphabetFingerprint"] = serde_json::json!("contest:wpx");
+        written["contest"] = serde_json::json!({ "v": 9, "laterKey": [1, 2.5, "x"] });
+        let raw = serde_json::to_string(&[written.clone()]).unwrap();
+        let back = parse_sessions(&raw).expect("a list");
+        assert_eq!(back[0].char_set_mode, CharSetMode::Contest);
+        let (saved, kept) = newest_that_fit(&back, usize::MAX);
+        assert_eq!(kept, 1);
+        let saved: Vec<serde_json::Value> = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved[0]["charSetMode"], "callsign");
+        assert_eq!(saved[0]["alphabetFingerprint"], "contest:wpx");
+        assert_eq!(saved[0]["contest"], written["contest"]);
+    }
+
     #[test]
     fn only_the_newest_sessions_that_fit_are_kept() {
         let all: Vec<SessionResult> = (0..10)
@@ -357,11 +379,17 @@ mod tests {
     #[test]
     fn what_became_of_a_history_is_said_plainly() {
         assert_eq!(HistorySaved::Stored { kept: 4 }.problem(), None);
-        assert_eq!(HistorySaved::Squeezed { kept: 40 }.kept(), Some(40));
+        let squeezed = |runs| HistorySaved::Squeezed { kept: 40, runs };
+        assert_eq!(squeezed(false).kept(), Some(40));
         assert!(
-            HistorySaved::Squeezed { kept: 40 }
+            squeezed(false)
                 .problem()
-                .is_some_and(|text| text.contains("newest 40"))
+                .is_some_and(|text| text.contains("newest 40") && !text.contains("contest"))
+        );
+        assert!(
+            squeezed(true)
+                .problem()
+                .is_some_and(|text| text.ends_with("Long contest runs take more room."))
         );
         assert_eq!(HistorySaved::Held.kept(), None);
         assert!(HistorySaved::Held.problem().is_some());

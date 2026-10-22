@@ -769,3 +769,157 @@ fn a_session_on_words_sends_the_words_of_the_list() {
         assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Words);
     });
 }
+
+/// The contest card's presets each put the settings where they say, as
+/// the card and the cards below it show them, and the card reads Custom
+/// once anything a preset set is changed, wherever it is changed.
+#[test]
+fn a_contest_preset_sets_its_fields_and_reads_custom_once_one_changes() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.has("Custom · a preset sets the callers"));
+        ui.click("preset-first-qso");
+        assert!(ui.input_tag("preset-first-qso").contains("active"));
+        assert!(
+            ui.has("15–18\u{a0}WPM\u{a0}· tier\u{a0}1\u{a0}calls\u{a0}· one\u{a0}caller\u{a0}at\u{a0}a\u{a0}time\u{a0}· easy\u{a0}habits\u{a0}· no\u{a0}fading\u{a0}or\u{a0}static"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(value_of(&ui, "field-level"), "1");
+        assert!(ui.has("One station calls at a time"));
+        let settings = ui.with_app(|ctx| {
+            use dioxus::prelude::ReadableExt;
+            ctx.settings.peek().clone()
+        });
+        assert_eq!(
+            cw_core::ContestPreset::of(&settings),
+            Some(cw_core::ContestPreset::FirstQso)
+        );
+        assert!(!settings.band.qsb_enabled && !settings.band.qrn_enabled);
+
+        ui.click("preset-contester");
+        assert!(ui.has("28–36\u{a0}WPM\u{a0}· tier\u{a0}6\u{a0}calls\u{a0}· 2–5\u{a0}callers\u{a0}· rough\u{a0}habits\u{a0}· deep\u{a0}fading,\u{a0}strong\u{a0}static"));
+        // The Band card shows the habits it set.
+        assert!(ui.input_tag("habits-rough").contains("active"));
+        assert_eq!(value_of(&ui, "field-level"), "6");
+        assert!(
+            ui.has("2–5 callers · set on the Band card"),
+            "{}",
+            ui.html()
+        );
+        assert_eq!(
+            ui.stored_settings().await.band.stations_max,
+            5,
+            "stored as any edit is"
+        );
+
+        // The tier moved by hand: the settings are your own.
+        ui.commit("field-level", "5");
+        ui.advance(50).await;
+        assert!(ui.has("Custom · a preset sets the callers"));
+        assert!(!ui.input_tag("preset-contester").contains("active"));
+        // Back on Club, then a single caller picked: your own again.
+        ui.click("preset-club");
+        assert!(ui.has("20–26\u{a0}WPM\u{a0}· tier\u{a0}3\u{a0}calls\u{a0}· 1–3\u{a0}callers\u{a0}· real\u{a0}habits\u{a0}· QSB\u{a0}fading\u{a0}and\u{a0}QRN\u{a0}static"));
+        ui.click("style-single-caller");
+        assert!(ui.has("Custom · a preset sets the callers"));
+        // Back on Club, then easier habits picked on the Band card: your
+        // own again.
+        ui.click("preset-club");
+        assert!(ui.input_tag("preset-club").contains("active"));
+        ui.click("habits-easy");
+        assert!(ui.has("Custom · a preset sets the callers"));
+        assert!(!ui.input_tag("preset-club").contains("active"));
+    });
+}
+
+/// In Contest mode the Band card says how the callers operate, a sentence
+/// for each habit that follows the contest, and keeps the one picked; in
+/// group training it has no callers to say it of.
+#[test]
+fn the_band_card_sets_the_callers_habits_in_a_contest() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.has("Caller habits"));
+        assert!(
+            ui.has("Stations, callers"),
+            "the card note names the habits"
+        );
+        assert!(ui.input_tag("habits-easy").contains("active"));
+        for said in [
+            "Easy: plain digits, nobody slips, and callers slow down for you",
+            "Real: numbers as contesters send them, T\u{a0}for\u{a0}0, N\u{a0}for\u{a0}9 (TT7\u{a0}for\u{a0}7), now and then O\u{a0}for\u{a0}0 and ENN\u{a0}for\u{a0}5NN; nobody slows down for you.",
+            "Rough: real, with careless callers who fumble a serial, send their exchange too soon",
+        ] {
+            assert!(ui.has(said), "{said}");
+        }
+        // The examples follow the contest: a zone in CQ WW, and nothing to
+        // cut nor a serial to fumble in Field Day.
+        ui.click("contest-cq-ww");
+        assert!(ui.has("(A4\u{a0}for\u{a0}14)"));
+        assert!(ui.has("careless callers who send their exchange too soon"));
+        ui.click("contest-field-day");
+        assert!(ui.has("Real: Field Day callers send no number cut, so it plays as Easy"));
+        ui.click("contest-cq-wpx");
+        assert!(!ui.has("and, with Rough habits, now and then a station"));
+        ui.click("habits-rough");
+        ui.advance(50).await;
+        assert!(ui.input_tag("habits-rough").contains("active"));
+        assert_eq!(
+            ui.stored_settings().await.contest.contest_habits,
+            cw_core::CallerHabits::Rough
+        );
+        // At one at a time the band has QRM on it all the same.
+        assert!(ui.has("and, with Rough habits, now and then a station that is not calling you"));
+        // Its reset puts them back with the rest of the band.
+        ui.click("reset-band-conditions");
+        ui.advance(50).await;
+        assert_eq!(
+            ui.stored_settings().await.contest.contest_habits,
+            cw_core::CallerHabits::Easy
+        );
+        // Callsigns is group training: no callers, no habits.
+        ui.click("seg-callsigns");
+        ui.advance(50).await;
+        assert!(!ui.has("Caller habits"));
+        assert!(!ui.shows("habits-easy"));
+    });
+}
+
+/// Show copy is on Session shape in Contest mode only, says what it shows
+/// and what it costs a run, is stored, goes back off with its card's reset,
+/// and no preset touches it.
+#[test]
+fn show_copy_is_a_session_shape_switch_in_contest_mode() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(!ui.shows("switch-show-copy"), "not outside Contest");
+
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.shows("switch-show-copy"));
+        assert!(
+            ui.has("Shows each caller&#39;s text on the run screen a moment after it is sent.")
+        );
+        assert!(ui.has("marked assisted: it counts in every stat, but is greyed on the board and never placed there"));
+        // It sits on Session shape, after the minutes a run lasts.
+        let html = ui.html();
+        let shape = html.find(">Session shape<").expect("the card");
+        let minutes = html.find("Minutes per run").expect("its minutes");
+        let switch = html.find(r#"id="switch-show-copy""#).expect("the switch");
+        assert!(shape < minutes && minutes < switch);
+
+        ui.commit("switch-show-copy", "true");
+        assert!(ui.stored_settings().await.contest.contest_show_copy);
+        ui.click("preset-contester");
+        assert!(
+            ui.stored_settings().await.contest.contest_show_copy,
+            "a preset leaves it alone"
+        );
+        ui.click("reset-session-shape");
+        assert!(!ui.stored_settings().await.contest.contest_show_copy);
+    });
+}

@@ -83,9 +83,26 @@ pub fn start_send(
     transmission: &Transmission,
     settings: &TrainingSettings,
 ) -> Result<PlaybackWait, String> {
-    player.apply_band(settings);
     let plan = plan_transmission(transmission, settings);
-    let signal = player.start(transmission, &plan, settings)?;
+    start_planned(player, &plan, transmission, settings)
+}
+
+/// Send a send planned already on `player`, and hand back something to wait
+/// on: a contest's turn, every reply in it whole and your message stretched
+/// to the last of them, which [`plan_transmission`] would cut. `transcript`
+/// is what the turn says, for a player that keeps it; `plan` is all a player
+/// plays.
+///
+/// The band is brought in line first, as for any send, and the wait reads
+/// its length off the plan.
+pub fn start_planned(
+    player: &mut dyn MorseBackend,
+    plan: &PlannedTransmission,
+    transcript: &Transmission,
+    settings: &TrainingSettings,
+) -> Result<PlaybackWait, String> {
+    player.apply_band(settings);
+    let signal = player.start(transcript, plan, settings)?;
     Ok(PlaybackWait::new(&plan.wanted, signal))
 }
 
@@ -111,6 +128,7 @@ pub fn default_backend() -> Result<Box<dyn MorseBackend>, String> {
 pub mod fake {
     use super::epoch::{Epoch, Ticket};
     use super::*;
+    use cw_core::band::Qsb;
     use std::cell::{Cell, RefCell};
 
     #[derive(Clone, Debug, PartialEq)]
@@ -137,6 +155,17 @@ pub mod fake {
         Stall,
     }
 
+    /// One send as the player was handed it: what it plays, the fading it
+    /// plays with, and what it says.
+    #[derive(Clone, Debug)]
+    pub struct Started {
+        /// What it plays, and whether its wanted send went past the
+        /// receiver, as your message in a contest does.
+        pub plan: PlannedTransmission,
+        pub qsb: Option<Qsb>,
+        pub transcript: Transmission,
+    }
+
     #[derive(Default)]
     pub struct Recorder {
         pub calls: RefCell<Vec<Call>>,
@@ -146,9 +175,10 @@ pub mod fake {
         /// The page is out of sight, the way a hidden browser tab is: the
         /// audio clock parks, and nothing charges the stall budget.
         pub page_hidden: Cell<bool>,
-        /// Every transmission, in order, so a test can hear whether a repeated
-        /// group came from the same operator and who else was calling.
-        pub sent: RefCell<Vec<Transmission>>,
+        /// Every send, in order, so a test can hear whether a repeated group
+        /// came from the same operator and who else was calling, and what a
+        /// contest's turn played and said.
+        pub starts: RefCell<Vec<Started>>,
         /// Whether the receiver background is running. The real player keeps
         /// it on its own stream, outliving any one send, so a test that only
         /// watches sends cannot tell when it has been left playing.
@@ -156,6 +186,9 @@ pub mod fake {
         /// Sends that break before the good ones start, whatever `behaviour`
         /// says. One per send, so a recovery can be tested exactly.
         pub failures_left: Cell<u32>,
+        /// How long after it starts each send says it reaches the ear: none,
+        /// unless a test asks for some.
+        pub latency_sec: Cell<f64>,
     }
 
     impl Recorder {
@@ -201,15 +234,27 @@ pub mod fake {
 
         pub fn clear(&self) {
             self.calls.borrow_mut().clear();
-            self.sent.borrow_mut().clear();
+            self.starts.borrow_mut().clear();
         }
 
         pub fn sent(&self) -> Vec<Transmission> {
-            self.sent.borrow().clone()
+            self.starts
+                .borrow()
+                .iter()
+                .map(|start| start.transcript.clone())
+                .collect()
         }
 
         pub fn voices(&self) -> Vec<cw_core::StationVoice> {
-            self.sent.borrow().iter().map(|t| t.voice).collect()
+            self.starts
+                .borrow()
+                .iter()
+                .map(|start| start.transcript.voice)
+                .collect()
+        }
+
+        pub fn starts(&self) -> Vec<Started> {
+            self.starts.borrow().clone()
         }
 
         pub fn factory(self: &Rc<Self>) -> Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>> {
@@ -238,9 +283,14 @@ pub mod fake {
         ticket: Ticket,
         duration_ms: u32,
         played: Cell<u32>,
+        latency_sec: f64,
     }
 
     impl PlaybackSignal for FakeSignal {
+        fn heard_after_sec(&self) -> f64 {
+            self.latency_sec
+        }
+
         fn poll(&self) -> WaitFlags {
             if self.ticket.is_cancelled() {
                 return WaitFlags {
@@ -308,13 +358,17 @@ pub mod fake {
             &mut self,
             transmission: &Transmission,
             plan: &PlannedTransmission,
-            _settings: &TrainingSettings,
+            settings: &TrainingSettings,
         ) -> Result<Rc<dyn PlaybackSignal>, String> {
             self.recorder
                 .calls
                 .borrow_mut()
                 .push(Call::Start(transmission.text.clone()));
-            self.recorder.sent.borrow_mut().push(transmission.clone());
+            self.recorder.starts.borrow_mut().push(Started {
+                plan: plan.clone(),
+                qsb: Qsb::of(&settings.band),
+                transcript: transmission.clone(),
+            });
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
             }
@@ -325,6 +379,7 @@ pub mod fake {
                 ticket: self.epoch.arm(),
                 duration_ms,
                 played: Cell::new(0),
+                latency_sec: self.recorder.latency_sec.get(),
             }))
         }
 

@@ -128,6 +128,10 @@ pub const TESTERS: &[Tester] = &[
     },
 ];
 
+/// Dust is its own work. Contest mode took a few ideas from how
+/// MorseRunner plays a contest, and one line says so.
+pub const INSPIRATION: &str = "Contest mode takes some inspiration from MorseRunner.";
+
 /// The people in `credits`, by role, in the card's order, leaving out the
 /// roles nobody holds.
 fn by_role(credits: &[Credit]) -> Vec<(Role, Vec<Credit>)> {
@@ -200,8 +204,9 @@ pub fn CreditsCard(
                             }
                         }
                     }
+                    p { class: "muted", "{INSPIRATION}" }
                     p { class: "muted",
-                        "Dust {version} is free software, under the GNU General Public License version 3 or later, with permission to publish it in app stores: share it and change it, and what is built from it stays free. "
+                        "Dust {version} is free software, under the GNU General Public License version 3 or later, with permission to publish it in app stores for iOS, Android or any other platform as long as it stays free of charge and its source stays available: share it and change it, and what is built from it stays free. "
                         a {
                             class: "credit-link",
                             href: SOURCE_URL,
@@ -223,7 +228,8 @@ mod tests {
 
     /// The card, opened.
     fn render(credits: &'static [Credit], testers: &'static [Tester]) -> String {
-        let mut ui = Ui::new(CreditsCard, CreditsCardProps { credits, testers });
+        let props = CreditsCardProps { credits, testers };
+        let mut ui = Ui::new(CreditsCard, props);
         ui.open_disclosures();
         ui.html()
     }
@@ -363,6 +369,16 @@ mod tests {
         );
     }
 
+    /// Other programs get one line between them, not a list: Dust is its
+    /// own work, and only Contest mode borrowed ideas.
+    #[test]
+    fn other_programs_get_one_line() {
+        let html = render(CREDITS, TESTERS);
+        assert_eq!(html.matches("MorseRunner").count(), 1, "{html}");
+        assert!(html.contains(INSPIRATION), "{html}");
+        assert!(!html.contains("Built on"), "{html}");
+    }
+
     #[test]
     fn the_card_names_the_version_and_links_the_source() {
         let html = render(CREDITS, TESTERS);
@@ -370,6 +386,7 @@ mod tests {
         assert!(html.contains(SOURCE_URL));
         assert!(html.contains("GNU General Public License version 3"));
         assert!(html.contains("permission to publish it in app stores"));
+        assert!(html.contains("stays free of charge and its source stays available"));
         assert!(!html.contains("MIT"), "no other licence: {html}");
     }
 }

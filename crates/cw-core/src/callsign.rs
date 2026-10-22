@@ -26,11 +26,20 @@
 //! (`G3XYZ/P`), and last a station operating abroad (`DL/W1AW`). Tiers are
 //! cumulative, so moving up never takes practice away — a high tier sounds
 //! like a real band.
+//!
+//! A contest's callers are drawn the same way by [`generate_call`], which
+//! also says where each one is and can keep to the countries a contest
+//! hears ([`CallSpec`]). Reading a call back — its parts, its country and
+//! its WPX prefix — is [`parse_callsign`], [`country_of`] and [`wpx_prefix`].
+//! Beside the counts, the table holds each country's name, CQ zone and
+//! continent, the facts a contest scores by ([`country_name`]), with the
+//! prefixes cty.dat puts in another zone or on another continent.
 
 mod prefixes;
 
+use crate::contest::data::counted::FIELD_DAY_DX;
 use crate::rng::{Rng, SplitMix64};
-use prefixes::PREFIXES;
+use prefixes::{CONTINENT_PREFIXES, COUNTRIES, PREFIXES, ZONE_PREFIXES};
 
 pub const CALLSIGN_TIER_MIN: u32 = 1;
 pub const CALLSIGN_TIER_MAX: u32 = 6;
@@ -45,6 +54,113 @@ const PORTABLE_SHARE: f64 = 0.25;
 
 /// How often a tier that allows it sends a station operating abroad.
 const ABROAD_SHARE: f64 = 0.12;
+
+/// The same two shares in a contest. The tiers send portables and stations
+/// abroad often, because they are what is being practised there; a contest's
+/// callers are mostly at home, as on a real band.
+const CONTEST_PORTABLE_SHARE: f64 = 0.04;
+const CONTEST_ABROAD_SHARE: f64 = 0.03;
+
+/// The countries a contest's callers may be in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Countries {
+    /// Anywhere: WPX, CQ WW.
+    #[default]
+    Any,
+    /// W/VE as the ARRL DX contest counts it: the USA, without Alaska,
+    /// Hawaii or the islands, and Canada.
+    WVe,
+    /// Everyone else: who W/VE works in the ARRL DX contest.
+    NotWVe,
+    /// The USA with Alaska, Hawaii and its Caribbean islands, and Canada:
+    /// the stations an ARRL or RAC section covers.
+    NorthAmerica,
+    /// The USA with Alaska and Hawaii, and Canada: the stations whose state,
+    /// province or territory the NA Sprint's exchange sends.
+    UsAndCanada,
+    /// Who calls in Field Day: [`Self::NorthAmerica`], and now and then a
+    /// station anywhere else, as often as Field Day's entries send DX.
+    FieldDay,
+    /// Everyone outside [`Self::NorthAmerica`]: Field Day's DX.
+    OutsideNorthAmerica,
+}
+
+impl Countries {
+    /// Whether a station in `country`, by its DXCC primary prefix as the
+    /// table names it, may call.
+    pub fn admits(self, country: &str) -> bool {
+        let w_ve = matches!(country, "K" | "VE");
+        let states = w_ve || matches!(country, "KL" | "KH6");
+        let sections = states || matches!(country, "KP4" | "KP2");
+        match self {
+            Self::Any | Self::FieldDay => true,
+            Self::WVe => w_ve,
+            Self::NotWVe => !w_ve,
+            Self::NorthAmerica => sections,
+            Self::UsAndCanada => states,
+            Self::OutsideNorthAmerica => !sections,
+        }
+    }
+
+    /// The countries one caller is drawn from: a Field Day caller is in
+    /// North America but as often as Field Day's entries send DX, when it is
+    /// anywhere else; every other choice is itself, and draws nothing.
+    pub(crate) fn for_one_call(self, rng: &mut impl Rng) -> Self {
+        match self {
+            Self::FieldDay if rng.f64() * 100.0 < FIELD_DAY_DX => Self::OutsideNorthAmerica,
+            Self::FieldDay => Self::NorthAmerica,
+            countries => countries,
+        }
+    }
+}
+
+/// Which calls to draw: from which countries, and whether for a contest or
+/// for practice. The default is the tier's own draw, which Callsigns mode
+/// and the band send, and which never changes under them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CallSpec {
+    pub countries: Countries,
+    /// A contest's callers: portables and stations abroad come as often as
+    /// a contest hears them, not as often as the tier offers them for
+    /// practice, and no call is drawn that a contest would score in another
+    /// country than the one it is labelled with (Guantanamo Bay's).
+    pub contest: bool,
+}
+
+impl CallSpec {
+    /// A contest's callers, from `countries`.
+    pub const fn contest(countries: Countries) -> Self {
+        Self {
+            countries,
+            contest: true,
+        }
+    }
+}
+
+/// A call drawn for a station, and what the station it belongs to is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedCall {
+    /// The call as it is sent: `W1AW`, `G3XYZ/P`, `DL/W1AW`.
+    pub text: String,
+    /// The country the station is in, by its DXCC primary prefix: the host's
+    /// for a station operating abroad, whose contacts count for the country
+    /// it is in.
+    pub country: &'static str,
+    /// The call's own separator digit: the `1` of `W1AW`.
+    pub digit: char,
+    /// The prefix a station operating abroad signs first: the `DL` of
+    /// `DL/W1AW`.
+    pub host: Option<&'static str>,
+    /// What follows the slash of a portable: `P`, `M`, `QRP`, `A`, or a
+    /// call-area digit.
+    pub marker: Option<&'static str>,
+}
+
+impl AsRef<str> for GeneratedCall {
+    fn as_ref(&self) -> &str {
+        &self.text
+    }
+}
 
 /// The longest suffix in the table. Longer ones are special-event calls
 /// (`YL0YOTA`), which it leaves out.
@@ -175,6 +291,83 @@ const fn area(
     }
 }
 
+/// A country of the table: its name, CQ zone and continent.
+#[derive(Clone, Copy, Debug)]
+struct Country {
+    /// Its DXCC primary prefix, as [`Prefix::country`] names it.
+    key: &'static str,
+    name: &'static str,
+    zone: u32,
+    /// Its continent, by the two letters contests use: `EU`, `NA`.
+    continent: &'static str,
+}
+
+/// The country `key`, called `name`, in CQ zone `zone` on `continent`.
+const fn country(
+    key: &'static str,
+    name: &'static str,
+    zone: u32,
+    continent: &'static str,
+) -> Country {
+    Country {
+        key,
+        name,
+        zone,
+        continent,
+    }
+}
+
+/// The table's facts about the country `key`, if it is one of its.
+fn country_row(key: &str) -> Option<&'static Country> {
+    COUNTRIES.iter().find(|country| country.key == key)
+}
+
+/// What the country `key`, a DXCC primary prefix as [`country_of`] reads
+/// one, is called: "Japan". None for one the table does not hold.
+pub fn country_name(key: &str) -> Option<&'static str> {
+    country_row(key).map(|country| country.name)
+}
+
+/// The continent of a station in the country `key` whose call reads
+/// `text`, its prefix and digit (`TA1`), by the two letters contests use:
+/// `EU`, `NA`, `SA`, `AS`, `AF` or `OC`. The prefix's where the table puts
+/// it on another continent than its country's (European Turkey's TA1 is in
+/// Europe), and else the country's. None for a country the table does not
+/// hold.
+pub(crate) fn continent_in(key: &str, text: &str) -> Option<&'static str> {
+    CONTINENT_PREFIXES
+        .iter()
+        .find(|(country, prefix, _)| *country == key && *prefix == text)
+        .map(|(_, _, continent)| *continent)
+        .or_else(|| country_row(key).map(|country| country.continent))
+}
+
+/// What a continent's two letters stand for: "Europe". None for anything
+/// else.
+pub fn continent_name(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "AF" => "Africa",
+        "AS" => "Asia",
+        "EU" => "Europe",
+        "NA" => "North America",
+        "OC" => "Oceania",
+        "SA" => "South America",
+        _ => return None,
+    })
+}
+
+/// The CQ zone of a station in the country `key` whose call reads `text`,
+/// its prefix and the digit its zone goes by (`BY0`): the prefix's where
+/// the table puts it in another zone than its country's, and else the
+/// country's. None for a country the table does not hold.
+pub(crate) fn zone_in(key: &str, text: &str) -> Option<u32> {
+    ZONE_PREFIXES
+        .iter()
+        .find(|(country, prefix, _)| *country == key && *prefix == text)
+        .map(|(_, _, zone)| *zone)
+        .or_else(|| country_row(key).map(|country| country.zone))
+}
+
 impl Prefix {
     fn shape(&self) -> PrefixShape {
         if self.prefix.chars().any(|c| c.is_ascii_digit()) {
@@ -250,7 +443,7 @@ fn tier_at(tier: u32) -> &'static Tier {
 /// Draw from a weighted table. Weights are the point of these tables, so a
 /// table that somehow sums to nothing still yields its first entry rather than
 /// nothing at all.
-fn pick_weighted<'t, T>(table: &'t [(T, f64)], rng: &mut impl Rng) -> Option<&'t T> {
+pub(crate) fn pick_weighted<'t, T>(table: &'t [(T, f64)], rng: &mut impl Rng) -> Option<&'t T> {
     let total: f64 = table.iter().map(|(_, weight)| weight.max(0.0)).sum();
     if total <= 0.0 {
         return table.first().map(|(item, _)| item);
@@ -265,12 +458,12 @@ fn pick_weighted<'t, T>(table: &'t [(T, f64)], rng: &mut impl Rng) -> Option<&'t
     table.last().map(|(item, _)| item)
 }
 
-/// A prefix of a shape the tier allows, as often as real calls carry it with
-/// a suffix of a length the tier allows.
-fn pick_prefix(tier: &Tier, rng: &mut impl Rng) -> &'static Prefix {
+/// A prefix of a shape the tier allows, of a country `countries` admits, as
+/// often as real calls carry it with a suffix of a length the tier allows.
+fn pick_prefix(tier: &Tier, countries: Countries, rng: &mut impl Rng) -> &'static Prefix {
     let usable: Vec<(&'static Prefix, f64)> = PREFIXES
         .iter()
-        .filter(|prefix| tier.shapes.contains(&prefix.shape()))
+        .filter(|prefix| tier.shapes.contains(&prefix.shape()) && countries.admits(prefix.country))
         .map(|prefix| {
             let calls: f64 = prefix.lengths_in(tier).iter().map(|(_, calls)| calls).sum();
             (prefix, calls)
@@ -290,47 +483,101 @@ fn separator(prefix: &Prefix, rng: &mut impl Rng) -> char {
     pick_weighted(&digits, rng).copied().unwrap_or('1')
 }
 
-/// A suffix length both the tier and the country allow, as often as real
-/// calls of the prefix have it.
-fn suffix_len(tier: &Tier, prefix: &Prefix, rng: &mut impl Rng) -> usize {
-    pick_weighted(&prefix.lengths_in(tier), rng)
+/// Guantanamo Bay's calls: KG4 with a two-letter suffix. The table counts
+/// the rest of KG4 under the US, with KG's other digits, whose two-letter
+/// suffixes are the US's own, and does not hold Guantanamo Bay.
+pub(crate) const GUANTANAMO: (&str, char, usize) = ("KG", '4', 2);
+
+/// A suffix length both the tier and the country allow after `prefix` and
+/// `digit`, as often as real calls of the prefix have it. For a `contest`,
+/// never one that would make the call another country's, as KG4 with two
+/// letters would be Guantanamo Bay's, which a contest scores apart from the
+/// US it is labelled with. Practice keeps them: a call is a call there, and
+/// Callsigns mode sends what it always sent.
+fn suffix_len(
+    tier: &Tier,
+    prefix: &Prefix,
+    digit: char,
+    contest: bool,
+    rng: &mut impl Rng,
+) -> usize {
+    let lengths: Vec<(usize, f64)> = prefix
+        .lengths_in(tier)
+        .into_iter()
+        .filter(|(len, _)| !contest || (prefix.prefix, digit, *len) != GUANTANAMO)
+        .collect();
+    pick_weighted(&lengths, rng)
         .copied()
         .unwrap_or(tier.suffix_min.max(1))
 }
 
 /// One realistic callsign at this tier.
 pub fn generate_callsign(tier: u32, rng: &mut impl Rng) -> String {
+    generate_call(tier, CallSpec::default(), rng).text
+}
+
+/// The digit markers a portable can sign, as text: `W1AW/4`.
+const AREA_DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+/// One realistic call at this tier, from the countries `spec` admits, and
+/// what the station is. With the default spec it is drawn exactly as
+/// [`generate_callsign`] draws one, draw for draw. Its country is the one
+/// [`country_of`] reads off it, so the two never disagree where the table
+/// gives one prefix and digit to two countries (`R9`, `VP2`).
+pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> GeneratedCall {
     let tier = tier_at(tier);
-    let prefix = pick_prefix(tier, rng);
-    let mut call = prefix.prefix.to_string();
-    call.push(separator(prefix, rng));
-    for _ in 0..suffix_len(tier, prefix, rng) {
-        call.push(LETTERS[rng.usize_in(0, LETTERS.len() - 1)]);
+    let countries = spec.countries.for_one_call(rng);
+    let prefix = pick_prefix(tier, countries, rng);
+    let digit = separator(prefix, rng);
+    let mut call = GeneratedCall {
+        text: format!("{}{digit}", prefix.prefix),
+        country: prefix.country,
+        digit,
+        host: None,
+        marker: None,
+    };
+    for _ in 0..suffix_len(tier, prefix, digit, spec.contest, rng) {
+        call.text.push(LETTERS[rng.usize_in(0, LETTERS.len() - 1)]);
     }
+    let (portable_share, abroad_share) = if spec.contest {
+        (CONTEST_PORTABLE_SHARE, CONTEST_ABROAD_SHARE)
+    } else {
+        (PORTABLE_SHARE, ABROAD_SHARE)
+    };
     // One of the two at most: abroad, or portable at home.
     if tier.abroad
-        && rng.f64() < ABROAD_SHARE
-        && let Some(host) = pick_host(prefix.country, rng)
+        && rng.f64() < abroad_share
+        && let Some((host, country)) = pick_host(prefix.country, countries, rng)
     {
-        return format!("{host}/{call}");
-    }
-    if tier.portable && rng.f64() < PORTABLE_SHARE {
-        call.push('/');
-        if prefix.area_marker && rng.f64() < AREA_MARKER_SHARE {
-            call.push(char::from_digit(rng.usize_in(0, 9) as u32, 10).unwrap_or('1'));
-        } else if let Some(marker) = pick_weighted(PORTABLE_MARKERS, rng) {
-            call.push_str(marker);
+        call.text = format!("{host}/{}", call.text);
+        call.host = Some(host);
+        call.country = country;
+    } else if tier.portable && rng.f64() < portable_share {
+        call.marker = if prefix.area_marker && rng.f64() < AREA_MARKER_SHARE {
+            Some(AREA_DIGITS[rng.usize_in(0, 9)])
+        } else {
+            pick_weighted(PORTABLE_MARKERS, rng).copied()
+        };
+        if let Some(marker) = call.marker {
+            call.text.push('/');
+            call.text.push_str(marker);
         }
     }
+    call.country = country_of(&call.text).unwrap_or(call.country);
     call
 }
 
-/// A country to be operating in that is not `home`.
-fn pick_host(home: &str, rng: &mut impl Rng) -> Option<&'static str> {
-    let away: Vec<(&'static str, f64)> = HOSTS
+/// A country to be operating in that is not `home` and that `countries`
+/// admits: the prefix signed first, and its country.
+fn pick_host(
+    home: &str,
+    countries: Countries,
+    rng: &mut impl Rng,
+) -> Option<(&'static str, &'static str)> {
+    let away: Vec<((&'static str, &'static str), f64)> = HOSTS
         .iter()
-        .filter(|(_, country, _)| *country != home)
-        .map(|(prefix, _, weight)| (*prefix, *weight))
+        .filter(|(_, country, _)| *country != home && countries.admits(country))
+        .map(|(prefix, country, weight)| ((*prefix, *country), *weight))
         .collect();
     pick_weighted(&away, rng).copied()
 }
@@ -354,10 +601,9 @@ pub fn tier_examples(tier: u32) -> Vec<String> {
     (0..4).map(|_| generate_callsign(tier, &mut rng)).collect()
 }
 
-/// A callsign taken apart: what the tests hold every generated call to.
-#[cfg(test)]
+/// A callsign taken apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CallsignParts<'a> {
+pub struct CallsignParts<'a> {
     /// The country a station operating abroad signs first: the `DL` of
     /// `DL/W1AW`.
     pub host: Option<&'a str>,
@@ -372,9 +618,11 @@ pub(crate) struct CallsignParts<'a> {
 /// The separator is the *last* digit before the suffix, which is what makes
 /// `9A1AA` split as `9A` + `1` + `AA` rather than at its leading digit. A
 /// slash has a marker after the call (`G3XYZ/P`) or a host country before it
-/// (`DL/W1AW`); whichever side is a whole call is the call.
-#[cfg(test)]
-pub(crate) fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
+/// (`DL/W1AW`); whichever side is a whole call is the call. Some hosts read
+/// as a call too (`VP2M`, `VK9X`, `3D2R`), so when both sides do, the shorter
+/// is the host or the marker, as MorseRunner's `ExtractPrefix` takes it, and
+/// at equal lengths the side with the longer suffix is the call.
+pub fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
     let Some((left, right)) = call.split_once('/') else {
         return parse_base(call, None, None);
     };
@@ -387,10 +635,49 @@ pub(crate) fn parse_callsign(call: &str) -> Option<CallsignParts<'_>> {
     if !marker(left) || !marker(right) {
         return None;
     }
-    parse_base(left, None, Some(right)).or_else(|| parse_base(right, Some(left), None))
+    match (
+        parse_base(left, None, Some(right)),
+        parse_base(right, Some(left), None),
+    ) {
+        (Some(on_left), Some(on_right)) => {
+            let left_is_call =
+                (left.len(), on_left.suffix.len()) > (right.len(), on_right.suffix.len());
+            Some(if left_is_call { on_left } else { on_right })
+        }
+        (on_left, on_right) => on_left.or(on_right),
+    }
 }
 
-#[cfg(test)]
+/// Why `call` is not a callsign, in a few plain words ("needs a digit"), or
+/// `None` when [`parse_callsign`] reads it. `call` is written as a callsign
+/// is kept: upper case, with slashes only inside it. Of the two sides of a
+/// slash, the longer is taken for the call, as the one meant.
+pub fn call_fault(call: &str) -> Option<&'static str> {
+    if parse_callsign(call).is_some() {
+        return None;
+    }
+    if call.matches('/').count() > 1 {
+        return Some("one slash at most");
+    }
+    let base = match call.split_once('/') {
+        Some((left, right)) if right.len() > left.len() => right,
+        Some((left, _)) => left,
+        None => call,
+    };
+    let Some(digit) = base.rfind(|c: char| c.is_ascii_digit()) else {
+        return Some("needs a digit");
+    };
+    Some(if digit == 0 {
+        "needs a prefix before the digit"
+    } else if digit + 1 == base.len() {
+        "needs letters after the last digit"
+    } else {
+        "only letters, digits and a slash"
+    })
+}
+
+/// One side of a call: `prefix + separator + suffix`, or `None` if it is not
+/// a whole call.
 fn parse_base<'a>(
     base: &'a str,
     host: Option<&'a str>,
@@ -418,6 +705,150 @@ fn parse_base<'a>(
         suffix,
         portable,
     })
+}
+
+/// What can follow a call's slash without saying where it is: portable,
+/// mobile, low power, an alternative address, at sea or in the air. Contest
+/// rules count such a call by its own prefix.
+const MODIFIERS: &[&str] = &["P", "M", "QRP", "A", "MM", "AM"];
+
+impl<'a> CallsignParts<'a> {
+    /// Where the station says it is, when that is not its own call's
+    /// country: the host it signs first (`DL/W1AW`), or a country after the
+    /// slash (`W1AW/KH6`). A single digit after it is a call area at home,
+    /// and a modifier says nothing about where.
+    fn place(&self) -> Option<&'a str> {
+        self.host.or(self
+            .portable
+            .filter(|marker| !MODIFIERS.contains(marker) && self.area_digit().is_none()))
+    }
+
+    /// The call-area digit after the slash: the `4` of `W1AW/4`.
+    fn area_digit(&self) -> Option<char> {
+        let marker = self.portable?;
+        let mut chars = marker.chars();
+        let digit = chars.next().filter(char::is_ascii_digit)?;
+        chars.next().is_none().then_some(digit)
+    }
+
+    /// Where the station says it is: the one walk its country, its WPX
+    /// prefix and its call area all read.
+    fn area(&self) -> CallArea<'a> {
+        let Some(place) = self.place() else {
+            return CallArea {
+                prefix: self.prefix,
+                digit: Some(self.separator),
+                marker: self.area_digit(),
+            };
+        };
+        let host = host_prefix(place);
+        let (prefix, digit) = match host.char_indices().last() {
+            Some((at, digit)) if digit.is_ascii_digit() => (&host[..at], Some(digit)),
+            _ => (host, None),
+        };
+        CallArea {
+            prefix,
+            digit,
+            marker: None,
+        }
+    }
+}
+
+/// Where a station signing a call says it is ([`call_area`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CallArea<'a> {
+    /// The prefix of the country it is in: a host's, signed before the call
+    /// or after it (`VE3/W1AW` and `W1AW/VE3` are `VE`), cut as
+    /// [`host_prefix`] cuts one, or else its own.
+    pub prefix: &'a str,
+    /// That prefix's digit: a host's (the `3` of `VE3`), none for a host
+    /// with none (`PA/N8XYZ`), or else the call's own.
+    pub digit: Option<char>,
+    /// A call-area digit after the slash, which says where at home the
+    /// station is: the `4` of `W1AW/4`.
+    pub marker: Option<char>,
+}
+
+/// A host as MorseRunner cuts one: its letters after the last digit go, but
+/// two characters stay (`VP2M` is `VP2`, `9A` stays `9A`).
+fn host_prefix(place: &str) -> &str {
+    let keep = place
+        .rfind(|c: char| c.is_ascii_digit())
+        .map_or(0, |at| at + 1)
+        .max(2)
+        .min(place.len());
+    &place[..keep]
+}
+
+/// A call's WPX prefix, the CQ WPX contest's multiplier, or `None` if it is
+/// not a call.
+///
+/// It is everything up to the last digit (`9A1AA` is `9A1`); a call-area
+/// digit after the slash takes the place of that digit (`W1XYZ/4` is `W4`);
+/// a station abroad counts by its host, cut as MorseRunner cuts one (`VP2M`
+/// is `VP2`), with a `0` added when it has no digit at its end (`PA/N8XYZ`
+/// is `PA0`); a country after the slash counts as a host (`W1XYZ/KH6` is
+/// `KH6`, `W1XYZ/VE` is `VE0`); and the modifiers `/P`, `/M`, `/QRP`, `/A`,
+/// `/MM` and `/AM` change nothing.
+pub fn wpx_prefix(call: &str) -> Option<String> {
+    let area = call_area(call)?;
+    let digit = area.marker.or(area.digit).unwrap_or('0');
+    Some(format!("{}{digit}", area.prefix))
+}
+
+/// The country a call is in, by its DXCC primary prefix as the table names
+/// it (`K`, `DL`, `UA9`), or `None` if it is not a call or the table cannot
+/// place it: its prefix is not in the table, or is one that countries share
+/// by a digit none of them has (`VP8`). A station abroad is in its host's
+/// country.
+pub fn country_of(call: &str) -> Option<&'static str> {
+    let area = call_area(call)?;
+    let text: String = area.prefix.chars().chain(area.digit).collect();
+    country_by_prefix(&text)
+}
+
+/// Where a station signing `call` says it is: the prefix and digit of the
+/// country it is in, and a call-area digit after the slash. None for what
+/// is not a call.
+pub(crate) fn call_area(call: &str) -> Option<CallArea<'_>> {
+    parse_callsign(call).map(|parts| parts.area())
+}
+
+/// The country of `text`, a call's prefix and digit (`R9`, `KH6`) or a host
+/// (`DL`, `HB9`, `S5`), as the table places it: an entry whose prefix and a
+/// digit its calls have spell the whole of it, or whose prefix alone does.
+/// Where countries share it, the one with the most calls that way wins: `R9`
+/// is Asiatic Russia, `EA8` the Canaries. A digit the table has never seen
+/// after a prefix still places it when one country has that prefix (`KG3` is
+/// the USA), and nothing places a prefix the table lacks: `C31`, `NL7`,
+/// `VP8` are `None` rather than a country that merely shares a letter.
+fn country_by_prefix(text: &str) -> Option<&'static str> {
+    // The digit that follows `entry`'s prefix and ends `text`.
+    let digit_after = |entry: &Prefix| {
+        let mut rest = text.strip_prefix(entry.prefix)?.chars();
+        let digit = rest.next()?.to_digit(10)?;
+        rest.next().is_none().then_some(digit as usize)
+    };
+    PREFIXES
+        .iter()
+        .filter_map(|entry| {
+            let calls = if entry.prefix == text {
+                entry.digits.iter().sum()
+            } else {
+                entry.digits[digit_after(entry)?]
+            };
+            (calls > 0).then_some((calls, entry.country))
+        })
+        .max_by_key(|(calls, _)| *calls)
+        .map(|(_, country)| country)
+        .or_else(|| {
+            let mut countries = PREFIXES
+                .iter()
+                .filter(|entry| digit_after(entry).is_some())
+                .map(|entry| entry.country);
+            let first = countries.next()?;
+            countries.all(|country| country == first).then_some(first)
+        })
 }
 
 #[cfg(test)]
@@ -608,6 +1039,47 @@ mod tests {
         assert!(parse_callsign("DL/W1AW").is_some_and(|parts| parts.host == Some("DL")));
     }
 
+    /// A call that does not read says why, and one that does says nothing,
+    /// whatever was typed and kept.
+    #[test]
+    fn what_is_not_a_callsign_says_why() {
+        for (call, fault) in [
+            ("ABC", "needs a digit"),
+            ("", "needs a digit"),
+            ("1AW", "needs a prefix before the digit"),
+            ("W1", "needs letters after the last digit"),
+            ("DL1AB2", "needs letters after the last digit"),
+            ("W1A/P/M", "one slash at most"),
+            ("P/W1", "needs letters after the last digit"),
+            ("DL/ABCD", "needs a digit"),
+        ] {
+            assert_eq!(call_fault(call), Some(fault), "{call:?}");
+        }
+        let mut rng = SplitMix64::new(11);
+        for tier in 1..=CALLSIGN_TIER_MAX {
+            for _ in 0..500 {
+                let call = generate_callsign(tier, &mut rng);
+                assert_eq!(call_fault(&call), None, "{call}");
+            }
+        }
+        for typed in [
+            "K",
+            "KK",
+            "9A",
+            "Q/1",
+            "A/B",
+            "W1AW/P",
+            "DL/W1AW",
+            "ABCDEFGHIJ1",
+        ] {
+            assert_eq!(
+                call_fault(typed).is_none(),
+                parse_callsign(typed).is_some(),
+                "{typed:?}"
+            );
+        }
+    }
+
     /// The countries whose real calls include `prefix`, then `digit`, then a
     /// suffix `len` letters long.
     fn issuing(prefix: &str, digit: char, len: usize) -> Vec<&'static Prefix> {
@@ -793,6 +1265,108 @@ mod tests {
         assert!(share("9A") > 0.0, "some Croats");
     }
 
+    /// Every country the counts keep has its name, CQ zone and continent,
+    /// and nothing else has; zones run 1 to 40, continents are the six.
+    #[test]
+    fn every_country_has_a_name_a_zone_and_a_continent() {
+        for entry in PREFIXES {
+            assert!(country_row(entry.country).is_some(), "{}", entry.country);
+        }
+        for country in COUNTRIES {
+            assert!(
+                PREFIXES.iter().any(|entry| entry.country == country.key),
+                "{}",
+                country.key
+            );
+            assert!((1..=40).contains(&country.zone), "{}", country.key);
+            assert!(
+                continent_name(country.continent).is_some(),
+                "{}",
+                country.key
+            );
+            assert!(!country.name.is_empty());
+        }
+        let mut keys: Vec<&str> = COUNTRIES.iter().map(|country| country.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), COUNTRIES.len(), "a country listed twice");
+        for (country, prefix, zone) in ZONE_PREFIXES {
+            assert!(country_row(country).is_some(), "{country} {prefix}");
+            assert!((1..=40).contains(zone), "{prefix}");
+            assert_ne!(
+                Some(*zone),
+                country_row(country).map(|row| row.zone),
+                "{prefix}"
+            );
+            assert!(prefix.ends_with(|c: char| c.is_ascii_digit()), "{prefix}");
+        }
+        // The US and Canada go by state and province, entered by hand.
+        assert!(
+            ZONE_PREFIXES
+                .iter()
+                .all(|(country, _, _)| !matches!(*country, "K" | "VE"))
+        );
+        for (country, prefix, continent) in CONTINENT_PREFIXES {
+            assert!(continent_name(continent).is_some(), "{prefix}");
+            assert_ne!(
+                Some(*continent),
+                country_row(country).map(|row| row.continent),
+                "{prefix}"
+            );
+            assert!(prefix.ends_with(|c: char| c.is_ascii_digit()), "{prefix}");
+        }
+    }
+
+    /// A sample of the facts, as cty.dat gives them: names, zones and
+    /// continents, Alaska and Hawaii countries of their own, China's zones
+    /// on a prefix and its digit, and the continents of WAE entities the
+    /// table counts under another country: European Turkey and African
+    /// Italy.
+    #[test]
+    fn the_countries_are_where_cty_dat_puts_them() {
+        for (key, name, zone, continent) in [
+            ("K", "United States", 5, "NA"),
+            ("DL", "Fed. Rep. of Germany", 14, "EU"),
+            ("JA", "Japan", 25, "AS"),
+            ("UA", "European Russia", 16, "EU"),
+            ("UA9", "Asiatic Russia", 17, "AS"),
+            ("VK", "Australia", 30, "OC"),
+            ("PY", "Brazil", 11, "SA"),
+            ("ZS", "South Africa", 38, "AF"),
+            ("KL", "Alaska", 1, "NA"),
+            ("KH6", "Hawaii", 31, "OC"),
+            ("KP4", "Puerto Rico", 8, "NA"),
+            ("EA8", "Canary Islands", 33, "AF"),
+            ("TF", "Iceland", 40, "EU"),
+        ] {
+            assert_eq!(country_name(key), Some(name), "{key}");
+            assert_eq!(zone_in(key, ""), Some(zone), "{key}");
+            assert_eq!(continent_in(key, ""), Some(continent), "{key}");
+        }
+        assert_eq!(zone_in("BY", "BY1"), Some(24));
+        assert_eq!(zone_in("BY", "BY0"), Some(23));
+        assert_eq!(zone_in("BY", "BG9"), Some(23));
+        assert_eq!(zone_in("BY", "3H0"), Some(23));
+        assert_eq!(zone_in("I", "IG9"), Some(33));
+        assert_eq!(zone_in("I", "I1"), Some(15));
+        for prefix in ["TA1", "TB1", "TC1", "YM1"] {
+            assert_eq!(continent_in("TA", prefix), Some("EU"), "{prefix}");
+            assert_eq!(zone_in("TA", prefix), Some(20), "{prefix}");
+        }
+        assert_eq!(continent_in("TA", "TA2"), Some("AS"));
+        assert_eq!(continent_in("I", "IH9"), Some("AF"));
+        // An override is its country's alone.
+        assert_eq!(zone_in("DL", "BY0"), Some(14));
+        assert_eq!(continent_in("DL", "TA1"), Some("EU"));
+        assert_eq!(continent_in("JA", "TA1"), Some("AS"));
+        assert_eq!(country_name("XX"), None);
+        assert_eq!(continent_in("XX", "XX1"), None);
+        assert_eq!(zone_in("XX", "XX1"), None);
+        assert_eq!(continent_name("EU"), Some("Europe"));
+        assert_eq!(continent_name("NA"), Some("North America"));
+        assert_eq!(continent_name("XX"), None);
+    }
+
     #[test]
     fn a_weighted_table_always_yields_something() {
         let mut rng = SplitMix64::new(3);
@@ -802,6 +1376,318 @@ mod tests {
         let table = [("rare", 0.0), ("common", 1.0)];
         for _ in 0..1_000 {
             assert_eq!(pick_weighted(&table, &mut rng), Some(&"common"));
+        }
+    }
+
+    /// The calls Callsigns mode sends must never change under it: a contest's
+    /// draw shares the code, and only a spec of its own may draw differently.
+    #[test]
+    fn generate_callsign_draws_what_it_always_drew() {
+        let golden: [&[&str]; 6] = [
+            &[
+                "N2CD", "N7RF", "R0LL", "N3AR", "N8YY", "R2NW", "W5TF", "F4FF", "W4DX", "W6TP",
+                "K2EO", "W1MV",
+            ],
+            &[
+                "M7UHW", "F6HHK", "W3BN", "M6FXI", "W3ULJ", "N6VBJ", "G0AWY", "K5QTZ", "N6ARB",
+                "W1BWR", "F1RLX", "K1FBO",
+            ],
+            &[
+                "W4LK", "GW7ZMK", "RU4YT", "W4ZDB", "OM1OW", "OZ1UL", "W4DG", "WB2NBO", "F8WP",
+                "OM4LEK", "HB9FG", "EA6JD",
+            ],
+            &[
+                "KD8ENR", "JP3LTE", "JJ1ALW", "UB8N", "K0RS", "EG1WPO", "W7BMC", "OE1JPD", "W0JIW",
+                "M0IEG", "DU9LX", "R3WP",
+            ],
+            &[
+                "YD8YDG", "AA2SO", "VK4ZB", "GW3KRZ/P", "W0HAF", "TA0XJ", "KC1WHQ/8", "IK5LCF",
+                "WB2OBU", "2M0OKA", "W9FYP", "DL1YE/P",
+            ],
+            &[
+                "RD3HG",
+                "DL/PU5KSF",
+                "HZ1BI/M",
+                "SP/W6PJO",
+                "UA0XDQ",
+                "LZ7AX",
+                "K2AZ",
+                "W3QFS",
+                "R3RY",
+                "EA5QZ",
+                "N0YC",
+                "DL5RWL",
+            ],
+        ];
+        for (tier, expected) in (CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX).zip(golden) {
+            let mut rng = SplitMix64::new(0x00C0_FFEE ^ u64::from(tier));
+            let drawn: Vec<String> = (0..expected.len())
+                .map(|_| generate_callsign(tier, &mut rng))
+                .collect();
+            assert_eq!(drawn, expected, "tier {tier}");
+        }
+        // KG4 with two letters is Guantanamo Bay's, which only a contest
+        // leaves out (`no_contest_call_is_guantanamo_bays`): practice draws
+        // it where it always did, a few times in 20,000, and the calls after
+        // it as they always came.
+        for (tier, at, expected) in [
+            (3, 7_277, ["KG4SC", "AF2LY", "SQ5ZL"]),
+            (4, 3_785, ["KG4ID", "W8TD", "OP5K"]),
+        ] {
+            let mut rng = SplitMix64::new(0xABCD ^ u64::from(tier));
+            for _ in 0..at {
+                generate_callsign(tier, &mut rng);
+            }
+            let drawn: Vec<String> = (0..expected.len())
+                .map(|_| generate_callsign(tier, &mut rng))
+                .collect();
+            assert_eq!(drawn, expected, "tier {tier}");
+        }
+    }
+
+    fn generated(tier: u32, spec: CallSpec, count: usize) -> Vec<GeneratedCall> {
+        let mut rng = SplitMix64::new(u64::from(tier).wrapping_mul(0x9E37_79B9) ^ 0xCA11);
+        (0..count)
+            .map(|_| generate_call(tier, spec, &mut rng))
+            .collect()
+    }
+
+    /// Every call a contest can send reads back as a call, with the parts
+    /// the generator says it has.
+    #[test]
+    fn every_generated_call_parses_back_into_its_parts() {
+        for spec in [CallSpec::default(), CallSpec::contest(Countries::Any)] {
+            for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+                for call in generated(tier, spec, 10_000) {
+                    let parts = parse_callsign(&call.text)
+                        .unwrap_or_else(|| panic!("tier {tier}: {:?} does not parse", call.text));
+                    assert_eq!(parts.separator, call.digit, "{call:?}");
+                    assert_eq!(parts.host, call.host, "{call:?}");
+                    assert_eq!(parts.portable, call.marker, "{call:?}");
+                    assert_eq!(country_of(&call.text), Some(call.country), "{call:?}");
+                }
+            }
+        }
+    }
+
+    /// A spec keeps to its countries, by what the generator says and by what
+    /// the call itself reads as.
+    #[test]
+    fn each_spec_gives_only_its_countries() {
+        let all = [
+            Countries::Any,
+            Countries::WVe,
+            Countries::NotWVe,
+            Countries::NorthAmerica,
+            Countries::UsAndCanada,
+            Countries::FieldDay,
+            Countries::OutsideNorthAmerica,
+        ];
+        for countries in all {
+            for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
+                let calls = generated(tier, CallSpec::contest(countries), 2_000);
+                for call in &calls {
+                    assert!(countries.admits(call.country), "{countries:?}: {call:?}");
+                    let read = country_of(&call.text).expect("a country");
+                    assert!(
+                        countries.admits(read),
+                        "{countries:?}: {call:?} reads as {read}"
+                    );
+                }
+            }
+        }
+        // The specs mean what they say about the edges of W/VE.
+        assert!(Countries::WVe.admits("K") && Countries::WVe.admits("VE"));
+        assert!(!Countries::WVe.admits("KH6") && !Countries::WVe.admits("KL"));
+        assert!(Countries::NotWVe.admits("KH6") && !Countries::NotWVe.admits("VE"));
+        assert!(Countries::NorthAmerica.admits("KL") && Countries::NorthAmerica.admits("KP4"));
+        assert!(!Countries::NorthAmerica.admits("XE") && !Countries::NorthAmerica.admits("DL"));
+        // The Sprint's callers each have a state or province to send.
+        for country in ["K", "VE", "KL", "KH6"] {
+            assert!(Countries::UsAndCanada.admits(country), "{country}");
+        }
+        for country in ["KP4", "KP2", "XE", "DL"] {
+            assert!(!Countries::UsAndCanada.admits(country), "{country}");
+        }
+        // Alaska, Hawaii and the islands do call in a North American contest.
+        let na = generated(
+            CALLSIGN_TIER_MAX,
+            CallSpec::contest(Countries::NorthAmerica),
+            4_000,
+        );
+        assert!(na.iter().any(|call| call.country == "KL"));
+        assert!(na.iter().any(|call| call.country == "KH6"));
+        assert!(na.iter().any(|call| call.country == "VE"));
+        // Field Day's callers are North American but for its DX, about one
+        // in a hundred, as its entries have them.
+        let field_day = generated(3, CallSpec::contest(Countries::FieldDay), 20_000);
+        let dx = field_day
+            .iter()
+            .filter(|call| !Countries::NorthAmerica.admits(call.country))
+            .count();
+        assert!(dx > 100 && dx < 300, "{dx} of 20000 DX");
+        for country in ["KP4", "KP2", "KL", "KH6", "K", "VE"] {
+            assert!(!Countries::OutsideNorthAmerica.admits(country), "{country}");
+        }
+        assert!(Countries::OutsideNorthAmerica.admits("XE"));
+        assert!(Countries::FieldDay.admits("DL") && Countries::FieldDay.admits("K"));
+    }
+
+    /// KG4 with two letters is Guantanamo Bay's, so no contest's US caller
+    /// is drawn that way, though KG4 has one- and three-letter suffixes and
+    /// KG's other digits two-letter ones. Practice still draws them
+    /// (`generate_callsign_draws_what_it_always_drew`).
+    #[test]
+    fn no_contest_call_is_guantanamo_bays() {
+        let kg: Vec<GeneratedCall> = generated(3, CallSpec::contest(Countries::WVe), 60_000)
+            .into_iter()
+            .filter(|call| call.text.starts_with("KG"))
+            .collect();
+        let suffix = |call: &GeneratedCall| call.text.len() - 3;
+        assert!(kg.iter().any(|call| call.digit == '4'));
+        assert!(kg.iter().any(|call| call.digit != '4' && suffix(call) == 2));
+        for call in &kg {
+            assert!(call.digit != '4' || suffix(call) != 2, "{call:?}");
+        }
+    }
+
+    /// A contest's callers are mostly at home: portables and stations abroad
+    /// come at the contest shares, not the tier's.
+    #[test]
+    fn a_contest_hears_few_portables_and_few_stations_abroad() {
+        let share = |calls: &[GeneratedCall], of: fn(&GeneratedCall) -> bool| {
+            calls.iter().filter(|call| of(call)).count() as f64 / calls.len() as f64
+        };
+        let contest = generated(CALLSIGN_TIER_MAX, CallSpec::contest(Countries::Any), 20_000);
+        let abroad = share(&contest, |call| call.host.is_some());
+        let portable = share(&contest, |call| call.marker.is_some());
+        assert!((0.02..0.04).contains(&abroad), "{abroad:.3} abroad");
+        assert!((0.03..0.05).contains(&portable), "{portable:.3} portable");
+        let practice = generated(CALLSIGN_TIER_MAX, CallSpec::default(), 20_000);
+        assert!(share(&practice, |call| call.host.is_some()) > 0.1);
+        assert!(share(&practice, |call| call.marker.is_some()) > 0.15);
+        // Below the tiers that send them, a contest sends neither.
+        let tier4 = generated(4, CallSpec::contest(Countries::Any), 2_000);
+        assert!(tier4.iter().all(|call| !call.text.contains('/')));
+    }
+
+    /// Where a station says it is: its own call area, one after the slash,
+    /// or a host's.
+    #[test]
+    fn a_call_says_which_call_area_it_is_in() {
+        let area = |prefix, digit, marker| {
+            Some(CallArea {
+                prefix,
+                digit,
+                marker,
+            })
+        };
+        for (call, read) in [
+            ("K5XYZ", area("K", Some('5'), None)),
+            ("VE3ABC", area("VE", Some('3'), None)),
+            ("W1AW/4", area("W", Some('1'), Some('4'))),
+            ("W1AW/P", area("W", Some('1'), None)),
+            ("VE3/W1AW", area("VE", Some('3'), None)),
+            ("W1AW/VE3", area("VE", Some('3'), None)),
+            ("W1AW/KH6", area("KH", Some('6'), None)),
+            ("VP2E/DL1ABC", area("VP", Some('2'), None)),
+            ("PA/N8XYZ", area("PA", None, None)),
+            ("ABC", None),
+        ] {
+            assert_eq!(call_area(call), read, "{call}");
+        }
+    }
+
+    #[test]
+    fn a_wpx_prefix_is_read_as_the_contest_reads_it() {
+        let cases = [
+            // Up to the last digit.
+            ("K5XYZ", "K5"),
+            ("DL1ABC", "DL1"),
+            ("9A1AA", "9A1"),
+            ("2E0ABC", "2E0"),
+            ("VP2EAB", "VP2"),
+            // A call-area digit takes the place of the call's own.
+            ("W1XYZ/4", "W4"),
+            ("JA1ABC/3", "JA3"),
+            // Portable, mobile and low power change nothing.
+            ("W1XYZ/P", "W1"),
+            ("W1XYZ/M", "W1"),
+            ("DL1ABC/QRP", "DL1"),
+            ("G3XYZ/A", "G3"),
+            ("G3XYZ/MM", "G3"),
+            // A host is the prefix, with a 0 when it ends without a digit.
+            ("PA/N8XYZ", "PA0"),
+            ("F/G3XYZ", "F0"),
+            ("9A/DL1ABC", "9A0"),
+            ("EA8/G3XYZ", "EA8"),
+            ("HB9/DL1ABC", "HB9"),
+            ("S5/W1AW", "S5"),
+            // And so is a country after the call.
+            ("W1XYZ/KH6", "KH6"),
+            ("W1XYZ/VE", "VE0"),
+            // A host that reads as a call is still the host: the shorter side.
+            ("VP2M/G3XYZ", "VP2"),
+            ("G3XYZ/VP2M", "VP2"),
+            ("VK9X/DL1ABC", "VK9"),
+            ("3D2R/W1AW", "3D2"),
+        ];
+        for (call, prefix) in cases {
+            assert_eq!(wpx_prefix(call).as_deref(), Some(prefix), "{call}");
+        }
+        for not_a_call in ["", "K5", "K5?", "W1A/P/M", "k5xyz"] {
+            assert_eq!(wpx_prefix(not_a_call), None, "{not_a_call:?}");
+        }
+    }
+
+    #[test]
+    fn a_country_is_the_longest_match_and_a_host_comes_first() {
+        let cases = [
+            ("K1ABC", "K"),
+            ("W1AW", "K"),
+            ("AA1AA", "K"),
+            ("DL1ABC", "DL"),
+            ("VE3ABC", "VE"),
+            ("VY2AB", "VE"),
+            ("KH6XYZ", "KH6"),
+            ("AH6XY", "KH6"),
+            ("KL7XYZ", "KL"),
+            ("KP4ABC", "KP4"),
+            ("9A1AA", "9A"),
+            ("S51AB", "S5"),
+            // The digit decides where a prefix is shared.
+            ("EA1ABC", "EA"),
+            ("EA8ABC", "EA8"),
+            ("R3ABC", "UA"),
+            ("R9ABC", "UA9"),
+            ("UA9ABC", "UA9"),
+            ("OH2ABC", "OH"),
+            ("OH0ABC", "OH0"),
+            // Abroad is where the host is; portable is still at home.
+            ("DL/W1AW", "DL"),
+            ("PA/N8XYZ", "PA"),
+            ("EA8/G3XYZ", "EA8"),
+            ("HB9/DL1ABC", "HB"),
+            ("W1AW/4", "K"),
+            ("G3XYZ/P", "G"),
+            ("W1XYZ/KH6", "KH6"),
+            // A host that reads as a call is still the host.
+            ("VP2M/G3XYZ", "VP2M"),
+            ("G3XYZ/VP2M", "VP2M"),
+            // A digit the table has not seen, after a prefix one country has.
+            ("KG3ABC", "K"),
+        ];
+        for (call, country) in cases {
+            assert_eq!(country_of(call), Some(country), "{call}");
+        }
+        // A prefix the table lacks is no country, not one that shares its
+        // first letter: Andorra, Sable Island, St Paul, the Falklands, the
+        // Cook Islands, Guadeloupe, the Isle of Man and Alaska's NL and WL.
+        for unknown in [
+            "3B8ABC", "", "W1", "K5?", "C31AB", "CY0AA", "CY9AA", "VP8AB", "E51AB", "FG5AB",
+            "GD4AB", "MD0AB", "NL7AB", "WL7AB",
+        ] {
+            assert_eq!(country_of(unknown), None, "{unknown:?}");
         }
     }
 }

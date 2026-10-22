@@ -8,6 +8,8 @@
 //! and lands on exactly the same instants every time.
 
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use cw_core::{
@@ -37,6 +39,28 @@ const NESTED_DISCLOSURES: usize = 8;
 /// How many rounds of rendering one event may set off before the page is
 /// said never to settle. Real chains are a handful deep.
 const SETTLE_PASSES: usize = 32;
+
+thread_local! {
+    /// The fields the page has asked to give the cursor to, by id, that no
+    /// page has looked for yet.
+    static FOCUS_ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many times the page has asked to be scrolled to its top since a
+    /// test last looked.
+    static SCROLLS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The page asks for the field with this id to have the cursor. In a
+/// browser that is a script, which runs at once, on the page as drawn so
+/// far; here the [`Ui`] runs it when the page next settles.
+pub fn ask_focus(id: &str) {
+    FOCUS_ASKED.with_borrow_mut(|asked| asked.push(id.to_string()));
+}
+
+/// The page asks to be scrolled back to its top. In a browser that is a
+/// script; here a [`Ui`] counts it ([`Ui::take_scrolls`]).
+pub fn ask_scroll_to_top() {
+    SCROLLS_ASKED.set(SCROLLS_ASKED.get() + 1);
+}
 
 pub struct Harness {
     dom: VirtualDom,
@@ -95,6 +119,121 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
     machine.session().result(1_000, date.to_string())
 }
 
+/// A finished ten-minute WPX run, the way the app stores it: each QSO's
+/// call and number as the station sent them and as you logged them, one a
+/// minute.
+pub fn stored_run(date: &str, qsos: &[(&str, &str, &str, &str)]) -> SessionResult {
+    let copies: Vec<Vec<(&str, &str)>> = qsos
+        .iter()
+        .map(|(call, nr, logged_call, logged_nr)| vec![(*call, *logged_call), (*nr, *logged_nr)])
+        .collect();
+    stored_contest_run(date, "wpx", &["nr"], &copies)
+}
+
+/// `run` as it is kept with Show copy on: marked assisted, and logged so.
+pub fn assisted(mut run: SessionResult) -> SessionResult {
+    run.alphabet_fingerprint.push_str(":a");
+    if let Some(log) = run.contest.as_mut() {
+        log.0["assisted"] = serde_json::json!(true);
+    }
+    run
+}
+
+/// A finished ten-minute Simple QSO run, the way the app stores it: each
+/// QSO's call, report and name as the station sent them, each beside what
+/// you logged, one a minute.
+pub fn stored_simple_qso_run(date: &str, qsos: &[[(&str, &str); 3]]) -> SessionResult {
+    let copies: Vec<Vec<(&str, &str)>> = qsos.iter().map(|qso| qso.to_vec()).collect();
+    stored_contest_run(date, "simpleQso", &["rst", "name"], &copies)
+}
+
+/// A finished ten-minute NA Sprint run, the way the app stores it: each
+/// QSO's call, serial, name and state as the station sent them, each beside
+/// what you logged, one a minute.
+pub fn stored_sprint_run(date: &str, qsos: &[[(&str, &str); 4]]) -> SessionResult {
+    let copies: Vec<Vec<(&str, &str)>> = qsos.iter().map(|qso| qso.to_vec()).collect();
+    stored_contest_run(date, "sprint", &["nr", "name", "st"], &copies)
+}
+
+/// A finished ten-minute Field Day run, the way the app stores it: each
+/// QSO's call, class and section as the station sent them, each beside
+/// what you logged, one a minute.
+pub fn stored_field_day_run(date: &str, qsos: &[[(&str, &str); 3]]) -> SessionResult {
+    let copies: Vec<Vec<(&str, &str)>> = qsos.iter().map(|qso| qso.to_vec()).collect();
+    stored_contest_run(date, "fieldDay", &["cl", "sec"], &copies)
+}
+
+/// A finished ten-minute run of the contest `kind`, copying `fields`: each
+/// QSO its groups, sent beside received, one a minute.
+fn stored_contest_run(
+    date: &str,
+    kind: &str,
+    fields: &[&str],
+    qsos: &[Vec<(&str, &str)>],
+) -> SessionResult {
+    let group = |sent: &str, received: &str| cw_core::GroupResult {
+        sent: sent.to_string(),
+        received: received.to_string(),
+        correct: sent == received,
+    };
+    let groups: Vec<cw_core::GroupResult> = qsos
+        .iter()
+        .flat_map(|qso| qso.iter().map(|(sent, received)| group(sent, received)))
+        .collect();
+    let mut tally = cw_core::CopyTally::default();
+    for group in &groups {
+        tally.add(&group.sent, &group.received);
+    }
+    let serials = fields.contains(&"nr");
+    let records: Vec<serde_json::Value> = (1..=qsos.len() as u64)
+        .zip(qsos)
+        .map(|(n, qso)| {
+            let nr = if serials { n } else { 0 };
+            serde_json::json!({ "t": n * 60_000, "h": n * 60_000 - 20_000, "g": qso.len(), "nr": nr })
+        })
+        .collect();
+    let log = serde_json::json!({
+        "v": 1,
+        "kind": kind,
+        "style": "single",
+        "callers": [1, 1],
+        "side": "",
+        "myCountry": "DL",
+        "myContinent": "",
+        "myZone": 0,
+        "fields": fields,
+        "limitS": 600,
+        "runMs": 600_000,
+        "pausedMs": 0,
+        "myWpm": 26.0,
+        "qsos": records,
+    });
+    let mut run = SessionResult {
+        date: date.to_string(),
+        timestamp: 1_760_000_000_000,
+        group_timings: groups
+            .iter()
+            .map(|_| cw_core::SessionTiming {
+                time_to_complete_ms: 900.0,
+                char_wpm: Some(26.0),
+                effective_wpm: Some(26.0),
+                sends: 1,
+            })
+            .collect(),
+        groups,
+        accuracy: tally.accuracy(),
+        tally,
+        char_set_mode: cw_core::CharSetMode::Contest,
+        alphabet_fingerprint: format!("contest:{kind}"),
+        contest: Some(cw_core::ContestLog(log)),
+        char_wpm: 26.0,
+        effective_wpm: 26.0,
+        ..SessionResult::empty_for_test()
+    };
+    run.score = run.points();
+    run
+}
+
 /// Settings that make a session short and predictable to test.
 pub fn test_settings() -> TrainingSettings {
     let mut settings = TrainingSettings::default();
@@ -118,6 +257,31 @@ pub fn test_settings() -> TrainingSettings {
     settings.band.qrn_enabled = false;
     settings.band.noise_enabled = false;
     settings.band.qsb_enabled = false;
+    settings
+}
+
+/// The line under a call, as Your station and Home write it: "Reads as"
+/// and `parts`, each kept on one line, a dot between them.
+pub fn reads_as(parts: &[&str]) -> String {
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|part| part.replace(' ', "\u{a0}"))
+        .collect();
+    format!("Reads as {}", parts.join("\u{a0}· "))
+}
+
+/// Settings that run a contest at once: WPX as DL1ABC, every speed 30 WPM,
+/// a quiet band with the fading on, which the run's turns leave off.
+pub fn contest_settings() -> TrainingSettings {
+    let mut settings = test_settings();
+    settings.curriculum.char_set_mode = cw_core::CharSetMode::Contest;
+    settings.contest.my_call = "DL1ABC".to_string();
+    settings.playback.char_wpm_min = 30.0;
+    settings.playback.char_wpm_max = 30.0;
+    settings.playback.effective_wpm_min = 30.0;
+    settings.playback.effective_wpm_max = 30.0;
+    settings.band.qsb_enabled = true;
+    settings.band.qsb_depth = 0.6;
     settings
 }
 
@@ -163,6 +327,26 @@ impl Harness {
             tokio::task::yield_now().await;
             self.pump();
         }
+    }
+
+    /// Count each time `signal` is written from here on, waking whatever
+    /// reads it: a screen that shows it would be drawn again.
+    pub fn count_writes<T: 'static>(&self, signal: Signal<T>) -> Arc<AtomicUsize> {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let counted = writes.clone();
+        self.in_app(|| {
+            let watcher = dioxus::core::ReactiveContext::new_with_callback(
+                move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                },
+                ScopeId::ROOT,
+                std::panic::Location::caller(),
+            );
+            watcher.run_in(|| {
+                let _ = signal.read();
+            });
+        });
+        writes
     }
 
     /// Start a session the way the Practice screen's button does: through
@@ -315,6 +499,10 @@ pub struct Ui {
     ids: Vec<(String, ElementId)>,
     /// Mutations since the last time anybody asked.
     work: usize,
+    /// The fields given the cursor since the last time anybody asked, by
+    /// id. A focus script finds only a field that is drawn when it runs, so
+    /// one asked for before the page has it is not among them.
+    focused: Vec<String>,
     /// What the app on the page has stored.
     pub store: Rc<MemoryStore>,
 }
@@ -422,10 +610,14 @@ impl Ui {
     }
 
     fn from_dom(dom: VirtualDom, store: Rc<MemoryStore>) -> Self {
+        // What an earlier page asked for is not this one's to do.
+        FOCUS_ASKED.take();
+        SCROLLS_ASKED.take();
         let mut ui = Self {
             dom,
             ids: Vec::new(),
             work: 0,
+            focused: Vec::new(),
             store,
         };
         let mut log = IdLog::default();
@@ -458,7 +650,9 @@ impl Ui {
     /// it between two of its passes.
     pub fn settle(&mut self) {
         for _ in 0..SETTLE_PASSES {
-            if !self.has_work() {
+            let work = self.has_work();
+            self.run_focus_scripts();
+            if !work {
                 return;
             }
             let mut log = IdLog::default();
@@ -466,6 +660,29 @@ impl Ui {
             self.apply(log);
         }
         panic!("the page never settled: something keeps waking itself");
+    }
+
+    /// Run the focus scripts the page has asked for, on the page as it is
+    /// drawn now: before the render an event or a callback sets off, and
+    /// after the one an effect follows.
+    fn run_focus_scripts(&mut self) {
+        for id in FOCUS_ASKED.take() {
+            if self.shows(&id) {
+                self.focused.push(id);
+            }
+        }
+    }
+
+    /// The fields the page gave the cursor to since this was last called,
+    /// by id, in order.
+    pub fn take_focused(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.focused)
+    }
+
+    /// How many times the page asked to be scrolled to its top since this
+    /// was last called.
+    pub fn take_scrolls(&mut self) -> usize {
+        SCROLLS_ASKED.take()
     }
 
     /// Whether anything is ready to run: a task woken, an effect queued, a
@@ -505,6 +722,16 @@ impl Ui {
             waited += u64::from(POLL_MS);
         }
         done(self)
+    }
+
+    /// Run `f` on the app's state, the way one of its own callbacks does,
+    /// then settle what it set off.
+    pub fn with_app<T>(&mut self, f: impl FnOnce(AppCtx) -> T) -> T {
+        let out = self
+            .dom
+            .in_scope(ScopeId::APP, || f(consume_context::<AppCtx>()));
+        self.settle();
+        out
     }
 
     /// How much the renderer has been asked to do since this was last called.
@@ -632,15 +859,19 @@ impl Ui {
     }
 
     /// Deliver an event the way a renderer does: a platform payload that the
-    /// html crate turns into the typed data the listener expects.
-    fn fire(&mut self, event: &str, id: &str, data: Box<dyn std::any::Any>) {
+    /// html crate turns into the typed data the listener expects. Whether
+    /// the page left the browser to do what it would do next.
+    fn fire(&mut self, event: &str, id: &str, data: Box<dyn std::any::Any>) -> bool {
         install_event_converter();
         let element = self.element(id);
-        let payload = std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
+        let payload: std::rc::Rc<dyn std::any::Any> =
+            std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
+        let delivered = dioxus::core::Event::new(payload, true);
         self.dom
             .runtime()
-            .handle_event(event, dioxus::core::Event::new(payload, true), element);
+            .handle_event(event, delivered.clone(), element);
         self.settle();
+        delivered.default_action_enabled()
     }
 
     /// Open every panel the page keeps behind a toggle, and keep going until
@@ -687,6 +918,17 @@ impl Ui {
             id,
             Box::new(dioxus::html::SerializedMouseData::default()),
         );
+    }
+
+    /// Press a mouse button down on the control with this id, and nothing
+    /// after it: whether the browser would move the focus there, from the
+    /// field being typed in, as it does unless the page stops it.
+    pub fn mouse_down(&mut self, id: &str) -> bool {
+        self.fire(
+            "mousedown",
+            id,
+            Box::new(dioxus::html::SerializedMouseData::default()),
+        )
     }
 
     /// A pointer of `kind` ("mouse", "touch") at `at` in the window, which is
@@ -784,6 +1026,17 @@ impl Ui {
     }
 
     pub fn press_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) {
+        self.press_key_held(id, key, code, dioxus::prelude::Modifiers::empty());
+    }
+
+    /// Press `key` with `held`, Shift or Ctrl and the like, held down.
+    pub fn press_key_held(
+        &mut self,
+        id: &str,
+        key: Key,
+        code: dioxus::prelude::Code,
+        held: dioxus::prelude::Modifiers,
+    ) {
         self.fire(
             "keydown",
             id,
@@ -792,7 +1045,7 @@ impl Ui {
                 code,
                 dioxus::prelude::Location::Standard,
                 false,
-                dioxus::prelude::Modifiers::empty(),
+                held,
                 false,
             )),
         );

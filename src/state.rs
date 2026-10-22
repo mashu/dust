@@ -5,14 +5,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cw_core::{GroupSession, SessionResult, TrainingSettings};
+use cw_core::{ContestView, GroupSession, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
+use crate::contest_runtime::ContestEntry;
 use crate::persist::backup::{Backup, backup_name, merge_sessions, write_backup};
 use crate::persist::{HistorySaved, Store};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
-use crate::session_runtime::{AnswerOutbox, LiveSession};
+use crate::session_runtime::{AnswerOutbox, Live};
 use crate::ui::format::{counted, day_of, short_date};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,13 +56,13 @@ pub struct Tour {
 }
 
 /// What the app holds outside the reactive tree: the audio player, the
-/// session being run on it, and where what it learns is kept. Cheap to
+/// session or run going on it, and where what it learns is kept. Cheap to
 /// clone; every clone is the same app.
 #[derive(Clone)]
 pub struct AppState {
     pub player: Player,
     pub store: Rc<dyn Store>,
-    pub session: Rc<RefCell<Option<LiveSession>>>,
+    pub session: Rc<RefCell<Option<Live>>>,
 }
 
 impl AppState {
@@ -113,8 +114,13 @@ pub struct AppCtx {
     pub sessions: Signal<Vec<SessionResult>>,
     /// The session in flight, as its screen shows it.
     pub runtime: Signal<Option<GroupSession>>,
-    /// The session just finished, for the results screen.
-    pub result: Signal<Option<SessionResult>>,
+    /// The contest run in flight, as its screen shows it.
+    pub contest: Signal<Option<ContestView>>,
+    /// What the run last said for a screen reader, once the air fell
+    /// silent: logged and how it checked, corrected, paused, time up.
+    pub announced: Signal<Option<Said>>,
+    /// How the session just finished ended, for the results screen.
+    pub result: Signal<Option<Finished>>,
     /// What the session just finished did to the level, if anything.
     pub auto_message: Signal<Option<String>>,
     pub toasts: Toasts,
@@ -122,8 +128,13 @@ pub struct AppCtx {
     pub preview: Signal<Preview>,
     /// The groups the stream has sent, newest last.
     pub stream_heard: Signal<Vec<crate::playback::HeardGroup>>,
+    /// What Hear a QSO has played, as far as it has been heard: kept once it
+    /// ends, until something else plays or the screen is left.
+    pub dialogue: Signal<Option<crate::playback::Dialogue>>,
     /// The open answer box's text, on its way to the session.
     pub answer: AnswerOutbox,
+    /// The run's Call and Exchange fields, as typed.
+    pub entry: ContestEntry,
     /// The guided setup, while it is open.
     pub tour: Signal<Option<Tour>>,
     /// When the last backup was saved, if ever.
@@ -134,6 +145,9 @@ pub struct AppCtx {
     /// The history and settings as they stood before the last restore, for
     /// Undo to put back.
     before_restore: Signal<Option<(Vec<SessionResult>, TrainingSettings)>>,
+    /// The settings as they were stored last, so that settings stored
+    /// already are not stored again.
+    stored_settings: CopyValue<TrainingSettings>,
     app: CopyValue<AppState>,
 }
 
@@ -142,21 +156,27 @@ impl AppCtx {
     /// scope that owns the app, as everything in it lives as long as that.
     pub fn new(app: AppState, settings: TrainingSettings, sessions: Vec<SessionResult>) -> Self {
         let last_backup = app.store.last_backup();
+        let stored_settings = CopyValue::new(settings.clone().clamp());
         Self {
             screen: Signal::new(Screen::Home),
             settings: Signal::new(settings),
             sessions: Signal::new(sessions),
             runtime: Signal::new(None),
+            contest: Signal::new(None),
+            announced: Signal::new(None),
             result: Signal::new(None),
             auto_message: Signal::new(None),
             toasts: Toasts::new(),
             preview: Signal::new(Preview::Idle),
             stream_heard: Signal::new(Vec::new()),
+            dialogue: Signal::new(None),
             answer: AnswerOutbox::new(),
+            entry: ContestEntry::new(),
             tour: Signal::new(None),
             last_backup: Signal::new(last_backup),
             trash: Signal::new(Vec::new()),
             before_restore: Signal::new(None),
+            stored_settings,
             app: CopyValue::new(app),
         }
     }
@@ -165,9 +185,23 @@ impl AppCtx {
         self.app.cloned()
     }
 
-    /// Whether a session has the app: on its screen, or about to be.
+    /// Whether a session or a run has the app: on its screen, or about to
+    /// be.
     pub fn session_running(self) -> bool {
-        matches!(*self.screen.peek(), Screen::Training) || self.runtime.peek().is_some()
+        matches!(*self.screen.peek(), Screen::Training)
+            || self.runtime.peek().is_some()
+            || self.contest.peek().is_some()
+    }
+
+    /// Store the settings as they are now, clamped, unless they are stored
+    /// so already.
+    pub fn store_settings(self) {
+        let persist = self.settings.peek().clone().clamp();
+        let mut stored = self.stored_settings;
+        if *stored.peek() != persist {
+            self.app().store.save_settings(&persist);
+            stored.set(persist);
+        }
     }
 
     /// Stop whatever is playing outside a session.
@@ -292,7 +326,7 @@ impl AppCtx {
         let mut sessions = self.sessions;
         let mut settings = self.settings;
         let before = (sessions.peek().clone(), settings.peek().clone());
-        let (merged, added) = merge_sessions(&before.0, backup.sessions);
+        let (merged, added, filled) = merge_sessions(&before.0, backup.sessions);
         sessions.set(merged);
         let saved = self.store_history();
         if let Some(why) = why_not_stored(&saved) {
@@ -316,13 +350,22 @@ impl AppCtx {
             .filter(|_| backup.saved_at > 0)
             .map(|day| format!(" from {}", short_date(&day)))
             .unwrap_or_default();
-        let mut text = if added > 0 {
-            format!(
+        let mut text = match (added, filled) {
+            (0, 0) => {
+                format!("Restored your settings{from}. Every session in it was already here.")
+            }
+            (0, _) => format!(
+                "Filled in {} and restored your settings{from}.",
+                counted(filled, "session")
+            ),
+            (_, 0) => format!(
                 "Restored {} and your settings{from}.",
                 counted(added, "session")
-            )
-        } else {
-            format!("Restored your settings{from}. Every session in it was already here.")
+            ),
+            _ => format!(
+                "Restored {} and filled in {filled}, with your settings{from}.",
+                counted(added, "session")
+            ),
         };
         if let Some(problem) = saved.problem() {
             text = format!("{text} {problem}");
@@ -372,6 +415,7 @@ impl AppCtx {
         self.app().player.release();
         self.preview.set(Preview::Idle);
         self.stream_heard.set(Vec::new());
+        self.dialogue.set(None);
         self.screen.set(to);
     }
 }
@@ -385,6 +429,46 @@ fn why_not_stored(saved: &HistorySaved) -> Option<String> {
             Some("your saved history could not be read, so it was left as it is".into())
         }
         HistorySaved::Failed(reason) => Some(reason.clone()),
+    }
+}
+
+/// How the session just finished ended, as its results screen shows it.
+/// One value, so the screen can never show both.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Finished {
+    Kept(Box<SessionResult>),
+    /// A run that worked nobody, so nothing was kept.
+    NothingKept,
+}
+
+#[cfg(test)]
+impl Finished {
+    /// The session kept, if one was.
+    pub fn kept(self) -> Option<SessionResult> {
+        match self {
+            Self::Kept(result) => Some(*result),
+            Self::NothingKept => None,
+        }
+    }
+}
+
+/// Something said to a screen reader.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Said {
+    pub text: String,
+    /// Which time this was said. The same words said twice are said twice:
+    /// a screen reader speaks what is put in its region anew, not what is
+    /// left there unchanged.
+    pub serial: u64,
+}
+
+impl Said {
+    pub fn new(text: String) -> Self {
+        static SAID: AtomicU64 = AtomicU64::new(0);
+        Self {
+            text,
+            serial: SAID.fetch_add(1, Ordering::Relaxed),
+        }
     }
 }
 

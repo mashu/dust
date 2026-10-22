@@ -221,7 +221,7 @@ pub(crate) fn resolve_pileup(
 /// already `placed` has [`PILEUP_CALLER_SEPARATION_HZ`] of room either side of
 /// it: the pieces a new caller can still land in. Empty when the side had no
 /// room to begin with or has none left.
-fn free_room((low, high): (f64, f64), placed: &[f64]) -> Vec<(f64, f64)> {
+pub(crate) fn free_room((low, high): (f64, f64), placed: &[f64]) -> Vec<(f64, f64)> {
     let mut pieces = Vec::new();
     if high >= low {
         pieces.push((low, high));
@@ -252,7 +252,7 @@ fn free_room((low, high): (f64, f64), placed: &[f64]) -> Vec<(f64, f64)> {
 /// side broken up by the callers already on it is no likelier to be used at
 /// one end than the other. Where all that is left are single points, one of
 /// them.
-fn pick_in_room(pieces: &[(f64, f64)], rng: &mut impl Rng) -> f64 {
+pub(crate) fn pick_in_room(pieces: &[(f64, f64)], rng: &mut impl Rng) -> f64 {
     let total: f64 = pieces.iter().map(|(a, b)| b - a).sum();
     if total <= 0.0 {
         let last = pieces.len().saturating_sub(1);

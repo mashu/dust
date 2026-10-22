@@ -45,6 +45,16 @@ pub fn clock(timestamp: u64) -> Option<String> {
     local_at(timestamp).map(|at| at.format("%H:%M").to_string())
 }
 
+/// When a session kept on `date` finished at `timestamp`, as a list of
+/// them says it: "Fri 16 Oct 2026 · 14:32", or the day alone where the
+/// time cannot be read.
+pub fn day_and_clock(date: &str, timestamp: u64) -> String {
+    match clock(timestamp) {
+        Some(time) => format!("{} · {time}", short_date(date)),
+        None => short_date(date),
+    }
+}
+
 /// The local day of `timestamp`, the way dates are stored: "2026-10-19".
 pub fn day_of(timestamp: u64) -> Option<String> {
     local_at(timestamp).map(|at| at.format("%Y-%m-%d").to_string())
@@ -69,6 +79,25 @@ pub fn counted<N: Display + PartialEq + From<u8>>(n: N, noun: &str) -> String {
     } else {
         format!("{n} {noun}s")
     }
+}
+
+/// As [`counted`], with a few in words, as a sentence says them: "one
+/// call", "two NRs", "13 calls".
+pub fn counted_in_words(n: usize, noun: &str) -> String {
+    const WORDS: [&str; 10] = [
+        "no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    let counted = counted(n, noun);
+    match WORDS.get(n) {
+        Some(word) => counted.replacen(&n.to_string(), word, 1),
+        None => counted,
+    }
+}
+
+/// A stretch of run time as a clock reads it: "07:42", "60:00".
+pub fn minutes_seconds(ms: u64) -> String {
+    let seconds = ms / 1_000;
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// "1st", "2nd", "3rd", "4th", "11th", "21st".
@@ -133,6 +162,17 @@ mod tests {
         assert_eq!(counted(1_u32, "session"), "1 session");
         assert_eq!(counted(2_usize, "session"), "2 sessions");
         assert_eq!(counted(0_u32, "character"), "0 characters");
+        assert_eq!(counted_in_words(1, "call"), "one call");
+        assert_eq!(counted_in_words(2, "NR"), "two NRs");
+        assert_eq!(counted_in_words(0, "QSO"), "no QSOs");
+        assert_eq!(counted_in_words(13, "call"), "13 calls");
+    }
+
+    #[test]
+    fn run_time_reads_as_a_clock() {
+        assert_eq!(minutes_seconds(0), "00:00");
+        assert_eq!(minutes_seconds(462_999), "07:42");
+        assert_eq!(minutes_seconds(3_600_000), "60:00");
     }
 
     #[test]

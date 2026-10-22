@@ -4,7 +4,7 @@
 //! The structs spell theirs out in `Default` impls; the enums mark theirs with
 //! `#[default]` on the variant, where it reads as part of the type.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::keyer::KeyerMode;
 use crate::level::LEVEL_MIN;
@@ -131,24 +131,54 @@ pub enum CharSetMode {
     /// Whole words from a list of the learner's own, each sent as a group.
     /// There is no level to climb: the list is the curriculum.
     Words,
+    /// Contest runs: callers answer your CQ and you copy their calls and
+    /// exchanges. Not offered by the settings' control yet. It shares the
+    /// callsign tier with Callsign, which shapes the callers' calls. On disk
+    /// it is written as Callsign with a mark beside it ([`mode_on_disk`]),
+    /// so a build that knows no contests still reads a run, and the
+    /// settings.
+    Contest,
+}
+
+/// A mode as it is written to disk: Contest as Callsign, so a build that
+/// knows no contests reads a run as the callsign practice it is, and opens
+/// the settings in Callsigns at the same tier, where a mode name it did not
+/// know would have cost the whole session or every setting. A mark beside it
+/// says it was Contest: a run's fingerprint, the settings' `contestActive`.
+pub(crate) fn mode_on_disk<S: Serializer>(
+    mode: &CharSetMode,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match mode {
+        CharSetMode::Contest => CharSetMode::Callsign.serialize(serializer),
+        mode => mode.serialize(serializer),
+    }
 }
 
 impl CharSetMode {
     /// Every character set, in the order the settings list them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Koch,
         Self::Digits,
         Self::Mixed,
         Self::Callsign,
         Self::Words,
+        Self::Contest,
     ];
 }
 
 impl CharSetMode {
     /// Whether a group is drawn a character at a time, at a length the group
-    /// size gives it. Callsigns and words are not: each is as long as it is.
+    /// size gives it. Callsigns, words and contest calls are not: each is as
+    /// long as it is.
     pub fn draws_characters(self) -> bool {
-        !matches!(self, Self::Callsign | Self::Words)
+        !matches!(self, Self::Callsign | Self::Words | Self::Contest)
+    }
+
+    /// Whether what is sent is callsigns, shaped by the callsign tier: in
+    /// Callsigns, and from a contest's callers.
+    pub fn sends_callsigns(self) -> bool {
+        matches!(self, Self::Callsign | Self::Contest)
     }
 }
 
@@ -211,6 +241,7 @@ pub struct CurriculumSettings {
     /// Saves from the first versions called it the Koch level.
     #[serde(alias = "kochLevel")]
     pub level: u32,
+    #[serde(serialize_with = "mode_on_disk")]
     pub char_set_mode: CharSetMode,
     pub digits_level: u32,
     /// When mixed: 0–100 percent of characters that are letters (rest digits).
@@ -502,18 +533,21 @@ pub enum SettingsSection {
     CharacterSet,
     /// Pitch and level of the station you are copying.
     ToneAndVolume,
-    /// Fading, static, the noise floor, the filter and who else is calling.
+    /// Fading, static, the noise floor, the filter, who else is calling,
+    /// and in a contest how the callers operate.
     BandConditions,
     /// Whether the trainer moves your level for you, and on what evidence.
     AutoLevel,
     /// How the next group is drawn from the characters you know.
     CharacterSampling,
+    /// Your callsign, and the exchange you send in a contest.
+    Station,
 }
 
 impl SettingsSection {
     /// Every section, for the tests that sweep them.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::SessionShape,
         Self::Speed,
         Self::KeyingEnvelope,
@@ -522,6 +556,7 @@ impl SettingsSection {
         Self::BandConditions,
         Self::AutoLevel,
         Self::CharacterSampling,
+        Self::Station,
     ];
 }
 
@@ -548,28 +583,31 @@ pub struct RangeValues {
     pub linked: bool,
 }
 
-/// Everything the trainer can be set to. Read back from a save through
-/// [`save`], which also reads the older ones.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Everything the trainer can be set to. Written to a save and read back
+/// from one through [`save`], which also reads the older ones.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrainingSettings {
-    #[serde(flatten)]
     pub curriculum: CurriculumSettings,
-    #[serde(flatten)]
     pub playback: PlaybackSettings,
-    #[serde(flatten)]
     pub band: BandSettings,
-    #[serde(flatten)]
     pub auto_level: AutoLevelSettings,
+    pub contest: ContestSettings,
 }
 
 mod clamp;
+mod contest;
+mod contest_preset;
 mod curriculum;
 mod experience;
 mod ranges;
 mod reset;
 mod save;
 
+pub use contest::{
+    CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX, MY_NAME_MAX, MY_POWER_MAX, MY_ZONE_MAX,
+    class_reading, power_reading, section_code, state_code,
+};
+pub use contest_preset::ContestPreset;
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
 pub use curriculum::LevelAxis;
 pub use experience::Experience;
@@ -860,6 +898,18 @@ mod tests {
         s.auto_level.char_sampling_coverage_strength = -1.0;
         s.auto_level.auto_adjust_above_threshold_count = 900;
         s.auto_level.auto_adjust_below_threshold_count = 900;
+        s.contest.contest_kind = crate::contest::ContestKind::Sprint;
+        s.contest.contest_style = crate::contest::RunStyle::Pileup;
+        s.contest.contest_habits = crate::contest::CallerHabits::Rough;
+        s.contest.contest_minutes = 9_000;
+        s.contest.contest_show_copy = true;
+        s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
+        s.contest.my_name = " jean-luc maximilian ".to_string();
+        s.contest.my_state = " p.q. ".to_string();
+        s.contest.my_zone = 9_000;
+        s.contest.my_power = "9000 watts".to_string();
+        s.contest.my_class = " 0003a ".to_string();
+        s.contest.my_section = "e.m.a.x".to_string();
         s
     }
 
@@ -868,13 +918,7 @@ mod tests {
     /// make that effect loop forever.
     #[test]
     fn clamping_reaches_a_fixed_point_in_one_pass() {
-        for mode in [
-            CharSetMode::Koch,
-            CharSetMode::Digits,
-            CharSetMode::Mixed,
-            CharSetMode::Callsign,
-            CharSetMode::Words,
-        ] {
+        for mode in CharSetMode::ALL {
             for linked in [false, true] {
                 let mut first = wild();
                 first.curriculum.char_set_mode = mode;
@@ -967,6 +1011,14 @@ mod tests {
             s.curriculum.callsign_level,
             crate::callsign::CALLSIGN_TIER_MAX
         );
+        assert_eq!(s.contest.contest_minutes, CONTEST_MINUTES_MAX);
+        assert_eq!(s.contest.my_call, "DL1/ABC/QRP");
+        assert_eq!(s.contest.my_name, "JEANLUCMAX");
+        assert_eq!(s.contest.my_state, "QC");
+        assert_eq!(s.contest.my_zone, super::contest::MY_ZONE_MAX);
+        assert_eq!(s.contest.my_power, "100");
+        assert_eq!(s.contest.my_class, "3A");
+        assert_eq!(s.contest.my_section, "");
 
         // The strengths have tops as well as bottoms, the ones the settings
         // screen offers.
@@ -1075,6 +1127,19 @@ mod tests {
         assert_eq!(s.alphabet(LevelAxis::Letters), s.progress_alphabet());
         s.set_active_level(7);
         assert_eq!(s.curriculum.level, 7);
+    }
+
+    /// The modes that send callsigns are the ones the callsign tier shapes.
+    #[test]
+    fn callsigns_are_sent_where_the_callsign_tier_shapes_them() {
+        for mode in CharSetMode::ALL {
+            assert_eq!(
+                mode.sends_callsigns(),
+                mode.axis() == LevelAxis::Callsign,
+                "{mode:?}"
+            );
+        }
+        assert!(CharSetMode::Contest.sends_callsigns());
     }
 
     #[test]
@@ -1438,6 +1503,109 @@ mod tests {
         s.auto_level.error_weight_strength = 0.9;
         s.auto_level.char_sampling_coverage_strength = 0.9;
         s.auto_level.char_sampling_thompson = false;
+        s.contest.contest_kind = crate::contest::ContestKind::Sprint;
+        s.contest.contest_style = crate::contest::RunStyle::Pileup;
+        s.contest.contest_habits = crate::contest::CallerHabits::Real;
+        s.contest.contest_minutes = 25;
+        s.contest.contest_show_copy = true;
+        s.contest.my_call = "DL1ABC".to_string();
+        s.contest.my_name = "MAT".to_string();
+        s.contest.my_state = "MA".to_string();
+        s.contest.my_zone = 15;
+        s.contest.my_power = "KW".to_string();
+        s.contest.my_class = "3A".to_string();
+        s.contest.my_section = "EMA".to_string();
         s
+    }
+
+    /// Your callsign is kept the way a callsign can be written, and a run
+    /// is never longer than the longest.
+    #[test]
+    fn clamping_keeps_your_call_a_call_and_a_run_inside_its_hour() {
+        let mut s = TrainingSettings::default();
+        s.contest.my_call = " k1abc/ ".to_string();
+        s.contest.contest_minutes = 61;
+        let s = s.clamp();
+        assert_eq!(s.contest.my_call, "K1ABC");
+        assert_eq!(s.contest.contest_minutes, CONTEST_MINUTES_MAX);
+        let mut open = TrainingSettings::default();
+        open.contest.contest_minutes = 0;
+        assert_eq!(
+            open.clamp().contest.contest_minutes,
+            0,
+            "0 is a run left open"
+        );
+        assert!(s.contest.my_call.len() <= MY_CALL_MAX);
+    }
+
+    /// Your state, zone, power, class and section are Your station's: its
+    /// reset puts them back with your call and name, and no other section's
+    /// touches them.
+    #[test]
+    fn your_state_zone_power_class_and_section_belong_to_your_station() {
+        for section in SettingsSection::ALL {
+            let mut s = wildly_different();
+            s.reset_section(section);
+            let cleared = section == SettingsSection::Station;
+            assert_eq!(s.contest.my_state.is_empty(), cleared, "{section:?}");
+            assert_eq!(s.contest.my_zone == 0, cleared, "{section:?}");
+            assert_eq!(s.contest.my_power == "100", cleared, "{section:?}");
+            assert_eq!(s.contest.my_class == "1D", cleared, "{section:?}");
+            assert_eq!(s.contest.my_section.is_empty(), cleared, "{section:?}");
+        }
+    }
+
+    /// The callers' habits are the Band card's: its reset puts them back
+    /// to easy, and no other section's touches them.
+    #[test]
+    fn the_callers_habits_belong_to_the_band() {
+        for section in SettingsSection::ALL {
+            let mut s = wildly_different();
+            s.reset_section(section);
+            let easy = s.contest.contest_habits == crate::contest::CallerHabits::Easy;
+            assert_eq!(
+                easy,
+                section == SettingsSection::BandConditions,
+                "{section:?}"
+            );
+        }
+    }
+
+    /// Show copy is Session shape's: its reset turns it off, and no other
+    /// section's touches it.
+    #[test]
+    fn show_copy_belongs_to_the_session_shape() {
+        for section in SettingsSection::ALL {
+            let mut s = wildly_different();
+            s.reset_section(section);
+            assert_eq!(
+                !s.contest.contest_show_copy,
+                section == SettingsSection::SessionShape,
+                "{section:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contest_settings_default_to_ten_minutes_of_wpx_with_no_call() {
+        let s = TrainingSettings::default();
+        assert_eq!(s.contest.contest_kind, crate::contest::ContestKind::Wpx);
+        assert_eq!(s.contest.contest_minutes, 10);
+        assert!(s.contest.my_call.is_empty());
+        let json = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(json["contestKind"], "wpx");
+        assert_eq!(json["contestStyle"], "single");
+        assert_eq!(json["contestHabits"], "easy");
+        assert_eq!(json["contestMinutes"], 10);
+        assert_eq!(json["contestShowCopy"], false);
+        assert_eq!(json["myCall"], "");
+        assert_eq!(json["myName"], "");
+        assert_eq!(json["myState"], "");
+        assert_eq!(json["myZone"], 0);
+        assert_eq!(json["myPower"], "100");
+        assert_eq!(json["myClass"], "1D");
+        assert_eq!(json["mySection"], "");
+        assert!(s.contest.my_name.is_empty());
+        assert!(json.get("contest").is_none(), "flattened");
     }
 }

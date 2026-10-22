@@ -32,6 +32,8 @@ impl TrainingSettings {
                 self.playback.paddle_swap = d.playback.paddle_swap;
                 self.playback.keyer_mode = d.playback.keyer_mode;
                 self.playback.keyer_wpm = d.playback.keyer_wpm;
+                self.contest.contest_minutes = d.contest.contest_minutes;
+                self.contest.contest_show_copy = d.contest.contest_show_copy;
             }
             SettingsSection::Speed => {
                 self.playback.char_wpm_min = d.playback.char_wpm_min;
@@ -55,6 +57,8 @@ impl TrainingSettings {
                 self.curriculum.custom_sequence = d.curriculum.custom_sequence.clone();
                 self.curriculum.sequence_is_custom = d.curriculum.sequence_is_custom;
                 self.curriculum.practice_window = d.curriculum.practice_window;
+                self.contest.contest_kind = d.contest.contest_kind;
+                self.contest.contest_style = d.contest.contest_style;
             }
             SettingsSection::ToneAndVolume => {
                 self.band.side_tone_min = d.band.side_tone_min;
@@ -78,6 +82,7 @@ impl TrainingSettings {
                 self.band.stations_max = d.band.stations_max;
                 self.band.pileup_spread_hz = d.band.pileup_spread_hz;
                 self.band.pileup_level_db = d.band.pileup_level_db;
+                self.contest.contest_habits = d.contest.contest_habits;
             }
             SettingsSection::AutoLevel => {
                 self.auto_level.auto_adjust_level = d.auto_level.auto_adjust_level;
@@ -94,6 +99,15 @@ impl TrainingSettings {
                 self.auto_level.char_sampling_coverage_strength =
                     d.auto_level.char_sampling_coverage_strength;
                 self.auto_level.char_sampling_thompson = d.auto_level.char_sampling_thompson;
+            }
+            SettingsSection::Station => {
+                self.contest.my_call = d.contest.my_call;
+                self.contest.my_name = d.contest.my_name;
+                self.contest.my_state = d.contest.my_state;
+                self.contest.my_zone = d.contest.my_zone;
+                self.contest.my_power = d.contest.my_power;
+                self.contest.my_class = d.contest.my_class;
+                self.contest.my_section = d.contest.my_section;
             }
         }
         *self = std::mem::take(self).clamp();

@@ -49,7 +49,8 @@ impl CharSetMode {
     pub fn axis(self) -> LevelAxis {
         match self {
             Self::Digits => LevelAxis::Digits,
-            Self::Callsign => LevelAxis::Callsign,
+            // Contest callers' calls are shaped by the callsign tier.
+            Self::Callsign | Self::Contest => LevelAxis::Callsign,
             Self::Words => LevelAxis::Words,
             Self::Koch | Self::Mixed => LevelAxis::Letters,
         }

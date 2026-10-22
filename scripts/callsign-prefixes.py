@@ -14,6 +14,19 @@ and a digit and a suffix length as often as that prefix's calls have them.
 Only counts survive, never a call, so the generator still makes up every call
 it sends.
 
+Beside the counts go the facts the contests score by, for every country the
+counts keep: its name, its CQ zone and its continent, as cty.dat gives them,
+and the prefixes cty.dat puts in another CQ zone than their country's, such as
+China's BY0 in zone 23. Only an override on a prefix and its digit is kept,
+the shape a call's country is read by; one that turns on the first letter of
+the suffix, as Russia's oblasts do, is left out, so Asiatic Russia is one
+zone. The US and Canada are left out too: their zones go by state and
+province, which contest mode enters by hand. An entity that counts only for
+the WAE award keeps its zone and continent for its prefixes where they differ
+from the DXCC entity its calls are counted under: European Turkey's TA1 is in
+Europe, though Turkey is in Asia. The header names the cty.dat version, as
+the facts change with it.
+
 What the counts leave out:
 - a prefix and country with fewer than MIN_CALLS calls behind it, which is
   too few to say what the country issues;
@@ -56,31 +69,67 @@ AREA_MARKING = {"K", "JA", "VE", "VK"}
 
 CALL = re.compile(r"^(.*?)([0-9])([A-Z]+)$")
 PREFIX = re.compile(r"^(?:[A-Z]{1,2}|[A-Z][0-9]|[0-9][A-Z])$")
+# A prefix and its digit, the part of a call its country is read by: `BY0`,
+# `3H9`. A zone override on anything longer turns on the suffix.
+ZONE_PREFIX = re.compile(r"^[A-Z0-9]*[A-Z][A-Z0-9]*[0-9]$")
+# Countries whose CQ zones go by state and province, entered by hand.
+ZONED_BY_HAND = {"K", "VE"}
+# The version cty.dat writes into itself, as a call of Canada's.
+VERSION = re.compile(r"^VER(\d{8})$")
 
 
 def read_cty(path):
-    """Prefixes and whole calls to DXCC entities, by primary prefix.
+    """Prefixes and whole calls to DXCC entities, by primary prefix; each
+    entity's name, CQ zone and continent; its prefixes in another CQ zone or
+    on another continent; and the file's version.
 
     Entities marked `*` count only for the WAE award, not for DXCC; leaving
-    them out puts their calls under the DXCC entity they belong to.
+    them out puts their calls under the DXCC entity they belong to, and only
+    their prefixes' zone and continent are kept, as overrides of that
+    entity's.
     """
-    names, prefixes, exact = {}, {}, {}
+    names, prefixes, exact, places = {}, {}, {}, {}
+    zones, continents, wae, version = defaultdict(list), defaultdict(list), [], None
     text = Path(path).read_text(encoding="latin-1")
     for record in text.split(";"):
         head, _, aliases = record.strip().partition("\n")
         fields = [field.strip() for field in head.split(":")]
-        if len(fields) < 8 or fields[7].startswith("*"):
+        if len(fields) < 8:
             continue
         name, primary = fields[0], fields[7]
-        names[primary] = name
+        zone, continent = int(fields[1]), fields[3]
+        if not primary.startswith("*"):
+            names[primary] = name
+            places[primary] = (zone, continent)
         for alias in aliases.replace("\n", "").split(","):
-            # Drop the zone, position and continent overrides.
-            alias = re.sub(r"[(\[<{~].*", "", alias.strip())
-            if alias.startswith("="):
+            alias = alias.strip()
+            # A CQ zone in round brackets, then the ITU zone, position and
+            # continent overrides, all dropped from the alias itself.
+            override = re.search(r"\((\d+)\)", alias)
+            alias = re.sub(r"[(\[<{~].*", "", alias)
+            found = int(override.group(1)) if override else zone
+            if primary.startswith("*"):
+                if ZONE_PREFIX.match(alias):
+                    wae.append((alias, found, continent))
+            elif alias.startswith("="):
                 exact[alias[1:]] = primary
+                stamp = VERSION.match(alias[1:])
+                if stamp:
+                    version = stamp.group(1)
             elif alias:
                 prefixes[alias] = primary
-    return names, prefixes, exact
+                if found != zone and ZONE_PREFIX.match(alias):
+                    zones[primary].append((alias, found))
+    # A WAE entity's prefix, under the DXCC entity its calls are counted in.
+    for alias, zone, continent in wae:
+        primary = entity(alias, prefixes, {})
+        if primary is None:
+            continue
+        if zone != places[primary][0]:
+            zones[primary].append((alias, zone))
+        if continent != places[primary][1]:
+            continents[primary].append((alias, continent))
+    return names, prefixes, exact, places, zones, continents, version
 
 
 def entity(call, prefixes, exact):
@@ -166,17 +215,20 @@ def table(rows):
     ]
 
 
-def rust(grouped, names, sources, total):
+def rust(grouped, names, places, zones, continents, version, sources, total):
     rows = sum(len(entries) for _, entries in grouped)
     lines = [
         "//! The prefixes real callsigns start with, and how many real calls carry",
         "//! each separator digit and each suffix length after them, by country:",
         f"//! {rows} prefixes of {len(grouped)} countries, counted from {total} calls.",
+        "//! Then each of those countries' name, CQ zone and continent, and the",
+        "//! prefixes in another CQ zone or on another continent than their",
+        f"//! country's, as cty.dat VER{version} gives them: facts, not counts.",
         "//!",
         f"//! Generated by `scripts/callsign-prefixes.py {' '.join(sources)}`.",
         "//! Run it again rather than editing this by hand.",
         "",
-        "use super::{Prefix, area, p};",
+        "use super::{Country, Prefix, area, country, p};",
         "",
         "#[rustfmt::skip]",
         "pub(super) const PREFIXES: &[Prefix] = &[",
@@ -190,13 +242,49 @@ def rust(grouped, names, sources, total):
                 f"[{', '.join(map(str, digits))}], [{', '.join(map(str, lengths))}]),"
             )
     lines.append("];")
+    lines += [
+        "",
+        "/// Each country of [`PREFIXES`], by the same primary prefix: its name, its",
+        "/// CQ zone and its continent. The US and Canada go by state and province",
+        "/// in a contest, whose zones are entered by hand.",
+        "#[rustfmt::skip]",
+        "pub(super) const COUNTRIES: &[Country] = &[",
+    ]
+    for country, _ in grouped:
+        zone, continent = places[country]
+        lines.append(f'    country("{country}", "{names[country]}", {zone}, "{continent}"),')
+    lines += [
+        "];",
+        "",
+        "/// The prefixes, each with its digit, whose calls are in another CQ zone",
+        "/// than their country's, by the country's primary prefix.",
+        "#[rustfmt::skip]",
+        "pub(super) const ZONE_PREFIXES: &[(&str, &str, u32)] = &[",
+    ]
+    for country, _ in grouped:
+        if country in ZONED_BY_HAND:
+            continue
+        for prefix, zone in zones.get(country, []):
+            lines.append(f'    ("{country}", "{prefix}", {zone}),')
+    lines += [
+        "];",
+        "",
+        "/// The prefixes, each with its digit, whose calls are on another continent",
+        "/// than their country's, by the country's primary prefix.",
+        "#[rustfmt::skip]",
+        "pub(super) const CONTINENT_PREFIXES: &[(&str, &str, &str)] = &[",
+    ]
+    for country, _ in grouped:
+        for prefix, continent in continents.get(country, []):
+            lines.append(f'    ("{country}", "{prefix}", "{continent}"),')
+    lines.append("];")
     return "\n".join(lines) + "\n"
 
 
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__.strip().splitlines()[-1])
-    names, prefixes, exact = read_cty(sys.argv[1])
+    names, prefixes, exact, places, zones, continents, version = read_cty(sys.argv[1])
     calls = set()
     for path in sys.argv[2:]:
         calls |= read_calls(path)
@@ -204,7 +292,9 @@ def main():
     grouped = table(count(calls, prefixes, exact))
     sources = [Path(sys.argv[1]).name] + [Path(path).name for path in sys.argv[2:]]
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text(rust(grouped, names, sources, len(calls)))
+    OUTPUT.write_text(
+        rust(grouped, names, places, zones, continents, version, sources, len(calls))
+    )
     print(f"{OUTPUT.relative_to(ROOT)}: {sum(len(e) for _, e in grouped)} prefixes")
 
 

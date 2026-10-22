@@ -10,52 +10,82 @@ use super::param::{Curve, ramp_to};
 use crate::audio::shape::SEND_RELEASE_SEC;
 
 /// A scheduled send: every station's tones through one gain, which the
-/// fading rides and a stop ramps down.
+/// fading rides and a stop ramps down; and, in a contest, your message
+/// through a gain of its own, past the receiver.
 pub struct ScheduledSend {
     gain: GainNode,
+    /// Your message, when the plan says it is dry.
+    dry: Option<GainNode>,
+}
+
+/// A gain for a send's tones, connected into `into`.
+fn send_gain(ctx: &AudioContext, into: &GainNode) -> Result<GainNode, String> {
+    let gain = ctx.create_gain().map_err(|e| format!("gain: {e:?}"))?;
+    gain.connect_with_audio_node(into)
+        .map_err(|e| format!("connect: {e:?}"))?;
+    Ok(gain)
 }
 
 impl ScheduledSend {
     /// Schedule every station's tones from `start` on the context clock,
-    /// into `into`.
+    /// into `into`, the receiver's input; a dry `wanted` goes into
+    /// `dry_into`, past the receiver.
     pub fn schedule(
         ctx: &AudioContext,
         into: &GainNode,
+        dry_into: &GainNode,
         planned: &PlannedTransmission,
         fading: Option<Qsb>,
         start: f64,
     ) -> Result<Self, String> {
-        let gain = ctx.create_gain().map_err(|e| format!("gain: {e:?}"))?;
-        gain.connect_with_audio_node(into)
-            .map_err(|e| format!("connect: {e:?}"))?;
+        let gain = send_gain(ctx, into)?;
+        let dry = planned
+            .dry_wanted
+            .then(|| send_gain(ctx, dry_into))
+            .transpose()
+            .inspect_err(|_| {
+                let _ = gain.disconnect();
+            })?;
+        let send = Self { gain, dry };
         // A send the browser will not finish building is taken out whole,
         // rather than left playing whatever tones it did get.
-        if let Err(err) = schedule_into(ctx, &gain, planned, fading, start) {
-            let _ = gain.disconnect();
+        if let Err(err) = schedule_into(ctx, &send.gain, send.dry.as_ref(), planned, fading, start)
+        {
+            for gain in send.gains() {
+                let _ = gain.disconnect();
+            }
             return Err(err);
         }
-        Ok(Self { gain })
+        Ok(send)
     }
 
-    /// Ramp the send down instead of cutting it, and hand back its gain with
-    /// the context time it is silent by.
+    /// Ramp the send down instead of cutting it, and hand back its gains
+    /// with the context time they are silent by.
     ///
     /// Disconnecting on the spot is what made the old stop click: the fade
     /// was scheduled and then the node that would have played it was taken
-    /// out of the graph in the same breath. The gain stays connected until
+    /// out of the graph in the same breath. The gains stay connected until
     /// the ramp has run.
-    pub fn release(self, ctx: &AudioContext) -> (GainNode, f64) {
+    pub fn release(self, ctx: &AudioContext) -> (impl Iterator<Item = GainNode>, f64) {
         let now = ctx.current_time();
         let done = now + SEND_RELEASE_SEC;
-        ramp_to(&self.gain.gain(), 0.0, now, done);
-        (self.gain, done)
+        for gain in self.gains() {
+            ramp_to(&gain.gain(), 0.0, now, done);
+        }
+        (std::iter::once(self.gain).chain(self.dry), done)
+    }
+
+    fn gains(&self) -> impl Iterator<Item = &GainNode> {
+        std::iter::once(&self.gain).chain(&self.dry)
     }
 }
 
-/// The fading on `gain`, and every station's tones into it, from `start`.
+/// The fading on `gain`, and every station's tones into it, from `start`:
+/// all but a dry `wanted`, which goes into `dry` unfaded.
 fn schedule_into(
     ctx: &AudioContext,
     gain: &GainNode,
+    dry: Option<&GainNode>,
     planned: &PlannedTransmission,
     fading: Option<Qsb>,
     start: f64,
@@ -73,11 +103,15 @@ fn schedule_into(
     }
     // The wanted station and everyone calling over it go into the same gain:
     // interference is addition, and each station's events already carry its
-    // own pitch and level.
-    let every_station = std::iter::once(&planned.wanted).chain(planned.others.iter());
+    // own pitch and level. Your own message is no station the receiver
+    // hears, and goes around it.
+    let every_station = std::iter::once((&planned.wanted, dry.unwrap_or(gain)))
+        .chain(planned.others.iter().map(|plan| (plan, gain)));
     let mut envelopes = Envelopes::default();
-    for event in every_station.flat_map(|plan| plan.events.iter()) {
-        schedule_tone(ctx, gain, event, &mut envelopes, start + event.start_sec)?;
+    for (plan, into) in every_station {
+        for event in &plan.events {
+            schedule_tone(ctx, into, event, &mut envelopes, start + event.start_sec)?;
+        }
     }
     Ok(())
 }

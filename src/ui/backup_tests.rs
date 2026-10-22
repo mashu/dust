@@ -151,6 +151,63 @@ fn a_backup_already_restored_adds_nothing() {
     });
 }
 
+/// A run whose log an older version dropped takes it back from a backup
+/// that kept it, and the message counts it beside what was added.
+#[test]
+fn a_restore_fills_in_a_runs_dropped_log() {
+    run(|| async {
+        let mut kept =
+            crate::testing::stored_run("2026-09-02", &[("K5XYZ", "214", "K5XYZ", "214")]);
+        kept.timestamp = 2 * 86_400_000;
+        let dropped = SessionResult {
+            contest: None,
+            ..kept.clone()
+        };
+        let here = vec![history(1).remove(0), dropped];
+        let mut ui = open(MemoryStore::default(), &here);
+        let mut backup = history(3);
+        backup[1] = kept;
+        let file = write_backup(&test_settings(), &backup, 0);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(20).await;
+        assert!(
+            ui.has("Restored 1 session and filled in 1, with your settings."),
+            "{}",
+            ui.html()
+        );
+        let stored = ui.store.load_sessions();
+        assert_eq!(stored.len(), 3);
+        assert!(stored[1].contest.is_some(), "the run has its log back");
+    });
+}
+
+/// A backup that only fills in a log adds no session, and says what it
+/// filled in.
+#[test]
+fn a_restore_that_only_fills_in_says_so() {
+    run(|| async {
+        let mut kept =
+            crate::testing::stored_run("2026-09-01", &[("K5XYZ", "214", "K5XYZ", "214")]);
+        kept.timestamp = 86_400_000;
+        let dropped = SessionResult {
+            contest: None,
+            ..kept.clone()
+        };
+        let mut ui = open(MemoryStore::default(), &[dropped]);
+        let file = write_backup(&test_settings(), &[kept], 0);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(20).await;
+        assert!(
+            ui.has("Filled in 1 session and restored your settings."),
+            "{}",
+            ui.html()
+        );
+        let stored = ui.store.load_sessions();
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].contest.is_some(), "the run has its log back");
+    });
+}
+
 /// A file that is not a backup, or far too large to be one, is refused, and
 /// the card says why.
 #[test]

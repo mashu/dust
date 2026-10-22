@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::CopyTally;
-use crate::callsign::generate_callsign;
+use crate::callsign::{CallSpec, GeneratedCall, generate_call};
+use crate::contest::{CallSource, Side};
 use crate::machine::GroupSource;
 use crate::pool::compute_char_pool;
 use crate::rng::{Rng, SplitMix64, weighted_random_pick};
@@ -125,16 +126,54 @@ impl GroupSource for Sampler {
     }
 }
 
+/// How many times a contest's caller is drawn again when its call is one to
+/// avoid, before the last draw is taken all the same.
+const CALL_REDRAWS: usize = 8;
+
+impl CallSource for Sampler {
+    /// Drawn as Callsigns mode draws a call — the candidate whose characters
+    /// the sampler wants most, at the callsign tier — from the countries the
+    /// contest hears.
+    fn next_call(
+        &mut self,
+        settings: &TrainingSettings,
+        spec: CallSpec,
+        avoid: &dyn Fn(&str) -> bool,
+    ) -> GeneratedCall {
+        let config = config_from_settings(settings);
+        let mut call = wanted_call(settings, &self.state, &config, &mut self.rng, spec);
+        for _ in 0..CALL_REDRAWS {
+            if !avoid(&call.text) {
+                break;
+            }
+            call = wanted_call(settings, &self.state, &config, &mut self.rng, spec);
+        }
+        self.state.count_sent(&call.text);
+        call
+    }
+
+    /// Only what was copied of each character: the span and speed beliefs
+    /// draw group lengths and speeds, which a contest does not.
+    fn learn(&mut self, answered: Answered<'_>) {
+        self.state.learn(answered.copied);
+    }
+}
+
 /// Whether `settings` have each group's speed chosen by adaptive speed.
 pub fn adapts_speed(settings: &TrainingSettings) -> bool {
     adaptive_speed_path(settings).is_some()
 }
 
 /// The line adaptive speed moves along, when it has one: it is switched on,
-/// and the speed settings leave more than one speed to choose from.
+/// the speed settings leave more than one speed to choose from, and the
+/// mode draws its speeds by it. A contest's callers come at speeds drawn
+/// evenly from the range, until adaptive caller speed comes (phase 5).
 pub(crate) fn adaptive_speed_path(settings: &TrainingSettings) -> Option<SpeedPath> {
     let path = SpeedPath::of(settings);
-    (settings.playback.adaptive_speed && path.has_room()).then_some(path)
+    (settings.playback.adaptive_speed
+        && path.has_room()
+        && settings.curriculum.char_set_mode != CharSetMode::Contest)
+        .then_some(path)
 }
 
 /// The shortest and longest group `settings` asks for. At least one
@@ -398,12 +437,48 @@ pub(crate) fn generate_callsign_group(
     config: &CharSamplingConfig,
     rng: &mut impl Rng,
 ) -> String {
-    let tier = settings.level(LevelAxis::Callsign);
-    let best = most_wanted(settings, state, config, rng, CALLSIGN_CANDIDATES, |rng| {
-        generate_callsign(tier, rng)
-    });
+    let best = wanted_call(settings, state, config, rng, CallSpec::default()).text;
     state.count_sent(&best);
     best
+}
+
+/// The call a contest's next caller would have, as [`Sampler`] draws it for
+/// a run of `settings`: from the countries the contest's rules have call
+/// you, with a contest's few portables and stations abroad. Counted as sent.
+pub(crate) fn generate_contest_call(
+    settings: &TrainingSettings,
+    state: &mut CharSamplingState,
+    config: &CharSamplingConfig,
+    rng: &mut impl Rng,
+) -> String {
+    let side = Side::of_call(&settings.contest.my_call);
+    let spec = settings.contest.contest_kind.rules().callers(side);
+    let call = wanted_call(settings, state, config, rng, spec).text;
+    state.count_sent(&call);
+    call
+}
+
+/// The call Callsigns mode would send, from the countries `spec` admits, at
+/// the callsign tier: of [`CALLSIGN_CANDIDATES`] drawn, the one whose
+/// characters the sampler wants most. Nothing is counted as sent.
+fn wanted_call(
+    settings: &TrainingSettings,
+    state: &CharSamplingState,
+    config: &CharSamplingConfig,
+    rng: &mut impl Rng,
+    spec: CallSpec,
+) -> GeneratedCall {
+    let tier = settings.level(LevelAxis::Callsign);
+    // Field Day's mix of North America and DX is settled once per caller,
+    // before the candidates: with a chance each, the most wanted of them
+    // would be DX far more often than Field Day's callers are.
+    let spec = CallSpec {
+        countries: spec.countries.for_one_call(rng),
+        ..spec
+    };
+    most_wanted(settings, state, config, rng, CALLSIGN_CANDIDATES, |rng| {
+        generate_call(tier, spec, rng)
+    })
 }
 
 /// How many words of the list are weighed against each other before one is
@@ -432,14 +507,14 @@ pub(crate) fn generate_word_group(
 /// error-weight and coverage settings mean what they mean everywhere else.
 /// When it wants them all alike, the first wins, and the draw is plainly
 /// random.
-fn most_wanted<R: Rng>(
+fn most_wanted<R: Rng, T: AsRef<str>>(
     settings: &TrainingSettings,
     state: &CharSamplingState,
     config: &CharSamplingConfig,
     rng: &mut R,
     candidates: usize,
-    mut draw: impl FnMut(&mut R) -> String,
-) -> String {
+    mut draw: impl FnMut(&mut R) -> T,
+) -> T {
     let pool = compute_char_pool(settings);
     let weights = compute_raw_sampling_weights(&pool, state, config, rng);
     let appetite = |group: &str| {
@@ -452,10 +527,10 @@ fn most_wanted<R: Rng>(
         if count > 0.0 { total / count } else { 0.0 }
     };
     let mut best = draw(rng);
-    let mut best_appetite = appetite(&best);
+    let mut best_appetite = appetite(best.as_ref());
     for _ in 1..candidates {
         let candidate = draw(rng);
-        let candidate_appetite = appetite(&candidate);
+        let candidate_appetite = appetite(candidate.as_ref());
         if candidate_appetite > best_appetite {
             best = candidate;
             best_appetite = candidate_appetite;
@@ -501,7 +576,9 @@ fn generate_group(
     // only built differently. This is the single place the modes part company.
     let config = config_from_settings(settings);
     match settings.curriculum.char_set_mode {
-        CharSetMode::Callsign => return generate_callsign_group(settings, state, &config, rng),
+        CharSetMode::Callsign | CharSetMode::Contest => {
+            return generate_callsign_group(settings, state, &config, rng);
+        }
         CharSetMode::Words => return generate_word_group(settings, state, &config, rng),
         CharSetMode::Koch | CharSetMode::Digits | CharSetMode::Mixed => {}
     }
@@ -521,12 +598,141 @@ mod tests {
     /// Teach `sampler` that `typed` was the answer to `sent`, played at
     /// `played` if it was measured.
     fn answer(sampler: &mut Sampler, sent: &str, typed: &str, played: Option<(f64, f64)>) {
-        sampler.learn(Answered {
-            sent,
-            received: typed,
-            copied: &CopyTally::of(sent, typed),
-            played,
+        GroupSource::learn(
+            sampler,
+            Answered {
+                sent,
+                received: typed,
+                copied: &CopyTally::of(sent, typed),
+                played,
+            },
+        );
+    }
+
+    /// A contest's caller is drawn as Callsigns mode draws a call, and with
+    /// a contest's spec keeps to its countries.
+    #[test]
+    fn a_contest_caller_is_drawn_as_callsigns_mode_draws_a_call() {
+        use crate::callsign::{Countries, country_of};
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.curriculum.callsign_level = 4;
+        let mut groups = Sampler::new(&[], &settings, 21);
+        let mut callers = Sampler::new(&[], &settings, 21);
+        for _ in 0..20 {
+            let (group, _) = groups.next_group(&settings);
+            let call = callers.next_call(&settings, CallSpec::default(), &|_| false);
+            assert_eq!(call.text, group);
+        }
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        let spec = CallSpec::contest(Countries::WVe);
+        for _ in 0..200 {
+            let call = callers.next_call(&settings, spec, &|_| false);
+            assert!(
+                matches!(country_of(&call.text), Some("K" | "VE")),
+                "{call:?}"
+            );
+        }
+    }
+
+    /// Field Day's callers are DX as often as its entries are, however the
+    /// sampler leans: the mix is settled once per caller, so the most wanted
+    /// of the candidates cannot pick the DX one out of six chances, nor a
+    /// learner weak at its rarer characters draw more of it.
+    #[test]
+    fn field_days_dx_share_holds_through_the_sampler() {
+        use crate::callsign::Countries;
+        use crate::contest::ContestKind;
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        settings.contest.contest_kind = ContestKind::FieldDay;
+        let settings = settings.clamp();
+        let spec = CallSpec::contest(Countries::FieldDay);
+        let mut weak = Sampler::new(&[], &settings, 6);
+        for _ in 0..20 {
+            CallSource::learn(
+                &mut weak,
+                Answered {
+                    sent: "JQZXY",
+                    received: "",
+                    copied: &CopyTally::of("JQZXY", ""),
+                    played: None,
+                },
+            );
+        }
+        for mut sampler in [Sampler::new(&[], &settings, 5), weak] {
+            let dx = (0..10_000)
+                .map(|_| sampler.next_call(&settings, spec, &|_| false))
+                .filter(|call| !Countries::NorthAmerica.admits(call.country))
+                .count();
+            // 0.9% of 10,000 is 90.
+            assert!(dx > 55 && dx < 130, "{dx} of 10000 DX");
+        }
+    }
+
+    /// Contest mode never says it adapts speed: its callers' speeds are
+    /// drawn evenly from the range, whatever the switch carried over from
+    /// Callsigns says.
+    #[test]
+    fn contest_has_no_adaptive_speed_path() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.char_wpm_max = 35.0;
+        settings.playback.effective_wpm_min = 20.0;
+        settings.playback.effective_wpm_max = 35.0;
+        settings.playback.adaptive_speed = true;
+        let settings = settings.clamp();
+        assert!(adapts_speed(&settings));
+        let mut contest = settings;
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        let contest = contest.clamp();
+        assert!(contest.playback.adaptive_speed, "the switch is kept");
+        assert!(!adapts_speed(&contest));
+        assert!(adaptive_speed_path(&contest).is_none());
+    }
+
+    /// A call to avoid is drawn again, a few times at most, and every call
+    /// drawn counts as sent.
+    #[test]
+    fn a_call_to_avoid_is_drawn_again() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        let spec = CallSpec::contest(crate::callsign::Countries::Any);
+        let mut sampler = Sampler::new(&[], &settings, 8);
+        let first = sampler.clone().next_call(&settings, spec, &|_| false);
+        let other = sampler.next_call(&settings, spec, &|call| call == first.text);
+        assert_ne!(other.text, first.text);
+        // Avoiding everything still gives a call, after the last redraw.
+        let draws = std::cell::Cell::new(0);
+        let call = sampler.next_call(&settings, spec, &|_| {
+            draws.set(draws.get() + 1);
+            true
         });
+        assert!(!call.text.is_empty());
+        assert_eq!(draws.get(), CALL_REDRAWS);
+        // The first draw was a copy's: only the two calls drawn here count.
+        let counted: u32 = sampler.state.session_sample_counts.values().sum();
+        assert_eq!(counted as usize, other.text.len() + call.text.len());
+    }
+
+    /// What a caller's call teaches the sampler is what each character was
+    /// copied as, as for a group.
+    #[test]
+    fn a_contest_caller_teaches_the_characters() {
+        let settings = TrainingSettings::default();
+        let mut sampler = Sampler::new(&[], &settings, 1);
+        CallSource::learn(
+            &mut sampler,
+            Answered {
+                sent: "K5XYZ",
+                received: "K5XYC",
+                copied: &CopyTally::of("K5XYZ", "K5XYC"),
+                played: Some((25.0, 25.0)),
+            },
+        );
+        assert_eq!(belief_for(&sampler.state, 'Z').beta, 2.0);
+        assert_eq!(belief_for(&sampler.state, 'K').alpha, 2.0);
     }
 
     /// A generator stuck on one value: the worst a broken stub can do.
@@ -1208,12 +1414,15 @@ mod tests {
             } else {
                 &typed
             };
-            sampler.learn(Answered {
-                sent: &sent,
-                received: heard,
-                copied: &CopyTally::of(&sent, &typed),
-                played: Some(played),
-            });
+            GroupSource::learn(
+                &mut sampler,
+                Answered {
+                    sent: &sent,
+                    received: heard,
+                    copied: &CopyTally::of(&sent, &typed),
+                    played: Some(played),
+                },
+            );
         }
         let counted_groups = (groups - half) as f64;
         Run {

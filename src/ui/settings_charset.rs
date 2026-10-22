@@ -1,13 +1,17 @@
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSetMode, GROUP_SIZE_MAX, LevelAxis, MAX_DIGITS_LEVEL, PracticeWindow,
-    SEQUENCE_PRESETS, STARTER_WORDS, SequenceChoice, SettingsSection, TrainingSettings,
-    WORD_LIST_MAX, WordList, compute_char_pool, current_practice_window, tier_examples,
-    unlocked_practice_count,
+    CALLSIGN_TIER_MAX, CharSetMode, ContestKind, ContestPreset, Fill, GROUP_SIZE_MAX, LevelAxis,
+    MAX_DIGITS_LEVEL, PracticeWindow, RunStyle, SEQUENCE_PRESETS, STARTER_WORDS, Sender,
+    SequenceChoice, SettingsSection, TrainingSettings, WORD_LIST_MAX, WordList, compute_char_pool,
+    current_practice_window, parse_callsign, tier_examples, unlocked_practice_count,
 };
 use dioxus::prelude::*;
 
+use crate::playback::Dialogue;
+use crate::ui::band::habits_label;
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
+use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
+use crate::ui::home::range_label;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id,
 };
@@ -49,12 +53,13 @@ fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<Str
 }
 
 /// The character sets, in the order the control offers them.
-pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 5] = [
+pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 6] = [
     (CharSetMode::Koch, "Koch"),
     (CharSetMode::Digits, "Digits"),
     (CharSetMode::Mixed, "Mixed"),
     (CharSetMode::Callsign, "Callsigns"),
     (CharSetMode::Words, "Words"),
+    (CharSetMode::Contest, "Contest"),
 ];
 
 /// What a character set is called on screen: "Callsigns".
@@ -66,6 +71,31 @@ pub(crate) fn mode_label(mode: CharSetMode) -> &'static str {
         .unwrap_or_default()
 }
 
+/// The run styles, in the order the card offers them.
+const RUN_STYLES: [(RunStyle, &str); 2] = [
+    (RunStyle::Single, "Single caller"),
+    (RunStyle::Pileup, "Pile-up"),
+];
+
+/// How many call at once in a pile-up of `settings`, from the Band card's
+/// stations range, and the noun that counts them: "1–3" callers, "1" caller.
+pub(crate) fn pileup_count(settings: &TrainingSettings) -> (String, &'static str) {
+    let band = &settings.band;
+    let count = range_label(f64::from(band.stations_min), f64::from(band.stations_max));
+    let noun = if band.stations_max == 1 {
+        "caller"
+    } else {
+        "callers"
+    };
+    (count, noun)
+}
+
+/// The same in words: "1–3 callers", "3 callers", "1 caller".
+pub(crate) fn pileup_callers(settings: &TrainingSettings) -> String {
+    let (count, noun) = pileup_count(settings);
+    format!("{count} {noun}")
+}
+
 /// The practice windows, and how many characters each needs unlocked before
 /// it is offered.
 const PRACTICE_WINDOWS: [(PracticeWindow, &str, usize); 3] = [
@@ -74,12 +104,103 @@ const PRACTICE_WINDOWS: [(PracticeWindow, &str, usize); 3] = [
     (PracticeWindow::Last5, "Newest 5", 5),
 ];
 
+/// Your call where an example of a QSO has it, or a stand-in until you
+/// give one a contest can read.
+fn call_or_stand_in(my_call: &str) -> &str {
+    if parse_callsign(my_call).is_some() {
+        my_call
+    } else {
+        "<your call>"
+    }
+}
+
+/// Your name, state or section where an example of a QSO sends it: what
+/// you gave or your call tells (DX for a call outside the US and Canada),
+/// or `stand_in` until then.
+fn or_stand_in<'a>(sent: &'a str, stand_in: &'a str) -> &'a str {
+    if sent.is_empty() { stand_in } else { sent }
+}
+
+/// Your CQ zone where an example of a QSO sends it: the one you gave or
+/// your call reads as, or a stand-in until one is known.
+fn zone_or_stand_in(zone: Option<u32>) -> String {
+    zone.map_or_else(|| "<your zone>".to_string(), |zone| zone.to_string())
+}
+
+/// What the card shows in Contest mode: which contest, what its exchange
+/// is, and a QSO of it as it goes, with your call in it.
+#[derive(Clone, PartialEq)]
+struct ContestCard {
+    kind: ContestKind,
+    /// One caller at a time, or a pile-up, and how many call in one.
+    style: RunStyle,
+    callers: String,
+    /// What you send: `5NN + serial`.
+    sends: String,
+    /// What you copy, as the log heads it: `NR`.
+    copies: String,
+    /// The side you are on and who you work from it, where sides change
+    /// it.
+    side_note: Option<String>,
+    /// What Dust leaves out of the real contest, if anything.
+    simplified: Option<&'static str>,
+    /// Who sends each line of the QSO, and what.
+    qso: Vec<(Sender, String)>,
+    /// The preset the settings are on, if any.
+    preset: Option<ContestPreset>,
+}
+
+impl ContestCard {
+    /// The card for the contest `settings` choose.
+    fn of(settings: &TrainingSettings) -> Self {
+        let contest = &settings.contest;
+        let kind = contest.contest_kind;
+        let side = contest.side();
+        let style = contest.contest_style;
+        let callers = pileup_callers(settings);
+        let preset = ContestPreset::of(settings);
+        let rules = kind.rules();
+        let copies: Vec<&str> = rules
+            .copied(side)
+            .iter()
+            .map(|field| field.label())
+            .collect();
+        let zone = zone_or_stand_in(contest.zone());
+        Self {
+            kind,
+            style,
+            callers,
+            sends: rules.sends(side),
+            copies: copies.join("\u{a0}"),
+            side_note: rules.side_note(side, parse_callsign(&contest.my_call).is_some()),
+            simplified: rules.simplified,
+            qso: rules.example_qso(
+                side,
+                &Fill {
+                    my_call: call_or_stand_in(&contest.my_call),
+                    my_name: or_stand_in(&contest.my_name, "<your name>"),
+                    my_state: or_stand_in(contest.state_sent(), "<your state>"),
+                    my_zone: &zone,
+                    my_power: &contest.my_power,
+                    my_class: &contest.my_class,
+                    my_section: or_stand_in(contest.section_sent(), "<your section>"),
+                    ..Fill::default()
+                },
+            ),
+            preset,
+        }
+    }
+}
+
 /// What the character-set card shows, worked out from the settings. A memo
 /// of this is what the card reads, so it redraws when one of these moves and
 /// not for a slider on another card.
 #[derive(Clone, PartialEq)]
 struct Charset {
     mode: CharSetMode,
+    /// In Contest mode, the contest; none in any other.
+    contest: Option<ContestCard>,
+    callsigns: bool,
     sequence: String,
     choice: SequenceChoice,
     level: u32,
@@ -89,6 +210,8 @@ struct Charset {
     unlocked: usize,
     window: PracticeWindow,
     pool: Vec<char>,
+    /// A few calls of the tier, as Callsigns shows them; none in Contest,
+    /// whose QSO shows a call.
     tier_examples: Vec<String>,
     /// The words Words sends, and whether they are the learner's own.
     words: Vec<String>,
@@ -98,9 +221,17 @@ struct Charset {
 impl Charset {
     fn of(settings: &TrainingSettings) -> Self {
         let c = &settings.curriculum;
-        let callsigns = c.char_set_mode == CharSetMode::Callsign;
+        let callsigns = c.char_set_mode.sends_callsigns();
+        let contest = (c.char_set_mode == CharSetMode::Contest).then(|| ContestCard::of(settings));
+        let tier_examples = if callsigns && contest.is_none() {
+            tier_examples(settings.active_level())
+        } else {
+            Vec::new()
+        };
         Self {
             mode: c.char_set_mode,
+            contest,
+            callsigns,
             sequence: settings.sequence().iter().collect(),
             choice: settings.sequence_choice(),
             level: settings.active_level(),
@@ -110,11 +241,7 @@ impl Charset {
             unlocked: unlocked_practice_count(settings),
             window: current_practice_window(settings),
             pool: compute_char_pool(settings),
-            tier_examples: if callsigns {
-                tier_examples(settings.active_level())
-            } else {
-                Vec::new()
-            },
+            tier_examples,
             words: settings.words().into_iter().map(str::to_string).collect(),
             own_words: settings.has_own_words(),
         }
@@ -129,10 +256,15 @@ impl Charset {
             CharSetMode::Digits => "Digits only".to_string(),
             CharSetMode::Mixed => "Letters and digits together".to_string(),
             CharSetMode::Callsign => "Real callsigns, off the air".to_string(),
+            // A contest is told by its name; its tier is the stepper's.
+            CharSetMode::Contest => {
+                let kind = self.contest.as_ref().map(|card| card.kind);
+                return format!("Contest · {}", kind.unwrap_or_default().label());
+            }
             CharSetMode::Words if self.own_words => "Your own words, sent whole".to_string(),
             CharSetMode::Words => "Starter words, sent whole".to_string(),
         };
-        if self.mode == CharSetMode::Callsign {
+        if self.callsigns {
             format!("{what} · tier {} of {CALLSIGN_TIER_MAX}", self.level)
         } else if self.mode == CharSetMode::Words {
             format!("{what} · {}", count_words(self.words.len()))
@@ -142,11 +274,54 @@ impl Charset {
     }
 }
 
+/// What a preset sets, in a line: "15–18 WPM · tier 1 calls · one caller
+/// at a time · easy habits · no fading or static", the callers' habits and
+/// the band in the Band card's own words.
+fn preset_summary(preset: ContestPreset) -> String {
+    let (slowest, fastest) = preset.char_wpm();
+    let (fewest, most) = preset.stations();
+    let callers = match preset.style() {
+        RunStyle::Single => "one caller at a time".to_string(),
+        RunStyle::Pileup => format!(
+            "{} callers",
+            range_label(f64::from(fewest), f64::from(most))
+        ),
+    };
+    let band = match preset {
+        ContestPreset::FirstQso => "no fading or static",
+        ContestPreset::Club => "QSB fading and QRN static",
+        ContestPreset::Contester => "deep fading, strong static",
+    };
+    let parts = [
+        format!("{} WPM", range_label(slowest, fastest)),
+        format!("tier {} calls", preset.tier()),
+        callers,
+        format!("{} habits", habits_label(preset.habits()).to_lowercase()),
+        band.to_string(),
+    ];
+    // One piece each, and the dot at the end of a line, not the start of
+    // the next, where a narrow line breaks.
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|part| part.replace(' ', "\u{a0}"))
+        .collect();
+    parts.join("\u{a0}· ")
+}
+
+/// The character set card. In Contest mode it also plays Hear a QSO:
+/// `hearing` while it plays, `dialogue` what it has played, `on_hear` to
+/// start it and `on_stop` to stop it.
 #[component]
-pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
+pub fn CharsetCard(
+    settings: Signal<TrainingSettings>,
+    #[props(default)] hearing: bool,
+    #[props(default)] dialogue: Option<Dialogue>,
+    #[props(default)] on_hear: EventHandler<()>,
+    #[props(default)] on_stop: EventHandler<()>,
+) -> Element {
     let charset = use_memo(move || Charset::of(&settings.read()));
     let c = charset.read();
-    let callsigns = c.mode == CharSetMode::Callsign;
+    let callsigns = c.callsigns;
     let words = c.mode == CharSetMode::Words;
     let has_unlock_order = matches!(c.mode, CharSetMode::Koch | CharSetMode::Mixed);
     rsx! {
@@ -159,13 +334,23 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     },
                 }
             }
-            div { class: "segmented",
+            div { class: "segmented charset-modes",
                 for (mode, label) in CHAR_SET_MODES {
                     Seg {
                         label,
                         active: c.mode == mode,
                         onclick: move |_| settings.write().set_char_set_mode(mode),
                     }
+                }
+            }
+            if let Some(contest) = c.contest.clone() {
+                ContestBody {
+                    settings,
+                    contest,
+                    hearing,
+                    dialogue,
+                    on_hear,
+                    on_stop,
                 }
             }
             if has_unlock_order {
@@ -219,6 +404,9 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
             }
+            if let Some(contest) = c.contest.clone() {
+                RunStylePicker { settings, style: contest.style, callers: contest.callers }
+            }
             if c.mode == CharSetMode::Mixed {
                 NumberField {
                     label: "Share of letters",
@@ -236,7 +424,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                     words: c.words.clone(),
                     own: c.own_words,
                 }
-            } else if callsigns {
+            } else if !c.tier_examples.is_empty() {
                 div { class: "eyebrow", "What this tier sends" }
                 div { class: "calls",
                     for call in c.tier_examples.iter() {
@@ -248,7 +436,7 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 p { class: "muted", style: "margin: 0;",
                     "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations, weighted the way you hear them."
                 }
-            } else {
+            } else if !callsigns {
                 div { class: "eyebrow", "Practice window" }
                 div { class: "mode-pills",
                     for (window, label, needs) in PRACTICE_WINDOWS {
@@ -274,6 +462,133 @@ pub fn CharsetCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
         }
+    }
+}
+
+/// A contest in place of an alphabet: a pill for each contest, what you send
+/// and copy, and a first QSO of it, line by line, with a few to hear (Hear a
+/// QSO); then where to start from, a preset.
+#[component]
+fn ContestBody(
+    settings: Signal<TrainingSettings>,
+    contest: ContestCard,
+    hearing: bool,
+    dialogue: Option<Dialogue>,
+    on_hear: EventHandler<()>,
+    on_stop: EventHandler<()>,
+) -> Element {
+    // What Hear a QSO played, while it is of the contest chosen now: kept
+    // once it ends, but not when it stopped before a line was heard.
+    let heard = dialogue
+        .filter(|dialogue| dialogue.kind == contest.kind)
+        .filter(|dialogue| hearing || !dialogue.lines.is_empty());
+    let eyebrow = heard
+        .as_ref()
+        .map_or_else(|| "A QSO".to_string(), |heard| heard_label(heard, hearing));
+    rsx! {
+        div { class: "eyebrow", "Contest" }
+        div { class: "mode-pills",
+            for kind in ContestKind::ALL {
+                Seg {
+                    label: kind.label(),
+                    id: control_id("contest", kind.label()),
+                    pill: true,
+                    active: contest.kind == kind,
+                    onclick: move |_| settings.write().contest.contest_kind = kind,
+                }
+            }
+        }
+        // What you copy keeps to one piece, after the dot where a narrow
+        // line breaks.
+        p { class: "muted", style: "margin: 0;",
+            "You send {contest.sends}\u{a0}· You\u{a0}copy\u{a0}{contest.copies}"
+        }
+        if let Some(side_note) = &contest.side_note {
+            p { id: "side-line", class: "muted", style: "margin: 0;", "{side_note}" }
+        }
+        if let Some(simplified) = contest.simplified {
+            p { class: "muted", style: "margin: 0;", "{simplified}" }
+        }
+        QsoHead { label: eyebrow,
+            if hearing {
+                button {
+                    id: control_id("btn", "stop hearing"),
+                    class: "btn btn-secondary btn-sm",
+                    r#type: "button",
+                    onclick: move |_| on_stop.call(()),
+                    Icon { name: IconName::Stop }
+                    "Stop"
+                }
+            } else {
+                button {
+                    id: control_id("btn", "hear a qso"),
+                    class: "btn btn-secondary btn-sm",
+                    r#type: "button",
+                    onclick: move |_| on_hear.call(()),
+                    Icon { name: IconName::Signal }
+                    "Hear a QSO"
+                }
+            }
+        }
+        if let Some(heard) = heard {
+            HeardDialogue { dialogue: heard, hearing }
+        } else {
+            QsoLines { lines: contest.qso.clone() }
+        }
+        PresetPicker { settings, preset: contest.preset }
+    }
+}
+
+/// Where a run starts from: a preset for a first QSO, a club operator or a
+/// contester, each setting the callers' speed, calls and habits, the run
+/// style and how many call, and the band. The settings read Custom once
+/// any of that is changed, as the Experience presets do.
+#[component]
+fn PresetPicker(settings: Signal<TrainingSettings>, preset: Option<ContestPreset>) -> Element {
+    let line = match preset {
+        Some(preset) => preset_summary(preset),
+        None => "Custom · a preset sets the callers' speed, calls and habits, how many call, and the band"
+            .to_string(),
+    };
+    rsx! {
+        div { class: "eyebrow", "Preset" }
+        div { class: "mode-pills",
+            for each in ContestPreset::ALL {
+                Seg {
+                    label: each.name(),
+                    id: control_id("preset", each.name()),
+                    pill: true,
+                    active: preset == Some(each),
+                    onclick: move |_| each.apply(&mut settings.write()),
+                }
+            }
+        }
+        p { id: "preset-line", class: "muted", style: "margin: 0;", "{line}" }
+    }
+}
+
+/// How a run goes: one station at a time, or a pile-up of as many as the
+/// Band card's stations range draws, which the line under it names.
+#[component]
+fn RunStylePicker(settings: Signal<TrainingSettings>, style: RunStyle, callers: String) -> Element {
+    let line = match style {
+        RunStyle::Single => "One station calls at a time".to_string(),
+        RunStyle::Pileup => format!("{callers} · set on the Band card"),
+    };
+    rsx! {
+        div { class: "eyebrow", "Run style" }
+        div { class: "mode-pills",
+            for (each, label) in RUN_STYLES {
+                Seg {
+                    label,
+                    id: control_id("style", label),
+                    pill: true,
+                    active: style == each,
+                    onclick: move |_| settings.write().set_contest_style(each),
+                }
+            }
+        }
+        p { id: "run-style-line", class: "muted", style: "margin: 0;", "{line}" }
     }
 }
 

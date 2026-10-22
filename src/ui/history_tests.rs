@@ -4,11 +4,11 @@
 //! What the store holds is read alongside the page, since a deletion that
 //! only reached the screen would come back at the next launch.
 
-use cw_core::{SessionResult, TrainingSettings};
+use cw_core::{CharSetMode, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
 use crate::persist::Store;
-use crate::testing::{Ui, run, stored_session, test_settings};
+use crate::testing::{Ui, run, stored_run, stored_session, test_settings};
 use crate::ui::stats::StatsView;
 
 /// Five sessions a day apart, oldest first, the way the store keeps them.
@@ -254,6 +254,162 @@ fn a_long_history_is_listed_a_page_at_a_time() {
         ui.click("history-select");
         ui.click("history-choose-all");
         assert!(ui.has("45 selected"));
+    });
+}
+
+/// Every row says what it practised, whatever is chosen now. A contest run
+/// a later version kept reads Contest, known by its mark even once an older
+/// build has dropped its log.
+#[test]
+fn every_row_names_its_mode() {
+    run(|| async {
+        let koch = stored_session("2026-10-01", &[("KM", "KM")]);
+        let mut calls = stored_session("2026-10-02", &[("K1ABC", "K1ABC")]);
+        calls.char_set_mode = CharSetMode::Callsign;
+        let mut written = serde_json::to_value(stored_session("2026-10-03", &[("K5XYZ", "K5XY")]))
+            .expect("a session writes");
+        written["charSetMode"] = serde_json::json!("callsign");
+        written["alphabetFingerprint"] = serde_json::json!("contest:wpx");
+        let contest: SessionResult = serde_json::from_value(written).expect("a run reads");
+        let (ui, _recorder) = open_history(&[koch, calls, contest]);
+        assert!(ui.has("Koch · 1/1 groups"));
+        assert!(ui.has("Callsigns · 1/1 groups"));
+        assert!(ui.has("Contest · CQ\u{a0}WPX · log not kept by an older version"));
+        assert!(ui.controls("history-open-").is_empty(), "no log to open");
+    });
+}
+
+/// A run with Show copy on says it was assisted on its row, by its log or,
+/// once an older build has dropped that, by its mark, which still reads as
+/// its contest; and its results say so too.
+#[test]
+fn an_assisted_run_says_so_on_its_row() {
+    run(|| async {
+        let kept = crate::testing::assisted(stored_run(
+            "2026-10-04",
+            &[("K5XYZ", "214", "K5XYZ", "214"), ("W1AW", "5", "W1AW", "5")],
+        ));
+        let dropped = SessionResult {
+            contest: None,
+            date: "2026-10-03".into(),
+            timestamp: kept.timestamp - 1,
+            ..kept.clone()
+        };
+        let (mut ui, _recorder) = open_history(&[dropped, kept]);
+        assert!(
+            ui.has("Contest · CQ\u{a0}WPX · assisted · 2/2\u{a0}QSOs"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has("Contest · CQ\u{a0}WPX · assisted · log not kept by an older version"));
+        ui.click("history-open-1");
+        assert!(ui.has("Assisted: Show copy was on."));
+        assert!(ui.shows("btn-history"));
+    });
+}
+
+/// A Simple QSO run's row gives the minutes a QSO took in place of a rate,
+/// as a contest without a score is told, and opens its results.
+#[test]
+fn a_simple_qso_row_reads_its_pace() {
+    run(|| async {
+        let contest = crate::testing::stored_simple_qso_run(
+            "2026-10-20",
+            &[
+                [("K5XYZ", "K5XYZ"), ("579", "579"), ("BOB", "BOB")],
+                [("DL2XYZ", "DL2XYZ"), ("599", "599"), ("HANS", "HANZ")],
+            ],
+        );
+        let (mut ui, _recorder) = open_history(&[contest]);
+        assert!(
+            ui.has("Contest · Simple\u{a0}QSO · 1/2\u{a0}QSOs · 5.0\u{a0}min/QSO"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("/h<"));
+        ui.click("history-open-0");
+        assert!(ui.has("Accuracy per field"));
+    });
+}
+
+/// An NA Sprint run's row reads as a WPX run's does, with its rate, and
+/// opens its results with its contest score.
+#[test]
+fn a_sprint_row_reads_as_a_run() {
+    run(|| async {
+        let contest = crate::testing::stored_sprint_run(
+            "2026-10-21",
+            &[
+                [
+                    ("W7XYZ", "W7XYZ"),
+                    ("145", "145"),
+                    ("BOB", "BOB"),
+                    ("OR", "OR"),
+                ],
+                [
+                    ("VE3ABC", "VE3ABC"),
+                    ("23", "23"),
+                    ("DAVE", "DAVE"),
+                    ("ON", "QC"),
+                ],
+            ],
+        );
+        let (mut ui, _recorder) = open_history(&[contest]);
+        assert!(
+            ui.has("Contest · NA\u{a0}Sprint · 1/2\u{a0}QSOs · 12/h"),
+            "{}",
+            ui.html()
+        );
+        ui.click("history-open-0");
+        assert!(ui.has("Contest score"));
+        assert!(ui.has("1\u{a0}wrong\u{a0}ST"));
+    });
+}
+
+/// A contest run's row reads as a run — its contest, its QSOs clean of
+/// those logged, its rate — and its points say so; it opens the run's
+/// results, to be read and left again, with no run started from them.
+#[test]
+fn a_contest_row_opens_the_runs_results() {
+    run(|| async {
+        let koch = stored_session("2026-10-01", &[("KM", "KM")]);
+        let contest = stored_run(
+            "2026-10-20",
+            &[
+                ("K5XYZ", "214", "K5XYZ", "214"),
+                ("DL2XYZ", "13", "DL2XYZ", "31"),
+            ],
+        );
+        let pts = format!("{} pts", contest.score.round());
+        let (mut ui, recorder) = open_history(&[koch, contest]);
+        assert!(
+            ui.has("Contest · CQ\u{a0}WPX · 1/2\u{a0}QSOs · 12/h"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has(&pts), "{pts}");
+        assert!(ui.has(" pts<"), "every row's points say so");
+        assert_eq!(ui.controls("history-open-"), ["history-open-1"]);
+
+        // Named by what the row shows, as every row is read.
+        assert!(!ui.input_tag("history-open-1").contains("aria-label"));
+        ui.click("history-open-1");
+        assert!(ui.has("Run complete"));
+        assert!(ui.has("CQ WPX · 10:00 · Tue\u{a0}20\u{a0}Oct\u{a0}2026"));
+        assert!(ui.has("31→13"), "what was logged, and really sent");
+        assert!(!ui.shows("btn-run-again"), "read only");
+        assert!(
+            ui.controls("history-delete-").is_empty(),
+            "the list gave way to the results"
+        );
+        ui.click("btn-back");
+        assert!(ui.has("2 sessions on this device"));
+        assert_eq!(ui.screen(), "stats");
+        // The way back at the top goes the same way.
+        ui.click("history-open-1");
+        ui.click("btn-history");
+        assert!(ui.has("2 sessions on this device"));
+        assert!(recorder.calls().is_empty(), "nothing was started");
     });
 }
 

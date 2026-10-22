@@ -4,12 +4,14 @@ use std::collections::BTreeMap;
 
 use crate::alignment::align_group;
 use crate::belief::EstimatePoint;
+use crate::contest::{ContestKind, StoredLog};
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
     CharSamplingConfig, CharSamplingState, adaptive_bounds, adapts_speed, belief_for,
     beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,
-    generate_callsign_group, generate_word_group, group_size_bounds, normalize_weights,
+    generate_callsign_group, generate_contest_call, generate_word_group, group_size_bounds,
+    normalize_weights,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -20,6 +22,12 @@ pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;
 pub const BUILDING_MIN_ACCURACY: f64 = 0.7;
 pub const SLOW_AVG_MS: f64 = 800.0;
+
+/// What the Letters card says once the history holds a contest run: its
+/// letters count, but not its times.
+pub const CONTEST_TIMES_NOTE: &str = "Contest runs count towards accuracy here, but their times \
+     are left out of the average time that marks a letter slow: they include waiting and typing, \
+     not only copying.";
 pub const GROUP_START_BIGRAM_TOKEN: char = '▸';
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +102,15 @@ pub struct SessionHistoryRow {
     pub correct_groups: u32,
     pub total_chars: u32,
     pub timestamp: u64,
+    /// What the session practised: every row says, since the history holds
+    /// every mode whatever is chosen now.
+    pub mode: CharSetMode,
+    /// The contest a run was of, when this build knows it.
+    pub contest: Option<ContestKind>,
+    /// What became of a run's log; none for a session of groups.
+    pub log: Option<StoredLog>,
+    /// A contest run had Show copy on.
+    pub assisted: bool,
     /// Where the session sits in the history the rows were made from, so a
     /// row names one session even when two finished in the same millisecond.
     pub index: usize,
@@ -141,6 +158,11 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
             let entry = totals.entry(*letter).or_insert((0, 0));
             entry.0 += stats.correct;
             entry.1 += stats.total;
+        }
+        // A contest's times run from a station's send to an edit, waiting
+        // and typing included: not answers after a send (§10 of the design).
+        if session.char_set_mode == CharSetMode::Contest {
+            continue;
         }
         for (group, timing) in session.groups.iter().zip(session.group_timings.iter()) {
             if timing.time_to_complete_ms <= 0.0 {
@@ -326,10 +348,11 @@ fn whole_group_character_shares(
     let mut total = 0.0;
     let mut sampling = state.clone();
     for _ in 0..DRAWS {
-        let call = if settings.curriculum.char_set_mode == CharSetMode::Words {
-            generate_word_group(settings, &mut sampling, config, rng)
-        } else {
-            generate_callsign_group(settings, &mut sampling, config, rng)
+        let call = match settings.curriculum.char_set_mode {
+            CharSetMode::Words => generate_word_group(settings, &mut sampling, config, rng),
+            // A contest's callers' calls; their exchanges are not drawn.
+            CharSetMode::Contest => generate_contest_call(settings, &mut sampling, config, rng),
+            _ => generate_callsign_group(settings, &mut sampling, config, rng),
         };
         for ch in call.chars() {
             if let Some(count) = counts.get_mut(&ch) {
@@ -408,6 +431,10 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
             correct_groups: s.groups.iter().filter(|g| g.correct).count() as u32,
             total_chars: s.total_chars,
             timestamp: s.timestamp,
+            mode: s.char_set_mode,
+            contest: s.contest_kind(),
+            log: s.stored_log(),
+            assisted: s.assisted(),
             index,
         })
         .collect();
@@ -515,6 +542,96 @@ mod tests {
             score: 1.0,
             ..SessionResult::empty_for_test()
         }
+    }
+
+    /// A contest run's letters count for accuracy, but its times, which
+    /// include waiting and typing, leave the average time alone.
+    #[test]
+    fn contest_times_stay_out_of_the_letters_times() {
+        use crate::contest::bot::script::{Habit, run_settings, work};
+        use crate::contest::bot::{Operator, Runtime};
+        let mut calls = SessionResult::empty_for_test();
+        calls.char_set_mode = CharSetMode::Callsign;
+        for _ in 0..10 {
+            calls.groups.push(GroupResult {
+                sent: "K5XYZ".into(),
+                received: "K5XYZ".into(),
+                correct: true,
+            });
+            calls.group_timings.push(SessionTiming {
+                time_to_complete_ms: 1_500.0,
+                char_wpm: Some(25.0),
+                effective_wpm: Some(25.0),
+                sends: 1,
+            });
+            calls.tally.add("K5XYZ", "K5XYZ");
+        }
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_minutes = 2;
+        let sampler = crate::Sampler::new(&[], &settings, 4);
+        let mut runtime = Runtime::start(4, settings, sampler);
+        work(&mut runtime, &mut Operator::new(Habit::HumanPaced), &[]);
+        let run = runtime.machine.result(2, "2026-10-20".into());
+        assert!(
+            run.group_timings
+                .iter()
+                .any(|t| t.time_to_complete_ms > 1_500.0)
+        );
+        let letter = |history: &[SessionResult], ch: char| {
+            character_diagnostics(history)
+                .into_iter()
+                .find(|diag| diag.letter == ch)
+        };
+        let alone = letter(std::slice::from_ref(&calls), 'K').expect("K");
+        let both = [calls.clone(), run.clone()];
+        let with_run = letter(&both, 'K').expect("K");
+        assert_eq!(with_run.avg_ms, alone.avg_ms);
+        let counted = run.letter_accuracy().get(&'K').map_or(0, |k| k.total);
+        assert_eq!(with_run.total, alone.total + counted);
+        // A letter only the run has shows no time at all.
+        let only = run
+            .groups
+            .iter()
+            .flat_map(|group| group.sent.chars())
+            .find(|ch| !"K5XYZ".contains(*ch))
+            .expect("a letter K5XYZ lacks");
+        assert_eq!(letter(&both, only).map(|diag| diag.avg_ms), Some(0.0));
+    }
+
+    /// A run with Show copy on is assisted, and counts in every stat all
+    /// the same: the calendar, accuracy, Letters, Mistakes and copy speed.
+    #[test]
+    fn an_assisted_run_counts_in_every_stat() {
+        use crate::contest::bot::script::{Habit, run_settings, work};
+        use crate::contest::bot::{Operator, Runtime};
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_minutes = 2;
+        settings.contest.contest_show_copy = true;
+        let sampler = crate::Sampler::new(&[], &settings, 4);
+        let mut runtime = Runtime::start(4, settings.clone(), sampler);
+        // A digit off in every number: mistakes to count.
+        work(&mut runtime, &mut Operator::new(Habit::DigitOff), &[]);
+        let run = runtime.machine.result(2, "2026-10-20".into());
+        assert!(run.assisted(), "{}", run.alphabet_fingerprint);
+        let history = [run.clone()];
+        let days = crate::heatmap::aggregate_heatmap(&history);
+        assert_eq!(days.get("2026-10-20").map(|day| day.sessions), Some(1));
+        assert_eq!(accuracy_chart(&history).len(), 1);
+        let letters = character_diagnostics(&history);
+        let counted: u32 = letters.iter().map(|letter| letter.total).sum();
+        let sent: u32 = run.tally.sent.values().map(|letter| letter.total).sum();
+        assert_eq!(counted, sent, "every character it sent");
+        assert!(
+            mistake_stats(&history, 8)
+                .confusions
+                .iter()
+                .any(|confusion| confusion.sent.is_ascii_digit()),
+            "the digits typed wrong"
+        );
+        assert_eq!(speed_history(&settings, &history).len(), 1);
+        let row = &session_history(&history)[0];
+        assert_eq!(row.contest, Some(ContestKind::Wpx));
+        assert!(row.assisted, "History says so");
     }
 
     #[test]
@@ -687,8 +804,9 @@ mod tests {
         assert_eq!(rows[1].total_chars, 2);
         assert_eq!(rows[1].accuracy_pct, 50.0);
         assert!(session_history(&[]).is_empty());
-        // Each row still names the session it came from.
+        // Each row still names the session it came from, and its mode.
         assert_eq!((rows[0].index, rows[1].index), (1, 0));
+        assert_eq!(rows[0].mode, CharSetMode::Koch);
     }
 
     #[test]
@@ -754,6 +872,35 @@ mod tests {
                 .any(|row| row.character == '/'),
             "tier 1 has no portable calls"
         );
+    }
+
+    /// A contest's snapshot is of its callers' calls, drawn as the run draws
+    /// them: few portables and stations abroad, where the top tier sends
+    /// plenty for practice. Drawn plainly, with no lean on any character,
+    /// the difference is the spec's alone.
+    #[test]
+    fn contest_sampling_shows_what_its_callers_send() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.callsign_level = crate::callsign::CALLSIGN_TIER_MAX;
+        settings.auto_level.error_weight_strength = 0.0;
+        settings.auto_level.char_sampling_coverage_strength = 0.0;
+        let slash = |mode| {
+            let mut settings = settings.clone();
+            settings.curriculum.char_set_mode = mode;
+            let rows = sampling_rows(&settings, &[]);
+            let total: f64 = rows.iter().map(|row| row.sampling_prob).sum();
+            assert!((total - 1.0).abs() < 1e-6, "{mode:?}: {total}");
+            rows.iter()
+                .find(|row| row.character == '/')
+                .map_or(0.0, |row| row.sampling_prob)
+        };
+        let calls = slash(CharSetMode::Callsign);
+        let callers = slash(CharSetMode::Contest);
+        assert!(
+            callers > 0.0,
+            "a contest still hears a portable now and then"
+        );
+        assert!(callers < calls / 2.0, "{callers} against {calls}");
     }
 
     #[test]

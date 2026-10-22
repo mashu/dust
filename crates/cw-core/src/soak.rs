@@ -9,23 +9,40 @@
 
 use crate::auto_level::apply_auto_level;
 use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
+use crate::contest::bot::{Copied, copy_of};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
 use crate::session::MIN_RESPONSE_MS_PER_CHAR;
 use crate::timing::resolve_pileup;
 use crate::{
-    Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CharSamplingState, CharSetMode, CopyTally,
-    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, MonoMs, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
-    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, Rng, STATIONS_MAX, STATIONS_MIN, Sampler, SessionId,
-    SessionPhase, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
-    evaluate_auto_level, generate_training_group, plan_morse_playback_for, plan_transmission,
-    resolve_station,
+    Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CallerHabits, CharSamplingState,
+    CharSetMode, ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
+    FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Fields, MonoMs, OpKey, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError, Rng, RowStatus,
+    RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso, Sender, SessionId, SessionPhase,
+    SessionResult, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
+    contest_score, evaluate_auto_level, generate_training_group, parse_exchange,
+    plan_morse_playback_for, plan_transmission, plan_turn, read_number, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
 /// Turn it up when hunting: the failures name the seed they came from, so a
 /// deep run reproduces exactly on a short one.
 const SEEDS: u64 = 2_000;
+
+/// The contest soak's seeds of single callers, half as many again as
+/// [`SEEDS`]: the runs are shared among the contests, and a Sprint's
+/// exchange, three fields long, is put wrong by a slip or junk more often
+/// than a lone number, so fewer of its QSOs reach the log with a slip in the
+/// call, and the floor of each kind needs more runs to stand on.
+const CONTEST_SEEDS: u64 = SEEDS + SEEDS / 2;
+
+/// The contest soak's pile-up seeds, half as many again as
+/// [`CONTEST_SEEDS`]: a caller that hears you go to someone else drops out
+/// of its QSO, and Enter sends the caller you go on to your exchange rather
+/// than a TU that logs it at once, so fewer of a pile-up's QSOs reach the
+/// log with a slip in the call.
+const PILEUP_SEEDS: u64 = CONTEST_SEEDS + CONTEST_SEEDS / 2;
 
 /// Settings from anywhere, including values no screen would ever produce.
 fn wild_settings(rng: &mut SplitMix64) -> TrainingSettings {
@@ -772,6 +789,785 @@ fn a_pile_up_is_always_something_you_could_copy() {
                 assert!(event.frequency_hz.is_finite() && event.frequency_hz > 0.0);
                 assert!(event.target_gain.is_finite() && event.target_gain >= 0.0);
             }
+        }
+    }
+}
+
+/// How often, at least, the contest soak hears what the callers' habits
+/// bring, in each run style, under rough habits; real ones bring the
+/// numbers cut and `ENN` alone ([`HabitsHeard::floors`]). The rarer come
+/// seldom by design: `ENN` in one message in twenty that sends a report
+/// nobody copies, a fumble once from one careless caller in ten, in the two
+/// contests with serials, and an early exchange from one operator in twenty
+/// whose call you sent wrong or asked for with a partial.
+const HABIT_FLOORS: HabitsHeard = HabitsHeard {
+    cut: 200,
+    enn: 15,
+    fumbled: 10,
+    early: 10,
+    qrm: 150,
+};
+
+/// Settings from anywhere, in Contest mode, of run `style`: any contest, a
+/// call from a few that read in different ways and are on either side of
+/// ARRL DX, none among them, a name or none, a state or none, Labrador among
+/// them, a zone or none, any power, a Field Day class and a section or none,
+/// Yukon's among them, callers of any habits, and runs short enough to
+/// reach their end.
+fn contest_settings(rng: &mut SplitMix64, style: RunStyle) -> TrainingSettings {
+    const CALLS: [&str; 8] = [
+        "DL1ABC",
+        "K1ABC",
+        "VP2E/DL1ABC",
+        "JA1XYZ",
+        "W1AW/4",
+        "VO2AB",
+        "KH6XYZ",
+        "",
+    ];
+    let mut s = wild_settings(rng);
+    s.curriculum.char_set_mode = CharSetMode::Contest;
+    s.contest.contest_style = style;
+    let kinds = ContestKind::ALL;
+    s.contest.contest_kind = kinds[rng.usize_in(0, kinds.len() - 1)];
+    s.contest.my_call = CALLS[rng.usize_in(0, CALLS.len() - 1)].to_string();
+    s.contest.my_name = ["MAT", ""][rng.usize_in(0, 1)].to_string();
+    s.contest.my_state = ["MA", "", "DX", "LB"][rng.usize_in(0, 3)].to_string();
+    s.contest.my_zone = [0, 0, 14, 40][rng.usize_in(0, 3)];
+    s.contest.my_power = ["100", "KW", "5", "1K"][rng.usize_in(0, 3)].to_string();
+    s.contest.my_class = ["1D", "3A", "12F"][rng.usize_in(0, 2)].to_string();
+    s.contest.my_section = ["EMA", "", "DX", "YT"][rng.usize_in(0, 3)].to_string();
+    s.contest.contest_minutes = [1, 2, 3, 4, 0][rng.usize_in(0, 4)];
+    s.contest.contest_habits = CallerHabits::ALL[rng.usize_in(0, CallerHabits::ALL.len() - 1)];
+    s.clamp()
+}
+
+/// `text` one edit off: a character changed, dropped or added.
+fn one_edit_off(text: &str, rng: &mut SplitMix64) -> String {
+    let mut chars: Vec<char> = text.chars().collect();
+    let at = rng.usize_in(0, chars.len());
+    match rng.usize_in(0, 2) {
+        0 if at < chars.len() => chars[at] = if chars[at] == 'X' { 'Y' } else { 'X' },
+        1 if at < chars.len() => {
+            chars.remove(at);
+        }
+        _ => chars.insert(at, '7'),
+    }
+    chars.into_iter().collect()
+}
+
+/// A key and its fields: 40% as heard, a quarter of those with the call
+/// heard before the last, as an operator logging a QSO it forgot types it;
+/// 20% one edit off, 10% empty, 10% a partial, 20% junk.
+fn contest_key(rng: &mut SplitMix64, now: u64, seen: &Seen) -> ContestEvent {
+    use OpKey::*;
+    const KEYS: [OpKey; 15] = [
+        Esm,
+        Cq,
+        Exchange,
+        Tu,
+        MyCall,
+        HisCall,
+        HisCallAndExchange,
+        B4,
+        Again,
+        Nil,
+        NrQuery,
+        TuAndLog,
+        LogOnly,
+        Wipe,
+        StopTx,
+    ];
+    const JUNK: [char; 14] = [
+        'K', '5', 'X', 'Y', 'Z', '?', '/', ' ', 'é', '中', 't', '1', 'N', '\u{200b}',
+    ];
+    let key = if rng.f64() < 0.6 {
+        Esm
+    } else {
+        KEYS[rng.usize_in(0, KEYS.len() - 1)]
+    };
+    let junk = |rng: &mut SplitMix64| -> String {
+        (0..rng.usize_in(0, 9))
+            .map(|_| JUNK[rng.usize_in(0, JUNK.len() - 1)])
+            .collect()
+    };
+    let (call, heard) = (seen.call.as_str(), seen.exch.as_str());
+    let draw = rng.f64();
+    let (call, exch) = if draw < 0.1 {
+        (seen.previous.clone(), heard.to_string())
+    } else if draw < 0.4 {
+        (call.to_string(), heard.to_string())
+    } else if draw < 0.6 {
+        (one_edit_off(call, rng), one_edit_off(heard, rng))
+    } else if draw < 0.7 {
+        (String::new(), String::new())
+    } else if draw < 0.8 {
+        (call.chars().take(2).chain(['?']).collect(), String::new())
+    } else {
+        (junk(rng), junk(rng))
+    };
+    let stamp = |rng: &mut SplitMix64| MonoMs(now.saturating_sub(rng.usize_in(0, 3_000) as u64));
+    let fields = Fields {
+        call,
+        exch,
+        call_edited: stamp(rng),
+        exch_complete: (rng.f64() < 0.7).then(|| stamp(rng)),
+        earlier: Vec::new(),
+    };
+    ContestEvent::Key { key, fields }
+}
+
+/// What came of every contest run across the seeds, to show the soak
+/// reached every kind of QSO.
+#[derive(Debug, Default)]
+struct Outcomes {
+    clean: u32,
+    busted: u32,
+    field: u32,
+    nil: u32,
+    lost: u32,
+}
+
+impl Outcomes {
+    /// Each kind of QSO, and how many came up.
+    fn counts(&self) -> [(&'static str, u32); 5] {
+        [
+            ("clean", self.clean),
+            ("busted", self.busted),
+            ("field error", self.field),
+            ("NIL", self.nil),
+            ("lost", self.lost),
+        ]
+    }
+}
+
+/// What a contest soak run has seen of the machine's effects: every id
+/// handed out, the turns and timers among them, the last call and exchange
+/// a listener would have copied from the callers, and the call before it.
+#[derive(Debug, Default)]
+struct Seen {
+    ids: std::collections::BTreeSet<u64>,
+    turns: Vec<u64>,
+    timers: Vec<u64>,
+    call: String,
+    exch: String,
+    previous: String,
+    heard: HabitsHeard,
+}
+
+/// What a contest soak run has heard of its callers' habits: numbers sent
+/// cut, reports sent as `ENN`, serials fumbled and put right, exchanges
+/// sent early with a call put right, and messages of QRM.
+#[derive(Debug, Default, Clone, Copy)]
+struct HabitsHeard {
+    cut: u32,
+    enn: u32,
+    fumbled: u32,
+    early: u32,
+    qrm: u32,
+}
+
+impl HabitsHeard {
+    fn add(&mut self, other: Self) {
+        self.cut += other.cut;
+        self.enn += other.enn;
+        self.fumbled += other.fumbled;
+        self.early += other.early;
+        self.qrm += other.qrm;
+    }
+
+    /// How much of each the soak hears at least under `habits`: nothing
+    /// under easy ones, numbers cut and `ENN` under real ones, and all of
+    /// [`HABIT_FLOORS`] under rough ones.
+    fn floors(habits: CallerHabits) -> Self {
+        match habits {
+            CallerHabits::Easy => Self::default(),
+            CallerHabits::Real => Self {
+                cut: HABIT_FLOORS.cut,
+                enn: HABIT_FLOORS.enn,
+                ..Self::default()
+            },
+            CallerHabits::Rough => HABIT_FLOORS,
+        }
+    }
+
+    /// Each count, with what it counts.
+    fn counts(self) -> [(&'static str, u32); 5] {
+        [
+            ("cut numbers", self.cut),
+            ("ENN", self.enn),
+            ("fumbled serials", self.fumbled),
+            ("early exchanges", self.early),
+            ("QRM messages", self.qrm),
+        ]
+    }
+}
+
+/// Every effect a contest run hands back has to be one the runtime can act
+/// on: an id never handed out before, a timer that runs, a turn with
+/// something in it, no station sending over itself and no reply past your
+/// message; and in a pile-up, its callers sixty hertz apart or more. What
+/// the callers' habits bring is tallied, `machine` as the effects left it
+/// telling an exchange sent early.
+fn check_contest_effects(
+    effects: &[ContestEffect],
+    machine: &ContestMachine<Sampler>,
+    settings: &TrainingSettings,
+    seed: u64,
+    step: usize,
+    seen: &mut Seen,
+) {
+    for effect in effects {
+        match effect {
+            ContestEffect::PlayTurn(turn) => {
+                assert!(
+                    seen.ids.insert(turn.id),
+                    "seed {seed} step {step}: id {} again",
+                    turn.id
+                );
+                seen.turns.push(turn.id);
+                assert!(!turn.segments.is_empty(), "seed {seed}: an empty turn");
+                let planned = plan_turn(turn, settings);
+                for other in &planned.others {
+                    assert!(
+                        other.duration_sec <= planned.wanted.duration_sec + 1e-9,
+                        "seed {seed} step {step}: a reply ends after your message"
+                    );
+                }
+                let callers: Vec<_> = turn
+                    .segments
+                    .iter()
+                    .filter(|segment| segment.who != Sender::You)
+                    .collect();
+                for (at, caller) in callers.iter().enumerate() {
+                    for other in &callers[..at] {
+                        // A caller keyed over sends again only once its rest
+                        // is done, and so does QRM.
+                        let apart_in_time =
+                            caller.start_sec >= other.end_sec || other.start_sec >= caller.end_sec;
+                        assert!(
+                            caller.who != other.who || apart_in_time,
+                            "seed {seed} step {step}: a station sends over itself"
+                        );
+                        // QRM may sit anywhere the filter passes it.
+                        if caller.who != other.who
+                            && caller.who.is_caller()
+                            && other.who.is_caller()
+                            && settings.contest.contest_style == RunStyle::Pileup
+                        {
+                            let apart = (caller.voice.tone_hz - other.voice.tone_hz).abs();
+                            assert!(
+                                apart >= 60.0 - 1e-6,
+                                "seed {seed} step {step}: two callers {apart:.1} Hz apart"
+                            );
+                        }
+                    }
+                }
+                let rough = settings.contest.contest_habits == CallerHabits::Rough;
+                let easy = settings.contest.contest_habits == CallerHabits::Easy;
+                for segment in &turn.segments {
+                    if segment.who == Sender::Qrm {
+                        // QRM comes only with rough habits, and is heard by
+                        // nobody as a caller.
+                        assert!(rough, "seed {seed} step {step}: QRM under easier habits");
+                        seen.heard.qrm += 1;
+                        continue;
+                    }
+                    if segment.who == Sender::You {
+                        continue;
+                    }
+                    let words: Vec<&str> = segment.text.split_whitespace().collect();
+                    let fumbled = words.iter().any(|word| word.ends_with("EEEEE"));
+                    let enn = words.contains(&"ENN");
+                    assert!(
+                        !fumbled || rough,
+                        "seed {seed} step {step}: a fumbled serial under easier habits: {}",
+                        segment.text
+                    );
+                    assert!(
+                        !enn || !easy,
+                        "seed {seed} step {step}: ENN under easy habits: {}",
+                        segment.text
+                    );
+                    seen.heard.fumbled += u32::from(fumbled);
+                    seen.heard.enn += u32::from(enn);
+                    let (call, exch) = match copy_of(&segment.text) {
+                        Some(Copied::Call(call)) => (Some(call), None),
+                        Some(Copied::Correction(call, exch)) => {
+                            // A correction carrying an exchange from a station
+                            // still waiting for yours: a careless operator's,
+                            // under rough habits alone.
+                            let early = exch.is_some() && machine.sends_exchange_early(segment.who);
+                            assert!(
+                                !early || rough,
+                                "seed {seed} step {step}: an early exchange under easier habits"
+                            );
+                            seen.heard.early += u32::from(early);
+                            (Some(call), exch)
+                        }
+                        Some(Copied::Exchange(exch)) => (None, Some(exch)),
+                        None => (None, None),
+                    };
+                    if let Some(call) = call
+                        && seen.call != call
+                    {
+                        seen.previous = std::mem::replace(&mut seen.call, call.to_string());
+                    }
+                    if let Some(exch) = exch {
+                        // Callers with easy habits send their numbers in
+                        // plain digits: a report is all that goes cut.
+                        let rules = settings.contest.contest_kind.rules();
+                        let reading = parse_exchange(rules, settings.contest.side(), &exch);
+                        // A kilowatt is written with a letter, and is no
+                        // number cut.
+                        let cut = reading.fields.iter().any(|read| {
+                            read.field.numeric()
+                                && read.token.chars().any(|c| c.is_ascii_alphabetic())
+                                && read_number(&read.token).is_some()
+                        });
+                        assert!(
+                            !cut || !easy,
+                            "seed {seed} step {step}: a number sent cut under easy habits: {exch}"
+                        );
+                        seen.heard.cut += u32::from(cut);
+                        seen.exch = exch;
+                    }
+                }
+            }
+            ContestEffect::StartTimer { id, ms } => {
+                assert!(
+                    seen.ids.insert(*id),
+                    "seed {seed} step {step}: id {id} again"
+                );
+                assert!(*ms > 0, "seed {seed} step {step}: a zero-length timer");
+                seen.timers.push(*id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// One of everything the runtime and a careless operator can send a run at
+/// `now`: keys, news of the turn on the air or of a stale one, timers by
+/// any id, pauses stamped no earlier than `shown_at`, when the run was
+/// last shown, resumes, speed changes and early ends.
+fn random_contest_event(
+    rng: &mut SplitMix64,
+    now: u64,
+    shown_at: u64,
+    seen: &Seen,
+) -> ContestEvent {
+    // Mostly the latest id, sometimes an older one, now and then one never
+    // handed out.
+    let pick = |rng: &mut SplitMix64, ids: &[u64]| {
+        if ids.is_empty() || rng.f64() < 0.1 {
+            rng.usize_in(0, 60) as u64
+        } else if rng.f64() < 0.7 {
+            ids[ids.len() - 1]
+        } else {
+            ids[rng.usize_in(0, ids.len() - 1)]
+        }
+    };
+    let draw = rng.f64();
+    if draw < 0.36 {
+        contest_key(rng, now, seen)
+    } else if draw < 0.46 {
+        ContestEvent::TurnStarted {
+            id: pick(rng, &seen.turns),
+            heard_from: MonoMs(now + rng.usize_in(0, 200) as u64),
+        }
+    } else if draw < 0.62 {
+        ContestEvent::TurnEnded {
+            id: pick(rng, &seen.turns),
+        }
+    } else if draw < 0.65 {
+        ContestEvent::TurnCancelled {
+            id: pick(rng, &seen.turns),
+        }
+    } else if draw < 0.67 {
+        ContestEvent::TurnFailed {
+            id: pick(rng, &seen.turns),
+        }
+    } else if draw < 0.87 {
+        ContestEvent::TimerFired {
+            id: pick(rng, &seen.timers),
+        }
+    } else if draw < 0.91 {
+        // Stamped as late as the heartbeat stamps one: never before the run
+        // was last shown, at the event before.
+        ContestEvent::Pause {
+            why: [PauseWhy::You, PauseWhy::Hidden, PauseWhy::Sound][rng.usize_in(0, 2)],
+            at: MonoMs(
+                now.saturating_sub(rng.usize_in(0, 2_500) as u64)
+                    .max(shown_at),
+            ),
+        }
+    } else if draw < 0.97 {
+        ContestEvent::Resume
+    } else if draw < 0.995 {
+        ContestEvent::Speed {
+            delta: [2, -2, 9, -40][rng.usize_in(0, 3)],
+        }
+    } else {
+        ContestEvent::FinishNow
+    }
+}
+
+/// One contest soak run: every event applied, with when, what each gave,
+/// the machine as it ended, and when the run started and ended.
+struct SoakRun {
+    events: Vec<(ContestEvent, MonoMs)>,
+    effects: Vec<Vec<ContestEffect>>,
+    machine: ContestMachine<Sampler>,
+    started: Option<u64>,
+    ended: Option<u64>,
+    heard: HabitsHeard,
+}
+
+/// Soak a run of seed `seed`, on events of its own or those of `replay`.
+fn contest_run(
+    seed: u64,
+    settings: &TrainingSettings,
+    replay: Option<&[(ContestEvent, MonoMs)]>,
+) -> SoakRun {
+    let mut rng = SplitMix64::new(seed.wrapping_mul(0x4F1B_BCDD).wrapping_add(31));
+    let sampler = Sampler::new(&[], settings, seed);
+    let (mut machine, first) = ContestMachine::start(seed, MonoMs(0), settings.clone(), sampler);
+    let mut applied = Vec::new();
+    let mut all_effects = vec![first.clone()];
+    let mut seen = Seen::default();
+    let mut now = 0u64;
+    let mut shown = 0u64;
+    let mut shown_at = 0u64;
+    let mut started = (machine.phase() == ContestPhase::Running).then_some(0);
+    let mut ended = None;
+    let mut effects = first;
+    let steps = replay.map_or(400, <[_]>::len);
+    for step in 0..steps {
+        check_contest_effects(&effects, &machine, settings, seed, step, &mut seen);
+        let (event, at) = match replay {
+            Some(events) => events[step].clone(),
+            None => {
+                now += match rng.usize_in(0, 9) {
+                    0 => 0,
+                    1..=6 => rng.usize_in(0, 1_500) as u64,
+                    _ => rng.usize_in(0, 6_000) as u64,
+                };
+                let event = random_contest_event(&mut rng, now, shown_at, &seen);
+                (event, MonoMs(now))
+            }
+        };
+        let was_terminal = machine.is_terminal();
+        let lost = machine.nil_and_lost_copies();
+        effects = machine.apply(event.clone(), at);
+        // A station you left for another, or whose QSO ended with another
+        // station's call in the Call field, keeps the call you had for it,
+        // and a NIL logged for a station you left is no copy of the one you
+        // work: no copy lost or charged now is a call another station took
+        // from you.
+        let crossed = machine.crossed_since(&lost);
+        assert!(
+            crossed.is_empty(),
+            "seed {seed} step {step}: lost or NIL copies that are another station's call: {crossed:?}"
+        );
+        if was_terminal {
+            assert!(
+                effects.is_empty(),
+                "seed {seed} step {step}: {event:?} after the end"
+            );
+        }
+        if started.is_none() && machine.phase() == ContestPhase::Running {
+            started = Some(at.0);
+        }
+        if !was_terminal && machine.is_terminal() {
+            ended = Some(at.0);
+        }
+        let view = machine.view();
+        if let Some(mut clock) = view.clock {
+            let reading = clock.elapsed_ms(at);
+            // The one step back by design: a send whose every retry failed
+            // gives its retries back as time paused, whether that pauses
+            // the run or, past its limit all the same, ends it.
+            let failed = matches!(event, ContestEvent::TurnFailed { .. })
+                && matches!(
+                    view.phase,
+                    ContestPhase::Paused {
+                        why: PauseWhy::Sound
+                    } | ContestPhase::Finished
+                );
+            assert!(
+                reading >= shown || failed,
+                "seed {seed} step {step}: the clock went back"
+            );
+            shown = reading;
+        }
+        shown_at = at.0;
+        applied.push((event, at));
+        all_effects.push(effects.clone());
+    }
+    SoakRun {
+        events: applied,
+        effects: all_effects,
+        machine,
+        started,
+        ended,
+        heard: seen.heard,
+    }
+}
+
+/// Contest runs driven by a stream of anything the runtime and a careless
+/// operator can send (§13 of the design): keys with fields as heard, a slip
+/// off, empty, partial or junk; turn news for the turn on the air and for
+/// stale ones; timers by any id; pauses, resumes, hidden pages and early
+/// ends. Whatever happens, the run stays whole and keeps what it should, a
+/// run of single callers and a pile-up alike.
+#[test]
+fn no_run_of_events_can_put_a_contest_run_somewhere_impossible() {
+    for style in RunStyle::ALL {
+        soak_contest_runs(style);
+    }
+}
+
+/// The contest soak, every seed a run of `style`: single callers on the
+/// first [`CONTEST_SEEDS`] seeds, pile-ups on the [`PILEUP_SEEDS`] after
+/// them, so a failure's seed says which.
+fn soak_contest_runs(style: RunStyle) {
+    let mut outcomes = Outcomes::default();
+    // QSOs logged in each contest, so every one is seen to be soaked, and
+    // under each of the callers' habits, with what was heard of them.
+    let mut logged_in: std::collections::BTreeMap<&str, u32> = Default::default();
+    let mut logged_with: std::collections::BTreeMap<&str, u32> = Default::default();
+    let mut heard_with: std::collections::BTreeMap<&str, HabitsHeard> = Default::default();
+    let seeds = match style {
+        RunStyle::Single => 0..CONTEST_SEEDS,
+        RunStyle::Pileup => CONTEST_SEEDS..CONTEST_SEEDS + PILEUP_SEEDS,
+    };
+    for seed in seeds {
+        let mut rng = SplitMix64::new(seed.wrapping_mul(0x2F7A_9C35).wrapping_add(37));
+        let mut settings = contest_settings(&mut rng, style);
+        // Show copy on every third run, set by the seed so that every other
+        // draw is as it was: it changes only the copies the groups keep.
+        settings.contest.contest_show_copy = seed % 3 == 0;
+        let SoakRun {
+            mut events,
+            mut machine,
+            started,
+            ended,
+            heard,
+            ..
+        } = contest_run(seed, &settings, None);
+        let with = settings.contest.contest_habits.name();
+        heard_with.entry(with).or_default().add(heard);
+        let finished_at = ended.unwrap_or_else(|| {
+            let end = events.last().map_or(0, |(_, at)| at.0) + 1;
+            let lost = machine.nil_and_lost_copies();
+            let _ = machine.apply(ContestEvent::FinishNow, MonoMs(end));
+            let crossed = machine.crossed_since(&lost);
+            assert!(
+                crossed.is_empty(),
+                "seed {seed}: lost at the end, copies that are another station's call: {crossed:?}"
+            );
+            events.push((ContestEvent::FinishNow, MonoMs(end)));
+            end
+        });
+        let view = machine.view();
+        let result = machine.result(finished_at, "2026-10-20".into());
+        // One station, one copy: every station worked, logged or lost has
+        // its groups in exactly one of its QSOs, however often it was
+        // logged or lost.
+        for (station, copies) in machine.copies_by_station() {
+            assert_eq!(
+                copies, 1,
+                "seed {seed}: station {station} copied {copies} times"
+            );
+        }
+        assert!(
+            view.log
+                .iter()
+                .all(|row| matches!(row.status, RowStatus::Checked(_))),
+            "seed {seed}: a row is still waiting at the end"
+        );
+        assert!(
+            result.score.is_finite() && result.score >= 0.0,
+            "seed {seed}"
+        );
+        assert!((0.0..=1.0).contains(&result.accuracy), "seed {seed}");
+        assert!(
+            result
+                .group_timings
+                .iter()
+                .zip(&result.groups)
+                .all(|(t, g)| t.time_to_complete_ms
+                    >= MIN_RESPONSE_MS_PER_CHAR * g.sent.chars().count() as f64),
+            "seed {seed}: a copy quicker than anyone types"
+        );
+        let json = serde_json::to_string(&result).expect("a run serializes");
+        let back: SessionResult = serde_json::from_str(&json).expect("a run reads back");
+        assert_eq!(back, result, "seed {seed}: the round trip changed the run");
+        let Some(log) = &result.contest else {
+            assert!(result.groups.is_empty(), "seed {seed}: groups with no log");
+            continue;
+        };
+        let run = log
+            .run(result.groups.len())
+            .unwrap_or_else(|| panic!("seed {seed}: the log does not read back"));
+        let rules = settings.contest.contest_kind.rules();
+        assert_eq!(run.kind, rules.kind.name(), "seed {seed}");
+        // A run with Show copy on is marked assisted, by its log and its
+        // mark alike.
+        assert_eq!(
+            run.assisted, settings.contest.contest_show_copy,
+            "seed {seed}"
+        );
+        assert_eq!(result.assisted(), run.assisted, "seed {seed}");
+        let owned: u32 = run.qsos.iter().map(|qso| qso.g).sum();
+        assert_eq!(owned as usize, result.groups.len(), "seed {seed}");
+        let limit_ms = u64::from(run.limit_s) * 1_000;
+        assert!(run.run_ms <= limit_ms, "seed {seed}: ran past the limit");
+        let span = started.map_or(0, |started| finished_at - started);
+        if run.run_ms < limit_ms {
+            assert_eq!(run.run_ms + run.paused_ms, span, "seed {seed}");
+        } else {
+            assert!(run.run_ms + run.paused_ms <= span, "seed {seed}");
+        }
+        let mut last = 0;
+        let mut logged = 0;
+        for qso in &run.qsos {
+            assert!(qso.t >= last, "seed {seed}: QSO times went back");
+            assert!(
+                qso.t <= run.run_ms && qso.h <= qso.t,
+                "seed {seed}: {qso:?}"
+            );
+            last = qso.t;
+            // A contest without serials sends none.
+            let serial = |n: u32| if rules.serial { n } else { 0 };
+            if qso.k == "lost" {
+                assert_eq!(
+                    qso.nr,
+                    serial(logged + 1),
+                    "seed {seed}: a lost QSO's serial"
+                );
+                outcomes.lost += 1;
+            } else {
+                logged += 1;
+                assert_eq!(qso.nr, serial(logged), "seed {seed}: serials run 1, 2, 3…");
+            }
+        }
+        assert_eq!(logged, view.qsos, "seed {seed}");
+        *logged_in.entry(rules.kind.name()).or_default() += logged;
+        *logged_with.entry(with).or_default() += logged;
+        let checks: Vec<ScoredQso<'_>> = view
+            .log
+            .iter()
+            .filter_map(|row| match &row.status {
+                RowStatus::Checked(check) => Some(ScoredQso {
+                    at_ms: row.at_ms,
+                    call: &row.call,
+                    fields: &row.fields,
+                    check,
+                }),
+                RowStatus::Pending => None,
+            })
+            .collect();
+        for scored in &checks {
+            let errors = &scored.check.errors;
+            if errors.contains(&QsoError::Nil) {
+                outcomes.nil += 1;
+            } else if scored.check.is_clean() {
+                outcomes.clean += 1;
+            }
+            if errors
+                .iter()
+                .any(|error| matches!(error, QsoError::Call { .. }))
+            {
+                outcomes.busted += 1;
+            }
+            if errors
+                .iter()
+                .any(|error| matches!(error, QsoError::Field(_)))
+            {
+                outcomes.field += 1;
+            }
+        }
+        match rules.scoring {
+            Some(scoring) => {
+                let live = contest_score(&scoring, &run.me(), &checks, run.run_ms);
+                let stored = run.score(&result.groups).expect("a stored run scores");
+                assert_eq!(
+                    stored, live,
+                    "seed {seed}: the stored run scores differently"
+                );
+                assert!(stored.verified.score <= stored.raw.score, "seed {seed}");
+            }
+            None => assert_eq!(run.score(&result.groups), None, "seed {seed}"),
+        }
+        // Its results list each QSO logged as the run's own log did.
+        let listed = run
+            .log(&result.groups, &result.group_timings)
+            .expect("a stored run lists its QSOs");
+        let listed: Vec<_> = listed.iter().filter(|qso| qso.n.is_some()).collect();
+        assert_eq!(listed.len(), view.log.len(), "seed {seed}");
+        for (row, qso) in view.log.iter().zip(listed) {
+            assert_eq!(
+                (&qso.call, qso.at_ms, qso.wpm, qso.asked),
+                (&row.call, row.at_ms, row.wpm, row.asked),
+                "seed {seed}: QSO {} lists otherwise than it ran",
+                row.n
+            );
+            assert_eq!(
+                Some(&row.status),
+                qso.check.clone().map(RowStatus::Checked).as_ref(),
+                "seed {seed}: QSO {} checks otherwise than it ran",
+                row.n
+            );
+        }
+
+        // The same events, replayed, make the same run.
+        let replays: Vec<_> = (0..2)
+            .map(|_| {
+                let replay = contest_run(seed, &settings, Some(&events));
+                let result = replay.machine.result(finished_at, "2026-10-20".into());
+                (replay.effects, result)
+            })
+            .collect();
+        assert_eq!(replays[0], replays[1], "seed {seed}: a replay differed");
+        assert_eq!(
+            replays[0].1, result,
+            "seed {seed}: the replay is another run"
+        );
+    }
+    // Every kind of QSO came up, many times over, and every contest.
+    for (kind, count) in outcomes.counts() {
+        assert!(
+            count >= 100,
+            "{style:?}: only {count} {kind} QSOs across the seeds"
+        );
+    }
+    for kind in ContestKind::ALL {
+        let count = logged_in.get(kind.name()).copied().unwrap_or(0);
+        assert!(
+            count >= 100,
+            "{style:?}: only {count} QSOs logged in {} across the seeds",
+            kind.label()
+        );
+    }
+    // Every habit of the callers was soaked, and what each brings came up:
+    // numbers cut and `ENN` under real and rough habits, and under rough
+    // ones serials fumbled and put right, exchanges sent early, and QRM.
+    for habits in CallerHabits::ALL {
+        let name = habits.name();
+        let count = logged_with.get(name).copied().unwrap_or(0);
+        assert!(
+            count >= 100,
+            "{style:?}: only {count} QSOs logged under {name} habits"
+        );
+        let heard = heard_with.get(name).copied().unwrap_or_default();
+        let floors = HabitsHeard::floors(habits).counts();
+        for ((what, count), (_, floor)) in heard.counts().into_iter().zip(floors) {
+            assert!(
+                count >= floor,
+                "{style:?}: only {count} {what} under {name} habits"
+            );
         }
     }
 }

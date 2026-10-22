@@ -1,19 +1,34 @@
-use cw_core::{BOARD_MIN_GROUPS, BoardEntry};
+use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode};
 use dioxus::prelude::*;
 
-use super::{Medal, mode_label, per_group_label, speed};
-use crate::ui::format::{clock, short_date};
+use super::{Medal, mode_label, per_group_label, run_rule, speed};
+use crate::ui::format::day_and_clock;
+use crate::ui::stats_detail::ASSISTED;
 use crate::ui::widgets::{CardHead, IconName, control_id};
 
 /// The rows the board shows before it is asked for all of them.
 const BOARD_TOP: usize = 10;
 
-/// The board itself, best first: the top ten until asked for every row.
-/// Pointing at a row with a mouse marks it on the timeline for as long as
-/// it stays; a tap keeps it marked until the same row is tapped again.
+/// What a board says when it holds contest runs among sessions of other
+/// modes: runs earn less a group, so they sit lower than their copy
+/// deserves there.
+const CONTEST_RUNS_NOTE: &str = "A WPX run earns about 30% less a group than a \
+     Callsigns session, since half its groups are short serials. Under Contest, each run is \
+     ranked within its own contest.";
+
+/// What a board says when it lists assisted runs.
+const ASSISTED_NOTE: &str = "Runs with Show copy on are assisted: listed greyed after the places, never placed, and kept out of the record and the form.";
+
+/// The board itself, best first: the top ten until asked for every row,
+/// then the assisted runs, greyed and with no place. Pointing at a row with
+/// a mouse marks it on the timeline for as long as it stays; a tap keeps it
+/// marked until the same row is tapped again. An assisted run is on no
+/// timeline, so its row marks nothing.
 #[component]
 pub(super) fn BoardList(
     board: Vec<BoardEntry>,
+    /// The whole runs it holds that had Show copy on, newest first.
+    assisted: Vec<BoardEntry>,
     /// When the session marked on the timeline was set.
     focus: u64,
     /// The row a mouse is pointing at.
@@ -25,19 +40,53 @@ pub(super) fn BoardList(
 ) -> Element {
     let (mut hovered, mut pinned) = (hovered, pinned);
     let mut show_all = use_signal(|| false);
-    let total = board.len();
-    let mut rows = board;
+    let total = board.len() + assisted.len();
+    // The rule the card names is the one its rows went on by: a board of
+    // runs alone names the run rule, whichever pill is chosen, and one that
+    // mixes runs with group sessions says where the runs sit among them.
+    let is_run = |entry: &BoardEntry| entry.mode == CharSetMode::Contest;
+    let runs_only = board.iter().chain(&assisted).all(is_run);
+    let runs_among_others = !runs_only && board.iter().any(is_run);
+    let note = if runs_only {
+        format!(
+            "Ranked by points a group, over {}. Deleting a run takes it off.",
+            run_rule()
+        )
+    } else {
+        format!(
+            "Ranked by points a group, over sessions of {BOARD_MIN_GROUPS} groups or more. Deleting a session takes it off."
+        )
+    };
+    let (mut rows, mut greyed) = (board, assisted);
     if !show_all() {
         rows.truncate(BOARD_TOP);
+        greyed.truncate(BOARD_TOP - rows.len());
     }
+    let detail = |entry: &BoardEntry| {
+        let mut detail = format!(
+            "{} groups · {} · {}%",
+            entry.groups,
+            speed(entry),
+            (entry.accuracy * 100.0).round()
+        );
+        if show_mode {
+            detail.push_str(&format!(" · {}", mode_label(entry.mode)));
+        }
+        detail
+    };
+    let when = |entry: &BoardEntry| day_and_clock(&entry.date, entry.timestamp);
     rsx! {
         div { class: "card stack-sm",
             CardHead {
                 icon: IconName::Medal,
                 title: "Best sessions",
-                note: format!(
-                    "Ranked by points a group, over sessions of {BOARD_MIN_GROUPS} groups or more. Deleting a session takes it off."
-                ),
+                note,
+            }
+            if runs_among_others {
+                p { class: "muted", style: "margin: 0; font-size: 0.85rem;", "{CONTEST_RUNS_NOTE}" }
+            }
+            if !greyed.is_empty() {
+                p { class: "muted", style: "margin: 0; font-size: 0.85rem;", "{ASSISTED_NOTE}" }
             }
             div { class: "board-list",
                 for entry in rows {
@@ -50,19 +99,7 @@ pub(super) fn BoardList(
                             (true, false) => "board-row focused",
                             (false, false) => "board-row",
                         };
-                        let mut detail = format!(
-                            "{} groups · {} · {}%",
-                            entry.groups,
-                            speed(&entry),
-                            (entry.accuracy * 100.0).round()
-                        );
-                        if show_mode {
-                            detail.push_str(&format!(" · {}", mode_label(entry.mode)));
-                        }
-                        let when = match clock(at) {
-                            Some(time) => format!("{} · {time}", short_date(&entry.date)),
-                            None => short_date(&entry.date),
-                        };
+                        let (detail, when) = (detail(&entry), when(&entry));
                         rsx! {
                             button {
                                 id: control_id("board", &entry.place.to_string()),
@@ -96,6 +133,20 @@ pub(super) fn BoardList(
                                 span { class: "board-detail", "{detail}" }
                             }
                         }
+                    }
+                }
+                for entry in greyed {
+                    div {
+                        key: "{entry.timestamp}",
+                        class: "board-row assisted",
+                        span { class: "board-place",
+                            span { class: "board-number unplaced", aria_label: "Not placed", "—" }
+                        }
+                        span { class: "board-main",
+                            span { class: "board-score", "{per_group_label(entry.per_group)}" }
+                            span { class: "board-when", "{when(&entry)}" }
+                        }
+                        span { class: "board-detail", "{detail(&entry)} · {ASSISTED}" }
                     }
                 }
             }

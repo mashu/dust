@@ -60,19 +60,32 @@ pub struct ToneSignal {
     /// is never moved to another stream: one that replaces a broken stream
     /// may run at another rate.
     stream_failed: Arc<AtomicBool>,
+    /// How far behind the stream's callback the speaker was as the send
+    /// started, in seconds: how long it waits to be heard.
+    latency_sec: f64,
 }
 
 impl ToneSignal {
-    pub fn new(ticket: Ticket, finished: Arc<AtomicBool>, stream_failed: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        ticket: Ticket,
+        finished: Arc<AtomicBool>,
+        stream_failed: Arc<AtomicBool>,
+        latency_sec: f64,
+    ) -> Self {
         Self {
             ticket,
             finished,
             stream_failed,
+            latency_sec,
         }
     }
 }
 
 impl PlaybackSignal for ToneSignal {
+    fn heard_after_sec(&self) -> f64 {
+        self.latency_sec
+    }
+
     fn poll(&self) -> WaitFlags {
         WaitFlags {
             cancelled: self.ticket.is_cancelled(),
@@ -131,7 +144,8 @@ mod tests {
         let armed = state.arm();
         let finished = Arc::new(AtomicBool::new(false));
         let broken = Arc::new(AtomicBool::new(false));
-        let signal = ToneSignal::new(armed, Arc::clone(&finished), Arc::clone(&broken));
+        let signal = ToneSignal::new(armed, Arc::clone(&finished), Arc::clone(&broken), 0.04);
+        assert_eq!(signal.heard_after_sec(), 0.04);
         assert_eq!(
             signal.poll(),
             WaitFlags {

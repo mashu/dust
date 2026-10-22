@@ -6,19 +6,49 @@
 //! session, which is gone the moment the session's own screen comes up: they
 //! are spawned on the root scope, and the lease, not a component, decides
 //! how long they live.
+//!
+//! A contest run has a runtime of its own ([`crate::contest_runtime`]):
+//! settings in Contest start one, and [`finish_run`] and [`abort_run`] reach
+//! whichever is live.
 
 use cw_core::{
-    AnswerClose, CharSamplingState, CountersKey, CountersUpdate, MonoMs, Sampler, SessionEffect,
-    SessionEvent, SessionId, SessionMachine, SplitMix64, Transmission, complete_session,
-    generate_training_group, resolve_station,
+    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate, MonoMs,
+    Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult, SplitMix64,
+    Transmission, complete_session, generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
+use crate::contest_runtime::{LiveContest, send_run_event, start_run};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease};
-use crate::state::{AppCtx, Screen};
+use crate::state::{AppCtx, Finished, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
+
+/// What has the training screen: a session of groups, or a contest run.
+/// Each is a machine of some size, and only one is ever live, so each is
+/// boxed.
+pub enum Live {
+    Groups(Box<LiveSession>),
+    Contest(Box<LiveContest>),
+}
+
+impl Live {
+    /// The session of groups, if that is what is live.
+    fn groups(&self) -> Option<&LiveSession> {
+        match self {
+            Self::Groups(live) => Some(live.as_ref()),
+            Self::Contest(_) => None,
+        }
+    }
+
+    fn groups_mut(&mut self) -> Option<&mut LiveSession> {
+        match self {
+            Self::Groups(live) => Some(live.as_mut()),
+            Self::Contest(_) => None,
+        }
+    }
+}
 
 /// A session in progress: the machine that decides it, the stations it is
 /// sent by, and its hold on the audio.
@@ -197,6 +227,15 @@ pub fn start_session(ctx: AppCtx) {
     if *settings.peek() != fitted {
         settings.set(fitted.clone());
     }
+    // Stored now, with whatever the press that starts it kept, a call typed
+    // into Home's hero among it: nothing is stored while the session runs,
+    // so a reload mid-run would lose them otherwise.
+    ctx.store_settings();
+    // A contest is a run, with a machine of its own.
+    if fitted.curriculum.char_set_mode == CharSetMode::Contest {
+        start_run(ctx, fitted);
+        return;
+    }
     // The session has the audio now, whether or not it can open it: any
     // preview that had it has stopped.
     preview.set(Preview::Idle);
@@ -219,11 +258,11 @@ pub fn start_session(ctx: AppCtx) {
     );
     runtime.set(Some(machine.session().clone()));
     screen.set(Screen::Training);
-    *app.session.borrow_mut() = Some(LiveSession {
+    *app.session.borrow_mut() = Some(Live::Groups(Box::new(LiveSession {
         machine,
         stations: SplitMix64::new(seed_rng()),
         lease: lease.clone(),
-    });
+    })));
     run_effects(ctx, &lease, effects);
 }
 
@@ -235,9 +274,35 @@ pub fn send_event(ctx: AppCtx, event: SessionEvent) {
         .session
         .borrow()
         .as_ref()
+        .and_then(Live::groups)
         .map(|live| live.lease.clone());
     if let Some(lease) = lease {
         dispatch(ctx, &lease, event);
+    }
+}
+
+/// Whether what is live is a contest run.
+fn contest_live(ctx: AppCtx) -> bool {
+    matches!(&*ctx.app().session.borrow(), Some(Live::Contest(_)))
+}
+
+/// End whatever has the training screen, keeping what it has to keep: Exit,
+/// End session, End run. The machine that is live decides what that is.
+pub fn finish_run(ctx: AppCtx) {
+    if contest_live(ctx) {
+        send_run_event(ctx, ContestEvent::FinishNow);
+    } else {
+        send_event(ctx, SessionEvent::FinishNow);
+    }
+}
+
+/// Leave whatever has the training screen without keeping it: Discard, the
+/// guided setup moving on.
+pub fn abort_run(ctx: AppCtx) {
+    if contest_live(ctx) {
+        send_run_event(ctx, ContestEvent::Abort);
+    } else {
+        send_event(ctx, SessionEvent::Abort);
     }
 }
 
@@ -249,11 +314,16 @@ pub fn send_event(ctx: AppCtx, event: SessionEvent) {
 fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
     let mut runtime = ctx.runtime;
     let app = ctx.app();
-    let closes = app.session.borrow().as_ref().and_then(|live| {
-        (live.lease.is(lease) && lease.is_current())
-            .then(|| live.machine.closes_answer(&event))
-            .flatten()
-    });
+    let closes = app
+        .session
+        .borrow()
+        .as_ref()
+        .and_then(Live::groups)
+        .and_then(|live| {
+            (live.lease.is(lease) && lease.is_current())
+                .then(|| live.machine.closes_answer(&event))
+                .flatten()
+        });
     match closes {
         // What is entered in full by the deadline is part of the answer,
         // whatever is still settling. Finishing it can hand the session an
@@ -283,6 +353,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         let mut slot = app.session.borrow_mut();
         let Some(live) = slot
             .as_mut()
+            .and_then(Live::groups_mut)
             .filter(|live| live.lease.is(lease) && lease.is_current())
         else {
             return;
@@ -332,10 +403,17 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     // Every group is built from the settings the session started with, not
     // from whatever the settings screen holds now: a change made mid-session
     // belongs to the next one.
-    let Some((settings, transmission)) = ctx.app().session.borrow().as_ref().map(|live| {
-        let settings = live.machine.session().settings().clone();
-        (settings, live.transmission(index, text))
-    }) else {
+    let Some((settings, transmission)) = ctx
+        .app()
+        .session
+        .borrow()
+        .as_ref()
+        .and_then(Live::groups)
+        .map(|live| {
+            let settings = live.machine.session().settings().clone();
+            (settings, live.transmission(index, text))
+        })
+    else {
         return;
     };
     let lease = lease.clone();
@@ -359,9 +437,16 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
 
 /// The session, taken out of the app, with the audio given back.
 fn end_session(ctx: AppCtx) -> Option<LiveSession> {
-    let live = ctx.app().session.borrow_mut().take()?;
+    let taken = ctx
+        .app()
+        .session
+        .borrow_mut()
+        .take_if(|live| matches!(live, Live::Groups(_)));
+    let Some(Live::Groups(live)) = taken else {
+        return None;
+    };
     live.lease.release();
-    Some(live)
+    Some(*live)
 }
 
 /// End the session without keeping it.
@@ -380,11 +465,8 @@ fn abandon_session(ctx: AppCtx) {
 /// the results.
 fn finish_session(ctx: AppCtx) {
     let AppCtx {
-        mut screen,
         mut runtime,
-        mut result,
         mut auto_message,
-        mut sessions,
         mut settings,
         toasts,
         ..
@@ -413,9 +495,22 @@ fn finish_session(ctx: AppCtx) {
         toasts.show(message.clone());
     }
     auto_message.set(message);
+    runtime.set(None);
+    keep_and_show(ctx, done.result);
+}
 
+/// Add `finished` to the history, store it, and show it on the results
+/// screen: a session of groups and a contest run alike.
+pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
+    let AppCtx {
+        mut screen,
+        mut result,
+        mut sessions,
+        toasts,
+        ..
+    } = ctx;
     // The history grows by one where it is, and is stored from there.
-    sessions.write().push(done.result.clone());
+    sessions.write().push(finished.clone());
     let saved = ctx.store_history();
     // A browser may clear its store to make room; there is now something in
     // it worth asking it to keep.
@@ -423,8 +518,7 @@ fn finish_session(ctx: AppCtx) {
     if let Some(problem) = saved.problem() {
         toasts.show(problem);
     }
-    result.set(Some(done.result));
-    runtime.set(None);
+    result.set(Some(Finished::Kept(Box::new(finished))));
     screen.set(Screen::Results);
 }
 
@@ -435,16 +529,18 @@ mod tests {
     use crate::persist::Store;
     use crate::testing::{Harness, run, test_settings};
     use cw_core::AutoLevelCounters;
-    use cw_core::CharSetMode;
     use cw_core::SessionEffect;
     use cw_core::SessionPhase;
     use std::cell::Cell;
     use std::rc::Rc;
 
-    impl LiveSession {
-        /// The session's hold on the audio, for a test to end or to stop.
+    impl Live {
+        /// Its hold on the audio, for a test to end or to stop.
         pub(crate) fn lease(&self) -> &Lease {
-            &self.lease
+            match self {
+                Self::Groups(live) => &live.lease,
+                Self::Contest(live) => live.lease(),
+            }
         }
     }
 
@@ -457,7 +553,13 @@ mod tests {
             h.start_training();
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.groups.len(), 2);
             assert!(result.groups.iter().all(|g| g.correct));
             assert_eq!(result.accuracy, 1.0);
@@ -469,6 +571,32 @@ mod tests {
             assert!(h.calls().contains(&Call::Shutdown));
             // Two groups, one send each.
             assert_eq!(h.texts().len(), 2);
+        });
+    }
+
+    /// Settings in Contest start a run, not a session of groups: the run's
+    /// machine has the training screen, and its first CQ is on the air.
+    #[test]
+    fn settings_in_contest_start_a_run() {
+        run(|| async {
+            let mut h = Harness::with_settings(crate::testing::contest_settings());
+            h.start_training();
+            assert_eq!(h.screen(), Screen::Training);
+            assert!(
+                h.ctx.runtime.peek().is_none(),
+                "a session of groups started"
+            );
+            assert!(matches!(&*h.app.session.borrow(), Some(Live::Contest(_))));
+            assert!(h.ctx.session_running());
+            assert_eq!(
+                h.ctx.contest.peek().as_ref().map(|view| view.phase),
+                Some(cw_core::ContestPhase::Running)
+            );
+            assert!(h.texts()[0].starts_with("CQ DL1ABC"), "{:?}", h.texts());
+            assert_eq!(
+                h.ctx.settings.peek().curriculum.char_set_mode,
+                CharSetMode::Contest
+            );
         });
     }
 
@@ -585,7 +713,13 @@ mod tests {
                 h.ctx.answer.hold(0, "K".into());
                 h.send(event.clone());
                 if event == SessionEvent::FinishNow {
-                    let result = h.ctx.result.peek().clone().expect("{event:?} kept it");
+                    let result = h
+                        .ctx
+                        .result
+                        .peek()
+                        .clone()
+                        .and_then(Finished::kept)
+                        .expect("{event:?} kept it");
                     assert_eq!(result.groups[0].received, "K", "{event:?}");
                 } else {
                     assert_eq!(input_of(&h, 0).as_deref(), Some("K"), "{event:?}");
@@ -829,11 +963,12 @@ mod tests {
             assert_eq!(h.screen(), Screen::Training);
             assert!(!matches!(h.phase(), Some(SessionPhase::Aborted)));
             assert_eq!(
-                h.app.session.borrow().as_ref().map(|live| live
-                    .machine
-                    .session()
-                    .session_id()
-                    .raw()),
+                h.app
+                    .session
+                    .borrow()
+                    .as_ref()
+                    .and_then(Live::groups)
+                    .map(|live| live.machine.session().session_id().raw()),
                 Some(second.turn())
             );
             assert!(h.run_until(6_000, |h| h.awaiting_answer() == Some(0)).await);
@@ -880,7 +1015,13 @@ mod tests {
             h.send(SessionEvent::FinishNow);
             h.advance(200).await;
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.groups.len(), 1);
             assert_eq!(h.ctx.sessions.peek().len(), 1);
         });
@@ -965,7 +1106,13 @@ mod tests {
             h.play_through(120_000).await;
 
             assert_eq!(h.screen(), Screen::Results);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.groups.len(), 2);
             assert_eq!(result.accuracy, 1.0, "every call was answered correctly");
             // The calls themselves are cw-core's to get right; here, every
@@ -1179,7 +1326,13 @@ mod tests {
 
             // Every group was answered correctly, because the pile-up is not
             // part of the answer.
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.accuracy, 1.0);
             assert_eq!(h.ctx.sessions.peek().len(), 1);
         });
@@ -1279,26 +1432,11 @@ mod tests {
     #[test]
     fn an_event_that_changes_nothing_is_not_published() {
         run(|| async {
-            use std::sync::Arc;
-            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::sync::atomic::Ordering;
 
             let mut h = Harness::new();
             h.start_training();
-            let writes = Arc::new(AtomicUsize::new(0));
-            let counted = writes.clone();
-            let runtime = h.ctx.runtime;
-            h.in_app(|| {
-                let watcher = dioxus::core::ReactiveContext::new_with_callback(
-                    move || {
-                        counted.fetch_add(1, Ordering::Relaxed);
-                    },
-                    ScopeId::ROOT,
-                    std::panic::Location::caller(),
-                );
-                watcher.run_in(|| {
-                    let _ = runtime.read();
-                });
-            });
+            let writes = h.count_writes(h.ctx.runtime);
             // The group is still being sent, and the box is locked.
             h.type_answer(0, "K");
             assert_eq!(
@@ -1366,7 +1504,13 @@ mod tests {
             );
             h.set_behaviour(Behaviour::RefuseToStart);
             assert!(h.run_until(30_000, |h| h.screen() == Screen::Results).await);
-            let result = h.ctx.result.peek().clone().expect("a result");
+            let result = h
+                .ctx
+                .result
+                .peek()
+                .clone()
+                .and_then(Finished::kept)
+                .expect("a result");
             assert_eq!(result.groups.len(), 1);
         });
     }
@@ -1645,7 +1789,32 @@ mod tests {
             assert_eq!(shown[0], "2026-09-02", "the oldest is the one let go");
             assert_eq!(h.store.load_sessions().len(), 2);
             assert!(
-                h.toast().is_some_and(|text| text.contains("newest 2")),
+                h.toast()
+                    .is_some_and(|text| text.contains("newest 2") && !text.contains("contest")),
+                "{:?}",
+                h.toast()
+            );
+        });
+    }
+
+    /// A history that held a contest run says why it ran short of room: a
+    /// run's log takes more of it than a session of groups.
+    #[test]
+    fn a_squeezed_history_that_held_a_run_says_runs_take_more_room() {
+        run(|| async {
+            let mut h = Harness::new();
+            let qsos = [("K5XYZ", "214", "K5XYZ", "214")];
+            h.ctx.sessions.set(vec![
+                crate::testing::stored_run("2026-09-01", &qsos),
+                crate::testing::stored_session("2026-09-02", &[("KM", "KM")]),
+            ]);
+            h.store.room.set(Some(2));
+            h.start_training();
+            h.play_through(60_000).await;
+            assert_eq!(h.store.load_sessions().len(), 2);
+            assert!(
+                h.toast().is_some_and(|text| text.contains("newest 2")
+                    && text.ends_with("Long contest runs take more room.")),
                 "{:?}",
                 h.toast()
             );

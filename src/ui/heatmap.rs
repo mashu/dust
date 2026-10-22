@@ -228,7 +228,7 @@ fn tip_rows(cell: &HeatmapCell, grid: &HeatmapGrid) -> Vec<TipRow> {
     }
     if let Some(score) = cell.best_score {
         rows.push(TipRow {
-            label: if several { "Best score" } else { "Score" },
+            label: if several { "Best points" } else { "Points" },
             value: format!("{score:.0}"),
             note: None,
             share: share(score, grid.max_score),
@@ -452,7 +452,7 @@ mod tests {
                 "Groups",
                 "Speed",
                 "Accuracy",
-                "Score"
+                "Points"
             ]
         );
         assert_eq!(row(&rows, "Characters").value, "60");
@@ -470,8 +470,8 @@ mod tests {
         assert_eq!(row(&rows, "Accuracy").heat, Some(heat_color(0.959)));
         assert_eq!(row(&rows, "Characters").heat, None);
         assert_eq!(row(&rows, "Characters").tone, "fill-chars");
-        assert_eq!(row(&rows, "Score").value, "800");
-        assert_eq!(row(&rows, "Score").share, 0.5);
+        assert_eq!(row(&rows, "Points").value, "800");
+        assert_eq!(row(&rows, "Points").share, 0.5);
     }
 
     #[test]
@@ -485,7 +485,7 @@ mod tests {
             Some("~10.0/session · ~3.0 chars/group")
         );
         assert_eq!(row(&rows, "Accuracy").value, "95.9% avg");
-        assert_eq!(row(&rows, "Best score").value, "800");
+        assert_eq!(row(&rows, "Best points").value, "800");
         assert_eq!(
             row(&rows, "Speed").note.as_deref(),
             Some("spaced to 15 WPM")

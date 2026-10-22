@@ -8,21 +8,24 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use cw_core::band::{FilterDesign, agc_knee};
-use cw_core::{SessionEvent, TrainingSettings, compute_char_pool};
+use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
+use crate::page_hidden::{LISTEN_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
 use crate::playback;
 use crate::session_runtime::{send_event, start_session};
-use crate::state::{AppCtx, Screen, SessionPick};
+use crate::state::{AppCtx, Finished, Screen, SessionPick};
 use crate::time::{local_date_string, sleep_ms};
 use crate::ui::backup::Backups;
+use crate::ui::contest::ContestRunView;
+use crate::ui::contest_results::NothingKept;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
-use crate::ui::training::{TrainingProgress, TrainingView};
+use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
 
 /// How often the band follows the settings while it is being previewed:
 /// often enough to sound live, seldom enough that a slider dragged across
@@ -59,6 +62,27 @@ fn HomeRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     let on_start = use_callback(move |()| start_session(ctx));
     let on_listen = use_callback(move |()| ctx.go_to(Screen::Listen));
+    // The same setting the Your station card writes, kept the same way.
+    let on_call = use_callback(move |typed: String| {
+        let mut settings = ctx.settings;
+        settings.write().contest.set_my_call(&typed);
+    });
+    let on_name = use_callback(move |typed: String| {
+        let mut settings = ctx.settings;
+        settings.write().contest.set_my_name(&typed);
+    });
+    let on_state = use_callback(move |typed: String| {
+        let mut settings = ctx.settings;
+        settings.write().contest.set_my_state(&typed);
+    });
+    let on_zone = use_callback(move |typed: String| {
+        let mut settings = ctx.settings;
+        settings.write().contest.set_my_zone(&typed);
+    });
+    let on_section = use_callback(move |typed: String| {
+        let mut settings = ctx.settings;
+        settings.write().contest.set_my_section(&typed);
+    });
     let settings = ctx.settings.read();
     // Every session counts, whatever character set it was recorded with.
     let sessions = ctx.sessions.read();
@@ -73,6 +97,11 @@ fn HomeRoute() -> Element {
             auto_progress: auto_progress(&*ctx.app().store, &settings),
             on_start,
             on_listen,
+            on_call,
+            on_name,
+            on_state,
+            on_zone,
+            on_section,
         }
     }
 }
@@ -83,7 +112,10 @@ fn SettingsRoute() -> Element {
     let on_preview_band = use_callback(move |()| playback::start_band_preview(ctx));
     let on_stop_band = use_callback(move |()| ctx.stop_audio());
     let on_play_sample = use_callback(move |text| playback::start_sample(ctx, text));
+    let on_hear_qsos = use_callback(move |()| playback::start_qsos(ctx));
     use_band_follow(ctx);
+    use_qsos_follow(ctx);
+    use_qsos_stop_when_hidden(ctx, SETTINGS_HIDDEN);
     let preview = ctx.preview.read();
     rsx! {
         SettingsView {
@@ -93,8 +125,44 @@ fn SettingsRoute() -> Element {
             on_preview_band,
             on_stop_band,
             on_play_sample,
+            hearing: preview.is_qsos(),
+            dialogue: ctx.dialogue.read().clone(),
+            on_hear_qsos,
         }
     }
+}
+
+/// Hear a QSO is of the contest it was started from: once the settings
+/// move off it, to another contest or out of Contest mode, it stops and its
+/// lines go, so what plays is always the contest the card shows, and Stop
+/// is never left off the screen while it plays.
+fn use_qsos_follow(ctx: AppCtx) {
+    use_effect(move || {
+        let chosen = {
+            let settings = ctx.settings.read();
+            (settings.curriculum.char_set_mode == CharSetMode::Contest)
+                .then_some(settings.contest.contest_kind)
+        };
+        let mut dialogue = ctx.dialogue;
+        let of = dialogue.peek().as_ref().map(|dialogue| dialogue.kind);
+        if of.is_some_and(|kind| Some(kind) != chosen) {
+            if ctx.preview.peek().is_qsos() {
+                ctx.stop_audio();
+            }
+            dialogue.set(None);
+        }
+    });
+}
+
+/// While a screen that plays Hear a QSO is up, the page going out of sight
+/// stops it, as it pauses a run: QSOs played to nobody are only to be heard
+/// again, and stopping is all a demonstration needs.
+fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
+    use_page_hidden(slot, move || {
+        if ctx.preview.peek().is_qsos() {
+            ctx.stop_audio();
+        }
+    });
 }
 
 /// While the band preview runs, the band follows the settings: the latest
@@ -213,8 +281,12 @@ fn ListenRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     let on_play = use_callback(move |chars| playback::start_letters(ctx, chars));
     let on_stream = use_callback(move |()| playback::start_stream(ctx));
+    let on_hear = use_callback(move |()| playback::start_qsos(ctx));
+    let mut dialogue = ctx.dialogue;
+    let on_put_away = use_callback(move |()| dialogue.set(None));
     let on_stop = use_callback(move |()| ctx.stop_audio());
     let on_back = use_callback(move |()| ctx.go_to(Screen::Home));
+    use_qsos_stop_when_hidden(ctx, LISTEN_HIDDEN);
     let preview = ctx.preview.read();
     #[cfg(feature = "desktop")]
     let floating = use_context::<crate::ui::floating::FloatingWindow>();
@@ -245,8 +317,12 @@ fn ListenRoute() -> Element {
             playing: preview.is_letters(),
             streaming: preview.is_stream(),
             heard: ctx.stream_heard.read().clone(),
+            hearing: preview.is_qsos(),
+            dialogue: ctx.dialogue.read().clone(),
             on_play,
             on_stream,
+            on_hear,
+            on_put_away,
             on_stop,
             on_back,
         }
@@ -256,23 +332,30 @@ fn ListenRoute() -> Element {
 #[component]
 fn TrainingRoute() -> Element {
     let ctx = use_context::<AppCtx>();
+    // A contest run has a screen of its own, which reads the run itself.
+    let contest = use_memo(move || ctx.contest.read().is_some());
     let on_change = use_callback(move |(index, text): (usize, String)| {
         send_event(ctx, SessionEvent::Input { index, text });
     });
     let on_confirm = use_callback(move |()| send_event(ctx, SessionEvent::Confirm));
     let on_submit = use_callback(move |()| send_event(ctx, SessionEvent::FinishNow));
     let on_stop = use_callback(move |()| send_event(ctx, SessionEvent::Abort));
+    if contest() {
+        return rsx! { ContestRunView {} };
+    }
     let runtime = ctx.runtime.read();
     let Some(session) = runtime.as_ref() else {
         return rsx! { p { class: "muted", "Starting…" } };
     };
     let view = session.view();
+    let open = focused_box_open(view.current, view.focused, &view.confirmed);
     rsx! {
         div { class: "stack train",
             TrainingProgress {
                 focused: view.focused,
                 total: view.sent.len(),
                 playing: view.playing,
+                open,
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
                 countdown: view.countdown,
@@ -304,8 +387,10 @@ fn ResultsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     let on_again = use_callback(move |()| start_session(ctx));
     let on_home = use_callback(move |()| ctx.go_to(Screen::Home));
-    let Some(result) = ctx.result.read().clone() else {
-        return rsx! { p { class: "muted", "No result." } };
+    let result = match ctx.result.read().clone() {
+        Some(Finished::Kept(result)) => *result,
+        Some(Finished::NothingKept) => return rsx! { NothingKept { on_again, on_home } },
+        None => return rsx! { p { class: "muted", "No result." } },
     };
     let place = cw_core::board_place(&ctx.sessions.read(), result.timestamp);
     rsx! {

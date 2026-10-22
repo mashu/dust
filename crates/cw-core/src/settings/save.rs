@@ -1,11 +1,49 @@
-//! How settings are read back from a save, older ones included.
+//! How settings are written to a save, and read back from one, older ones
+//! included.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 
 use super::{
-    AutoLevelSettings, BandSettings, CharSetMode, CurriculumSettings, PlaybackSettings,
-    PracticeWindow, TrainingSettings,
+    AutoLevelSettings, BandSettings, CharSetMode, ContestSettings, CurriculumSettings,
+    PlaybackSettings, PracticeWindow, TrainingSettings,
 };
+
+/// Settings as they are written: every section flattened into one object,
+/// and Contest written as Callsigns with `contestActive` beside it, a key
+/// that exists only on disk. A build that knows no contests then opens in
+/// Callsigns at the same tier rather than failing the whole save, and its
+/// next save drops Your station: settings, which a backup holds, not
+/// training data.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsOnDisk<'a> {
+    #[serde(flatten)]
+    curriculum: &'a CurriculumSettings,
+    #[serde(flatten)]
+    playback: &'a PlaybackSettings,
+    #[serde(flatten)]
+    band: &'a BandSettings,
+    #[serde(flatten)]
+    auto_level: &'a AutoLevelSettings,
+    #[serde(flatten)]
+    contest: &'a ContestSettings,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    contest_active: bool,
+}
+
+impl Serialize for TrainingSettings {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SettingsOnDisk {
+            curriculum: &self.curriculum,
+            playback: &self.playback,
+            band: &self.band,
+            auto_level: &self.auto_level,
+            contest: &self.contest,
+            contest_active: self.curriculum.char_set_mode == CharSetMode::Contest,
+        }
+        .serialize(serializer)
+    }
+}
 
 /// A save as it is read: today's settings, and the practice window and
 /// character set as older saves kept them.
@@ -28,6 +66,8 @@ struct SettingsSave {
     band: BandSettings,
     #[serde(flatten)]
     auto_level: AutoLevelSettings,
+    #[serde(flatten)]
+    contest: ContestSettings,
 }
 
 /// Before the practice window was named, a save kept the first and last
@@ -42,12 +82,14 @@ struct WindowSave {
 
 /// Before an unlock order could be the learner's own, a list of their own
 /// was a character set of its own, Custom, unlocked from the left like any
-/// order. Its list is that order now, under Koch.
+/// order. Its list is that order now, under Koch. Contest is written as
+/// Callsigns with `contestActive`.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct CharSetSave {
     char_set_mode: Option<ModeSave>,
     custom_set: Vec<char>,
+    contest_active: bool,
 }
 
 #[derive(Deserialize)]
@@ -65,8 +107,14 @@ impl From<SettingsSave> for TrainingSettings {
             playback: save.playback,
             band: save.band,
             auto_level: save.auto_level,
+            contest: save.contest,
         };
         match save.char_set.char_set_mode {
+            Some(ModeSave::Today(CharSetMode::Callsign)) if save.char_set.contest_active => {
+                settings.curriculum.char_set_mode = CharSetMode::Contest;
+            }
+            // Nothing writes `contest` as the mode, but a save edited by hand
+            // that names it means it.
             Some(ModeSave::Today(mode)) => settings.curriculum.char_set_mode = mode,
             Some(ModeSave::Custom) => {
                 settings.curriculum.char_set_mode = CharSetMode::Koch;
@@ -269,6 +317,153 @@ mod tests {
                 json["charSetMode"]
             );
         }
+    }
+
+    /// Contest goes to disk as Callsigns with `contestActive`, which only a
+    /// build that knows contests reads, and comes back as Contest with
+    /// everything it holds.
+    #[test]
+    fn contest_is_written_as_callsigns_and_read_back_as_contest() {
+        let mut contest = TrainingSettings::default();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        contest.curriculum.callsign_level = 4;
+        contest.contest.contest_minutes = 25;
+        contest.contest.my_call = "DL1ABC".to_string();
+        let json = serde_json::to_value(&contest).expect("settings serialize");
+        assert_eq!(json["charSetMode"], "callsign");
+        assert_eq!(json["contestActive"], true);
+        assert_eq!(json["contestKind"], "wpx");
+        assert_eq!(json["contestMinutes"], 25);
+        assert_eq!(json["myCall"], "DL1ABC");
+        assert_eq!(load(json), contest);
+
+        // Every other mode is written as it is, with no mark.
+        for mode in CharSetMode::ALL {
+            if mode == CharSetMode::Contest {
+                continue;
+            }
+            let mut settings = TrainingSettings::default();
+            settings.curriculum.char_set_mode = mode;
+            let json = serde_json::to_value(&settings).expect("settings serialize");
+            assert!(json.get("contestActive").is_none(), "{mode:?}");
+            assert_eq!(load(json).curriculum.char_set_mode, mode);
+        }
+        // The mark means Contest only beside Callsigns.
+        let koch = load(serde_json::json!({ "charSetMode": "koch", "contestActive": true }));
+        assert_eq!(koch.curriculum.char_set_mode, CharSetMode::Koch);
+    }
+
+    /// A pile-up is saved by its name and read back, and a run style this
+    /// build does not know reads as a single caller rather than costing the
+    /// rest of the save.
+    #[test]
+    fn a_run_style_reads_back_and_an_unknown_one_is_a_single_caller() {
+        let mut pileup = TrainingSettings::default();
+        pileup.contest.contest_style = crate::contest::RunStyle::Pileup;
+        let json = serde_json::to_value(&pileup).expect("settings serialize");
+        assert_eq!(json["contestStyle"], "pileup");
+        assert_eq!(load(json), pileup);
+        let unknown = load(serde_json::json!({ "contestStyle": "swarm", "contestMinutes": 25 }));
+        assert_eq!(
+            unknown.contest.contest_style,
+            crate::contest::RunStyle::Single
+        );
+        assert_eq!(unknown.contest.contest_minutes, 25, "the rest of the save");
+    }
+
+    /// The callers' habits are saved by their name and read back, and
+    /// habits this build does not know, or none at all, read as easy rather
+    /// than costing the rest of the save.
+    #[test]
+    fn callers_habits_read_back_and_unknown_ones_are_easy() {
+        use crate::contest::CallerHabits;
+        let mut rough = TrainingSettings::default();
+        rough.contest.contest_habits = CallerHabits::Rough;
+        let json = serde_json::to_value(&rough).expect("settings serialize");
+        assert_eq!(json["contestHabits"], "rough");
+        assert_eq!(load(json), rough);
+        let unknown = load(serde_json::json!({ "contestHabits": "lids", "contestMinutes": 25 }));
+        assert_eq!(unknown.contest.contest_habits, CallerHabits::Easy);
+        assert_eq!(unknown.contest.contest_minutes, 25, "the rest of the save");
+        let older = load(serde_json::json!({ "contestMinutes": 25 }));
+        assert_eq!(older.contest.contest_habits, CallerHabits::Easy);
+    }
+
+    /// Show copy is saved as a switch and read back; anything else in its
+    /// place, or nothing, reads as off rather than costing the rest of the
+    /// save.
+    #[test]
+    fn show_copy_reads_back_and_anything_else_is_off() {
+        let mut shown = TrainingSettings::default();
+        shown.contest.contest_show_copy = true;
+        let json = serde_json::to_value(&shown).expect("settings serialize");
+        assert_eq!(json["contestShowCopy"], true);
+        assert_eq!(load(json), shown);
+        for odd in [
+            serde_json::json!("yes"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let read = load(serde_json::json!({ "contestShowCopy": odd, "contestMinutes": 25 }));
+            assert!(!read.contest.contest_show_copy, "{odd}");
+            assert_eq!(read.contest.contest_minutes, 25, "the rest of the save");
+        }
+        let older = load(serde_json::json!({ "contestMinutes": 25 }));
+        assert!(!older.contest.contest_show_copy);
+    }
+
+    /// A build that knows no contests reads Contest as Callsigns at the same
+    /// tier: the mode is one it knows, and `contestActive` a key it skips.
+    #[test]
+    fn a_build_before_contests_opens_contest_in_callsigns() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct BeforeContests {
+            char_set_mode: ModeBeforeContests,
+            callsign_level: u32,
+        }
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum ModeBeforeContests {
+            Koch,
+            Digits,
+            Mixed,
+            Callsign,
+            Words,
+        }
+        let mut contest = TrainingSettings::default();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        contest.curriculum.callsign_level = 5;
+        let json = serde_json::to_value(&contest).expect("settings serialize");
+        let older: BeforeContests = serde_json::from_value(json).expect("an older build reads it");
+        assert_eq!(older.char_set_mode, ModeBeforeContests::Callsign);
+        assert_eq!(older.callsign_level, 5);
+        let named = serde_json::json!({ "charSetMode": "contest", "callsignLevel": 5 });
+        assert!(serde_json::from_value::<BeforeContests>(named).is_err());
+    }
+
+    /// Nothing writes `contest` as the mode; a save edited by hand that
+    /// names it opens in Contest, and is written back the way Contest is.
+    #[test]
+    fn a_save_that_names_contest_opens_in_contest() {
+        let settings = load(serde_json::json!({ "charSetMode": "contest", "callsignLevel": 4 }));
+        assert_eq!(settings.curriculum.char_set_mode, CharSetMode::Contest);
+        assert_eq!(settings.curriculum.callsign_level, 4);
+        let json = serde_json::to_value(&settings).expect("settings serialize");
+        assert_eq!(json["charSetMode"], "callsign");
+        assert_eq!(json["contestActive"], true);
+    }
+
+    /// A contest this build does not know is the default one, and costs
+    /// nothing else in the save.
+    #[test]
+    fn an_unknown_contest_reads_as_wpx() {
+        let settings = load(serde_json::json!({ "contestKind": "cwt", "contestMinutes": 30 }));
+        assert_eq!(
+            settings.contest.contest_kind,
+            crate::contest::ContestKind::Wpx
+        );
+        assert_eq!(settings.contest.contest_minutes, 30);
     }
 
     /// The first versions named two settings after the Koch method. Their

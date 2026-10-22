@@ -25,7 +25,9 @@ impl CountersKey {
                 settings.level(LevelAxis::Digits)
             ),
             CharSetMode::Digits => format!("digits_{level}_{fingerprint}"),
-            CharSetMode::Callsign => format!("callsign_{level}"),
+            // A contest run never reaches auto level; its tier is the
+            // callsign one, so its key is too.
+            CharSetMode::Callsign | CharSetMode::Contest => format!("callsign_{level}"),
             CharSetMode::Words => format!("words_{level}"),
             CharSetMode::Koch => format!("koch_{level}_{fingerprint}"),
         })
@@ -221,9 +223,13 @@ pub fn auto_level_progress(
     settings: &TrainingSettings,
     counters: AutoLevelCounters,
 ) -> Option<AutoLevelProgress> {
-    // Off, or a word list, which has no level to move.
+    // Off, or a word list, which has no level to move, or a contest, whose
+    // runs never move one.
     if !settings.auto_level.auto_adjust_level
-        || settings.curriculum.char_set_mode == CharSetMode::Words
+        || matches!(
+            settings.curriculum.char_set_mode,
+            CharSetMode::Words | CharSetMode::Contest
+        )
     {
         return None;
     }
@@ -542,6 +548,18 @@ mod tests {
             }
         }
         assert_eq!(settings.curriculum.level, 12);
+        assert!(auto_level_progress(&settings, Default::default()).is_none());
+    }
+
+    /// A contest's runs never move a level, so Home shows no progress
+    /// towards one, whatever the switch says.
+    #[test]
+    fn a_contest_shows_no_level_progress() {
+        let mut settings = koch(12);
+        settings.curriculum.char_set_mode = CharSetMode::Callsign;
+        assert!(auto_level_progress(&settings, Default::default()).is_some());
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        assert!(settings.auto_level.auto_adjust_level);
         assert!(auto_level_progress(&settings, Default::default()).is_none());
     }
 

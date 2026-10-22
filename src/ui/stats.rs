@@ -145,6 +145,8 @@ fn TrendCard(
     on_mode: EventHandler<CharSetMode>,
     /// What the pills' ids begin with.
     pills: &'static str,
+    /// A line under the chart, where the series shown needs one.
+    note: Option<&'static str>,
 ) -> Element {
     let shown = &points[points.len().saturating_sub(TREND_SESSIONS_SHOWN)..];
     let estimates: Vec<Estimate> = shown.iter().map(|point| point.estimate).collect();
@@ -204,12 +206,21 @@ fn TrendCard(
                 }
                 span { class: if steering.is_some() { "chip good" } else { "chip" }, "{chip}" }
             }
+            // The card is no stack, so the note keeps its own distance from
+            // the chip row above it.
+            if let Some(note) = note {
+                p { class: "muted", style: "margin: 0.6rem 0 0; font-size: 0.85rem;", "{note}" }
+            }
         }
     }
 }
 
 /// What the chip says of a character set that is not the one practised now.
 const NOT_NOW: &str = "Not the set practised now";
+
+/// How a contest's callers' speeds come, which no copy speed steers yet.
+pub(crate) const CONTEST_SPEEDS: &str =
+    "Callers' speeds are drawn evenly from your range, shifted by − / + during a run.";
 
 /// The copy span: how long a group you copy whole, and how that has moved,
 /// for each character set with groups drawn a character at a time in its
@@ -243,6 +254,7 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
             mode,
             on_mode: move |mode| chosen.set(Some(mode)),
             pills: "span",
+            note: None,
         }
     }
 }
@@ -262,6 +274,12 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
     shown.curriculum.char_set_mode = mode;
     let now = mode == current;
     let aim = settings.curriculum.aim;
+    let contest = mode == CharSetMode::Contest;
+    let off = match (now, contest) {
+        (false, _) => NOT_NOW,
+        (true, true) => "Not adaptive",
+        (true, false) => "Adaptive speed off",
+    };
     rsx! {
         TrendCard {
             points: speed_history(&shown, &sessions),
@@ -272,11 +290,12 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             colour: "var(--good)",
             meaning: format!("{:.0}% of characters right", aim.chars_right() * 100.0),
             steering: (now && adapts_speed(&settings)).then(|| aim_label(aim)),
-            off: if now { "Adaptive speed off" } else { NOT_NOW },
+            off,
             modes,
             mode,
             on_mode: move |mode| chosen.set(Some(mode)),
             pills: "speed",
+            note: contest.then_some(CONTEST_SPEEDS),
         }
     }
 }

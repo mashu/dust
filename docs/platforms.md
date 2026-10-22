@@ -226,6 +226,17 @@ that field. A history that
 cannot be read at all is set aside beside the new one rather than written over,
 and if it cannot even be moved, nothing is saved over it.
 
+From contest mode on, a mode added later is written under the name of the
+older mode closest to it, plus a mark only newer builds read, so older builds
+can still read its sessions: a contest run is stored as a callsign session
+whose alphabet fingerprint starts `contest:`, with its log beside the groups.
+An older build keeps such a session as practice in the older mode, and drops
+what it does not know, the log, the next time it saves; after an upgrade the
+mark makes it a contest run again, so it leaves the callsign copy speed and
+board, which can shift them a little. A new mode name instead makes every
+older build skip the session as unreadable and lose it on its next save, as
+builds from before Words do with a Words session.
+
 ### Backups
 
 A browser clears `localStorage` along with cookies when someone clears a
@@ -269,7 +280,8 @@ not against someone clearing the site's data: only a backup does.
 
 The history keeps your newest 500 sessions. A browser also gives each site only
 a few megabytes; should the history outgrow that — hundreds of sessions of
-hundreds of groups — the newest that fit are kept, and the app says so.
+hundreds of groups, or long contest runs, which take more room — the newest
+that fit are kept, and the app says so.
 
 Sessions can be deleted under **Stats → History**: one from its own row, or
 several with **Select**, all of them included. Deleting everything asks once

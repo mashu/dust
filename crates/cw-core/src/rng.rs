@@ -48,6 +48,33 @@ pub trait Rng {
         let (radius, angle) = box_muller(self);
         radius * angle.cos()
     }
+
+    /// A normal deviate about `mean` that strays at most `limit` either
+    /// side: half the limit is one standard deviation, and the tails are
+    /// cut at the whole of it, so most draws sit near the mean.
+    fn normal_within(&mut self, mean: f64, limit: f64) -> f64
+    where
+        Self: Sized,
+    {
+        (mean + self.normal() * limit / 2.0).clamp(mean - limit, mean + limit)
+    }
+
+    /// A Poisson count with mean `mean`, by multiplying uniforms (Knuth),
+    /// and never more than `most`, which bounds the draws it takes too:
+    /// one more than the count.
+    fn poisson(&mut self, mean: f64, most: usize) -> usize {
+        if mean.is_nan() || mean <= 0.0 {
+            return 0;
+        }
+        let limit = (-mean).exp();
+        let mut product = self.f64();
+        let mut count = 0;
+        while product > limit && count < most {
+            product *= self.f64();
+            count += 1;
+        }
+        count
+    }
 }
 
 /// Box–Muller's radius and angle for one pair of standard normal deviates:
@@ -167,6 +194,24 @@ mod tests {
         fn f64(&mut self) -> f64 {
             self.0
         }
+    }
+
+    /// A draw within a limit stays within it, about a third of draws
+    /// beyond half of it, as one standard deviation is.
+    #[test]
+    fn a_normal_draw_within_a_limit_stays_within_it() {
+        let mut rng = SplitMix64::new(3);
+        let draws: Vec<f64> = (0..10_000).map(|_| rng.normal_within(4.0, 2.0)).collect();
+        assert!(draws.iter().all(|draw| (2.0..=6.0).contains(draw)));
+        let wide = draws
+            .iter()
+            .filter(|draw| (*draw - 4.0).abs() > 1.0)
+            .count();
+        assert!(
+            (2_900..3_500).contains(&wide),
+            "{wide} beyond half the limit"
+        );
+        assert_eq!(Fixed(0.5).normal_within(4.0, 0.0), 4.0);
     }
 
     #[test]

@@ -25,10 +25,11 @@ use super::paddle::{PaddlePad, use_paddle_keys};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
-use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView};
+use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView, focused_box_open};
 use crate::audio::fake::Recorder;
 use crate::session_runtime::AnswerOutbox;
 use crate::state::{AppState, Screen};
+use crate::testing::reads_as;
 
 std::thread_local! {
     /// How many times a [`Keyed`] with no sound device has looked for one.
@@ -102,6 +103,7 @@ fn TrainingScreen(
     countdown: Option<u32>,
 ) -> Element {
     let answer = use_hook(AnswerOutbox::new);
+    let open = focused_box_open(current, focused, &confirmed);
     rsx! {
         Keyed { screen: Screen::Training, keyer_mode,
             div { class: "stack",
@@ -109,6 +111,7 @@ fn TrainingScreen(
                     focused,
                     total,
                     playing,
+                    open,
                     repeat_total,
                     repeat_done,
                     countdown,
@@ -174,16 +177,13 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
             sends: 1,
         }],
         accuracy,
-        tally: Default::default(),
         avg_response_ms: 450.0,
         total_chars: 40,
         score: 820.0,
         level: 3,
-        digits_level: 1,
         char_set_mode: CharSetMode::Mixed,
         char_wpm: 20.0,
-        effective_wpm: 18.0,
-        alphabet_fingerprint: String::new(),
+        ..SessionResult::empty_for_test()
     }
 }
 
@@ -252,6 +252,145 @@ fn home_in_callsign_mode_points_at_no_character_and_counts_calls() {
     assert!(html.contains("Callsign tier 1"));
 }
 
+/// Home in Contest mode with `my_call` as your call, and no history.
+fn contest_home(my_call: &'static str) -> String {
+    #[component]
+    fn ContestHome(my_call: &'static str) -> Element {
+        let mut settings = crate::testing::contest_settings();
+        settings.contest.my_call = my_call.to_string();
+        rsx! {
+            Home {
+                settings,
+                last_accuracy: None,
+                session_count: 0,
+                pool: String::new(),
+                sessions: Vec::new(),
+                today: "2026-10-21".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    }
+    render_props(ContestHome, ContestHomeProps { my_call })
+}
+
+/// Without a call, the hero asks for one where the fields will show, and
+/// the first-run card says what to do.
+#[test]
+fn home_in_contest_mode_asks_for_your_call() {
+    let html = contest_home("");
+    for shown in [
+        ">Contest<",
+        "CQ WPX",
+        r#"id="field-your-callsign""#,
+        "Your callsign",
+        "Start contest",
+        r#"id="btn-start-training""#,
+        "First contest",
+        "Add your call, press Start contest; Enter sends what the QSO needs next.",
+        ">Minutes<",
+        ">Single<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in [
+        "Current alphabet",
+        "field-chip",
+        "Start training",
+        ">Sent<",
+        "Calls",
+        "First session",
+    ] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+}
+
+/// With a call, the hero shows what a run copies and what you send, as
+/// whom, and how long and how busy a run is.
+#[test]
+fn home_in_contest_mode_says_what_a_run_is() {
+    let html = contest_home("DL1ABC");
+    for shown in [
+        r#"class="pool-chip field-chip">CALL<"#,
+        r#"class="pool-chip field-chip">NR<"#,
+        "You send 5NN + serial, as DL1ABC",
+        ">30<",
+        ">WPM<",
+        ">10<",
+        ">Minutes<",
+        ">Single<",
+        ">Caller<",
+        "Start contest",
+        "Press Start contest; Enter sends what the QSO needs next.",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("field-your-callsign"), "{html}");
+    assert!(!html.contains("home-missing"), "nothing refused yet");
+}
+
+/// Home in Contest mode for the NA Sprint as K1ABC, called `my_name`, in
+/// `my_state`, and no history.
+fn sprint_home(my_name: &'static str, my_state: &'static str) -> String {
+    #[component]
+    fn SprintHome(my_name: &'static str, my_state: &'static str) -> Element {
+        let mut settings = crate::testing::contest_settings();
+        settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+        settings.contest.my_call = "K1ABC".to_string();
+        settings.contest.my_name = my_name.to_string();
+        settings.contest.my_state = my_state.to_string();
+        rsx! {
+            Home {
+                settings,
+                last_accuracy: None,
+                session_count: 0,
+                pool: String::new(),
+                sessions: Vec::new(),
+                today: "2026-10-21".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    }
+    render_props(SprintHome, SprintHomeProps { my_name, my_state })
+}
+
+/// With the call and the name, a Sprint's hero asks for your state where
+/// the fields will show; with it, it shows what a run copies and sends.
+#[test]
+fn home_asks_for_your_state_before_a_sprint() {
+    let html = sprint_home("MIKE", "");
+    for shown in [
+        "NA Sprint",
+        r#"id="field-your-state-or-province""#,
+        "Your state or province",
+        "e.g. MA, ON or DX",
+        "Add your state, press Start contest; Enter sends what the QSO needs next.",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in ["field-your-callsign", "field-your-name", "field-chip"] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // The name comes first.
+    let html = sprint_home("", "");
+    assert!(html.contains(r#"id="field-your-name""#), "{html}");
+    assert!(!html.contains("field-your-state"), "{html}");
+    let html = sprint_home("MIKE", "MA");
+    for shown in [
+        r#"class="pool-chip field-chip">NR<"#,
+        r#"class="pool-chip field-chip">NAME<"#,
+        r#"class="pool-chip field-chip">ST<"#,
+        "You send serial + name + state, as K1ABC",
+        "Press Start contest; Enter sends what the QSO needs next.",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("field-your-state"), "{html}");
+}
+
 #[test]
 fn home_without_history_invites_a_first_session() {
     let html = render(|| {
@@ -271,6 +410,28 @@ fn home_without_history_invites_a_first_session() {
     });
     assert!(html.contains("First session"));
     assert!(!html.contains("Last accuracy"));
+}
+
+/// Once the history holds a contest run, the Letters tab says its times
+/// are left out of the letters' times.
+#[test]
+fn the_letters_tab_says_when_contest_times_are_left_out() {
+    let says = |sessions: Vec<SessionResult>| {
+        let props = StatsViewProps {
+            settings: TrainingSettings::default(),
+            sessions,
+            on_delete: None,
+            backups: None,
+        };
+        let mut ui = crate::testing::Ui::new(StatsView, props);
+        ui.click("seg-letters");
+        assert!(ui.has("Letter accuracy"));
+        ui.has(cw_core::CONTEST_TIMES_NOTE)
+    };
+    assert!(!says(vec![session("2026-09-01", 0.9)]));
+    let mut contest = session("2026-09-02", 0.9);
+    contest.char_set_mode = CharSetMode::Contest;
+    assert!(says(vec![session("2026-09-01", 0.9), contest]));
 }
 
 #[test]
@@ -486,6 +647,629 @@ fn settings_renders_every_card() {
     assert!(html.contains("aria-label=\"Rise time\""));
 }
 
+/// In Contest mode the Character set card shows the contest in place of an
+/// alphabet: a pill for each contest, what you send and copy, a
+/// QSO with your call in it, and the tier its callers' calls come from.
+/// Your station follows, and no alphabet, group, preset or level control
+/// is drawn.
+#[test]
+fn settings_in_contest_mode_show_the_contest_and_your_station() {
+    let html = render(|| {
+        let settings = use_signal(crate::testing::contest_settings);
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    });
+    for shown in [
+        ">Character set<",
+        "Contest · CQ WPX",
+        r#"<div class="eyebrow">Contest</div><div class="mode-pills">"#,
+        r#"id="contest-cq-wpx" class="pill active""#,
+        "You send 5NN + serial\u{a0}· You\u{a0}copy\u{a0}NR",
+        r#"<li class="qso-line you"><span class="qso-who tiny">You</span><span class="qso-sends"><span class="call">CQ DL1ABC TEST</span>"#,
+        r#"<li class="qso-line they"><span class="qso-who tiny">They</span><span class="qso-sends"><span class="call">K5XYZ</span>"#,
+        ">K5XYZ 5NN TT1<",
+        ">TU 5NN 214<",
+        ">TU<",
+        "Callsign tier (1–6)",
+        ">Your station<",
+        "Signing DL1ABC",
+        &reads_as(&[
+            "Fed. Rep. of Germany",
+            "Europe",
+            "CQ zone 14",
+            "WPX prefix DL1",
+        ]),
+        "Stored on this device only.",
+        "Minutes per run",
+        "Band activity",
+        crate::ui::privacy::CONTEST_PRIVACY,
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in [
+        "Unlock order",
+        "Practice window",
+        "What this tier sends",
+        "Digits level",
+        "select-experience",
+        "Groups per session",
+        "Sends per group",
+        "Adapt speed to me",
+        "Adjust the level for me",
+    ] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // Contest's segment is the one chosen, and no alphabet's.
+    for (mode, label) in crate::ui::settings_charset::CHAR_SET_MODES {
+        let id = crate::ui::widgets::control_id("seg", label);
+        let class = if mode == CharSetMode::Contest {
+            "seg active"
+        } else {
+            "seg"
+        };
+        assert!(
+            html.contains(&format!(r#"id="{id}" class="{class}">"#)),
+            "{id} {html}"
+        );
+    }
+    // Your station sits under the card whose contest it serves.
+    let charset = html.find(">Character set<").expect("the card");
+    let station = html.find(">Your station<").expect("the station");
+    let shape = html.find(">Session shape<").expect("session shape");
+    assert!(charset < station && station < shape);
+}
+
+/// Settings in Contest mode for a Simple QSO as DL1ABC, called `my_name`.
+fn simple_qso_settings(my_name: &'static str) -> String {
+    #[component]
+    fn SimpleQsoSettings(my_name: &'static str) -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            settings.contest.my_name = my_name.to_string();
+            settings
+        });
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    }
+    render_props(SimpleQsoSettings, SimpleQsoSettingsProps { my_name })
+}
+
+/// Simple QSO has its pill, its own dialogue from its row, and on Your
+/// station a name field, which a start needs and the card says so.
+#[test]
+fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
+    let html = simple_qso_settings("");
+    for shown in [
+        "Contest · Simple QSO",
+        r#"id="contest-simple-qso" class="pill active""#,
+        r#"id="contest-cq-wpx" class="pill""#,
+        "You send 599 + name\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}NAME",
+        ">CQ CQ DE DL1ABC DL1ABC K<",
+        ">DL1ABC DE K5XYZ K5XYZ K<",
+        ">K5XYZ DE DL1ABC UR 599 599 NAME &#60;your name&#62; &#60;your name&#62; BK<",
+        ">R TNX UR 579 579 NAME BOB BOB BK<",
+        ">TU BOB 73 EE<",
+        ">73 EE<",
+        r#"for="field-your-name""#,
+        "Add your name to start a Simple\u{a0}QSO",
+        "Signing DL1ABC<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    let html = simple_qso_settings("MAT");
+    assert!(html.contains("Signing DL1ABC · MAT"), "{html}");
+    assert!(html.contains(">K5XYZ DE DL1ABC UR 599 599 NAME MAT MAT BK<"));
+    assert!(!html.contains("Add your name"));
+    // WPX sends no name, so Your station has no field for one.
+    let wpx = render(|| {
+        let settings = use_signal(crate::testing::contest_settings);
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    });
+    assert!(!wpx.contains("field-your-name"));
+}
+
+/// Settings in Contest mode for the NA Sprint as `my_call`, called
+/// `my_name`, in `my_state`.
+fn sprint_settings(my_call: &'static str, my_name: &'static str, my_state: &'static str) -> String {
+    station_settings(
+        cw_core::ContestKind::Sprint,
+        Station {
+            call: my_call,
+            name: my_name,
+            state: my_state,
+            ..Station::default()
+        },
+    )
+}
+
+/// The NA Sprint has its pill, first as the card lists the contests, its
+/// dialogue from its row, the simplifications it makes, and on Your station
+/// a name and a state, each asked for in turn, the state read as the place
+/// it names, or as DX for a call outside the US and Canada.
+#[test]
+fn a_sprint_shows_its_dialogue_and_asks_for_your_name_and_state() {
+    let html = sprint_settings("K1ABC", "", "");
+    for shown in [
+        "Contest · NA Sprint",
+        r#"id="contest-na-sprint" class="pill active""#,
+        "You send serial + name + state\u{a0}· You\u{a0}copy\u{a0}NR\u{a0}NAME\u{a0}ST",
+        "Simplified: you keep your frequency (in the real contest you QSY after each QSO), so you sign last",
+        "outside the US and Canada you send DX",
+        ">CQ NA K1ABC<",
+        ">W7XYZ<",
+        ">W7XYZ K1ABC 1 &#60;your name&#62; &#60;your state&#62;<",
+        ">K1ABC 214 BOB OR<",
+        ">TU K1ABC<",
+        r#"for="field-your-name""#,
+        r#"for="field-your-state-or-province""#,
+        "Add your name to start an NA\u{a0}Sprint",
+        "Signing K1ABC<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // The pills go as the card lists the contests: the Sprint first.
+    let sprint = html.find("contest-na-sprint").expect("the pill");
+    let wpx = html.find("contest-cq-wpx").expect("the pill");
+    assert!(sprint < wpx);
+    let html = sprint_settings("K1ABC", "MIKE", "");
+    assert!(
+        html.contains("Add your state or province to start an NA\u{a0}Sprint"),
+        "{html}"
+    );
+    let html = sprint_settings("K1ABC", "MIKE", "MA");
+    for shown in [
+        "Signing K1ABC · MIKE · MA",
+        "Reads as Massachusetts",
+        ">W7XYZ K1ABC 1 MIKE MA<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("Add your"), "{html}");
+    // Outside North America your state is DX, and nothing is missing.
+    let html = sprint_settings("DL1ABC", "MAT", "");
+    for shown in [
+        "Sends DX: in Dust every station outside the US and Canada sends DX",
+        "Signing DL1ABC · MAT · DX",
+        ">W7XYZ DL1ABC 1 MAT DX<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // WPX sends no state, so Your station has no field for one.
+    let wpx = simple_qso_settings("MAT");
+    assert!(!wpx.contains("field-your-state"));
+}
+
+/// Your station, as a render test gives it.
+#[derive(Clone, Copy, PartialEq)]
+struct Station {
+    call: &'static str,
+    name: &'static str,
+    state: &'static str,
+    zone: u32,
+    power: &'static str,
+    class: &'static str,
+    section: &'static str,
+}
+
+impl Default for Station {
+    fn default() -> Self {
+        Self {
+            call: "",
+            name: "",
+            state: "",
+            zone: 0,
+            power: "100",
+            class: "1D",
+            section: "",
+        }
+    }
+}
+
+/// Your station as `call`, everything else as it is until given.
+fn called(call: &'static str) -> Station {
+    Station {
+        call,
+        ..Station::default()
+    }
+}
+
+/// Settings in Contest mode for `kind` as `station`.
+fn station_settings(kind: cw_core::ContestKind, station: Station) -> String {
+    #[component]
+    fn StationSettings(kind: cw_core::ContestKind, station: Station) -> Element {
+        let settings = use_signal(|| {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = kind;
+            settings.contest.my_call = station.call.to_string();
+            settings.contest.my_name = station.name.to_string();
+            settings.contest.my_state = station.state.to_string();
+            settings.contest.my_zone = station.zone;
+            settings.contest.my_power = station.power.to_string();
+            settings.contest.my_class = station.class.to_string();
+            settings.contest.my_section = station.section.to_string();
+            settings
+        });
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                SettingsView {
+                    settings,
+                    previewing: false,
+                    sample_playing: None,
+                    on_preview_band: move |_| {},
+                    on_stop_band: move |_| {},
+                    on_play_sample: move |_: String| {},
+                }
+            }
+        }
+    }
+    render_props(StationSettings, StationSettingsProps { kind, station })
+}
+
+/// CQ WW has its pill, its dialogue from its row with your zone cut, what
+/// it simplifies, and on Your station your zone, read from your call while
+/// you give none, with no name, state or power.
+#[test]
+fn cqww_shows_its_dialogue_and_your_zone() {
+    let html = station_settings(cw_core::ContestKind::Cqww, called("DL1ABC"));
+    let reading = reads_as(&["Fed. Rep. of Germany", "Europe", "CQ zone 14"]);
+    for shown in [
+        "Contest · CQ WW",
+        r#"id="contest-cq-ww" class="pill active""#,
+        "You send 5NN + zone\u{a0}· You\u{a0}copy\u{a0}ZN",
+        "one band, so a station, a zone and a country each count once",
+        "no WAE countries",
+        ">CQ DL1ABC TEST<",
+        ">JA1XYZ<",
+        ">JA1XYZ 5NN A4<",
+        ">TU 5NN 25<",
+        r#"for="field-your-cq-zone-0-40""#,
+        "0 takes it from your call: zone 14, sent A4",
+        &format!("{reading}<"),
+        "Signing DL1ABC · zone 14",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in [
+        "field-your-name",
+        "field-your-state",
+        "field-your-power",
+        "side-line",
+    ] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // A zone given goes out in place of the call's, which the line names.
+    let html = station_settings(
+        cw_core::ContestKind::Cqww,
+        Station {
+            zone: 15,
+            ..called("DL1ABC")
+        },
+    );
+    for shown in [
+        "Sends A5: zone 15, where your call reads as zone 14",
+        ">JA1XYZ 5NN A5<",
+        "Signing DL1ABC · zone 15",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // A state left from another contest gives a US call its zone, and the
+    // lines say so, though CQ WW has no field for it.
+    let html = station_settings(
+        cw_core::ContestKind::Cqww,
+        Station {
+            state: "CA",
+            ..called("K1ABC")
+        },
+    );
+    for shown in [
+        "0 takes it from your call and state: zone 3 in California, sent 3",
+        &reads_as(&["United States", "North America", "CQ zone 3 in California"]),
+        ">JA1XYZ 5NN 3<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // A call Dust cannot place needs its zone given before a run, and
+    // reads as no country, its WPX prefix left to WPX.
+    let html = station_settings(cw_core::ContestKind::Cqww, called("C31AB"));
+    for shown in [
+        "Add your CQ zone to start a CQ\u{a0}WW",
+        "JA1XYZ 5NN &#60;your zone&#62;",
+        &format!("{}<", reads_as(&["unknown prefix, so no country"])),
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+}
+
+/// ARRL DX has its pill and says which side you are on: as DX, you send
+/// your power, which Your station asks for, and copy a state; as W/VE, you
+/// send your state, Labrador among them, and copy power.
+#[test]
+fn arrl_dx_says_your_side_and_asks_for_what_it_sends() {
+    let html = station_settings(cw_core::ContestKind::ArrlDx, called("DL1ABC"));
+    let reading = reads_as(&["Fed. Rep. of Germany", "Europe", "CQ zone 14", "you are DX"]);
+    for shown in [
+        "Contest · ARRL DX",
+        r#"id="contest-arrl-dx" class="pill active""#,
+        "You send 5NN + power\u{a0}· You\u{a0}copy\u{a0}ST",
+        r#"id="side-line" class="muted" style="margin: 0;">You are DX: you work US and Canada only<"#,
+        "Simplified: one band, so a station and a multiplier each count once.",
+        ">W7XYZ 5NN 1TT<",
+        ">TU 5NN OR<",
+        r#"for="field-your-power""#,
+        "Sends 1TT: 100 W",
+        &reading,
+        "Signing DL1ABC · 100 W",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in ["field-your-name", "field-your-state", "field-your-cq-zone"] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // The pills go as the card lists the contests.
+    let order: Vec<usize> = [
+        "contest-na-sprint",
+        "contest-arrl-dx",
+        "contest-cq-wpx",
+        "contest-cq-ww",
+        "contest-field-day",
+        "contest-simple-qso",
+    ]
+    .iter()
+    .map(|id| html.find(id).expect("every pill"))
+    .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+    let html = station_settings(cw_core::ContestKind::ArrlDx, called("K1ABC"));
+    for shown in [
+        "You send 5NN + state\u{a0}· You\u{a0}copy\u{a0}PWR",
+        "You are W/VE: you work DX only (Alaska and Hawaii count as DX)",
+        ">G4XYZ 5NN &#60;your state&#62;<",
+        ">TU 5NN KW<",
+        r#"for="field-your-state-or-province""#,
+        "Add your state or province to start an ARRL\u{a0}DX",
+        "you\u{a0}are\u{a0}W/VE",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("field-your-power"), "{html}");
+    // With no call yet, you are DX until you add one.
+    let html = station_settings(cw_core::ContestKind::ArrlDx, called(""));
+    assert!(
+        html.contains("Until you add your call you are DX: you work US and Canada only"),
+        "{html}"
+    );
+    // Labrador is a place of its own in ARRL DX.
+    let html = station_settings(
+        cw_core::ContestKind::ArrlDx,
+        Station {
+            state: "LB",
+            ..called("VO2AB")
+        },
+    );
+    for shown in ["Reads as Labrador", "Signing VO2AB · LB", ">G4XYZ 5NN LB<"] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+}
+
+/// Field Day has its pill, the sixth, and its dialogue from its row: you
+/// send their call, your class and your section, they send theirs led by
+/// R. Your station asks for your class and section, each with a line
+/// saying how it goes out; a call that tells its section sends it.
+#[test]
+fn field_day_shows_its_dialogue_your_class_and_section() {
+    let html = station_settings(
+        cw_core::ContestKind::FieldDay,
+        Station {
+            section: "EMA",
+            ..called("K1ABC")
+        },
+    );
+    for shown in [
+        "Contest · Field Day",
+        r#"id="contest-field-day" class="pill active""#,
+        "You send class + section\u{a0}· You\u{a0}copy\u{a0}CL\u{a0}SEC",
+        "Simplified: one band, so a station counts once; and no power multiplier or bonus points, which score the entry, not the copying.",
+        ">CQ FD K1ABC<",
+        ">W7XYZ<",
+        ">W7XYZ 1D EMA<",
+        ">R 3A OR<",
+        r#"for="field-your-class""#,
+        "Sends 1D: 1 transmitter, a home station on commercial power",
+        r#"for="field-your-section""#,
+        "Reads as Eastern Massachusetts",
+        "Signing K1ABC · 1D · EMA",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in [
+        "field-your-name",
+        "field-your-state",
+        "field-your-power",
+        "field-your-cq-zone",
+        "side-line",
+    ] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    // Six contests, a pill each.
+    assert_eq!(html.matches(r#"id="contest-"#).count(), 6, "{html}");
+    // A W/VE call with no section given is asked for one.
+    let html = station_settings(
+        cw_core::ContestKind::FieldDay,
+        Station {
+            class: "3A",
+            ..called("K1ABC")
+        },
+    );
+    for shown in [
+        "Add your section to start a Field\u{a0}Day",
+        ">W7XYZ 3A &#60;your section&#62;<",
+        "Sends 3A: 3 transmitters, a club or group in the field",
+        "Signing K1ABC · 3A",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // Hawaii's call tells its section: PAC.
+    let html = station_settings(cw_core::ContestKind::FieldDay, called("KH6XYZ"));
+    for shown in [
+        "Sends PAC from your call: Pacific",
+        ">W7XYZ 1D PAC<",
+        "Signing KH6XYZ · 1D · PAC",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // Yukon's section goes out as the Territories'.
+    let html = station_settings(
+        cw_core::ContestKind::FieldDay,
+        Station {
+            section: "YT",
+            ..called("VY1AB")
+        },
+    );
+    for shown in [
+        "Sends TER: ARRL contests count Yukon in the Territories",
+        ">W7XYZ 1D TER<",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+}
+
+/// Home in Contest mode for Field Day as `my_call`, in the section
+/// `my_section`, and no history.
+fn field_day_home(my_call: &'static str, my_section: &'static str) -> String {
+    #[component]
+    fn FieldDayHome(my_call: &'static str, my_section: &'static str) -> Element {
+        let mut settings = crate::testing::contest_settings();
+        settings.contest.contest_kind = cw_core::ContestKind::FieldDay;
+        settings.contest.my_call = my_call.to_string();
+        settings.contest.my_section = my_section.to_string();
+        rsx! {
+            Home {
+                settings,
+                last_accuracy: None,
+                session_count: 0,
+                pool: String::new(),
+                sessions: Vec::new(),
+                today: "2026-10-22".to_string(),
+                auto_progress: None,
+                on_start: move |_| {},
+                on_listen: move |_| {},
+            }
+        }
+    }
+    render_props(
+        FieldDayHome,
+        FieldDayHomeProps {
+            my_call,
+            my_section,
+        },
+    )
+}
+
+/// With a W/VE call, Field Day's hero asks for your section where the
+/// fields will show, as it asks for a state, and says what a section is;
+/// with it, or with a call that tells it, it shows what a run copies and
+/// sends.
+#[test]
+fn home_asks_for_your_section_before_field_day() {
+    let html = field_day_home("K1ABC", "");
+    for shown in [
+        "Field Day",
+        r#"id="field-your-section""#,
+        "Your section",
+        "e.g. EMA, ONS or DX",
+        "Your ARRL or RAC section, as EMA for Eastern Massachusetts; DX outside them",
+        "Add your section, press Start contest; Enter sends what the QSO needs next.",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in ["field-your-callsign", "field-your-class", "field-chip"] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+    for (call, section) in [("K1ABC", "EMA"), ("KL7AB", ""), ("DL1ABC", "")] {
+        let html = field_day_home(call, section);
+        for shown in [
+            r#"class="pool-chip field-chip">CL<"#,
+            r#"class="pool-chip field-chip">SEC<"#,
+            &format!("You send class + section, as {call}"),
+            "Press Start contest; Enter sends what the QSO needs next.",
+        ] {
+            assert!(html.contains(shown), "{call}: no {shown:?} in {html}");
+        }
+        assert!(!html.contains("field-your-section"), "{call}: {html}");
+    }
+}
+
+/// A Field Day run's results: two points a QSO and nothing to multiply
+/// them, so the multipliers read a dash and the score is the points; raw
+/// as logged, verified as sent, with what the checks found.
+#[test]
+fn a_field_day_run_has_results_with_its_points() {
+    let html = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_field_day_run(
+                    "2026-10-22",
+                    &[
+                        [("W7XYZ", "W7XYZ"), ("3A", "3A"), ("OR", "OR")],
+                        [("VE3ABC", "VE3ABC"), ("1D", "1D"), ("ONS", "ONS")],
+                        [("KH6AB", "KH6AB"), ("2A", "2A"), ("PAC", "PAC")],
+                        [("W1ABC", "W1ABC"), ("1E", "1E"), ("EMA", "WMA")],
+                    ],
+                ),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    for shown in [
+        "Run complete",
+        "Field Day · 10:00",
+        "4 QSOs, 24 an hour. One SEC was wrong.",
+        ">3/4<",
+        "Contest score",
+        ">Mults<",
+        r#"<th scope="row">Raw</th><td>8</td><td>—</td><td>8</td>"#,
+        r#"<th scope="row">Verified</th><td>6</td><td>—</td><td>6</td>"#,
+        "0\u{a0}busted\u{a0}calls\u{a0}· 0\u{a0}wrong\u{a0}CL\u{a0}· 1\u{a0}wrong\u{a0}SEC\u{a0}· 0\u{a0}NIL\u{a0}· 0\u{a0}dupes",
+        "WMA→EMA",
+        "wrong SEC",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+}
+
 #[test]
 fn envelope_card_draws_a_closed_trace() {
     let html = render(|| {
@@ -554,7 +1338,177 @@ fn results_renders_the_score_ring_and_rows() {
     assert!(html.contains("Unlocked a new character"));
     assert!(html.contains("50%"));
     assert!(html.contains("1/2"));
+    assert!(html.contains(">Points<"), "Dust's points read Points");
+    assert!(!html.contains(">Score<"));
     assert!(!html.contains("place-banner"), "no place, no banner");
+}
+
+/// A contest run's results: the share of QSOs logged clean, the run in a
+/// sentence, the four tiles, both contest scores with what the checks
+/// found, and the log beside what was really sent.
+#[test]
+fn a_contest_run_has_results_of_its_own() {
+    let html = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_run(
+                    "2026-10-20",
+                    &[("K5XYZ", "214", "K5XYZ", "214"), ("DL2XYZ", "13", "DL2XYZ", "31")],
+                ),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    for shown in [
+        "Run complete",
+        ">CLEAN<",
+        r#"aria-label="50% of QSOs logged clean""#,
+        "50%",
+        "CQ WPX · 10:00",
+        "2 QSOs, 12 an hour. One NR was wrong.",
+        ">QSOs<",
+        ">1/2<",
+        ">Rate<",
+        ">12/h<",
+        ">Accuracy<",
+        ">Points<",
+        "Contest score",
+        ">QSO pts<",
+        ">Mults<",
+        ">Score<",
+        ">Raw<",
+        ">Verified<",
+        "0\u{a0}busted\u{a0}calls\u{a0}· 1\u{a0}wrong\u{a0}NR\u{a0}· 0\u{a0}NIL\u{a0}· 0\u{a0}dupes",
+        "Log, with what was really sent",
+        "31→13",
+        "wrong NR",
+        "Run again",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    assert!(!html.contains("Session complete"), "a run is not a session");
+    assert!(!html.contains("Group by group"));
+    assert!(
+        !html.contains("btn-history"),
+        "fresh from the run: no History"
+    );
+}
+
+/// An NA Sprint run's results: its contest score, a point a QSO times the
+/// places worked, raw as logged and verified as sent, with what the checks
+/// found field by field, and its rate.
+#[test]
+fn a_sprint_run_has_results_with_its_score() {
+    let html = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_sprint_run(
+                    "2026-10-21",
+                    &[
+                        [("W7XYZ", "W7XYZ"), ("145", "145"), ("BOB", "BOB"), ("OR", "OR")],
+                        [("VE3ABC", "VE3ABC"), ("23", "23"), ("DAVE", "DAVE"), ("ON", "ON")],
+                        [("K3DC", "K3DC"), ("7", "7"), ("JIM", "JIM"), ("DC", "DC")],
+                        [("KL7AB", "KL7AB"), ("88", "88"), ("SUE", "SUE"), ("AK", "AK")],
+                        [("W5ABC", "W5ABC"), ("61", "61"), ("TOM", "TIM"), ("TX", "NM")],
+                    ],
+                ),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    for shown in [
+        "Run complete",
+        "NA Sprint · 10:00",
+        "5 QSOs, 30 an hour. One NAME was wrong; one ST was wrong.",
+        ">QSOs<",
+        ">4/5<",
+        ">Rate<",
+        ">30/h<",
+        "Contest score",
+        // Raw: five QSOs, OR ON DC AK NM as logged; verified: four, and
+        // their four places.
+        r#"<th scope="row">Raw</th><td>5</td><td>5</td><td>25</td>"#,
+        r#"<th scope="row">Verified</th><td>4</td><td>4</td><td>16</td>"#,
+        "0\u{a0}busted\u{a0}calls\u{a0}· 0\u{a0}wrong\u{a0}NR\u{a0}· 1\u{a0}wrong\u{a0}NAME\u{a0}· 1\u{a0}wrong\u{a0}ST\u{a0}· 0\u{a0}NIL\u{a0}· 0\u{a0}dupes",
+        "TIM→TOM",
+        "NM→TX",
+        "wrong NAME, wrong ST",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+}
+
+/// A Simple QSO run has no contest score: its pace is minutes a QSO, and in
+/// place of the score, how well each part of a QSO was copied.
+#[test]
+fn a_simple_qso_run_has_results_without_a_score() {
+    let html = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_simple_qso_run(
+                    "2026-10-20",
+                    &[
+                        [("K5XYZ", "K5XYZ"), ("579", "579"), ("BOB", "BOB")],
+                        [("DL2XYZ", "DL2XYZ"), ("599", "599"), ("HANS", "HANZ")],
+                    ],
+                ),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    for shown in [
+        "Run complete",
+        "Simple QSO · 10:00",
+        "2 QSOs, 5.0 minutes each. One NAME was wrong.",
+        ">Per QSO<",
+        ">5.0 min<",
+        ">Accuracy<",
+        ">Points<",
+        "Accuracy per field",
+        r#"<th scope="row">CALL</th><td>100%</td>"#,
+        r#"<th scope="row">RST</th><td>100%</td>"#,
+        r#"<th scope="row">NAME</th><td>86%</td>"#,
+        "0\u{a0}busted\u{a0}calls\u{a0}· 0\u{a0}wrong\u{a0}RST\u{a0}· 1\u{a0}wrong\u{a0}NAME\u{a0}· 0\u{a0}NIL\u{a0}· 0\u{a0}dupes",
+        "HANZ→HANS",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    for gone in ["Contest score", ">Rate<", ">QSO pts<", ">Mults<"] {
+        assert!(!html.contains(gone), "{gone:?} in {html}");
+    }
+}
+
+/// A run long enough for the board says where it stands among runs of its
+/// own contest.
+#[test]
+fn a_contest_run_is_placed_among_runs_of_its_contest() {
+    let html = render(|| {
+        let qsos: Vec<(String, String)> = (1..=5)
+            .map(|n| (format!("K{n}XYZ"), format!("{n}{n}")))
+            .collect();
+        let rows: Vec<(&str, &str, &str, &str)> = qsos
+            .iter()
+            .map(|(call, nr)| (call.as_str(), nr.as_str(), call.as_str(), nr.as_str()))
+            .collect();
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_run("2026-10-20", &rows),
+                place: Some((3, 14)),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(html.contains("3rd best of your 14 CQ WPX runs"), "{html}");
+    assert!(html.contains("100%"), "every QSO clean");
+    assert!(html.contains("Every one logged clean."));
 }
 
 /// A session that tops the board says so with the gold medal; one further
@@ -701,6 +1655,126 @@ fn every_listen_chip_has_an_id_of_its_own() {
         .filter(|id| id.starts_with("chip-"))
         .count();
     assert!(chips > 36, "{chips} chips");
+}
+
+/// Listen in Contest mode offers Hear a QSO first, and shows what it has
+/// played line by line, You and They, callers calling at once on one line
+/// and each QSO set apart, with where your station stood in and which QSO
+/// is playing, Stop above the lines while it plays; no character is
+/// picked meanwhile. A dialogue of a contest other than the one chosen
+/// stays out of sight, and so does one stopped before a line was heard.
+#[test]
+fn listen_in_contest_mode_offers_hear_a_qso_and_shows_its_lines() {
+    use crate::playback::{Dialogue, DialogueLine};
+    use cw_core::{ContestKind, Sender};
+    let shown = |dialogue: Option<Dialogue>, hearing: bool| {
+        render_props(
+            |props: (Option<Dialogue>, bool)| {
+                let (dialogue, hearing) = props;
+                let mut settings = TrainingSettings::default();
+                settings.curriculum.char_set_mode = CharSetMode::Contest;
+                rsx! {
+                    ListenView {
+                        settings,
+                        playing: false,
+                        on_play: move |_: String| {},
+                        on_stop: move |_| {},
+                        on_back: move |_| {},
+                        hearing,
+                        dialogue,
+                    }
+                }
+            },
+            (dialogue, hearing),
+        )
+    };
+    let idle = shown(None, false);
+    assert!(idle.contains("Hear a few QSOs of CQ WPX"), "{idle}");
+    assert!(
+        idle.contains("or a stream of groups."),
+        "as the button says"
+    );
+    let hear = idle.find("id=\"btn-hear-a-qso\"").expect("Hear a QSO");
+    let play = idle.find("id=\"btn-play\"").expect("Play");
+    assert!(hear < play, "Hear a QSO comes first");
+    assert!(idle.contains("listen-glyph"));
+    assert!(idle.contains("letter-chip active"));
+    let line = |who, sends: &[&str], qso| DialogueLine {
+        who,
+        sends: sends.iter().map(|send| (*send).to_string()).collect(),
+        qso,
+    };
+    let dialogue = Dialogue {
+        kind: ContestKind::Wpx,
+        stand_in: Some("DL1ABC".to_string()),
+        qsos: 3,
+        lines: vec![
+            line(Sender::You, &["CQ DL1ABC TEST"], 1),
+            line(Sender::Caller(0), &["K5XYZ"], 1),
+            line(Sender::You, &["TU"], 1),
+            line(Sender::Caller(1), &["G4ABC", "W7XC"], 2),
+        ],
+    };
+    let hearing = shown(Some(dialogue.clone()), true);
+    assert!(hearing.contains(">QSO 2 of 3 · CQ WPX<"), "{hearing}");
+    assert!(
+        hearing
+            .contains(">You</span><span class=\"qso-sends\"><span class=\"call\">CQ DL1ABC TEST<")
+    );
+    assert!(hearing.contains(">They</span><span class=\"qso-sends\"><span class=\"call\">K5XYZ<"));
+    assert!(
+        hearing.contains("<span class=\"call\">G4ABC</span><span class=\"call\">W7XC</span>"),
+        "callers at once side by side"
+    );
+    assert_eq!(
+        hearing.matches("qso-next").count(),
+        1,
+        "the second QSO apart"
+    );
+    assert!(hearing.contains("Your station is sent as DL1ABC until you add yours."));
+    assert!(hearing.contains("not scored, not saved to History"));
+    let stop = hearing.find("id=\"btn-stop\"").expect("Stop");
+    let lines = hearing.find("qso-line").expect("lines");
+    assert!(stop < lines, "Stop above the lines");
+    assert_eq!(hearing.matches("id=\"btn-stop\"").count(), 1);
+    assert!(!hearing.contains("btn-hear-a-qso"), "Stop in its place");
+    assert!(!hearing.contains("listen-glyph"));
+    assert!(!hearing.contains("letter-chip active"), "nothing picked");
+    let heard = shown(Some(dialogue.clone()), false);
+    assert!(heard.contains("QSOs heard · CQ WPX"));
+    assert!(heard.contains("btn-hear-a-qso"));
+    assert!(!heard.contains("letter-chip active"));
+    let other = shown(
+        Some(Dialogue {
+            kind: ContestKind::SimpleQso,
+            ..dialogue.clone()
+        }),
+        false,
+    );
+    assert!(!other.contains("qso-line"), "{other}");
+    // Stopped before a line was heard: the stage as it was.
+    let none = Dialogue {
+        lines: Vec::new(),
+        ..dialogue
+    };
+    let stopped = shown(Some(none.clone()), false);
+    assert!(stopped.contains("listen-glyph"), "{stopped}");
+    assert!(!stopped.contains("Listening"));
+    let waiting = shown(Some(none), true);
+    assert!(waiting.contains("Listening — each line shows once it has been sent."));
+    // Outside Contest mode there is no QSO to hear.
+    let koch = render(|| {
+        rsx! {
+            ListenView {
+                settings: TrainingSettings::default(),
+                playing: false,
+                on_play: move |_: String| {},
+                on_stop: move |_| {},
+                on_back: move |_| {},
+            }
+        }
+    });
+    assert!(!koch.contains("btn-hear-a-qso"));
 }
 
 #[test]
@@ -947,6 +2021,86 @@ fn a_confirmed_group_moves_up_and_leaves_no_box() {
     assert!(html.contains("Waiting…"), "{html}");
 }
 
+/// Between two groups, once Enter has answered one, the box below waits for
+/// the next and takes no typing: the header says the next group is coming,
+/// beside the plain dot, not "Your turn" beside the green one, which wait
+/// for the box to open.
+#[test]
+fn between_groups_the_header_says_the_next_group_is_coming() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec!["KM".to_string(), String::new()],
+                confirmed: vec![true, false],
+                focused: 1,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(
+        html.contains(r#"class="progress-status">Next group…<"#),
+        "{html}"
+    );
+    assert!(
+        html.contains(r#"<span class="status-dot"></span>"#),
+        "{html}"
+    );
+    assert!(!html.contains("Your turn"), "{html}");
+    assert!(!html.contains("status-dot ready"), "{html}");
+    assert!(!html.contains("status-dot live"), "{html}");
+    // In the words the box and the hint below it use.
+    assert!(html.contains("Next group on its way."), "{html}");
+    assert!(
+        input_open_tag(&html, "group-input-1").contains("Waiting…"),
+        "{html}"
+    );
+}
+
+/// The box open on a group that has been sent: the header says it is your
+/// turn, beside the green dot.
+#[test]
+fn an_open_box_is_your_turn() {
+    let html = render(|| {
+        rsx! {
+            TrainingScreen {
+                current: 1,
+                total: 2,
+                groups: vec!["KM".to_string(), "UR".to_string()],
+                inputs: vec!["KM".to_string(), String::new()],
+                confirmed: vec![true, false],
+                focused: 1,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |_: (usize, String)| {},
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    });
+    assert!(
+        html.contains(r#"class="progress-status">Your turn<"#),
+        "{html}"
+    );
+    assert!(html.contains(r#"class="status-dot ready""#), "{html}");
+    assert!(!html.contains("Next group"), "{html}");
+    let tag = input_open_tag(&html, "group-input-1");
+    assert!(!tag.contains("answer locked"), "{tag}");
+    assert!(tag.contains("Type the group"), "{tag}");
+}
+
 /// Components that own state, driven through their own controls.
 mod interactions {
     use super::*;
@@ -1015,6 +2169,97 @@ mod interactions {
             },
         );
         assert!(on.has("Adapting · Balanced"));
+    }
+
+    /// Ten contest runs of five QSOs, a day apart from 2 October 2026,
+    /// each copied clean, after `koch` days of Koch.
+    fn contest_history(koch: u32) -> Vec<SessionResult> {
+        let calls = ["K5XYZ", "DL2ABC", "JA1XYZ", "G4ABC", "VE3XYZ"];
+        let mut sessions: Vec<SessionResult> = (1..=koch)
+            .map(|day| {
+                let mut s = stored_session(&format!("2026-09-{day:02}"), &[("KM", "KM"); 10]);
+                s.timestamp = 1_759_000_000_000 + u64::from(day) * 86_400_000;
+                s.char_set_mode = CharSetMode::Koch;
+                s
+            })
+            .collect();
+        for day in 1..=10u32 {
+            let rows: Vec<(&str, &str, &str, &str)> = calls
+                .iter()
+                .map(|call| (*call, "214", *call, "214"))
+                .collect();
+            let mut run = crate::testing::stored_run(&format!("2026-10-{day:02}"), &rows);
+            run.timestamp = 1_760_000_000_000 + u64::from(day) * 86_400_000;
+            sessions.push(run);
+        }
+        sessions
+    }
+
+    #[component]
+    fn ContestStatsHarness(mode: CharSetMode) -> Element {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = mode;
+        rsx! {
+            StatsView { settings, sessions: contest_history(3) }
+        }
+    }
+
+    /// Copy speed has a Contest pill once there are runs, and in Contest it
+    /// says how the callers' speeds come.
+    #[test]
+    fn copy_speed_has_a_contest_pill_that_says_how_callers_are_drawn() {
+        let mut ui = Ui::new(
+            ContestStatsHarness,
+            ContestStatsHarnessProps {
+                mode: CharSetMode::Koch,
+            },
+        );
+        assert!(
+            ui.shows("speed-koch") && ui.shows("speed-contest"),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("drawn evenly from your range"));
+        ui.click("speed-contest");
+        assert!(ui.has("drawn evenly from your range, shifted by − / + during a run"));
+        assert!(ui.has("Not the set practised now"));
+
+        let contest = Ui::new(
+            ContestStatsHarness,
+            ContestStatsHarnessProps {
+                mode: CharSetMode::Contest,
+            },
+        );
+        assert!(contest.has("drawn evenly from your range"));
+        assert!(contest.has(">Not adaptive<"));
+        assert!(!contest.has("Adaptive speed off"));
+    }
+
+    /// Under All, the board says where contest runs sit; under Contest, a
+    /// chip for each contest ranks runs within it.
+    #[test]
+    fn the_board_ranks_contest_runs_within_their_contest() {
+        use crate::ui::scores::{ScoresTab, ScoresTabProps};
+        let mut ui = Ui::new(
+            ScoresTab,
+            ScoresTabProps {
+                sessions: contest_history(3),
+            },
+        );
+        assert!(ui.shows("pill-all-modes") && ui.shows("pill-contest"));
+        assert!(ui.has("A WPX run earns about 30% less a group"));
+        assert!(!ui.shows("kind-cq-wpx"), "no contest chosen yet");
+        ui.click("pill-contest");
+        assert!(
+            ui.has(r#"id="kind-cq-wpx" class="pill active""#),
+            "{}",
+            ui.html()
+        );
+        assert!(!ui.has("A WPX run earns about 30% less a group"));
+        assert!(ui.has("over runs of 5 minutes or more that hold 10 groups or more"));
+        assert_eq!(ui.controls("board-").len(), 10, "every run, ranked");
+        ui.click("pill-koch");
+        assert!(!ui.shows("kind-cq-wpx"));
     }
 
     #[test]
@@ -1156,10 +2401,11 @@ mod interactions {
             "Groups",
             "Speed",
             "Accuracy",
-            "Score",
+            "Points",
         ] {
             assert!(ui.has(&format!(">{row}<")), "no {row} on the card");
         }
+        assert!(!ui.has(">Score<"), "Dust's points read Points");
         assert!(ui.input_tag("day-2026-09-08").contains("selected"));
         ui.click("day-2026-09-08");
         assert!(!ui.has("day-tip"));

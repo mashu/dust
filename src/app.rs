@@ -1,21 +1,22 @@
 //! The shell every screen sits in: the header, the navigation, the toasts,
 //! and the state they all share.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::SessionEvent;
 use dioxus::prelude::*;
 
+use crate::contest_runtime::focus_field;
 use crate::keep_awake::use_keep_awake;
 use crate::routes::Route;
-use crate::session_runtime::send_event;
+use crate::session_runtime::finish_run;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
+use crate::ui::contest::RunAnnouncer;
 use crate::ui::paddle::use_paddle_keys;
 use crate::ui::tour::{TourButton, TourDock};
-use crate::ui::widgets::{Icon, IconName, control_id};
+use crate::ui::widgets::{Icon, IconName, control_id, keep_focus};
 
 // Desktop inlines this in the window head. Web loads it through `asset!` so
 // `dx bundle` copies the file; compiling the sheet into wasm would ship it
@@ -28,7 +29,7 @@ pub(crate) const STYLESHEET: &str = include_str!("../assets/styles.css");
 pub(crate) const SETTINGS_SAVE_DELAY_MS: u32 = 250;
 
 /// The type faces, from Google Fonts. Every build links the same sheet.
-pub(crate) const FONT_CSS_URL: &str = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional";
+pub(crate) const FONT_CSS_URL: &str = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;700&display=optional";
 
 // The web stylesheet, written into the page's `<head>` by `dx bundle`.
 //
@@ -113,7 +114,14 @@ pub fn App() -> Element {
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
-    use_keep_awake(screen);
+    use_keep_awake(screen, ctx.contest, ctx.preview);
+    // Each screen opens at its top, wherever the one before it was scrolled
+    // to: a run started from the foot of its results would otherwise begin
+    // with its clock and its fields out of sight.
+    use_effect(move || {
+        let _ = screen();
+        scroll_to_top();
+    });
     #[cfg(feature = "desktop")]
     crate::ui::floating::use_floating_window(ctx);
 
@@ -164,6 +172,15 @@ pub fn App() -> Element {
                             class: "icon-btn",
                             title: "{theme().label()}",
                             aria_label: "{theme().label()}",
+                            // On the training screen a click on it leaves
+                            // the cursor in the box being typed in, so that
+                            // Enter goes on sending or answering rather than
+                            // pressing this again.
+                            onmousedown: move |e| {
+                                if screen_now == Screen::Training {
+                                    keep_focus(e);
+                                }
+                            },
                             // Theme is a data-theme attribute on the app root,
                             // not a JS write to <html>. Both the desktop
                             // webview and the web build key CSS off that.
@@ -171,6 +188,11 @@ pub fn App() -> Element {
                                 let next = theme().next();
                                 theme.set(next);
                                 ctx.app().store.save_theme(next.key());
+                                // A run's fields take the cursor back, as
+                                // after any of the run's own buttons.
+                                if screen_now == Screen::Training && ctx.contest.peek().is_some() {
+                                    focus_field(ctx, ctx.entry.focus());
+                                }
                             },
                             Icon { name: theme().icon() }
                         }
@@ -178,10 +200,11 @@ pub fn App() -> Element {
                             button {
                                 id: control_id("btn", "exit"),
                                 class: "btn btn-secondary btn-sm",
-                                // End session, from the header: the session
-                                // decides what is worth keeping, the same way
-                                // whichever button asked.
-                                onclick: move |_| send_event(ctx, SessionEvent::FinishNow),
+                                // End session, or End run, from the header:
+                                // the machine that is live decides what is
+                                // worth keeping, the same way whichever
+                                // button asked.
+                                onclick: move |_| finish_run(ctx),
                                 "Exit"
                             }
                         }
@@ -219,6 +242,7 @@ pub fn App() -> Element {
                 }
             }
             TourDock {}
+            RunAnnouncer {}
             if let Some(toast) = toasts.current() {
                 div { class: if show_nav { "toast-dock has-nav" } else { "toast-dock" },
                     div { class: "toast", role: "status",
@@ -254,7 +278,6 @@ pub fn App() -> Element {
 /// are stored already are not stored again: moving between screens writes
 /// nothing.
 fn use_stored_settings(ctx: AppCtx) {
-    let stored = use_hook(|| Rc::new(RefCell::new(ctx.settings.peek().clone().clamp())));
     let edits = use_hook(|| Rc::new(Cell::new(0u64)));
     use_effect(move || {
         let AppCtx {
@@ -268,31 +291,34 @@ fn use_stored_settings(ctx: AppCtx) {
         }
         let persist = settings.read().clone().clamp();
         if screen != Screen::Settings && persist != *settings.peek() {
-            settings.set(persist.clone());
+            settings.set(persist);
         }
         // Whatever edit was still waiting, this one replaces it.
         let edit = edits.get() + 1;
         edits.set(edit);
-        let store = {
-            let stored = stored.clone();
-            move || {
-                if *stored.borrow() != persist {
-                    ctx.app().store.save_settings(&persist);
-                    *stored.borrow_mut() = persist;
-                }
-            }
-        };
         if screen == Screen::Settings {
             let edits = edits.clone();
             spawn(async move {
                 sleep_ms(SETTINGS_SAVE_DELAY_MS).await;
                 if edits.get() == edit {
-                    store();
+                    ctx.store_settings();
                 }
             });
         } else {
-            store();
+            ctx.store_settings();
         }
+    });
+}
+
+/// Scroll the page back to its top. The script outlives the component that
+/// asked for it, which a press of Resume takes off the page.
+pub(crate) fn scroll_to_top() {
+    // Tests have no page to run it on: the harness counts the asking.
+    #[cfg(test)]
+    crate::testing::ask_scroll_to_top();
+    #[cfg(not(test))]
+    dioxus::core::spawn_forever(async {
+        let _ = document::eval("window.scrollTo(0, 0);").await;
     });
 }
 
@@ -322,11 +348,37 @@ fn toggle_fullscreen() {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::FONT_CSS_URL;
+
+    /// Each face the font sheet asks for gives a value for every axis its
+    /// family names (`opsz,wght@9..144,600`): Google Fonts refuses the whole
+    /// sheet for one face that leaves an axis out, and no face loads.
+    #[test]
+    fn every_face_of_the_font_sheet_names_each_axis() {
+        let (_, query) = FONT_CSS_URL.split_once('?').expect("a query");
+        let families: Vec<&str> = query
+            .split('&')
+            .filter_map(|part| part.strip_prefix("family="))
+            .collect();
+        assert_eq!(families.len(), 3, "{query}");
+        for family in families {
+            let (_, axes) = family.split_once(':').expect("its axes");
+            let (names, faces) = axes.split_once('@').expect("its faces");
+            let axes = names.split(',').count();
+            for face in faces.split(';') {
+                assert_eq!(face.split(',').count(), axes, "{family}: {face}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod ui_tests {
     use crate::persist::Store;
     use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
-    use dioxus::prelude::{Code, Key};
+    use dioxus::prelude::{Code, Key, ReadableExt};
 
     fn short_session() -> TrainingSettings {
         let mut settings = test_settings();
@@ -390,6 +442,46 @@ mod ui_tests {
                 assert!(ui.has(shown));
                 assert_eq!(ui.store.load_theme(), key);
             }
+        });
+    }
+
+    /// On the training screen the theme button never takes the cursor from
+    /// the box being typed in, so Enter goes on reaching the session or the
+    /// run, and a run's fields take it back after a press. Anywhere else it
+    /// is an ordinary button.
+    #[test]
+    fn the_theme_button_leaves_the_cursor_where_it_is_in_training() {
+        run(|| async {
+            let (mut ui, _recorder) = awaiting_answer(short_session()).await;
+            assert!(!ui.mouse_down("btn-theme"), "it took a session's cursor");
+            ui.take_focused();
+            ui.click("btn-theme");
+            assert_eq!(ui.take_focused(), Vec::<String>::new());
+
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            assert!(
+                ui.mouse_down("btn-theme"),
+                "on Home it is an ordinary button"
+            );
+            ui.click("btn-start-training");
+            ui.advance(8_000).await;
+            let call = recorder.starts()[0].transcript.others[0].text.clone();
+            ui.type_into("field-call", &call);
+            assert!(!ui.mouse_down("btn-theme"), "it took the run's cursor");
+            ui.take_focused();
+            ui.click("btn-theme");
+            assert!(ui.has("Theme: light"));
+            assert_eq!(ui.take_focused(), ["field-call"], "the cursor stayed away");
+            ui.press_enter("field-call");
+            let sent = recorder
+                .starts()
+                .last()
+                .map(|start| start.transcript.text.clone());
+            assert!(
+                sent.as_deref()
+                    .is_some_and(|sent| sent.starts_with(&format!("{call} 5NN"))),
+                "{sent:?}"
+            );
         });
     }
 
@@ -812,6 +904,265 @@ mod ui_tests {
             assert!(ui.has("Stream groups"));
             assert_eq!(ui.screen(), "listen");
             assert!(ui.store.load_sessions().is_empty());
+        });
+    }
+
+    /// Listen treats a contest as Callsigns: its pool is the calls'
+    /// characters, and it streams calls, never storing a run.
+    #[test]
+    fn the_listen_screen_streams_calls_in_contest_mode() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("btn-listen-to-letters");
+            assert!(!ui.has("Newest unlocked character"));
+            assert!(ui.shows("chip-k") && ui.shows("chip-1"), "{}", ui.html());
+            ui.click("btn-stream-groups");
+            assert!(ui.run_until(20_000, |_| recorder.texts().len() >= 2).await);
+            for text in recorder.texts() {
+                assert!(
+                    cw_core::parse_callsign(&text).is_some(),
+                    "{text} is no call"
+                );
+            }
+            ui.click("btn-stop");
+            assert!(ui.store.load_sessions().is_empty());
+        });
+    }
+
+    /// The QSO the page shows, line by line: who sent each, and what, the
+    /// sends of callers calling at once side by side.
+    fn qso_lines(ui: &Ui) -> Vec<String> {
+        let html = ui.html();
+        html.split("<li class=\"qso-line ")
+            .skip(1)
+            .map(|line| {
+                let line = line.split("</li>").next().unwrap_or_default();
+                let who = if line.starts_with("you") {
+                    "You"
+                } else {
+                    "They"
+                };
+                let sends: Vec<&str> = line
+                    .split("<span class=\"call\">")
+                    .skip(1)
+                    .filter_map(|rest| rest.split("</span>").next())
+                    .collect();
+                format!("{who} {}", sends.join(" "))
+            })
+            .collect()
+    }
+
+    /// How far into its turn the last tone of a send's `plan` ends, in
+    /// milliseconds.
+    fn tones_end_ms(plan: &cw_core::PlaybackPlan) -> u64 {
+        let last = plan.events.last().expect("a send has tones");
+        ((last.start_sec + last.duration_sec) * 1_000.0) as u64
+    }
+
+    /// Hear a QSO, from Listen in Contest mode: a few QSOs played turn by
+    /// turn as a run plays them, your message dry and the callers through
+    /// the receiver, each line shown once its send has been heard whole and
+    /// not before, to the TU of the third. The lines stay once it ends, and
+    /// nothing is kept: no session, nothing stored.
+    #[test]
+    fn hear_a_qso_plays_a_few_qsos_and_shows_each_line_as_it_ends() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("btn-listen-to-letters");
+            assert!(ui.has("Hear a few QSOs of CQ WPX"), "{}", ui.html());
+            ui.click("btn-hear-a-qso");
+            assert!(ui.has(">QSO 1 of 3"));
+            assert!(ui.has("Listening — each line shows once it has been sent."));
+            assert_eq!(recorder.starts().len(), 1, "the first CQ at once");
+            let first = recorder.starts()[0].clone();
+            assert!(first.plan.dry_wanted, "your message dry, as in a run");
+            assert_eq!(first.qsb, None, "the callers' fading is in their tones");
+            assert_eq!(first.transcript.text, "CQ DL1ABC TEST");
+            let call = first.transcript.others[0].text.clone();
+            // The CQ shows once it has gone out, and not while it sounds;
+            // the answer likewise. The fake clock moves in steps of 4 ms.
+            let mut now = 0;
+            for (ends, shown) in [
+                (tones_end_ms(&first.plan.wanted), 1),
+                (tones_end_ms(&first.plan.others[0]), 2),
+            ] {
+                let almost = (ends - 40).div_ceil(4) * 4;
+                ui.advance(almost - now).await;
+                now = almost;
+                assert_eq!(qso_lines(&ui).len(), shown - 1, "{:?}", qso_lines(&ui));
+                while qso_lines(&ui).len() < shown && now < ends + 1_000 {
+                    ui.advance(4).await;
+                    now += 4;
+                }
+                assert_eq!(qso_lines(&ui).len(), shown, "{:?}", qso_lines(&ui));
+            }
+            assert_eq!(
+                qso_lines(&ui),
+                ["You CQ DL1ABC TEST".to_string(), format!("They {call}")]
+            );
+            assert!(ui.run_until(240_000, |ui| ui.has("QSOs heard")).await);
+            // Every send of every turn, in order, and the third TU last.
+            let sent: Vec<String> = recorder
+                .starts()
+                .iter()
+                .flat_map(|start| {
+                    let yours = &start.transcript.text;
+                    let yours = (!yours.is_empty()).then(|| format!("You {yours}"));
+                    let theirs = start.transcript.others.iter();
+                    yours
+                        .into_iter()
+                        .chain(theirs.map(|other| format!("They {}", other.text)))
+                })
+                .collect();
+            let lines = qso_lines(&ui);
+            assert_eq!(lines, sent);
+            let tus = lines.iter().filter(|line| *line == "You TU").count();
+            assert_eq!(tus, 3, "{lines:?}");
+            assert_eq!(lines.last().map(String::as_str), Some("You TU"));
+            // Each QSO after the first set apart where its caller comes in.
+            let html = ui.html();
+            assert_eq!(html.matches("qso-next").count(), 2, "{lines:?}");
+            assert!(ui.has("btn-hear-a-qso"), "it can be heard again");
+            assert!(ui.has("not scored, not saved to History"));
+            assert_eq!(ui.screen(), "listen");
+            assert!(ui.with_app(|ctx| ctx.sessions.peek().is_empty()));
+            assert!(ui.store.load_sessions().is_empty());
+            // A character picked puts the lines away.
+            ui.click("chip-b");
+            assert!(qso_lines(&ui).is_empty());
+            assert!(ui.has("Play B"));
+            ui.click("btn-hear-a-qso");
+            assert!(ui.run_until(10_000, |ui| !qso_lines(ui).is_empty()).await);
+            // Leaving the screen lets the lines go.
+            ui.click("btn-listen-back");
+            assert!(ui.with_app(|ctx| ctx.dialogue.peek().is_none()));
+        });
+    }
+
+    /// Stop ends Hear a QSO where it is: nothing more plays, the lines
+    /// heard so far stay, and another sound played puts them away. Stopped
+    /// before a line was heard, it leaves the stage as it was.
+    #[test]
+    fn hear_a_qso_stops_on_stop() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("btn-listen-to-letters");
+            ui.click("btn-hear-a-qso");
+            assert!(ui.run_until(10_000, |ui| qso_lines(ui).len() >= 2).await);
+            ui.click("btn-stop");
+            let played = recorder.starts().len();
+            let shown = qso_lines(&ui);
+            ui.advance(30_000).await;
+            assert_eq!(recorder.starts().len(), played, "nothing more played");
+            assert_eq!(qso_lines(&ui), shown);
+            assert!(ui.has("QSOs heard"));
+            assert!(ui.has("btn-hear-a-qso"));
+            ui.click("btn-play");
+            assert!(qso_lines(&ui).is_empty());
+            assert!(ui.store.load_sessions().is_empty());
+
+            ui.click("btn-stop");
+            ui.click("btn-hear-a-qso");
+            ui.advance(200).await;
+            ui.click("btn-stop");
+            assert!(!ui.has("Listening — each line"), "{}", ui.html());
+            assert!(!ui.has("QSOs heard"));
+            assert!(ui.has("listen-glyph"));
+        });
+    }
+
+    /// Hear a QSO on the Character set card: the card's QSO gives way to
+    /// the QSOs as they are heard, with Stop where Hear a QSO was, and
+    /// Stop stops them. Stopped before a line, the card's QSO comes back.
+    #[test]
+    fn hear_a_qso_plays_from_the_character_set_card() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("nav-settings");
+            assert!(ui.has(">A QSO<"), "{}", ui.html());
+            let example = qso_lines(&ui);
+            assert_eq!(example[0], "You CQ DL1ABC TEST");
+            ui.click("btn-hear-a-qso");
+            assert!(ui.has(">QSO 1 of 3"));
+            assert!(ui.run_until(10_000, |ui| qso_lines(ui).len() >= 2).await);
+            assert!(recorder.starts().iter().all(|start| start.plan.dry_wanted));
+            ui.click("btn-stop-hearing");
+            assert!(ui.has("QSOs heard"));
+            let played = recorder.starts().len();
+            ui.advance(20_000).await;
+            assert_eq!(recorder.starts().len(), played);
+            assert!(ui.store.load_sessions().is_empty());
+
+            ui.click("btn-hear-a-qso");
+            ui.advance(200).await;
+            ui.click("btn-stop-hearing");
+            assert!(ui.has(">A QSO<"), "{}", ui.html());
+            assert_eq!(qso_lines(&ui), example);
+        });
+    }
+
+    /// Hear a QSO is of the contest it was started from: picking another
+    /// contest, or another mode, while it plays stops it and puts its lines
+    /// away, so the card never shows one contest while another sounds, nor
+    /// leaves it playing with no Stop on the screen.
+    #[test]
+    fn hear_a_qso_stops_when_the_contest_or_the_mode_changes() {
+        run(|| async {
+            for pick in ["contest-simple-qso", "seg-koch"] {
+                let (mut ui, recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+                ui.click("nav-settings");
+                ui.click("btn-hear-a-qso");
+                assert!(ui.run_until(10_000, |ui| qso_lines(ui).len() >= 2).await);
+                ui.click(pick);
+                assert!(
+                    ui.with_app(|ctx| !ctx.preview.peek().is_qsos()),
+                    "{pick}: stopped"
+                );
+                assert!(ui.with_app(|ctx| ctx.dialogue.peek().is_none()), "{pick}");
+                let played = recorder.starts().len();
+                ui.advance(20_000).await;
+                assert_eq!(recorder.starts().len(), played, "{pick}");
+                assert!(!ui.has("QSOs heard"), "{pick}");
+            }
+            // The first contest picked again shows its own QSO, not the
+            // lines heard before.
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("nav-settings");
+            ui.click("btn-hear-a-qso");
+            assert!(ui.run_until(10_000, |ui| qso_lines(ui).len() >= 2).await);
+            ui.click("contest-simple-qso");
+            assert!(qso_lines(&ui)[0].starts_with("You CQ CQ DE DL1ABC"));
+            ui.click("contest-cq-wpx");
+            assert!(ui.has(">A QSO<"));
+            assert_eq!(qso_lines(&ui)[0], "You CQ DL1ABC TEST");
+        });
+    }
+
+    /// The press of Start that keeps what was typed into Home's hero, and
+    /// starts the run with it, stores it then: the run stores no settings
+    /// while it is on, so a reload mid-run used to lose it.
+    #[test]
+    fn what_start_keeps_from_the_hero_is_stored_as_the_run_starts() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into("field-your-callsign", "dl1abc");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            assert_eq!(ui.store.load_settings().contest.my_call, "DL1ABC");
+
+            // And a name, the last a Simple QSO asks for.
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into("field-your-name", "mat");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            assert_eq!(ui.store.load_settings().contest.my_name, "MAT");
+            let saves = ui.store.settings_saves.get();
+            ui.advance(5_000).await;
+            assert_eq!(ui.store.settings_saves.get(), saves, "nothing more mid-run");
         });
     }
 
@@ -1526,6 +1877,247 @@ mod ui_tests {
         });
     }
 
+    /// Without a call, Home asks for one in the hero, and a start says what
+    /// is missing there rather than in a toast; with one, it starts the run.
+    #[test]
+    fn home_asks_for_your_call_before_a_contest() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            assert!(ui.has("Start contest"));
+            assert!(ui.shows("field-your-callsign"));
+            assert!(!ui.shows("home-missing"));
+
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.shows("home-missing"));
+            assert!(ui.has("Add your callsign to start a contest"));
+            assert!(!ui.has("class=\"toast\""), "said on Home, not in a toast");
+
+            // A call that does not read is flagged under the field, and a
+            // start does not say it again above Start.
+            ui.commit("field-your-callsign", "abc");
+            ui.advance(50).await;
+            assert!(ui.has("Not a callsign yet: needs a digit"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(!ui.shows("home-missing"), "{}", ui.html());
+            assert!(!ui.has("ABC is not a callsign Dust can read"));
+
+            ui.commit("field-your-callsign", "k1abc");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_call, "K1ABC");
+            assert!(!ui.shows("field-your-callsign"));
+            assert!(!ui.shows("home-missing"));
+            assert!(ui.has("You send 5NN + serial, as K1ABC"));
+
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+        });
+    }
+
+    /// After a refused start, the call typed into the hero is kept by one
+    /// press of Start, which keeps the cursor in the field: leaving the box
+    /// would keep the call on the press and redraw the hero, Start moved,
+    /// under the finger before its click came. So is a name, and what is
+    /// still missing is said as before, the cursor going to its field once
+    /// the hero has drawn it.
+    #[test]
+    fn one_press_of_start_keeps_what_was_typed_and_starts() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            assert!(ui.shows("home-missing"));
+            assert_eq!(ui.take_focused(), ["field-your-callsign"]);
+            ui.type_into("field-your-callsign", "dl1abc");
+            assert!(
+                !ui.mouse_down("btn-start-training"),
+                "Start took the cursor"
+            );
+            assert!(ui.shows("home-missing") && ui.shows("field-your-callsign"));
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            let kept = ui.with_app(|ctx| ctx.settings.peek().contest.my_call.clone());
+            assert_eq!(kept, "DL1ABC");
+
+            // A Simple QSO with neither: the call is kept, and the start is
+            // refused for the name, which is asked for next.
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into("field-your-callsign", "dl1abc");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your name to start a Simple\u{a0}QSO"));
+            assert_eq!(
+                ui.take_focused(),
+                ["field-your-name"],
+                "the name's field, drawn by the same press, has no cursor"
+            );
+            ui.type_into("field-your-name", "mat");
+            assert!(!ui.mouse_down("btn-start-training"));
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            let kept = ui.with_app(|ctx| ctx.settings.peek().contest.clone());
+            assert_eq!(
+                (kept.my_call.as_str(), kept.my_name.as_str()),
+                ("DL1ABC", "MAT")
+            );
+
+            // A call typed that does not read is kept, and said under the
+            // field rather than above Start. With nothing to type, Start is
+            // an ordinary button.
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into("field-your-callsign", "abc");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Not a callsign yet: needs a digit"));
+            assert!(!ui.shows("home-missing"));
+            assert_eq!(ui.take_focused(), ["field-your-callsign"]);
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            assert!(ui.mouse_down("btn-start-training"));
+        });
+    }
+
+    /// Listen, beside Start, keeps the cursor and what was typed the same
+    /// way, so one press of it after a refused start keeps the call and
+    /// opens Listen.
+    #[test]
+    fn one_press_of_listen_keeps_what_was_typed() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.type_into("field-your-callsign", "dl1abc");
+            assert!(
+                !ui.mouse_down("btn-listen-to-letters"),
+                "Listen took the cursor"
+            );
+            ui.click("btn-listen-to-letters");
+            assert_eq!(ui.screen(), "listen");
+            let kept = ui.with_app(|ctx| ctx.settings.peek().contest.my_call.clone());
+            assert_eq!(kept, "DL1ABC");
+            // With nothing to type, it is an ordinary button.
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            assert!(ui.mouse_down("btn-listen-to-letters"));
+        });
+    }
+
+    /// A Simple QSO sends your name: with the call given and no name, Home
+    /// asks for it in the hero, a start says it is missing, and once it is
+    /// given the run starts, sending it.
+    #[test]
+    fn home_asks_for_your_name_before_a_simple_qso() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            assert!(ui.shows("field-your-name"));
+            assert!(!ui.shows("field-your-callsign"));
+            assert!(ui.has("Add your name, press Start contest"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your name to start a Simple\u{a0}QSO"));
+            assert!(!ui.has("class=\"toast\""), "said on Home, not in a toast");
+
+            ui.commit("field-your-name", "mat");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_name, "MAT");
+            assert!(!ui.shows("field-your-name"));
+            assert!(!ui.shows("home-missing"));
+            assert!(ui.has("You send 599 + name, as DL1ABC"));
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            ui.advance(10_000).await;
+            let first = &recorder.starts()[0].transcript;
+            assert!(
+                first.text.starts_with("CQ CQ DE DL1ABC DL1ABC K"),
+                "{}",
+                first.text
+            );
+        });
+    }
+
+    /// The NA Sprint sends your name and your state: Home asks for the
+    /// name, then the state, saying what is missing and taking the cursor
+    /// to the field; a state that is none is said so under its field,
+    /// however it was kept; once it is given the run starts, its CQ the
+    /// Sprint's.
+    #[test]
+    fn home_asks_for_your_name_then_your_state_before_a_sprint() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+            settings.contest.my_call = "K1ABC".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            assert!(ui.shows("field-your-name"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your name to start an NA\u{a0}Sprint"));
+            assert_eq!(ui.take_focused(), ["field-your-name"]);
+
+            // The press that keeps the name brings in the state's field, and
+            // the cursor goes there.
+            ui.type_into("field-your-name", "mike");
+            assert!(
+                !ui.mouse_down("btn-start-training"),
+                "Start took the cursor"
+            );
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_name, "MIKE");
+            assert!(ui.shows("field-your-state-or-province"));
+            assert!(ui.has("Add your state, press Start contest"));
+            assert!(ui.has("Add your state or province to start an NA\u{a0}Sprint"));
+            assert_eq!(ui.take_focused(), ["field-your-state-or-province"]);
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert_eq!(ui.take_focused(), ["field-your-state-or-province"]);
+
+            // A state written out is no code: kept as none, and said so,
+            // whether the field was left or Start pressed from it.
+            ui.commit("field-your-state-or-province", "Mass");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_state, "");
+            assert!(ui.has("MASS is not a state or province"), "{}", ui.html());
+            ui.type_into("field-your-state-or-province", "Ontario");
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(
+                ui.has("ONTARIO is not a state or province"),
+                "{}",
+                ui.html()
+            );
+            assert!(ui.has("Add your state or province to start an NA\u{a0}Sprint"));
+            ui.commit("field-your-state-or-province", "ma");
+            ui.advance(50).await;
+            let kept = ui.stored_settings().await.contest;
+            assert_eq!(
+                (kept.my_name.as_str(), kept.my_state.as_str()),
+                ("MIKE", "MA")
+            );
+            assert!(ui.has("You send serial + name + state, as K1ABC"));
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            ui.advance(10_000).await;
+            let first = &recorder.starts()[0].transcript;
+            assert!(first.text.starts_with("CQ NA K1ABC"), "{}", first.text);
+        });
+    }
+
     /// Every control on a screen, pressed and typed into in turn: none may
     /// panic, and none may leave settings the trainer would refuse to start
     /// from. Each one starts from a fresh app, so the sweep cannot walk itself
@@ -1631,6 +2223,352 @@ mod ui_tests {
             ui.advance(50).await;
             assert_ne!(before, ui.html(), "the preview should follow the tier");
             assert_eq!(ui.stored_settings().await.curriculum.callsign_level, 6);
+        });
+    }
+
+    #[test]
+    fn nothing_on_the_settings_screen_can_break_contest_mode() {
+        run(|| async {
+            sweep("nav-settings", crate::testing::contest_settings()).await;
+        });
+    }
+
+    /// In Contest mode what a group has means nothing, and nor does a
+    /// preset that sets it, a level that never moves, or a pile-up's spread
+    /// and level around a wanted station that is not there: they go.
+    #[test]
+    fn the_settings_screen_only_offers_what_a_contest_has() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.band.stations_min = 3;
+            settings.band.stations_max = 3;
+            settings.playback.adaptive_speed = true;
+            settings.curriculum.adaptive_group_size = true;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.open_disclosures();
+            for shown in [
+                "Contest · CQ WPX",
+                "Your station",
+                "Minutes per run",
+                "Callsign tier (1–6)",
+                "Band activity",
+                "Countdown before the first CQ",
+                "Key speed",
+                "Character sampling",
+            ] {
+                assert!(ui.has(shown), "{shown} should show");
+            }
+            for gone in [
+                "select-experience",
+                "number-groups-per-session",
+                "number-callsigns-per-session",
+                "number-answer-timeout",
+                "number-pause-after-each-group",
+                "switch-adapt-group-size-to-me",
+                "switch-lock-typing-while-sending",
+                "switch-adapt-speed-to-me",
+                "switch-adjust-the-level-for-me",
+                "slider-pile-up-spread",
+                "slider-pile-up-is-weaker-by",
+                "fixed-stations-calling",
+                "field-sequence-order",
+                "field-digits-level",
+            ] {
+                assert!(!ui.shows(gone), "{gone} has no meaning in a contest");
+            }
+            for gone in [
+                "Experience",
+                "Sends per group",
+                "Group size",
+                "Aim for",
+                "Practice window",
+                "What this tier sends",
+                "Auto level",
+                "Stations calling",
+            ] {
+                assert!(!ui.has(gone), "{gone} has no meaning in a contest");
+            }
+
+            // A run's length is a setting of its own.
+            ui.commit("number-minutes-per-run", "25");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.contest_minutes, 25);
+
+            // Callsigns is a group mode again: its controls come back, and
+            // the station goes.
+            ui.click("seg-callsigns");
+            ui.advance(50).await;
+            assert!(ui.has("Callsigns per session"));
+            assert!(ui.has("Stations calling"));
+            assert!(!ui.shows("field-your-callsign"));
+            assert!(!ui.has("Minutes per run"));
+        });
+    }
+
+    /// The run style is chosen on the Character set card, which says how
+    /// many a pile-up brings and where that is set; the Band card's range is
+    /// then the callers at once, with their spread and how many the filter
+    /// fits, and back to the band's activity for a single caller. Home says
+    /// who calls.
+    #[test]
+    fn a_pile_up_is_chosen_with_the_contest_and_shaped_on_the_band_card() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("nav-settings");
+            ui.open_disclosures();
+            for shown in ["Run style", "One station calls at a time", "Band activity"] {
+                assert!(ui.has(shown), "{shown} should show");
+            }
+            assert!(!ui.shows("slider-pile-up-spread"));
+            assert!(!ui.shows("filter-fits"));
+
+            // A pile-up of one is none: picked on the range as it ships,
+            // the range opens to one to three.
+            ui.click("style-pile-up");
+            ui.advance(50).await;
+            let stored = ui.stored_settings().await;
+            assert_eq!(stored.contest.contest_style, cw_core::RunStyle::Pileup);
+            assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 3));
+            assert!(
+                ui.has("1–3 callers · set on the Band card"),
+                "{}",
+                ui.html()
+            );
+            assert!(ui.has("Callers at once"));
+            assert!(!ui.has("Band activity"));
+            assert!(ui.shows("slider-pile-up-spread"));
+            assert!(ui.shows("filter-fits"));
+            assert!(ui.has("Your filter fits"));
+            assert!(
+                !ui.shows("slider-pile-up-is-weaker-by"),
+                "no wanted station to sit under"
+            );
+            // Held at one, it counts one caller.
+            ui.click("link-callers-at-once");
+            ui.advance(50).await;
+            assert!(ui.has("1 caller · set on the Band card"));
+            assert!(ui.has("1 caller<"), "{}", ui.html());
+            assert!(!ui.has("1 callers"));
+            ui.click("link-callers-at-once");
+            ui.commit("from-callers-at-once", "1");
+            ui.commit("to-callers-at-once", "3");
+            ui.advance(50).await;
+            let stored = ui.stored_settings().await;
+            assert_eq!((stored.band.stations_min, stored.band.stations_max), (1, 3));
+            assert!(ui.has("1–3 callers · set on the Band card"));
+
+            ui.click("nav-practice");
+            assert!(ui.has("1–3</span>"), "{}", ui.html());
+            assert!(ui.has("Callers</span>"));
+
+            ui.click("nav-settings");
+            ui.click("style-single-caller");
+            ui.advance(50).await;
+            assert!(ui.has("Band activity"));
+            assert!(!ui.shows("slider-pile-up-spread"));
+            ui.click("nav-practice");
+            assert!(ui.has("Single</span>"));
+        });
+    }
+
+    /// Your call is typed once, kept as a call is written, and read back:
+    /// where a contest places it, or why it is no call yet.
+    #[test]
+    fn your_station_keeps_your_call_and_reads_it() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            assert!(ui.has("No licence yet? Make up a call"));
+            assert!(
+                ui.has("CQ &#60;your call&#62; TEST"),
+                "the QSO waits for your call"
+            );
+            assert!(
+                ui.has("Add your callsign to start a contest"),
+                "the card says what a run is missing, as Home does"
+            );
+
+            ui.commit("field-your-callsign", "abc");
+            ui.advance(50).await;
+            assert!(ui.has("Not a callsign yet: needs a digit"));
+            assert!(!ui.has("Add your callsign to start a contest"));
+            assert!(
+                ui.has("CQ &#60;your call&#62; TEST"),
+                "a call that does not read is not put in the QSO"
+            );
+
+            ui.commit("field-your-callsign", " dl1abc ");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_call, "DL1ABC");
+            assert!(ui.has(&crate::testing::reads_as(&[
+                "Fed. Rep. of Germany",
+                "Europe",
+                "CQ zone 14",
+                "WPX prefix DL1"
+            ])));
+            assert!(
+                ui.input_tag("field-your-callsign")
+                    .contains("value=\"DL1ABC\"")
+            );
+            for line in ["CQ DL1ABC TEST", "K5XYZ 5NN TT1", "TU 5NN 214"] {
+                assert!(ui.has(line), "the QSO should read {line}");
+            }
+
+            // Its own reset clears it, and nothing else.
+            ui.commit("number-minutes-per-run", "15");
+            ui.advance(50).await;
+            ui.click("reset-your-station");
+            ui.advance(50).await;
+            let stored = ui.stored_settings().await;
+            assert!(stored.contest.my_call.is_empty());
+            assert_eq!(stored.contest.contest_minutes, 15);
+            assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Contest);
+        });
+    }
+
+    /// Your state, for the Sprint, reads as the place it names; what is no
+    /// state is said so only while nothing else of your station has changed
+    /// since: your call put outside the US and Canada sends DX, and the
+    /// card's reset leaves nothing to say.
+    #[test]
+    fn your_station_says_what_your_state_reads_as_while_it_is_so() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Sprint;
+            settings.contest.my_call = "K1ABC".to_string();
+            settings.contest.my_name = "MIKE".to_string();
+            settings.contest.my_state = "MA".to_string();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            assert!(ui.has("Reads as Massachusetts"));
+            ui.commit("field-your-state-or-province", "Mass");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_state, "");
+            assert!(ui.has("MASS is not a state or province"));
+            ui.commit("field-your-callsign", "DL1ABC");
+            ui.advance(50).await;
+            assert!(!ui.has("MASS is not a state or province"));
+            assert!(ui.has("Sends DX: in Dust every station outside the US and Canada sends DX"));
+
+            ui.commit("field-your-callsign", "K1ABC");
+            ui.commit("field-your-state-or-province", "Mass");
+            ui.advance(50).await;
+            assert!(ui.has("MASS is not a state or province"));
+            ui.click("reset-your-station");
+            ui.advance(50).await;
+            assert!(ui.stored_settings().await.contest.my_call.is_empty());
+            assert!(!ui.has("MASS is not a state or province"), "{}", ui.html());
+            // Nor does it come back with the call it was typed under.
+            ui.commit("field-your-callsign", "K1ABC");
+            ui.advance(50).await;
+            assert!(!ui.has("MASS is not a state or province"));
+        });
+    }
+
+    /// Your power, for ARRL DX as DX: what is no power is said so, kept as
+    /// 100 W, until the card's reset, even with no call or name for the
+    /// reset to change.
+    #[test]
+    fn your_stations_reset_takes_back_a_power_that_was_none() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::ArrlDx;
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            assert!(ui.shows("field-your-power"));
+            ui.commit("field-your-power", "max");
+            ui.advance(50).await;
+            assert!(ui.has("MAX is not a power"));
+            assert_eq!(ui.stored_settings().await.contest.my_power, "100");
+            ui.click("reset-your-station");
+            ui.advance(50).await;
+            assert!(!ui.has("MAX is not a power"), "{}", ui.html());
+            assert!(ui.has("Sends 1TT: 100 W"));
+        });
+    }
+
+    /// CQ WW from a call that does not say its zone: Home says so in a
+    /// zone field of its own, Start takes the cursor there, and a zone
+    /// typed and kept by the press of Start starts the run.
+    #[test]
+    fn home_asks_for_your_zone_before_a_cqww_from_a_call_that_does_not_say_it() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::Cqww;
+            settings.contest.my_call = "C31AB".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            assert!(ui.shows("field-your-cq-zone"));
+            assert!(ui.has("Add your CQ zone, press Start contest"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your CQ zone to start a CQ\u{a0}WW"));
+            assert_eq!(ui.take_focused(), ["field-your-cq-zone"]);
+            ui.type_into("field-your-cq-zone", "27");
+            assert!(
+                !ui.mouse_down("btn-start-training"),
+                "Start took the cursor"
+            );
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            assert_eq!(ui.stored_settings().await.contest.my_zone, 27);
+            ui.advance(10_000).await;
+            let first = &recorder.starts()[0].transcript;
+            assert!(first.text.starts_with("CQ C31AB TEST"), "{}", first.text);
+        });
+    }
+
+    /// Field Day from a call that does not tell its section: Home asks for
+    /// it in a field of its own and says what one is, Start takes the cursor
+    /// there, a section written out is no code and is said so, and a section
+    /// typed and kept by the press of Start starts the run, sent after your
+    /// class.
+    #[test]
+    fn home_asks_for_your_section_before_field_day_from_a_call_that_does_not_tell_it() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::FieldDay;
+            settings.contest.my_call = "K1ABC".to_string();
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            assert!(ui.shows("field-your-section"));
+            assert!(ui.has("Add your section, press Start contest"));
+            assert!(ui.has("Your ARRL or RAC section, as EMA for Eastern Massachusetts"));
+            ui.click("btn-start-training");
+            ui.advance(50).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.has("Add your section to start a Field\u{a0}Day"));
+            assert_eq!(ui.take_focused(), ["field-your-section"]);
+            ui.commit("field-your-section", "Mass");
+            ui.advance(50).await;
+            assert_eq!(ui.stored_settings().await.contest.my_section, "");
+            assert!(ui.has("MASS is not a section"), "{}", ui.html());
+            ui.type_into("field-your-section", "ema");
+            assert!(
+                !ui.mouse_down("btn-start-training"),
+                "Start took the cursor"
+            );
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "training").await);
+            assert_eq!(ui.stored_settings().await.contest.my_section, "EMA");
+            ui.advance(10_000).await;
+            let first = recorder.starts()[0].transcript.clone();
+            assert!(first.text.starts_with("CQ FD K1ABC"), "{}", first.text);
+            let his = first.others[0].text.clone();
+            ui.type_into("field-call", &his);
+            ui.press_enter("field-call");
+            ui.advance(300).await;
+            let yours = format!("{his} 1D EMA");
+            assert!(
+                recorder
+                    .starts()
+                    .iter()
+                    .any(|start| start.transcript.text == yours),
+                "no {yours:?}"
+            );
         });
     }
 

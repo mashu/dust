@@ -1,10 +1,15 @@
 //! Everything the app plays outside a training session: the band preview,
-//! the letter player, the group stream and the envelope samples.
+//! the letter player, the group stream, the envelope samples, and Hear a
+//! QSO.
+
+use std::cell::Cell;
+use std::rc::Rc;
 
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSamplingState, GroupSource, Sampler, SplitMix64, TrainingSettings,
-    Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
-    generate_training_group, resolve_station,
+    CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, Sampler, Sender,
+    SplitMix64, TrainingSettings, Transmission, compute_after_group_gap_ms,
+    compute_group_gap_for_wpm, generate_callsign, generate_training_group, hear_qsos, plan_turn,
+    resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -42,6 +47,42 @@ impl HeardGroup {
 /// The pause between letters on the Listen screen.
 const LETTER_GAP_MS: u32 = 420;
 
+/// How many QSOs Hear a QSO plays: a few, enough to hear one follow
+/// another.
+const HEAR_QSOS: u32 = 3;
+
+/// What Hear a QSO has played so far, for a screen to show as a dialogue.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dialogue {
+    /// The contest the QSOs are of.
+    pub kind: ContestKind,
+    /// Your station as they send it, where some of it stands in for yours.
+    pub stand_in: Option<String>,
+    /// How many QSOs it plays.
+    pub qsos: u32,
+    /// Each line heard whole so far, in the order they ended.
+    pub lines: Vec<DialogueLine>,
+}
+
+impl Dialogue {
+    /// The QSO it has reached: the one its newest line is part of.
+    pub fn qso(&self) -> u32 {
+        self.lines.last().map_or(1, |line| line.qso)
+    }
+}
+
+/// One line of a dialogue: your message, or what callers sent at once, as
+/// a pile-up's callers do.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DialogueLine {
+    /// Who sent it: you, the first of the callers, or QRM.
+    pub who: Sender,
+    /// What was sent, a send each, in the order they ended.
+    pub sends: Vec<String>,
+    /// Which of the QSOs it is part of, counted from 1.
+    pub qso: u32,
+}
+
 /// What the band preview calls, and the pause between calls.
 const BAND_PREVIEW_CALL: &str = "CQ";
 const BAND_PREVIEW_GAP_MS: u32 = 280;
@@ -65,6 +106,9 @@ pub enum Preview {
     Stream,
     /// One short envelope sample, named so the chip that sent it can show it.
     Sample(String),
+    /// A few QSOs of the chosen contest, worked by an operator who copies
+    /// every character, for a learner to hear before working one.
+    Qsos,
 }
 
 impl Preview {
@@ -78,6 +122,10 @@ impl Preview {
 
     pub fn is_stream(&self) -> bool {
         matches!(self, Self::Stream)
+    }
+
+    pub fn is_qsos(&self) -> bool {
+        matches!(self, Self::Qsos)
     }
 
     /// The sample now sounding, for the chip that is waiting to light up.
@@ -105,10 +153,15 @@ where
     }
     let AppCtx {
         mut preview,
+        mut dialogue,
         toasts,
         settings,
         ..
     } = ctx;
+    // What Hear a QSO played stays up only until something else plays.
+    if kind != Preview::Qsos {
+        dialogue.set(None);
+    }
     let settings = settings.peek().clone().clamp();
     let lease = match ctx.app().player.claim(&settings) {
         Ok(lease) => lease,
@@ -169,6 +222,202 @@ pub fn start_sample(ctx: AppCtx, text: String) {
 pub fn start_band_preview(ctx: AppCtx) {
     start_preview(ctx, Preview::Band, |lease, _| {
         loop_band_preview(lease, ctx.settings, BAND_PREVIEW_CALL, BAND_PREVIEW_GAP_MS)
+    });
+}
+
+/// Hear a QSO: a few QSOs of the contest the settings choose, worked by
+/// the perfect operator and played as a run plays its turns, each send
+/// shown once it has been heard whole.
+///
+/// This is not a run. The QSOs are worked through before the first is
+/// played, by an operator that hears their turns only, as it would hear a
+/// run's; the sampler their calls come from is one of its own, built from
+/// the history as a run's is, and let go of once they are worked. Nothing
+/// is stored, and no stat hears of them.
+pub fn start_qsos(ctx: AppCtx) {
+    let AppCtx {
+        sessions,
+        mut dialogue,
+        ..
+    } = ctx;
+    start_preview(ctx, Preview::Qsos, |lease, settings| {
+        let sampler = Sampler::new(&sessions.peek(), &settings, seed_rng());
+        let heard = hear_qsos(seed_rng(), &settings, sampler, HEAR_QSOS);
+        let kind = settings.contest.contest_kind;
+        dialogue.set(Some(Dialogue {
+            kind,
+            stand_in: heard.stand_in,
+            qsos: HEAR_QSOS,
+            lines: Vec::new(),
+        }));
+        let signoff = kind.rules().signoff;
+        let sends = sends_of(&heard.turns, signoff);
+        // Played as a run plays: each caller's fading is in its tones, so
+        // the send itself has none.
+        let mut sound = settings;
+        sound.band.qsb_enabled = false;
+        play_qsos(lease, sound, heard.turns, sends, dialogue)
+    });
+}
+
+/// Play `turns`, each after the quiet before it, through the same player
+/// path as a run's: your message dry, around the receiver, and the callers
+/// through it. Each of a turn's `sends` shows in `dialogue` once it has
+/// been heard whole, and every one of them once the turn is over.
+async fn play_qsos(
+    lease: Lease,
+    sound: TrainingSettings,
+    turns: Vec<HeardTurn>,
+    sends: Vec<Vec<HeardSend>>,
+    dialogue: Signal<Option<Dialogue>>,
+) -> Result<(), AudioError> {
+    // Which start of a send may show its lines: a send tried again starts
+    // its lines over, and one over leaves none for its timers to show.
+    let showing = Rc::new(Cell::new(0u64));
+    let mut before = 0;
+    for (HeardTurn { quiet_ms, turn }, sends) in turns.into_iter().zip(sends) {
+        if quiet_ms > 0 {
+            lease
+                .sleep(u32::try_from(quiet_ms).unwrap_or(u32::MAX))
+                .await?;
+        }
+        let Some(transcript) = turn.transcript() else {
+            continue;
+        };
+        let plan = plan_turn(&turn, &sound);
+        let asked = lease.ask_to_send();
+        let started = {
+            let (lease, showing, sends) = (lease.clone(), showing.clone(), sends.clone());
+            move |heard_after_sec: f64| {
+                showing.set(showing.get() + 1);
+                let shows = (showing.clone(), showing.get());
+                spawn_forever(show_sends(
+                    lease.clone(),
+                    sends.clone(),
+                    before,
+                    heard_after_sec,
+                    shows,
+                    dialogue,
+                ));
+            }
+        };
+        lease
+            .send_planned(asked, &plan, &transcript, &sound, started)
+            .await?;
+        showing.set(showing.get() + 1);
+        show(dialogue, before, &sends);
+        before += lines_of(&sends).len();
+    }
+    Ok(())
+}
+
+/// One send of QSOs heard: when, into its turn, it starts and ends, who
+/// sent what, and which of the QSOs it is part of.
+#[derive(Clone, Debug)]
+struct HeardSend {
+    start_sec: f64,
+    end_sec: f64,
+    who: Sender,
+    text: String,
+    qso: u32,
+}
+
+/// The sends of each of `turns`, in the order they end. A QSO closes with
+/// your TU, and with its station's `signoff` where the contest has one;
+/// the next caller to send begins the next QSO. QRM, a station on your
+/// frequency that is not calling you, is heard as it comes, but begins no
+/// QSO.
+fn sends_of(turns: &[HeardTurn], signoff: Option<&str>) -> Vec<Vec<HeardSend>> {
+    let mut qso = 1;
+    let mut closed = false;
+    turns
+        .iter()
+        .map(|heard| {
+            let mut segments: Vec<_> = heard.turn.segments.iter().collect();
+            segments.sort_by(|a, b| a.end_sec.total_cmp(&b.end_sec));
+            segments
+                .into_iter()
+                .map(|segment| {
+                    let text = &segment.text;
+                    if segment.who == Sender::You {
+                        closed |= text.split_whitespace().any(|word| word == "TU");
+                    } else if segment.who.is_caller() && closed && Some(text.as_str()) != signoff {
+                        qso += 1;
+                        closed = false;
+                    }
+                    HeardSend {
+                        start_sec: segment.start_sec,
+                        end_sec: segment.end_sec,
+                        who: segment.who,
+                        text: text.clone(),
+                        qso,
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `sends` as lines: each its own, but callers sending at once for the
+/// same QSO, one starting before another has ended, share one. QRM is a
+/// line of its own.
+fn lines_of(sends: &[HeardSend]) -> Vec<DialogueLine> {
+    let mut lines: Vec<DialogueLine> = Vec::new();
+    let mut ended_sec = 0.0;
+    for send in sends {
+        let at_once = send.who.is_caller()
+            && send.start_sec < ended_sec
+            && lines
+                .last()
+                .is_some_and(|line| line.who.is_caller() && line.qso == send.qso);
+        match lines.last_mut() {
+            Some(line) if at_once => line.sends.push(send.text.clone()),
+            _ => lines.push(DialogueLine {
+                who: send.who,
+                sends: vec![send.text.clone()],
+                qso: send.qso,
+            }),
+        }
+        ended_sec = send.end_sec;
+    }
+    lines
+}
+
+/// Show `sends`, those of a turn after the `before` lines of the turns
+/// before it, each as it is heard whole, `heard_after_sec` after now, for
+/// as long as `shows` is the start of the send that may show them.
+async fn show_sends(
+    lease: Lease,
+    sends: Vec<HeardSend>,
+    before: usize,
+    heard_after_sec: f64,
+    shows: (Rc<Cell<u64>>, u64),
+    dialogue: Signal<Option<Dialogue>>,
+) {
+    let (showing, mine) = shows;
+    let mut waited_ms = 0;
+    for heard in 1..=sends.len() {
+        let due_ms = ((heard_after_sec + sends[heard - 1].end_sec) * 1_000.0).ceil() as u32;
+        if due_ms > waited_ms {
+            if lease.sleep(due_ms - waited_ms).await.is_err() {
+                return;
+            }
+            waited_ms = due_ms;
+        }
+        if showing.get() != mine {
+            return;
+        }
+        show(dialogue, before, &sends[..heard]);
+    }
+}
+
+/// The lines of `sends` shown after the `before` lines already up.
+fn show(mut dialogue: Signal<Option<Dialogue>>, before: usize, sends: &[HeardSend]) {
+    dialogue.with_mut(|dialogue| {
+        if let Some(dialogue) = dialogue {
+            dialogue.lines.truncate(before);
+            dialogue.lines.extend(lines_of(sends));
+        }
     });
 }
 
@@ -337,6 +586,89 @@ mod tests {
             .player
             .claim(&test_settings())
             .expect("the fake always opens")
+    }
+
+    /// QRM is heard as it comes, a line of its own that no caller shares,
+    /// and begins no QSO after your TU: the next caller does.
+    #[test]
+    fn qrm_is_a_line_of_its_own_and_begins_no_qso() {
+        use cw_core::{HeardTurn, Segment, Sender, SplitMix64, Turn, resolve_station};
+        let voice = resolve_station(&test_settings(), &mut SplitMix64::new(1));
+        let segment = |who, text: &str, start_sec, end_sec| Segment {
+            who,
+            text: text.to_string(),
+            voice,
+            start_sec,
+            end_sec,
+            fade: None,
+        };
+        let turn = |segments| HeardTurn {
+            quiet_ms: 0,
+            turn: Turn {
+                id: 1,
+                at_run_ms: 0,
+                segments,
+            },
+        };
+        let turns = [
+            turn(vec![
+                segment(Sender::You, "K5XYZ 5NN TT1", 0.0, 2.0),
+                segment(Sender::Qrm, "QRL?", 0.0, 1.0),
+                segment(Sender::Caller(0), "TU 5NN 214", 2.3, 4.0),
+            ]),
+            turn(vec![
+                segment(Sender::You, "TU", 0.0, 0.5),
+                segment(Sender::Qrm, "CQ CQ TEST K5ABC K5ABC TEST", 1.0, 6.0),
+                segment(Sender::Caller(1), "W7AB", 0.8, 1.5),
+            ]),
+        ];
+        let sends = sends_of(&turns, None);
+        let said: Vec<Vec<&str>> = sends
+            .iter()
+            .map(|sends| sends.iter().map(|send| send.text.as_str()).collect())
+            .collect();
+        assert_eq!(
+            said,
+            [
+                vec!["QRL?", "K5XYZ 5NN TT1", "TU 5NN 214"],
+                vec!["TU", "W7AB", "CQ CQ TEST K5ABC K5ABC TEST"]
+            ]
+        );
+        let lines: Vec<(Sender, u32)> = sends
+            .iter()
+            .flat_map(|sends| lines_of(sends))
+            .map(|line| (line.who, line.qso))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (Sender::Qrm, 1),
+                (Sender::You, 1),
+                (Sender::Caller(0), 1),
+                (Sender::You, 1),
+                (Sender::Caller(1), 2),
+                (Sender::Qrm, 2),
+            ],
+            "W7AB begins the next, the QRM none"
+        );
+        // A caller sending while QRM does shares no line with it.
+        let at_once = [
+            HeardSend {
+                start_sec: 0.0,
+                end_sec: 2.0,
+                who: Sender::Caller(0),
+                text: "K5XYZ".to_string(),
+                qso: 1,
+            },
+            HeardSend {
+                start_sec: 0.5,
+                end_sec: 2.5,
+                who: Sender::Qrm,
+                text: "QRL?".to_string(),
+                qso: 1,
+            },
+        ];
+        assert_eq!(lines_of(&at_once).len(), 2);
     }
 
     /// A wait is one timer, not a run of short ones.

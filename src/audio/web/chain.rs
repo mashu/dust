@@ -24,8 +24,9 @@ pub struct Chain {
     /// compressor adds of its own accord.
     limiter_in: GainNode,
     /// The way into the limiter around the compressor: for the audio-stage
-    /// floor, which the native player adds after its AGC, and for the
-    /// paddle's sidetone. Neither has make-up gain to take back.
+    /// floor, which the native player adds after its AGC, for the paddle's
+    /// sidetone, and for your own message in a contest. None of them has
+    /// make-up gain to take back.
     pub floor_in: GainNode,
 }
 

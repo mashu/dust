@@ -5,9 +5,10 @@
 //! Everything the receiver plays is worked out here, a sample at a time and
 //! in one place, as one receiver would: the send through the filter, the
 //! band, the AGC hearing the two together and riding both, bands handing
-//! over to each other. The output stage — the paddle's sidetone, and the
-//! limiter on the lot — is added by the stream, which runs it even when the
-//! UI holds the mixer for a moment.
+//! over to each other. Your own message in a contest joins after all of it,
+//! as a rig's sidetone does. The output stage — the paddle's sidetone, and
+//! the limiter on the lot — is added by the stream, which runs it even when
+//! the UI holds the mixer for a moment.
 
 mod band;
 mod send;
@@ -42,6 +43,9 @@ pub struct Mixer {
     send: Option<SendVoice>,
     /// Sends a newer one replaced, riding out their release.
     retiring: Vec<SendVoice>,
+    /// How far behind the last callback the speaker was, in frames: how
+    /// long a send started now waits to be heard.
+    latency: usize,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -73,11 +77,18 @@ impl Mixer {
             fading: Vec::with_capacity(FADING_BANDS + 1),
             send: None,
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
+            latency: 0,
         }
     }
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// How long after it starts a send is heard, in seconds, as the last
+    /// callback found the speaker behind it.
+    pub fn latency_sec(&self) -> f64 {
+        self.latency as f64 / f64::from(self.sample_rate)
     }
 
     /// Put a new band in, or take the band away. The one going out is not
@@ -147,13 +158,14 @@ impl Mixer {
     /// speaker is `latency` frames behind: a send is over once its last
     /// sample has been heard, not when it was played.
     pub fn render(&mut self, out: &mut [f32], latency: usize) {
+        self.latency = latency;
         // The band's own traffic makes room for a pile-up while it calls.
         let callers = self.send.as_ref().map_or(0, SendVoice::callers_now);
         if let Some(band) = self.band.as_mut() {
             band.reserve_stations(callers);
         }
         for slot in out.iter_mut() {
-            let mut send = self.send.as_mut().map_or(0.0, SendVoice::next);
+            let mut send = self.send.as_mut().map(SendVoice::next).unwrap_or_default();
             for old in &mut self.retiring {
                 send += old.next();
             }
@@ -163,16 +175,20 @@ impl Mixer {
             // behind.
             let mut gain = None;
             if let Some(band) = self.band.as_mut() {
-                let played = band.next(send);
+                let played = band.next(send.heard);
                 background += played.band;
                 gain = Some(played.gain);
             }
             for band in self.fading.iter_mut().rev() {
-                let played = band.next(send);
+                let played = band.next(send.heard);
                 background += played.band;
                 gain.get_or_insert(1.0 + (played.gain - 1.0) * played.weight);
             }
-            *slot += (background + send * gain.unwrap_or(1.0)) as f32;
+            // Your own message comes in after the AGC: the receiver never
+            // hears it, so it neither ducks the reply that follows nor is
+            // shaped by the filter, and only the limiter is past it.
+            let heard = send.heard * gain.unwrap_or(1.0);
+            *slot += (background + heard + send.dry) as f32;
         }
         for send in self.send.iter().chain(&self.retiring) {
             send.settle(latency);

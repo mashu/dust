@@ -109,26 +109,35 @@ pub fn backup_name(date: &str) -> String {
 }
 
 /// `current` with every session of `restored` that it does not already
-/// have, in the order they were practised, and how many that was. A session
-/// is the same session if it finished at the same moment on the same day.
+/// have, in the order they were practised, and how many that was; and how
+/// many of its own it filled in. A session is the same session if it
+/// finished at the same moment on the same day. A contest run whose log an
+/// older version dropped is filled in from a copy that kept it.
 pub fn merge_sessions(
     current: &[SessionResult],
     restored: Vec<SessionResult>,
-) -> (Vec<SessionResult>, usize) {
+) -> (Vec<SessionResult>, usize, usize) {
     let same =
         |a: &SessionResult, b: &SessionResult| a.timestamp == b.timestamp && a.date == b.date;
     let mut merged = current.to_vec();
-    let mut added = 0;
+    let (mut added, mut filled) = (0, 0);
     for session in restored {
-        if !merged.iter().any(|kept| same(kept, &session)) {
-            merged.push(session);
-            added += 1;
+        match merged.iter_mut().find(|kept| same(kept, &session)) {
+            Some(kept) if kept.contest.is_none() && session.contest.is_some() => {
+                *kept = session;
+                filled += 1;
+            }
+            Some(_) => {}
+            None => {
+                merged.push(session);
+                added += 1;
+            }
         }
     }
     if added > 0 {
         merged.sort_by_key(|session| session.timestamp);
     }
-    (merged, added)
+    (merged, added, filled)
 }
 
 /// How many of `sessions` finished after the backup saved at `last`: all of
@@ -212,15 +221,72 @@ mod tests {
             at(30, "2026-10-30"),
             at(5, "2026-10-05"),
         ];
-        let (merged, added) = merge_sessions(&current, restored);
-        assert_eq!(added, 2);
+        let (merged, added, filled) = merge_sessions(&current, restored);
+        assert_eq!((added, filled), (2, 0));
         assert_eq!(
             merged.iter().map(|s| s.timestamp).collect::<Vec<_>>(),
             [5, 10, 20, 30],
             "in the order they were practised"
         );
-        let (again, none) = merge_sessions(&merged, merged.clone());
-        assert_eq!((again, none), (merged, 0), "restoring twice does nothing");
+        let (again, none, nothing) = merge_sessions(&merged, merged.clone());
+        assert_eq!(
+            (again, none, nothing),
+            (merged, 0, 0),
+            "restoring twice does nothing"
+        );
+    }
+
+    /// A run whose log an older version dropped takes it back from a copy
+    /// that kept it, where it sits; a run that has its log keeps it, and a
+    /// copy without one takes nothing away.
+    #[test]
+    fn restoring_fills_in_a_runs_dropped_log() {
+        let run = |timestamp: u64, log: bool| {
+            let qso = [("K5XYZ", "214", "K5XYZ", "214")];
+            let mut run = crate::testing::stored_run("2026-10-10", &qso);
+            run.timestamp = timestamp;
+            if !log {
+                run.contest = None;
+            }
+            run
+        };
+        let current = vec![run(10, false), at(20, "2026-10-20"), run(30, true)];
+        let restored = vec![run(10, true), run(30, false), run(40, true)];
+        let (merged, added, filled) = merge_sessions(&current, restored);
+        assert_eq!((added, filled), (1, 1));
+        assert_eq!(
+            merged.iter().map(|s| s.timestamp).collect::<Vec<_>>(),
+            [10, 20, 30, 40]
+        );
+        assert!(merged[0].contest.is_some(), "filled in");
+        assert!(merged[2].contest.is_some(), "kept");
+        assert_eq!(merged[0].char_set_mode, cw_core::CharSetMode::Contest);
+        let (_, _, again) = merge_sessions(&merged, merged.clone());
+        assert_eq!(again, 0, "a log already here is not filled in twice");
+    }
+
+    /// An assisted run, `contest:wpx:a`, read back from a backup is still a
+    /// WPX run, its log dropped or not, and is filled in as any run is.
+    #[test]
+    fn an_assisted_run_is_restored_as_its_contest() {
+        let qso = [("K5XYZ", "214", "K5XYZ", "214")];
+        let kept = crate::testing::assisted(crate::testing::stored_run("2026-10-10", &qso));
+        // As an older version writes it back: its mode Callsigns and its
+        // log dropped, its mark kept.
+        let mut older = serde_json::to_value(&kept).expect("a run writes");
+        if let Some(run) = older.as_object_mut() {
+            run.remove("contest");
+        }
+        let raw = format!(r#"{{"dustBackup":1,"savedAt":0,"sessions":[{older}]}}"#);
+        let backup = read_backup(&raw).expect("a backup");
+        let read = &backup.sessions[0];
+        assert_eq!(read.alphabet_fingerprint, "contest:wpx:a");
+        assert_eq!(read.char_set_mode, cw_core::CharSetMode::Contest);
+        assert_eq!(read.contest_kind(), Some(cw_core::ContestKind::Wpx));
+        assert!(read.assisted(), "by its mark");
+        let (merged, added, filled) = merge_sessions(&backup.sessions, vec![kept.clone()]);
+        assert_eq!((added, filled), (0, 1));
+        assert_eq!(merged[0], kept);
     }
 
     #[test]

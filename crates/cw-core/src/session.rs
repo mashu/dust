@@ -8,12 +8,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::alignment::{CopyTally, LetterAccuracy};
+use crate::contest::{CONTEST_MARK, ContestLog};
 use crate::level::LEVEL_MIN;
 use crate::score::{
     GroupCopy, calculate_effective_alphabet_size, calculate_total_chars,
     compute_average_response_ms, copy_speed, session_points,
 };
-use crate::settings::{CharSetMode, LevelAxis, PlaybackSettings, TrainingSettings};
+use crate::settings::{CharSetMode, LevelAxis, PlaybackSettings, TrainingSettings, mode_on_disk};
 
 /// The quickest a listener can be said to answer, per character.
 ///
@@ -64,6 +65,19 @@ impl MonoMs {
     pub fn plus(self, ms: u64) -> Self {
         Self(self.0.saturating_add(ms))
     }
+
+    /// `seconds` later, to the nearest millisecond: how far off a player
+    /// says a send is heard, where a segment of a turn starts. A negative
+    /// span moves it nowhere.
+    #[must_use]
+    pub fn plus_sec(self, seconds: f64) -> Self {
+        self.plus(whole_ms(seconds))
+    }
+}
+
+/// Seconds as whole milliseconds; none for a negative span.
+pub(crate) fn whole_ms(seconds: f64) -> u64 {
+    (seconds.max(0.0) * 1_000.0).round() as u64
 }
 
 /// Where a session is. Every phase that is about a group names it.
@@ -490,6 +504,14 @@ impl GroupSession {
             )
         };
 
+        // A contest run is recorded by its own machine, with its log, never
+        // as groups.
+        let mode = self.settings.curriculum.char_set_mode;
+        debug_assert_ne!(
+            mode,
+            CharSetMode::Contest,
+            "a contest run recorded as a group session"
+        );
         let mut result = SessionResult {
             date,
             timestamp: finished_at,
@@ -511,13 +533,24 @@ impl GroupSession {
             // callsigns need no second field the way Mixed needs `digits_level`.
             level: self.settings.active_level(),
             digits_level: self.settings.level(LevelAxis::Digits),
-            char_set_mode: self.settings.curriculum.char_set_mode,
+            char_set_mode: recorded_mode(mode),
             char_wpm,
             effective_wpm,
             alphabet_fingerprint: self.settings.alphabet_fingerprint(),
+            contest: None,
         };
         result.score = result.points();
         result
+    }
+}
+
+/// The mode a group session run in `mode` is recorded as: its own, except
+/// that a contest run, which only its own machine records, is filed as the
+/// callsign practice it was, not as a run with no log to show.
+fn recorded_mode(mode: CharSetMode) -> CharSetMode {
+    match mode {
+        CharSetMode::Contest => CharSetMode::Callsign,
+        mode => mode,
     }
 }
 
@@ -585,7 +618,7 @@ fn session_wpm_default() -> f64 {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "StoredSession")]
 pub struct SessionResult {
     pub date: String,
     /// Wall time the session finished, in milliseconds: what history is
@@ -600,21 +633,86 @@ pub struct SessionResult {
     pub avg_response_ms: f64,
     pub total_chars: u32,
     pub score: f64,
-    /// Saves from the first versions called it the Koch level.
-    #[serde(alias = "kochLevel", default = "session_level_default")]
     pub level: u32,
-    #[serde(default = "session_level_default")]
     pub digits_level: u32,
-    #[serde(default = "session_mode_legacy")]
+    /// Contest is written "callsign", so a build that knows no contests
+    /// still reads the session.
+    #[serde(serialize_with = "mode_on_disk")]
     pub char_set_mode: CharSetMode,
-    #[serde(default = "session_wpm_default")]
     pub char_wpm: f64,
-    #[serde(default = "session_wpm_default")]
     pub effective_wpm: f64,
     /// Full progress alphabet at the time of the session, in its unlock
-    /// order. Empty on legacy saves.
-    #[serde(default)]
+    /// order. Empty on legacy saves. A contest run's starts with
+    /// [`CONTEST_MARK`] and names the contest: it outlives a lost log.
     pub alphabet_fingerprint: String,
+    /// A contest run's log, as it was written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contest: Option<ContestLog>,
+}
+
+/// A session as it is read: the keys this version knows, with what older
+/// saves lack filled in. Keys it does not read are dropped, not carried
+/// along: a catch-all would keep retired keys alive and could write a key
+/// twice. The contest log is the one part kept that this version does not
+/// read, and it is kept by name.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSession {
+    date: String,
+    timestamp: u64,
+    groups: Vec<GroupResult>,
+    group_timings: Vec<SessionTiming>,
+    accuracy: f64,
+    #[serde(flatten)]
+    tally: CopyTally,
+    avg_response_ms: f64,
+    total_chars: u32,
+    score: f64,
+    /// Saves from the first versions called it the Koch level.
+    #[serde(alias = "kochLevel", default = "session_level_default")]
+    level: u32,
+    #[serde(default = "session_level_default")]
+    digits_level: u32,
+    #[serde(default = "session_mode_legacy")]
+    char_set_mode: CharSetMode,
+    #[serde(default = "session_wpm_default")]
+    char_wpm: f64,
+    #[serde(default = "session_wpm_default")]
+    effective_wpm: f64,
+    #[serde(default)]
+    alphabet_fingerprint: String,
+    #[serde(default)]
+    contest: Option<ContestLog>,
+}
+
+impl From<StoredSession> for SessionResult {
+    /// A contest run is known by its log, or by its mark once a build that
+    /// knew no contests has saved it without the log.
+    fn from(stored: StoredSession) -> Self {
+        let run = stored.contest.is_some() || stored.alphabet_fingerprint.starts_with(CONTEST_MARK);
+        Self {
+            date: stored.date,
+            timestamp: stored.timestamp,
+            groups: stored.groups,
+            group_timings: stored.group_timings,
+            accuracy: stored.accuracy,
+            tally: stored.tally,
+            avg_response_ms: stored.avg_response_ms,
+            total_chars: stored.total_chars,
+            score: stored.score,
+            level: stored.level,
+            digits_level: stored.digits_level,
+            char_set_mode: if run {
+                CharSetMode::Contest
+            } else {
+                stored.char_set_mode
+            },
+            char_wpm: stored.char_wpm,
+            effective_wpm: stored.effective_wpm,
+            alphabet_fingerprint: stored.alphabet_fingerprint,
+            contest: stored.contest,
+        }
+    }
 }
 
 impl SessionResult {
@@ -664,9 +762,10 @@ impl SessionResult {
         Cow::Owned(tally.sent)
     }
 
-    /// A Koch session with nothing in it, for tests to fill in.
-    #[cfg(test)]
-    pub(crate) fn empty_for_test() -> Self {
+    /// A Koch session with nothing in it, for tests to fill in: the app's
+    /// as well as this crate's, so a field added here is added to them all
+    /// in one place.
+    pub fn empty_for_test() -> Self {
         Self {
             date: "2026-09-01".into(),
             timestamp: 0,
@@ -683,6 +782,7 @@ impl SessionResult {
             char_wpm: 18.0,
             effective_wpm: 18.0,
             alphabet_fingerprint: String::new(),
+            contest: None,
         }
     }
 }
@@ -710,6 +810,14 @@ mod tests {
 
     fn result(session: &GroupSession) -> SessionResult {
         session.result(3_000, "2026-09-01".into())
+    }
+
+    #[test]
+    fn a_span_in_seconds_moves_a_moment_to_the_millisecond() {
+        assert_eq!(MonoMs(1_000).plus_sec(0.3), MonoMs(1_300));
+        assert_eq!(MonoMs(1_000).plus_sec(0.000_4), MonoMs(1_000));
+        assert_eq!(MonoMs(1_000).plus_sec(-2.0), MonoMs(1_000));
+        assert_eq!(MonoMs(1_000).plus_sec(f64::NAN), MonoMs(1_000));
     }
 
     #[test]
@@ -1088,6 +1196,206 @@ mod tests {
         ] {
             assert!(json.get(gone).is_none(), "{gone} is still written");
         }
+    }
+
+    /// `SessionResult` as builds before contest mode have it, key for key,
+    /// with the character sets they know: what an older build makes of a
+    /// session this one writes.
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BeforeContests {
+        date: String,
+        timestamp: u64,
+        groups: Vec<GroupResult>,
+        group_timings: Vec<SessionTiming>,
+        accuracy: f64,
+        #[serde(flatten)]
+        tally: CopyTally,
+        avg_response_ms: f64,
+        total_chars: u32,
+        score: f64,
+        #[serde(alias = "kochLevel", default = "session_level_default")]
+        level: u32,
+        #[serde(default = "session_level_default")]
+        digits_level: u32,
+        #[serde(default)]
+        char_set_mode: ModeBeforeContests,
+        #[serde(default = "session_wpm_default")]
+        char_wpm: f64,
+        #[serde(default = "session_wpm_default")]
+        effective_wpm: f64,
+        #[serde(default)]
+        alphabet_fingerprint: String,
+    }
+
+    #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum ModeBeforeContests {
+        #[default]
+        #[serde(alias = "custom")]
+        Koch,
+        Digits,
+        Mixed,
+        Callsign,
+        Words,
+    }
+
+    /// A contest run as a later build records one: a call and its number as
+    /// groups, the mark, and a log.
+    fn contest_run() -> SessionResult {
+        let timing = SessionTiming {
+            time_to_complete_ms: 900.0,
+            char_wpm: Some(26.0),
+            effective_wpm: Some(26.0),
+            sends: 1,
+        };
+        SessionResult {
+            groups: vec![
+                GroupResult {
+                    sent: "K5XYZ".into(),
+                    received: "K5XYZ".into(),
+                    correct: true,
+                },
+                GroupResult {
+                    sent: "TT7".into(),
+                    received: "TT1".into(),
+                    correct: false,
+                },
+            ],
+            group_timings: vec![timing.clone(), timing],
+            char_set_mode: CharSetMode::Contest,
+            level: 2,
+            alphabet_fingerprint: "contest:wpx".into(),
+            contest: Some(ContestLog(serde_json::json!({
+                "v": 1,
+                "kind": "wpx",
+                "qsos": [{ "t": 61_000, "h": 58_400, "g": 2, "nr": 1 }],
+            }))),
+            ..SessionResult::empty_for_test()
+        }
+    }
+
+    /// A run goes to disk as a callsign session, with its mark and its log,
+    /// and comes back as the run it was.
+    #[test]
+    fn a_contest_run_is_written_as_a_callsign_session_with_its_mark_and_log() {
+        let run = contest_run();
+        let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json["charSetMode"], "callsign");
+        assert_eq!(json["alphabetFingerprint"], "contest:wpx");
+        assert_eq!(
+            Some(&json["contest"]),
+            run.contest.as_ref().map(|log| &log.0)
+        );
+        let back: SessionResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back, run);
+
+        // Callsign practice is still callsign practice, and writes no log.
+        let mut calls = SessionResult::empty_for_test();
+        calls.char_set_mode = CharSetMode::Callsign;
+        calls.alphabet_fingerprint = "callsign".into();
+        let json = serde_json::to_value(&calls).unwrap();
+        assert!(json.get("contest").is_none());
+        let back: SessionResult = serde_json::from_value(json).unwrap();
+        assert_eq!(back.char_set_mode, CharSetMode::Callsign);
+    }
+
+    /// A build that knows no contests keeps a run as callsign practice, and
+    /// drops its log the next time it saves. The mark it keeps is what makes
+    /// the session a run again after an upgrade.
+    #[test]
+    fn a_build_before_contests_keeps_a_run_and_its_mark_brings_it_back() {
+        let written = serde_json::to_value(contest_run()).unwrap();
+        let older: BeforeContests =
+            serde_json::from_value(written.clone()).expect("an older build reads a run");
+        assert_eq!(older.char_set_mode, ModeBeforeContests::Callsign);
+        assert_eq!(older.groups, contest_run().groups);
+
+        let stripped = serde_json::to_value(&older).unwrap();
+        assert!(
+            stripped.get("contest").is_none(),
+            "the older build drops the log"
+        );
+        assert_eq!(stripped["alphabetFingerprint"], "contest:wpx");
+        let back: SessionResult = serde_json::from_value(stripped).unwrap();
+        assert_eq!(back.char_set_mode, CharSetMode::Contest);
+        assert_eq!(back.contest, None);
+        assert_eq!(back.groups, contest_run().groups);
+
+        // Written under a name of its own, the run would have cost the
+        // older build the whole session.
+        let mut named = written;
+        named["charSetMode"] = serde_json::json!("contest");
+        assert!(serde_json::from_value::<BeforeContests>(named).is_err());
+    }
+
+    /// A log this version cannot read, an empty one or a later layout, still
+    /// marks a run, and goes back to disk exactly as it was read.
+    #[test]
+    fn a_log_this_version_cannot_read_goes_back_as_it_was_read() {
+        for log in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "v": 2,
+                "contestKind": "wpx",
+                "operators": 2,
+                "log": [
+                    { "at": 61.5, "copied": ["K5XYZ", "TT7"], "drift": -0.1, "note": null },
+                    { "at": 1e300, "copied": [], "serial": 18_446_744_073_709_551_615u64 },
+                ],
+            }),
+        ] {
+            let mut written = serde_json::to_value(SessionResult::empty_for_test()).unwrap();
+            written["charSetMode"] = serde_json::json!("callsign");
+            written["contest"] = log.clone();
+            let read: SessionResult = serde_json::from_value(written.clone()).unwrap();
+            assert_eq!(read.char_set_mode, CharSetMode::Contest, "{log}");
+            assert_eq!(serde_json::to_value(&read).unwrap(), written);
+        }
+    }
+
+    /// Every mode a group session runs in is the mode it is recorded as.
+    #[test]
+    fn a_group_session_records_the_mode_it_ran_in() {
+        for mode in CharSetMode::ALL
+            .into_iter()
+            .filter(|mode| *mode != CharSetMode::Contest)
+        {
+            let mut settings = TrainingSettings::default();
+            settings.curriculum.char_set_mode = mode;
+            let recorded = result(&answered(settings, &[("KM", "KM", 400)]));
+            assert_eq!(recorded.char_set_mode, mode);
+            assert_eq!(recorded.contest, None);
+            let json = serde_json::to_value(&recorded).unwrap();
+            let back: SessionResult = serde_json::from_value(json).unwrap();
+            assert_eq!(back, recorded);
+        }
+    }
+
+    /// Should a group session ever run in Contest mode, it is filed as the
+    /// callsign practice it was; every other mode is filed as itself.
+    #[test]
+    fn a_group_session_is_never_recorded_as_a_contest_run() {
+        for mode in CharSetMode::ALL {
+            let recorded = recorded_mode(mode);
+            assert_ne!(recorded, CharSetMode::Contest);
+            if mode != CharSetMode::Contest {
+                assert_eq!(recorded, mode);
+            }
+        }
+        assert_eq!(recorded_mode(CharSetMode::Contest), CharSetMode::Callsign);
+    }
+
+    /// A contest run is only ever recorded by its own machine, with its log,
+    /// so a group session run in Contest mode is a bug a debug build says
+    /// out loud.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a contest run recorded as a group session")]
+    fn a_debug_build_says_when_a_group_session_ran_as_a_contest() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        result(&answered(settings, &[("K5XYZ", "K5XYZ", 400)]));
     }
 
     #[test]

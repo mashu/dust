@@ -1,16 +1,20 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    GROUP_START_BIGRAM_TOKEN, MasteryStatus, SamplingRow, SessionResult, SpeedPath,
-    TrainingSettings, character_diagnostics, group_length_forecast, mistake_stats, sampling_rows,
-    session_history, speed_forecast,
+    CONTEST_TIMES_NOTE, CharSetMode, ContestKind, GROUP_START_BIGRAM_TOKEN, MasteryStatus,
+    SamplingRow, SessionHistoryRow, SessionResult, SpeedPath, StoredLog, TrainingSettings,
+    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
+    speed_forecast,
 };
 use dioxus::prelude::*;
 
 use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
 use crate::ui::backup::{BackupCard, Backups};
+use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::format::counted;
+use crate::ui::settings_charset::mode_label;
+use crate::ui::stats::CONTEST_SPEEDS;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
@@ -21,9 +25,15 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
             div { class: "card", p { class: "muted", "No letter data yet." } }
         };
     }
+    let contest = sessions
+        .iter()
+        .any(|session| session.char_set_mode == CharSetMode::Contest);
     rsx! {
         div { class: "card stack",
             div { class: "tiny", "Letter accuracy" }
+            if contest {
+                p { class: "muted", "{CONTEST_TIMES_NOTE}" }
+            }
             for row in letters.iter() {
                 {
                     let status = match row.status {
@@ -137,10 +147,16 @@ fn character_sampling_card(settings: &TrainingSettings, sessions: &[SessionResul
         .max(0.0001);
     let (drawn, others): (Vec<&SamplingRow>, Vec<&SamplingRow>) =
         rows.iter().partition(|row| row.drawn_now);
+    // A contest draws its callers' calls; their exchanges are not drawn.
+    let next = if settings.curriculum.char_set_mode == CharSetMode::Contest {
+        "of turning up in the next caller's call"
+    } else {
+        "of being drawn in the next group"
+    };
     rsx! {
         div { class: "card stack",
             div { class: "tiny", "Sampling snapshot" }
-            p { class: "muted", "Posterior error vs chance of being drawn in the next group (mean weights, not Thompson draws). What every character you have practised has taught counts, whatever set it was sent in." }
+            p { class: "muted", "Posterior error vs chance {next} (mean weights, not Thompson draws). What every character you have practised has taught counts, whatever set it was sent in." }
             if drawn.is_empty() {
                 p { class: "muted", "Pool is empty." }
             }
@@ -233,14 +249,16 @@ fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Elemen
         .fold(0.0_f64, f64::max)
         .max(0.0001);
     let playback = &settings.playback;
-    let mut note = if !playback.adaptive_speed {
-        "Adaptive speed is off, so each group's speed is drawn evenly from your range. Right is the share of characters you copy at that speed."
+    let mut note = if settings.curriculum.char_set_mode == CharSetMode::Contest {
+        format!("{CONTEST_SPEEDS} Right is the share of characters you copy at that speed.")
+    } else if !playback.adaptive_speed {
+        "Adaptive speed is off, so each group's speed is drawn evenly from your range. Right is the share of characters you copy at that speed.".to_string()
     } else if !SpeedPath::of(settings).has_room() {
-        "One speed is set, so there is no speed to choose. Right is the share of characters you copy at it."
+        "One speed is set, so there is no speed to choose. Right is the share of characters you copy at it.".to_string()
     } else {
         "Chance of each speed in the next group, and the share of characters you copy right at it."
-    }
-    .to_string();
+            .to_string()
+    };
     if !playback.link_char_to_effective {
         note.push_str(
             " With Farnsworth spacing, a speed counts the spacing too, as the score does.",
@@ -269,8 +287,64 @@ fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Elemen
     }
 }
 
-/// How many sessions the history lists before it offers more.
-const HISTORY_PAGE: usize = 40;
+/// How many sessions the history lists before it offers more, as the Runs
+/// card does its runs.
+pub(crate) const HISTORY_PAGE: usize = 40;
+
+/// What a run with Show copy on is called wherever it is listed.
+pub const ASSISTED: &str = "assisted";
+
+/// What a row says under its date: "Koch · 18/20 groups · 96 chars", or for
+/// a contest run "Contest · CQ WPX · 11/12 QSOs · 72/h", and for one without
+/// a score "Contest · Simple QSO · 8/9 QSOs · 1.2 min/QSO", whose parts each
+/// keep to one piece, so a narrow line breaks only between them. A run with
+/// Show copy on says it was assisted, after its contest.
+fn history_sub(row: &SessionHistoryRow) -> String {
+    let Some(log) = &row.log else {
+        return format!(
+            "{} · {}/{} groups · {} chars",
+            mode_label(row.mode),
+            row.correct_groups,
+            row.groups,
+            row.total_chars
+        );
+    };
+    let mut parts = vec![mode_label(row.mode).to_string()];
+    if let Some(kind) = row.contest {
+        parts.push(kind.label().replace(' ', "\u{a0}"));
+    }
+    if row.assisted {
+        parts.push(ASSISTED.to_string());
+    }
+    parts.extend(log_parts(log, row.contest));
+    parts.join(" · ")
+}
+
+/// What a contest run's row says of its log, in History and on the Runs
+/// card alike: "11/12 QSOs · 72/h", or for a contest without a score, told
+/// by the minutes a QSO took, "8/9 QSOs · 1.2 min/QSO"; and for a log that
+/// does not read, why.
+pub(crate) fn log_parts(log: &StoredLog, kind: Option<ContestKind>) -> Vec<String> {
+    match log {
+        StoredLog::Read(run) => {
+            let mut parts = vec![format!("{}/{}\u{a0}QSOs", run.clean, run.qsos)];
+            if kind.is_none_or(ContestKind::scored) {
+                parts.extend(run.rate.map(|rate| format!("{rate:.0}/h")));
+            } else {
+                let minutes = run.minutes_per_qso();
+                parts.extend(minutes.map(|minutes| format!("{minutes:.1}\u{a0}min/QSO")));
+            }
+            parts
+        }
+        StoredLog::Dropped => vec!["log not kept by an older version".to_string()],
+        StoredLog::Unreadable => vec!["this version cannot read its log".to_string()],
+    }
+}
+
+/// Whether a row opens its run's results: a contest run whose log reads.
+fn opens(row: &SessionHistoryRow) -> bool {
+    matches!(row.log, Some(StoredLog::Read(_))) && row.contest.is_some()
+}
 
 /// Every session kept on this device, newest first.
 ///
@@ -285,11 +359,19 @@ pub fn HistoryTab(
     on_delete: Option<EventHandler<Vec<SessionPick>>>,
     backups: Option<Backups>,
 ) -> Element {
-    let rows = session_history(&sessions);
+    // Each run's log is read and checked to make its row: once for the
+    // history as it stands, not again for every choice made in the list.
+    let rows = use_memo(use_reactive!(|sessions| session_history(&sessions)));
+    let rows = rows.read();
     let mut selecting = use_signal(|| false);
     let mut chosen = use_signal(BTreeSet::<SessionPick>::new);
     let mut confirming = use_signal(|| false);
     let mut shown = use_signal(|| HISTORY_PAGE);
+    // The run whose results are open, read again from its row.
+    let mut opened = use_opened_run();
+    if let Some(results) = opened_results(&sessions, opened, "History") {
+        return results;
+    }
 
     let every: Vec<SessionPick> = rows
         .iter()
@@ -360,14 +442,16 @@ pub fn HistoryTab(
                             let pick = SessionPick { index: row.index, timestamp: row.timestamp };
                             let is_chosen = chosen.read().contains(&pick);
                             let key = row.index.to_string();
+                            // Spans, as a button that holds them may hold
+                            // nothing else.
                             let when = rsx! {
-                                div { class: "history-when",
-                                    div { class: "mono", "{row.date}" }
-                                    div { class: "history-sub", "{row.correct_groups}/{row.groups} groups · {row.total_chars} chars" }
+                                span { class: "history-when",
+                                    span { class: "mono", "{row.date}" }
+                                    span { class: "history-sub", "{history_sub(row)}" }
                                 }
-                                div { class: "history-acc",
+                                span { class: "history-acc",
                                     span { class: "value", "{row.accuracy_pct.round()}%" }
-                                    span { class: "muted", "{row.score.round()}" }
+                                    span { class: "muted", "{row.score.round()} pts" }
                                 }
                             };
                             if selecting_now {
@@ -391,7 +475,19 @@ pub fn HistoryTab(
                             } else {
                                 rsx! {
                                     div { class: "history-item",
-                                        {when}
+                                        // Named by what it shows, as every
+                                        // other row is read.
+                                        if opens(row) {
+                                            button {
+                                                id: control_id("history-open", &key),
+                                                class: "history-open",
+                                                onclick: move |_| opened.set(Some(pick)),
+                                                {when}
+                                                span { class: "history-open-mark", Icon { name: IconName::Chevron } }
+                                            }
+                                        } else {
+                                            {when}
+                                        }
                                         if let Some(on_delete) = on_delete {
                                             button {
                                                 id: control_id("history-delete", &key),

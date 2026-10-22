@@ -1,11 +1,12 @@
 //! One send, as the audio callback plays it: generated sample by sample from
 //! its plan, never rendered ahead.
 
+use std::ops::AddAssign;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cw_core::band::{FilterDesign, Qsb, ReceiverFilter};
-use cw_core::{PlannedTransmission, ToneEvent};
+use cw_core::{PlannedTransmission, PlaybackPlan, ToneEvent};
 
 use crate::audio::shape::{SEND_RELEASE_SEC, release_gain};
 
@@ -75,6 +76,17 @@ fn envelope_gain(tone: &ToneEvent, t: f64) -> f32 {
 }
 
 impl Station {
+    fn new(plan: &PlaybackPlan, sample_rate: f64) -> Self {
+        Self {
+            elements: plan
+                .events
+                .iter()
+                .map(|tone| Element::new(tone, sample_rate))
+                .collect(),
+            next: 0,
+        }
+    }
+
     /// This station's sound at sample `pos`. Called with `pos` rising one at
     /// a time, so the elements it has finished are never looked at again.
     fn sample(&mut self, pos: usize, sample_rate: f64) -> f32 {
@@ -104,13 +116,37 @@ struct Fading {
     left: usize,
 }
 
+/// One sample of a send, for the two places the mixer adds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SendSample {
+    /// Through the receiver's filter and under the fading, as its AGC hears
+    /// it.
+    pub heard: f64,
+    /// Past the receiver: your own message in a contest, at the level you
+    /// monitor it at, for after the AGC.
+    pub dry: f64,
+}
+
+impl AddAssign for SendSample {
+    fn add_assign(&mut self, other: Self) {
+        self.heard += other.heard;
+        self.dry += other.dry;
+    }
+}
+
 /// One send playing out: every station's tones, summed — interference is
-/// addition — through the receiver's filter and under the fading.
+/// addition — through the receiver's filter and under the fading; and, in a
+/// contest, your own message beside them, which the receiver never hears.
 ///
 /// Built on the UI thread from the plan, which is all it allocates; the
 /// audio callback only reads it forward.
 pub struct SendVoice {
+    /// The stations the receiver hears.
     stations: Vec<Station>,
+    /// Your message, when the plan says it is dry: played as a rig's
+    /// sidetone is, neither filtered nor faded, so its level is the one the
+    /// plan gave it.
+    dry: Option<Station>,
     filter: ReceiverFilter,
     fading: Option<Fading>,
     sample_rate: f64,
@@ -126,7 +162,7 @@ pub struct SendVoice {
     /// Where a stopped send began its release.
     released_at: Option<usize>,
     release_len: usize,
-    /// How many other stations are calling across this send.
+    /// The most other stations calling across this send at once.
     callers: usize,
     finished: Arc<AtomicBool>,
 }
@@ -140,21 +176,17 @@ impl SendVoice {
         started_at_sec: f64,
     ) -> Self {
         let sr = f64::from(sample_rate.max(1));
-        let stations: Vec<Station> = std::iter::once(&plan.wanted)
+        let received = (!plan.dry_wanted).then_some(&plan.wanted);
+        let stations: Vec<Station> = received
+            .into_iter()
             .chain(&plan.others)
-            .map(|station| Station {
-                elements: station
-                    .events
-                    .iter()
-                    .map(|tone| Element::new(tone, sr))
-                    .collect(),
-                next: 0,
-            })
+            .map(|station| Station::new(station, sr))
             .collect();
         let samples = |seconds: f64| (seconds * sr).round().max(1.0) as usize;
         let length = (plan.wanted.duration_sec.max(0.0) * sr).ceil() as usize;
         Self {
             stations,
+            dry: plan.dry_wanted.then(|| Station::new(&plan.wanted, sr)),
             filter: ReceiverFilter::new(sample_rate, receiver),
             fading: fading.map(|qsb| Fading {
                 qsb,
@@ -170,7 +202,7 @@ impl SendVoice {
             tail_fade: samples(TAIL_FADE_SEC),
             released_at: None,
             release_len: samples(SEND_RELEASE_SEC),
-            callers: plan.others.len(),
+            callers: plan.others_at_once(),
             finished: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -208,30 +240,40 @@ impl SendVoice {
         if self.is_sounding() { self.callers } else { 0 }
     }
 
-    /// The next sample, as the receiver hears it before its AGC.
-    pub fn next(&mut self) -> f64 {
+    /// The next sample: what the receiver hears of it before its AGC, and
+    /// what of it is played past the receiver.
+    pub fn next(&mut self) -> SendSample {
         let pos = self.pos;
         self.pos += 1;
         if pos >= self.sound_ends_at() {
-            return 0.0;
+            return SendSample::default();
         }
         let release = self.released_at.map_or(1.0, |at| {
             release_gain((pos - at) as f64 / self.release_len as f64)
         });
         let sr = self.sample_rate;
-        let dry: f32 = self
+        let on_air: f32 = self
             .stations
             .iter_mut()
             .map(|station| station.sample(pos, sr))
             .sum();
-        let heard = self.filter.process(f64::from(dry));
+        let heard = self.filter.process(f64::from(on_air));
+        let dry = self
+            .dry
+            .as_mut()
+            .map_or(0.0, |station| f64::from(station.sample(pos, sr)));
         let tail_from = self.end - self.tail_fade.min(self.end);
         let tail = if pos >= tail_from {
             release_gain((pos - tail_from) as f64 / self.tail_fade as f64)
         } else {
             1.0
         };
-        heard * self.fading_gain(pos) * release * tail
+        // A stop takes your message down with the rest; the fading is the
+        // path's, and yours never crossed it.
+        SendSample {
+            heard: heard * self.fading_gain(pos) * release * tail,
+            dry: dry * release * tail,
+        }
     }
 
     fn fading_gain(&mut self, pos: usize) -> f64 {
@@ -324,7 +366,7 @@ mod tests {
     }
 
     fn play(voice: &mut SendVoice, samples: usize) -> Vec<f32> {
-        (0..samples).map(|_| voice.next() as f32).collect()
+        (0..samples).map(|_| voice.next().heard as f32).collect()
     }
 
     /// The send the callback generates is the one the player used to render
@@ -410,7 +452,7 @@ mod tests {
         let mut plain = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
         let mut faded = SendVoice::new(&plan, &receiver(), Some(qsb), SR, 40.0);
         for i in 0..SR as usize {
-            let (a, b) = (plain.next(), faded.next());
+            let (a, b) = (plain.next().heard, faded.next().heard);
             if a.abs() > 1e-3 {
                 let expected = f64::from(qsb.gain_at(40.0 + i as f64 / f64::from(SR)));
                 assert!(
@@ -420,6 +462,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A dry send keeps your message out of the receiver: it comes out as
+    /// its tones were planned, sample for sample, neither filtered nor
+    /// faded, while the others come through the receiver as they would
+    /// without it. A stop takes it down with them.
+    #[test]
+    fn a_dry_message_is_played_past_the_receiver() {
+        let mut fading = settings();
+        fading.band.qsb_enabled = true;
+        fading.band.qsb_depth = 0.75;
+        let qsb = Qsb::of(&fading.band).expect("fading");
+        let sr = f64::from(SR);
+        let mut dry = planned("PARIS", &["K"]);
+        dry.dry_wanted = true;
+        let mut callers = dry.clone();
+        callers.wanted.events.clear();
+        let mut voice = SendVoice::new(&dry, &receiver(), Some(qsb), SR, 0.0);
+        let mut alone = SendVoice::new(&callers, &receiver(), Some(qsb), SR, 0.0);
+        let mut yours = Station::new(&dry.wanted, sr);
+        let mut peak = 0.0f64;
+        for pos in 0..(dry.wanted.duration_sec * sr) as usize {
+            let sample = voice.next();
+            assert_eq!(sample.heard, alone.next().heard, "at {pos}");
+            assert_eq!(sample.dry, f64::from(yours.sample(pos, sr)), "at {pos}");
+            peak = peak.max(sample.dry.abs());
+        }
+        assert!(peak > 0.25, "your message peaked at {peak}");
+
+        let mut voice = SendVoice::new(&dry, &receiver(), None, SR, 0.0);
+        // Into the dah of the P.
+        let into: Vec<f64> = (0..SR as usize / 5).map(|_| voice.next().dry).collect();
+        assert!(
+            into[into.len() - 16..].iter().any(|s| s.abs() > 0.1),
+            "it should be sounding"
+        );
+        voice.release();
+        let release = voice.release_len;
+        let after: Vec<f64> = (0..release + 16).map(|_| voice.next().dry).collect();
+        assert!(after[..release].iter().any(|s| *s != 0.0), "it cut off");
+        assert!(after[release..].iter().all(|s| *s == 0.0));
     }
 
     /// A stopped send rides down over the release, never stepping, and is
@@ -455,11 +538,26 @@ mod tests {
         );
     }
 
+    /// The band makes room for the callers sounding at once across a send,
+    /// not for every call in it: two short calls one after the other are
+    /// one, two long ones over each other two.
+    #[test]
+    fn a_send_makes_room_for_the_callers_sounding_at_once() {
+        let apart = planned("TTTTT", &["E", "E"]);
+        assert_eq!(apart.others.len(), 2);
+        let voice = SendVoice::new(&apart, &receiver(), None, SR, 0.0);
+        assert_eq!(voice.callers_now(), 1);
+        let over = planned("TTTTT", &["TTT", "TTT"]);
+        let voice = SendVoice::new(&over, &receiver(), None, SR, 0.0);
+        assert_eq!(voice.callers_now(), 2);
+    }
+
     /// A send is over when it has been heard, not when it has been played:
-    /// the speaker is a buffer or more behind the callback.
+    /// the speaker is a buffer or more behind the callback. Its one caller,
+    /// heard across it, is off the air with it.
     #[test]
     fn a_send_is_finished_once_it_has_been_heard() {
-        let plan = planned("E", &["T"]);
+        let plan = planned("TTT", &["E"]);
         let mut voice = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
         let finished = voice.finished_flag();
         assert_eq!(voice.callers_now(), 1);

@@ -63,7 +63,8 @@ use super::dsp::{db_to_gain, finite_or, gain_to_db};
 use super::filter::{FilterDesign, passband_edges};
 use super::qsb::MULTIPATH_RATES;
 use super::random::Draw;
-use crate::callsign::generate_callsign;
+use crate::callsign::{country_of, generate_callsign};
+use crate::contest::data::names::draw_name;
 use crate::morse::morse_for;
 use crate::rng::Rng;
 use crate::settings::{BandSettings, STATIONS_MAX, STATIONS_MIN};
@@ -1149,10 +1150,6 @@ struct Traffic {
     scripts: Vec<(u32, u32)>,
 }
 
-const NAMES: &[&str] = &[
-    "BOB", "JOHN", "HANS", "PETE", "JIM", "TOM", "MIKE", "ANDY", "PAUL", "JAN", "IVO", "LUC",
-    "KEN", "OLE", "JOSE", "YURI",
-];
 const QTHS: &[&str] = &[
     "BERLIN", "OHIO", "PARIS", "OSLO", "TEXAS", "KRAKOW", "TOKYO", "MAINE", "LYON", "RIGA", "BRNO",
     "IDAHO", "KIEV", "BARI",
@@ -1261,7 +1258,8 @@ fn calling_cq(own: &str, random: &mut Draw) -> Vec<String> {
 
 fn ragchew(own: &str, random: &mut Draw) -> Vec<String> {
     let other = generate_callsign(CALL_TIER, random);
-    let name = pick(random, NAMES);
+    // The names contest callers go by, by the country of the call.
+    let name = draw_name(country_of(own).unwrap_or_default(), random);
     let qth = pick(random, QTHS);
     let report = pick(random, REPORTS);
     let greeting = pick(random, GREETINGS);

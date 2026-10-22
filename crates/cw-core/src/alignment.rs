@@ -41,6 +41,13 @@ pub(crate) fn align_holding(sent: &str, received: &str) -> (Vec<AlignmentPair>, 
     (table.walk_back(&s, &r, s.len() - lost), lost)
 }
 
+/// The fewest edits — a wrong character, one dropped, or one added — that
+/// turn `sent` into `received`: how far a call you sent is from a station's.
+pub(crate) fn edit_distance(sent: &str, received: &str) -> u32 {
+    let (s, r) = (upper(sent), upper(received));
+    Edits::new(&s, &r).at(s.len(), r.len())
+}
+
 fn upper(text: &str) -> Vec<char> {
     text.chars().map(|c| c.to_ascii_uppercase()).collect()
 }
@@ -211,6 +218,17 @@ mod tests {
         let (pairs, lost) = align_holding("KMRSU", "KXR");
         assert_eq!(lost, 2);
         assert_eq!(pairs, align_group("KMR", "KXR"));
+    }
+
+    #[test]
+    fn the_distance_counts_the_fewest_edits() {
+        assert_eq!(edit_distance("K5XYZ", "K5XYZ"), 0);
+        assert_eq!(edit_distance("K5XYW", "K5XYZ"), 1);
+        assert_eq!(edit_distance("K5XY", "K5XYZ"), 1);
+        assert_eq!(edit_distance("K5XYZZ", "K5XYZ"), 1);
+        assert_eq!(edit_distance("K5ZYX", "K5XYZ"), 2);
+        assert_eq!(edit_distance("", "K5XYZ"), 5);
+        assert_eq!(edit_distance("k5xyz", "K5XYZ"), 0, "case is no edit");
     }
 
     #[test]
