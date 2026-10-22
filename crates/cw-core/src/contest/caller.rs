@@ -407,8 +407,8 @@ pub(super) struct Caller {
 
 impl Caller {
     /// A station calling with `call` in a run of `style`, where `placed`
-    /// puts it, its voice and ways drawn from `rng`, its speed (the run's,
-    /// shifted by − / +) and the callers' habits from `settings`.
+    /// puts it, its voice and ways drawn from `rng`, its speed (the Speed
+    /// card's) and the callers' habits from `settings`.
     pub(super) fn arrive(
         call: GeneratedCall,
         settings: &TrainingSettings,

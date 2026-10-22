@@ -2221,7 +2221,7 @@ mod interactions {
         );
         assert!(!ui.has("drawn evenly from your range"));
         ui.click("speed-contest");
-        assert!(ui.has("drawn evenly from your range, shifted by − / + during a run"));
+        assert!(ui.has("drawn evenly from your range; − and + move only your own"));
         assert!(ui.has("Not the set practised now"));
 
         let contest = Ui::new(

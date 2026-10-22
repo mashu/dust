@@ -51,7 +51,9 @@ pub use clock::RunClock;
 pub use data::places::{home_country, place_name};
 pub use data::sections::section_name;
 pub use data::zones::home_continent;
-pub use esm::{EntryField, Esm, Fields, MessagePart, QsoState, esm, loggable, message_text};
+pub use esm::{
+    EntryField, Esm, Fields, MessagePart, QsoState, esm, loggable, message_text, space_to_call,
+};
 pub use exchange::{
     Field, cut_power, cut_serial, cut_zone, keyed_token, read_number, send_power, send_report,
     send_serial, send_zone,
@@ -212,6 +214,49 @@ impl CallerHabits {
     }
 }
 
+/// How often your TU signs with your call in a pile-up, where the
+/// contest's TU does not sign by its own rules: MorseRunner's station ID
+/// rate (`StationIdRate`, `Contest.pas:468-474`), every third QSO unless
+/// set otherwise. A station tuning in hears who is running from it; the
+/// callers call after your TU whether it signs or not, as MorseRunner's do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TuCall {
+    /// Every TU signs.
+    Every,
+    /// Every third QSO's TU signs.
+    #[default]
+    Third,
+    /// No TU signs.
+    Never,
+}
+
+impl TuCall {
+    pub const ALL: [Self; 3] = [Self::Every, Self::Third, Self::Never];
+
+    /// The name it is saved under.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Every => "every",
+            Self::Third => "third",
+            Self::Never => "never",
+        }
+    }
+
+    /// The choice saved as `name`, if this build knows it.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|choice| choice.name() == name)
+    }
+
+    /// Whether the TU that closes your `number`th QSO signs with your call.
+    pub fn signs(self, number: u32) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Third => number.is_multiple_of(3),
+            Self::Never => false,
+        }
+    }
+}
+
 // Each is saved by its name. Read back, anything this version does not know
 // — a contest a later version added, or a save edited by hand — comes back as
 // the default rather than costing the rest of the save, as the filter shape
@@ -256,6 +301,19 @@ impl<'de> Deserialize<'de> for CallerHabits {
     }
 }
 
+impl Serialize for TuCall {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for TuCall {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(Self::from_name(&name).unwrap_or_default())
+    }
+}
+
 /// Where a contest's callers come from, and where what was copied of their
 /// calls goes back to, as [`crate::machine::GroupSource`] is for groups.
 pub trait CallSource {
@@ -294,6 +352,11 @@ mod tests {
                 Some(habits)
             );
         }
+        for choice in TuCall::ALL {
+            let json = serde_json::to_value(choice).expect("serialize");
+            assert_eq!(json, choice.name());
+            assert_eq!(serde_json::from_value::<TuCall>(json).ok(), Some(choice));
+        }
         let names: Vec<&str> = ContestKind::ALL.iter().map(|kind| kind.name()).collect();
         assert_eq!(
             names,
@@ -320,7 +383,20 @@ mod tests {
         assert_eq!(style, Some(RunStyle::Single));
         let habits = serde_json::from_value::<CallerHabits>("lids".into()).ok();
         assert_eq!(habits, Some(CallerHabits::Easy));
+        let tu = serde_json::from_value::<TuCall>("sometimes".into()).ok();
+        assert_eq!(tu, Some(TuCall::Third));
         assert_eq!(ContestKind::from_name("cwt"), None);
+    }
+
+    /// Every TU signs, every third QSO's does, or none does.
+    #[test]
+    fn your_call_signs_the_tu_as_chosen() {
+        let signed =
+            |choice: TuCall| -> Vec<u32> { (1..=7).filter(|n| choice.signs(*n)).collect() };
+        assert_eq!(signed(TuCall::Every), [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(signed(TuCall::Third), [3, 6]);
+        assert!(signed(TuCall::Never).is_empty());
+        assert_eq!(TuCall::default(), TuCall::Third);
     }
 
     /// Every contest on the card has its row of rules, and one only.

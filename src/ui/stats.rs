@@ -220,7 +220,7 @@ const NOT_NOW: &str = "Not the set practised now";
 
 /// How a contest's callers' speeds come, which no copy speed steers yet.
 pub(crate) const CONTEST_SPEEDS: &str =
-    "Callers' speeds are drawn evenly from your range, shifted by − / + during a run.";
+    "Callers' speeds are drawn evenly from your range; − and + move only your own.";
 
 /// The copy span: how long a group you copy whole, and how that has moved,
 /// for each character set with groups drawn a character at a time in its

@@ -160,7 +160,8 @@ pub enum ContestEvent {
         at: MonoMs,
     },
     Resume,
-    /// − / +: your speed and later callers', in WPM.
+    /// − / +: your speed, in WPM, from your next message on. The callers'
+    /// speeds are the Speed card's.
     Speed {
         delta: i32,
     },
@@ -280,7 +281,8 @@ pub struct ContestView {
     /// The run's clock, once it has started: the run bar reads it itself.
     pub clock: Option<RunClock>,
     pub limit_ms: u64,
-    /// The speed you send at.
+    /// The speed you send at: your speed as set, or the middle of the
+    /// callers' range, as − / + have left it, a whole speed once moved.
     pub my_wpm: f64,
     /// What Enter reads: the call last sent, whether your exchange was
     /// taken, and whether the station corrected you.
@@ -355,11 +357,6 @@ const SHOWN_AFTER_MS: u64 = 1_000;
 /// are stations worked before (§4.7 of the design).
 const DUPES_AFTER: u32 = 5;
 const DUPE_SHARE: f64 = 0.02;
-
-/// In a pile-up, your TU signs with your call every this many QSOs, as
-/// MorseRunner's does (`Contest.pas:468-474`), so a station tuning in
-/// knows who is running.
-const TU_SIGNS_EVERY: u32 = 3;
 
 /// The stream, forked off the run's generator, that the run's own draws
 /// come from: how many call, and who calls again. The callers' streams are
@@ -960,8 +957,8 @@ pub struct ContestMachine<S> {
     taught: usize,
     /// Your next serial: QSOs logged, plus one.
     serial: u32,
-    /// − / + for the run, in WPM.
-    speed_offset: f64,
+    /// The speed you send at, in WPM: your speed as set, moved by − / +.
+    my_wpm: f64,
     /// The speed of each message you sent.
     sent_wpm: Vec<f64>,
     /// Run time and time paused, once the run is over.
@@ -990,6 +987,7 @@ impl<S: CallSource> ContestMachine<S> {
         let my_class = settings.contest.my_class.clone();
         let my_section = settings.contest.section_sent().to_string();
         let countdown = settings.playback.countdown_sec;
+        let my_wpm = settings.my_wpm();
         let pileup = settings.contest.contest_style == RunStyle::Pileup;
         let rng = SplitMix64::new(seed);
         let side = Side::of_call(&my_call);
@@ -1030,7 +1028,7 @@ impl<S: CallSource> ContestMachine<S> {
             entries: Vec::new(),
             taught: 0,
             serial: 1,
-            speed_offset: 0.0,
+            my_wpm,
             sent_wpm: Vec::new(),
             ended: None,
             shown_last: Vec::new(),
@@ -1227,7 +1225,7 @@ impl<S: CallSource> ContestMachine<S> {
             phase: self.phase,
             clock: self.clock,
             limit_ms: self.limit_ms,
-            my_wpm: self.my_wpm(),
+            my_wpm: self.my_wpm,
             qso: self.qso.clone(),
             air: self.air.as_ref().map(|air| AirView {
                 heard_from: air.heard_from,
@@ -1262,7 +1260,7 @@ impl<S: CallSource> ContestMachine<S> {
     pub fn result(&self, finished_at: u64, date: String) -> SessionResult {
         let (run_ms, paused_ms) = self.ended.unwrap_or_default();
         let my_wpm = if self.sent_wpm.is_empty() {
-            self.my_wpm()
+            self.my_wpm
         } else {
             self.sent_wpm.iter().sum::<f64>() / self.sent_wpm.len() as f64
         };
@@ -1480,33 +1478,12 @@ impl<S: CallSource> ContestMachine<S> {
             .is_some_and(|clock| clock.peek_ms(now) >= self.limit_ms)
     }
 
-    /// The speed you send at: the middle of the character speed range,
-    /// moved by − / +.
-    fn my_wpm(&self) -> f64 {
-        let playback = &self.settings.playback;
-        (playback.char_wpm_min + playback.char_wpm_max) / 2.0 + self.speed_offset
-    }
-
-    /// The settings a caller who arrives now is drawn from: the speed
-    /// ranges moved by − / +.
-    fn callers_settings(&self) -> TrainingSettings {
-        let mut settings = self.settings.clone();
-        let playback = &mut settings.playback;
-        playback.char_wpm_min += self.speed_offset;
-        playback.char_wpm_max += self.speed_offset;
-        playback.effective_wpm_min += self.speed_offset;
-        playback.effective_wpm_max += self.speed_offset;
-        settings
-    }
-
-    /// Move − / + by `delta` WPM, as far as keeps both speed ranges inside
-    /// the Speed card's bounds.
+    /// Move your speed by `delta` WPM, from the whole speed nearest it,
+    /// within the Speed card's bounds. The callers' speeds stay the Speed
+    /// card's: your speed is kept from run to run, and a shift of theirs
+    /// would last only the run.
     fn shift_speed(&mut self, delta: i32) {
-        let playback = &self.settings.playback;
-        let lowest = WPM_MIN - playback.char_wpm_min.min(playback.effective_wpm_min);
-        let highest = WPM_MAX - playback.char_wpm_max.max(playback.effective_wpm_max);
-        self.speed_offset =
-            (self.speed_offset + f64::from(delta)).clamp(lowest.min(0.0), highest.max(0.0));
+        self.my_wpm = (self.my_wpm.round() + f64::from(delta)).clamp(WPM_MIN, WPM_MAX);
     }
 
     /// The clock starts, the run's end is set, and your first CQ goes out.
@@ -1837,19 +1814,17 @@ impl<S: CallSource> ContestMachine<S> {
             my_section: &self.my_section,
             serial,
             his_name: &his_name,
+            // In a pile-up, a TU signs with your call as often as you
+            // choose, every third QSO unless you choose otherwise, where the
+            // contest's TU does not sign by its own rules.
+            tu_signed: self.rules.tu_adds_call(
+                self.style,
+                self.settings.contest.contest_tu_call,
+                number,
+            ),
         };
-        // In a pile-up, a TU signs with your call every third QSO, unless it
-        // always does.
-        let signs = self.style == RunStyle::Pileup
-            && self.rules.tu_calls
-            && !self.rules.tu_signs()
-            && number.is_multiple_of(TU_SIGNS_EVERY)
-            && !self.my_call.is_empty();
         for part in &message {
-            let mut said = message_text(std::slice::from_ref(part), self.rules, self.side, &me);
-            if *part == MessagePart::Tu && signs {
-                said = format!("{said} {}", self.my_call);
-            }
+            let said = message_text(std::slice::from_ref(part), self.rules, self.side, &me);
             if said.is_empty() {
                 continue;
             }
@@ -1920,7 +1895,7 @@ impl<S: CallSource> ContestMachine<S> {
         let your_end = if text.is_empty() {
             0.0
         } else {
-            let voice = your_voice(&self.settings, self.my_wpm());
+            let voice = your_voice(&self.settings, self.my_wpm);
             sending_sec(text, &self.settings, &voice)
         };
         let done_first: Vec<usize> = callers
@@ -2361,7 +2336,7 @@ impl<S: CallSource> ContestMachine<S> {
         let mut my_chars = Vec::new();
         let heard_you = !mine.text.is_empty();
         if heard_you {
-            let voice = your_voice(&self.settings, self.my_wpm());
+            let voice = your_voice(&self.settings, self.my_wpm);
             your_end = sending_sec(&mine.text, &self.settings, &voice);
             my_chars = char_spans(&mine.text, &self.settings, &voice)
                 .into_iter()
@@ -3280,9 +3255,8 @@ impl<S: CallSource> ContestMachine<S> {
         sounding: &[usize],
         run_ms: u64,
     ) -> Option<usize> {
-        let settings = self.callers_settings();
         let taken = self.taken(sounding);
-        let placed = place_contest_caller(&settings, self.style, &taken, &mut self.draws)?;
+        let placed = place_contest_caller(&self.settings, self.style, &taken, &mut self.draws)?;
         before.push((index, self.stations[index].clone()));
         let station = &mut self.stations[index];
         station.caller.call_again(placed.tone_hz, run_ms);
@@ -3339,8 +3313,8 @@ impl<S: CallSource> ContestMachine<S> {
         }
         let index = self.stations.len();
         let mut rng = self.rng.fork(index as u64);
-        let settings = self.callers_settings();
-        let placed = place_contest_caller(&settings, self.style, &self.taken(sounding), &mut rng)?;
+        let taken = self.taken(sounding);
+        let placed = place_contest_caller(&self.settings, self.style, &taken, &mut rng)?;
         let calls: Vec<String> = self
             .stations
             .iter()
@@ -3358,10 +3332,10 @@ impl<S: CallSource> ContestMachine<S> {
         let avoid = |call: &str| calls.iter().any(|taken| taken == call);
         let call = self
             .source
-            .next_call(&settings, self.rules.callers(self.side), &avoid);
+            .next_call(&self.settings, self.rules.callers(self.side), &avoid);
         let caller = Caller::arrive(
             call,
-            &settings,
+            &self.settings,
             self.rules,
             self.settings.contest.limit_minutes(),
             self.style,
@@ -5269,10 +5243,11 @@ mod tests {
         assert_eq!(aborted.machine.phase(), ContestPhase::Aborted);
     }
 
-    /// − / + moves your speed and later callers', within the Speed card's
-    /// bounds; callers already calling keep theirs.
+    /// − / + moves your speed, from your next message on, within the Speed
+    /// card's bounds; the callers' speeds stay the Speed card's, those
+    /// already calling and those who come later alike.
     #[test]
-    fn speed_moves_your_message_and_later_callers() {
+    fn speed_moves_your_message_and_not_the_callers() {
         let mut runtime = runtime(&["K5XYZ", "G4ABC"]);
         runtime.finish_turn();
         runtime.apply(ContestEvent::Speed { delta: 2 });
@@ -5286,11 +5261,48 @@ mod tests {
             turn.segments[1].text.clone()
         };
         runtime.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
-        assert_eq!(runtime.last_turn().segments[1].voice.char_wpm, 27.0);
+        let tu = runtime.last_turn();
+        assert_eq!(tu.segments[0].voice.char_wpm, 27.0, "your TU");
+        assert_eq!(tu.segments[1].voice.char_wpm, 25.0, "the next caller");
         runtime.apply(ContestEvent::Speed { delta: -200 });
         assert_eq!(view(&runtime).my_wpm, crate::settings::WPM_MIN);
         runtime.apply(ContestEvent::Speed { delta: 200 });
         assert_eq!(view(&runtime).my_wpm, crate::settings::WPM_MAX);
+        // The stored run records what you sent: a CQ at 25, then your
+        // exchange and your TU at 27.
+        runtime.apply(ContestEvent::FinishNow);
+        assert_eq!(result(&runtime).1.my_wpm, 26.3);
+    }
+
+    /// You send at your speed as set, whatever the callers' range; until
+    /// you set one, at the middle of their range, and − / + then moves it
+    /// from the whole speed nearest that.
+    #[test]
+    fn you_send_at_your_speed_or_the_callers_middle() {
+        let mut settings = run_settings(25.0);
+        settings.contest.my_wpm = 34;
+        let set = Runtime::start(1, settings.clamp(), ScriptCalls::new(&["K5XYZ"]));
+        assert_eq!(view(&set).my_wpm, 34.0);
+        assert_eq!(set.last_turn().segments[0].voice.char_wpm, 34.0, "your CQ");
+        assert_eq!(
+            set.last_turn().segments[1].voice.char_wpm,
+            25.0,
+            "the caller"
+        );
+        let mut settings = run_settings(25.0);
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.effective_wpm_min = 20.0;
+        let mut middle = Runtime::start(1, settings.clamp(), ScriptCalls::new(&["K5XYZ"]));
+        assert_eq!(view(&middle).my_wpm, 22.5);
+        assert_eq!(middle.last_turn().segments[0].voice.char_wpm, 22.5);
+        middle.apply(ContestEvent::Speed { delta: 2 });
+        assert_eq!(
+            view(&middle).my_wpm,
+            25.0,
+            "from 23, the nearest whole speed"
+        );
+        middle.apply(ContestEvent::Speed { delta: -2 });
+        assert_eq!(view(&middle).my_wpm, 23.0);
     }
 
     /// A caller left waiting tries again on its timeout, and gives up when
@@ -7401,6 +7413,46 @@ mod tests {
             work_with_enter(&mut single, call, n as u32);
         }
         assert!(single.turns.iter().all(|turn| yours(turn) != "TU DL1ABC"));
+    }
+
+    /// Your call signs a pile-up's TU as you choose: every QSO's, every
+    /// third's, or none; and the callers call after each TU, signed or not,
+    /// as MorseRunner's do. A single caller's TU never signs. (The Sprint's
+    /// signs every time by its rules, whatever is chosen: its row says so,
+    /// and the choice is not its, `tu_call_chosen`.)
+    #[test]
+    fn your_call_signs_the_tu_as_you_choose() {
+        use crate::contest::TuCall;
+        let tus = |style: RunStyle, choice: TuCall| {
+            let mut settings = run_settings(25.0);
+            settings.contest.contest_style = style;
+            settings.contest.contest_tu_call = choice;
+            settings.contest.my_call = "K1ABC".to_string();
+            settings.band.stations_min = 1;
+            settings.band.stations_max = 1;
+            settings.band.filter_width_hz = crate::settings::FILTER_WIDTH_MAX;
+            let mut runtime = Runtime::start(1, settings.clamp(), ScriptCalls::new(&[]));
+            let mut tus = Vec::new();
+            for n in 0..4u32 {
+                let call = format!("W{}AW", n + 1);
+                work_with_enter(&mut runtime, &call, n);
+                let tu = runtime
+                    .turns
+                    .iter()
+                    .rev()
+                    .find(|turn| yours(turn).starts_with("TU"))
+                    .expect("a TU")
+                    .clone();
+                assert!(!replies(&tu).is_empty(), "{choice:?}: the next one calls");
+                tus.push(yours(&tu).to_string());
+            }
+            tus
+        };
+        let (pileup, single) = (RunStyle::Pileup, RunStyle::Single);
+        assert_eq!(tus(pileup, TuCall::Every), ["TU K1ABC"; 4]);
+        assert_eq!(tus(pileup, TuCall::Third), ["TU", "TU", "TU K1ABC", "TU"]);
+        assert_eq!(tus(pileup, TuCall::Never), ["TU"; 4]);
+        assert_eq!(tus(single, TuCall::Every), ["TU"; 4]);
     }
 
     /// Each caller fades on its own path, from its own point in the band's

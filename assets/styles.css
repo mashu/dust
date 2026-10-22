@@ -1633,19 +1633,27 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .run-reads { font-size: 0.85rem; }
 .reads-bad { color: var(--bad); font-weight: 700; }
 .run-keys { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-/* Narrower than a small button, so the bar's fifteen keys take three rows
-   on a desktop window 640 px wide or more, and no key is left alone on a
+/* Narrower than a small button, so the bar's sixteen keys take three rows
+   on a desktop window 726 px wide or more, and no key is left alone on a
    row. */
 .run-key { padding-left: 0.6rem; padding-right: 0.6rem; gap: 0.35rem; }
 /* Narrower, where every key still shows, rows that wrap at random leave a
-   key alone at one width or another: Enter takes a row of its own, and the
-   other fourteen even columns, two or three, so none is ever alone. */
-@media (max-width: 639px) and (not (any-pointer: coarse)) {
+   key alone at one width or another: Enter takes a row with Space alone,
+   Space in its last column, and the other fourteen even columns, three or
+   four, so none is ever alone. Two columns leave Enter too little room for
+   the call it names, so there Enter and Space take a row each, a space bar,
+   and the fourteen fill seven rows. */
+@media (max-width: 725px) and (not (any-pointer: coarse)) {
   .run:not(.touch) .run-keys {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+    container-type: inline-size;
   }
-  .run:not(.touch) .run-key-enter { grid-column: 1 / -1; }
+  .run:not(.touch) .run-key-enter { grid-column: 1 / -2; }
+  /* Under three columns of 8.5rem and their gaps. */
+  @container (max-width: 26.29rem) {
+    .run:not(.touch) .run-key-enter, .run:not(.touch) .run-key-space { grid-column: 1 / -1; }
+  }
 }
 .run-key kbd {
   padding: 0.05rem 0.3rem;
@@ -1662,6 +1670,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
    next. */
 .run-key-enter { flex: 0 0 13rem; max-width: 100%; min-width: 0; justify-content: flex-start; }
 .run-key-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Space says what it does now, and keeps one width whatever it says, so
+   the keys after it never change rows as an exchange is typed. */
+.run-key-space .run-key-label { flex: none; width: 4.8em; text-align: left; }
 .run-key.btn-primary kbd { border-color: currentColor; background: transparent; color: inherit; }
 /* The keys Enter would press now, lit as MorseRunner lights them: Enter
    is a shortcut for them, and they say what it sends. */

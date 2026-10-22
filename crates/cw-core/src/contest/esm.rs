@@ -227,6 +227,39 @@ impl Esm {
     pub fn logs(&self) -> bool {
         self.message.contains(&MessagePart::Tu)
     }
+
+    /// The hint and its rest, where `space_back` says whether Space would
+    /// take the cursor back to the call now ([`space_to_call`], from the
+    /// Exchange field). With a correction to put right, a wider screen then
+    /// says Space goes back, as Enter's own `Fix call` does; a phone's line
+    /// keeps the hint, which names the Enter key it has, lit. Elsewhere the
+    /// hint is the same either way.
+    pub fn hint_for(&self, space_back: bool) -> (String, String) {
+        if self.corrected && space_back {
+            fit(CORRECTED.to_string(), SPACE_BACK)
+        } else {
+            (self.hint.clone(), self.hint_more.clone())
+        }
+    }
+}
+
+/// What the hint says once the station corrected you.
+const CORRECTED: &str = "They corrected you: fix the call, then Enter";
+/// What a wider screen says after it where Space goes back to the call.
+const SPACE_BACK: &str = ". Space goes back to it";
+
+/// Whether Space in the Exchange field takes the cursor back to Call
+/// rather than typing a space, as MorseRunner's and N1MM's space bar
+/// toggles between the two fields, so going back to fix a call is one key:
+/// always where the exchange has one item to type; where it has more, once
+/// the items typed read whole, or the field is empty or ends in a space
+/// already. Otherwise it types the space that separates the next item, so
+/// no space it types is one the reading would only drop.
+pub fn space_to_call(exch: &str, rules: &ContestRules, side: Side) -> bool {
+    rules.copied(side).len() <= 1
+        || exch.is_empty()
+        || exch.ends_with(char::is_whitespace)
+        || parse_exchange(rules, side, exch).state == ExchangeState::Complete
 }
 
 /// Whether the fields hold a QSO that a key can log without Enter, as TU
@@ -323,7 +356,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
         return Esm {
             message: Vec::new(),
             label: "Fix call".to_string(),
-            hint: "They corrected you: fix the call, then Enter".to_string(),
+            hint: CORRECTED.to_string(),
             hint_more: String::new(),
             focus: Some(EntryField::Call),
             clears: false,
@@ -601,6 +634,101 @@ mod tests {
         // Cleared, they read as they are.
         let fields = Fields::cleared(MonoMs(900));
         assert_eq!(fields.text_at(EntryField::Call, MonoMs(350)), "");
+    }
+
+    /// Space in the Exchange field goes back to Call where the exchange
+    /// has one item to type, in WPX, CQ WW and ARRL DX from either side,
+    /// whatever is typed; where it has more, once what is typed reads
+    /// whole, or is nothing, or ends in a space, and otherwise types the
+    /// space before the next item.
+    #[test]
+    fn space_goes_back_to_the_call_as_each_contest_has_it() {
+        use crate::contest::ContestKind::{ArrlDx, Cqww, FieldDay, SimpleQso, Sprint, Wpx};
+        for (kind, side) in [
+            (Wpx, Side::Dx),
+            (Cqww, Side::Dx),
+            (ArrlDx, Side::Dx),
+            (ArrlDx, Side::WVe),
+        ] {
+            for exch in ["", "2", "214", "5NN 2", "BOB", "14 "] {
+                assert!(space_to_call(exch, kind.rules(), side), "{kind:?} {exch:?}");
+            }
+        }
+        for (kind, partly, whole) in [
+            (Sprint, ["145", "145 BOB", "BOB OR", "145 3X"], "145 BOB OR"),
+            (FieldDay, ["1D", "EMA", "1D 3X", "2"], "1D EMA"),
+            (SimpleQso, ["579", "BOB", "57N", "579 1"], "579 BOB"),
+        ] {
+            let rules = kind.rules();
+            for exch in partly {
+                assert!(!space_to_call(exch, rules, Side::Dx), "{kind:?} {exch:?}");
+                let spaced = format!("{exch} ");
+                assert!(
+                    space_to_call(&spaced, rules, Side::Dx),
+                    "{kind:?} {spaced:?}"
+                );
+            }
+            assert!(
+                space_to_call("", rules, Side::Dx),
+                "{kind:?}: nothing typed"
+            );
+            assert!(
+                space_to_call("  ", rules, Side::Dx),
+                "{kind:?}: spaces alone"
+            );
+            assert!(space_to_call(whole, rules, Side::Dx), "{kind:?} {whole:?}");
+        }
+    }
+
+    /// The station corrected you: where Space would go back to the call,
+    /// a wider screen says so after the hint, which a phone's line keeps
+    /// whole; where it would not, from Call or with an exchange typed
+    /// partly, the hint is as ever, and so it is in any other state.
+    #[test]
+    fn a_correction_says_space_goes_back_where_it_does() {
+        let corrected = QsoState {
+            call_sent: "K5XYZ".into(),
+            exchange_sent: true,
+            corrected: true,
+            ..QsoState::default()
+        };
+        let fields = Fields {
+            call: "K5XYZ".into(),
+            exch: "214".into(),
+            ..Fields::default()
+        };
+        let fix = esm(&corrected, &fields, rules(), Side::Dx);
+        let plain = (
+            "They corrected you: fix the call, then Enter".to_string(),
+            String::new(),
+        );
+        assert_eq!(
+            fix.hint_for(true),
+            (plain.0.clone(), ". Space goes back to it".to_string())
+        );
+        assert!(fix.hint_for(true).0.chars().count() <= HINT_LEN_MAX);
+        assert_eq!(fix.hint_for(false), plain);
+        let other = enter("K5XYZ", true, "K5XYZ", "");
+        for space_back in [false, true] {
+            assert_eq!(
+                other.hint_for(space_back),
+                (other.hint.clone(), other.hint_more.clone())
+            );
+        }
+        // A Sprint's correction, with its exchange copied partly: Space
+        // types the space before the next item, so the hint never says it
+        // goes back.
+        let sprint = ContestKind::Sprint.rules();
+        let fields = Fields {
+            call: "K5XYZ".into(),
+            exch: "145".into(),
+            ..Fields::default()
+        };
+        let fix = esm(&corrected, &fields, sprint, Side::WVe);
+        assert!(fix.corrected);
+        let space_back = space_to_call(&fields.exch, sprint, Side::WVe);
+        assert!(!space_back, "145 wants a name and a state");
+        assert_eq!(fix.hint_for(space_back), plain);
     }
 
     /// Every hint a WPX run gives keeps to one line of a 360 px phone,

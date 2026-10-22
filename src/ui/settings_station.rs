@@ -33,12 +33,12 @@ const ZONE_ENTRY_LABEL: &str = "Your CQ zone";
 /// effect, which runs once the page has the render.
 fn focus_field(label: &'static str) {
     let id = control_id("field", label);
+    let script = crate::ui::widgets::focus_script(&id);
     // Tests have no page to run it on: the harness looks for the field.
     #[cfg(test)]
-    crate::testing::ask_focus(&id);
+    crate::testing::ask_focus(&id, &script);
     #[cfg(not(test))]
     spawn(async move {
-        let script = crate::ui::widgets::focus_script(&id);
         let _ = document::eval(&script).await;
     });
 }

@@ -525,13 +525,16 @@ impl Default for AutoLevelSettings {
 pub enum SettingsSection {
     /// How many groups, how long, how often repeated.
     SessionShape,
-    /// Character and effective speed, and the spacing between words.
+    /// Character and effective speed, and the spacing between words; in a
+    /// contest, your own speed too.
     Speed,
     /// Attack and decay of the keying.
     KeyingEnvelope,
-    /// Which characters are practised, and how far into them you are.
+    /// Which characters are practised, and how far into them you are; in
+    /// a contest, which one, how it runs and how often your TU signs.
     CharacterSet,
-    /// Pitch and level of the station you are copying.
+    /// Pitch and level of the station you are copying; in a contest, how
+    /// loud you hear your own sending.
     ToneAndVolume,
     /// Fading, static, the noise floor, the filter, who else is calling,
     /// and in a contest how the callers operate.
@@ -604,8 +607,9 @@ mod reset;
 mod save;
 
 pub use contest::{
-    CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX, MY_NAME_MAX, MY_POWER_MAX, MY_ZONE_MAX,
-    class_reading, power_reading, section_code, state_code,
+    CONTEST_MINUTES_MAX, ContestSettings, MY_CALL_MAX, MY_NAME_MAX, MY_POWER_MAX,
+    MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN, MY_ZONE_MAX, class_reading,
+    power_reading, section_code, state_code,
 };
 pub use contest_preset::ContestPreset;
 pub(crate) use curriculum::LETTER_LEVEL_CEILING;
@@ -903,6 +907,9 @@ mod tests {
         s.contest.contest_habits = crate::contest::CallerHabits::Rough;
         s.contest.contest_minutes = 9_000;
         s.contest.contest_show_copy = true;
+        s.contest.contest_tu_call = crate::contest::TuCall::Never;
+        s.contest.my_wpm = 9_000;
+        s.contest.my_sending_db = 9_000;
         s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
         s.contest.my_name = " jean-luc maximilian ".to_string();
         s.contest.my_state = " p.q. ".to_string();
@@ -1019,6 +1026,8 @@ mod tests {
         assert_eq!(s.contest.my_power, "100");
         assert_eq!(s.contest.my_class, "3A");
         assert_eq!(s.contest.my_section, "");
+        assert_eq!(s.contest.my_wpm, MY_WPM_MAX);
+        assert_eq!(s.contest.my_sending_db, MY_SENDING_MAX_DB);
 
         // The strengths have tops as well as bottoms, the ones the settings
         // screen offers.
@@ -1508,6 +1517,9 @@ mod tests {
         s.contest.contest_habits = crate::contest::CallerHabits::Real;
         s.contest.contest_minutes = 25;
         s.contest.contest_show_copy = true;
+        s.contest.contest_tu_call = crate::contest::TuCall::Every;
+        s.contest.my_wpm = 34;
+        s.contest.my_sending_db = -21;
         s.contest.my_call = "DL1ABC".to_string();
         s.contest.my_name = "MAT".to_string();
         s.contest.my_state = "MA".to_string();
@@ -1586,6 +1598,50 @@ mod tests {
         }
     }
 
+    /// Your speed is the Speed card's, your sending Tone and volume's, and
+    /// your call in TU the contest card's, the Character set's: each
+    /// card's reset puts its own back, and no other's touches it.
+    #[test]
+    fn your_speed_sending_and_tu_call_belong_to_their_cards() {
+        for section in SettingsSection::ALL {
+            let mut s = wildly_different();
+            s.reset_section(section);
+            assert_eq!(
+                s.contest.my_wpm == 0,
+                section == SettingsSection::Speed,
+                "{section:?}"
+            );
+            assert_eq!(
+                s.contest.my_sending_db == -9,
+                section == SettingsSection::ToneAndVolume,
+                "{section:?}"
+            );
+            assert_eq!(
+                s.contest.contest_tu_call == crate::contest::TuCall::Third,
+                section == SettingsSection::CharacterSet,
+                "{section:?}"
+            );
+        }
+    }
+
+    /// Your speed is a speed of your own inside the Speed card's bounds, or
+    /// none; your sending runs from silent to the loudest.
+    #[test]
+    fn clamping_keeps_your_speed_and_sending_in_their_ranges() {
+        let clamped = |wpm: u32, db: i32| {
+            let mut s = TrainingSettings::default();
+            s.contest.my_wpm = wpm;
+            s.contest.my_sending_db = db;
+            let s = s.clamp();
+            (s.contest.my_wpm, s.contest.my_sending_db)
+        };
+        assert_eq!(clamped(0, -9), (0, -9), "no speed of your own");
+        assert_eq!(clamped(1, -61), (MY_WPM_MIN, -60));
+        assert_eq!(clamped(33, -60), (33, -60));
+        assert_eq!(clamped(81, 1), (MY_WPM_MAX, 0));
+        assert_eq!(clamped(u32::MAX, i32::MIN), (80, -60));
+    }
+
     #[test]
     fn contest_settings_default_to_ten_minutes_of_wpx_with_no_call() {
         let s = TrainingSettings::default();
@@ -1598,6 +1654,9 @@ mod tests {
         assert_eq!(json["contestHabits"], "easy");
         assert_eq!(json["contestMinutes"], 10);
         assert_eq!(json["contestShowCopy"], false);
+        assert_eq!(json["contestTuCall"], "third");
+        assert_eq!(json["myWpm"], 0);
+        assert_eq!(json["mySendingDb"], -9);
         assert_eq!(json["myCall"], "");
         assert_eq!(json["myName"], "");
         assert_eq!(json["myState"], "");

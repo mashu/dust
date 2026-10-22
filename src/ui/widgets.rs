@@ -74,6 +74,18 @@ input.focus({{ preventScroll: true }});"#
     )
 }
 
+/// The script that gives the input called `id` the focus, unless it has it,
+/// with the cursor at the end of what it holds and nothing selected: a run's
+/// field taken back to finish or put right.
+pub fn focus_end_script(id: &str) -> String {
+    format!(
+        r#"{}
+const end = input.value.length;
+input.setSelectionRange(end, end);"#,
+        focus_script(id)
+    )
+}
+
 /// A button that leaves the cursor where it is: a click would otherwise take
 /// it from the box being typed in, so that the letters typed next went
 /// nowhere and Enter pressed the button again.
@@ -866,8 +878,8 @@ mod tests {
     use dioxus::prelude::*;
 
     use super::{
-        NumberField, control_id, focus_script, html_bool, nudge, parse_number_input, pct_between,
-        pretty_number,
+        NumberField, control_id, focus_end_script, focus_script, html_bool, nudge,
+        parse_number_input, pct_between, pretty_number,
     };
     use crate::testing::Ui;
 
@@ -887,6 +899,21 @@ mod tests {
             .find("input.focus({ preventScroll: true })")
             .expect("the input takes the focus where it is");
         assert!(has < focus, "{script}");
+    }
+
+    /// A run's field takes the focus the same way, then has the cursor put
+    /// at the end of what it holds, nothing selected: once it has the
+    /// focus, and never in a field that had it already.
+    #[test]
+    fn a_runs_field_takes_the_focus_at_its_end() {
+        let script = focus_end_script("field-call");
+        assert!(script.starts_with(&focus_script("field-call")), "{script}");
+        let focus = script.find("input.focus(").expect("focused");
+        let end = script
+            .find("input.setSelectionRange(end, end)")
+            .expect("the cursor at the end, nothing selected");
+        assert!(focus < end, "{script}");
+        assert!(script.contains("const end = input.value.length;"));
     }
 
     /// A number field whose unit can be changed under it, which redraws it

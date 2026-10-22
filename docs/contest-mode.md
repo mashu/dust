@@ -103,7 +103,15 @@ A browser test of group training on a 360×640 phone followed, which found
 the keypad's last row ending 16 px under the screen's foot, on the main
 branch too: the run's rule for phones under 760 px tall is a session's as
 well now, its groups drawn closer with its cards, and a long group
-answered keeps to its slot (§7).
+answered keeps to its slot (§7). Feedback from a contester running
+pile-ups at 235 QSOs an hour on the published app followed, decided with
+the user on 2026-10-22 (§15.2): Space in the Exchange field goes back to
+Call, as MorseRunner's and N1MM's space bar does, but where it separates
+the items of a longer exchange (§4.5); your sending has a volume of its
+own, from off to the loudest, on the Tone and volume card (§5.3, §8); your
+speed is a setting of its own, kept from run to run as − and + leave it,
+the callers' speeds staying the Speed card's (§6.6, §8); and how often
+your TU signs with your call in a pile-up is yours to choose (§3, §8).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -347,7 +355,12 @@ as `5NN` (`Station.pas:529`), prefilled 599 and never checked, as loggers
 do, except in Simple QSO; in pile-ups TU becomes `TU <your call>` every
 third QSO, as in MRCE's Pile-Up and WPX modes (`Contest.pas:468-474`), in
 a contest whose TU works as a CQ (not Simple QSO, whose TU greets the
-station by name and brings nobody); and
+station by name and brings nobody), and as built after operator feedback
+(2026-10-22) every QSO or never if you choose (`contestTuCall`, §8), as
+MRCE's station ID rate is a setting (`StationIdRate`, `Ini.pas:259`); the
+callers call after your TU whether it signs or not, as MRCE's do
+(`Contest.pas:1000-1005` brings them on any TU), so a pile-up that never
+hears your call goes on as ever; and
 you type into two fields, Call and Exchange, as
 in the screenshot, with exchange items in any order and a later item of a
 kind replacing an earlier one (11.7).
@@ -430,7 +443,9 @@ North American Sprint.
   callsign tier 3 up. Your TU signs with your call every time, so a
   pile-up's every third TU adds nothing to it; their exchange has no word
   before it (`their_lead` empty), the caller's call having gone out when
-  it called. A station with no place sends `DX`. The card's pill comes
+  it called; the choice of your call in TU is not the Sprint's
+  (`ContestRules::tu_call_chosen`). A station with no place sends `DX`.
+  The card's pill comes
   first, as the card lists the contests (`ContestKind::shipped` keeps
   that order), and a line under "You send" states the simplifications.
   The dialogue's caller is `W7XYZ`, as the state it sends is Oregon.
@@ -571,7 +586,8 @@ so a seed and an event list give one run. Its state:
   (`timing/station.rs:6-11`), pitch, level, fade offset, skill 1–3,
   patience, and MRCE's state (`DxOper.pas:17-88`): `NeedQso`, `NeedNr`,
   `NeedCall`, `NeedCallNr`, `NeedEnd`, `Done`, `Gone`;
-- the log, your next serial, the run's speed offset, one id counter.
+- the log, your next serial, your speed (as built after operator
+  feedback, §6.6; it was the run's speed offset), one id counter.
 
 ```rust
 pub enum ContestEvent {
@@ -616,7 +632,7 @@ The machine needs the fields only at a key press. The runtime maps
 | Paused | Resume | clock resumes; run end re-armed with the time left; a 1 s resume timer → Running |
 | Running | the resume timer | callers the pause or failure cut short send again, as the rows above say; the others wait for you afresh, as after a turn, so what was heard whole comes again only on a timeout or at your asking: a pause is no free `?`. A key that sends forgets the timer; one that sends nothing (Wipe, Shift+Enter, Esc with nothing on the air) leaves it to bring the callers back |
 | Running | run-end timer, or the limit passed on any event but TurnStarted (a look at the clock, which stamps nothing, 6.3) | → Finished. While the turn on the air may be retrying its sound (an attempt after the first has started, or the one playing is past its length and 2 s), only what keeps its reading ends the run (its end, a key, End run): its failure gives the retries back (5.2), and the run end waits until its last attempt would have failed |
-| live | Speed{±2} | the offset moves for your next message and later callers |
+| live | Speed{±2} | your speed moves, from the whole speed nearest it, for your next message; the callers' stay the Speed card's (as built after operator feedback, §6.6) |
 | live | FinishNow | → Finished |
 | any | Abort | `StopAudio`, `AbortToHome` → Aborted |
 
@@ -964,7 +980,7 @@ key that sends nothing reads no other caller's call into it (9.1).
 | CQ | F1 | `CQ` | 1 |
 | Again: `?` (4.6) | F7 | `? Again` | 1 |
 | Stop sending; wipe the fields | Esc or Alt+S; Alt+W | —; `Wipe` | 1 |
-| Next field | Space in Call; Tab as on any page | `␣ Field`, or a tap | 1 |
+| Call ⇄ Exchange | Space: on to Exchange from Call, back to Call from Exchange (as built after operator feedback, below); Tab as on any page | `␣ Field`, or a tap | 1 |
 | Speed ±2 WPM; pause; end run | PgUp/PgDn; Alt+P; Alt+E | − / +; `Pause`; `End run` | 1 |
 | Your exchange; TU without logging (as MRCE) | F2; F3 | — | 1d |
 | His call; his call + exchange | F5; `;` (Insert also works) | — | 1d |
@@ -990,20 +1006,30 @@ key that sends nothing reads no other caller's call into it (9.1).
 - Every key has a button. The key bar's "Enter · TU & log" chip names what
   Enter sends, and F3 reads "F3 TU (no log)". After Enter come F1 CQ, F2
   Exch, F3 TU (no log), F5 His, F7 ? Again, `;` His + exch, `.` TU & log,
-  Shift+Enter Log, Alt+W Wipe and Esc Stop. The buttons Enter would press
-  now are lit (its CQ is F1's, their call F5's, your exchange F2's, `?`
-  F7's, its TU `.`'s), and `.` and Shift+Enter wait, disabled, until the
-  call is whole and the exchange complete (`loggable`). On a desktop
-  window 760 px wide or more the bar took two rows, Enter to F5 and F7 to
-  Esc; with F4 My call, F6 B4, F8 NIL and F12 NR? (2a) it takes three,
-  Enter to F4, F5 to `.`, and Shift+Enter to Esc, and three from 640 px,
-  none alone on a row; narrower, Enter takes a row of its own and the
-  other keys two or three even columns. F12 names the contest's own word
-  for its query: `AGN` in Simple QSO, whose exchange has no number. While
-  the call typed was logged clean, B4 is offered in the B4 tag's copper
-  wash, not lit, for Enter never sends it. Where a finger types, only CQ,
-  ? Again and Wipe stay beside the keypad, and B4 on a dupe, at the row's
-  end, so the keys a finger knows never move.
+  Shift+Enter Log, Alt+W Wipe and Esc Stop; as built after operator
+  feedback, Space comes straight after Enter (below). The buttons Enter
+  would press now are lit (its CQ is F1's, their call F5's, your exchange
+  F2's, `?` F7's, its TU `.`'s), and `.` and Shift+Enter wait, disabled,
+  until the call is whole and the exchange complete (`loggable`). On a
+  desktop window 760 px wide or more the bar took two rows, Enter to F5
+  and F7 to Esc; with F4 My call, F6 B4, F8 NIL and F12 NR? (2a) it takes
+  three, Enter to F4, F5 to `.`, and Shift+Enter to Esc, and three from
+  640 px, none alone on a row; narrower, Enter takes a row of its own and
+  the other keys two or three even columns. With Space after Enter
+  (operator feedback) it takes three rows from 726 px, none alone: Enter
+  to F3, F4 to `;`, and `.` to Esc. Narrower it is a grid: Enter spans
+  every column but the last, Space in it, and the other fourteen keys fill
+  three or four even columns (four from about 622 px, three from about
+  480 px); under three columns, where Enter would have too little room
+  for the call it names, Enter and Space take a row each, Space as a space
+  bar, and the fourteen fill seven rows of two (a container query on the
+  bar's width). The 16th key left Esc alone on a fourth row from 640 to
+  about 724 px until the grid took that band too. F12 names the contest's
+  own word for its query: `AGN` in Simple QSO, whose exchange has no
+  number. While the call typed was logged clean, B4 is offered in the B4
+  tag's copper wash, not lit, for Enter never sends it. Where a finger
+  types, only CQ, ? Again and Wipe stay beside the keypad, and B4 on a
+  dupe, at the row's end, so the keys a finger knows never move.
 - `;` `.` `,` `+` are known by the character they type, Shift held or not
   (`+` takes Shift on many a keyboard, `;` on others), and never typed into
   a field, as in MorseRunner; one typed by a paddle key (`+` sits on `]` in
@@ -1012,6 +1038,42 @@ key that sends nothing reads no other caller's call into it (9.1).
   With the Command key, which the listener passes by, it is Enter still.
 - Paddles key into the focused field (`paddle.rs:287-299`) and never
   transmit; phase 5 adds a field space after a 7-dit gap.
+- **Space** (as built after operator feedback, 2026-10-22) toggles between
+  the fields as MorseRunner's and N1MM's space bar does, so going back to
+  fix a call is one key. In Call it moves on to Exchange, as a call has no
+  spaces. In Exchange it goes back to Call where the contest's exchange has
+  one item to type (WPX, CQ WW, ARRL DX from either side), whatever is
+  typed; where it has more (the Sprint's NR NAME ST, Field Day's class and
+  section, Simple QSO's report and name, which §11.7's parser reads from
+  one field), once the items typed read whole (E Complete), or the field
+  is empty or already ends in a space; otherwise it types the space before
+  the next item (`space_to_call`, `contest/esm.rs`), so no space it types
+  is one the reading would drop. Moving, it types nothing, and the cursor
+  lands at the end of the field it goes to with nothing selected, so ⌫
+  takes the call's last character at once; every move of the run's cursor
+  does so (`focus_end_script`, `src/ui/widgets.rs`), and the app's tests
+  see the script that moved it. The keypad's `␣ Field` follows the same
+  rule, from one place (`space_goes_to`, `src/ui/contest.rs`), as the key
+  bar's Space and the hint do. The key bar shows Space on a keyboard,
+  desk-only, straight after Enter's chip, saying what it does now: "→
+  Call" from Exchange where it goes back, "→ Exch" from Call, named as a
+  place so it never reads as a message key beside F2 Exch, and "Next
+  item" where it types the space before the exchange's next item; its
+  `aria-label` says the same in words, and it keeps one width whatever it
+  says, so no key changes rows as an exchange is typed. It is lit, as
+  Enter's own keys are, where it takes the cursor back to a call to put
+  right, as Enter's `Fix call` does; a click does what the key does, the
+  move or the space. With the station's correction to put right, the hint
+  reads "They corrected you: fix the call, then Enter", which a phone's
+  line holds whole, naming the Enter key it has, lit as `Fix call ↵`; where
+  Space would go back to the call, a wider screen adds ". Space goes back
+  to it" (`Esm::hint_for`). The cursor is in Exchange after your exchange
+  went out with the call, which is when a correction comes, but a
+  Sprint's or Field Day's correction can carry the exchange, part of which
+  you may have typed: there Space types the space, and neither the hint
+  nor the key says it goes back. Tab and Shift+Tab move as on any page.
+  Before, Space in Exchange typed a space, which the user found confusing
+  beside MorseRunner.
 
 ### 4.6 "Repeat their call on demand"
 
@@ -1291,6 +1353,49 @@ spacing and no fist variation.
     `plan.others` sounding at once (5.6). The silent player and the
     recorder are unchanged; the recorder
     keeps each plan, `dry_wanted` with it.
+- **Your sending** (as built after operator feedback, 2026-10-22). Against
+  weak callers the fixed level was painfully loud, the user said, and
+  being able to turn your own sidetone down mattered most of the four
+  changes. `MONITOR_LEVEL` is now the loudest your message plays, your
+  sending at 0 dB; "Your sending" on the Tone and volume card
+  (`mySendingDb`, §8) turns it down in decibels, as MorseRunner's
+  self-monitor level is set (`MonLevel`, -60 to 0 dB, saved as
+  `SelfMonVolume`, `Ini.pas:282, 461, 556`), to off at -60 dB.
+  `plan_turn` plans your tones at `ContestSettings::sending_level()`, so
+  both players play it as they played the monitor's level, the native
+  mixer's dry sample and the web player's dry gain into `floor_in`, and
+  the recorder keeps it with each plan: nothing in the players changed.
+  Off, `wanted` has no tones of yours and lasts as long as ever, so the
+  send, `PlaybackWait`, the turn's segments, the air line and the heard
+  timer keep their time. It starts at -9 dB. By the figures above the
+  loudest stands about 6 dB over an average caller before the AGC (4.4 dB
+  over the loudest caller, and the U-shaped strength's middle, 0.85 of the
+  volume range's top, is 1.4 dB under that), and the AGC ducks that caller
+  3.5 to 5 dB more (`band/agc.rs`), so a caller is heard about 10 dB under
+  it; at -9 dB your message is level with an average caller as you hear
+  it, a decibel over, as a rig's sidetone set to the receiver's audio is,
+  and still some 16 dB over the default band's noise through the default
+  filter (2 dB over the hardest noise, which the loudest caller clears by
+  7 dB before the AGC). Hear a QSO plays your message at it too.
+- **The paddles' sidetone** does not follow it. In a run the paddles key
+  letters into the fields and never transmit (§4.5), so their sidetone is
+  the sound of typing into the log, not your sending; it plays at the
+  Tone and volume card's volume floor in every mode, never under 0.15
+  (`live_tone`, `player.rs`), and a setting of Contest mode's would make
+  the same paddle sound different in another mode. Following it would
+  also cost keying its sidetone: with your sending off the paddles would
+  key in silence, and few can send without hearing it. The cost of
+  leaving it is a level gap: at the default volume floor (0.7) the
+  paddles sound about 12 dB over your messages at -9 dB (0.18 of full
+  scale) and about 9 dB over an average caller before the AGC (0.25), and
+  the only way to turn them down is the volume floor, which moves the
+  callers' strengths too. A contester who keys the log with paddles hears
+  that gap; one who types, as at 235 QSOs an hour, does not. Left as it
+  is, it is a question for the user (§15.1): the choice would be to cap
+  the paddles' sidetone in a run at your sending's level, with a floor
+  that keeps it heard. Should keying with the paddles transmit one day
+  (§14, later), their sidetone in a run would be your sending, and should
+  follow it then.
 
 The turn plays from a copy of the run settings with `qsb_enabled = false`:
 QSB is attached per send (`Qsb::of`, `audio/native.rs:244`) and `BandKey`
@@ -1501,14 +1606,28 @@ flight, which Dust's "a logged QSO is final" rule covers.
 - **Rate:** QSOs per hour over the last 5 minutes of run time, as MRCE's
   `ShowRate` (`Log.pas:1133-1147`), shown after the first minute; Simple QSO
   shows minutes per QSO.
-- **Speed.** Callers' speeds are drawn from the Speed card's ranges plus the
-  run offset, through `resolve_station` (`timing/station.rs:33-47`). You
-  send at the middle of the shifted character range. − / + moves the offset
-  by 2 WPM, MRCE's step (`Ini.pas:238`), within the Speed card's bounds, for
-  your next message and callers who arrive later; callers already calling
-  keep their speed (`DxOper.pas:235-262`), but for slowing down for you
-  (QRS, 4.3). The offset lasts for the run and
-  is not saved.
+- **Speed.** Callers' speeds are drawn from the Speed card's ranges,
+  through `resolve_station` (`timing/station.rs:33-47`). As built after
+  operator feedback (2026-10-22), you send at your speed, "Your speed" on
+  the Speed card in Contest mode (`myWpm`, §8), a setting of its own as
+  MorseRunner's `Wpm` is (`Ini.pas:237`, saved); until you set one (0) you
+  send at the middle of the callers' character range, as before, so
+  nothing changed until it is set. − / + moves it by 2 WPM, MRCE's step
+  (`Ini.pas:238`), from the whole speed nearest it, within the Speed
+  card's bounds (5–80 WPM), for your next message; the run bar and the
+  Speed card round it the same way, half away from zero, so a middle of
+  16.5 reads 17 on both and a press moves what is shown by 2. It is kept: the
+  run writes it to the settings as it moves, stored once the run screen
+  is left, as nothing is stored while a run is on, so the next run sends
+  at it. The callers keep the Speed card's speeds, those already calling
+  (`DxOper.pas:235-262`) and those who arrive later alike, but for slowing
+  down for you (QRS, 4.3). − / + used to shift later callers too, for the
+  run only; with your speed kept from run to run, a shift of theirs that
+  lasted only the run would leave your speed kept and theirs put back, or
+  need the card's ranges rewritten mid-run. MorseRunner's callers follow
+  your speed (`DxOper.pas:235-250`), as they have no range of their own.
+  The stored run's `my_wpm` is the mean of the speeds your messages went
+  out at, what you sent.
 
 ## 7. Screen layout
 
@@ -1537,9 +1656,9 @@ in place of `current/total`.
 │ │ K5XYZ▌                   │  │ 214                           │  │
 │ └──────────────────────────┘  └───────────────────────────────┘  │
 │ Reads as: NR 214                                                 │
-│ [Enter · TU & log] [F1 CQ] [F2 Exch] [F3 TU (no log)] [F5 His]   │
-│ [F7 ? Again] [; His + exch] [. TU & log] [Shift+Enter Log]       │
-│ [Alt+W Wipe] [Esc Stop]                                          │
+│ [Enter · TU & log] [Space → Exch] [F1 CQ] [F2 Exch]              │
+│ [F3 TU (no log)] [F5 His] [F7 ? Again] [; His + exch]            │
+│ [. TU & log] [Shift+Enter Log] [Alt+W Wipe] [Esc Stop]           │
 ├──────────────────────────────────────────────────────────────────┤
 │ Log                                              9 QSOs · 8 clean│
 │  9  07:31  W6XYZ     214        24 WPM          clean            │
@@ -1561,7 +1680,10 @@ in place of `current/total`.
   heard and no station on the frequency would take, from `heard_gone`, and
   once nobody calls, "The station has gone: Enter calls CQ" for a partial
   or a slip sent to nobody that fits a station gone, from
-  `sent_fits_gone`), one line, as
+  `sent_fits_gone`; as built after operator feedback, with the station's
+  correction to put right, "They corrected you: fix the call, then
+  Enter", and ". Space goes back to it" after it on a wider screen where
+  Space would go back, `Esm::hint_for`, §4.5), one line, as
   group training's (`training.rs:566-585`), and in its type. The hints are
   short enough for a phone's line ("Copy their number, then TU & log").
   Before the first CQ it says the seconds to it ("Your first CQ goes out in
@@ -1681,7 +1803,8 @@ The desktop log's exchange column holds a Sprint's serial, name and state.
 The keypad takes its rows as props, not the constants at
 `training.rs:353-357`: the character
 rows stay as in group training, only `,` and `.` leave row four, and the
-last row is `␣ Field` (Call to Exchange; a space in Exchange) and the ESM
+last row is `␣ Field` (Space's rule, §4.5: Call to Exchange, and back
+to Call from Exchange but where it separates an item) and the ESM
 key, whose label and `aria-label` name what it sends, cut short before its
 `↵` when long. Fields keep `inputmode="none"` (`training.rs:205`); a tapped
 field takes focus and the paddles.
@@ -1793,7 +1916,7 @@ fist variation.
 
 | Setting | In Contest |
 |---|---|
-| Character and effective speed ranges | the callers' speeds; you send at the middle; −/+ shifts both for the run |
+| Character and effective speed ranges | the callers' speeds; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
 | `callsignLevel` | the callers' call shapes, shared with Callsigns mode |
 | `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept |
 | `pileupSpreadHz` | Pile-up only: how far either side of the centre callers land; hidden for Single, where it does nothing |
@@ -1845,7 +1968,10 @@ and a band that fades deep and crackles. As built (4a), First QSO's
 callers send plain numbers (easy), Club's numbers as contesters send
 them (real), and Contester's add careless operators and QRM (rough), the
 hardest preset taking the hardest habits. You send at the middle of the
-speed range, and callers space at the speed they key, as contest callers
+speed range: as built after operator feedback, each preset puts your speed
+back there (`myWpm` 0), so settings a preset left before your speed was a
+setting are on it still, and a speed of your own afterwards reads Custom.
+Callers space at the speed they key, as contest callers
 do: the character range is written, and with the speeds tied the spacing
 follows it; with Farnsworth spacing set, the same range goes in the
 spacing's range too (the switch is left as it is), and a spacing changed
@@ -1871,6 +1997,9 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `myPower` | String | `100` | 1..=1500 (leading zeros dropped), `K`, `KW` or `1K` as written; else `100` | Station | 3 |
 | `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 (as built, 4a) |
 | `contestShowCopy` | bool | false | — | Session shape | 4 (as built, 4b) |
+| `contestTuCall` | `every` `third` `never` | `third` | forgiving | Character set | operator feedback |
+| `myWpm` | u32 | 0 | 0 (the callers' middle) or 5..=80; read back, anything but a number is 0 | Speed | operator feedback |
+| `mySendingDb` | i32 | -9 | -60..=0 (-60 is off); read back, anything but a number is -9 | Tone and volume | operator feedback |
 
 - **Caller habits.** `easy`: plain digits, no LIDs. `real`: numbers as
   MRCE's callers send them (11.6). `rough`: LIDs and on-frequency QRM. As
@@ -1899,6 +2028,45 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   anything but true or false (a save edited by hand) is off and costs the
   rest of the save nothing; its card's reset turns it off; `clamp()` has
   nothing to bound, as for the habits; no preset touches it.
+- **Your call in TU** (as built after operator feedback, 2026-10-22). On
+  the contest card under the run style, in a pile-up only and only where
+  the contest's TU leaves it to you (`ContestRules::tu_call_chosen`: WPX,
+  CQ WW, ARRL DX and Field Day; not the Sprint, whose TU always signs by
+  its rules, nor Simple QSO, whose TU greets the station by name and
+  brings nobody): "Your call in TU", with Every QSO, Every third and
+  Never, and a line saying what each does. The card's example QSO, your
+  first, signs its TU as that QSO would: "TU DL1ABC" with Every QSO, and
+  plain "TU" otherwise (`ContestRules::tu_adds_call`, which the run's TU
+  follows too, through `Fill::tu_signed`). A single caller's TU never
+  signs, as MorseRunner's single calls never ID (its station ID is for its
+  Pile-Up and WPX modes, `Contest.pas:471`), so the control is not shown
+  for one and keeps its value meanwhile. Read back, a name this build does
+  not know is every third; its card's reset puts every third back; no
+  preset touches it.
+- **Your speed** (as built after operator feedback). On the Speed card in
+  Contest mode, after the callers' ranges: "Your speed", in whole WPM,
+  showing the callers' middle until you set one, rounded as the run bar
+  shows it (16.5 reads 17), with a line saying so and that the run
+  screen's − and + move it and it is kept for the next run; once set, a
+  line saying it is yours from run to run, and "Send at the callers'
+  middle", which puts it back to 0. It reads its own values
+  (`TrainingSettings::my_wpm`), so the card never redraws for them. The
+  card's note reads "The callers' speeds, Farnsworth spacing, and yours"
+  in Contest mode, and its line under the ranges "Callers come at speeds
+  drawn from these ranges." Read back, a number is kept for the clamp to
+  bound and anything else is 0. The card's reset puts it back to 0, and so
+  does a preset (above).
+- **Your sending** (as built after operator feedback). On the Tone and
+  volume card, where the volume range lives, in Contest mode only, after
+  the volume: a slider "Your sending" in 3 dB steps from Off to 0 dB,
+  reading "−9 dB" in decibels as MorseRunner's self-monitor reads (the
+  card's volume reads a gain, a station's share of full scale; a monitor's
+  level is told from its loudest, as MorseRunner's is), with a short line:
+  "Your own messages in a run, apart from the volume above: 0 dB is the
+  loudest, −9 dB about level with an average caller, and Off silent, the
+  run keeping its time", its −9 dB the default cw-core keeps. Read back, a
+  number is kept for the clamp to bound and anything else is -9 dB. The
+  card's reset puts -9 dB back; no preset touches it.
 - **On disk, Contest is written like a session (9.1):** `"charSetMode":
   "callsign"` plus `"contestActive": true`, a key that exists only on disk
   and that `From<SettingsSave>` reads back as Contest. An older build opens
@@ -2324,7 +2492,7 @@ out of the Callsign series (`belief.rs:134-145`, `stats.rs:420-429`,
 | Mistakes, sampler beliefs | Count, on keyed tokens: K5XYC for K5XYZ is Z→C, `1T5` for `1N5` is N→T. |
 | Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. |
 | Copy span, group-length forecast | Not contest measures, as for Callsigns (`ui/stats.rs:211-245`). |
-| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` is `None` in Contest until phase 5; the card reads "Callers' speeds are drawn evenly from your range, shifted by − / + during a run", its chip "Not adaptive". |
+| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` is `None` in Contest until phase 5; the card reads "Callers' speeds are drawn evenly from your range; − and + move only your own" (as built after operator feedback; it said − / + shifted them during a run), its chip "Not adaptive". |
 | Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form: as built (4b), a whole run with Show copy on is listed after the places on every board that holds it, its place a dashed `—` read as "Not placed", its figures greyed and "· assisted" after them, with a line saying why (`assisted_runs`); it marks nothing on the timeline. As built (4b), the Contest pill shows once the history holds a run, placed or not, with a chip for every contest it holds runs of (`board_modes`, `run_kinds`; the first with a run on the board is chosen until another is), as the Runs card is under it: a board of runs alone offers All modes and Contest. |
 | History (`ui/stats_detail.rs:362-371`) | Every row names its mode (phase 0); a contest row opens its results; a stripped run says "log not kept by an older version". As built (4b), an assisted run says "assisted" after its contest, by its log or its mark, and its results say "Assisted: Show copy was on. The run counts in every stat, and is never placed on the board." |
 | Auto level | Untouched: the contest finish never calls `complete_session` (`auto_level.rs:285-308`). |
@@ -2838,11 +3006,11 @@ whichever is live.
 
 | File | Holds |
 |---|---|
-| `mod.rs` | `ContestKind`, `RunStyle`, `CallerHabits` (forgiving serde), `CallSource` |
-| `rules.rs`, `esm.rs`, `clock.rs` | the `ContestRules` table; `esm()`, `Fields::edit`; `RunClock` |
+| `mod.rs` | `ContestKind`, `RunStyle`, `CallerHabits`, `TuCall` (forgiving serde; `TuCall` from the operator feedback), `CallSource` |
+| `rules.rs`, `esm.rs`, `clock.rs` | the `ContestRules` table, `tu_adds_call` (operator feedback); `esm()`, `Fields::edit`, `space_to_call` (operator feedback); `RunClock` |
 | `machine.rs` | `ContestMachine`, events, effects, `ContestView` |
 | `caller.rs` | caller states, patience, matching, replies, collisions, QRS |
-| `turn.rs` | `Turn`, segments, continuations, `plan_turn`, `MONITOR_LEVEL`, per-caller fades |
+| `turn.rs` | `Turn`, segments, continuations, `plan_turn`, `MONITOR_LEVEL` (your sending's loudest, operator feedback), per-caller fades |
 | `place.rs` | `place_contest_caller`, `filter_capacity` (phase 2); `place_qrm` (4a) |
 | `qrm.rs` | the QRM of rough habits: when a station starts up, what it sends and where in a turn (as built, 4a) |
 | `exchange.rs`, `parse.rs` | canonical forms, cut numbers, keyed tokens; `parse_exchange` |
@@ -2968,10 +3136,11 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   the soak over all six contests. The counted table is checked against
   the script's output with `scripts/contest-data.py --check` (§11.8).
 - **Turns:** `wanted` ends last; no reply is cut; your tones are unfaded,
-  at the monitor's level; your message is dry and the callers are not;
-  callers fade independently and smoothly; a continuation keeps every
-  character of your message; capacity follows reach ÷ 60 Hz + 1; the band
-  makes room for the callers sounding at once.
+  at your sending's level, none with it off and the turn as long; your
+  message is dry and the callers are not; callers fade independently and
+  smoothly; a continuation keeps every character of your message;
+  capacity follows reach ÷ 60 Hz + 1; the band makes room for the callers
+  sounding at once.
 
 **Machine tests** (fixed seeds, a script source):
 
@@ -3147,6 +3316,33 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   unplaced on the board, out of record and form; the Runs card's rows, its
   best of each length and its assisted and unread runs, and the Contest
   pill for a run too short for the board.
+
+- from the operator feedback (2026-10-22): Space in the Exchange field
+  goes back to Call, typing nothing, where the exchange has one item to
+  type (WPX, CQ WW, ARRL DX from either side) whatever is typed, and
+  where it has more (the Sprint, Field Day, Simple QSO) once what is typed
+  reads whole, is nothing or ends in a space, a space typed otherwise; the
+  keypad's `␣ Field` the same; the cursor at the end of the field it goes
+  to, which the app's tests see in the focus script that moved it; with a
+  correction to put right, the hint on a wider screen and the key bar say
+  Space goes back only where it does, not in a Sprint's exchange typed
+  partly, where the key reads Next item and a click types the space as the
+  key does; Space never named like F2; your sending sets your tones'
+  level, the native mixer's dry sample alone,
+  and off leaves no tones and every time as it was, a QSO worked and
+  logged clean; − / + moves your speed alone, from the whole speed nearest
+  it, the callers keeping the Speed card's, the stored run's `my_wpm` what
+  you sent, and the speed kept for the next run and stored once the run is
+  over; − / + moving what the run bar shows by 2 from a middle on a half,
+  shown as the Speed card shows it; your speed set sends at it, unset at
+  the callers' middle, which a preset puts back; your call signs a
+  pile-up's TU every QSO, every third or never as chosen, the callers
+  calling after each, a single caller's never, and the card's example TU
+  as your first QSO's would; the choice is the contest's where its TU
+  leaves it, not the Sprint's or Simple QSO's; the three settings' serde,
+  forgiving, their clamps and their sections; their controls, each on its
+  card in Contest mode only (the TU's in a pile-up only), and their
+  resets.
 
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
@@ -3444,7 +3640,7 @@ keying with the paddles, a contest level, and more contests.
 | Pause | release the audio; Resume claims in the tap | stop the turn only | silence, sleep and the gesture rule at once |
 | Hidden page | visibility, minimise, heartbeat | visibility only | a minimised window is never hidden; native never reports suspended |
 | Time up | ends at once; a started TU is final | a 15 s Closing | a real log does not count an open QSO |
-| Speed offset | for the run only | saved | no third speed setting with a cross-field clamp |
+| Your speed (operator feedback, 2026-10-22; was "Speed offset, for the run only") | a setting of its own, the callers' middle until set, kept as − / + leave it; the callers' speeds the Speed card's | an offset for the run that shifted later callers too | a fast runner keeps the speed it sends at, as MorseRunner's `Wpm`; a shift of the callers lasting only the run would leave your speed kept and theirs put back |
 | ESM on a bad exchange | sends nothing, "Fix exchange" | a `?` | the fault is your typing; MRCE refuses it too (`Main.pas:1210-1216`) |
 | Again | `?`, as MRCE's F7 | `K5X?` | partials go through Enter |
 | Sends | repeats you drew: calls asked for, exchanges any key drew | every re-send | pile-ups and slow typists would pay for waiting; time charges waiting |
@@ -3470,6 +3666,10 @@ keying with the paddles, a contest level, and more contests.
 | A call left in the Call field as the next caller's text shows (4b) | no copy of that caller, a single caller's as a pile-up caller's: an empty copy | the field kept as its copy | the call is another station's (F3's, one gone), and one typed call would be two stations' copy, a mistake no ear made for Letters, Mistakes and the sampler |
 | Pause while paused (4b) | kept in its place, inert | taken out; Resume in its place | End run slid into its place under a finger that taps twice; a second Resume would make a double tap resume |
 | The Runs card (4b) | under the Contest pill on Scores, which shows once a run is kept | a tab or a card of its own | the board's contest and its runs side by side, and no new place to look |
+| Space in Exchange (operator feedback) | back to Call where the exchange has one item to type, or what is typed reads whole, is nothing or ends in a space; else the space before the next item | a space, always | MorseRunner's and N1MM's space bar toggles the fields, so a call is put right with one key; a longer exchange still needs its spaces, and none is typed only to be dropped |
+| Your sending (operator feedback) | a level of its own, off to the loudest in dB, -9 dB to start | a fixed monitor level | painfully loud against weak callers; -9 dB is level with an average caller as heard through the AGC |
+| The paddles' sidetone (operator feedback; for the user to confirm) | the volume floor, in every mode | your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The cost: at the defaults the paddles sound about 12 dB over your messages and 9 dB over an average caller, turned down only with the volume floor, which moves the callers too (§5.3) |
+| Your call in TU (operator feedback) | every QSO, every third or never, in a pile-up, where the contest's TU leaves it; the callers call after every TU | every third, always | MorseRunner's station ID rate is a setting; its callers come on every TU, signed or not, so none waits for your call |
 
 ### 15.2 Decisions taken with the user
 
@@ -3484,12 +3684,50 @@ The user approved every recommended default on 2026-10-20:
    letter.
 5. Contest runs rank within their kind, not by points per character on the
    All board.
-6. The speed offset lasts one run.
+6. The speed offset lasts one run. (Replaced on 2026-10-22 by 11 below:
+   your speed is a setting of its own, kept from run to run.)
 7. Builds older than phase 0 may drop logs but keep runs; the mark and
    backups recover them.
 8. Data licences: asking AD1C about cty.dat facts and W7SST about the
    counted files is for the maintainer to do. Until they answer, the tables
    use facts and rounded counted shares only, as designed (11.8).
+
+Decided with the user on 2026-10-22, from the feedback of a contester
+running pile-ups at 235 QSOs an hour on the published app, which replaces
+the design where it says so:
+
+9. Space in the Exchange field goes back to the Call field, as MorseRunner's
+   and N1MM's space bar toggles them, so going back to fix a call is one
+   key: always where the exchange has one item to type; where it has more,
+   once the items typed read whole, or the field is empty or ends in a
+   space, and otherwise it types the space before the next item. It never
+   types a space only for it to be dropped, and the cursor lands at the end
+   of the call with nothing selected. The keypad's `␣ Field` follows it;
+   the hint (on a wider screen) and the key bar say how to get back where
+   a correction waits and Space does go back, and the key bar names what
+   Space does at every keystroke; Tab moves as on any page (§4.5, §7).
+10. Your sending has a volume of its own, "Your sending" on the Tone and
+    volume card in Contest mode, from off to the old fixed level in dB, as
+    MorseRunner's self-monitor level; it starts at -9 dB, level with an
+    average caller as you hear one, not at the old maximum. Off leaves your
+    messages silent and every time as it was (§5.3, §8). Whether the
+    paddles' sidetone should follow it was not part of the feedback: it
+    keeps the volume floor, and the level gap that leaves is a question
+    for the user (§5.3, §15.1).
+11. Your speed is a setting of its own, "Your speed" on the Speed card in
+    Contest mode, as MorseRunner's `Wpm` is: the middle of the callers'
+    range until you set it, so nothing changes until then; − / + moves it
+    during a run and it is kept for the next run, and presets put it back
+    to the middle of their range. − / + no longer shifts the callers, who
+    keep the Speed card's ranges. The stored run's `my_wpm` records what
+    you sent. This replaces 6 (§6.6, §8).
+12. How often your TU signs with your call is a setting, "Your call in TU"
+    on the contest card: every QSO, every third QSO (the default, as
+    before) or never, in a pile-up, in every contest whose TU does not sign
+    by its own rules (not the Sprint, whose TU always signs, nor Simple
+    QSO, whose TU is its own). A single caller's TU never signs, as before.
+    Callers call after your TU whether it signs or not, as MorseRunner's
+    do, so a pile-up that never hears your call goes on as ever (§3, §8).
 
 ## 16. Risks
 

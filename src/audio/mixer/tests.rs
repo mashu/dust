@@ -274,10 +274,12 @@ fn hear(
 
 /// Your message in a contest is not received, so the receiver's filter
 /// takes none of it: sent a kilohertz off the narrowest filter, which all
-/// but silences it through the receiver, it is heard at the monitor's level.
+/// but silences it through the receiver, it is heard at the monitor's level
+/// with your sending at its loudest.
 #[test]
 fn your_message_is_not_filtered() {
     let mut settings = hiss();
+    settings.contest.my_sending_db = 0;
     settings.band.filter_width_hz = FILTER_WIDTH_MIN;
     let off = settings.side_tone_center() + 1_000.0;
     let mine = segment(&settings, Sender::You, "TTT", keyer(off, 1.0), 0.0);
@@ -296,6 +298,51 @@ fn your_message_is_not_filtered() {
         filtered < 0.1 * MONITOR_LEVEL,
         "through the receiver it peaked at {filtered}"
     );
+}
+
+/// Your sending sets the level your message is heard at, the monitor's
+/// turned down by its decibels, the dry sample and nothing else: the
+/// replies play as they would at any level of it; off, your message is
+/// silence, and the send lasts as long, its reply where it was.
+#[test]
+fn your_sending_sets_the_dry_level_alone() {
+    let mut settings = hiss();
+    let centre = settings.side_tone_center();
+    let mine = segment(&settings, Sender::You, "TTT", keyer(centre, 1.0), 0.0);
+    let reply = segment(
+        &settings,
+        Sender::Caller(0),
+        "K5XYZ",
+        keyer(centre, 1.0),
+        mine.end_sec + 0.2,
+    );
+    let mut loudest_reply = None;
+    for db in [0, -12, -30, cw_core::MY_SENDING_OFF_DB] {
+        settings.contest.my_sending_db = db;
+        let level = settings.contest.sending_level();
+        let yours = planned_turn(&settings, &[&mine]);
+        let heard = f64::from(loudest(&hear(&settings, &yours, None)));
+        if db == cw_core::MY_SENDING_OFF_DB {
+            assert_eq!(heard, 0.0, "off is silence");
+        } else {
+            assert!(
+                (heard - level).abs() < 0.02 * level,
+                "{db} dB: {heard} for {level}"
+            );
+        }
+        let turn = planned_turn(&settings, &[&mine, &reply]);
+        let played = hear(&settings, &turn, None);
+        let sr = f64::from(SR);
+        let from = (reply.start_sec * sr) as usize;
+        let tail = played[from..].to_vec();
+        match &loudest_reply {
+            None => loudest_reply = Some((played.len(), tail)),
+            Some((length, before)) => {
+                assert_eq!(played.len(), *length, "{db} dB: the send's length");
+                assert_eq!(&tail, before, "{db} dB: the reply as ever");
+            }
+        }
+    }
 }
 
 /// The AGC never hears your message, so the weakest reply right after it
@@ -346,7 +393,7 @@ fn your_message_never_ducks_the_reply_after_it() {
 /// Your message joins after the AGC, not under its gain: on a band whose
 /// static, and a caller at full level calling across you, pull the gain
 /// well down, what your message adds to the receiver's output is its own
-/// tones at the monitor's level, sample for sample. Ridden by the gain, it
+/// tones at your sending's level, sample for sample. Ridden by the gain, it
 /// would duck on every crash.
 #[test]
 fn your_message_is_not_ridden_by_the_agc() {

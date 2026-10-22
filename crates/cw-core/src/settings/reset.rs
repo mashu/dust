@@ -46,6 +46,7 @@ impl TrainingSettings {
                 self.playback.adaptive_speed = d.playback.adaptive_speed;
                 self.playback.extra_word_space_multiplier = d.playback.extra_word_space_multiplier;
                 self.playback.fist_variation = d.playback.fist_variation;
+                self.contest.my_wpm = d.contest.my_wpm;
             }
             SettingsSection::KeyingEnvelope => {
                 self.band.steepness = d.band.steepness;
@@ -59,6 +60,7 @@ impl TrainingSettings {
                 self.curriculum.practice_window = d.curriculum.practice_window;
                 self.contest.contest_kind = d.contest.contest_kind;
                 self.contest.contest_style = d.contest.contest_style;
+                self.contest.contest_tu_call = d.contest.contest_tu_call;
             }
             SettingsSection::ToneAndVolume => {
                 self.band.side_tone_min = d.band.side_tone_min;
@@ -66,6 +68,7 @@ impl TrainingSettings {
                 self.band.volume_min = d.band.volume_min;
                 self.band.volume_max = d.band.volume_max;
                 self.band.link_volume = d.band.link_volume;
+                self.contest.my_sending_db = d.contest.my_sending_db;
             }
             SettingsSection::BandConditions => {
                 self.band.qsb_enabled = d.band.qsb_enabled;
