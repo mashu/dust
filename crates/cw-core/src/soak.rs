@@ -1366,8 +1366,8 @@ fn soak_contest_runs(style: RunStyle) {
         assert_eq!(listed.len(), view.log.len(), "seed {seed}");
         for (row, qso) in view.log.iter().zip(listed) {
             assert_eq!(
-                (&qso.call, qso.at_ms, qso.asked),
-                (&row.call, row.at_ms, row.asked),
+                (&qso.call, qso.at_ms, qso.wpm, qso.asked),
+                (&row.call, row.at_ms, row.wpm, row.asked),
                 "seed {seed}: QSO {} lists otherwise than it ran",
                 row.n
             );

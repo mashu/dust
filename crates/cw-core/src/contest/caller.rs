@@ -238,8 +238,12 @@ const MORE_PATIENCE: u32 = 2;
 const MORE_PATIENCE_UPTO: u32 = 4;
 
 /// How many of its reply timeouts in a row the station you work sits
-/// through with nothing from you before it leaves, as MorseRunner's Caller
-/// Stays (`DxOper.pas:319-335`).
+/// through with nothing from you before it gives up. Once it has your
+/// exchange, or you sent its call wrong, it leaves then. Still waiting for
+/// your exchange, it stops asking for it but stays, silent, and takes it
+/// whenever it comes, as MorseRunner's station waiting for your number does
+/// once its patience is spent, where only the others are sent away
+/// (`DxOper.pas:319-335`).
 const SILENT_TIMEOUTS: u32 = 3;
 
 /// How long after your message a caller starts to reply, in seconds
@@ -505,6 +509,22 @@ impl Caller {
         self.pileup && self.state == CallerState::NeedQso && self.other_qso
     }
 
+    /// It waits for your exchange and has sat through its silent timeouts
+    /// ([`SILENT_TIMEOUTS`]): it asks no more, and no timeout runs for it,
+    /// but it stays on the frequency and takes your exchange whenever it
+    /// comes, as MorseRunner's station waiting for your number does once its
+    /// patience is spent. Anything of yours it hears brings it back.
+    fn stays_silent(&self) -> bool {
+        self.state == CallerState::NeedNr && self.silent >= SILENT_TIMEOUTS
+    }
+
+    /// Whether a reply timeout runs for it: it is on the frequency, and
+    /// neither waits out your QSO with someone else nor stays silent for
+    /// your exchange.
+    pub(super) fn times_out(&self) -> bool {
+        self.state.active() && !self.waits() && !self.stays_silent()
+    }
+
     /// Whether, once it has your exchange, it sends its own with the call
     /// put right: for a test to pick an operator of each kind.
     #[cfg(test)]
@@ -512,14 +532,16 @@ impl Caller {
         self.fixes_with_exchange
     }
 
-    /// In a pile-up, it was still sending when you keyed over it, heard
-    /// only your message's tail, and finished first: it sends again a
-    /// moment after you, as MorseRunner's callers do on hearing garbage
-    /// (`DxStn.pas:249-253`). A caller takes more patience first, then
-    /// spends a try on it (`DxOper.pas:805-808`), so being keyed over never
-    /// sends it away; the station you work stays, as you are keying.
-    /// Whether it still sends.
-    pub(super) fn keyed_over(&mut self) -> bool {
+    /// It heard only garbage of a message of yours: in a pile-up, the tail
+    /// of one you keyed over it while it was still sending, and it finished
+    /// first; or, in any run, one Esc cut short while it listened. It sends
+    /// again a moment after, as MorseRunner's callers do on hearing garbage
+    /// (`DxStn.pas:249-253`), an aborted send among it (`MyStn.pas:108-116`).
+    /// A caller takes more patience first, then spends a try on it
+    /// (`DxOper.pas:805-808`), so garbage never sends it away; the station
+    /// you work stays, its silent timeouts counted afresh, and sends again
+    /// what it owes. Whether it still sends.
+    pub(super) fn heard_garbage(&mut self) -> bool {
         match self.state {
             CallerState::NeedQso => {
                 let more = (self.patience + MORE_PATIENCE).min(MORE_PATIENCE_UPTO);
@@ -839,17 +861,17 @@ impl Caller {
 
     /// Its reply timeout ran out with nothing from you. Whether it sends
     /// again: a caller tries while its patience lasts, and the station you
-    /// work leaves after [`SILENT_TIMEOUTS`] in a row.
+    /// work gives up after [`SILENT_TIMEOUTS`] in a row.
     pub(super) fn time_out(&mut self) -> bool {
         self.deadline = None;
         self.wait_over();
-        self.state.active()
+        self.times_out()
     }
 
     /// Whether it sends again when its reply timeout runs out, with
     /// `pending` more of its timeouts already sending and not yet heard:
     /// one that would spend its last try, or sit through its last silence,
-    /// leaves instead.
+    /// leaves or falls silent instead.
     pub(super) fn calls_on_time_out(&self, pending: u32) -> bool {
         match self.state {
             CallerState::NeedQso => self.patience > pending + 1,
@@ -860,7 +882,8 @@ impl Caller {
 
     /// What a timeout costs it: a caller spends a try, and calls again, so
     /// a `?` now is for it; the station you work sits through one more
-    /// silence, and leaves after [`SILENT_TIMEOUTS`] in a row.
+    /// silence, and after [`SILENT_TIMEOUTS`] in a row leaves, or, still
+    /// waiting for your exchange, stays silent.
     pub(super) fn wait_over(&mut self) {
         match self.state {
             CallerState::NeedQso => {
@@ -869,7 +892,7 @@ impl Caller {
             }
             state if state.worked() => {
                 self.silent += 1;
-                if self.silent >= SILENT_TIMEOUTS {
+                if self.silent >= SILENT_TIMEOUTS && state != CallerState::NeedNr {
                     self.state = CallerState::Gone;
                 }
             }
@@ -899,6 +922,8 @@ impl Caller {
                 (query.to_string(), Says::Query)
             }
             CallerState::NeedCall | CallerState::NeedCallNr => {
+                // Two words, whichever the form: where the exchange after
+                // it starts ([`exchange_at`]).
                 let correction = if self.de_first {
                     format!("DE {call}")
                 } else {
@@ -1020,6 +1045,13 @@ impl Caller {
     pub(super) fn draw_delay_sec(&mut self) -> f64 {
         self.rng.pick_in_range(REPLY_DELAY_SEC.0, REPLY_DELAY_SEC.1)
     }
+}
+
+/// Where the exchange starts in `text`, a call put right with the
+/// station's exchange after it ([`Says::CorrectionAndExchange`]): after the
+/// two words that put the call right, `DE K5XYZ` or `K5XYZ K5XYZ`.
+pub(super) fn exchange_at(text: &str) -> Option<usize> {
+    text.match_indices(' ').nth(1).map(|(at, _)| at + 1)
 }
 
 /// How much slower a caller of `skill` sends after `incomplete` incomplete
@@ -1510,6 +1542,28 @@ mod tests {
         assert_eq!(caller.state, CallerState::Gone);
     }
 
+    /// A station still waiting for your exchange stops asking for it after
+    /// three silent timeouts in a row, but stays, as MorseRunner's station
+    /// waiting for your number does: no timeout runs for it, and your
+    /// exchange, however late, is taken and answered.
+    #[test]
+    fn a_station_waiting_for_your_exchange_stays_silent_and_takes_it_late() {
+        let mut caller = caller(8);
+        caller.hear(&[call("K5XYZ")], &[]);
+        assert_eq!(caller.state, CallerState::NeedNr);
+        assert!(caller.time_out());
+        assert!(caller.time_out());
+        assert!(!caller.calls_on_time_out(0), "no third ask");
+        assert!(!caller.time_out(), "the third in a row");
+        assert_eq!(caller.state, CallerState::NeedNr, "it stays");
+        assert!(caller.stays_silent() && !caller.times_out());
+        assert!(!caller.time_out(), "and stays silent");
+        let reaction = caller.hear(&[call("K5XYZ"), Exchange], &[]);
+        assert!(reaction.took_exchange && reaction.replies);
+        assert_eq!(caller.state, CallerState::NeedEnd);
+        assert!(caller.times_out());
+    }
+
     /// Your exchange after a partial it answered, in the same message or
     /// the next, is for the caller: it has your exchange and puts its call
     /// right, as MorseRunner's `osNeedCallNr` does. After another call
@@ -1918,6 +1972,8 @@ mod tests {
                 with += 1;
                 assert_eq!(says, Says::CorrectionAndExchange);
                 assert_eq!(fix, format!("{alone} 5NN {serial}"), "the same form");
+                let exchange = exchange_at(&fix).map(|at| &fix[at..]);
+                assert_eq!(exchange, Some(format!("5NN {serial}").as_str()));
                 // Its exchange is out: sent again, it goes without a word
                 // before it.
                 caller.hear(&[call("K5XYZ"), Again], &[]);
@@ -1962,7 +2018,7 @@ mod tests {
         for (before, after) in [(1, 2), (2, 3), (3, 3), (4, 3), (9, 8)] {
             let mut caller = pileup_caller(1, "K5XYZ");
             caller.patience = before;
-            assert!(caller.keyed_over(), "{before}");
+            assert!(caller.heard_garbage(), "{before}");
             assert_eq!(caller.patience, after, "{before}");
             assert_eq!(caller.state, CallerState::NeedQso);
         }

@@ -967,9 +967,13 @@ mod tests {
                 press_key(ctx, OpKey::StopTx);
             });
             h.pump();
-            assert!(view(&h).is_some_and(|view| view.air.is_none()));
+            // Nothing of yours is on the air: at most a caller answering
+            // what it heard of the CQ.
+            let air = view(&h).and_then(|view| view.air);
+            let yours = air.as_ref().map(|air| air.my_text.as_str());
+            assert!(yours.is_none_or(str::is_empty), "{air:?}");
             h.advance(3_000).await;
-            // Callers may call again on their own; your CQ never goes out.
+            // Callers may call again; your CQ never goes out.
             let sent = &h.texts()[before..];
             assert!(sent.iter().all(String::is_empty), "{sent:?}");
         });

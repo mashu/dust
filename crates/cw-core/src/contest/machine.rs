@@ -25,7 +25,7 @@
 
 use std::collections::BTreeSet;
 
-use super::caller::{CallMatch, Caller, CallerState, Likeness, Says, match_call};
+use super::caller::{CallMatch, Caller, CallerState, Likeness, Says, exchange_at, match_call};
 use super::check::{QsoCheck, QsoText, check_qso};
 use super::clock::RunClock;
 use super::data::places::home_country;
@@ -249,7 +249,9 @@ pub struct LogRow {
     pub call: String,
     /// What you logged of its exchange, each field's value.
     pub fields: Vec<(Field, String)>,
-    /// The station's speed, once its check is shown.
+    /// The station's speed, once its check is shown: the slower of what its
+    /// call and its exchange are credited at. None for a QSO that owns no
+    /// groups, a station logged again or one nobody was heard for.
     pub wpm: Option<f64>,
     /// How many repeats you asked for.
     pub asked: u32,
@@ -416,7 +418,9 @@ impl Heard {
         u32::try_from(asks).unwrap_or(u32::MAX)
     }
 
-    /// A send of `says` began to reach you in `voice`.
+    /// A send of `says` began to reach you in `voice`: of a call put right
+    /// with an exchange after it, the call, its exchange noted apart once
+    /// that begins too.
     fn note_voice(&mut self, says: Says, voice: StationVoice) {
         let slowest = |kept: &mut Option<StationVoice>| {
             if kept.is_none_or(|kept| slower(voice, kept)) {
@@ -424,12 +428,10 @@ impl Heard {
             }
         };
         match says {
-            Says::Call | Says::Correction => slowest(&mut self.call_voice),
-            Says::Exchange => slowest(&mut self.exch_voice),
-            Says::CorrectionAndExchange => {
+            Says::Call | Says::Correction | Says::CorrectionAndExchange => {
                 slowest(&mut self.call_voice);
-                slowest(&mut self.exch_voice);
             }
+            Says::Exchange => slowest(&mut self.exch_voice),
             Says::Query | Says::Signoff => {}
         }
     }
@@ -441,6 +443,22 @@ impl Heard {
             self.call_voice.unwrap_or(own),
             self.exch_voice.unwrap_or(own),
         )
+    }
+
+    /// What reached you of it, as `now` has it, kept over this, the
+    /// station as it was before a message Esc took back: Esc takes your
+    /// message back from the callers, not what they sent from you. What it
+    /// took from you, and whether it has its groups, stay as they were.
+    fn keep_heard(&mut self, now: &Self) {
+        self.first = now.first;
+        self.call_begun = now.call_begun;
+        self.call_ends.clone_from(&now.call_ends);
+        self.call_asks.clone_from(&now.call_asks);
+        self.exch_begun = now.exch_begun;
+        self.exch_ends.clone_from(&now.exch_ends);
+        self.exch_asks.clone_from(&now.exch_asks);
+        self.call_voice = now.call_voice;
+        self.exch_voice = now.exch_voice;
     }
 
     /// The repeats of its call and of its exchange you asked for and heard.
@@ -567,10 +585,18 @@ impl Replying {
 }
 
 /// How much of a reply on the air has been counted: nothing yet, its start
-/// (what it is charged, and that it began to reach you), or all of it.
+/// (what it is charged, and that it began to reach you), or all of it. A
+/// call put right with the station's exchange after it has the exchange's
+/// start counted apart, once that reaches you: what you log of the
+/// exchange is a copy only then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Counted {
     Nothing,
+    /// Its call put right has begun to reach you, and the exchange after
+    /// it, from the byte `exchange_from` of its text on, not yet.
+    CallBegun {
+        exchange_from: usize,
+    },
     Begun,
     Whole,
 }
@@ -732,6 +758,8 @@ struct Carried {
 struct Overlapping {
     reply: Replying,
     says: Says,
+    /// How much of it has been counted, its start at least.
+    counted: Counted,
     text: String,
     /// How it was sending: a caller that slowed down for you since goes on
     /// at the speed its send began at.
@@ -918,12 +946,47 @@ impl<S: CallSource> ContestMachine<S> {
     }
 
     /// Enter's QSO is over: nothing sent, taken or corrected, in a run of
-    /// the same style.
+    /// the same style. A call whose station has gone stays one.
     fn end_qso(&mut self) {
         self.qso = QsoState {
             pileup: self.qso.pileup,
+            gone: std::mem::take(&mut self.qso.gone),
             ..QsoState::default()
         };
+    }
+
+    /// Enter's QSO is over, its station `index` gone: every call the Call
+    /// field could still hold for it is one Enter no longer sends, as nobody
+    /// would answer it ([`QsoState::gone`]). Its own call is among them once
+    /// it has reached you, as you may have put the field right since
+    /// without a key: it has left, and its copy is closed, so that tells
+    /// nothing a score could still use. The name the station goes by: its
+    /// own call once it put yours right, as you heard it say; else the call
+    /// you had for it, while that is whole and no partial; else "The
+    /// station".
+    fn station_gone(&mut self, index: usize) -> String {
+        let partial = self.qso.call_sent.contains('?');
+        let corrected = self.qso.corrected;
+        self.end_qso();
+        let station = &self.stations[index];
+        let heard = &station.heard;
+        let own = &station.caller.call.text;
+        let mut gone = vec![heard.typed.clone(), heard.call_sent.clone()];
+        if heard.call_begun {
+            gone.push(own.clone());
+        }
+        gone.retain(|call| !call.is_empty());
+        gone.sort();
+        gone.dedup();
+        let name = if corrected {
+            own.clone()
+        } else if parse_callsign(&heard.typed).is_some() && !partial {
+            heard.typed.clone()
+        } else {
+            "The station".to_string()
+        };
+        self.qso.gone = gone;
+        name
     }
 
     /// Note for Enter whether anyone is calling you or working with you. In
@@ -1374,9 +1437,11 @@ impl<S: CallSource> ContestMachine<S> {
     }
 
     /// Enter starts the QSO afresh: no call sent, no exchange taken,
-    /// nothing corrected; and Esc does not bring back what it read.
+    /// nothing corrected, no station gone; and Esc does not bring back what
+    /// it read.
     fn forget_qso(&mut self) {
         self.end_qso();
+        self.qso.gone.clear();
         if let Some(unheard) = self.air.as_mut().and_then(|air| air.unheard.as_mut()) {
             unheard.qso = None;
         }
@@ -1398,7 +1463,7 @@ impl<S: CallSource> ContestMachine<S> {
                     logs: enter.logs(),
                     focus: enter.focus,
                     message: enter.message,
-                    wipe: false,
+                    wipe: enter.clears,
                 }
             }
             OpKey::Cq => only(MessagePart::Cq),
@@ -1407,10 +1472,16 @@ impl<S: CallSource> ContestMachine<S> {
             OpKey::MyCall => only(MessagePart::MyCall),
             // A dupe calling has not heard its call from you yet: B4 sends
             // the call typed first, as TU and log does, so it knows it is
-            // meant.
+            // meant. So it does when the call went out and the station you
+            // work never took it: a dupe still calling as it went out never
+            // heard it, and would take the B4 alone for the rest of the
+            // pile-up's cue to call again.
             OpKey::B4 => {
+                let taken = self
+                    .qso_station()
+                    .is_some_and(|index| self.stations[index].heard.call_sent == call);
                 let mut message = Vec::new();
-                if whole && call != self.qso.call_sent {
+                if whole && (call != self.qso.call_sent || !taken) {
                     message.push(MessagePart::HisCall(call));
                 }
                 message.push(MessagePart::B4);
@@ -1585,11 +1656,11 @@ impl<S: CallSource> ContestMachine<S> {
         }
         let garbled = self.keyed_over(&carried.callers, &text, &deaf);
         // The station you worked, or one you called in this message, sent
-        // away by what you sent (B4, NIL, or its last try spent), ends the
-        // QSO as its leaving on its timeouts does.
-        let gone = |index: usize| self.stations[index].caller.state == CallerState::Gone;
-        if [worked, self.working].into_iter().flatten().any(gone) {
-            self.end_qso();
+        // away by what you sent (B4, NIL, a CQ before its exchange, or its
+        // last try spent), ends the QSO as its leaving on its timeouts does.
+        let gone = |index: &usize| self.stations[*index].caller.state == CallerState::Gone;
+        if let Some(index) = [self.working, worked].into_iter().flatten().find(gone) {
+            self.station_gone(index);
         }
         if !logs {
             self.thank(worked, &message, fields, true);
@@ -1643,7 +1714,7 @@ impl<S: CallSource> ContestMachine<S> {
             .collect();
         done_first
             .into_iter()
-            .filter(|station| self.stations[*station].caller.keyed_over())
+            .filter(|station| self.stations[*station].caller.heard_garbage())
             .map(Replying::unasked)
             .collect()
     }
@@ -1720,8 +1791,10 @@ impl<S: CallSource> ContestMachine<S> {
     }
 
     /// What Enter reads after `message`: a CQ or TU ends the QSO, as
-    /// logging does; a call is the call last sent, and not corrected yet.
-    /// Whether your exchange was taken is for the callers to say.
+    /// logging does; a call is the call last sent, and not corrected yet,
+    /// and once a call goes out that is none of a gone station's, Enter
+    /// sends that station's calls again. Whether your exchange was taken is
+    /// for the callers to say.
     fn note_sent(&mut self, message: &[MessagePart]) {
         for part in message {
             match part {
@@ -1731,6 +1804,11 @@ impl<S: CallSource> ContestMachine<S> {
                     self.qso.corrected = false;
                     self.qso.call_taken = false;
                     self.qso.thanked.clear();
+                    // Sent again (B4 once more, or F5), the call is still
+                    // that of a station that has gone.
+                    if !self.qso.gone.contains(&call.replace('?', "")) {
+                        self.qso.gone.clear();
+                    }
                 }
                 _ => {}
             }
@@ -1943,7 +2021,7 @@ impl<S: CallSource> ContestMachine<S> {
                 fade: self.fade(caller, run_ms, 0.0),
             });
             replies.push((over.reply, over.says));
-            counted.push(Counted::Begun);
+            counted.push(over.counted);
             busy.push((station, end_sec));
         }
         for replying in replying.into_iter().chain(garbled) {
@@ -2087,7 +2165,7 @@ impl<S: CallSource> ContestMachine<S> {
                 .map(|segment| segment.end_sec)
                 .reduce(f64::max);
             let caller = &mut self.stations[index].caller;
-            if !caller.state.active() || caller.waits() {
+            if !caller.times_out() {
                 continue;
             }
             match sent.or(message_end) {
@@ -2226,6 +2304,7 @@ impl<S: CallSource> ContestMachine<S> {
                     return Some(Overlapping {
                         reply: reply.clone(),
                         says: *says,
+                        counted: *counted,
                         text: segment.text.clone(),
                         voice: segment.voice,
                     });
@@ -2236,9 +2315,18 @@ impl<S: CallSource> ContestMachine<S> {
                 let spans = char_spans(&segment.text, &self.settings, &segment.voice);
                 let at_sec = (run_now - start) as f64 / 1_000.0;
                 let from = sounding_at(&spans, at_sec)?;
+                // An exchange yet to reach you starts as far into what is
+                // left.
+                let counted = match *counted {
+                    Counted::CallBegun { exchange_from } => Counted::CallBegun {
+                        exchange_from: exchange_from.saturating_sub(from),
+                    },
+                    counted => counted,
+                };
                 Some(Overlapping {
                     reply: reply.clone(),
                     says: *says,
+                    counted,
                     text: segment.text[from..].to_string(),
                     voice: segment.voice,
                 })
@@ -2310,15 +2398,9 @@ impl<S: CallSource> ContestMachine<S> {
                     if call && reply.asked && heard.call_begun && heard.first_call.is_none() {
                         heard.call_asks.push(keyed.call.clone());
                     }
-                    // Its exchange, whatever key drew it; but one sent with
-                    // the call put right only when your `?` or `NR?` drew
-                    // it, as a partial or a slip asks for the call alone.
-                    let exchange = match says {
-                        Says::Exchange => true,
-                        Says::CorrectionAndExchange => reply.again,
-                        _ => false,
-                    };
-                    if exchange && heard.exch_begun {
+                    // Its exchange, whatever key drew it; one sent with the
+                    // call put right counts once it begins, below.
+                    if *says == Says::Exchange && heard.exch_begun {
                         heard.exch_asks.push(keyed.exch.clone());
                     }
                 }
@@ -2326,11 +2408,12 @@ impl<S: CallSource> ContestMachine<S> {
                 match says {
                     Says::Call | Says::Correction => heard.call_begun = true,
                     Says::Exchange => heard.exch_begun = true,
-                    // Its call and its exchange: what you log of the
-                    // exchange is a copy.
+                    // Its call, and its exchange once that begins too.
                     Says::CorrectionAndExchange => {
                         heard.call_begun = true;
-                        heard.exch_begun = true;
+                        if let Some(exchange_from) = exchange_at(&segment.text) {
+                            *counted = Counted::CallBegun { exchange_from };
+                        }
                     }
                     Says::Query | Says::Signoff => {}
                 }
@@ -2343,6 +2426,28 @@ impl<S: CallSource> ContestMachine<S> {
                     && heard.call_sent == self.qso.call_sent
                 {
                     self.qso.call_taken = true;
+                }
+            }
+            // The exchange sent with the call put right, once it begins to
+            // reach you: what you log of it is a copy, and it is a repeat
+            // you asked for only when your `?` or `NR?` drew it, as a
+            // partial or a slip asks for the call alone.
+            if let Counted::CallBegun { exchange_from } = *counted {
+                let spans = char_spans(&segment.text, &self.settings, &segment.voice);
+                let from_sec = spans
+                    .iter()
+                    .find(|(at, ..)| *at >= exchange_from)
+                    .map_or(segment.end_sec - segment.start_sec, |(_, from, _)| *from);
+                if upto.is_none_or(|upto| start + whole_ms(from_sec) < upto) {
+                    *counted = Counted::Begun;
+                    if let Some(keyed) = &reply.keyed
+                        && reply.again
+                        && heard.exch_begun
+                    {
+                        heard.exch_asks.push(keyed.exch.clone());
+                    }
+                    heard.note_voice(Says::Exchange, segment.voice);
+                    heard.exch_begun = true;
                 }
             }
             if *counted == Counted::Whole || upto.is_some_and(|upto| end > upto) {
@@ -2411,8 +2516,8 @@ impl<S: CallSource> ContestMachine<S> {
     /// callers hear only what of the message keyed last went out whole,
     /// unless a QSO has been logged since it was keyed, or lost by a key
     /// since: what the message itself lost, and a caller it brought, go
-    /// with it, as MorseRunner's callers hear nothing of an aborted send
-    /// (`MyStn.pas`, `AbortSend`).
+    /// with it. Your message cut short, the callers listening copy the rest
+    /// as garbage and answer it at once ([`Self::garbled`]).
     fn stop_sending(&mut self, now: MonoMs) -> Vec<ContestEffect> {
         let Some(mut air) = self.air.take() else {
             return Vec::new();
@@ -2445,25 +2550,72 @@ impl<S: CallSource> ContestMachine<S> {
             }
         }
         self.resolve(&carried.pending, &mut effects);
-        effects.extend(self.arm_patience(run_ms, &sent_by));
+        let garbled = if sent < parts.len() {
+            self.garbled(&carried.callers)
+        } else {
+            Vec::new()
+        };
+        self.start_waits(run_ms, &sent_by);
+        if garbled.is_empty() {
+            effects.extend(self.rearm_patience(run_ms));
+        } else {
+            effects.extend(self.play(Carried::default(), None, Vec::new(), garbled, run_ms, now));
+        }
         effects
+    }
+
+    /// Esc cut your message short: each caller on the frequency that was
+    /// listening, not `sounding` still, nor waiting out your QSO with
+    /// someone else, copies what it heard as garbage, as MorseRunner's
+    /// callers copy an aborted send (`MyStn.pas:108-116` makes it
+    /// `msgGarbage` and says the send is over), and answers it a moment
+    /// after (`DxOper.pas:805-817`, `DxStn.pas:240-275`): a caller takes
+    /// more patience, spends a try and calls again, as when you key over
+    /// it, and the station you work sends again what it owes. Nobody asked
+    /// for it, so it costs only time.
+    fn garbled(&mut self, sounding: &[Overlapping]) -> Vec<Replying> {
+        let listening: Vec<usize> = (0..self.stations.len())
+            .filter(|index| !sounding.iter().any(|over| over.reply.station == *index))
+            .filter(|index| {
+                let caller = &self.stations[*index].caller;
+                caller.state.active() && !caller.waits()
+            })
+            .collect();
+        listening
+            .into_iter()
+            .filter(|station| self.stations[*station].caller.heard_garbage())
+            .map(Replying::unasked)
+            .collect()
     }
 
     /// The callers as `unheard` holds them, before they heard a message Esc
     /// stopped, then hearing only the parts of it that went out whole,
-    /// `sent`. What they owe for those comes on their timeouts.
+    /// `sent`. What reached you since of the stations on the frequency at
+    /// the key, from a caller you keyed over that went on over your message,
+    /// stays heard, and so does what it told Enter: that the station you
+    /// work took the call, or corrected it. A dupe the message brought back
+    /// goes back as it was, whole: what it had of you is its old QSO's.
     fn unhear(&mut self, unheard: Unheard, sent: &[MessagePart], run_ms: u64) {
         self.entries.truncate(unheard.lost_from);
         self.taught = self.taught.min(self.entries.len());
         self.stations.truncate(unheard.count);
-        for (index, station) in unheard.stations {
+        for (index, mut station) in unheard.stations {
+            let there = station.caller.state.active() || unheard.thanked == Some(index);
+            if there {
+                station.heard.keep_heard(&self.stations[index].heard);
+            }
             self.stations[index] = station;
         }
         self.working = unheard.working;
         self.thanked = unheard.thanked;
         let notes = unheard.qso.is_some();
         if let Some(qso) = unheard.qso {
-            self.qso = qso;
+            let (taken, corrected) = (self.qso.call_taken, self.qso.corrected);
+            self.qso = QsoState {
+                call_taken: qso.call_taken || taken,
+                corrected: qso.corrected || corrected,
+                ..qso
+            };
             self.note_sent(sent);
         }
         // Esc takes back only a message that logged nothing.
@@ -2497,20 +2649,26 @@ impl<S: CallSource> ContestMachine<S> {
         effects
     }
 
+    /// Everyone still on the frequency waits for you, each its own time,
+    /// and the timer runs to the first of them to give up waiting
+    /// ([`Self::start_waits`]).
+    fn arm_patience(&mut self, run_ms: u64, sent: &[(usize, u64)]) -> Option<ContestEffect> {
+        self.start_waits(run_ms, sent);
+        self.rearm_patience(run_ms)
+    }
+
     /// Everyone still on the frequency waits for you, each its own time, as
     /// MorseRunner's callers do (`DxStn.pas:204-208`): one that sent, as
     /// `sent` has it, from the end of its send; one that heard you and has
     /// no wait running, from now; any other keeps the wait it had, as
     /// another caller's send is nothing to it. A pile-up caller that heard
-    /// you work someone else waits for that QSO to end, with no timeout.
-    /// The timer runs to the first of them to give up waiting.
-    fn arm_patience(&mut self, run_ms: u64, sent: &[(usize, u64)]) -> Option<ContestEffect> {
+    /// you work someone else waits for that QSO to end, with no timeout,
+    /// and so does the station you work once it stays silent for your
+    /// exchange.
+    fn start_waits(&mut self, run_ms: u64, sent: &[(usize, u64)]) {
         for (index, station) in self.stations.iter_mut().enumerate() {
             let caller = &mut station.caller;
-            if !caller.state.active() {
-                continue;
-            }
-            if caller.waits() {
+            if !caller.times_out() {
                 caller.deadline = None;
                 continue;
             }
@@ -2527,7 +2685,6 @@ impl<S: CallSource> ContestMachine<S> {
                 None => {}
             }
         }
-        self.rearm_patience(run_ms)
     }
 
     /// The patience timer, to the soonest deadline still running.
@@ -2560,14 +2717,8 @@ impl<S: CallSource> ContestMachine<S> {
         let mut effects = Vec::new();
         let gone = |index: &usize| self.stations[*index].caller.state == CallerState::Gone;
         if let Some(index) = worked.filter(gone) {
-            let typed = &self.stations[index].heard.typed;
-            let who = if parse_callsign(typed).is_some() {
-                typed.as_str()
-            } else {
-                "The station"
-            };
+            let who = self.station_gone(index);
             effects.push(ContestEffect::Announce(format!("{who} has gone")));
-            self.end_qso();
         }
         if replying.is_empty() {
             effects.extend(self.rearm_patience(run_ms));
@@ -2970,7 +3121,9 @@ impl<S: CallSource> ContestMachine<S> {
             row: Some(Row {
                 call: logged.call.clone(),
                 fields: values(reading),
-                wpm: Some(row_wpm(call_voice, exch_voice)),
+                // A station logged again shows no speed: its copy, and the
+                // speed that is credited at, are the earlier QSO's.
+                wpm: (!again).then(|| row_wpm(call_voice, exch_voice)),
                 asked: heard.asked(),
                 check,
                 pending: true,
@@ -3212,7 +3365,9 @@ impl<S: CallSource> ContestMachine<S> {
                 |((reply, _), counted)| match counted {
                     Counted::Nothing if reply.on_time_out => None,
                     Counted::Nothing => Some(reply.clone()),
-                    Counted::Begun | Counted::Whole => Some(Replying::unasked(reply.station)),
+                    Counted::CallBegun { .. } | Counted::Begun | Counted::Whole => {
+                        Some(Replying::unasked(reply.station))
+                    }
                 },
             );
         self.cut_short.extend(again);
@@ -4129,7 +4284,13 @@ mod tests {
             let state = view(&runtime).qso;
             assert_eq!(state.call_sent, call_sent, "{after_ms} ms in");
             assert_eq!(state.exchange_sent, exchange_sent, "{after_ms} ms in");
-            assert!(view(&runtime).air.is_none());
+            // Nothing of yours goes on: only the callers answering what
+            // they heard of it.
+            let air = view(&runtime).air;
+            assert!(
+                air.is_none_or(|air| air.my_text.is_empty()),
+                "{after_ms} ms in"
+            );
         }
         // Esc with nothing on the air does nothing.
         let mut quiet = runtime(&["K5XYZ"]);
@@ -4144,10 +4305,10 @@ mod tests {
         let mut runtime = runtime(&["K5XYZ"]);
         runtime.finish_turn();
         // A slip, stopped at once: the station never heard it, and calls
-        // again on its timeout.
+        // again at once, as it would after any garbage.
         runtime.key(OpKey::Esm, "K5XYW", "");
         runtime.key(OpKey::StopTx, "K5XYW", "");
-        assert_eq!(replies(&next_turn(&mut runtime)), ["K5XYZ"]);
+        assert_eq!(replies(runtime.last_turn()), ["K5XYZ"]);
         runtime.finish_turn();
         runtime.key(OpKey::Esm, "K5XYZ", "");
         let exchange = replies(runtime.last_turn())[0].to_string();
@@ -4171,7 +4332,8 @@ mod tests {
         half.key(OpKey::Esm, "K5XYZ", "");
         half.now += (call_sec * 1_000.0) as u64 + 50;
         half.key(OpKey::StopTx, "K5XYZ", "");
-        let ask = next_turn(&mut half);
+        let ask = half.last_turn().clone();
+        assert_eq!(yours(&ask), "");
         assert!(
             matches!(replies(&ask)[..], ["NR?"] | ["AGN"]),
             "{:?}",
@@ -4184,7 +4346,8 @@ mod tests {
         logged.key(OpKey::Esm, "K5XYZ", "");
         logged.key(OpKey::LogOnly, "K5XYZ", "123");
         logged.key(OpKey::StopTx, "", "");
-        let owed = next_turn(&mut logged);
+        let owed = logged.last_turn().clone();
+        assert_eq!(yours(&owed), "");
         assert!(replies(&owed)[0].contains("5NN"), "{:?}", replies(&owed));
         logged.apply(ContestEvent::FinishNow);
         let (_, run) = self::result(&logged);
@@ -5031,12 +5194,10 @@ mod tests {
         assert_eq!(run.qsos.len(), 6);
         assert!(run.qsos[1..].iter().all(|qso| qso.g == 0));
         assert_eq!(again.machine.source.learned.len(), 2, "taught once");
-        // Asked for its exchange, then left after three silent timeouts:
-        // lost, and the log after that is a NIL with no group of its own.
+        // Its exchange sent, then left after three silent timeouts: lost,
+        // and the log after that is a NIL with no group of its own.
         let mut left = self::runtime(&["K5XYZ"]);
-        left.finish_turn();
-        left.key(OpKey::HisCall, "K5XYZ", "");
-        left.finish_turn();
+        to_its_exchange(&mut left);
         left.run_to(left.now + 60_000);
         left.key(OpKey::LogOnly, "K5XYZ", "7");
         left.apply(ContestEvent::FinishNow);
@@ -6079,9 +6240,11 @@ mod tests {
         assert!(
             runtime.effects[from..].contains(&ContestEffect::Announce("K5XYZ has gone".into()))
         );
-        // Nobody calls now: Enter's CQ is for the next station.
+        // Nobody calls now: Enter's CQ is for the next station, in place
+        // of the call it would only send to nobody.
         let afresh = QsoState {
             nobody_calling: true,
+            gone: vec!["K5XYZ".into()],
             ..QsoState::default()
         };
         assert_eq!(view(&runtime).qso, afresh);
@@ -6091,8 +6254,10 @@ mod tests {
             ..Fields::default()
         };
         let enter = esm(&view(&runtime).qso, &fields, &RULES[0], Side::Dx);
-        assert_ne!(enter.label, "TU & log");
-        assert_ne!(enter.label, "? Again");
+        assert_eq!(
+            (enter.label.as_str(), enter.hint.as_str()),
+            ("CQ", "K5XYZ has gone: Enter calls CQ")
+        );
     }
 
     /// A `?` asked with the call already typed as it is sent with your
@@ -6276,9 +6441,11 @@ mod tests {
     /// after any station you work leaves, rather than thanking nobody.
     #[test]
     fn b4_or_nil_sending_the_station_away_starts_enter_afresh() {
-        // Nobody calls then: Enter's CQ is for the next station.
+        // Nobody calls then: Enter's CQ is for the next station, and never
+        // the call of the station sent away.
         let afresh = QsoState {
             nobody_calling: true,
+            gone: vec!["K5XYZ".into()],
             ..QsoState::default()
         };
         for key in [OpKey::B4, OpKey::Nil] {
@@ -6298,7 +6465,7 @@ mod tests {
                 ..Fields::default()
             };
             let enter = esm(&view(&runtime).qso, &fields, &RULES[0], Side::Dx);
-            assert_ne!(enter.label, "TU & log", "{key:?}");
+            assert_eq!(enter.label, "CQ", "{key:?}");
         }
         // A station that answered your partial, still calling: the NIL that
         // spends its last try sends it away just the same.
@@ -6316,6 +6483,11 @@ mod tests {
             runtime.finish_turn();
         }
         assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Gone);
+        // What the partial asked for is as gone as the call it brought.
+        let afresh = QsoState {
+            gone: vec!["K5".into(), "K5XYZ".into()],
+            ..afresh
+        };
         assert_eq!(view(&runtime).qso, afresh, "a partial");
     }
 
@@ -7765,7 +7937,7 @@ mod tests {
 
     /// A call typed for another station, at a key that sends no call, is
     /// that station's, never a copy of the one you work: once the station
-    /// you work gives up, it is named by the call you had for it, and keeps
+    /// you work has gone, it is named by the call you had for it, and keeps
     /// that call as its copy, whether the key was a wipe, a `?`, a log
     /// that cannot log yet, or a call to the other taken back with Esc.
     #[test]
@@ -7787,27 +7959,20 @@ mod tests {
                 }
                 key => {
                     runtime.key(key, "W7ABC", "");
-                    runtime.finish_turn();
                 }
             }
+            runtime.finish_turn();
             assert_eq!(runtime.machine.stations[0].heard.typed, "K5XYZ", "{key:?}");
-            // No more from you: K5XYZ gives up, and W7ABC waits on.
-            let from = runtime.effects.len();
-            runtime.run_to(runtime.now + 60_000);
+            // K5XYZ, waiting for your exchange, would wait on: a NIL with the
+            // Call field empty sends it away, and W7ABC is still there.
+            runtime.key(OpKey::Nil, "", "");
+            runtime.finish_turn();
             assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Gone);
             assert_eq!(
                 runtime.machine.stations[1].caller.state,
                 CallerState::NeedQso
             );
-            let gone: Vec<&ContestEffect> = runtime.effects[from..]
-                .iter()
-                .filter(|effect| matches!(effect, ContestEffect::Announce(said) if said.ends_with("has gone")))
-                .collect();
-            assert_eq!(
-                gone,
-                [&ContestEffect::Announce("K5XYZ has gone".into())],
-                "{key:?}"
-            );
+            assert_eq!(view(&runtime).qso.gone, ["K5XYZ"], "{key:?}");
             runtime.apply(ContestEvent::FinishNow);
             let (result, _) = result(&runtime);
             let copies = copies(&result);
@@ -7852,7 +8017,9 @@ mod tests {
         runtime.key(OpKey::Again, "K5XZ", "");
         runtime.finish_turn();
         let lost = runtime.machine.nil_and_lost_copies();
-        runtime.run_to(runtime.now + 60_000);
+        // A NIL with the Call field empty sends it away.
+        runtime.key(OpKey::Nil, "", "");
+        runtime.finish_turn();
         assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Gone);
         assert!(runtime.machine.crossed_since(&lost).is_empty());
         let lost = runtime.machine.nil_and_lost_copies();
@@ -8450,5 +8617,477 @@ mod tests {
             assert_eq!(enter.label, "Fix call", "seed {seed}");
         }
         assert!(tried >= 1, "{tried}");
+    }
+
+    /// A dupe still calling when B4 is keyed never hears its call or the
+    /// B4. B4 again then goes out alone, as its call counts as sent, and
+    /// the dupe, still calling, takes it as the pile-up's cue to call
+    /// again, with fresh patience: it never leaves.
+    #[test]
+    fn b4_keyed_over_a_dupe_still_calling_sends_its_call_again() {
+        let mut runtime = pileup(&["K5XYZ", "W7ABC"], 1, 1);
+        work_with_enter(&mut runtime, "K5XYZ", 0);
+        let mut before = Vec::new();
+        let run_ms = view(&runtime).run_ms(MonoMs(runtime.now));
+        assert_eq!(runtime.machine.rejoin(0, &mut before, &[], run_ms), Some(0));
+        runtime.finish_turn();
+        let at = runtime.now;
+        runtime.key(OpKey::Cq, "", "");
+        let dupe = sent_by(runtime.last_turn(), 0)[0].clone();
+        assert!(dupe.text.starts_with("K5XYZ"), "{}", dupe.text);
+        // F6 while the dupe still calls: it never hears its call or the B4.
+        runtime.run_to(at + ms((dupe.start_sec + dupe.end_sec) / 2.0));
+        runtime.key(OpKey::B4, "K5XYZ", "");
+        assert_eq!(yours(runtime.last_turn()), "K5XYZ QSO B4");
+        runtime.finish_turn();
+        assert_eq!(
+            runtime.machine.stations[0].caller.state,
+            CallerState::NeedQso
+        );
+        // B4 again, the dupe's call still in the field.
+        runtime.key(OpKey::B4, "K5XYZ", "");
+        let b4 = runtime.last_turn().clone();
+        runtime.finish_turn();
+        assert_eq!(
+            runtime.machine.stations[0].caller.state,
+            CallerState::Gone,
+            "sent {:?}; the dupe answered {:?}",
+            yours(&b4),
+            said_by(&b4, 0)
+        );
+    }
+
+    /// Esc on a message before any of it has gone out whole: MorseRunner's
+    /// callers copy the aborted send as garbage (`MyStn.pas:108-116` sets
+    /// `Msg := [msgGarbage]` and fires `evMsgSent`) and answer it after
+    /// their reply delay, 0.1-0.6 s (`DxStn.pas:240-275`,
+    /// `DxOper.pas:805-817`), so the pile-up comes straight back.
+    #[test]
+    fn esc_brings_the_pile_up_back_at_once_as_garbage_does() {
+        for seed in 0..20 {
+            let mut runtime = pileup_seed(seed, &["K5XYZ", "W7ABC", "G4ABC"], 3, 3);
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "K5XYZ", "");
+            runtime.now += 50;
+            let esc_at = runtime.now;
+            let turns = runtime.turns.len();
+            runtime.key(OpKey::StopTx, "K5XYZ", "");
+            while runtime.turns.len() == turns {
+                assert!(runtime.step(), "seed {seed}: nobody calls again");
+            }
+            let first = runtime
+                .last_turn()
+                .segments
+                .iter()
+                .map(|segment| segment.start_sec)
+                .fold(f64::INFINITY, f64::min);
+            let quiet = runtime.now - esc_at + ms(first);
+            assert!(
+                quiet <= 1_000,
+                "seed {seed}: the pile-up keeps quiet {quiet} ms after Esc"
+            );
+        }
+    }
+
+    /// Once the station you work has gone, whatever call the fields still
+    /// hold for it, the screen says it has gone and Enter calls CQ, where
+    /// it would send that call to nobody while the rest of the pile-up
+    /// waits in silence: its call and number as copied; a slip it put
+    /// right, or the call put right in the field since with no key
+    /// pressed; a partial it answered, `?` and all, or its call typed
+    /// whole since. The CQ clears the fields for the next station, and the
+    /// pile-up answers it.
+    #[test]
+    fn after_the_station_you_work_leaves_with_its_call_typed_the_hint_says_cq() {
+        let follow = |runtime: &mut Runtime<ScriptCalls>, call: &str, exch: &str, hint: &str| {
+            let typed = Fields {
+                call: call.into(),
+                exch: exch.into(),
+                ..Fields::default()
+            };
+            let enter = esm(&view(runtime).qso, &typed, &RULES[0], Side::Dx);
+            assert_eq!(
+                (enter.label.as_str(), enter.hint.as_str()),
+                ("CQ", hint),
+                "{call:?}"
+            );
+            let after = runtime.turns.len();
+            let effects = runtime.key(OpKey::Esm, call, exch);
+            assert!(effects.contains(&ContestEffect::ClearFields), "{call:?}");
+            assert_eq!(yours(&runtime.turns[after]), "CQ DL1ABC TEST", "{call:?}");
+            let answered = runtime.turns[after..]
+                .iter()
+                .any(|turn| turn.segments.iter().any(|s| s.who != Sender::You));
+            assert!(answered, "{call:?}: the pile-up answers the CQ");
+        };
+        let leaves = |runtime: &mut Runtime<ScriptCalls>, said: &str| {
+            let from = runtime.effects.len();
+            runtime.run_to(runtime.now + 90_000);
+            assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Gone);
+            let gone = ContestEffect::Announce(format!("{said} has gone"));
+            assert!(runtime.effects[from..].contains(&gone), "{said}");
+        };
+        // Its call and number, as copied.
+        let mut runtime = pileup(&["K5XYZ", "W7ABC", "G4ABC"], 3, 3);
+        let nr = its_number(&mut runtime, "K5XYZ", 0);
+        leaves(&mut runtime, "K5XYZ");
+        follow(&mut runtime, "K5XYZ", &nr, "K5XYZ has gone: Enter calls CQ");
+        // A slip it put right, named by the call it put right; the field
+        // put right since, or not.
+        for (call, hint) in [
+            ("K5XYZ", "K5XYZ has gone: Enter calls CQ"),
+            ("K5XYW", "K5XYW has gone: Enter calls CQ"),
+        ] {
+            let mut runtime = pileup(&["K5XYZ", "W7ABC", "G4ABC"], 3, 3);
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "K5XYW", "");
+            let fix = said_by(runtime.last_turn(), 0).unwrap_or_default();
+            assert!(fix.contains("K5XYZ"), "{fix:?}");
+            runtime.finish_turn();
+            leaves(&mut runtime, "K5XYZ");
+            follow(&mut runtime, call, "", hint);
+        }
+        // A partial it answered, and its call typed whole since.
+        for (partial, call, hint) in [
+            ("K5?", "K5?", "The station has gone: Enter calls CQ"),
+            ("XYZ?", "XYZ?", "The station has gone: Enter calls CQ"),
+            ("K5X?", "K5X?", "The station has gone: Enter calls CQ"),
+            ("K5?", "K5XYZ", "K5XYZ has gone: Enter calls CQ"),
+        ] {
+            let mut runtime = pileup(&["K5XYZ", "W7ABC", "G4ABC"], 3, 3);
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, partial, "");
+            assert_eq!(replies(runtime.last_turn()), ["K5XYZ"], "{partial}");
+            runtime.finish_turn();
+            leaves(&mut runtime, "The station");
+            follow(&mut runtime, call, "", hint);
+        }
+    }
+
+    /// The same once B4 has sent a dupe away, its call still typed. The
+    /// rest of the pile-up calls again, so a CQ would only go over them:
+    /// Enter clears the fields rather than send the dupe's call, which
+    /// would leave them all waiting on a QSO with a station that has gone.
+    /// B4 pressed again sends that call again, still the dupe's, and F5
+    /// the call of a station that has given up: neither brings back
+    /// Enter's call to nobody.
+    #[test]
+    fn after_b4_sends_a_dupe_away_with_its_call_typed_enter_clears_it() {
+        let mut runtime = pileup(&["K5XYZ", "W7ABC"], 2, 2);
+        work_with_enter(&mut runtime, "K5XYZ", 0);
+        let mut before = Vec::new();
+        let run_ms = view(&runtime).run_ms(MonoMs(runtime.now));
+        assert_eq!(runtime.machine.rejoin(0, &mut before, &[], run_ms), Some(0));
+        runtime.key(OpKey::Cq, "", "");
+        runtime.finish_turn();
+        let typed = Fields {
+            call: "K5XYZ".into(),
+            ..Fields::default()
+        };
+        for b4 in 0..2 {
+            runtime.key(OpKey::B4, "K5XYZ", "");
+            assert_eq!(yours(runtime.last_turn()), "K5XYZ QSO B4", "B4 {b4}");
+            assert!(
+                said_by(runtime.last_turn(), 1).is_some(),
+                "B4 {b4}: W7ABC calls again"
+            );
+            runtime.finish_turn();
+            assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Gone);
+            let enter = esm(&view(&runtime).qso, &typed, &RULES[0], Side::Dx);
+            assert_eq!(
+                (enter.label.as_str(), enter.hint.as_str()),
+                ("Wipe", "K5XYZ has gone: Enter clears the fields"),
+                "B4 {b4}"
+            );
+        }
+        let turns = runtime.turns.len();
+        let effects = runtime.key(OpKey::Esm, "K5XYZ", "");
+        assert!(effects.contains(&ContestEffect::ClearFields));
+        assert_eq!(runtime.turns.len(), turns, "nothing goes out");
+        // Typed afresh, the next station's call goes out as ever.
+        runtime.key(OpKey::Esm, "W7ABC", "");
+        assert_eq!(yours(runtime.last_turn()), "W7ABC 5NN TT2");
+        assert!(said_by(runtime.last_turn(), 1).is_some(), "W7ABC answers");
+        // F5 with the call of a station that has given up: Enter still
+        // calls CQ, and never sends its TU to log it.
+        let mut runtime = pileup(&["K5XYZ", "W7ABC", "G4ABC"], 3, 3);
+        let nr = its_number(&mut runtime, "K5XYZ", 0);
+        runtime.run_to(runtime.now + 60_000);
+        assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Gone);
+        runtime.key(OpKey::HisCall, "K5XYZ", &nr);
+        runtime.finish_turn();
+        let typed = Fields {
+            call: "K5XYZ".into(),
+            exch: nr,
+            ..Fields::default()
+        };
+        let enter = esm(&view(&runtime).qso, &typed, &RULES[0], Side::Dx);
+        assert_eq!(
+            (enter.label.as_str(), enter.hint.as_str()),
+            ("CQ", "K5XYZ has gone: Enter calls CQ")
+        );
+    }
+
+    /// Once a CQ has brought a caller after the station you work has
+    /// gone, its call still typed, Enter sends no CQ over the caller, which
+    /// would charge a single caller's call a repeat you never asked for: it
+    /// clears the fields, and the hint says why.
+    #[test]
+    fn after_a_cq_brings_a_caller_the_call_of_a_station_gone_is_cleared() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let exchange = to_its_exchange(&mut runtime);
+        let nr = serial(&exchange);
+        runtime.run_to(runtime.now + 60_000);
+        assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Gone);
+        // F1 with the fields as they were: a new caller answers.
+        runtime.key(OpKey::Cq, "K5XYZ", &nr);
+        let next = replies(runtime.last_turn())[0].to_string();
+        runtime.finish_turn();
+        let typed = Fields {
+            call: "K5XYZ".into(),
+            exch: nr.clone(),
+            ..Fields::default()
+        };
+        let enter = esm(&view(&runtime).qso, &typed, &RULES[0], Side::Dx);
+        assert_eq!(
+            (enter.label.as_str(), enter.hint.as_str()),
+            ("Wipe", "K5XYZ has gone: Enter clears the fields")
+        );
+        let turns = runtime.turns.len();
+        let effects = runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        assert!(effects.contains(&ContestEffect::ClearFields));
+        assert_eq!(runtime.turns.len(), turns, "nothing goes out");
+        runtime.key(OpKey::Esm, &next, "");
+        let theirs = serial(replies(runtime.last_turn())[0]);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, &next, &theirs);
+        runtime.finish_turn();
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
+        let charged = result
+            .groups
+            .iter()
+            .zip(&result.group_timings)
+            .find(|(group, _)| group.sent == next)
+            .map(|(_, timing)| timing.sends);
+        assert_eq!(charged, Some(1), "{next}'s call charged a repeat");
+    }
+
+    /// After Esc the station you work sends what it owes at once, as it
+    /// does after any garbage, and as no repeat you asked for: it costs
+    /// only time. A caller waiting out your QSO with it keeps quiet.
+    #[test]
+    fn after_esc_the_station_you_work_sends_what_it_owes_at_no_charge() {
+        let mut runtime = pileup(&["K5XYZ", "W7ABC"], 2, 2);
+        let nr = its_number(&mut runtime, "K5XYZ", 0);
+        assert!(runtime.machine.stations[1].caller.waits(), "W7ABC waits");
+        runtime.key(OpKey::Again, "K5XYZ", "");
+        runtime.now += 30;
+        runtime.key(OpKey::StopTx, "K5XYZ", "");
+        let owed = runtime.last_turn().clone();
+        assert_eq!((yours(&owed), senders(&owed)), ("", BTreeSet::from([0])));
+        assert_eq!(
+            said_by(&owed, 0).and_then(copy_of),
+            Some(Copied::Exchange(nr.clone()))
+        );
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        runtime.apply(ContestEvent::FinishNow);
+        assert_eq!(sends(&runtime), [1, 1]);
+    }
+
+    /// A pile-up caller that missed your exchange and asked for it stops
+    /// asking after its silent timeouts, but stays, as MorseRunner's
+    /// station waiting for your number does: your exchange, twenty seconds
+    /// later, is still taken and answered.
+    #[test]
+    fn a_caller_that_missed_your_exchange_still_takes_it_late() {
+        let mut tried = 0;
+        for seed in 0..200 {
+            let mut runtime = pileup_seed(seed, &["K5XYZ"], 1, 1);
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "K5XYZ", "");
+            let Some(asks) = said_by(runtime.last_turn(), 0).map(str::to_string) else {
+                continue;
+            };
+            if asks != "NR?" && asks != "AGN" {
+                continue;
+            }
+            tried += 1;
+            runtime.finish_turn();
+            // Twenty seconds before you send it again.
+            runtime.run_to(runtime.now + 20_000);
+            runtime.key(OpKey::Esm, "K5XYZ", "");
+            assert_eq!(yours(runtime.last_turn()), "K5XYZ 5NN TT1");
+            assert!(
+                said_by(runtime.last_turn(), 0).is_some(),
+                "seed {seed}: it asked {asks}, then left ({:?}) before your exchange came again",
+                runtime.machine.stations[0].caller.state
+            );
+            break;
+        }
+        assert!(tried > 0);
+    }
+
+    /// Esc takes your message back from the callers, not what they sent
+    /// from you: a call heard whole over a partial you then stopped is
+    /// still the end its copy is timed from.
+    #[test]
+    fn esc_keeps_a_call_heard_whole_over_your_message() {
+        let mut runtime = pileup(&["K5XYZ"], 1, 1);
+        let cq = runtime.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        // A partial keyed over the end of its first call, which goes on
+        // over it.
+        runtime.run_to(ms(call.start_sec + 1.6));
+        runtime.key(OpKey::Esm, "K5X?", "");
+        let turn = runtime.last_turn().clone();
+        let rest = sent_by(&turn, 0)[0].clone();
+        assert_eq!((rest.start_sec, yours(&turn)), (0.0, "K5X?"));
+        // Its call ends, heard whole, while your partial is still going
+        // out; then Esc.
+        let ended = runtime.now + ms(rest.end_sec);
+        runtime.run_to(ended + 100);
+        let air = view(&runtime).air.expect("on the air");
+        assert!(!air.still_sending(MonoMs(runtime.now)).is_empty());
+        runtime.key(OpKey::StopTx, "K5X?", "");
+        // It answers what it heard of your partial, unasked; half a second
+        // after, the call is typed whole, and sent.
+        runtime.finish_turn();
+        runtime.now += 500;
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        assert_eq!(yours(runtime.last_turn()), "K5XYZ 5NN TT1");
+        let (copy, took) = runtime.machine.stations[0]
+            .heard
+            .first_call
+            .clone()
+            .expect("it took your exchange");
+        assert_eq!(copy, "K5XYZ");
+        let typed = runtime.now - ended;
+        assert!(
+            took + 50 >= typed,
+            "copy timed at {took} ms, typed {typed} ms after the call ended"
+        );
+    }
+
+    /// Esc keeps what reached you since the key only of the stations on
+    /// the frequency then: a dupe the message brought back goes back as it
+    /// was, whole, its old QSO's ends and voices with it, so a NIL logged
+    /// after with a slip of its call is charged to nobody, never to the
+    /// station you work.
+    #[test]
+    fn esc_puts_back_a_dupe_the_message_brought_as_it_was() {
+        let mut runtime = pileup(&[], 1, 1);
+        for n in 0..5 {
+            work_with_enter(&mut runtime, &format!("W{}AW", n + 1), n);
+        }
+        // The next caller, its call sent: the station you work.
+        runtime.key(OpKey::HisCall, "W6AW", "");
+        runtime.finish_turn();
+        assert_eq!(runtime.machine.qso_station(), Some(5));
+        let worked: Vec<Heard> = (0..5)
+            .map(|index| runtime.machine.stations[index].heard.clone())
+            .collect();
+        // CQs taken back at once, until one brings a station worked before.
+        let dupe = (0..2_000)
+            .find_map(|_| {
+                runtime.key(OpKey::Cq, "W6AW", "");
+                let dupe = (0..5).find(|index| {
+                    runtime.machine.stations[*index].caller.state == CallerState::NeedQso
+                });
+                runtime.now += 30;
+                runtime.key(OpKey::StopTx, "W6AW", "");
+                runtime.finish_turn();
+                dupe
+            })
+            .expect("a dupe calls");
+        let station = &runtime.machine.stations[dupe];
+        assert_eq!(station.caller.state, CallerState::Done);
+        assert_eq!(station.heard, worked[dupe], "station {dupe}");
+        assert_eq!(runtime.machine.qso_station(), Some(5));
+        // A slip of its call, logged with a number: a NIL, whose copy is
+        // nobody's, its own kept already.
+        let slip = format!("W{}AX", dupe + 1);
+        runtime.key(OpKey::LogOnly, &slip, "5");
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, run) = result(&runtime);
+        let copies = copies(&result);
+        assert!(
+            copies.iter().all(|(_, copy)| *copy != slip),
+            "the NIL is charged: {copies:?}"
+        );
+        assert_eq!(run.qsos[5].lc, slip, "the record holds the call");
+    }
+
+    /// The results list each QSO at the speed its live log row showed: the
+    /// slower of its call's and its exchange's, so a caller that slowed
+    /// down for you reads the same in both, and a station logged again,
+    /// whose copy the first QSO holds, shows none in either.
+    #[test]
+    fn a_stored_runs_log_reads_the_wpm_its_live_log_showed() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let exchange = to_its_exchange(&mut runtime);
+        let own = runtime.machine.stations[0].caller.voice;
+        let mut slowed = false;
+        for _ in 0..5 {
+            runtime.key(OpKey::Again, "K5XYZ", "");
+            slowed = runtime.last_turn().segments[1].voice.char_wpm < own.char_wpm;
+            runtime.finish_turn();
+            if slowed {
+                break;
+            }
+        }
+        assert!(slowed, "it slowed down");
+        let nr = serial(&exchange);
+        runtime.key(OpKey::LogOnly, "K5XYZ", &nr);
+        runtime.key(OpKey::HisCall, "K5XYZ", "");
+        runtime.finish_turn();
+        runtime.key(OpKey::LogOnly, "K5XYZ", &nr);
+        let live: Vec<Option<f64>> = view(&runtime).log.iter().map(|row| row.wpm).collect();
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, run) = result(&runtime);
+        let stored: Vec<Option<f64>> = run
+            .log(&result.groups, &result.group_timings)
+            .expect("the run lists its QSOs")
+            .iter()
+            .map(|qso| qso.wpm)
+            .collect();
+        assert_eq!(stored, live, "the results against the live log");
+    }
+
+    /// A number logged while only the call put right of a correction
+    /// that carries the station's exchange has reached you is a miss, as a
+    /// guess is no copy; logged once the exchange after it has begun, it is
+    /// a copy, as for an exchange sent alone.
+    #[test]
+    fn a_number_logged_before_the_correction_reaches_it_is_a_miss() {
+        let settings = run_settings(25.0);
+        for begun in [false, true] {
+            let mut runtime = runtime_fixing(&["K5XYZ"], true);
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "K5XYW", "");
+            let at = runtime.now;
+            let fix = sent_by(runtime.last_turn(), 0)[0].clone();
+            assert!(fix.text.starts_with("DE K5XYZ "), "{}", fix.text);
+            let nr = serial(&fix.text);
+            // 300 ms into it, the D of DE; or a moment into its exchange,
+            // found as the count of what is heard finds it.
+            let into = if begun {
+                let from = exchange_at(&fix.text).expect("its exchange");
+                let spans = char_spans(&fix.text, &settings, &fix.voice);
+                let start = spans.iter().find(|(at, ..)| *at >= from).expect("sent").1;
+                ms(start) + 50
+            } else {
+                300
+            };
+            runtime.run_to(at + ms(fix.start_sec) + into);
+            runtime.key(OpKey::LogOnly, "K5XYZ", &nr);
+            runtime.apply(ContestEvent::FinishNow);
+            let (result, _) = result(&runtime);
+            assert_eq!(result.groups[1].sent, nr);
+            let copied = if begun { nr.as_str() } else { "" };
+            assert_eq!(result.groups[1].received, copied, "begun: {begun}");
+        }
     }
 }

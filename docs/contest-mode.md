@@ -54,7 +54,16 @@ call table and North America's zones by hand (`contest/data/zones.rs`,
 §11.3), the ARRL DX side and Labrador (`contest/data/places.rs`, §11.2),
 the counted power shares (`contest/data/power.rs`, §11.5), points by
 distance and the multipliers of both sides (`contest/score.rs`), and
-`myZone`, `myPower` and LB in `myState` on Your station (§2, §8).
+`myZone`, `myPower` and LB in `myState` on Your station (§2, §8). Fixes
+from a third audit of pile-ups followed: B4 sends a dupe its call again
+when it never heard it (§4.7); after Esc the callers answer what they
+heard as garbage, at once, and what reached you of a caller you keyed
+over stays heard (§5.2); the station you work, still waiting for your
+exchange, falls silent and stays rather than leave (§4.3); Enter calls CQ
+in place of any call the fields still hold for a station that has gone,
+or clears it once someone calls, and the hint says so (§4.4, §7); and the results read each QSO at the speed its live row
+showed, while a correction's exchange is a copy only once it begins to
+reach you (§9.1).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -514,12 +523,12 @@ The machine needs the fields only at a key press. The runtime maps
 | Running, Silent | Key | ESM (4.4) or the key picks the message; a logging key logs (4.8); replies are decided, and the calls of callers whose wait runs out before the turn is over (4.3) → `PlayTurn` (new id) |
 | Running, Turn | Key but StopTx | what of the turn has reached you counts first, so Enter decides on what you have heard; a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing |
 | Running, Turn | TimerFired (heard) | what of the turn has reached you counts, a look at the clock (6.3): Enter's QSO and the screen follow the audio, a correction is said, and the checks whose TU is out show; the timer runs on to the next end of a send of the station you work, or to those checks → Turn |
-| Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange of the message keyed last not fully sent (`Main.pas:884-891`), not for one carried from an earlier key, heard then; the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it (5.2) → Silent |
+| Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange of the message keyed last not fully sent (`Main.pas:884-891`), not for one carried from an earlier key, heard then; the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it; your message cut short, the callers listening answer what they heard of it as garbage (5.2) → a turn of their replies, or Silent |
 | Turn(id) | TurnStarted{id} | `heard_from` re-stamped; no effects, no limit check |
 | Turn(id) | TurnEnded{id} | all segments count; each caller waits as the turn planned it (4.3); the patience timer starts if anyone waits → Silent |
 | Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused, but not time the clock was read at since (6.3), so the run bar steps back by the retries; every caller in the turn sends again after Resume, as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout that never began, which waits afresh; timers forgotten; `ReleaseAudio` → Paused{Sound} |
 | any | TurnCancelled, or another id | ignored |
-| Silent | TimerFired (patience) | waiting callers call again (4.3); if the station you work has left, "K5XYZ has gone" is announced and Enter starts afresh, as after a CQ → a turn of replies |
+| Silent | TimerFired (patience) | waiting callers call again (4.3); if the station you work has left, "K5XYZ has gone" is announced, by the call it put yours right with, or else the call you had for it, or "The station", and Enter starts afresh, as after a CQ, calling CQ in place of its call (4.4) → a turn of replies |
 | Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count. A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout, which waits afresh; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
 | Paused | Resume | clock resumes; run end re-armed with the time left; a 1 s resume timer → Running |
 | Running | the resume timer | callers the pause or failure cut short send again, as the rows above say; the others wait for you afresh, as after a turn, so what was heard whole comes again only on a timeout or at your asking: a pause is no free `?`. A key that sends forgets the timer; one that sends nothing (Wipe, Shift+Enter, Esc with nothing on the air) leaves it to bring the callers back |
@@ -582,8 +591,18 @@ contest; MRCE's sources are the reference for the numbers below.
   patience, as MRCE's `osNeedPrevEnd` does: to your CQ or NIL with no try
   spent on it (`DxOper.pas:708, 719`), and to a `?` with the Call field
   empty before the try the `?` costs (`DxOper.pas:793`).
-- **The station you work stays** while you keep keying, and leaves after 3
-  silent timeouts in a row, as MRCE's Caller Stays (`DxOper.pas:319-335`).
+- **The station you work stays** while you keep keying. Once it has your
+  exchange, or you sent its call wrong, it leaves after 3 silent timeouts
+  in a row, as MRCE's Caller Stays sends such a station away once its
+  patience is spent (`DxOper.pas:319-335`); MRCE's leaves on its fourth,
+  its patience set afresh as its state moved, and Dust's on its third, a
+  choice of its own. As built (third pile-up audit), one still
+  waiting for your exchange (`NeedNr`) asks for it on its first two
+  timeouts, then stops asking but stays on the frequency, silent, with no
+  timeout running, and takes your exchange whenever it comes, as MRCE's
+  `osNeedNr` station does once its patience is spent, which `DecPatience`
+  never sends away: a learner slow to send it again after `NR?` loses no
+  QSO for it. Anything you send it brings it back to asking.
 - **QRS** (phase 2, habits `easy`). After 3 incomplete tries (4 for a skilled
   caller) a caller slows by 12–20% by skill, 2% more from the fourth
   (`DxOper.pas:343-375`). As built (2c), as MRCE's QRS After a Few
@@ -652,7 +671,8 @@ but only after it takes two more tries, up to four, as MRCE's
 no caller away. One still sending as you end waits from the end of its
 send. A CQ, TU or NIL is heard from a fragment: the caller goes on over it
 all the same, and answers once you and it are both done. Esc takes the rest
-back with the message. A missed exchange is not taken, so N stays false and
+back with the message, but what of it had reached you stays heard (5.2). A
+missed exchange is not taken, so N stays false and
 Enter sends the call and exchange again, though the call that went with it
 is the call's copy, as first sent with your exchange (9.1); a caller that
 answered your partial and then missed your exchange puts its call right
@@ -667,7 +687,8 @@ over that QSO nor spends a try on waiting, and a `?` with the Call field
 typed is not for it; your CQ, TU, B4 or NIL, its own call, or a `?` with
 the Call field empty brings it back, all but its own call with fresh
 patience. So once the station you work has gone, nobody calls until you
-CQ, and Enter's hint says so (7). The station
+CQ, and Enter's hint says so (7), and with a call the fields still hold
+for it, Enter calls CQ in its place (4.4). The station
 you work hearing another call is over its QSO as the table says. A single
 caller calls again on its timeout, and stays in its QSO when you send
 another call, kinder to a learner.
@@ -720,6 +741,7 @@ is part of E.
 |---|---|---|
 | Call empty | CQ | `CQ` |
 | your TU without logging (F3) went to this call, V, E Complete | TU, and logs that QSO, as MRCE's C and N still hold after F3 | `TU & log` |
+| the call, without `?`, is one the fields could still hold for a station that has gone (as built, third pile-up audit) | with nobody calling, CQ; with someone calling, nothing, but for a partial, which asks as below; either way the fields clear | `CQ`, or `Wipe` |
 | C, V, and the station corrected that call, unasked or in answer to `?` | nothing; focus to Call, as a `?` would only bring the correction again | `Fix call` |
 | not C, or not V, or (not N and E Empty) | his call as typed, then… | `Send K5XYZ`, or `Ask K5?` |
 | …not N and V | …your exchange | `Send K5XYZ + exch` |
@@ -732,8 +754,27 @@ The rows that fire go out as one message: `K5XYZ` typed sends
 A CQ or a TU ends the QSO for Enter as logging does, and so does a key
 pressed with the Call field empty, as MRCE's `Edit1Change` resets C and N
 when the field empties (`Main.pas:2063-2068`), and the station you work
-leaving, on its timeouts or sent away by what you send (B4, NIL, or its
-last try spent). F3 keeps only the call it went to, so Enter or `.` on that
+leaving, on its timeouts or sent away by what you send (B4, NIL, a CQ
+before its exchange, or its last try spent). As built (third pile-up
+audit), every call the Call field could still hold for it is then one
+Enter no longer sends (`QsoState`'s `gone`): the field as last keyed for
+it, a partial (`K5?`, `K5X?`) too, the call it took, and its own call
+once that has reached you, as you may have put the field right since
+without a key, after its correction or a partial it answered; it has
+left, and its copy is closed, so that tells nothing a score could still
+use. Nobody would answer one, and in a pile-up the rest wait on that QSO
+in silence, where `Send K5XYZ + exch` or `Ask K5?` would only go on into
+it. While nobody calls, Enter calls CQ in its place, clears the fields
+for the next station, and its hint says why ("K5XYZ has gone: Enter calls
+CQ", or "The station has gone" for a partial). Once someone calls, after
+a CQ that brought a caller or a B4 the rest of the pile-up called again
+on, a CQ would go over them, in single style a `?` by another key (4.6):
+Enter sends nothing and clears the fields for the call you hear ("K5XYZ
+has gone: Enter clears the fields"), but for a partial, which asks the
+callers as typed. The calls stay through a CQ or a TU sent meanwhile, and
+through the same call sent again (B4 pressed again, or F5), until another
+call goes out or the Call field is emptied. F3 keeps only the
+call it went to, so Enter or `.` on that
 call sends the TU alone and logs the QSO it closed, as MRCE's TU and log
 does while that call still counts as sent, and any other call starts
 afresh. Its call sent in
@@ -849,8 +890,8 @@ caller F3's TU brought calls again on it, which you keyed to log, not to
 hear it again, so it costs only time (as built, 2c; the browser test had
 it charged, `?×1`). Re-sends you did not ask for (timeouts, calling
 twice, corrections, pile-up calls before you picked the station, a send a
-hidden page or a failed sound cut short and sent again after Resume) cost
-only time (9.1).
+hidden page or a failed sound cut short and sent again after Resume, an
+answer to a message of yours Esc cut short) cost only time (9.1).
 
 ### 4.7 Partials, AGN, wrong calls, dupes
 
@@ -900,8 +941,13 @@ only time (9.1).
   groups or is a lost copy. B4 (F6, and the phone's `B4` on a dupe) sends
   the call typed first when it has not gone out (`K5XYZ QSO B4`), as TU and
   log does: a dupe that has not heard its call would not know the B4 was
-  meant for it, and no other station takes it for its own. It leaves,
-  Enter starts afresh, and the rest of the pile-up calls again (4.3). A
+  meant for it, and no other station takes it for its own. As built
+  (third pile-up audit), so it does when the call went out but the
+  station you work never took it: keyed over a dupe still calling, which
+  never heard it, the B4 alone would be the rest of the pile-up's cue to
+  call again, the dupe among them, with fresh patience, every time. It
+  leaves, Enter starts afresh, and the rest of the pile-up calls again
+  (4.3). A
   slip that is close to a caller's call goes to that caller, which puts its
   call right and stays, as MRCE's does.
 
@@ -993,16 +1039,34 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   sent, as MRCE's Esc resets CallSent and NrSent (`Main.pas:884-891`). The
   callers heard the message when you keyed it (4.3), so Esc takes back what
   had not gone out whole: they are as they were before the message keyed
-  last, then hear only its parts sent whole. A reply it cut never sounded,
-  and what they owe comes on their timeouts. A QSO the message itself lost
+  last, then hear only its parts sent whole. A QSO the message itself lost
   (a CQ or TU keyed by mistake, or the next station's call while the QSO
   your TU without logging closed waits) is taken back with it, and so is a
-  caller it brought, as MRCE's callers hear nothing of an aborted send
-  (`AbortSend`); the groups of such a QSO reach the sampler only once it
-  is final. A QSO logged since that key, or lost by a later key, is final,
-  so then nothing is taken back; nor is a continuation's carried rest,
-  heard at its own key. After Wipe, or a key with the Call field empty, C
-  and N stay reset.
+  caller it brought, which never heard it whole; the groups of such a QSO
+  reach the sampler only once it is final. A QSO logged since that key, or
+  lost by a later key, is final, so then nothing is taken back; nor is a
+  continuation's carried rest, heard at its own key. After Wipe, or a key
+  with the Call field empty, C and N stay reset. As built (third pile-up
+  audit), your message cut short, every caller that was listening, not
+  sending still at the Esc nor waiting out your QSO with someone else,
+  copies what it heard of the message as garbage, as MRCE's callers copy
+  an aborted send (`MyStn.pas:108-116`: `AbortSend` makes it `msgGarbage`
+  and fires `evMsgSent`), and answers it after its reply delay, 0.1–0.6 s
+  (`DxOper.pas:805-817`, `DxStn.pas:240-275`): a caller takes more
+  patience and spends a try, as when you key over it (4.3), and the
+  station you work sends again what it owes, at no charge (4.6). So the
+  pile-up comes straight back, as in MRCE, where it used to keep quiet for
+  a whole reply timeout, thinking time MRCE never gives. With your message
+  out whole before the Esc, the callers heard it: a reply it cut never
+  sounded, and what they owe comes on their timeouts. What reached you
+  since the key of the callers on the frequency then stays heard: a caller
+  you keyed over that went on over your message keeps the end of a call
+  or exchange heard whole, which its copy is timed from, and what it told
+  Enter (that the station you work took the call, or corrected it) stands.
+  Esc takes your message back from the callers, not their sends from you.
+  A dupe the message brought back goes back as it was, whole, its old
+  QSO's ends and voices with it, so a NIL after is never charged to the
+  station you work for want of them.
 - **Stale sends.** A stopped or replaced send returns `Cancelled`
   (`player.rs:325-349`): `TurnCancelled`, ignored. Arming cancels the send,
   not the lease (`audio/epoch.rs:6-9, 21-27`; `player.rs:236-238`). Each
@@ -1296,7 +1360,11 @@ in place of `current/total`.
 - **The hint line** is `esm()`'s `hint` ("Type the call you hear, then
   Enter"; with nobody calling, after a Simple QSO's TU or once the station
   has gone, the rest of a pile-up waiting on its QSO, "Enter calls CQ for
-  the next station", from `QsoState`'s `nobody_calling`), one line, as
+  the next station", from `QsoState`'s `nobody_calling`; as built, third
+  pile-up audit, with a call the fields could still hold for a station
+  that has gone, "K5XYZ has gone: Enter calls CQ", or once someone calls
+  "K5XYZ has gone: Enter clears the fields", from `QsoState`'s `gone`, so
+  the screen says what the screen reader's "K5XYZ has gone" says), one line, as
   group training's (`training.rs:566-585`), and in its type. The hints are
   short enough for a phone's line ("Copy their number, then TU & log").
   Before the first CQ it says the seconds to it ("Your first CQ goes out in
@@ -1727,7 +1795,11 @@ exactly as it was while the run went on.
   has begun to reach you: logged before that, each field group is a miss
   (received empty, 1 send), as a guess is no copy, so logging early neither
   raises accuracy nor shrinks the groups a run is ranked over; `l` and `s`
-  hold what you logged and what was sent, for the check.
+  hold what you logged and what was sent, for the check. As built (third
+  pile-up audit), of a call put right with the exchange after it
+  (`DE K5XYZ 5NN 214`), the exchange has begun once its first character
+  has, not once the `DE` has, and so its speed and a repeat of it count
+  from then (`exchange_at`, `contest/caller.rs`).
 - **One station, one copy.** A station logged again (a dupe, or a log
   after a NIL charged to it) owns no groups: `sc` holds its call, `lc` the
   call logged, and `l` and `s` both exchanges. The soak checks that every
@@ -1836,7 +1908,11 @@ exactly as it was while the run went on.
   the slowest a send of it began to reach you at, so a caller that slowed
   down for you (QRS, 4.3) credits the copy at the speed it may have been
   copied from: its call at the slowest call it sent, its exchange at the
-  slowest exchange; the log row's WPM is the slower of the two. The
+  slowest exchange; the log row's WPM is the slower of the two, and the
+  results list it the same, the slowest of the QSO's groups (as built,
+  third pile-up audit; the results used to read the call's alone). A QSO
+  that owns no groups, a station logged again, shows no speed in either:
+  its copy, and the speed that is credited at, are the earlier QSO's. The
   session's are their mean, as `GroupSession::result` does
   (`session.rs:478-491`), never `my_wpm`. `digits_level` comes from the
   settings, `level` is the callsign tier, `score` is `points()`, and the
@@ -2306,7 +2382,7 @@ pub struct Fields { pub call: String, pub exch: String,
 pub struct ContestView {
     pub phase: ContestPhase, pub clock: Option<RunClock> /* None in the countdown */,
     pub limit_ms: u64, pub my_wpm: f64,
-    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up
+    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up, a gone station's calls
     pub air: Option<AirView>,  // heard from, your text and where each character ends, segment spans
     pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked
     pub qsos: u32, pub clean: u32,
@@ -2525,7 +2601,7 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   a station left for another, even with a slip of the next call, keeps
   the call you sent it, and Enter sends the next one your exchange; a call
   typed for another station at a key that sends no call is no copy of the
-  one you work, nor its name once it has gone; a copy is crossed only by a
+  one you work, nor a call kept for it once it has gone; a copy is crossed only by a
   station there when it is lost; a fix sent over a correction leaves Enter
   working and is not called for again; a caller that only answered a
   partial is charged no NIL and ends no QSO your TU closed; B4 with a slip
@@ -2558,7 +2634,25 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   again slows down from the third partial, or the fourth, its exchange
   back at its own speed once its call is heard right, its call credited
   at its slowest and its exchange at its own; a slow reply keyed over
-  before it began credits nothing slower.
+  before it began credits nothing slower;
+- from the third pile-up audit: B4 keyed over a dupe still calling sends
+  its call again, and sends it away; Esc brings the pile-up back at once,
+  as garbage does, and the station you work sends what it owes at no
+  charge while a caller waiting out its QSO keeps quiet; a caller that
+  missed your exchange still takes it late; once the station you work
+  has gone, whatever call the fields hold for it (its call, a slip it put
+  right, the call put right since, a partial it answered, its call typed
+  since), the hint says so and Enter calls CQ, which the pile-up answers;
+  after B4 sends a dupe away, B4 pressed again or not, or once a CQ brings
+  a caller, Enter clears the call and charges no repeat, and F5 with the
+  call keeps it gone; Esc keeps a call heard whole over your message, and
+  puts back a dupe the message brought as it was; a stored run's log reads
+  the speed its live log showed; a number logged before a correction's
+  exchange reaches you is a miss, and a copy once it has. Unit tests: a
+  station waiting for your exchange stays silent after its silent
+  timeouts and takes it late; Enter calls CQ in place of a call whose
+  station has gone, or clears it once someone calls; a correction's
+  exchange starts after its two words.
 
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
@@ -2815,6 +2909,9 @@ keying with the paddles, a contest level, and more contests.
 | Lost copies | a call group and a missed group per field for each station engaged, as for a QSO logged before its exchange came | logged copies only; a call group alone | wiping a hard call, or walking away once the exchanges are out, must not raise accuracy, nor the board's points per group |
 | Fields logged before they were heard | a missed group each | no group | logging early with a guess must not raise accuracy, nor the board's points per group |
 | A send a pause you chose cut | owed on the caller's timeout | sent again a moment after Resume | a pause is no free `?`; a hidden page or failed sound is no choice, and does send it again |
+| Esc on your message | the callers listening answer what they heard as garbage, at once | silence for a reply timeout | MRCE's callers do (`AbortSend`); the quiet was thinking time MRCE never gives |
+| The station you work, waiting for your exchange, hears nothing from you | stops asking after 3 silent timeouts, stays, and takes it late; in any other worked state it leaves after 3 | leaving after 3 | MRCE's `osNeedNr` stays; a slow learner keeps the QSO. MRCE's others leave on the fourth; Dust keeps three |
+| Enter on the call of a station that has gone | CQ, the fields cleared, the hint saying why; once someone calls, the fields cleared alone | its call and your exchange | nobody would answer it, a pile-up waits on that QSO in silence, and a CQ over a caller only costs it |
 | F3, then log | checked against the station F3 closed | a NIL | MRCE's log finds a station done with you (`Log.pas:745-755`) |
 | Stored tokens | as keyed | canonical | Letters and Mistakes see what was heard |
 | Copy speed | calls and numbers only | every group | closed lists are guessed, not copied |

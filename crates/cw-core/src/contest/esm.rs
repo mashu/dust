@@ -55,6 +55,16 @@ pub struct QsoState {
     /// exchange, or by asking for yours, with no correction: that call is
     /// its own, so in a pile-up any other whole call is another caller's.
     pub call_taken: bool,
+    /// Every call the Call field could still hold for the station Enter's
+    /// QSO was with, once that station has gone, its timeouts sat through,
+    /// or sent away by what you sent (B4, NIL, a CQ before its exchange):
+    /// the field as last keyed for it, a partial without its `?` too, the
+    /// call it took, and its own call once that has reached you. Nobody
+    /// would answer one, so Enter calls CQ in its place while nobody calls,
+    /// and once someone does, clears the fields for the call you hear; the
+    /// hint says why. They stay through a CQ or a TU, and go once another
+    /// call goes out, or the Call field is emptied.
+    pub gone: Vec<String>,
 }
 
 /// The two fields as typed, with when they were typed: a copy is timed from
@@ -143,9 +153,11 @@ pub enum MessagePart {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Esm {
     /// What it sends, as one message. Nothing for an exchange that cannot
-    /// be read.
+    /// be read, a call to put right, or the call of a station that has gone
+    /// while others call.
     pub message: Vec<MessagePart>,
-    /// The key's label: `CQ`, `Send K5XYZ + exch`, `? Again`, `TU & log`.
+    /// The key's label: `CQ`, `Send K5XYZ + exch`, `? Again`, `TU & log`,
+    /// or `Wipe` where it only clears the fields.
     pub label: String,
     /// One line on what to do next, as much of it as a phone's line holds.
     pub hint: String,
@@ -157,6 +169,9 @@ pub struct Esm {
     /// does not log and the call is whole, as MorseRunner advances; back to
     /// Call once the QSO is logged.
     pub focus: Option<EntryField>,
+    /// Enter clears both fields: the QSO they hold is over, its station
+    /// gone, and the next goes into empty ones.
+    pub clears: bool,
     /// The station corrected the call the Call field still reads: Enter
     /// sends nothing until it is put right.
     pub corrected: bool,
@@ -193,6 +208,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             hint: hint.to_string(),
             hint_more: String::new(),
             focus: None,
+            clears: false,
             corrected: false,
         };
     }
@@ -222,6 +238,30 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             hint_more,
             message,
             focus: Some(EntryField::Call),
+            clears: false,
+            corrected: false,
+        };
+    }
+    // The station you had this call for has gone: nobody would answer it.
+    // While nobody calls, Enter calls CQ for the next station, the fields
+    // cleared for it; once someone does, a CQ would only go over them, so
+    // Enter just clears the fields for the call you hear, but for a
+    // partial, which asks the callers as typed.
+    if qso.gone.contains(&call.replace('?', "")) && (qso.nobody_calling || v) {
+        let name = if v { call.as_str() } else { "The station" };
+        let (message, label, then) = if qso.nobody_calling {
+            (vec![MessagePart::Cq], "CQ", ": Enter calls CQ")
+        } else {
+            (Vec::new(), "Wipe", ": Enter clears the fields")
+        };
+        let (hint, hint_more) = fit(format!("{name} has gone"), then);
+        return Esm {
+            message,
+            label: label.to_string(),
+            hint,
+            hint_more,
+            focus: Some(EntryField::Call),
+            clears: true,
             corrected: false,
         };
     }
@@ -233,6 +273,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             hint: "They corrected you: fix the call, then Enter".to_string(),
             hint_more: String::new(),
             focus: Some(EntryField::Call),
+            clears: false,
             corrected: true,
         };
     }
@@ -243,6 +284,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
             hint: "Exchange cannot be read: fix it, then Enter".to_string(),
             hint_more: String::new(),
             focus: Some(EntryField::Exchange),
+            clears: false,
             corrected: false,
         };
     }
@@ -277,6 +319,7 @@ pub fn esm(qso: &QsoState, fields: &Fields, rules: &ContestRules, side: Side) ->
         hint_more,
         message,
         focus,
+        clears: false,
         corrected: false,
     }
 }
@@ -944,5 +987,54 @@ mod tests {
             assert!(!esm.hint.is_empty(), "{call:?} {exch:?}");
             assert!(!esm.label.is_empty(), "{call:?} {exch:?}");
         }
+    }
+
+    /// The call of a station that has gone is one Enter no longer sends:
+    /// nobody would answer it. While nobody calls, Enter calls CQ in its
+    /// place, says why, and clears the fields for the next station; a
+    /// partial it answered, `?` or not, is just as gone. Once someone calls,
+    /// a CQ would go over them: Enter only clears the fields, but for a
+    /// partial, which asks the callers. Any other call goes out as ever.
+    #[test]
+    fn enter_calls_cq_in_place_of_a_call_whose_station_has_gone() {
+        let mut qso = QsoState {
+            gone: vec!["K5".to_string(), "K5XYZ".to_string()],
+            nobody_calling: true,
+            ..QsoState::default()
+        };
+        let fields = |call: &str| Fields {
+            call: call.to_string(),
+            exch: "214".to_string(),
+            ..Fields::default()
+        };
+        let gone = esm(&qso, &fields("K5XYZ"), rules(), Side::Dx);
+        assert_eq!(gone.message, [Cq]);
+        assert_eq!(
+            (gone.label.as_str(), gone.hint.as_str()),
+            ("CQ", "K5XYZ has gone: Enter calls CQ")
+        );
+        assert_eq!((gone.clears, gone.focus), (true, Some(EntryField::Call)));
+        for partial in ["K5?", "K5"] {
+            let gone = esm(&qso, &fields(partial), rules(), Side::Dx);
+            assert_eq!(gone.message, [Cq], "{partial}");
+            assert_eq!(gone.hint, "The station has gone: Enter calls CQ");
+            assert!(gone.clears, "{partial}");
+        }
+        let other = esm(&qso, &fields("W7ABC"), rules(), Side::Dx);
+        assert_eq!(other.message, [HisCall("W7ABC".to_string()), Exchange]);
+        assert!(!other.clears);
+        // Someone calls: Enter sends nothing over them, and clears the
+        // fields for the call you hear.
+        qso.nobody_calling = false;
+        let gone = esm(&qso, &fields("K5XYZ"), rules(), Side::Dx);
+        assert!(gone.message.is_empty());
+        assert_eq!(
+            (gone.label.as_str(), gone.hint.as_str()),
+            ("Wipe", "K5XYZ has gone: Enter clears the fields")
+        );
+        assert_eq!((gone.clears, gone.focus), (true, Some(EntryField::Call)));
+        let partial = esm(&qso, &fields("K5?"), rules(), Side::Dx);
+        assert_eq!(partial.message, [HisCall("K5?".to_string())]);
+        assert!(!partial.clears);
     }
 }

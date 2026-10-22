@@ -156,7 +156,9 @@ pub struct RunQso {
     /// Each field: what you logged, and what the station sent, empty where
     /// it sent nothing.
     pub fields: Vec<(Field, String, String)>,
-    /// The station's speed.
+    /// The station's speed: the slower of what its call and its exchange
+    /// were credited at. None for a QSO that owns no groups, a station
+    /// logged again, whose copy an earlier QSO holds.
     pub wpm: Option<f64>,
     /// How many repeats you asked for, as the live log counted them.
     pub asked: u32,
@@ -425,10 +427,14 @@ impl ContestRun {
                         (*field, typed, sent)
                     })
                     .collect(),
+                // The slowest its groups are credited at, as the live log
+                // showed it: its call's or its exchange's.
                 wpm: timings
                     .get(walked.groups)
-                    .and_then(<[SessionTiming]>::first)
-                    .and_then(|timing| timing.char_wpm),
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|timing| timing.char_wpm)
+                    .reduce(f64::min),
                 asked: qso.a,
                 check,
             });
