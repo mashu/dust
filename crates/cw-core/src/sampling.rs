@@ -74,7 +74,9 @@ impl CharSamplingState {
 /// The trainer's own group source: groups drawn for the curriculum, leaning
 /// on the characters the history says are hard and on those this session
 /// has not sent yet, and learning from every answer as it comes. With
-/// adaptive group size on, their lengths lean on what you copy whole, too.
+/// adaptive group size on, their lengths lean on what you copy whole, too,
+/// and with adaptive speed on their speeds, or a contest's callers', on
+/// how fast you copy.
 #[derive(Clone, Debug)]
 pub struct Sampler {
     state: CharSamplingState,
@@ -111,13 +113,35 @@ impl GroupSource for Sampler {
     fn learn(&mut self, answered: Answered<'_>) {
         self.state.learn(answered.copied);
         self.span.learn_copy(answered.copied);
-        if let Some((char_wpm, effective_wpm)) = answered.played {
-            let copy = crate::score::copy_speed(char_wpm, effective_wpm);
+        if let Some(copy) = played_speed(answered) {
             self.speed.learn(answered.sent, answered.received, copy);
         }
     }
 
+    /// Drawn from the copy speed while group training's adaptive speed is
+    /// on. In Contest mode the switch is the callers' alone, so Listen's
+    /// stream of groups comes at speeds drawn evenly from the range there,
+    /// as it always has.
     fn next_speed(&mut self, settings: &TrainingSettings) -> Option<(f64, f64)> {
+        if settings.curriculum.char_set_mode == CharSetMode::Contest {
+            return None;
+        }
+        self.draw_speed(settings)
+    }
+}
+
+/// The copy speed `answered` was played at, once it is known.
+fn played_speed(answered: Answered<'_>) -> Option<f64> {
+    let (char_wpm, effective_wpm) = answered.played?;
+    Some(crate::score::copy_speed(char_wpm, effective_wpm))
+}
+
+impl Sampler {
+    /// The character and effective speed to send at next, drawn from the
+    /// copy speed's belief within the speed settings, aiming for the share
+    /// of characters "Aim for" asks: a group's, or a contest's caller's.
+    /// None while the speed does not adapt ([`adaptive_speed_path`]).
+    fn draw_speed(&mut self, settings: &TrainingSettings) -> Option<(f64, f64)> {
         let path = adaptive_speed_path(settings)?;
         let (low, high) = path.bounds();
         let target = settings.curriculum.aim.chars_right();
@@ -152,28 +176,52 @@ impl CallSource for Sampler {
         call
     }
 
-    /// Only what was copied of each character: the span and speed beliefs
-    /// draw group lengths and speeds, which a contest does not.
+    /// Only what was copied of each character: the span belief draws group
+    /// lengths, which a contest does not, and the speed belief hears only
+    /// the calls and numbers ([`CallSource::learn_speed`]).
     fn learn(&mut self, answered: Answered<'_>) {
         self.state.learn(answered.copied);
     }
+
+    /// As the history will read it once the run is in it, so a run's belief
+    /// moves as the history's will: every character of a call or a number
+    /// counts, those lost off its end too, as no span answers for them.
+    fn learn_speed(&mut self, answered: Answered<'_>) {
+        if let Some(copy) = played_speed(answered) {
+            self.speed
+                .learn_whole(answered.sent, answered.received, copy);
+        }
+    }
+
+    /// As the next group's is drawn, when the callers' speed adapts.
+    fn next_speed(&mut self, settings: &TrainingSettings) -> Option<(f64, f64)> {
+        self.draw_speed(settings)
+    }
 }
 
-/// Whether `settings` have each group's speed chosen by adaptive speed.
+/// Whether `settings` have each group's speed, or each new caller's in a
+/// contest, chosen by adaptive speed.
 pub fn adapts_speed(settings: &TrainingSettings) -> bool {
     adaptive_speed_path(settings).is_some()
 }
 
-/// The line adaptive speed moves along, when it has one: it is switched on,
-/// the speed settings leave more than one speed to choose from, and the
-/// mode draws its speeds by it. A contest's callers come at speeds drawn
-/// evenly from the range, until adaptive caller speed comes (phase 5).
+/// Whether the adaptive speed switch of the mode `settings` train is on,
+/// room or not: in Contest mode the callers' own, on as it ships, so group
+/// training's, off as it ships, is left as it was; in any other, group
+/// training's.
+pub fn adaptive_speed_on(settings: &TrainingSettings) -> bool {
+    if settings.curriculum.char_set_mode == CharSetMode::Contest {
+        settings.contest.contest_adapt_speed
+    } else {
+        settings.playback.adaptive_speed
+    }
+}
+
+/// The line adaptive speed moves along, when it has one: the mode's switch
+/// is on, and the speed settings leave more than one speed to choose from.
 pub(crate) fn adaptive_speed_path(settings: &TrainingSettings) -> Option<SpeedPath> {
     let path = SpeedPath::of(settings);
-    (settings.playback.adaptive_speed
-        && path.has_room()
-        && settings.curriculum.char_set_mode != CharSetMode::Contest)
-        .then_some(path)
+    (adaptive_speed_on(settings) && path.has_room()).then_some(path)
 }
 
 /// The shortest and longest group `settings` asks for. At least one
@@ -670,26 +718,251 @@ mod tests {
         }
     }
 
-    /// Contest mode never says it adapts speed: its callers' speeds are
-    /// drawn evenly from the range, whatever the switch carried over from
-    /// Callsigns says.
-    #[test]
-    fn contest_has_no_adaptive_speed_path() {
+    /// Settings in Contest mode whose callers come at `low` to `high` WPM.
+    fn contest_speeds(low: f64, high: f64) -> TrainingSettings {
         let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Callsign;
-        settings.playback.char_wpm_min = 20.0;
-        settings.playback.char_wpm_max = 35.0;
-        settings.playback.effective_wpm_min = 20.0;
-        settings.playback.effective_wpm_max = 35.0;
-        settings.playback.adaptive_speed = true;
-        let settings = settings.clamp();
-        assert!(adapts_speed(&settings));
-        let mut contest = settings;
-        contest.curriculum.char_set_mode = CharSetMode::Contest;
-        let contest = contest.clamp();
-        assert!(contest.playback.adaptive_speed, "the switch is kept");
-        assert!(!adapts_speed(&contest));
-        assert!(adaptive_speed_path(&contest).is_none());
+        settings.curriculum.char_set_mode = CharSetMode::Contest;
+        settings.playback.char_wpm_min = low;
+        settings.playback.char_wpm_max = high;
+        settings.playback.effective_wpm_min = low;
+        settings.playback.effective_wpm_max = high;
+        settings.clamp()
+    }
+
+    /// The character speeds of `n` callers in a row, as `sampler` draws
+    /// them for `settings`.
+    fn callers_speeds(sampler: &mut Sampler, settings: &TrainingSettings, n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|_| {
+                CallSource::next_speed(sampler, settings)
+                    .expect("the callers' speed adapts")
+                    .0
+            })
+            .collect()
+    }
+
+    fn mean(speeds: &[f64]) -> f64 {
+        speeds.iter().sum::<f64>() / speeds.len() as f64
+    }
+
+    /// A contest's callers adapt by a switch of their own, on as it ships:
+    /// group training's switch, carried over from Callsigns, says nothing of
+    /// them, nor theirs of a group session's or of Listen's stream of
+    /// groups, and one speed leaves nothing to adapt.
+    #[test]
+    fn a_contests_callers_adapt_by_a_switch_of_their_own() {
+        let mut contest = contest_speeds(20.0, 35.0);
+        assert!(adapts_speed(&contest), "the callers' is on as it ships");
+        for group in [false, true] {
+            contest.playback.adaptive_speed = group;
+            contest.contest.contest_adapt_speed = false;
+            assert!(!adapts_speed(&contest), "group training's {group}");
+            assert_eq!(
+                CallSource::next_speed(&mut Sampler::new(&[], &contest, 1), &contest),
+                None
+            );
+            contest.contest.contest_adapt_speed = true;
+            assert!(adapts_speed(&contest), "group training's {group}");
+            assert_eq!(
+                GroupSource::next_speed(&mut Sampler::new(&[], &contest, 1), &contest),
+                None,
+                "group training's {group}"
+            );
+        }
+        let mut calls = contest.clone();
+        calls.curriculum.char_set_mode = CharSetMode::Callsign;
+        calls.playback.adaptive_speed = false;
+        assert!(!adapts_speed(&calls), "Callsigns goes by group training's");
+        let mut fixed = contest;
+        fixed.playback.char_wpm_max = 20.0;
+        fixed.playback.effective_wpm_max = 20.0;
+        assert!(adaptive_speed_path(&fixed.clamp()).is_none(), "one speed");
+    }
+
+    /// A contest's next caller comes at a speed drawn from your copy speed,
+    /// within the ranges: calls and numbers copied clean draw faster
+    /// callers, misses slower ones, smoothly as the belief moves. A field
+    /// from a short list, which only `learn` hears, moves nothing.
+    #[test]
+    fn a_contests_callers_speed_follows_the_calls_and_numbers_copied() {
+        let settings = contest_speeds(15.0, 40.0);
+        let after = |typed: &str, wpm: f64, copies: usize, tells: bool| {
+            let mut sampler = Sampler::new(&[], &settings, 3);
+            for _ in 0..copies {
+                let copied = CopyTally::of("K5XYZ", typed);
+                let answered = Answered {
+                    sent: "K5XYZ",
+                    received: typed,
+                    copied: &copied,
+                    played: Some((wpm, wpm)),
+                };
+                CallSource::learn(&mut sampler, answered);
+                if tells {
+                    CallSource::learn_speed(&mut sampler, answered);
+                }
+            }
+            let speeds = callers_speeds(&mut sampler, &settings, 400);
+            assert!(
+                speeds.iter().all(|wpm| (15.0..=40.0).contains(wpm)),
+                "{speeds:?}"
+            );
+            mean(&speeds)
+        };
+        let fresh = after("K5XYZ", 25.0, 0, true);
+        assert_eq!(
+            after("K5XYZ", 30.0, 20, false),
+            fresh,
+            "a name says nothing"
+        );
+        let few_clean = after("K5XYZ", 30.0, 3, true);
+        let clean = after("K5XYZ", 30.0, 20, true);
+        let missed = after("K7XQC", 22.0, 20, true);
+        assert!(
+            few_clean > fresh,
+            "{few_clean} after 3 clean, {fresh} fresh"
+        );
+        assert!(clean > few_clean + 2.0, "{clean} after 20 clean");
+        assert!(
+            missed < fresh - 2.0,
+            "{missed} after 20 missed, {fresh} fresh"
+        );
+    }
+
+    /// A call or a number copied without its end is a miss, a busted call
+    /// in the log: no copy span answers for a contest's lost end, as it does
+    /// for a group's. Copied clean, the same calls draw faster callers.
+    #[test]
+    fn a_call_or_number_copied_without_its_tail_is_a_miss() {
+        let settings = contest_speeds(15.0, 40.0);
+        let after = |pairs: &[(&str, &str)]| {
+            let mut sampler = Sampler::new(&[], &settings, 3);
+            for _ in 0..20 {
+                for (sent, typed) in pairs {
+                    let copied = CopyTally::of(sent, typed);
+                    CallSource::learn_speed(
+                        &mut sampler,
+                        Answered {
+                            sent,
+                            received: typed,
+                            copied: &copied,
+                            played: Some((30.0, 30.0)),
+                        },
+                    );
+                }
+            }
+            mean(&callers_speeds(&mut sampler, &settings, 400))
+        };
+        let fresh = after(&[]);
+        let busted = after(&[("K5XYZ", "K5XY"), ("214", "21")]);
+        let clean = after(&[("K5XYZ", "K5XYZ"), ("214", "214")]);
+        assert!(
+            busted < fresh,
+            "{busted} after 20 busted calls and numbers, {fresh} fresh"
+        );
+        assert!(clean > fresh + 2.0, "{clean} after 20 clean, {fresh} fresh");
+        assert_eq!(after(&[("214", "")]), fresh, "an empty field says nothing");
+    }
+
+    /// Contest runs of ten QSOs at `timestamp`, `wpm`, each its call copied
+    /// as `call` and its number as `nr`, as the history keeps them; with
+    /// Show copy on when `assisted`, each copy a send more.
+    fn contest_run(
+        timestamp: u64,
+        call: &str,
+        nr: &str,
+        wpm: f64,
+        assisted: bool,
+    ) -> SessionResult {
+        use crate::contest::ContestLog;
+        use crate::session::SessionTiming;
+        let groups: Vec<GroupResult> = (0..10)
+            .flat_map(|_| [("K5XYZ", call), ("214", nr)])
+            .map(|(sent, received)| GroupResult {
+                sent: sent.into(),
+                received: received.into(),
+                correct: sent == received,
+            })
+            .collect();
+        let qsos: Vec<serde_json::Value> = (1..=10)
+            .map(|n| serde_json::json!({ "t": n, "h": 0, "g": 2, "nr": n }))
+            .collect();
+        let layout = serde_json::json!({
+            "v": 1, "kind": "wpx", "style": "single", "callers": [1, 1], "side": "",
+            "myCountry": "DL", "myContinent": "EU", "myZone": 14, "fields": ["nr"],
+            "limitS": 600, "runMs": 600_000, "pausedMs": 0, "myWpm": wpm,
+            "assisted": assisted, "qsos": qsos,
+        });
+        SessionResult {
+            timestamp,
+            char_set_mode: CharSetMode::Contest,
+            alphabet_fingerprint: if assisted {
+                "contest:wpx:a"
+            } else {
+                "contest:wpx"
+            }
+            .into(),
+            contest: Some(ContestLog(layout)),
+            group_timings: groups
+                .iter()
+                .map(|_| SessionTiming {
+                    time_to_complete_ms: 900.0,
+                    char_wpm: Some(wpm),
+                    effective_wpm: Some(wpm),
+                    sends: 1 + u32::from(assisted),
+                })
+                .collect(),
+            groups,
+            ..SessionResult::empty_for_test()
+        }
+    }
+
+    /// A run's callers start from the copy speed the contest runs in the
+    /// history leave, by their calls and numbers: runs copied clean at 34
+    /// WPM draw faster callers than none, and runs that missed at 20 slower,
+    /// as do runs whose calls and numbers lost their ends at 30, read whole
+    /// as the run learned them.
+    /// An assisted run counts as any run does, blind to its sends as the
+    /// copy-speed series is, its copies what you had by ear when each text
+    /// showed; and group sessions, at whatever speed, say nothing of it.
+    #[test]
+    fn a_runs_callers_start_from_the_contest_runs_in_the_history() {
+        let settings = contest_speeds(15.0, 40.0);
+        let start = |history: &[SessionResult]| {
+            mean(&callers_speeds(
+                &mut Sampler::new(history, &settings, 5),
+                &settings,
+                400,
+            ))
+        };
+        let runs = |call: &str, nr: &str, wpm: f64, assisted: bool| -> Vec<SessionResult> {
+            (1..=3)
+                .map(|at| contest_run(at, call, nr, wpm, assisted))
+                .collect()
+        };
+        let fresh = start(&[]);
+        let fast = start(&runs("K5XYZ", "214", 34.0, false));
+        let slow = start(&runs("K7XQC", "819", 20.0, false));
+        assert!(fast > fresh + 2.0, "{fast} after clean runs, {fresh} fresh");
+        assert!(
+            slow < fresh - 2.0,
+            "{slow} after missed runs, {fresh} fresh"
+        );
+        let cut = start(&runs("K5XY", "21", 30.0, false));
+        assert!(
+            cut < fresh,
+            "{cut} after runs that lost the ends, {fresh} fresh"
+        );
+        assert_eq!(start(&runs("K5XYZ", "214", 34.0, true)), fast, "assisted");
+        let groups: Vec<SessionResult> = runs("K5XYZ", "214", 38.0, false)
+            .into_iter()
+            .map(|run| SessionResult {
+                char_set_mode: CharSetMode::Callsign,
+                alphabet_fingerprint: String::new(),
+                contest: None,
+                ..run
+            })
+            .collect();
+        assert_eq!(start(&groups), fresh, "Callsigns sessions are their own");
     }
 
     /// A call to avoid is drawn again, a few times at most, and every call
@@ -1396,7 +1669,8 @@ mod tests {
         let half = groups / 2;
         for n in 0..groups {
             let (sent, _) = sampler.next_group(&settings);
-            let played = sampler.next_speed(&settings).expect("adaptive speed is on");
+            let played =
+                GroupSource::next_speed(&mut sampler, &settings).expect("adaptive speed is on");
             let speed = crate::score::copy_speed(played.0, played.1);
             let typed = learner.answer(&sent, speed, &mut rng);
             if n >= half {

@@ -908,6 +908,7 @@ mod tests {
         s.contest.contest_minutes = 9_000;
         s.contest.contest_show_copy = true;
         s.contest.contest_tu_call = crate::contest::TuCall::Never;
+        s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 9_000;
         s.contest.my_sending_db = 9_000;
         s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
@@ -1518,6 +1519,7 @@ mod tests {
         s.contest.contest_minutes = 25;
         s.contest.contest_show_copy = true;
         s.contest.contest_tu_call = crate::contest::TuCall::Every;
+        s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 34;
         s.contest.my_sending_db = -21;
         s.contest.my_call = "DL1ABC".to_string();
@@ -1624,6 +1626,47 @@ mod tests {
         }
     }
 
+    /// The callers' adaptive speed is the Speed card's, beside group
+    /// training's: its reset turns it back on, and no other section's
+    /// touches it, nor group training's switch.
+    #[test]
+    fn the_callers_adaptive_speed_belongs_to_the_speed_card() {
+        for section in SettingsSection::ALL {
+            let mut s = wildly_different();
+            s.reset_section(section);
+            assert_eq!(
+                s.contest.contest_adapt_speed,
+                section == SettingsSection::Speed,
+                "{section:?}"
+            );
+        }
+        let mut s = TrainingSettings::default();
+        assert!(s.contest.contest_adapt_speed, "on as it ships");
+        assert!(!s.playback.adaptive_speed, "group training's stays off");
+        s.contest.contest_adapt_speed = false;
+        s.playback.adaptive_speed = true;
+        let s = s.clamp();
+        assert!(!s.contest.contest_adapt_speed && s.playback.adaptive_speed);
+        // In Contest the aim shows beside the switch while the callers
+        // adapt: the reset that turns the switch back on brings the aim onto
+        // the card it resets, so it puts the aim back too; Session shape's
+        // reset leaves an aim it does not show.
+        let mut contest = TrainingSettings::default();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        contest.curriculum.aim = Aim::Stretch;
+        contest.contest.contest_adapt_speed = false;
+        let contest = contest.clamp();
+        let mut shape = contest.clone();
+        shape.contest.contest_adapt_speed = true;
+        shape.reset_section(SettingsSection::SessionShape);
+        assert_eq!(shape.curriculum.aim, Aim::Stretch, "not Session shape's");
+        let mut speed = contest;
+        speed.reset_section(SettingsSection::Speed);
+        assert!(speed.contest.contest_adapt_speed);
+        assert_eq!(crate::sampling::aim_section(&speed), SettingsSection::Speed);
+        assert_eq!(speed.curriculum.aim, Aim::Balanced, "the Speed card's");
+    }
+
     /// Your speed is a speed of your own inside the Speed card's bounds, or
     /// none; your sending runs from silent to the loudest.
     #[test]
@@ -1655,6 +1698,7 @@ mod tests {
         assert_eq!(json["contestMinutes"], 10);
         assert_eq!(json["contestShowCopy"], false);
         assert_eq!(json["contestTuCall"], "third");
+        assert_eq!(json["contestAdaptSpeed"], true);
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -9);
         assert_eq!(json["myCall"], "");

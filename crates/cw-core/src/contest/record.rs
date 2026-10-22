@@ -145,6 +145,20 @@ impl QsoRecord {
     fn owns_call_group(&self) -> bool {
         self.g > 0 && self.sc.is_empty()
     }
+
+    /// What each of its groups holds, the run's copied fields being `field`
+    /// by their place: the station's call where it owns that group, then a
+    /// field each, and nothing a field names past them.
+    pub(crate) fn group_copies(
+        &self,
+        field: impl Fn(usize) -> Option<Field>,
+    ) -> impl Iterator<Item = GroupCopy> {
+        let call = self.owns_call_group();
+        let fields = self.g as usize - usize::from(call);
+        call.then_some(GroupCopy::Call)
+            .into_iter()
+            .chain((0..fields).map(move |at| field(at).map_or(GroupCopy::Other, GroupCopy::Field)))
+    }
 }
 
 /// One QSO of a stored run, as its results list it: what you logged, and
@@ -544,22 +558,11 @@ impl ContestRun {
     /// knows every field and owns exactly its session's groups, so this is
     /// one for each of them.
     pub(crate) fn group_copies(&self) -> Vec<GroupCopy> {
-        let mut copies = Vec::new();
-        for qso in &self.qsos {
-            let call = qso.owns_call_group();
-            if call {
-                copies.push(GroupCopy::Call);
-            }
-            // A group past the fields holds nothing a field names.
-            let fields = qso.g as usize - usize::from(call);
-            copies.extend((0..fields).map(|at| {
-                self.fields
-                    .get(at)
-                    .and_then(|name| Field::from_name(name))
-                    .map_or(GroupCopy::Other, GroupCopy::Field)
-            }));
-        }
-        copies
+        let field = |at: usize| self.fields.get(at).and_then(|name| Field::from_name(name));
+        self.qsos
+            .iter()
+            .flat_map(|qso| qso.group_copies(field))
+            .collect()
     }
 
     /// The fields copied from each caller; none if this build does not

@@ -1,7 +1,7 @@
 use cw_core::{
     AccuracyPoint, CharSetMode, Estimate, EstimatePoint, MasteryStatus, SessionResult,
-    TrainingSettings, accuracy_chart, adapts_group_size, adapts_speed, character_diagnostics,
-    practised_modes, span_history, speed_history,
+    TrainingSettings, accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed,
+    character_diagnostics, practised_modes, span_history, speed_history,
 };
 use dioxus::prelude::*;
 
@@ -146,7 +146,7 @@ fn TrendCard(
     /// What the pills' ids begin with.
     pills: &'static str,
     /// A line under the chart, where the series shown needs one.
-    note: Option<&'static str>,
+    note: Option<String>,
 ) -> Element {
     let shown = &points[points.len().saturating_sub(TREND_SESSIONS_SHOWN)..];
     let estimates: Vec<Estimate> = shown.iter().map(|point| point.estimate).collect();
@@ -218,9 +218,24 @@ fn TrendCard(
 /// What the chip says of a character set that is not the one practised now.
 const NOT_NOW: &str = "Not the set practised now";
 
-/// How a contest's callers' speeds come, which no copy speed steers yet.
-pub(crate) const CONTEST_SPEEDS: &str =
-    "Callers' speeds are drawn evenly from your range; − and + move only your own.";
+/// What the run screen's keys do to the speeds, however the callers' speeds
+/// come.
+pub(crate) const YOUR_SPEED_KEYS: &str = "The run screen's − and + move only your own speed.";
+
+/// How a contest's callers' speeds come under `settings`: from your copy
+/// speed in contests while their switch is on; every one at the one speed
+/// set while it is on with no room to adapt; and evenly from your range
+/// while it is off. Then what − and + do, the same either way.
+pub(crate) fn contest_speeds(settings: &TrainingSettings) -> String {
+    let callers = if adapts_speed(settings) {
+        "Each new caller's speed is drawn from your copy speed, within your range: faster as you copy calls and numbers clean, slower as you miss them."
+    } else if adaptive_speed_on(settings) {
+        "One speed is set, so every caller comes at it."
+    } else {
+        "Callers' speeds are drawn evenly from your range."
+    };
+    format!("{callers} {YOUR_SPEED_KEYS}")
+}
 
 /// The copy span: how long a group you copy whole, and how that has moved,
 /// for each character set with groups drawn a character at a time in its
@@ -275,9 +290,12 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
     let now = mode == current;
     let aim = settings.curriculum.aim;
     let contest = mode == CharSetMode::Contest;
+    // Switched on with one speed set, nothing adapts, but the switch is not
+    // off either.
     let off = match (now, contest) {
         (false, _) => NOT_NOW,
-        (true, true) => "Not adaptive",
+        (true, _) if adaptive_speed_on(&settings) => "One speed set",
+        (true, true) => "Adaptive callers off",
         (true, false) => "Adaptive speed off",
     };
     rsx! {
@@ -295,7 +313,7 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             mode,
             on_mode: move |mode| chosen.set(Some(mode)),
             pills: "speed",
-            note: contest.then_some(CONTEST_SPEEDS),
+            note: contest.then(|| contest_speeds(&shown)),
         }
     }
 }

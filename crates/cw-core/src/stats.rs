@@ -1085,6 +1085,28 @@ mod tests {
         assert!(rows.iter().any(|row| (row.drawn - 0.125).abs() > 0.05));
     }
 
+    /// In Contest mode the forecast is the callers': drawn from your copy
+    /// speed while their switch is on, whatever group training's says, and
+    /// evenly across the range while it is off.
+    #[test]
+    fn a_contests_forecast_follows_the_callers_switch() {
+        for group in [false, true] {
+            let mut contest = speed_settings(group);
+            contest.curriculum.char_set_mode = CharSetMode::Contest;
+            // Drawn evenly, every speed between the ends is an eighth.
+            let leans = |settings: &TrainingSettings| {
+                let rows = speed_forecast(settings, &[]);
+                assert!((rows.iter().map(|row| row.drawn).sum::<f64>() - 1.0).abs() < 1e-9);
+                rows[1..rows.len() - 1]
+                    .iter()
+                    .any(|row| (row.drawn - 0.125).abs() > 0.05)
+            };
+            assert!(leans(&contest), "group training's {group}");
+            contest.contest.contest_adapt_speed = false;
+            assert!(!leans(&contest), "group training's {group}");
+        }
+    }
+
     #[test]
     fn one_speed_is_the_only_one_sent() {
         let mut settings = speed_settings(true);

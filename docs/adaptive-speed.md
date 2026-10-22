@@ -126,7 +126,12 @@ updated after every answer.
 slowest corner of the settings to the fastest — character speed and spacing
 together, each across its own range, on a log scale. Tied spacing moves with
 the characters. A fixed character speed with a range of Effective speed
-adapts the spacing alone, the way Farnsworth training does.
+adapts the spacing alone, the way Farnsworth training does. The spacing is
+never faster than the characters, so when Effective speed's slowest is
+above Character speed's, the line starts with the spacing at the
+characters' own speed and keeps it within its range as soon as they are as
+fast as its slowest, as a station drawn evenly from the ranges is; the
+speed along it is found by halving, as the copy speed only rises along it.
 
 **Targets.** "Aim for" is shared with adaptive group size:
 
@@ -193,8 +198,9 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 - `speed.rs`: `SpeedBelief` (the speed's grid and curve on a `GridBelief`:
   history replay, learning from each group, `draw_speed`, `estimate`, and for
   the Sampling card `drawn_near` and `right_at`), `speed_evidence` (which
-  characters count against the speed), and `SpeedPath` (the line through the
-  speed settings).
+  characters count against the speed), `whole_evidence` (a contest's call or
+  number, every character of it counting, those lost off its end too), and
+  `SpeedPath` (the line through the speed settings).
 - `belief.rs` and `aim.rs`: the grid posterior and the aim found by
   bisection, shared with the span. The speed's `Leaning` keeps its wider
   share around the aim (`Spread::Around`).
@@ -205,7 +211,12 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
   `next_speed` draws a speed only when `adapts_speed` allows: the switch is
   on and the speed settings leave more than one speed. `learn` updates it
   whenever the group's speed was measured. The joint simulation lives in its
-  tests.
+  tests. In Contest mode the same belief, started from the Contest
+  copy-speed series, draws each new caller's speed (`CallSource::next_speed`)
+  while the callers' own switch is on, and learns from the run's calls and
+  numbers as each QSO is final (`CallSource::learn_speed`), each counted
+  whole; `GroupSource::next_speed` draws none there, so Listen's stream of
+  groups stays even. See §6.6 of `contest-mode.md`.
 - `machine.rs`: `GroupSource::next_speed`, which by default chooses none,
   and `learn`, which takes the group as it was answered (`Answered`), with
   the speed it was actually played at. The machine keeps each group's chosen
@@ -213,7 +224,10 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 - `session.rs`: `planned_wpm` for the sender, `Group::answered` for the
   source, and `SessionView::speed` (`ChosenSpeed`) for the screen.
 - `settings/mod.rs`: `adaptive_speed` (default `false`) in the Speed section;
-  `Aim::chars_right` for the character targets.
+  `Aim::chars_right` for the character targets. A contest's callers have a
+  switch of their own in the same section, `contestAdaptSpeed` (default
+  `true`, `settings/contest.rs`), which `adaptive_speed_on` reads in
+  Contest mode, for `adaptive_speed_path` and the Speed card alike.
 - `stats.rs`: `speed_history`, and `speed_forecast` for the Sampling card:
   round speeds across the range, with the chance of each and the share of
   characters copied right at it. With adaptive speed off the chances are the

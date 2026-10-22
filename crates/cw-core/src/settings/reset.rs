@@ -10,10 +10,10 @@ impl TrainingSettings {
     /// the character set under a level, say — is never left half valid.
     pub fn reset_section(&mut self, which: SettingsSection) {
         let d = Self::default();
-        // The aim is shared, and goes back with whichever card shows it.
-        if crate::sampling::aim_section(self) == which {
-            self.curriculum.aim = d.curriculum.aim;
-        }
+        // The aim is shared, and goes back with whichever card shows it:
+        // before the reset, or after it, as a switch the reset turns back on
+        // can bring the aim onto the card just reset.
+        let shown = crate::sampling::aim_section(self) == which;
         match which {
             SettingsSection::SessionShape => {
                 self.curriculum.num_groups = d.curriculum.num_groups;
@@ -44,6 +44,7 @@ impl TrainingSettings {
                 self.playback.link_effective_wpm = d.playback.link_effective_wpm;
                 self.playback.link_char_to_effective = d.playback.link_char_to_effective;
                 self.playback.adaptive_speed = d.playback.adaptive_speed;
+                self.contest.contest_adapt_speed = d.contest.contest_adapt_speed;
                 self.playback.extra_word_space_multiplier = d.playback.extra_word_space_multiplier;
                 self.playback.fist_variation = d.playback.fist_variation;
                 self.contest.my_wpm = d.contest.my_wpm;
@@ -114,5 +115,8 @@ impl TrainingSettings {
             }
         }
         *self = std::mem::take(self).clamp();
+        if shown || crate::sampling::aim_section(self) == which {
+            self.curriculum.aim = d.curriculum.aim;
+        }
     }
 }

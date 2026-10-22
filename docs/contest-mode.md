@@ -112,6 +112,14 @@ own, from off to the loudest, on the Tone and volume card (§5.3, §8); your
 speed is a setting of its own, kept from run to run as − and + leave it,
 the callers' speeds staying the Speed card's (§6.6, §8); and how often
 your TU signs with your call in a pile-up is yours to choose (§3, §8).
+Phase 5's adaptive caller speed followed, brought forward at the user's
+asking and decided with the user on 2026-10-22 (§15.2): each new caller
+comes at a speed drawn from your copy speed in contests, within the Speed
+card's ranges, faster as you copy calls and numbers clean and slower as
+you miss them, by the Bayesian belief group training's adaptive speed
+uses, started from the Contest copy-speed series and learning within the
+run; a switch of its own on the Speed card, on as it ships (§6.6, §8,
+§10).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -280,13 +288,18 @@ hidden, as for Words (`auto_level_progress` is `None` in Contest,
 
 **Listen** treats Contest like Callsigns (`src/ui/listen.rs:30-222`), as
 does the one fork in group generation (`sampling.rs:503-507`). Phase 2 adds
-"Hear a QSO".
+"Hear a QSO". As built with adaptive callers' speed (2026-10-22), Listen's
+stream of groups comes in Contest mode at speeds drawn evenly from the
+Speed card's ranges, as it did before: the callers' switch is theirs alone
+(§6.6), and group training's is not shown in Contest, so the sampler's
+`GroupSource::next_speed` draws none there.
 
 **Hear a QSO** (as built, 2c) is offered where a learner meets the
 contest: first on Listen in Contest mode ("Hear a few QSOs of CQ WPX, or
 play one character, the pool, or a stream of groups"), and beside the
 QSO's eyebrow on the Character set card. It plays three QSOs of the chosen
-contest, in its run style, speeds and band, worked by the perfect operator
+contest, in its run style, speeds (drawn as a run's, §6.6) and band,
+worked by the perfect operator
 (`hear_qsos`, `contest/bot.rs`), which hears the turns only, as in a run.
 They are worked through before the first plays, on a run clock of their
 own, from a sampler built from the history as a run's is and let go of
@@ -736,7 +749,11 @@ contest; MRCE's sources are the reference for the numbers below.
   speed is credited at that, and a slow reply you keyed over before it
   began credits nothing (9.1). As built (4a), callers do so under easy
   habits only, a courtesy to a learner; under real and rough habits they
-  keep their speed, as contesters do.
+  keep their speed, as contesters do. As built with adaptive callers'
+  speed (2026-10-22), a caller slows from the speed it came with, drawn
+  from your copy speed while the callers adapt, and the belief never
+  touches it once it calls, so the two never pull against each other
+  (§6.6).
 - **Calling twice.** 10% of pile-up callers send their call twice; single
   callers never do (`DxOper.pas:500-502`). As built, a caller that calls
   twice sends its call twice where the contest's answer has it once
@@ -1606,8 +1623,10 @@ flight, which Dust's "a logged QSO is final" rule covers.
 - **Rate:** QSOs per hour over the last 5 minutes of run time, as MRCE's
   `ShowRate` (`Log.pas:1133-1147`), shown after the first minute; Simple QSO
   shows minutes per QSO.
-- **Speed.** Callers' speeds are drawn from the Speed card's ranges,
-  through `resolve_station` (`timing/station.rs:33-47`). As built after
+- **Speed.** Callers' speeds are drawn from the Speed card's ranges:
+  evenly, through `resolve_station` (`timing/station.rs:33-47`), or, as
+  built with adaptive callers' speed (2026-10-22), from your copy speed
+  within them while the callers adapt (below). As built after
   operator feedback (2026-10-22), you send at your speed, "Your speed" on
   the Speed card in Contest mode (`myWpm`, §8), a setting of its own as
   MorseRunner's `Wpm` is (`Ini.pas:237`, saved); until you set one (0) you
@@ -1628,6 +1647,94 @@ flight, which Dust's "a logged QSO is final" rule covers.
   your speed (`DxOper.pas:235-250`), as they have no range of their own.
   The stored run's `my_wpm` is the mean of the speeds your messages went
   out at, what you sent.
+- **Callers' speed from your copy** (as built, phase 5's adaptive caller
+  speed brought forward and decided with the user on 2026-10-22, §15.2).
+  The user asked for callers that speed up as you copy their calls clean,
+  as an option on by default. MorseRunner's callers move only by your keys
+  (its HST mode sends them at your speed), and RufzXP steps its speed up on
+  each right call and down on a miss; Dust draws each new caller's speed
+  from the Bayesian copy-speed belief group training's adaptive speed uses
+  (`SpeedBelief`, `speed.rs`), so the speed moves smoothly as the posterior
+  does, and a few lucky calls move it less than many. While "Adapt
+  callers' speed to me" is on (`contestAdaptSpeed`, §8), the call source
+  draws each newcomer's character speed and spacing with `draw_speed`
+  along the Speed card's line from its slowest corner to its fastest
+  (`SpeedPath`), its spacing kept within the Effective speed range
+  wherever the characters are as fast as its slowest, as an even draw
+  keeps it, so every caller comes within the card's ranges, but for QRS
+  (below), aiming for the share of characters right that "Aim for"
+  asks (94% at Balanced), the target group training's adaptive speed
+  aims for: one setting for every adaptive feature, shown on the Speed
+  card beside the switch while the callers adapt, as it is in Callsigns
+  mode while speed adapts (`aim_section`). A contest's own fixed target
+  was the other choice; it would have been a second, hidden notion of how
+  hard to push, and the copy-speed card reads its series at the Aim's
+  share. Off, the callers' speeds are drawn evenly from the ranges, as
+  before: the source draws nothing, so the run is the very run it always
+  was. One speed set leaves nothing to adapt, and the switch says so.
+  - The belief starts each run from the Contest copy-speed series in the
+    history (§10): the calls and numbers (NR, ZN) of every contest run, by
+    its log's layout (`ContestRun::group_copies`), faded one session as a
+    run starts (`SpeedBelief::for_session`, as a group session's). An
+    assisted run counts as any run does, as group training's rules count
+    every session of its set whatever it was sent with (blind to `sends`),
+    and its copies are what you had by ear when each text showed (§9.1).
+  - It learns within the run from every call and number copy as its QSO
+    becomes final, when the call source is taught its groups
+    (`ContestMachine::teach`, `CallSource::learn_speed`): the very groups,
+    at the very speeds, the stored run keeps, so the belief at the run's
+    end is the one the next run starts from, but for that fade. A field
+    from a short list (a name, a state, a section, a class, a power, a
+    report) is half guessed and says nothing of speed. A QSO a message on
+    the air lost waits, as Esc may take it back.
+  - Each call and number counts whole (`whole_evidence`,
+    `SpeedBelief::learn_whole`), live and in the history alike: a
+    character lost off its end is a miss. A group session's lost end is
+    its length's to answer for, which the copy span learns from
+    (`speed_evidence`), but a call or a number is as long as it is and no
+    span learns from a run, so a busted call (K5XY for K5XYZ), a number
+    short a digit, the partial a lost QSO keeps (K5) and a Show copy text
+    frozen while your typing lagged all slow the callers. Counted as
+    group training counts them, they read as clean copies, and faster
+    callers, losing more ends, would push the speed up further. A field
+    left empty still says nothing: the run keeps no word of whether it was
+    heard at all, and a caller gone before its exchange reached you leaves
+    one as a send too fast to follow does.
+  - Asking again never slows the callers: a copy counts as it ends, at
+    the slowest send of it that began to reach you (§9.1), as the series
+    counts it, blind to sends as group training's is, so a call got after
+    a partial or a `?` counts as one got first time. What asking costs
+    shows in the rate and the points; a call asked for and still busted or
+    lost counts against the speed (above). Under easy habits QRS adds to
+    this, as the copy is credited at the slowed speed. Counting a repeat
+    as a partial miss would need the record to keep what each send gave
+    you, which it does not.
+  - A caller too fast to work at all, one you never answer, leaves no
+    copy when it gives up, as the stored run's rules say (§9.1), so it
+    teaches the belief nothing. Early on, while the belief is wide, a few
+    such callers can come before ones you can partly copy narrow it, and
+    an early run may stall for a while; the Speed card's Max bounds them.
+    Counting them would need the run's log to keep callers it never
+    worked, so that the history replays them; a known limit, as built.
+  - Callers already calling keep their speed; only a newcomer's is drawn,
+    and a dupe calling again is the same operator at its old speed. The
+    rest of a caller comes from its own generator as ever, its speed alone
+    set over the one `resolve_station` drew (`Caller::send_at`).
+  - QRS under easy habits (§4.3) still slows a caller down for you, from
+    the speed it came with. The two never pull against each other: the
+    belief picks only a newcomer's speed and never touches a caller once
+    it calls, and QRS slows one caller within its QSO and is gone with it;
+    the copy is credited at the slowest send of it that began to reach you
+    (§9.1), which is the speed the belief learns it at.
+  - − / + move only your speed (`myWpm`), and the draw keeps within the
+    Speed card's ranges, so they leave it alone.
+  - The speed is drawn from the call source's generator, seeded for each
+    run as its calls are, so a seed and the keys pressed give one run.
+  - Hear a QSO (§2) draws its callers so too, from a sampler built from
+    the history as a run's is, which learns within it what the perfect
+    operator copies, as it does the characters, and is let go of after.
+    Listen's stream of groups is no caller, and keeps to an even draw in
+    Contest mode (§2).
 
 ## 7. Screen layout
 
@@ -1899,7 +2006,9 @@ exchange as callers send it, each copied field's example
 (`Field::example`). The callsign tier's examples ("What this tier sends")
 are not shown: the dialogue shows a call. Session shape's countdown reads
 "Countdown before the first CQ", and the Speed card says the callers come
-at speeds drawn from its ranges in place of Adapt speed to me.
+at speeds drawn from its ranges; as built with adaptive callers' speed,
+"Adapt callers' speed to me" stands in place of Adapt speed to me, with
+"Aim for" under it while it adapts (§8).
 
 ## 8. Settings
 
@@ -1916,7 +2025,7 @@ fist variation.
 
 | Setting | In Contest |
 |---|---|
-| Character and effective speed ranges | the callers' speeds; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
+| Character and effective speed ranges | the callers' speeds, drawn within them from your copy speed while the callers adapt (`contestAdaptSpeed`, on as it ships), evenly otherwise; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
 | `callsignLevel` | the callers' call shapes, shared with Callsigns mode |
 | `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept |
 | `pileupSpreadHz` | Pile-up only: how far either side of the centre callers land; hidden for Single, where it does nothing |
@@ -1925,8 +2034,13 @@ fist variation.
 **Hidden in Contest mode** (`app.rs:1606-1635`): Experience presets; the
 group fields (groups per session, group size, adaptive size, Aim, sends,
 answer timeout, pause after a group, lock typing); Pile-up level, which
-needs a wanted station; Adapt speed to me, until phase 5; Auto level; the
-alphabet controls.
+needs a wanted station; Adapt speed to me, group training's switch, in
+whose place the callers' own shows (as built, adaptive callers' speed,
+below); Auto level; the alphabet controls. As built, the Aim shows on the
+Speed card while the callers adapt, as it does in Callsigns mode while
+speed adapts, and that card's reset puts it back: whenever the card shows
+it before the reset or after it, as the reset turns the callers' switch
+back on and so can bring the Aim onto the card (`reset_section`).
 
 **Presets** (phase 2): First QSO, Club and Contester on the contest card.
 Each writes shared fields (speed ranges, tier, stations, QSB, QRN) and
@@ -1975,7 +2089,10 @@ Callers space at the speed they key, as contest callers
 do: the character range is written, and with the speeds tied the spacing
 follows it; with Farnsworth spacing set, the same range goes in the
 spacing's range too (the switch is left as it is), and a spacing changed
-after reads Custom.
+after reads Custom. As built with adaptive callers' speed, no preset
+touches "Adapt callers' speed to me": a preset says how fast the callers
+may come, and whether they are drawn within that from your copy is yours,
+so turning it on or off keeps the preset.
 
 **New fields.** One flattened struct, `ContestSettings`
 (`settings/contest.rs`), joins `TrainingSettings`, `SettingsSave` and its
@@ -1998,6 +2115,7 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 (as built, 4a) |
 | `contestShowCopy` | bool | false | — | Session shape | 4 (as built, 4b) |
 | `contestTuCall` | `every` `third` `never` | `third` | forgiving | Character set | operator feedback |
+| `contestAdaptSpeed` | bool | true | — (read back, anything but true or false is on) | Speed | adaptive callers' speed |
 | `myWpm` | u32 | 0 | 0 (the callers' middle) or 5..=80; read back, anything but a number is 0 | Speed | operator feedback |
 | `mySendingDb` | i32 | -9 | -60..=0 (-60 is off); read back, anything but a number is -9 | Tone and volume | operator feedback |
 
@@ -2056,6 +2174,24 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   drawn from these ranges." Read back, a number is kept for the clamp to
   bound and anything else is 0. The card's reset puts it back to 0, and so
   does a preset (above).
+- **Adapt callers' speed to me** (as built, adaptive callers' speed,
+  2026-10-22). A switch on the Speed card in Contest mode, where group
+  training's "Adapt speed to me" sits and in its place, after the line
+  under the ranges ("Callers come at speeds drawn from these ranges.") and
+  before your speed: "New callers come faster while you copy calls and
+  numbers clean, slower when you miss them; those already calling keep
+  their speed. Your copy speed is under Stats." With one speed set it
+  says, as group training's does, "Give Character speed a range to use
+  this: one speed leaves nothing to adapt.", naming Effective speed too
+  ("Give Character speed or Effective speed a range…") only while the
+  speeds are untied and its range shows. On, "Aim for" shows under it
+  (§6.6). It is the contest's own (`contestAdaptSpeed`), on as it ships,
+  so group training's switch (`adaptiveSpeed`, off as it ships) is left as
+  it was, and neither steers the other's mode (`adaptive_speed_on` reads
+  the mode's, for the sampler and the card alike). Read back, anything but
+  true or false is on, as it ships, costing the rest of the save nothing;
+  the Speed card's reset turns it back on, and puts the Aim back with it
+  (above); `clamp()` has nothing to bound; no preset touches it.
 - **Your sending** (as built after operator feedback). On the Tone and
   volume card, where the volume range lives, in Contest mode only, after
   the volume: a slider "Your sending" in 3 dB steps from Off to 0 dB,
@@ -2360,7 +2496,9 @@ exactly as it was while the run went on.
   that owns no groups, a station logged again, shows no speed in either:
   its copy, and the speed that is credited at, are the earlier QSO's. The
   session's are their mean, as `GroupSession::result` does
-  (`session.rs:478-491`), never `my_wpm`. `digits_level` comes from the
+  (`session.rs:478-491`), never `my_wpm`. A call's and a number's
+  speeds are what the copy-speed belief learns them at, live as their QSO
+  is final and from the history after (§6.6). `digits_level` comes from the
   settings, `level` is the callsign tier, `score` is `points()`, and the
   tally and accuracy are worked out as for groups (`session.rs:458-521`).
 - **Show copy** (as built, 4b). A station's text shows a second after its
@@ -2490,10 +2628,10 @@ out of the Callsign series (`belief.rs:134-145`, `stats.rs:420-429`,
 | Calendar, streak, accuracy | Count; character accuracy covers calls and fields, lost copies included. A day's best reads "Best points" (`heatmap.rs:231`). |
 | Letters (`stats.rs:136-198`) | Accuracy counts every keyed character. Contest timings stay out of `avg_ms` and the slow flag, which measure answers after a send; the note says so ("left out of the average time that marks a letter slow"). |
 | Mistakes, sampler beliefs | Count, on keyed tokens: K5XYC for K5XYZ is Z→C, `1T5` for `1N5` is N→T. |
-| Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. |
+| Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. As built with adaptive callers' speed, its chances are the next caller's as the run would draw it (`speed_forecast`, by `adaptive_speed_path`, which reads the callers' switch in Contest): leaning on your copy speed while they adapt, and even across the range while not. Adapting, its line reads "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed.", as the chances are the belief the run starts from (`SpeedBelief::from_history`), and it adds "Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster." when more than half the chance sits on the range's top speed, or the same of its bottom ("…below this range, so most come at its bottom: … lets them go slower."). With the switch on and one speed set it reads "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed."; either then "Right is the share of characters you copy at that speed." |
 | Copy span, group-length forecast | Not contest measures, as for Callsigns (`ui/stats.rs:211-245`). |
-| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` is `None` in Contest until phase 5; the card reads "Callers' speeds are drawn evenly from your range; − and + move only your own" (as built after operator feedback; it said − / + shifted them during a run), its chip "Not adaptive". |
-| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form: as built (4b), a whole run with Show copy on is listed after the places on every board that holds it, its place a dashed `—` read as "Not placed", its figures greyed and "· assisted" after them, with a line saying why (`assisted_runs`); it marks nothing on the timeline. As built (4b), the Contest pill shows once the history holds a run, placed or not, with a chip for every contest it holds runs of (`board_modes`, `run_kinds`; the first with a run on the board is chosen until another is), as the Runs card is under it: a board of runs alone offers All modes and Contest. |
+| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` was `None` in Contest until adaptive caller speed came, and the card read "Callers' speeds are drawn evenly from your range; − and + move only your own" (as built after operator feedback; it said − / + shifted them during a run), its chip "Not adaptive". As built with adaptive callers' speed (2026-10-22), the series is what each run's callers start from (§6.6), each call and number counted whole, a character lost off its end a miss (`whole_evidence`), and `adaptive_speed_path` reports them: in Contest it follows the callers' switch, `contestAdaptSpeed`, not group training's (`adaptive_speed_on`). While they adapt the card's chip reads "Adapting · Balanced", as the aim steers them, and its line "Each new caller's speed is drawn from your copy speed, within your range: faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed."; with the switch on and one speed set the chip reads "One speed set", as nothing adapts but the switch is not off (group training's card reads so too with its switch on and one speed), and the line "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, the chip reads "Adaptive callers off" and the line "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed." A run whose callers adapted is a run like any other in the series, its copies what it copied. |
+| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. A run whose callers adapted to your copy is placed as any run is: points per group already weigh the speed each copy was sent at (§10, below), so faster callers copied clean earn more, and a run is not marked for how its callers' speeds were drawn. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form: as built (4b), a whole run with Show copy on is listed after the places on every board that holds it, its place a dashed `—` read as "Not placed", its figures greyed and "· assisted" after them, with a line saying why (`assisted_runs`); it marks nothing on the timeline. As built (4b), the Contest pill shows once the history holds a run, placed or not, with a chip for every contest it holds runs of (`board_modes`, `run_kinds`; the first with a run on the board is chosen until another is), as the Runs card is under it: a board of runs alone offers All modes and Contest. |
 | History (`ui/stats_detail.rs:362-371`) | Every row names its mode (phase 0); a contest row opens its results; a stripped run says "log not kept by an older version". As built (4b), an assisted run says "assisted" after its contest, by its log or its mark, and its results say "Assisted: Show copy was on. The run counts in every stat, and is never placed on the board." |
 | Auto level | Untouched: the contest finish never calls `complete_session` (`auto_level.rs:285-308`). |
 | Runs card (phase 4) | Every run per kind: date, length, QSOs, rate, both scores, error share, best verified per kind and length. As built (4b), on Stats → Scores under the Contest pill, for the contest its chip chooses, below the board (`src/ui/scores/runs.rs`, `contest_runs`): newest first, each row dated as the board dates it, day and time ("Mon 5 Oct 2026 · 14:13"), so runs of one day tell apart, then "10 min" or how far a run ended early went ("03:12 of 10 min"), clean and logged QSOs, the rate (a Simple QSO's minutes a QSO), the share of QSOs logged with an error and its Points, and at its end the verified contest score over the raw one (a Simple QSO's Points; a run of a scored contest whose log does not read, "—" over its Points, so the column holds scores alone). The best verified run of each length (the limit it was set to), Show copy off and above zero, is marked Best, the first to reach it holding it; a contest without a score marks none. An assisted run is marked "assisted" and is never Best. A run whose log this build cannot read, or an older one dropped, is listed with History's words and opens nothing; any other row opens the run's results in the tab's place, with Scores at its top and Back at its foot, as a History row opens them in its list's place. History's words for a log, and its QSOs and rate, are History's own (`log_parts`). The card lists the newest 40 runs, and the best of each length wherever it falls, with "Show n more" for the rest, as History pages its sessions. Each part of a row is kept whole, so at 360 px a row takes three lines and nothing scrolls sideways. |
@@ -2946,6 +3084,10 @@ pub trait CallSource {
     fn next_call(&mut self, s: &TrainingSettings, spec: CallSpec,
                  avoid: &dyn Fn(&str) -> bool) -> GeneratedCall;
     fn learn(&mut self, answered: Answered<'_>);        // session.rs:97-102
+    // As built, adaptive callers' speed (2026-10-22): calls and numbers
+    // teach the copy speed, and a newcomer's speed may be the source's.
+    fn learn_speed(&mut self, _answered: Answered<'_>) {}
+    fn next_speed(&mut self, _s: &TrainingSettings) -> Option<(f64, f64)> { None }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn { pub id: u64, pub at_run_ms: u64, pub segments: Vec<Segment> }
@@ -3027,9 +3169,11 @@ disk, `Station`, `wild`); `settings/curriculum.rs` (Contest → `LevelAxis::Call
 `:49-56`); `session.rs` (`StoredSession`, `mode_on_disk`, `recorded_mode`,
 `contest`, a test constructor, `MonoMs::plus_sec`); `callsign.rs` (`generate_call`, `CallSpec`, public
 `parse_callsign`, `wpx_prefix`, `country_of`); `sampling.rs`, `pool.rs`,
-`auto_level.rs` (Contest arms; `impl CallSource for Sampler`); `stats.rs`,
-`board.rs`, `speed.rs` (history rows, kinds, assisted runs, contest speed
-evidence, no adaptive path); `timing/pileup.rs` (reach helpers
+`auto_level.rs` (Contest arms; `impl CallSource for Sampler`, and, as
+built with adaptive callers' speed, its callers' speeds from the copy-speed
+belief, `adaptive_speed_on` reading the callers' switch in Contest);
+`stats.rs`, `board.rs`, `speed.rs` (history rows, kinds, assisted runs,
+contest speed evidence, `tells_speed`, `whole_evidence`); `timing/pileup.rs` (reach helpers
 `pub(crate)`); `timing/plan.rs` (`dry_wanted`, `plan_morse_playback_at`,
 1b); `soak.rs`, `lib.rs` (the contest soak; exports).
 
@@ -3344,6 +3488,34 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   card in Contest mode only (the TU's in a pile-up only), and their
   resets.
 
+- from adaptive callers' speed (2026-10-22): a run copied clean draws
+  faster callers than one whose numbers are missed, and by its end its
+  source draws faster than a fresh one, the missed run's slower, every
+  caller within the Speed card's range; callers already calling keep the
+  speed they came with, and newcomers' differ; under easy habits a caller
+  whose speed was drawn still slows down for you from it, back on track
+  at it, its call credited at its slowest, the next caller within the
+  range; a seed gives one run; with the switch off the run is the very run
+  of a source that chooses no speed; the source learns the copy speed
+  from calls and numbers, not from a report or a name, once the QSO is
+  logged. Unit tests: the callers' switch is their own, group training's
+  saying nothing of a contest nor theirs of a group session or of
+  Listen's stream of groups, and one speed leaves nothing to adapt; calls
+  and numbers copied clean draw faster callers and misses slower, a name
+  nothing; a call or number copied without its end is a miss, live and
+  from the history, an empty field nothing (`whole_evidence`); a run's
+  callers start from the contest runs in the history, an assisted run as
+  any, a Callsigns session not at all; the speed line keeps the spacing
+  within the Effective range wherever the characters allow it, sending at
+  the copy speed asked; the Sampling forecast follows the callers' switch;
+  the switch's serde (forgiving, on), its section and reset, the reset
+  putting back the Aim it brings onto the card, the presets leaving it
+  alone; the Speed card's switch in Contest only, its words, the one-speed
+  words naming only the ranges shown, the aim beside it while it adapts,
+  and its reset; the copy speed and Sampling cards' words and chips,
+  adapting, at one speed with the switch on, and off, the Sampling card
+  saying when the copy speed is past the range.
+
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
 verified, at 3600·n / Σ(planned turns and drawn delays) an hour within 5%,
@@ -3380,7 +3552,13 @@ current turn events, timers by any id, pause, resume, hide and finish.
   only under the habits that bring them, and callers' numbers in plain
   digits under easy ones. As built, a widened run on seeds of its own
   (9,000 single from seed 50,000 and 13,500 pile-up from seed 90,000)
-  passed with QRM held to it too.
+  passed with QRM held to it too. As built with adaptive callers' speed,
+  the callers adapt on every other seed, and every caller sends within
+  the Speed card's ranges: its characters within Character speed, its
+  spacing within Effective speed wherever its characters are as fast as
+  its slowest, and never outrunning them; slower only as it slows down for
+  you under easy habits, by at most 22% (`QRS_MOST`, skill 1's 20% and
+  2% more), and never under the card's slowest speed.
 - The end: serial = QSOs logged + 1; QSO times rise and stay within
   `run_ms` ≤ the limit; `run_ms + paused_ms` is the wall-clock span, or at
   most that when time ran out, as a run noticed past its limit ends at the
@@ -3618,6 +3796,21 @@ against the published rules and pinned before it ships.
 for continuations; contest tour steps; adaptive caller speed from the Contest
 copy-speed series; the paddles' field space.
 
+- Adaptive caller speed was brought forward at the user's asking and has
+  landed (2026-10-22, §15.2): `contestAdaptSpeed` on the Speed card, on as
+  it ships, beside "Aim for" while it adapts and in place of group
+  training's switch (§8); each newcomer's speed drawn by the call source
+  from the copy-speed belief (`CallSource::next_speed`), started from the
+  Contest series and taught the run's calls and numbers as each QSO is
+  final (`CallSource::learn_speed`), each counted whole, a lost end a
+  miss (`whole_evidence`), QRS slowing a caller from the speed it came
+  with (§6.6); `adaptive_speed_path` reading the mode's switch
+  (`adaptive_speed_on`), so the Sampling and copy-speed cards say how the
+  callers come (§10), and Listen's stream of groups kept to an even draw
+  (§2); and the soak's runs adapting on every other seed, every caller's
+  speed held to the Speed card's ranges but for QRS under easy habits,
+  which slows it by at most 22% (§13).
+
 **Later, not planned:** Search & Pounce with the Sprint QSY rule, QSK, RIT,
 keying with the paddles, a contest level, and more contests.
 
@@ -3670,6 +3863,13 @@ keying with the paddles, a contest level, and more contests.
 | Your sending (operator feedback) | a level of its own, off to the loudest in dB, -9 dB to start | a fixed monitor level | painfully loud against weak callers; -9 dB is level with an average caller as heard through the AGC |
 | The paddles' sidetone (operator feedback; for the user to confirm) | the volume floor, in every mode | your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The cost: at the defaults the paddles sound about 12 dB over your messages and 9 dB over an average caller, turned down only with the volume floor, which moves the callers too (§5.3) |
 | Your call in TU (operator feedback) | every QSO, every third or never, in a pile-up, where the contest's TU leaves it; the callers call after every TU | every third, always | MorseRunner's station ID rate is a setting; its callers come on every TU, signed or not, so none waits for your call |
+| Callers' speed (2026-10-22) | each newcomer's drawn from the copy-speed belief within the Speed card's ranges, on as it ships, a switch of the contest's own; aiming at the Aim's share of characters right; QRS slowing from that speed | MorseRunner's keys alone; RufzXP's step up on a right call and down on a miss; group training's switch; a fixed contest target | the user asked for callers that speed up as calls are copied clean; Dust's speeds come from a posterior, so they move smoothly and as surely as the copies say; group training's switch stays off and its own; one aim for every adaptive feature, shown where it steers |
+| Presets and the callers' speed (2026-10-22) | leave the switch alone | each set it | a preset says how fast callers may come; how they are drawn within that is yours, and toggling it keeps the preset |
+| Assisted runs in the callers' belief (2026-10-22) | counted, as every session of the set is | left out | group training's belief is blind to sends; a copy kept when its text showed is what was heard by ear |
+| A call's or number's lost end in the copy speed (2026-10-22) | a miss, live and in the history (`whole_evidence`) | the group's rule, its length's to answer for | no copy span learns from a run, so a busted call would read as clean, and faster callers, losing more ends, would push the speed up further |
+| Asking again and the callers' speed (2026-10-22) | not counted: a copy counts as it ends | a repeat counted as a partial miss at the first send's speed | the series is blind to sends, as group training's is, and the record keeps the copy at its end, not what each send gave; asking costs rate and points, and a call still busted counts |
+| Callers too fast to work (2026-10-22) | no evidence, a known limit | a speed-only miss kept in the run's log; a cap on the draw while the belief is wide | the record keeps only callers worked; a cap would put a rule of thumb over the posterior |
+| Listen's stream in Contest (2026-10-22) | drawn evenly from the ranges, as before | following the callers' switch | the stream is no caller, and the switch speaks of callers |
 
 ### 15.2 Decisions taken with the user
 
@@ -3728,6 +3928,24 @@ the design where it says so:
     QSO, whose TU is its own). A single caller's TU never signs, as before.
     Callers call after your TU whether it signs or not, as MorseRunner's
     do, so a pile-up that never hears your call goes on as ever (§3, §8).
+
+Decided with the user on 2026-10-22, who asked for callers that speed up
+as their calls are copied clean, as an option on by default:
+
+13. "Adapt callers' speed to me" (`contestAdaptSpeed`) on the Speed card in
+    Contest mode, on by default, a switch of its own, so group training's
+    "Adapt speed to me" stays off and as it was. Each new caller's speed is
+    drawn from the Bayesian copy-speed belief within the Speed card's
+    ranges, aiming at the share of characters "Aim for" asks, shown beside
+    the switch while it adapts; the belief starts each run from the
+    Contest copy-speed series and learns within it from every call and
+    number copied as its QSO is final, so clean calls speed callers up and
+    misses slow them down, smoothly. Callers already calling keep their
+    speed; QRS under easy habits slows a caller from the speed it came
+    with; − and + move only your own speed; no preset touches the switch.
+    Off, callers' speeds are drawn evenly from the ranges as before. Phase
+    5's adaptive caller speed, brought forward (§6.6, §8, §10, §14); how
+    each copy counts towards it is in §6.6 and §15.1.
 
 ## 16. Risks
 

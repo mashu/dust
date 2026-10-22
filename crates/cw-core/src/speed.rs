@@ -25,6 +25,8 @@
 //! last character typed, is the group's length to answer for, which the copy
 //! span learns from. So the span and the speed learn from different
 //! evidence, and both can steer at once without pulling against each other.
+//! A contest's call or number is as long as it is, and no span answers for
+//! its end, so there every character counts, those lost off the end too.
 //!
 //! Each group's speed is drawn the way the span draws a length: one `(V, w)`
 //! is drawn from the posterior, and the speeds whose accuracy comes closest
@@ -37,7 +39,7 @@
 use std::sync::OnceLock;
 
 use crate::aim::{self, Leaning, Spread};
-use crate::alignment::align_holding;
+use crate::alignment::{align_group, align_holding};
 use crate::belief::{Estimate, EstimatePoint, GridBelief, Tally, pick_index, sessions_in_order};
 use crate::callsign::parse_callsign;
 use crate::contest::{Field, GroupCopy};
@@ -158,9 +160,34 @@ pub fn speed_evidence(sent: &str, received: &str) -> Option<(u32, u32)> {
     (counted > 0).then_some((right, counted))
 }
 
+/// What a contest's call or number says about speed: as [`speed_evidence`],
+/// but every character of it counts, those lost off its end too. A call or
+/// a number is as long as it is, so nothing else answers for an end lost: a
+/// call logged without its last letter is a busted call, a miss. A field
+/// left empty still says nothing, as the run keeps no word of whether it
+/// was heard at all: a caller gone before its exchange reached you leaves
+/// one, and so does a send too fast to follow.
+pub fn whole_evidence(sent: &str, received: &str) -> Option<(u32, u32)> {
+    if sent.is_empty() || received.trim().is_empty() {
+        return None;
+    }
+    let aligned = align_group(sent, received);
+    let right = aligned.iter().filter(|pair| pair.matched).count() as u32;
+    Some((right, aligned.len() as u32))
+}
+
+/// Whether a contest run's group says how fast you copy: a call or a number
+/// (NR, ZN) does, a field from a short list does not, being half guessed.
+pub(crate) fn tells_speed(copy: GroupCopy) -> bool {
+    matches!(
+        copy,
+        GroupCopy::Call | GroupCopy::Field(Field::Nr | Field::Zn)
+    )
+}
+
 /// Which of `session`'s groups say how fast you copy: every one of a group
-/// session; of a contest run, the calls and the numbers (NR, ZN), as its
-/// log lays its groups out, since a field from a short list is half guessed.
+/// session; of a contest run, the calls and the numbers ([`tells_speed`]),
+/// as its log lays its groups out, each of them whole ([`whole_evidence`]).
 /// A run whose log an older version dropped, or this one cannot read, keeps
 /// the groups that read as calls.
 fn speed_groups(session: &SessionResult) -> Vec<bool> {
@@ -168,16 +195,7 @@ fn speed_groups(session: &SessionResult) -> Vec<bool> {
         return vec![true; session.groups.len()];
     }
     match session.contest_run() {
-        Some(run) => run
-            .group_copies()
-            .into_iter()
-            .map(|copy| {
-                matches!(
-                    copy,
-                    GroupCopy::Call | GroupCopy::Field(Field::Nr | Field::Zn)
-                )
-            })
-            .collect(),
+        Some(run) => run.group_copies().into_iter().map(tells_speed).collect(),
         None => session
             .groups
             .iter()
@@ -188,12 +206,22 @@ fn speed_groups(session: &SessionResult) -> Vec<bool> {
 
 /// The speed settings, seen as one line from the slowest corner to the
 /// fastest: the character speed and the spacing's pace each move across
-/// their range together, on a log scale.
+/// their range together, on a log scale, the spacing kept within its own
+/// range wherever the characters are fast enough to allow it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpeedPath {
     char_wpm: (f64, f64),
     effective_wpm: (f64, f64),
+    /// The spacing's range as set. The slowest corner may sit below it, as
+    /// the spacing is never faster than the characters; the line comes up
+    /// to it as soon as they allow, as a station drawn from the ranges
+    /// does.
+    spacing: (f64, f64),
 }
+
+/// How many times [`SpeedPath::voice_at`] halves the line to find a speed:
+/// to well under a millionth of it.
+const VOICE_HALVINGS: usize = 48;
 
 impl SpeedPath {
     /// The line `settings` allow. The spacing is never faster than the
@@ -204,20 +232,18 @@ impl SpeedPath {
             p.char_wpm_min.max(1.0),
             p.char_wpm_max.max(p.char_wpm_min).max(1.0),
         );
-        let effective_wpm = if p.link_char_to_effective {
+        let spacing = if p.link_char_to_effective {
             char_wpm
         } else {
             (
-                p.effective_wpm_min.max(1.0).min(char_wpm.0),
-                p.effective_wpm_max
-                    .max(p.effective_wpm_min)
-                    .max(1.0)
-                    .min(char_wpm.1),
+                p.effective_wpm_min.max(1.0),
+                p.effective_wpm_max.max(p.effective_wpm_min).max(1.0),
             )
         };
         Self {
             char_wpm,
-            effective_wpm,
+            effective_wpm: (spacing.0.min(char_wpm.0), spacing.1.min(char_wpm.1)),
+            spacing,
         }
     }
 
@@ -238,14 +264,35 @@ impl SpeedPath {
     /// The character speed and the spacing's pace that send at `copy`,
     /// kept on the line.
     pub fn voice_at(&self, copy: f64) -> (f64, f64) {
-        let (low, high) = self.bounds();
         if !self.has_room() || !copy.is_finite() {
-            return (self.char_wpm.0, self.effective_wpm.0);
+            return self.voice_along(0.0);
         }
-        let along = ((copy.ln() - low.ln()) / (high.ln() - low.ln())).clamp(0.0, 1.0);
+        // The copy speed only rises along the line, so halving it finds
+        // where it sends at `copy`, or the end nearer it.
+        let (mut slower, mut faster) = (0.0, 1.0);
+        for _ in 0..VOICE_HALVINGS {
+            let middle = 0.5 * (slower + faster);
+            let (char_wpm, effective_wpm) = self.voice_along(middle);
+            if copy_speed(char_wpm, effective_wpm) < copy {
+                slower = middle;
+            } else {
+                faster = middle;
+            }
+        }
+        self.voice_along(0.5 * (slower + faster))
+    }
+
+    /// The character speed and the spacing's pace `along` the line, from
+    /// the slowest corner at 0 to the fastest at 1: the spacing within its
+    /// range wherever the characters are as fast as its slowest, and never
+    /// faster than they are.
+    fn voice_along(&self, along: f64) -> (f64, f64) {
         let between = |(from, to): (f64, f64)| (from.ln() + along * (to.ln() - from.ln())).exp();
         let char_wpm = between(self.char_wpm);
-        (char_wpm, between(self.effective_wpm).min(char_wpm))
+        let (slowest, fastest) = self.spacing;
+        let effective_wpm =
+            between(self.effective_wpm).clamp(slowest.min(char_wpm), fastest.min(char_wpm));
+        (char_wpm, effective_wpm)
     }
 }
 
@@ -325,6 +372,11 @@ impl SpeedBelief {
         let mut speed = Self::new((low * high).sqrt());
         for session in sessions_in_order(history, settings.curriculum.char_set_mode) {
             speed.belief.fade();
+            let evidence = if session.char_set_mode == CharSetMode::Contest {
+                whole_evidence
+            } else {
+                speed_evidence
+            };
             let mut tally = Tally::new();
             let counted = session.groups.iter().zip(speed_groups(session));
             for (index, (group, counts)) in counted.enumerate() {
@@ -338,7 +390,7 @@ impl SpeedBelief {
                 let effective_wpm = timing
                     .and_then(|timing| timing.effective_wpm)
                     .unwrap_or(session.effective_wpm);
-                if let Some((right, counted)) = speed_evidence(&group.sent, &group.received) {
+                if let Some((right, counted)) = evidence(&group.sent, &group.received) {
                     let share = f64::from(right) / f64::from(counted);
                     let bin = speed_bin(copy_speed(char_wpm, effective_wpm).ln());
                     tally.add(bin, share, 1.0 - share);
@@ -366,7 +418,20 @@ impl SpeedBelief {
     /// Learn from one group sent at `copy` WPM: what was sent, and what came
     /// back.
     pub fn learn(&mut self, sent: &str, received: &str, copy: f64) {
-        if let Some((right, counted)) = speed_evidence(sent, received) {
+        self.learn_share(speed_evidence(sent, received), copy);
+    }
+
+    /// Learn from a contest's call or number sent at `copy` WPM, every
+    /// character of it counting ([`whole_evidence`]), as the history will
+    /// read it once its run is stored.
+    pub fn learn_whole(&mut self, sent: &str, received: &str, copy: f64) {
+        self.learn_share(whole_evidence(sent, received), copy);
+    }
+
+    /// Learn from what a copy says, its characters right of those counted,
+    /// sent at `copy` WPM.
+    fn learn_share(&mut self, evidence: Option<(u32, u32)>, copy: f64) {
+        if let Some((right, counted)) = evidence {
             let share = f64::from(right) / f64::from(counted);
             self.observe(speed_bin(copy.max(1.0).ln()), share, 1.0 - share);
         }
@@ -614,6 +679,27 @@ mod tests {
         assert!(cut.estimate(REFERENCE_RATE).mean >= start.estimate(REFERENCE_RATE).mean);
     }
 
+    /// A contest's call or number counts whole: an end lost is a miss, as no
+    /// span answers for it, and only an empty field says nothing.
+    #[test]
+    fn a_call_or_number_cut_short_is_a_miss() {
+        assert_eq!(whole_evidence("K5XYZ", "K5XYZ"), Some((5, 5)));
+        assert_eq!(
+            whole_evidence("K5XYZ", "K5XY"),
+            Some((4, 5)),
+            "lost the end"
+        );
+        assert_eq!(whole_evidence("214", "2"), Some((1, 3)));
+        assert_eq!(whole_evidence("K5XYZ", "K7XYZ"), Some((4, 5)), "misheard");
+        assert_eq!(whole_evidence("K5XYZ", "K5XYZE"), Some((5, 6)), "added one");
+        assert_eq!(whole_evidence("214", " "), None, "an empty field");
+        assert_eq!(whole_evidence("", "K"), None);
+        let start = SpeedBelief::new(20.0);
+        let mut cut = start.clone();
+        cut.learn_whole("K5XYZAB", "K5X", 22.0);
+        assert!(cut.estimate(REFERENCE_RATE).mean < start.estimate(REFERENCE_RATE).mean);
+    }
+
     /// A simulated learner is found, and copies near the target at the
     /// speeds drawn for them.
     #[test]
@@ -704,6 +790,34 @@ mod tests {
         assert!(near(tied.voice_at(22.0), (22.0, 22.0)));
         assert!(near(tied.voice_at(99.0), (30.0, 30.0)), "kept on the line");
         assert!(!SpeedPath::of(&settings(20.0, 20.0)).has_room());
+
+        // Spacing set from 20, above the slowest characters: the line starts
+        // with the spacing at the characters' own speed, and keeps it within
+        // its range once they are as fast as its slowest, as a station drawn
+        // from the ranges is.
+        let mut spaced = settings(15.0, 40.0);
+        spaced.playback.link_char_to_effective = false;
+        spaced.playback.effective_wpm_min = 20.0;
+        spaced.playback.effective_wpm_max = 25.0;
+        let path = SpeedPath::of(&spaced.clamp());
+        let (low, high) = path.bounds();
+        assert!((low - 15.0).abs() < 1e-9 && (high - copy_speed(40.0, 25.0)).abs() < 1e-9);
+        let mut last = (0.0, 0.0);
+        for step in 0..=60 {
+            let copy = low * (high / low).powf(f64::from(step) / 60.0);
+            let (char_wpm, effective_wpm) = path.voice_at(copy);
+            assert!(
+                (copy_speed(char_wpm, effective_wpm) - copy).abs() < 1e-6,
+                "{copy}"
+            );
+            assert!(
+                effective_wpm >= 20.0_f64.min(char_wpm) - 1e-9
+                    && effective_wpm <= 25.0_f64.min(char_wpm) + 1e-9,
+                "{copy}: {char_wpm}/{effective_wpm}"
+            );
+            assert!(char_wpm >= last.0 && effective_wpm >= last.1, "{copy}");
+            last = (char_wpm, effective_wpm);
+        }
     }
 
     fn stored(timestamp: u64, speed: f64, received: &str) -> SessionResult {

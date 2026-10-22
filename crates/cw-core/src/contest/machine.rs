@@ -49,6 +49,7 @@ use crate::session::{
     Answered, GroupResult, MIN_RESPONSE_MS_PER_CHAR, MonoMs, SessionResult, SessionTiming, whole_ms,
 };
 use crate::settings::{STATIONS_MAX, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
+use crate::speed::tells_speed;
 use crate::timing::StationVoice;
 
 /// Why a run is paused.
@@ -3333,7 +3334,7 @@ impl<S: CallSource> ContestMachine<S> {
         let call = self
             .source
             .next_call(&self.settings, self.rules.callers(self.side), &avoid);
-        let caller = Caller::arrive(
+        let mut caller = Caller::arrive(
             call,
             &self.settings,
             self.rules,
@@ -3342,6 +3343,11 @@ impl<S: CallSource> ContestMachine<S> {
             placed,
             rng,
         );
+        // A newcomer's speed, where the callers' speed follows your copy;
+        // those already calling keep theirs.
+        if let Some(speed) = self.source.next_speed(&self.settings) {
+            caller.send_at(speed);
+        }
         self.stations.push(Station {
             caller,
             heard: Heard::default(),
@@ -3448,16 +3454,21 @@ impl<S: CallSource> ContestMachine<S> {
     }
 
     /// Teach the call source every group of the QSOs that are final: all
-    /// but those the message on the air lost, which Esc can take back.
+    /// but those the message on the air lost, which Esc can take back. Its
+    /// calls and numbers teach it your copy speed too, as the copy-speed
+    /// series will read them once the run is stored, so the callers who
+    /// come next are drawn from what the run has shown so far.
     fn teach(&mut self) {
         let upto = match self.air.as_ref().and_then(|air| air.unheard.as_ref()) {
             Some(unheard) if unheard.entries == self.entries.len() => unheard.lost_from,
             _ => self.entries.len(),
         };
+        let copied = self.rules.copied(self.side);
         let source = &mut self.source;
         for entry in self.entries.get(self.taught..upto).unwrap_or_default() {
-            for (group, timing) in &entry.groups {
-                learn(source, group, timing);
+            let copies = entry.record.group_copies(|at| copied.get(at).copied());
+            for ((group, timing), copy) in entry.groups.iter().zip(copies) {
+                learn(source, group, timing, tells_speed(copy));
             }
         }
         self.taught = self.taught.max(upto);
@@ -4061,15 +4072,20 @@ fn values(reading: &Reading) -> Vec<(Field, String)> {
         .collect()
 }
 
-/// Teach `source` what was copied of a group.
-fn learn(source: &mut impl CallSource, group: &GroupResult, timing: &SessionTiming) {
+/// Teach `source` what was copied of a group, and, where it tells, how fast
+/// you copy.
+fn learn(source: &mut impl CallSource, group: &GroupResult, timing: &SessionTiming, speed: bool) {
     let copied = CopyTally::of(&group.sent, &group.received);
-    source.learn(Answered {
+    let answered = Answered {
         sent: &group.sent,
         received: &group.received,
         copied: &copied,
         played: timing.char_wpm.zip(timing.effective_wpm),
-    });
+    };
+    source.learn(answered);
+    if speed {
+        source.learn_speed(answered);
+    }
 }
 
 /// To a tenth.
@@ -4081,11 +4097,14 @@ fn tenth(value: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::contest::QsoError;
-    use crate::contest::bot::script::{ScriptCalls, run_settings};
-    use crate::contest::bot::{Copied, Runtime, copy_of};
+    use crate::contest::bot::script::{
+        Habit, ScriptCalls, default_run_settings, run_settings, work,
+    };
+    use crate::contest::bot::{Copied, Operator, Runtime, copy_of};
     use crate::contest::exchange::read_number;
     use crate::contest::rules::RULES;
     use crate::contest::turn::{plan_turn, sending_sec};
+    use crate::sampling::Sampler;
 
     /// A run worked by hand, its callers sending `calls` in turn.
     fn runtime(calls: &[&str]) -> Runtime<ScriptCalls> {
@@ -5303,6 +5322,252 @@ mod tests {
         );
         middle.apply(ContestEvent::Speed { delta: -2 });
         assert_eq!(view(&middle).my_wpm, 23.0);
+    }
+
+    /// Settings for a run whose callers' speed follows your copy, within
+    /// `low` to `high` WPM, in `style`, under `habits`: through a filter
+    /// wide open, so that a pile-up's filter is no limit.
+    fn adapting(low: f64, high: f64, style: RunStyle, habits: CallerHabits) -> TrainingSettings {
+        let mut settings = default_run_settings();
+        settings.playback.char_wpm_min = low;
+        settings.playback.char_wpm_max = high;
+        settings.playback.effective_wpm_min = low;
+        settings.playback.effective_wpm_max = high;
+        settings.set_contest_style(style);
+        settings.band.filter_width_hz = crate::settings::FILTER_WIDTH_MAX;
+        settings.contest.contest_habits = habits;
+        settings.contest.contest_adapt_speed = true;
+        settings.clamp()
+    }
+
+    /// A run of `settings` from `seed` through the sampler, worked by
+    /// `habit` to its end.
+    fn worked_by(habit: Habit, settings: &TrainingSettings, seed: u64) -> Runtime<Sampler> {
+        let sampler = Sampler::new(&[], settings, seed);
+        let mut runtime = Runtime::start(seed, settings.clone(), sampler);
+        work(&mut runtime, &mut Operator::new(habit), &[]);
+        runtime
+    }
+
+    /// Each caller's character speeds in every send of `turns`, by station,
+    /// in the order the callers first sent.
+    fn callers_speeds(turns: &[Turn]) -> Vec<(u32, Vec<f64>)> {
+        let mut speeds: Vec<(u32, Vec<f64>)> = Vec::new();
+        for segment in turns.iter().flat_map(|turn| &turn.segments) {
+            let Sender::Caller(station) = segment.who else {
+                continue;
+            };
+            match speeds.iter_mut().find(|(at, _)| *at == station) {
+                Some((_, sent)) => sent.push(segment.voice.char_wpm),
+                None => speeds.push((station, vec![segment.voice.char_wpm])),
+            }
+        }
+        speeds
+    }
+
+    fn mean(speeds: &[f64]) -> f64 {
+        speeds.iter().sum::<f64>() / speeds.len() as f64
+    }
+
+    /// With the callers' speed following your copy, a run whose calls and
+    /// numbers are copied clean brings faster callers as it goes on, and
+    /// one whose numbers are missed slower ones, smoothly, as the belief
+    /// moves with each QSO logged: by the run's end the callers it would
+    /// draw next are faster than at its start after clean copy, and slower
+    /// after misses. Every caller comes within the Speed card's range.
+    #[test]
+    fn callers_speed_up_as_you_copy_clean_and_slow_down_as_you_miss() {
+        let settings = adapting(15.0, 40.0, RunStyle::Single, CallerHabits::Real);
+        let next = |source: &mut Sampler| {
+            let speeds: Vec<f64> = (0..400)
+                .map(|_| source.next_speed(&settings).expect("adapting").0)
+                .collect();
+            mean(&speeds)
+        };
+        for seed in 1..=3 {
+            let fresh = next(&mut Sampler::new(&[], &settings, seed));
+            let worked = |habit: Habit| {
+                let mut runtime = worked_by(habit, &settings, seed);
+                let speeds: Vec<f64> = callers_speeds(&runtime.turns)
+                    .into_iter()
+                    .map(|(_, sent)| sent[0])
+                    .collect();
+                assert!(
+                    speeds.iter().all(|wpm| (15.0..=40.0).contains(wpm)),
+                    "seed {seed} {habit:?}: {speeds:?}"
+                );
+                assert!(speeds.len() >= 15, "seed {seed} {habit:?}: {speeds:?}");
+                let later = mean(&speeds[speeds.len() / 2..]);
+                (later, next(&mut runtime.machine.source))
+            };
+            let (clean_later, clean_next) = worked(Habit::Perfect);
+            let (missed_later, missed_next) = worked(Habit::DigitOff);
+            assert!(
+                clean_next > fresh + 3.0,
+                "seed {seed}: {clean_next} from {fresh}"
+            );
+            assert!(
+                missed_next < fresh - 3.0,
+                "seed {seed}: {missed_next} from {fresh}"
+            );
+            assert!(
+                clean_later > missed_later + 5.0,
+                "seed {seed}: callers at {clean_later} copied clean, {missed_later} missed"
+            );
+        }
+    }
+
+    /// Callers already calling keep the speed they came with, however the
+    /// belief moves while they call: only a newcomer's speed is drawn from
+    /// it, and newcomers' differ. A dupe is the same operator, at its old
+    /// speed.
+    #[test]
+    fn callers_already_calling_keep_their_speed() {
+        let mut settings = adapting(15.0, 40.0, RunStyle::Pileup, CallerHabits::Real);
+        settings.band.stations_min = 2;
+        settings.band.stations_max = 5;
+        for seed in 1..=3 {
+            let runtime = worked_by(Habit::Perfect, &settings, seed);
+            let speeds = callers_speeds(&runtime.turns);
+            for (station, sent) in &speeds {
+                assert!(
+                    sent.iter().all(|wpm| wpm == &sent[0]),
+                    "seed {seed}: caller {station} sent at {sent:?}"
+                );
+            }
+            let sends = |at: usize| speeds.iter().filter(|(_, sent)| sent.len() > at).count();
+            assert!(sends(3) > 5, "seed {seed}: callers call again and again");
+            let first: Vec<f64> = speeds.iter().map(|(_, sent)| sent[0]).collect();
+            assert!(
+                first.iter().any(|wpm| wpm != &first[0]),
+                "seed {seed}: {first:?}"
+            );
+        }
+    }
+
+    /// Under easy habits a caller asked for its call again and again still
+    /// slows down for you, from the speed it came with, drawn from your copy
+    /// speed: the belief picks a newcomer's speed and never touches a caller
+    /// once it calls, and QRS slows one caller within its QSO and is gone
+    /// with it, so the two never pull against each other. Its call is
+    /// credited at its slowest, which is what the belief learns from; the
+    /// next caller comes within the range again.
+    #[test]
+    fn a_caller_whose_speed_was_drawn_still_slows_down_for_you() {
+        let settings = adapting(15.0, 40.0, RunStyle::Single, CallerHabits::Easy);
+        let sampler = Sampler::new(&[], &settings, 1);
+        let mut runtime = Runtime::start(1, settings, sampler);
+        let calling = runtime.last_turn().segments[1].clone();
+        let own = calling.voice;
+        assert!((15.0..=40.0).contains(&own.char_wpm), "{own:?}");
+        let call = calling.text.split_whitespace().next().expect("its call");
+        let partial: String = call.chars().take(2).chain(['?']).collect();
+        runtime.finish_turn();
+        let mut speeds = Vec::new();
+        for _ in 0..4 {
+            runtime.key(OpKey::Esm, &partial, "");
+            speeds.push(runtime.last_turn().segments[1].voice.char_wpm);
+            runtime.finish_turn();
+        }
+        assert_eq!(speeds[..2], [own.char_wpm; 2], "{speeds:?}");
+        assert!(speeds[3] < own.char_wpm, "{speeds:?}");
+        assert!(
+            speeds[3] >= own.char_wpm * (1.0 - crate::contest::QRS_MOST) - 1e-9,
+            "{speeds:?}"
+        );
+        runtime.key(OpKey::Esm, call, "");
+        let exchange = runtime.last_turn().clone();
+        assert_eq!(exchange.segments[1].voice, own, "back on track");
+        runtime.finish_turn();
+        let effects = runtime.key(OpKey::Esm, call, &serial(&exchange.segments[1].text));
+        let tu = played(&effects).expect("TU goes out").clone();
+        let next = tu.segments.iter().find(|segment| segment.who.is_caller());
+        let next = next.expect("the next caller calls").voice.char_wpm;
+        assert!((15.0..=40.0).contains(&next), "{next}");
+        runtime.finish_turn();
+        runtime.apply(ContestEvent::FinishNow);
+        let result = runtime.machine.result(1_000, "2026-10-22".into());
+        assert_eq!(result.group_timings[0].char_wpm, Some(tenth(speeds[3])));
+    }
+
+    /// A seed and the keys pressed give one run, the callers' speeds drawn
+    /// from your copy among it.
+    #[test]
+    fn a_run_whose_callers_adapt_is_the_same_run_from_the_same_seed() {
+        let settings = adapting(15.0, 40.0, RunStyle::Pileup, CallerHabits::Rough);
+        let turns = |seed| worked_by(Habit::Perfect, &settings, seed).turns;
+        assert_eq!(turns(4), turns(4));
+        assert_ne!(turns(4), turns(5));
+    }
+
+    /// The sampler, but never choosing a caller's speed, as no source did
+    /// before the callers' speed could follow your copy.
+    struct Even(Sampler);
+
+    impl CallSource for Even {
+        fn next_call(
+            &mut self,
+            settings: &TrainingSettings,
+            spec: crate::callsign::CallSpec,
+            avoid: &dyn Fn(&str) -> bool,
+        ) -> crate::callsign::GeneratedCall {
+            self.0.next_call(settings, spec, avoid)
+        }
+
+        fn learn(&mut self, answered: Answered<'_>) {
+            CallSource::learn(&mut self.0, answered);
+        }
+    }
+
+    /// With the switch off, the callers' speeds are drawn evenly from the
+    /// Speed card's ranges, as before: the run is the very run of a source
+    /// that chooses no speed.
+    #[test]
+    fn with_the_switch_off_callers_come_as_they_always_have() {
+        let mut off = adapting(15.0, 40.0, RunStyle::Pileup, CallerHabits::Easy);
+        off.contest.contest_adapt_speed = false;
+        let on = adapting(15.0, 40.0, RunStyle::Pileup, CallerHabits::Easy);
+        for seed in 1..=2 {
+            let fixed = worked_by(Habit::Perfect, &off, seed);
+            let mut even = Runtime::start(seed, on.clone(), Even(Sampler::new(&[], &on, seed)));
+            work(&mut even, &mut Operator::new(Habit::Perfect), &[]);
+            assert_eq!(fixed.turns, even.turns, "seed {seed}");
+            let adapted = worked_by(Habit::Perfect, &on, seed);
+            assert_ne!(fixed.turns, adapted.turns, "seed {seed}");
+        }
+    }
+
+    /// The call source learns your copy speed from a QSO's call and its
+    /// number, as the copy-speed series reads a run, and not from a report
+    /// or a name, which are half guessed; it learns the characters of all
+    /// of them, once the QSO is logged.
+    #[test]
+    fn the_copy_speed_is_taught_by_calls_and_numbers() {
+        let mut wpx = runtime(&["K5XYZ"]);
+        let exchange = to_its_exchange(&mut wpx);
+        assert!(wpx.machine.source.learned_speed.is_empty(), "nothing final");
+        wpx.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
+        let taught = |pairs: &[(String, String)]| -> Vec<String> {
+            pairs.iter().map(|(sent, _)| sent.clone()).collect()
+        };
+        assert_eq!(
+            taught(&wpx.machine.source.learned_speed),
+            ["K5XYZ".to_string(), serial(&exchange)]
+        );
+        assert_eq!(wpx.machine.source.learned.len(), 2);
+
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_kind = crate::contest::ContestKind::SimpleQso;
+        let mut simple = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
+        let exchange = to_its_exchange(&mut simple);
+        let words: Vec<&str> = exchange.split_whitespace().collect();
+        simple.key(OpKey::Esm, "K5XYZ", &format!("{} {}", words[3], words[6]));
+        assert_eq!(taught(&simple.machine.source.learned_speed), ["K5XYZ"]);
+        assert_eq!(
+            simple.machine.source.learned.len(),
+            3,
+            "the call, report and name"
+        );
     }
 
     /// A caller left waiting tries again on its timeout, and gives up when

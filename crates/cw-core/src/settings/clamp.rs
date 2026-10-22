@@ -116,8 +116,8 @@ impl TrainingSettings {
         // The contest, its run style, its callers' habits and how often
         // your TU signs need nothing: each can hold only what it names, and
         // a name read back that this build does not know is the default
-        // already. Show copy is a switch, on or off, and needs nothing
-        // either.
+        // already. Show copy and the callers' adaptive speed are switches,
+        // on or off, and need nothing either.
         let k = &mut self.contest;
         k.contest_minutes = k.contest_minutes.min(CONTEST_MINUTES_MAX);
         // Zero is no speed of your own: the middle of the callers' range.

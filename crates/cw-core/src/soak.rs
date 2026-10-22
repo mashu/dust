@@ -9,6 +9,7 @@
 
 use crate::auto_level::apply_auto_level;
 use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
+use crate::contest::QRS_MOST;
 use crate::contest::bot::{Copied, copy_of};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
@@ -20,8 +21,8 @@ use crate::{
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Fields, MonoMs, OpKey, PILEUP_LEVEL_MAX_DB,
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError, Rng, RowStatus,
     RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso, Sender, SessionId, SessionPhase,
-    SessionResult, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
-    contest_score, evaluate_auto_level, generate_training_group, parse_exchange,
+    SessionResult, SplitMix64, TrainingSettings, Transmission, WPM_MIN, align_group,
+    compute_char_pool, contest_score, evaluate_auto_level, generate_training_group, parse_exchange,
     plan_morse_playback_for, plan_transmission, plan_turn, read_number, resolve_station,
 };
 
@@ -1076,6 +1077,31 @@ fn check_contest_effects(
                     if segment.who == Sender::You {
                         continue;
                     }
+                    // A caller sends within the Speed card's ranges, drawn
+                    // evenly or from your copy: its spacing within its own
+                    // wherever its characters are as fast as its slowest,
+                    // and never outrunning them. It is slower only as it
+                    // slows down for you under easy habits, by QRS_MOST at
+                    // most, and never under the card's slowest speed.
+                    let (voice, p) = (segment.voice, &settings.playback);
+                    let slack = if easy { 1.0 - QRS_MOST } else { 1.0 };
+                    let floor = |wpm: f64| (wpm * slack).max(WPM_MIN).min(wpm);
+                    assert!(
+                        voice.char_wpm <= p.char_wpm_max + 1e-9
+                            && voice.char_wpm >= floor(p.char_wpm_min) - 1e-9
+                            && voice.effective_wpm
+                                <= voice.char_wpm.min(p.effective_wpm_max) + 1e-9
+                            && voice.effective_wpm
+                                >= floor(p.effective_wpm_min).min(voice.char_wpm) - 1e-9,
+                        "seed {seed} step {step}: a caller at {:.2}/{:.2} WPM, the ranges \
+                         {}–{} and {}–{}",
+                        voice.char_wpm,
+                        voice.effective_wpm,
+                        p.char_wpm_min,
+                        p.char_wpm_max,
+                        p.effective_wpm_min,
+                        p.effective_wpm_max
+                    );
                     let words: Vec<&str> = segment.text.split_whitespace().collect();
                     let fumbled = words.iter().any(|word| word.ends_with("EEEEE"));
                     let enn = words.contains(&"ENN");
@@ -1346,8 +1372,10 @@ fn soak_contest_runs(style: RunStyle) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x2F7A_9C35).wrapping_add(37));
         let mut settings = contest_settings(&mut rng, style);
         // Show copy on every third run, set by the seed so that every other
-        // draw is as it was: it changes only the copies the groups keep.
+        // draw is as it was: it changes only the copies the groups keep. The
+        // callers' speed follows your copy on every other run, set so too.
         settings.contest.contest_show_copy = seed % 3 == 0;
+        settings.contest.contest_adapt_speed = seed % 2 == 0;
         let SoakRun {
             mut events,
             mut machine,

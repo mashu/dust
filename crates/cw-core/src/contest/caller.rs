@@ -304,6 +304,10 @@ const QRS_AFTER_SKILLED: u32 = 4;
 const QRS_DROP: [f64; 3] = [0.20, 0.16, 0.12];
 const QRS_MORE_FROM: u32 = 4;
 const QRS_MORE: f64 = 0.02;
+/// The most a caller slows down for you, at skill 1 from its fourth
+/// incomplete try on: for a test to bound it.
+#[cfg(test)]
+pub(crate) const QRS_MOST: f64 = QRS_DROP[0] + QRS_MORE;
 
 /// Under rough habits, how many callers fumble a digit of the first serial
 /// they send, then send `EEEEE` and the serial right, as MorseRunner's LIDs
@@ -499,6 +503,15 @@ impl Caller {
         for (_, token) in fields.filter(|(field, _)| *field == Field::Nr) {
             *token = send_serial(serial, self.habits, self.cuts_serial, &mut self.rng);
         }
+    }
+
+    /// It sends at `char_wpm`, spaced at `effective_wpm`, the speed the call
+    /// source drew from your copy speed as it arrived, in place of the one
+    /// drawn from the Speed card's ranges; the rest of it is as drawn, from
+    /// its own generator.
+    pub(super) fn send_at(&mut self, (char_wpm, effective_wpm): (f64, f64)) {
+        self.voice.char_wpm = char_wpm;
+        self.voice.effective_wpm = effective_wpm;
     }
 
     /// How it sounds in its next send: its own voice, slowed down while it

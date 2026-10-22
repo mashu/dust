@@ -116,6 +116,9 @@ impl ContestPreset {
     /// contest space at the speed they key. Your speed goes back to the
     /// middle of the callers' range, no speed of your own: so the settings
     /// a preset left before your speed was a setting are on it still.
+    /// Whether the callers' speed follows your copy within that range is
+    /// yours, and left as it is: a preset says how fast the callers may
+    /// come, not how they are drawn in it.
     pub fn apply(self, settings: &mut TrainingSettings) {
         let (slowest, fastest) = self.char_wpm();
         put(settings, RangeSetting::CharWpm, slowest, fastest);
@@ -276,6 +279,7 @@ mod tests {
         settings.band.qsb_depth = 0.8;
         settings.band.noise_level = 0.9;
         settings.band.pileup_spread_hz = 200.0;
+        settings.contest.contest_adapt_speed = false;
         for preset in ContestPreset::ALL {
             let mut applied = settings.clone();
             preset.apply(&mut applied);
@@ -298,6 +302,7 @@ mod tests {
             assert_eq!(band.qsb_rate_hz, 0.4);
             assert_eq!(band.noise_level, 0.9);
             assert_eq!(band.pileup_spread_hz, 200.0);
+            assert!(!applied.contest.contest_adapt_speed, "{preset:?}");
         }
         // Switched off, the fading keeps its depth for when it is on again.
         let mut first = settings;
@@ -314,6 +319,7 @@ mod tests {
         settings.contest.contest_kind = ContestKind::SimpleQso;
         settings.band.side_tone_max = 900.0;
         settings.band.qsb_rate_hz = 0.5;
+        settings.contest.contest_adapt_speed = !settings.contest.contest_adapt_speed;
         assert_eq!(ContestPreset::of(&settings), Some(ContestPreset::Club));
         // Each a change made as a screen makes it.
         type Change = fn(&mut TrainingSettings);

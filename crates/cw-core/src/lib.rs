@@ -77,7 +77,7 @@ pub use pool::{
 };
 pub use rng::{Rng, SplitMix64};
 pub use sampling::{
-    CharSamplingState, Sampler, adapts_group_size, adapts_speed, aim_section,
+    CharSamplingState, Sampler, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section,
     generate_training_group,
 };
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};

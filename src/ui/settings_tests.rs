@@ -978,6 +978,86 @@ fn your_speed_is_on_the_speed_card_in_contest_mode() {
     });
 }
 
+/// The callers' adaptive speed is on the Speed card in Contest mode only,
+/// where group training's switch sits and in its place, on as it ships,
+/// with a sentence saying what it does. On, the aim it shares with group
+/// training shows beside it. It is stored, group training's switch is left
+/// as it was, a preset leaves it alone, and the card's reset turns it back
+/// on. One speed leaves it nothing to adapt, which it says.
+#[test]
+fn the_callers_adaptive_speed_is_on_the_speed_card_in_contest_mode() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(
+            !ui.shows("switch-adapt-callers-speed-to-me"),
+            "not outside Contest"
+        );
+        assert!(ui.shows("switch-adapt-speed-to-me"));
+
+        let mut settings = crate::testing::contest_settings();
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.effective_wpm_min = 20.0;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(!ui.shows("switch-adapt-speed-to-me"), "group training's");
+        let switch = "switch-adapt-callers-speed-to-me";
+        assert!(ui.input_tag(switch).contains("checked"), "on as it ships");
+        assert!(ui.has(
+            "New callers come faster while you copy calls and numbers clean, slower when you miss them; those already calling keep their speed."
+        ));
+        assert!(ui.has("Balanced aims for 94% of characters right."));
+        // On the Speed card, after the callers' ranges and before your speed.
+        let html = ui.html();
+        let range = html.find("Character speed").expect("the callers' range");
+        let adapt = html.find(r#"id="switch-adapt-callers-speed-to-me""#);
+        let yours = html.find(r#"id="number-your-speed""#).expect("your speed");
+        assert!(adapt.is_some_and(|adapt| range < adapt && adapt < yours));
+
+        ui.commit(switch, "false");
+        let stored = ui.stored_settings().await;
+        assert!(!stored.contest.contest_adapt_speed);
+        assert!(
+            !stored.playback.adaptive_speed,
+            "group training's is its own"
+        );
+        assert!(!ui.has("Balanced aims for 94% of characters right."));
+        ui.click("preset-club");
+        assert!(
+            !ui.stored_settings().await.contest.contest_adapt_speed,
+            "a preset"
+        );
+        ui.click("reset-speed");
+        assert!(
+            ui.stored_settings().await.contest.contest_adapt_speed,
+            "the reset"
+        );
+
+        // Its reset turns it back on, and the aim it brings onto the card
+        // goes back too.
+        ui.click("seg-stretch");
+        ui.commit(switch, "false");
+        ui.click("reset-speed");
+        let stored = ui.stored_settings().await;
+        assert!(stored.contest.contest_adapt_speed);
+        assert_eq!(stored.curriculum.aim, Aim::Balanced, "the aim");
+
+        // One speed, tied: only Character speed shows, and only it is named.
+        let (mut fixed, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        fixed.click("nav-settings");
+        assert!(
+            fixed.has(
+                "Give Character speed a range to use this: one speed leaves nothing to adapt."
+            )
+        );
+        assert!(!fixed.has("Balanced aims for 94% of characters right."));
+        fixed.commit("switch-tie-effective-speed-to-character-speed", "false");
+        assert!(fixed.has(
+            "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
+        ));
+    });
+}
+
 /// Your sending is on the Tone and volume card in Contest mode only, in
 /// decibels from the loudest down to off, at -9 dB until you set it; it
 /// is stored, a preset leaves it alone, and the card's reset puts it back.

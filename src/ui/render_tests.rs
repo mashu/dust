@@ -2195,44 +2195,107 @@ mod interactions {
         sessions
     }
 
+    /// Stats under the default settings in `mode`, the callers adapting as
+    /// `adapt` says, with one speed set when `one_speed`, after a history of
+    /// Koch sessions and contest runs.
     #[component]
-    fn ContestStatsHarness(mode: CharSetMode) -> Element {
+    fn ContestStatsHarness(mode: CharSetMode, adapt: bool, one_speed: bool) -> Element {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = mode;
+        settings.contest.contest_adapt_speed = adapt;
+        if one_speed {
+            settings.playback.char_wpm_min = 30.0;
+            settings.playback.char_wpm_max = 30.0;
+        }
+        let settings = settings.clamp();
         rsx! {
             StatsView { settings, sessions: contest_history(3) }
         }
     }
 
-    /// Copy speed has a Contest pill once there are runs, and in Contest it
-    /// says how the callers' speeds come.
-    #[test]
-    fn copy_speed_has_a_contest_pill_that_says_how_callers_are_drawn() {
-        let mut ui = Ui::new(
+    /// Stats in `mode` as `ContestStatsHarness` shows them.
+    fn contest_stats(mode: CharSetMode, adapt: bool, one_speed: bool) -> Ui {
+        Ui::new(
             ContestStatsHarness,
             ContestStatsHarnessProps {
-                mode: CharSetMode::Koch,
+                mode,
+                adapt,
+                one_speed,
             },
-        );
+        )
+    }
+
+    /// What the copy speed card says of a contest's callers while they
+    /// adapt, as they do as the settings ship; with one speed set, the
+    /// switch on; and with it off.
+    const CALLERS_ADAPT: &str = "Each new caller&#39;s speed is drawn from your copy speed, within your range: faster as you copy calls and numbers clean, slower as you miss them. The run screen&#39;s − and + move only your own speed.";
+    const CALLERS_AT_ONE: &str = "One speed is set, so every caller comes at it. The run screen&#39;s − and + move only your own speed.";
+    const CALLERS_EVEN: &str = "Callers&#39; speeds are drawn evenly from your range. The run screen&#39;s − and + move only your own speed.";
+
+    /// Copy speed has a Contest pill once there are runs, and in Contest it
+    /// says how the callers' speeds come: from this copy speed while their
+    /// switch is on, as it ships, steered by the aim; every one at the one
+    /// speed set while the switch is on with no room, the chip saying so
+    /// rather than that the switch is off; and evenly from the range while
+    /// it is off.
+    #[test]
+    fn copy_speed_has_a_contest_pill_that_says_how_callers_are_drawn() {
+        let mut ui = contest_stats(CharSetMode::Koch, true, false);
         assert!(
             ui.shows("speed-koch") && ui.shows("speed-contest"),
             "{}",
             ui.html()
         );
-        assert!(!ui.has("drawn evenly from your range"));
+        assert!(!ui.has(CALLERS_ADAPT));
         ui.click("speed-contest");
-        assert!(ui.has("drawn evenly from your range; − and + move only your own"));
+        assert!(ui.has(CALLERS_ADAPT), "{}", ui.html());
         assert!(ui.has("Not the set practised now"));
 
-        let contest = Ui::new(
-            ContestStatsHarness,
-            ContestStatsHarnessProps {
-                mode: CharSetMode::Contest,
-            },
-        );
-        assert!(contest.has("drawn evenly from your range"));
-        assert!(contest.has(">Not adaptive<"));
+        let contest = contest_stats(CharSetMode::Contest, true, false);
+        assert!(contest.has(CALLERS_ADAPT));
+        assert!(contest.has("Adapting · Balanced"));
         assert!(!contest.has("Adaptive speed off"));
+
+        let one = contest_stats(CharSetMode::Contest, true, true);
+        assert!(one.has(CALLERS_AT_ONE), "{}", one.html());
+        assert!(one.has(">One speed set<"));
+        assert!(!one.has("Adaptive callers off") && !one.has("Adapting · Balanced"));
+
+        let fixed = contest_stats(CharSetMode::Contest, false, false);
+        assert!(fixed.has(CALLERS_EVEN));
+        assert!(fixed.has(">Adaptive callers off<"));
+        assert!(!fixed.has(CALLERS_ADAPT));
+    }
+
+    /// The Sampling tab's speed card says how a contest's callers' speeds
+    /// come, and its chances follow: leaning on your copy speed while they
+    /// adapt, the first callers' of your next run, and saying so when your
+    /// copy speed is past the range; at the one speed set; and even across
+    /// the range while they do not adapt.
+    #[test]
+    fn the_sampling_speed_card_says_how_callers_are_drawn() {
+        let mut adapting = contest_stats(CharSetMode::Contest, true, false);
+        adapting.click("seg-sampling");
+        assert!(adapting.has("Speed, WPM"));
+        // The runs were copied clean at 26 WPM, past the 18 to 25 the
+        // settings ship with.
+        assert!(adapting.has(
+            "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen&#39;s − and + move only your own speed. Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster."
+        ), "{}", adapting.html());
+        let mut one = contest_stats(CharSetMode::Contest, true, true);
+        one.click("seg-sampling");
+        assert!(one.has(&format!(
+            "{CALLERS_AT_ONE} Right is the share of characters you copy at that speed."
+        )));
+        let mut even = contest_stats(CharSetMode::Contest, false, false);
+        even.click("seg-sampling");
+        assert!(even.has(&format!(
+            "{CALLERS_EVEN} Right is the share of characters you copy at that speed."
+        )));
+        // The default speeds are 18 to 25 WPM, a seventh of the range
+        // nearest each whole speed between, and half that at either end.
+        assert_eq!(even.html().matches(">14%<").count(), 6, "{}", even.html());
+        assert_ne!(adapting.html().matches(">14%<").count(), 6);
     }
 
     /// Under All, the board says where contest runs sit; under Contest, a
