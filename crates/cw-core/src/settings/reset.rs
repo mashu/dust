@@ -33,6 +33,7 @@ impl TrainingSettings {
                 self.playback.keyer_mode = d.playback.keyer_mode;
                 self.playback.keyer_wpm = d.playback.keyer_wpm;
                 self.contest.contest_minutes = d.contest.contest_minutes;
+                self.contest.contest_show_copy = d.contest.contest_show_copy;
             }
             SettingsSection::Speed => {
                 self.playback.char_wpm_min = d.playback.char_wpm_min;

@@ -114,7 +114,8 @@ impl TrainingSettings {
 
         // The contest, its run style and its callers' habits need nothing:
         // each can hold only what it names, and a name read back that this
-        // build does not know is the default already.
+        // build does not know is the default already. Show copy is a
+        // switch, on or off, and needs nothing either.
         let k = &mut self.contest;
         k.contest_minutes = k.contest_minutes.min(CONTEST_MINUTES_MAX);
         k.my_call = super::contest::clean_call(&k.my_call);

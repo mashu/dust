@@ -72,6 +72,11 @@ pub struct ContestSettings {
     /// How long a run lasts, in minutes. Zero runs until you stop it, and
     /// ends at [`CONTEST_MINUTES_MAX`] all the same.
     pub contest_minutes: u32,
+    /// Show each caller's text on the run screen once it has been sent. A
+    /// run with it on is assisted: counted in every stat, but never placed
+    /// on the board.
+    #[serde(deserialize_with = "forgiving_bool")]
+    pub contest_show_copy: bool,
     /// Your callsign: upper case, letters, digits and single slashes inside
     /// it. Empty until you give one.
     pub my_call: String,
@@ -106,6 +111,7 @@ impl Default for ContestSettings {
             contest_style: RunStyle::Single,
             contest_habits: CallerHabits::Easy,
             contest_minutes: 10,
+            contest_show_copy: false,
             my_call: String::new(),
             my_name: String::new(),
             my_state: String::new(),
@@ -115,6 +121,14 @@ impl Default for ContestSettings {
             my_section: String::new(),
         }
     }
+}
+
+/// A switch saved as true or false. Anything else, a save edited by hand,
+/// reads as off rather than costing the rest of the save, as a contest this
+/// build does not know does.
+fn forgiving_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(false))
 }
 
 impl ContestSettings {

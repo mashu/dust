@@ -13,17 +13,23 @@
 
 use cw_core::{
     ContestKind, ContestRules, ContestScore, Field, QsoCheck, QsoError, RunErrors, RunQso,
-    RunSummary, SessionResult,
+    RunSummary, SessionResult, board_place,
 };
 use dioxus::prelude::*;
 
+use crate::state::SessionPick;
 use crate::ui::contest::LogRowView;
 use crate::ui::format::{counted, counted_in_words, minutes_seconds, short_date};
 use crate::ui::results::{PlaceBanner, place_line};
 use crate::ui::widgets::{CardHead, Icon, IconName, ScoreRing, control_id};
 
+/// What the results of a run with Show copy on say of it.
+const ASSISTED_NOTE: &str =
+    "Assisted: Show copy was on. The run counts in every stat, and is never placed on the board.";
+
 /// A run's results. Given `on_again`, a run just finished, with Run again;
-/// without, one opened again from History, only to be read.
+/// without, one opened again from History, or from the Runs card, only to
+/// be read, with the way back at the top named for where it goes.
 #[component]
 pub fn ContestResults(
     result: SessionResult,
@@ -33,6 +39,10 @@ pub fn ContestResults(
     place: Option<(usize, usize)>,
     on_again: Option<EventHandler<()>>,
     on_back: EventHandler<()>,
+    /// Where the way back at the top goes, opened again: History, or the
+    /// Scores the Runs card is on.
+    #[props(default = "History")]
+    back_to: &'static str,
 ) -> Element {
     let kind = result.contest_kind().map_or("Contest", ContestKind::label);
     // A contest without a score is told by its pace and its copy.
@@ -81,11 +91,11 @@ pub fn ContestResults(
             // the bottom: the results are long.
             if on_again.is_none() {
                 button {
-                    id: control_id("btn", "history"),
+                    id: control_id("btn", back_to),
                     class: "btn btn-secondary btn-sm run-results-back",
                     onclick: move |_| on_back.call(()),
                     Icon { name: IconName::Back }
-                    "History"
+                    "{back_to}"
                 }
             }
             div { class: "card",
@@ -103,6 +113,9 @@ pub fn ContestResults(
                         h2 { "Run complete" }
                         p { class: "muted run-about", "{about}" }
                         p { class: "run-summary", "{said}" }
+                        if result.assisted() {
+                            p { class: "muted run-assisted", "{ASSISTED_NOTE}" }
+                        }
                     }
                 }
             }
@@ -198,6 +211,54 @@ pub fn ContestResults(
             }
         }
     }
+}
+
+/// The script that brings the results of a run opened in a list's place
+/// into view, where its row was perhaps far down the list.
+#[cfg(not(test))]
+const SHOW_RESULTS: &str = r#"const shown = document.getElementById("run-results");
+if (shown) {
+    shown.scrollIntoView({ block: "start" });
+}"#;
+
+/// The run whose results are open in a list's place, from a History row or
+/// the Runs card, and the effect that brings them into view as they open.
+pub fn use_opened_run() -> Signal<Option<SessionPick>> {
+    let opened = use_signal(|| None::<SessionPick>);
+    use_effect(move || {
+        // Tests have no page to run it on.
+        #[cfg(not(test))]
+        if opened().is_some() {
+            spawn(async {
+                let _ = document::eval(SHOW_RESULTS).await;
+            });
+        }
+        #[cfg(test)]
+        let _ = opened();
+    });
+    opened
+}
+
+/// The results of the run `opened`, read again from `sessions`: only while
+/// it is still in the history. Back closes them, and the way back at the
+/// top is named `back_to`, for where it goes.
+pub fn opened_results(
+    sessions: &[SessionResult],
+    mut opened: Signal<Option<SessionPick>>,
+    back_to: &'static str,
+) -> Option<Element> {
+    let pick = opened()?;
+    let result = sessions
+        .get(pick.index)
+        .filter(|session| session.timestamp == pick.timestamp)?;
+    Some(rsx! {
+        ContestResults {
+            result: result.clone(),
+            place: board_place(sessions, result.timestamp),
+            on_back: move |()| opened.set(None),
+            back_to,
+        }
+    })
 }
 
 /// The contest score, raw and verified, and what the checks found. Where

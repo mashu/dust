@@ -2,7 +2,7 @@
 //! of mode, and what an empty board says.
 
 use super::*;
-use crate::testing::{Ui, stored_run, stored_session};
+use crate::testing::{Ui, assisted, stored_run, stored_session};
 
 /// A session of ten groups on the `day`th of October 2026, that earned
 /// `per_group` each.
@@ -159,14 +159,15 @@ fn wpx_run(day: u32, qsos: usize) -> SessionResult {
     run
 }
 
-/// A board of runs alone names the rule they went on by, with no pill to
-/// choose and no word of group sessions that are not there; one that mixes
-/// them with group sessions says where the runs sit.
+/// A board of runs alone names the rule they went on by, and no word of
+/// group sessions that are not there, its pills offering only Contest, whose
+/// Runs card lists them; one that mixes them with group sessions says where
+/// the runs sit.
 #[test]
 fn a_board_of_runs_alone_names_the_run_rule() {
     let ui = board((1..=3).map(|day| wpx_run(day, 5)).collect());
     assert_eq!(ui.controls("board-").len(), 3);
-    assert!(!ui.shows("pill-all-modes") && !ui.shows("pill-contest"));
+    assert_eq!(ui.controls("pill-"), ["pill-all-modes", "pill-contest"]);
     assert!(
         ui.has("over runs of 5 minutes or more that hold 10 groups or more"),
         "{}",
@@ -194,4 +195,130 @@ fn a_run_too_short_for_the_board_says_the_run_rule() {
     let mut short = koch(2, 50.0);
     short.groups.truncate(BOARD_MIN_GROUPS - 1);
     assert!(board(vec![wpx_run(1, 4), short]).has("No session long enough yet"));
+}
+
+/// A whole run with Show copy on is assisted: on the board it is listed
+/// greyed after the places, with no place and nothing to mark on the
+/// timeline, however well it scored, and the board says why.
+#[test]
+fn an_assisted_run_is_greyed_and_unplaced() {
+    let mut better = assisted(wpx_run(2, 8));
+    better.score *= 3.0;
+    let ui = board(vec![wpx_run(1, 5), better]);
+    assert_eq!(ui.controls("board-"), ["board-1"], "one place");
+    assert!(ui.has(r#"class="board-row assisted""#), "{}", ui.html());
+    assert!(ui.has(r#"aria-label="Not placed""#));
+    assert!(ui.has("· assisted</span>"));
+    assert!(ui.has("Runs with Show copy on are assisted"));
+    assert!(
+        ui.has("your one session"),
+        "the form is the placed run's alone"
+    );
+    // A board of assisted runs alone places nothing and says why.
+    let ui = board(vec![assisted(wpx_run(2, 8))]);
+    assert!(ui.has("No placed run yet"), "{}", ui.html());
+    assert!(ui.has(r#"class="board-row assisted""#));
+    assert!(ui.controls("board-").is_empty());
+}
+
+/// Under the Contest pill, the Runs card lists every run of the contest
+/// chosen, newest first: the best verified run of its length marked, an
+/// assisted run marked and never best, a run whose log an older version
+/// dropped listed as History lists it. A row whose log reads opens its
+/// results in the tab's place, with the way back to Scores.
+#[test]
+fn the_runs_card_lists_every_run_and_opens_its_results() {
+    let mut best = wpx_run(1, 6);
+    best.timestamp += 1;
+    let short = SessionResult {
+        timestamp: best.timestamp + 86_400_000,
+        ..wpx_run(2, 3)
+    };
+    let mut better = assisted(wpx_run(3, 9));
+    better.score *= 2.0;
+    let dropped = SessionResult {
+        contest: None,
+        ..wpx_run(4, 5)
+    };
+    let mut ui = board(vec![koch(5, 40.0), best, short, better, dropped]);
+    assert!(!ui.has("runs-card"), "only under the Contest pill");
+    ui.click("pill-contest");
+    assert!(ui.has("runs-card"), "{}", ui.html());
+    assert!(ui.has("4 runs of CQ WPX on this device, newest first"));
+    // Newest first; the dropped run opens nothing.
+    assert_eq!(
+        ui.controls("runs-open-"),
+        ["runs-open-1", "runs-open-2", "runs-open-3"]
+    );
+    let html = ui.html();
+    let at = |needle: &str| html.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+    // Each dated as the board dates it, with the time, so runs of one day
+    // tell apart.
+    let runs = &html[at("runs-card")..];
+    let on = |day: &str| {
+        runs.find(&format!("{day} · "))
+            .unwrap_or_else(|| panic!("no {day}"))
+    };
+    assert!(on("Sun 4 Oct 2026") < on("Sat 3 Oct 2026"));
+    assert!(on("Sat 3 Oct 2026") < on("Thu 1 Oct 2026"));
+    assert!(html.contains("log not kept by an older version"));
+    // With no contest score to show, its Points go under a dash: the
+    // column of scores holds scores alone.
+    assert!(
+        runs.contains(r#"<span class="value">—</span><span class="muted">"#),
+        "{runs}"
+    );
+    assert_eq!(
+        html.matches(r#"class="chip good">Best<"#).count(),
+        1,
+        "one length, one best"
+    );
+    assert_eq!(html.matches(r#"class="chip quiet">assisted<"#).count(), 1);
+    // The best is the six-QSO run, not the better assisted one.
+    let row = |id: &str| {
+        let tag = ui.input_tag(id);
+        let from = html.find(&tag).expect("drawn");
+        html[from..from + html[from..].find("</button>").expect("closed")].to_string()
+    };
+    assert!(
+        row("runs-open-1").contains("Best"),
+        "{}",
+        row("runs-open-1")
+    );
+    assert!(row("runs-open-3").contains("assisted") && !row("runs-open-3").contains("Best"));
+    // Each part of a row's figures kept whole, so a phone's line breaks
+    // only between them.
+    assert!(
+        row("runs-open-1").contains("10\u{a0}min · 6/6\u{a0}QSOs"),
+        "{}",
+        row("runs-open-1")
+    );
+    ui.click("runs-open-1");
+    assert!(ui.has("Run complete"));
+    assert!(ui.shows("btn-scores"));
+    ui.click("btn-scores");
+    assert!(ui.has("runs-card"));
+    // An assisted run's results say so.
+    ui.click("runs-open-3");
+    assert!(ui.has("Assisted: Show copy was on."), "{}", ui.html());
+}
+
+/// The Runs card lists a page of runs at a time, as History does, the best
+/// of each length wherever it falls, and offers the rest.
+#[test]
+fn the_runs_card_lists_a_page_at_a_time() {
+    let runs: Vec<SessionResult> = (1..=45).map(|day| wpx_run(day, 5)).collect();
+    let mut ui = board(runs);
+    ui.click("pill-contest");
+    assert!(ui.has("45 runs of CQ WPX on this device, newest first"));
+    // The newest forty, and the oldest, which set the best first.
+    let listed = ui.controls("runs-open-");
+    assert_eq!(listed.len(), 41);
+    assert!(listed.contains(&"runs-open-0".to_string()), "{listed:?}");
+    assert!(!listed.contains(&"runs-open-1".to_string()), "{listed:?}");
+    assert!(ui.has(r#"class="chip good">Best<"#));
+    assert!(ui.has("Show 4 more"), "{}", ui.html());
+    ui.click("runs-more");
+    assert_eq!(ui.controls("runs-open-").len(), 45);
+    assert!(!ui.shows("runs-more"));
 }

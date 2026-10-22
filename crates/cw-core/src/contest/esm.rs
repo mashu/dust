@@ -78,6 +78,13 @@ pub struct Fields {
     /// When the Exchange field first read complete, if it has since it was
     /// last cleared.
     pub exch_complete: Option<MonoMs>,
+    /// What a field held before each edit since the fields were last
+    /// cleared, oldest first, with when the edit came: what the fields held
+    /// at a moment past ([`Self::text_at`]), as Show copy keeps what you had
+    /// copied when a caller's text showed. Every edit is kept, so no edit
+    /// made after a text showed can pass for what you had then; the fields
+    /// are cleared at every log and wipe, and when a run starts.
+    pub earlier: Vec<(EntryField, MonoMs, String)>,
 }
 
 impl Fields {
@@ -87,6 +94,22 @@ impl Fields {
             call_edited: now,
             ..Self::default()
         }
+    }
+
+    /// What `field` held at `at`: what the first edit after it replaced, or
+    /// what it holds now if none came since. Fields made with no edits
+    /// kept, as a test's are, read as they are now.
+    pub fn text_at(&self, field: EntryField, at: MonoMs) -> &str {
+        self.earlier
+            .iter()
+            .find(|(edited, when, _)| *edited == field && *when > at)
+            .map_or(
+                match field {
+                    EntryField::Call => &self.call,
+                    EntryField::Exchange => &self.exch,
+                },
+                |(_, _, before)| before.as_str(),
+            )
     }
 
     /// `field` now holds `text`, typed at `now`. The call is stamped at
@@ -101,6 +124,11 @@ impl Fields {
         rules: &ContestRules,
         side: Side,
     ) {
+        let before = match field {
+            EntryField::Call => &self.call,
+            EntryField::Exchange => &self.exch,
+        };
+        self.earlier.push((field, now, before.clone()));
         match field {
             EntryField::Call => {
                 self.call = text;
@@ -521,6 +549,33 @@ mod tests {
         assert_eq!(fields.exch_complete, None);
         edit(&mut fields, EntryField::Exchange, "7", 800);
         assert_eq!(fields.exch_complete, Some(MonoMs(800)));
+    }
+
+    /// The fields say what each held at a moment past, however many edits
+    /// came since, until they are cleared.
+    #[test]
+    fn the_fields_say_what_they_held_at_a_moment_past() {
+        let edit = |fields: &mut Fields, field, text: &str, at| {
+            fields.edit(field, text.to_string(), MonoMs(at), rules(), Side::Dx);
+        };
+        let mut fields = Fields::cleared(MonoMs(100));
+        edit(&mut fields, EntryField::Call, "K5", 200);
+        edit(&mut fields, EntryField::Call, "K5X", 300);
+        // Far more edits after the moment than a learner types between a
+        // caller's text showing and the next key.
+        for at in 0..200 {
+            let text = if at % 2 == 0 { "1" } else { "" };
+            edit(&mut fields, EntryField::Exchange, text, 400 + at);
+        }
+        edit(&mut fields, EntryField::Call, "K5XYZ", 700);
+        assert_eq!(fields.text_at(EntryField::Call, MonoMs(150)), "");
+        assert_eq!(fields.text_at(EntryField::Call, MonoMs(350)), "K5X");
+        assert_eq!(fields.text_at(EntryField::Call, MonoMs(800)), "K5XYZ");
+        assert_eq!(fields.text_at(EntryField::Exchange, MonoMs(350)), "");
+        assert_eq!(fields.text_at(EntryField::Exchange, MonoMs(400)), "1");
+        // Cleared, they read as they are.
+        let fields = Fields::cleared(MonoMs(900));
+        assert_eq!(fields.text_at(EntryField::Call, MonoMs(350)), "");
     }
 
     /// Every hint a WPX run gives keeps to one line of a 360 px phone,

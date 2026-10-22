@@ -25,6 +25,11 @@ use crate::settings::{CharSetMode, LevelAxis, TrainingSettings};
 /// fingerprint, so the mark is what still makes the run a run after that.
 pub(crate) const CONTEST_MARK: &str = "contest:";
 
+/// What follows the contest in the mark of a run with Show copy on:
+/// `contest:wpx:a`, so the run is still known for assisted once an older
+/// build has dropped its log.
+const ASSISTED_MARK: &str = ":a";
+
 /// The log layout this build writes and reads. It rises only for a change
 /// an older reader would misread; a key added with a default does not
 /// raise it.
@@ -101,13 +106,15 @@ pub struct QsoRecord {
     pub c: String,
     /// The exchange you logged, a token for each of the run's fields: a
     /// NIL's always, and otherwise where no group holds it: a QSO's whose
-    /// exchange never reached you (its field groups are misses), or whose
-    /// station's copy an earlier QSO holds.
+    /// exchange never reached you (its field groups are misses), whose
+    /// station's copy an earlier QSO holds, or whose field groups keep what
+    /// you had when Show copy showed its exchange.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub l: Vec<String>,
     /// The call you logged, where its call group does not hold it: the
-    /// group keeps the call as first sent with your exchange, and the log
-    /// the call corrected since. Empty when they are the same.
+    /// group keeps the call as first sent with your exchange, or what you
+    /// had when Show copy showed it, and the log the call corrected since.
+    /// Empty when they are the same.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lc: String,
     /// What the station sent of its exchange, beside `l`, where no group
@@ -198,6 +205,12 @@ impl RunSummary {
     pub fn minutes_per_qso(&self) -> Option<f64> {
         self.rate.filter(|rate| *rate > 0.0).map(|rate| 60.0 / rate)
     }
+
+    /// The share of the QSOs logged that the check found something wrong
+    /// with; none before a QSO is logged.
+    pub fn error_share(&self) -> Option<f64> {
+        (self.qsos > 0).then(|| (self.qsos - self.clean) as f64 / self.qsos as f64)
+    }
 }
 
 /// What became of a contest run's log, as the history says it.
@@ -226,6 +239,14 @@ impl SessionResult {
     /// The contest a run was of, when this build knows it.
     pub fn contest_kind(&self) -> Option<ContestKind> {
         self.contest_name().and_then(ContestKind::from_name)
+    }
+
+    /// Whether a contest run had Show copy on: its log says so, or, where
+    /// an older version dropped the log, its mark (`contest:wpx:a`).
+    pub fn assisted(&self) -> bool {
+        self.char_set_mode == CharSetMode::Contest
+            && (self.alphabet_fingerprint.ends_with(ASSISTED_MARK)
+                || self.contest_run().is_some_and(|run| run.assisted))
     }
 
     /// A contest run's log, when this build can read it.
@@ -309,7 +330,11 @@ impl ContestRun {
             char_set_mode: CharSetMode::Contest,
             char_wpm: char_wpm.unwrap_or(self.my_wpm),
             effective_wpm: effective_wpm.unwrap_or(self.my_wpm),
-            alphabet_fingerprint: format!("{CONTEST_MARK}{}", self.kind),
+            alphabet_fingerprint: format!(
+                "{CONTEST_MARK}{}{}",
+                self.kind,
+                if self.assisted { ASSISTED_MARK } else { "" }
+            ),
             contest: Some(ContestLog::from(self)),
             groups: groups
                 .into_iter()
@@ -850,6 +875,9 @@ mod tests {
         // Two QSOs in ten minutes: five minutes each.
         assert_eq!(summary.minutes_per_qso(), Some(5.0));
         assert_eq!(RunSummary::default().minutes_per_qso(), None);
+        // One of the two with something wrong.
+        assert_eq!(summary.error_share(), Some(0.5));
+        assert_eq!(RunSummary::default().error_share(), None);
         let errors = stored.errors(&groups).expect("its checks");
         assert_eq!(errors.wrong, [(Field::Rst, 0), (Field::Name, 1)]);
         let accuracy = stored.accuracy_by_field(&groups).expect("each part");
@@ -1181,11 +1209,15 @@ mod tests {
             (unknown.contest_name(), unknown.contest_kind()),
             (Some("cwt"), None)
         );
+        assert!(!kept.assisted());
         let assisted = SessionResult {
             alphabet_fingerprint: "contest:wpx:a".into(),
+            contest: None,
             ..kept
         };
         assert_eq!(assisted.contest_kind(), Some(ContestKind::Wpx));
+        assert_eq!(assisted.contest_name(), Some("wpx"));
+        assert!(assisted.assisted(), "by its mark, its log dropped");
         let koch = SessionResult::empty_for_test();
         assert_eq!((koch.contest_kind(), koch.stored_log()), (None, None));
     }
@@ -1198,6 +1230,27 @@ mod tests {
         };
         let log = ContestLog::from(&assisted);
         assert_eq!(log.0["assisted"], true);
-        assert_eq!(log.run(5), Some(assisted));
+        assert_eq!(log.run(5), Some(assisted.clone()));
+        // Kept as a session, it is marked so, and the mark still reads as
+        // its contest.
+        let timing = SessionTiming {
+            time_to_complete_ms: 900.0,
+            char_wpm: Some(24.0),
+            effective_wpm: Some(24.0),
+            sends: 1,
+        };
+        let groups = ["K5XYZ", "214", "DL2XYZ", "TT7", "W1AW"]
+            .map(|sent| (group(sent, sent), timing.clone()))
+            .to_vec();
+        let kept = assisted.result(
+            groups,
+            &TrainingSettings::default(),
+            9_000,
+            "2026-10-20".into(),
+        );
+        assert_eq!(kept.alphabet_fingerprint, "contest:wpx:a");
+        assert_eq!(kept.contest_kind(), Some(ContestKind::Wpx));
+        assert!(kept.assisted());
+        assert_eq!(kept.char_set_mode, CharSetMode::Contest);
     }
 }

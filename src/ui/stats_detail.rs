@@ -3,15 +3,15 @@ use std::collections::BTreeSet;
 use cw_core::{
     CONTEST_TIMES_NOTE, CharSetMode, ContestKind, GROUP_START_BIGRAM_TOKEN, MasteryStatus,
     SamplingRow, SessionHistoryRow, SessionResult, SpeedPath, StoredLog, TrainingSettings,
-    board_place, character_diagnostics, group_length_forecast, mistake_stats, sampling_rows,
-    session_history, speed_forecast,
+    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
+    speed_forecast,
 };
 use dioxus::prelude::*;
 
 use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
 use crate::ui::backup::{BackupCard, Backups};
-use crate::ui::contest_results::ContestResults;
+use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::format::counted;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::stats::CONTEST_SPEEDS;
@@ -287,13 +287,18 @@ fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Elemen
     }
 }
 
-/// How many sessions the history lists before it offers more.
-const HISTORY_PAGE: usize = 40;
+/// How many sessions the history lists before it offers more, as the Runs
+/// card does its runs.
+pub(crate) const HISTORY_PAGE: usize = 40;
+
+/// What a run with Show copy on is called wherever it is listed.
+pub const ASSISTED: &str = "assisted";
 
 /// What a row says under its date: "Koch · 18/20 groups · 96 chars", or for
 /// a contest run "Contest · CQ WPX · 11/12 QSOs · 72/h", and for one without
 /// a score "Contest · Simple QSO · 8/9 QSOs · 1.2 min/QSO", whose parts each
-/// keep to one piece, so a narrow line breaks only between them.
+/// keep to one piece, so a narrow line breaks only between them. A run with
+/// Show copy on says it was assisted, after its contest.
 fn history_sub(row: &SessionHistoryRow) -> String {
     let Some(log) = &row.log else {
         return format!(
@@ -308,35 +313,38 @@ fn history_sub(row: &SessionHistoryRow) -> String {
     if let Some(kind) = row.contest {
         parts.push(kind.label().replace(' ', "\u{a0}"));
     }
+    if row.assisted {
+        parts.push(ASSISTED.to_string());
+    }
+    parts.extend(log_parts(log, row.contest));
+    parts.join(" · ")
+}
+
+/// What a contest run's row says of its log, in History and on the Runs
+/// card alike: "11/12 QSOs · 72/h", or for a contest without a score, told
+/// by the minutes a QSO took, "8/9 QSOs · 1.2 min/QSO"; and for a log that
+/// does not read, why.
+pub(crate) fn log_parts(log: &StoredLog, kind: Option<ContestKind>) -> Vec<String> {
     match log {
         StoredLog::Read(run) => {
-            parts.push(format!("{}/{}\u{a0}QSOs", run.clean, run.qsos));
-            // A contest without a score is told by the minutes a QSO took.
-            if row.contest.is_none_or(ContestKind::scored) {
+            let mut parts = vec![format!("{}/{}\u{a0}QSOs", run.clean, run.qsos)];
+            if kind.is_none_or(ContestKind::scored) {
                 parts.extend(run.rate.map(|rate| format!("{rate:.0}/h")));
             } else {
                 let minutes = run.minutes_per_qso();
                 parts.extend(minutes.map(|minutes| format!("{minutes:.1}\u{a0}min/QSO")));
             }
+            parts
         }
-        StoredLog::Dropped => parts.push("log not kept by an older version".to_string()),
-        StoredLog::Unreadable => parts.push("this version cannot read its log".to_string()),
+        StoredLog::Dropped => vec!["log not kept by an older version".to_string()],
+        StoredLog::Unreadable => vec!["this version cannot read its log".to_string()],
     }
-    parts.join(" · ")
 }
 
 /// Whether a row opens its run's results: a contest run whose log reads.
 fn opens(row: &SessionHistoryRow) -> bool {
     matches!(row.log, Some(StoredLog::Read(_))) && row.contest.is_some()
 }
-
-/// The script that brings the results of a run opened from History into
-/// view, where its row was perhaps far down the list.
-#[cfg(not(test))]
-const SHOW_RESULTS: &str = r#"const shown = document.getElementById("run-results");
-if (shown) {
-    shown.scrollIntoView({ block: "start" });
-}"#;
 
 /// Every session kept on this device, newest first.
 ///
@@ -359,33 +367,10 @@ pub fn HistoryTab(
     let mut chosen = use_signal(BTreeSet::<SessionPick>::new);
     let mut confirming = use_signal(|| false);
     let mut shown = use_signal(|| HISTORY_PAGE);
-    // The run whose results are open, read again from its row: only while
-    // it is still in the history.
-    let mut opened = use_signal(|| None::<SessionPick>);
-    use_effect(move || {
-        // Tests have no page to run it on.
-        #[cfg(not(test))]
-        if opened().is_some() {
-            spawn(async {
-                let _ = document::eval(SHOW_RESULTS).await;
-            });
-        }
-        #[cfg(test)]
-        let _ = opened();
-    });
-    let open_run = opened().and_then(|pick| {
-        sessions
-            .get(pick.index)
-            .filter(|session| session.timestamp == pick.timestamp)
-    });
-    if let Some(result) = open_run {
-        return rsx! {
-            ContestResults {
-                result: result.clone(),
-                place: board_place(&sessions, result.timestamp),
-                on_back: move |()| opened.set(None),
-            }
-        };
+    // The run whose results are open, read again from its row.
+    let mut opened = use_opened_run();
+    if let Some(results) = opened_results(&sessions, opened, "History") {
+        return results;
     }
 
     let every: Vec<SessionPick> = rows

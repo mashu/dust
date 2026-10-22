@@ -45,6 +45,16 @@ pub fn clock(timestamp: u64) -> Option<String> {
     local_at(timestamp).map(|at| at.format("%H:%M").to_string())
 }
 
+/// When a session kept on `date` finished at `timestamp`, as a list of
+/// them says it: "Fri 16 Oct 2026 · 14:32", or the day alone where the
+/// time cannot be read.
+pub fn day_and_clock(date: &str, timestamp: u64) -> String {
+    match clock(timestamp) {
+        Some(time) => format!("{} · {time}", short_date(date)),
+        None => short_date(date),
+    }
+}
+
 /// The local day of `timestamp`, the way dates are stored: "2026-10-19".
 pub fn day_of(timestamp: u64) -> Option<String> {
     local_at(timestamp).map(|at| at.format("%Y-%m-%d").to_string())

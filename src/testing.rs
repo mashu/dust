@@ -44,6 +44,9 @@ thread_local! {
     /// The fields the page has asked to give the cursor to, by id, that no
     /// page has looked for yet.
     static FOCUS_ASKED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many times the page has asked to be scrolled to its top since a
+    /// test last looked.
+    static SCROLLS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The page asks for the field with this id to have the cursor. In a
@@ -51,6 +54,12 @@ thread_local! {
 /// far; here the [`Ui`] runs it when the page next settles.
 pub fn ask_focus(id: &str) {
     FOCUS_ASKED.with_borrow_mut(|asked| asked.push(id.to_string()));
+}
+
+/// The page asks to be scrolled back to its top. In a browser that is a
+/// script; here a [`Ui`] counts it ([`Ui::take_scrolls`]).
+pub fn ask_scroll_to_top() {
+    SCROLLS_ASKED.set(SCROLLS_ASKED.get() + 1);
 }
 
 pub struct Harness {
@@ -119,6 +128,15 @@ pub fn stored_run(date: &str, qsos: &[(&str, &str, &str, &str)]) -> SessionResul
         .map(|(call, nr, logged_call, logged_nr)| vec![(*call, *logged_call), (*nr, *logged_nr)])
         .collect();
     stored_contest_run(date, "wpx", &["nr"], &copies)
+}
+
+/// `run` as it is kept with Show copy on: marked assisted, and logged so.
+pub fn assisted(mut run: SessionResult) -> SessionResult {
+    run.alphabet_fingerprint.push_str(":a");
+    if let Some(log) = run.contest.as_mut() {
+        log.0["assisted"] = serde_json::json!(true);
+    }
+    run
 }
 
 /// A finished ten-minute Simple QSO run, the way the app stores it: each
@@ -594,6 +612,7 @@ impl Ui {
     fn from_dom(dom: VirtualDom, store: Rc<MemoryStore>) -> Self {
         // What an earlier page asked for is not this one's to do.
         FOCUS_ASKED.take();
+        SCROLLS_ASKED.take();
         let mut ui = Self {
             dom,
             ids: Vec::new(),
@@ -658,6 +677,12 @@ impl Ui {
     /// by id, in order.
     pub fn take_focused(&mut self) -> Vec<String> {
         std::mem::take(&mut self.focused)
+    }
+
+    /// How many times the page asked to be scrolled to its top since this
+    /// was last called.
+    pub fn take_scrolls(&mut self) -> usize {
+        SCROLLS_ASKED.take()
     }
 
     /// Whether anything is ready to run: a task woken, an effect queued, a

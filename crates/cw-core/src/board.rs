@@ -15,14 +15,16 @@
 //! A contest run is ranked among runs of its own contest, and only one that
 //! says something of a whole run goes on: a log this build reads, five
 //! minutes or more of a limit of five or more, a QSO logged clean, and Show
-//! copy off.
+//! copy off. A whole run with Show copy on is assisted: the board lists it
+//! greyed, with no place, and it sets no record and moves no form. Every
+//! run of a contest, whole or not, is on its Runs card ([`contest_runs`]).
 //!
 //! There is one player, so a place on the board is a session's, not a
 //! person's. It is read off the stored history, so a deleted session leaves
 //! the board with it. Two equal scores are placed in the order they were set:
 //! the first to reach a score holds the higher place, as on any record list.
 
-use crate::contest::ContestKind;
+use crate::contest::{ContestKind, StoredLog};
 use crate::session::SessionResult;
 use crate::settings::CharSetMode;
 
@@ -39,7 +41,8 @@ pub const FORM_SESSIONS: usize = 10;
 /// One session's place on the board, and what it was.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoardEntry {
-    /// 1 for the best.
+    /// 1 for the best; 0 for an assisted run, which the board lists with
+    /// no place ([`assisted_runs`]).
     pub place: usize,
     /// Where the session sits in the history it was read from.
     pub index: usize,
@@ -60,26 +63,37 @@ pub struct BoardEntry {
 /// could be read and earned something, over enough groups, and for a
 /// contest run, a whole run.
 pub fn per_group(session: &SessionResult) -> Option<f64> {
+    earned(session, false)
+}
+
+/// What a session earned a group, if it would go on the board as a
+/// session that was `assisted` or not: for a contest run, a whole run with
+/// Show copy on or off as `assisted` says.
+fn earned(session: &SessionResult, assisted: bool) -> Option<f64> {
     let groups = session.groups.len();
     (session.score.is_finite()
         && session.score > 0.0
         && groups >= BOARD_MIN_GROUPS
-        && (session.char_set_mode != CharSetMode::Contest || a_whole_run(session)))
+        && if session.char_set_mode == CharSetMode::Contest {
+            a_whole_run(session, assisted)
+        } else {
+            !assisted
+        })
     .then(|| session.score / groups as f64)
 }
 
 /// Whether a contest run says something of a whole run: its log reads, it
-/// ran five minutes or more to a limit of five or more, it logged a QSO
-/// clean, and Show copy was off. A run whose log an older build dropped is
-/// left off.
-fn a_whole_run(session: &SessionResult) -> bool {
+/// ran five minutes or more to a limit of five or more, and it logged a
+/// QSO clean; and whether Show copy was on is as `assisted` says. A run
+/// whose log an older build dropped is left off.
+fn a_whole_run(session: &SessionResult, assisted: bool) -> bool {
     let groups = &session.groups;
     let run = session
         .contest
         .as_ref()
         .and_then(|log| log.run(groups.len()));
     run.is_some_and(|run| {
-        !run.assisted
+        run.assisted == assisted
             && u64::from(run.limit_s) >= BOARD_RUN_MIN_S
             && run.run_ms >= BOARD_RUN_MIN_S * 1_000
             && run.clean_qsos(groups).is_some_and(|clean| clean > 0)
@@ -108,7 +122,8 @@ impl BoardOf {
             .map_or(Self::Mode(session.char_set_mode), Self::Contest)
     }
 
-    fn holds(self, session: &SessionResult) -> bool {
+    /// Whether `session` is one of the sessions this board ranks.
+    pub fn holds(self, session: &SessionResult) -> bool {
         match self {
             Self::All => true,
             Self::Mode(mode) => session.char_set_mode == mode,
@@ -140,20 +155,41 @@ pub fn score_board(sessions: &[SessionResult], of: BoardOf) -> Vec<BoardEntry> {
     ranked
         .into_iter()
         .enumerate()
-        .map(|(rank, (index, session, rating))| BoardEntry {
-            place: rank + 1,
-            index,
-            per_group: rating,
-            score: session.score,
-            timestamp: session.timestamp,
-            date: session.date.clone(),
-            char_wpm: session.char_wpm,
-            effective_wpm: session.effective_wpm,
-            accuracy: session.accuracy,
-            groups: session.groups.len(),
-            mode: session.char_set_mode,
-        })
+        .map(|(rank, (index, session, rating))| entry(rank + 1, index, session, rating))
         .collect()
+}
+
+/// Session `index`, `session`, on the board at `place`, earning `per_group`.
+fn entry(place: usize, index: usize, session: &SessionResult, per_group: f64) -> BoardEntry {
+    BoardEntry {
+        place,
+        index,
+        per_group,
+        score: session.score,
+        timestamp: session.timestamp,
+        date: session.date.clone(),
+        char_wpm: session.char_wpm,
+        effective_wpm: session.effective_wpm,
+        accuracy: session.accuracy,
+        groups: session.groups.len(),
+        mode: session.char_set_mode,
+    }
+}
+
+/// The whole runs `of` holds that had Show copy on, newest first: the board
+/// lists them greyed, each with place 0, as they are never placed, and
+/// they set no record and move no form.
+pub fn assisted_runs(sessions: &[SessionResult], of: BoardOf) -> Vec<BoardEntry> {
+    let mut assisted: Vec<BoardEntry> = sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| of.holds(session))
+        .filter_map(|(index, session)| {
+            earned(session, true).map(|rating| entry(0, index, session, rating))
+        })
+        .collect();
+    assisted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.index.cmp(&a.index)));
+    assisted
 }
 
 /// Where the session finished at `timestamp` stands among the sessions of
@@ -171,17 +207,113 @@ pub fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize,
     Some((place + 1, board.len()))
 }
 
-/// The modes the board has sessions of, in the order the trainer offers
-/// them.
+/// The modes the board offers a pill for, in the order the trainer offers
+/// them: those it has sessions of, and Contest once the history holds a
+/// run, placed or not, as every run is on the Runs card under that pill
+/// ([`run_kinds`]).
 pub fn board_modes(sessions: &[SessionResult]) -> Vec<CharSetMode> {
+    let runs = !run_kinds(sessions).is_empty();
     CharSetMode::ALL
         .into_iter()
         .filter(|mode| {
-            sessions
-                .iter()
-                .any(|session| session.char_set_mode == *mode && per_group(session).is_some())
+            (*mode == CharSetMode::Contest && runs)
+                || sessions
+                    .iter()
+                    .any(|session| session.char_set_mode == *mode && per_group(session).is_some())
         })
         .collect()
+}
+
+/// The contests the history has runs of, placed or not, in the order the
+/// card lists them: the Runs card's ([`contest_runs`]).
+pub fn run_kinds(sessions: &[SessionResult]) -> Vec<ContestKind> {
+    ContestKind::ALL
+        .into_iter()
+        .filter(|kind| {
+            sessions
+                .iter()
+                .any(|session| session.contest_kind() == Some(*kind))
+        })
+        .collect()
+}
+
+/// One run of a contest, as its Runs card lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunEntry {
+    /// Where the run sits in the history it was read from.
+    pub index: usize,
+    pub timestamp: u64,
+    pub date: String,
+    /// What became of its log: one this build reads gives its QSOs, rate
+    /// and error share, and the figures below; one it cannot, or that an
+    /// older version dropped, is listed as History lists it.
+    pub log: StoredLog,
+    /// The length it was set to, and how long it ran, pauses left out, in
+    /// seconds; none where its log does not read.
+    pub limit_s: Option<u32>,
+    pub run_s: Option<u64>,
+    /// Points for its copy.
+    pub points: f64,
+    /// Its contest score, raw and verified; none in a contest without one,
+    /// or where its log does not read.
+    pub raw: Option<u32>,
+    pub verified: Option<u32>,
+    /// Show copy was on.
+    pub assisted: bool,
+    /// The best verified score among the runs of its contest set to its
+    /// length, Show copy off: the first to reach it, as on any record list.
+    pub best: bool,
+}
+
+/// Every run of `kind` the history holds, newest first, with the best
+/// verified run of each length marked.
+pub fn contest_runs(sessions: &[SessionResult], kind: ContestKind) -> Vec<RunEntry> {
+    let mut runs: Vec<RunEntry> = sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| session.contest_kind() == Some(kind))
+        .map(|(index, session)| {
+            let run = session.contest_run();
+            let score = run.as_ref().and_then(|run| run.score(&session.groups));
+            RunEntry {
+                index,
+                timestamp: session.timestamp,
+                date: session.date.clone(),
+                log: session.stored_log().unwrap_or(StoredLog::Dropped),
+                limit_s: run.as_ref().map(|run| run.limit_s),
+                run_s: run.as_ref().map(|run| run.run_ms / 1_000),
+                points: session.score,
+                raw: score.as_ref().map(|score| score.raw.score),
+                verified: score.as_ref().map(|score| score.verified.score),
+                assisted: session.assisted(),
+                best: false,
+            }
+        })
+        .collect();
+    // The best of each length: the highest verified score, the first to
+    // reach it holding it.
+    let mut by_age: Vec<usize> = (0..runs.len()).collect();
+    by_age.sort_by_key(|at| (runs[*at].timestamp, runs[*at].index));
+    let mut best: Vec<(u32, usize)> = Vec::new();
+    for at in by_age {
+        let run = &runs[at];
+        let (Some(limit), Some(verified)) = (run.limit_s, run.verified) else {
+            continue;
+        };
+        if run.assisted || verified == 0 {
+            continue;
+        }
+        match best.iter_mut().find(|(length, _)| *length == limit) {
+            Some((_, held)) if runs[*held].verified >= Some(verified) => {}
+            Some((_, held)) => *held = at,
+            None => best.push((limit, at)),
+        }
+    }
+    for (_, at) in best {
+        runs[at].best = true;
+    }
+    runs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.index.cmp(&a.index)));
+    runs
 }
 
 /// The contests the board has runs of, in the order the card lists them.
@@ -595,6 +727,166 @@ mod tests {
         assert_eq!(
             board[0].timestamp, 1,
             "the run that walked away ranks first: {ranked:?}"
+        );
+    }
+
+    /// A run of `minutes` minutes on seed `seed`, worked by an operator of
+    /// `habit`, with Show copy as `show_copy` says, kept at `timestamp`.
+    fn worked_run(
+        seed: u64,
+        minutes: u32,
+        habit: crate::contest::bot::script::Habit,
+        show_copy: bool,
+        timestamp: u64,
+    ) -> SessionResult {
+        use crate::contest::bot::Operator;
+        use crate::contest::bot::script::work;
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_minutes = minutes;
+        settings.contest.contest_show_copy = show_copy;
+        let sampler = crate::Sampler::new(&[], &settings, seed);
+        let mut runtime = Runtime::start(seed, settings, sampler);
+        work(&mut runtime, &mut Operator::new(habit), &[]);
+        runtime.machine.result(timestamp, "2026-10-20".into())
+    }
+
+    /// A whole run with Show copy on is assisted: never placed, however it
+    /// scores, but listed greyed apart from the places on every board that
+    /// holds it, and out of the record and the form.
+    #[test]
+    fn an_assisted_run_is_listed_but_never_placed() {
+        use crate::contest::bot::script::Habit;
+        let plain = worked_run(3, 5, Habit::Perfect, false, 1);
+        let assisted = worked_run(3, 5, Habit::Perfect, true, 2);
+        assert!(assisted.assisted() && !plain.assisted());
+        assert_eq!(assisted.alphabet_fingerprint, "contest:wpx:a");
+        assert!(assisted.score >= plain.score, "it copied as well");
+        assert_eq!(per_group(&assisted), None);
+        let sessions = [plain, assisted];
+        for of in [
+            BoardOf::All,
+            BoardOf::Mode(CharSetMode::Contest),
+            BoardOf::Contest(ContestKind::Wpx),
+        ] {
+            let placed: Vec<u64> = score_board(&sessions, of)
+                .iter()
+                .map(|entry| entry.timestamp)
+                .collect();
+            assert_eq!(placed, [1], "{of:?}");
+            let listed: Vec<(u64, usize)> = assisted_runs(&sessions, of)
+                .iter()
+                .map(|entry| (entry.timestamp, entry.place))
+                .collect();
+            assert_eq!(listed, [(2, 0)], "{of:?}");
+            let timeline = score_timeline(&sessions, of);
+            assert_eq!(timeline.len(), 1, "no record, no form: {of:?}");
+        }
+        assert_eq!(board_place(&sessions, 2), None);
+        assert_eq!(board_kinds(&sessions), [ContestKind::Wpx]);
+        assert!(assisted_runs(&sessions, BoardOf::Mode(CharSetMode::Koch)).is_empty());
+        assert!(assisted_runs(&sessions, BoardOf::Contest(ContestKind::Sprint)).is_empty());
+        // A run too short for the board is no assisted run on it either,
+        // but the Contest pill shows for it, with its Runs card.
+        let short = worked_run(3, 2, Habit::Perfect, true, 3);
+        assert!(assisted_runs(std::slice::from_ref(&short), BoardOf::All).is_empty());
+        assert!(board_kinds(std::slice::from_ref(&short)).is_empty());
+        assert_eq!(run_kinds(std::slice::from_ref(&short)), [ContestKind::Wpx]);
+        assert_eq!(
+            board_modes(&[short, koch(4, 50.0)]),
+            [CharSetMode::Koch, CharSetMode::Contest]
+        );
+    }
+
+    /// The Runs card lists every run of its contest, newest first: its
+    /// length, both scores and the share of QSOs with an error; the best
+    /// verified run of each length marked, the first to reach it holding
+    /// it; an assisted run marked and never best; and a run whose log this
+    /// build cannot read, or an older one dropped, listed as History lists
+    /// it.
+    #[test]
+    fn the_runs_card_lists_every_run_of_its_contest() {
+        use crate::contest::bot::script::Habit;
+        let first = worked_run(3, 5, Habit::Perfect, false, 1);
+        let assisted = SessionResult {
+            score: first.score * 2.0,
+            ..worked_run(3, 5, Habit::Perfect, true, 2)
+        };
+        let short = worked_run(5, 2, Habit::Perfect, false, 3);
+        let busted = worked_run(3, 5, Habit::DigitOff, false, 4);
+        let dropped = SessionResult {
+            contest: None,
+            timestamp: 5,
+            ..first.clone()
+        };
+        let mut unreadable = SessionResult {
+            timestamp: 6,
+            ..first.clone()
+        };
+        if let Some(log) = unreadable.contest.as_mut() {
+            log.0["v"] = serde_json::json!(2);
+        }
+        // The same run again later: it ties the first, which holds it.
+        let again = SessionResult {
+            timestamp: 7,
+            ..first.clone()
+        };
+        let koch = koch(8, 50.0);
+        let sessions = [
+            first.clone(),
+            assisted,
+            short,
+            busted,
+            dropped,
+            unreadable,
+            again,
+            koch,
+        ];
+        assert_eq!(run_kinds(&sessions), [ContestKind::Wpx]);
+        assert!(contest_runs(&sessions, ContestKind::Sprint).is_empty());
+        let runs = contest_runs(&sessions, ContestKind::Wpx);
+        let at: Vec<u64> = runs.iter().map(|run| run.timestamp).collect();
+        assert_eq!(at, [7, 6, 5, 4, 3, 2, 1], "newest first, Koch left out");
+        let lengths: Vec<Option<u32>> = runs.iter().map(|run| run.limit_s).collect();
+        assert_eq!(
+            lengths,
+            [
+                Some(300),
+                None,
+                None,
+                Some(300),
+                Some(120),
+                Some(300),
+                Some(300)
+            ]
+        );
+        let best: Vec<u64> = runs
+            .iter()
+            .filter(|run| run.best)
+            .map(|run| run.timestamp)
+            .collect();
+        assert_eq!(best, [3, 1], "one a length; the assisted run never");
+        let (assisted, first_row) = (&runs[5], &runs[6]);
+        assert!(assisted.assisted && !assisted.best);
+        assert!(!first_row.assisted);
+        assert!(matches!(first_row.log, StoredLog::Read(_)));
+        assert_eq!(runs[2].log, StoredLog::Dropped);
+        assert_eq!(runs[1].log, StoredLog::Unreadable);
+        assert_eq!((runs[1].raw, runs[1].verified), (None, None));
+        let share = |run: &RunEntry| match &run.log {
+            StoredLog::Read(summary) => summary.error_share(),
+            _ => None,
+        };
+        assert_eq!(share(first_row), Some(0.0));
+        assert_eq!(first_row.points, first.score);
+        assert!(first_row.verified.is_some_and(|verified| verified > 0));
+        assert!(first_row.raw >= first_row.verified);
+        // A digit off in every number: every QSO has an error.
+        assert_eq!(share(&runs[3]), Some(1.0));
+        assert_eq!(runs[3].verified, Some(0));
+        assert!(!runs[3].best);
+        assert_eq!(
+            first_row.run_s,
+            first.contest_run().map(|run| run.run_ms / 1_000)
         );
     }
 }

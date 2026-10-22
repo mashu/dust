@@ -58,7 +58,7 @@ pub use exchange::{
 };
 pub use machine::{
     AirView, ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestView, LogRow, OpKey,
-    PauseWhy, RowStatus,
+    PauseWhy, RowStatus, ShownText,
 };
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub use place::filter_capacity;

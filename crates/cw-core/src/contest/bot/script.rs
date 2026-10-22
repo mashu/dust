@@ -87,6 +87,7 @@ impl<S: CallSource> Runtime<S> {
             exch: exch.to_string(),
             call_edited: MonoMs(self.now),
             exch_complete: (!exch.is_empty()).then_some(MonoMs(self.now)),
+            earlier: Vec::new(),
         };
         self.apply(ContestEvent::Key { key, fields })
     }

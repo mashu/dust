@@ -364,6 +364,7 @@ impl Operator {
             exch: self.exch.clone(),
             call_edited: MonoMs(typed_at),
             exch_complete: (!self.exch.is_empty()).then_some(MonoMs(typed_at)),
+            earlier: Vec::new(),
         };
         (typed_at + per_key, key, fields)
     }

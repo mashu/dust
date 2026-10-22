@@ -265,6 +265,30 @@ mod tests {
         assert_eq!(again, 0, "a log already here is not filled in twice");
     }
 
+    /// An assisted run, `contest:wpx:a`, read back from a backup is still a
+    /// WPX run, its log dropped or not, and is filled in as any run is.
+    #[test]
+    fn an_assisted_run_is_restored_as_its_contest() {
+        let qso = [("K5XYZ", "214", "K5XYZ", "214")];
+        let kept = crate::testing::assisted(crate::testing::stored_run("2026-10-10", &qso));
+        // As an older version writes it back: its mode Callsigns and its
+        // log dropped, its mark kept.
+        let mut older = serde_json::to_value(&kept).expect("a run writes");
+        if let Some(run) = older.as_object_mut() {
+            run.remove("contest");
+        }
+        let raw = format!(r#"{{"dustBackup":1,"savedAt":0,"sessions":[{older}]}}"#);
+        let backup = read_backup(&raw).expect("a backup");
+        let read = &backup.sessions[0];
+        assert_eq!(read.alphabet_fingerprint, "contest:wpx:a");
+        assert_eq!(read.char_set_mode, cw_core::CharSetMode::Contest);
+        assert_eq!(read.contest_kind(), Some(cw_core::ContestKind::Wpx));
+        assert!(read.assisted(), "by its mark");
+        let (merged, added, filled) = merge_sessions(&backup.sessions, vec![kept.clone()]);
+        assert_eq!((added, filled), (0, 1));
+        assert_eq!(merged[0], kept);
+    }
+
     #[test]
     fn sessions_since_a_backup_are_counted() {
         let sessions = vec![at(10, "a"), at(20, "b"), at(30, "c")];

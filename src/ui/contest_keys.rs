@@ -520,14 +520,17 @@ mod tests {
             ui.with_app(|ctx| pressed(ctx, "PageDown"));
             assert!(wpm(&ui, 28));
 
+            ui.take_scrolls();
             ui.with_app(|ctx| pressed(ctx, "Alt+KeyP"));
             assert!(ui.shows("btn-resume"), "Alt+P pauses");
+            assert_eq!(ui.take_scrolls(), 0, "and scrolls nothing");
             // Paused, your speed stays as it is, as − / + are disabled.
             ui.with_app(|ctx| pressed(ctx, "PageUp"));
             assert!(wpm(&ui, 28));
             assert!(ui.input_tag("more-wpm").contains("disabled"));
             ui.with_app(|ctx| pressed(ctx, "Alt+KeyP"));
             assert!(!ui.shows("btn-resume"), "and carries on");
+            assert_eq!(ui.take_scrolls(), 1, "from the run screen's top");
             assert!(ui.shows("btn-pause"));
 
             ui.with_app(|ctx| pressed(ctx, "Alt+KeyE"));

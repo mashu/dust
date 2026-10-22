@@ -279,6 +279,35 @@ fn every_row_names_its_mode() {
     });
 }
 
+/// A run with Show copy on says it was assisted on its row, by its log or,
+/// once an older build has dropped that, by its mark, which still reads as
+/// its contest; and its results say so too.
+#[test]
+fn an_assisted_run_says_so_on_its_row() {
+    run(|| async {
+        let kept = crate::testing::assisted(stored_run(
+            "2026-10-04",
+            &[("K5XYZ", "214", "K5XYZ", "214"), ("W1AW", "5", "W1AW", "5")],
+        ));
+        let dropped = SessionResult {
+            contest: None,
+            date: "2026-10-03".into(),
+            timestamp: kept.timestamp - 1,
+            ..kept.clone()
+        };
+        let (mut ui, _recorder) = open_history(&[dropped, kept]);
+        assert!(
+            ui.has("Contest · CQ\u{a0}WPX · assisted · 2/2\u{a0}QSOs"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has("Contest · CQ\u{a0}WPX · assisted · log not kept by an older version"));
+        ui.click("history-open-1");
+        assert!(ui.has("Assisted: Show copy was on."));
+        assert!(ui.shows("btn-history"));
+    });
+}
+
 /// A Simple QSO run's row gives the minutes a QSO took in place of a rate,
 /// as a contest without a score is told, and opens its results.
 #[test]

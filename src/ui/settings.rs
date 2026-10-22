@@ -214,6 +214,9 @@ fn ExperiencePicker(on: Option<Experience>, on_pick: EventHandler<Experience>) -
     }
 }
 
+/// What Show copy does, and what it costs a run.
+const SHOW_COPY_NOTE: &str = "Shows each caller's text on the run screen a moment after it is sent. A run with it on is marked assisted: it counts in every stat, but is greyed on the board and never placed there.";
+
 /// What the session-shape card shows.
 #[derive(Clone, PartialEq)]
 struct SessionShape {
@@ -222,6 +225,8 @@ struct SessionShape {
     /// A contest is timed rather than counted, and has no groups.
     contest: bool,
     contest_minutes: u32,
+    /// Each caller's text shows on the run screen, and the run is assisted.
+    show_copy: bool,
     /// The group size is one length, so there is nothing to adapt.
     one_size: bool,
     adaptive: bool,
@@ -249,6 +254,7 @@ impl SessionShape {
             words: settings.curriculum.char_set_mode == CharSetMode::Words,
             contest: settings.curriculum.char_set_mode == CharSetMode::Contest,
             contest_minutes: settings.contest.contest_minutes,
+            show_copy: settings.contest.contest_show_copy,
             one_size: settings.curriculum.min_group_size >= settings.curriculum.max_group_size,
             adaptive: settings.curriculum.adaptive_group_size,
             adapts: adapts_group_size(settings),
@@ -377,6 +383,12 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
             if s.contest {
                 p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
                     "A run of zero minutes lasts until you stop it, and ends at {CONTEST_MINUTES_MAX} all the same."
+                }
+                Switch {
+                    title: "Show copy",
+                    description: "{SHOW_COPY_NOTE}",
+                    checked: s.show_copy,
+                    onchange: move |on| settings.write().contest.contest_show_copy = on,
                 }
             } else {
                 p { class: "muted", style: "margin: 0; font-size: 0.8rem;",

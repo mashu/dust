@@ -902,6 +902,7 @@ mod tests {
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_habits = crate::contest::CallerHabits::Rough;
         s.contest.contest_minutes = 9_000;
+        s.contest.contest_show_copy = true;
         s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
         s.contest.my_name = " jean-luc maximilian ".to_string();
         s.contest.my_state = " p.q. ".to_string();
@@ -1506,6 +1507,7 @@ mod tests {
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_habits = crate::contest::CallerHabits::Real;
         s.contest.contest_minutes = 25;
+        s.contest.contest_show_copy = true;
         s.contest.my_call = "DL1ABC".to_string();
         s.contest.my_name = "MAT".to_string();
         s.contest.my_state = "MA".to_string();
@@ -1569,6 +1571,21 @@ mod tests {
         }
     }
 
+    /// Show copy is Session shape's: its reset turns it off, and no other
+    /// section's touches it.
+    #[test]
+    fn show_copy_belongs_to_the_session_shape() {
+        for section in SettingsSection::ALL {
+            let mut s = wildly_different();
+            s.reset_section(section);
+            assert_eq!(
+                !s.contest.contest_show_copy,
+                section == SettingsSection::SessionShape,
+                "{section:?}"
+            );
+        }
+    }
+
     #[test]
     fn contest_settings_default_to_ten_minutes_of_wpx_with_no_call() {
         let s = TrainingSettings::default();
@@ -1580,6 +1597,7 @@ mod tests {
         assert_eq!(json["contestStyle"], "single");
         assert_eq!(json["contestHabits"], "easy");
         assert_eq!(json["contestMinutes"], 10);
+        assert_eq!(json["contestShowCopy"], false);
         assert_eq!(json["myCall"], "");
         assert_eq!(json["myName"], "");
         assert_eq!(json["myState"], "");

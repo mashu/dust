@@ -887,3 +887,39 @@ fn the_band_card_sets_the_callers_habits_in_a_contest() {
         assert!(!ui.shows("habits-easy"));
     });
 }
+
+/// Show copy is on Session shape in Contest mode only, says what it shows
+/// and what it costs a run, is stored, goes back off with its card's reset,
+/// and no preset touches it.
+#[test]
+fn show_copy_is_a_session_shape_switch_in_contest_mode() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(!ui.shows("switch-show-copy"), "not outside Contest");
+
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.shows("switch-show-copy"));
+        assert!(
+            ui.has("Shows each caller&#39;s text on the run screen a moment after it is sent.")
+        );
+        assert!(ui.has("marked assisted: it counts in every stat, but is greyed on the board and never placed there"));
+        // It sits on Session shape, after the minutes a run lasts.
+        let html = ui.html();
+        let shape = html.find(">Session shape<").expect("the card");
+        let minutes = html.find("Minutes per run").expect("its minutes");
+        let switch = html.find(r#"id="switch-show-copy""#).expect("the switch");
+        assert!(shape < minutes && minutes < switch);
+
+        ui.commit("switch-show-copy", "true");
+        assert!(ui.stored_settings().await.contest.contest_show_copy);
+        ui.click("preset-contester");
+        assert!(
+            ui.stored_settings().await.contest.contest_show_copy,
+            "a preset leaves it alone"
+        );
+        ui.click("reset-session-shape");
+        assert!(!ui.stored_settings().await.contest.contest_show_copy);
+    });
+}

@@ -1587,6 +1587,19 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   color: var(--ink-dim);
 }
 .run-tx .mono { letter-spacing: 0.06em; }
+/* With Show copy on, RX takes a line of its own under TX, for what the
+   stations sent, cut short as every line is. Each line is a slot of fixed
+   height: the "—" each says when it has nothing keeps to the line's own
+   size, so neither line grows or shrinks as a turn comes and goes, and
+   the keypad under them never moves. */
+.run.shows-copy .run-air { flex-direction: column; gap: 0; }
+.run.shows-copy .run-air .muted { font-size: inherit; line-height: inherit; }
+.run-copy { color: var(--ink); }
+.run-copy.mono { letter-spacing: 0.04em; }
+.run-copy-gap { color: var(--ink-dim); }
+/* QRM is kept back, as Hear a QSO's muted line keeps it. */
+.run-copy.qrm { color: var(--ink-dim); }
+.run-copy-tag { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em; }
 /* The two fields stay side by side, even on a phone. */
 .field-grid.run-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .run-fields .field { min-width: 0; }
@@ -1756,6 +1769,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.7rem; }
 .run-about { margin: 0 0 0.35rem; }
 .run-summary { margin: 0; line-height: 1.45; }
+.run-assisted { margin: 0.35rem 0 0; font-size: 0.85rem; line-height: 1.4; }
 .score-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 .score-table th, .score-table td { padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line-soft); }
 .score-table thead th { font-size: 0.75rem; font-weight: 700; color: var(--ink-dim); text-align: right; }
@@ -1916,6 +1930,21 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .board-when { font-size: 0.78rem; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .board-detail { font-size: 0.8rem; color: var(--ink-soft); text-align: right; font-variant-numeric: tabular-nums; }
 .board-more { align-self: flex-start; }
+/* An assisted run, Show copy on: listed greyed after the places, with no
+   place of its own, and nothing to point at on the timeline. */
+.board-row.assisted:hover { background: transparent; }
+.board-row.assisted .board-score, .board-row.assisted .board-detail { color: var(--ink-dim); }
+.board-row.assisted .board-score { font-weight: 600; }
+.board-number.unplaced { background: transparent; border: 1px dashed var(--line-strong); color: var(--ink-dim); }
+/* A chip for what is so of a row but is no achievement: an assisted run. */
+.chip.quiet { background: var(--surface-sunken); color: var(--ink-soft); }
+/* The Runs card: each run's date with its marks, and its figures under it,
+   each part kept whole, so a phone's line breaks only between them. */
+.runs-key { margin: 0; font-size: 0.82rem; line-height: 1.45; }
+.runs-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; min-width: 0; }
+.runs-row.assisted .history-acc .value { color: var(--ink-dim); }
+/* A row with nothing to open keeps its figures in line with the chevrons. */
+.runs-no-open { width: 1rem; }
 /* A phone has no room for the speed beside the date: it goes under it. */
 @media (max-width: 640px) {
   .board-row { grid-template-columns: 2rem minmax(0, 1fr); row-gap: 0.1rem; }
@@ -2532,8 +2561,10 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .field input, .field select, .stepper input, .answer { font-size: 16px; min-height: 44px; }
   .keypad-row { gap: 0.28rem; }
   .key { min-height: 2.85rem; font-size: 1.1rem; }
+  /* Paused, Pause keeps its column, inert, so End run never slides into
+     its place under a finger that taps twice. */
   .run-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .run.paused .run-actions, .run-actions.asking { grid-template-columns: 1fr 1fr; }
+  .run-actions.asking { grid-template-columns: 1fr 1fr; }
   .run-actions .btn { padding-left: 0.5rem; padding-right: 0.5rem; }
   .run-ask { grid-column: 1 / -1; }
   .grid-4 { grid-template-columns: 1fr 1fr; gap: 0.5rem; }
@@ -2597,6 +2628,11 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .run-entry { gap: 0.4rem; }
   .run-fields .field { gap: 0.25rem; }
   .run-keys .btn { min-height: 40px; }
+  /* With Show copy on, RX takes a line of its own: the keys and the air's
+     two lines close up to make room for it, so the run still fits down to
+     the keypad's last row. */
+  .run.shows-copy .key { min-height: 2.5rem; }
+  .run.shows-copy .run-air .run-line { min-height: 1.3em; line-height: 1.3; }
 }
 
 @media (hover: none) {

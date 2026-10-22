@@ -42,8 +42,9 @@ pub use auto_level::{
 };
 pub use belief::{Estimate, EstimatePoint};
 pub use board::{
-    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, TimelinePoint,
-    board_kinds, board_modes, board_place, per_group, score_board, score_timeline,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, RunEntry, TimelinePoint,
+    assisted_runs, board_kinds, board_modes, board_place, contest_runs, per_group, run_kinds,
+    score_board, score_timeline,
 };
 pub use callsign::{
     CALLSIGN_TIER_MAX, CallSpec, CallsignParts, Countries, GeneratedCall, call_fault,
@@ -57,8 +58,8 @@ pub use contest::{
     MessagePart, Multiplier, MyStation, OpKey, PauseWhy, PerSide, Points, QsoCheck, QsoError,
     QsoRecord, QsoState, QsoText, Rates, ReadField, Reading, RowStatus, RunClock, RunErrors,
     RunQso, RunStyle, RunSummary, SPRINT_SERIALS, ScoredQso, Scoring, Segment, Sender, SerialFit,
-    SerialModel, Side, StoredLog, Tally, Turn, WPX_SERIALS, check_qso, contest_score, cut_power,
-    cut_serial, cut_zone, esm, filter_capacity, hear_qsos, home_continent, home_country,
+    SerialModel, ShownText, Side, StoredLog, Tally, Turn, WPX_SERIALS, check_qso, contest_score,
+    cut_power, cut_serial, cut_zone, esm, filter_capacity, hear_qsos, home_continent, home_country,
     keyed_token, loggable, message_text, normalize_call, parse_exchange, place_name, plan_turn,
     rate_at, read_number, section_name, send_power, send_report, send_serial, send_zone,
 };

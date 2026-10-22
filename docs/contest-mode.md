@@ -77,6 +77,16 @@ easy, real or rough, on the Band card in Contest mode and written by the
 presets (§8); real habits sending numbers as MorseRunner's callers do,
 checked against its `Station.pas` (§11.6); and rough habits adding
 careless callers and on-frequency QRM (`contest/qrm.rs`, §4.3, §5.6).
+Slice 4b has landed, the rest of phase 4: `contestShowCopy` on the Session
+shape card in Contest mode (§8); with it on, each station's text in the RX
+line a moment after its send ends (§7), each copy kept as it stood when its
+text showed, the showing a send of its own, and the run marked
+`contest:<kind>:a` and stored `assisted` (§9.1), counted in every stat and
+listed greyed, never placed, on the board (§10); and the Runs card, every
+run of a contest on Stats → Scores under the Contest pill (§10). With them,
+two fixes from a browser test on a 360×640 phone: Pause keeps its place in
+the row while paused, inert, so a double tap on it never ends the run, and
+Resume brings the run screen back to its top (§2, §7).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -301,7 +311,14 @@ and, for the section, `EMA` ("K1ABC 1D EMA")
 - The tour targets group inputs (`tour.rs:231-240`), so its button is
   hidden in Contest mode until phase 5.
 - Every screen opens at its top (`src/app.rs`), so a run started from the
-  foot of its results begins with its clock and fields in sight.
+  foot of its results begins with its clock and fields in sight. As built
+  (4b), so does the run screen on Resume, by either way in (the button, or
+  Alt+P), after a pause you chose, a hidden page or a failed sound: the
+  paused page is shorter, so a phone scrolled down to Pause was left part
+  way down it, and the run carried on with its header, clock and run bar
+  above the screen's top. Pausing scrolls nothing, so nothing moves under
+  the finger that paused (`scroll_to_top`, `src/app.rs`, from
+  `resume_run`).
 
 ## 3. Contest catalogue
 
@@ -1324,7 +1341,10 @@ is in no QSO and is no station: RX counts callers only
 (`AirView::calling`), Enter and its hint never hear of it, the operators
 and the soak leave it (as a listener knows it by its pitch and speed), the
 copies and timing of §9.1 never look at it, and Hear a QSO shows it as it
-plays, a muted line of its own headed QRM that begins no QSO. Its draws
+plays, a muted line of its own headed QRM that begins no QSO; with Show
+copy on (as built, 4b) the run's RX line shows its text as it shows the
+callers', muted and after a QRM tag, as Hear a QSO keeps it, and still
+counts it among no callers (§7). Its draws
 come from a stream of its own, so a run under easier habits draws as it
 always has.
 
@@ -1486,7 +1506,23 @@ in place of `current/total`.
   below the keypad.
 - **The air line** shows only your own message, the part still being sent.
   RX counts the callers sending, QRM none of them (as built, 4a), but
-  never shows what they send (Show copy, phase 4, is the exception).
+  never shows what they send (Show copy, phase 4, is the exception). As
+  built (4b), with Show copy on, RX takes a line of its own under TX and
+  shows each station's text a moment after its send ends (a second,
+  `SHOWN_AFTER_MS`, §9.1), the whole of it even where a key carried its
+  rest into a turn of its own, in the order they showed, after the count
+  of callers, ` · ` between them; QRM's is muted after a QRM tag, as Hear a
+  QSO keeps it (§5.6). A turn's texts stay once it ends, and give way to the
+  next turn's or to a pause. The line is a one-line slot cut short as every
+  line is, and TX and RX each keep one height whatever they hold, the "—"
+  of an empty line drawn at the line's own size, so the layout never moves
+  as a turn comes and goes; at a phone's width, below 760 px of height, the
+  keys and the air's two lines close up a little (`.run.shows-copy`), so a
+  360×640 screen still holds the run down to the keypad's last row (to
+  634 px, in every state of the two lines). It
+  is not read out as it changes: a screen reader hears the run's events in
+  its one polite region, and reads the line when asked. With Show copy off
+  nothing changes on the run screen.
   Each says "—" when it has nothing, as "Reads as" does.
 - **A correction** turns the Call border to `--warn` and fills the field,
   with a "corrected" tag by its label, so it never reads as the focus ring:
@@ -1585,7 +1621,13 @@ run no longer primary, so Resume is the one thing to press. The pause sign
 is drawn as an icon, as `⏸` is missing from many a phone's fonts. Discard,
 paused or not, asks once more: "Discard this run? Its QSOs are not kept",
 with the confirming Discard first and Keep it last, where Discard stood,
-so the second tap of a double tap keeps the run.
+so the second tap of a double tap keeps the run. As built (4b), Pause keeps
+its place in that row while paused, inert (`disabled`) and reading Paused,
+with End run beside it as before: the paused page is shorter, so the row
+can come to rest under the finger that paused, and a double tap on Pause
+used to end the run there, End run having slid into Pause's place. Resume
+stays the one thing to press, in the paused card; Pause's place holds no
+second Resume, so a double tap leaves the run paused.
 
 **Results** (a contest branch of `ResultsView`, `src/ui/results.rs:59-167`;
 the same view opens read-only from a History row, in the list's place, with
@@ -1745,7 +1787,7 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `mySection` | String | `""` | a listed section, `YT`, or `DX`; else `""` (as built, `YT` kept and sent as `TER`) | Station | 3 |
 | `myPower` | String | `100` | 1..=1500 (leading zeros dropped), `K`, `KW` or `1K` as written; else `100` | Station | 3 |
 | `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 (as built, 4a) |
-| `contestShowCopy` | bool | false | — | Session shape | 4 |
+| `contestShowCopy` | bool | false | — | Session shape | 4 (as built, 4b) |
 
 - **Caller habits.** `easy`: plain digits, no LIDs. `real`: numbers as
   MRCE's callers send them (11.6). `rough`: LIDs and on-frequency QRM. As
@@ -1766,6 +1808,14 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   Rough habits a single caller's Band activity hint says QRM comes even at
   1. Its reset puts easy back. `clamp()` has nothing to bound: like the
   contest and its run style, the field holds only what it names.
+- **Show copy** (as built, 4b). A switch on the Session shape card, in
+  Contest mode only, after the minutes a run lasts and its countdown:
+  "Show copy", with "Shows each caller's text on the run screen a moment
+  after it is sent. A run with it on is marked assisted: it counts in every
+  stat, but is greyed on the board and never placed there." Read back,
+  anything but true or false (a save edited by hand) is off and costs the
+  rest of the save nothing; its card's reset turns it off; `clamp()` has
+  nothing to bound, as for the habits; no preset touches it.
 - **On disk, Contest is written like a session (9.1):** `"charSetMode":
   "callsign"` plus `"contestActive": true`, a key that exists only on disk
   and that `From<SettingsSave>` reads back as Contest. An older build opens
@@ -2062,6 +2112,47 @@ exactly as it was while the run went on.
   (`session.rs:478-491`), never `my_wpm`. `digits_level` comes from the
   settings, `level` is the callsign tier, `score` is `points()`, and the
   tally and accuracy are worked out as for groups (`session.rs:458-521`).
+- **Show copy** (as built, 4b). A station's text shows a second after its
+  send ends (`SHOWN_AFTER_MS`), not the moment it ends: a learner types
+  what it hears a beat behind it, and a copy cut off at the end of the send
+  would always miss the character heard last, a mistake no ear made, which
+  Letters, Mistakes and the sampler would all learn from. The call, and the
+  exchange, of a station whose text first shows before you copy it (send
+  the call with your exchange, or log the QSO) keep what the field held when
+  it showed: later edits count only for the log. The showing is a send of
+  its own, so the group's `sends` is 2 plus the repeats you asked for before
+  it, its points halved as for a repeat, and its time is the floor, the copy
+  done by then. A call or an exchange you sent or logged before its text
+  showed was copied by ear and keeps that copy, with no send for the
+  showing. The machine knows when each text shows; what the fields held
+  then it reads at your next key from `Fields::earlier`, what each field
+  held before every edit since the fields were last cleared, at a log, a
+  wipe or the run's start (`Fields::text_at`): every edit is kept, so none
+  made after a text showed can pass for what you had then. A copy made
+  with no key since the text showed (a station lost on its timeouts, or at
+  the run's end) keeps the field as last read at a key, as a lost copy
+  always has. A Call field that held a call another station signs or took
+  from you, or one a station gone left there (`QsoState::gone`), was typed
+  for that one, whatever the style, and of this one you had nothing: the
+  copy is empty, the showing a send. A call stays in the field past its
+  QSO, one F3 thanked and not yet logged, or one gone until Enter clears
+  it, as the next caller's text shows, and without this one typed call
+  would be the copy of two stations, a mistake no ear made. A single
+  caller, alone on the frequency, keeps any other call as you had it, but
+  one you had typed for a station worked before; in a pile-up a call
+  neither this station's nor close to it was typed for another caller. In
+  a pile-up the copy is empty too when another station takes that call
+  from you later, before the copy is made. A text that has not shown when
+  the next turn goes out, the run pauses, or the sound fails, never shows,
+  and is no copy's cut-off: the station's next send shows it. The log keeps what
+  you logged: where a group holds the copy kept when its text showed and not
+  the log, the record holds the log (`l` and `s`, `lc`), so the check and
+  the contest score are worked out again as they were. The run is marked
+  `contest:<kind>:a` and stored `assisted: true`; every reader of the mark
+  takes its kind as the part after `contest:` and before any further `:`
+  (`contest_name`), so the board's kinds, History and the backups' merge
+  read it as its contest, and `SessionResult::assisted` reads the mark, or
+  the log where the mark is plain.
 
 ### 9.2 What older builds do
 
@@ -2151,10 +2242,10 @@ out of the Callsign series (`belief.rs:134-145`, `stats.rs:420-429`,
 | Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. |
 | Copy span, group-length forecast | Not contest measures, as for Callsigns (`ui/stats.rs:211-245`). |
 | Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` is `None` in Contest until phase 5; the card reads "Callers' speeds are drawn evenly from your range, shifted by − / + during a run", its chip "Not adaptive". |
-| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form. |
-| History (`ui/stats_detail.rs:362-371`) | Every row names its mode (phase 0); a contest row opens its results; a stripped run says "log not kept by an older version". |
+| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form: as built (4b), a whole run with Show copy on is listed after the places on every board that holds it, its place a dashed `—` read as "Not placed", its figures greyed and "· assisted" after them, with a line saying why (`assisted_runs`); it marks nothing on the timeline. As built (4b), the Contest pill shows once the history holds a run, placed or not, with a chip for every contest it holds runs of (`board_modes`, `run_kinds`; the first with a run on the board is chosen until another is), as the Runs card is under it: a board of runs alone offers All modes and Contest. |
+| History (`ui/stats_detail.rs:362-371`) | Every row names its mode (phase 0); a contest row opens its results; a stripped run says "log not kept by an older version". As built (4b), an assisted run says "assisted" after its contest, by its log or its mark, and its results say "Assisted: Show copy was on. The run counts in every stat, and is never placed on the board." |
 | Auto level | Untouched: the contest finish never calls `complete_session` (`auto_level.rs:285-308`). |
-| Runs card (phase 4) | Every run per kind: date, length, QSOs, rate, both scores, error share, best verified per kind and length. |
+| Runs card (phase 4) | Every run per kind: date, length, QSOs, rate, both scores, error share, best verified per kind and length. As built (4b), on Stats → Scores under the Contest pill, for the contest its chip chooses, below the board (`src/ui/scores/runs.rs`, `contest_runs`): newest first, each row dated as the board dates it, day and time ("Mon 5 Oct 2026 · 14:13"), so runs of one day tell apart, then "10 min" or how far a run ended early went ("03:12 of 10 min"), clean and logged QSOs, the rate (a Simple QSO's minutes a QSO), the share of QSOs logged with an error and its Points, and at its end the verified contest score over the raw one (a Simple QSO's Points; a run of a scored contest whose log does not read, "—" over its Points, so the column holds scores alone). The best verified run of each length (the limit it was set to), Show copy off and above zero, is marked Best, the first to reach it holding it; a contest without a score marks none. An assisted run is marked "assisted" and is never Best. A run whose log this build cannot read, or an older one dropped, is listed with History's words and opens nothing; any other row opens the run's results in the tab's place, with Scores at its top and Back at its foot, as a History row opens them in its list's place. History's words for a log, and its QSOs and rate, are History's own (`log_parts`). The card lists the newest 40 runs, and the best of each length wherever it falls, with "Show n more" for the rest, as History pages its sessions. Each part of a row is kept whole, so at 360 px a row takes three lines and nothing scrolls sideways. |
 
 **Two scores, two jobs.**
 
@@ -2608,6 +2699,7 @@ pub struct ContestView {
     pub limit_ms: u64, pub my_wpm: f64,
     pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up, a gone station's calls
     pub air: Option<AirView>,  // heard from, your text and where each character ends, segment spans
+    pub shown: Vec<ShownText>, // with Show copy on (4b): each station's text and when it shows
     pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked
     pub qsos: u32, pub clean: u32,
     pub serial: u32,           // your next serial; 0 without one
@@ -2626,8 +2718,9 @@ Effects carry `Turn`, which derives `PartialEq` (as `StationVoice` does,
 then `lease.send_planned(asked, &plan, &transcript, &settings, on_start)`
 with `on_start: impl FnMut(f64)` taking lead plus latency in seconds, and
 `asked` from `lease.ask_to_send()` as the turn goes on the air (5.2). The
-view holds no caller truth until a row's check resolves, and is published
-only when it changes (`session_runtime.rs:297-303`).
+view holds no caller truth until a row's check resolves, but for what Show
+copy shows, each text with the moment it may show, and is published only
+when it changes (`session_runtime.rs:297-303`).
 
 `ContestEntry`, in `AppCtx` beside `answer: AnswerOutbox`, holds `call`
 and `exch` with their edit stamps (one `CopyValue<Fields>`, stamped by
@@ -2686,7 +2779,7 @@ panel, the pause on a hidden page, whose visibility listener and minimise
 handler are in `src/page_hidden.rs` as built); `src/ui/contest_keys.rs`; `src/ui/contest_results.rs`;
 `src/ui/settings_station.rs`; `src/page_hidden.rs` (the page going out of
 sight, for the run and for Hear a QSO, 2c); `src/ui/hear_qso.rs` (the dialogue of
-Hear a QSO, 2c); `src/ui/scores/runs.rs` (phase 4);
+Hear a QSO, 2c); `src/ui/scores/runs.rs` (the Runs card, as built 4b);
 `scripts/contest-data.py` (counted shares).
 
 **Changed in the app:** `src/session_runtime.rs` (`Live::{Groups, Contest}`,
@@ -2920,6 +3013,28 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   over its rest; under real habits a cut serial copied in digits is
   clean.
 
+- from 4b: with Show copy on, each caller's text shows a second after its
+  send ends, kept once the turn is over and given way to by the next, none
+  with it off; a call and an exchange whose text showed first keep what the
+  fields held then, a later edit never changing that copy, the showing a
+  send of its own, while the log keeps what was logged and is checked and
+  scored the same from the stored run; a copy sent before its text showed
+  keeps its own and no extra send; a pile-up caller keyed over is shown
+  whole; a single caller's text showing while the Call field still holds
+  the call of a station F3 thanked, or of one gone, keeps no copy of it;
+  in a pile-up the calls shown while you type another keep nothing, a
+  caller worked later keeping that empty copy, and a kept call another
+  station then takes is no copy; a text not yet shown when a `?` goes out,
+  or when the sound fails, is no cut-off, the next send's showing is; the
+  run marked `contest:wpx:a` and stored assisted, the soak's every third
+  run so, its stored score and log what the live run showed. Unit tests:
+  Show copy's serde, its section and reset; the fields' text at a moment
+  past, through any number of edits; assisted runs counted in the
+  calendar, accuracy, Letters, Mistakes and copy speed; greyed and
+  unplaced on the board, out of record and form; the Runs card's rows, its
+  best of each length and its assisted and unread runs, and the Contest
+  pill for a run too short for the board.
+
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
 verified, at 3600·n / Σ(planned turns and drawn delays) an hour within 5%,
@@ -3009,7 +3124,15 @@ static and a full-level caller pull the AGC well down, your message adds
 exactly its own tones to what is heard, unridden; and a dry send gives
 your tones out unfiltered and unfaded, and stops them with the rest.
 
-**Render tests:** Home in Contest with and without a call; no alphabet,
+**Render tests:** from 4b, a double tap on Pause leaves the run paused,
+Pause's place inert and End run where it was; Resume, by its button, Alt+P
+or after a hidden page, brings the run screen back to its top, and Pause
+scrolls nothing; Show copy on the Session shape card in Contest only, its
+reset and presets; the RX line showing what each caller sent, not before
+its send ends and not read out, the results and History saying assisted;
+the board's greyed assisted rows; the Runs card's rows, dated with their
+time, marks, an unread run's dash, a page at a time with the best kept,
+and opened results. Home in Contest with and without a call; no alphabet,
 group, Experience or Auto level controls; Your station's fields and
 reading; the run screen in countdown, running, corrected and paused; hint
 and Enter label per ESM row; the keypad without `=`, `+`, `,` and `.`; the
@@ -3167,6 +3290,13 @@ against the published rules and pinned before it ships.
   edits count only for the log. The run is marked `contest:<kind>:a` and
   stored `assisted`: in every stat, greyed and unplaced on the board.
 - The Runs card.
+- Landed as slice 4b: Show copy on Session shape (§8) and in the RX line, a
+  second after each send ends (§7), the copy kept as the fields held it
+  then, read from their edits at your next key (§9.1), assisted runs on the
+  board and in History (§10), and the Runs card under the Contest pill on
+  Stats → Scores (§10); and, from a browser test on a small phone, Pause
+  keeping its place while paused and Resume scrolling the run screen to its
+  top (§2, §7).
 
 **Phase 5: sound and Listen.** The receiver gate; flutter; a timed splice
 for continuations; contest tour steps; adaptive caller speed from the Contest
@@ -3215,6 +3345,11 @@ keying with the paddles, a contest level, and more contests.
 | Your call in a run | not stored; side, country, continent, zone are | stored | no score needs it |
 | Numbers | yours cut (Sprint's serial and Simple QSO's 599 plain); callers' by habits, the Sprint's serials plain under every habit | always cut | what operators send; learners start plain; a Sprint serial cut to letters alone reads as a state |
 | QRM (4a) | inside the turns on the air, carried over a key, never a station; one station at a time, starting as often as MRCE's | turns of its own; stations over one another, as MRCE's | the players hold one send; QRM is nothing to answer, so nothing to plan a turn for; one at a time, no station sends over itself |
+| When Show copy shows a text (4b) | a second after its send ends | the moment it ends | a copy cut off at the end of a send misses the character heard last, typed a beat behind it; a later showing hides nothing |
+| What the fields held when a text showed (4b) | read at the next key from the fields' own edits | a key or event of its own at the showing | the machine hears the fields only at a key; the edits tell it exactly, and a test's fields, with none, read as they are |
+| A call left in the Call field as the next caller's text shows (4b) | no copy of that caller, a single caller's as a pile-up caller's: an empty copy | the field kept as its copy | the call is another station's (F3's, one gone), and one typed call would be two stations' copy, a mistake no ear made for Letters, Mistakes and the sampler |
+| Pause while paused (4b) | kept in its place, inert | taken out; Resume in its place | End run slid into its place under a finger that taps twice; a second Resume would make a double tap resume |
+| The Runs card (4b) | under the Contest pill on Scores, which shows once a run is kept | a tab or a card of its own | the board's contest and its runs side by side, and no new place to look |
 
 ### 15.2 Decisions taken with the user
 

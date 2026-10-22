@@ -912,6 +912,7 @@ fn contest_key(rng: &mut SplitMix64, now: u64, seen: &Seen) -> ContestEvent {
         exch,
         call_edited: stamp(rng),
         exch_complete: (rng.f64() < 0.7).then(|| stamp(rng)),
+        earlier: Vec::new(),
     };
     ContestEvent::Key { key, fields }
 }
@@ -1343,7 +1344,10 @@ fn soak_contest_runs(style: RunStyle) {
     };
     for seed in seeds {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x2F7A_9C35).wrapping_add(37));
-        let settings = contest_settings(&mut rng, style);
+        let mut settings = contest_settings(&mut rng, style);
+        // Show copy on every third run, set by the seed so that every other
+        // draw is as it was: it changes only the copies the groups keep.
+        settings.contest.contest_show_copy = seed % 3 == 0;
         let SoakRun {
             mut events,
             mut machine,
@@ -1409,6 +1413,13 @@ fn soak_contest_runs(style: RunStyle) {
             .unwrap_or_else(|| panic!("seed {seed}: the log does not read back"));
         let rules = settings.contest.contest_kind.rules();
         assert_eq!(run.kind, rules.kind.name(), "seed {seed}");
+        // A run with Show copy on is marked assisted, by its log and its
+        // mark alike.
+        assert_eq!(
+            run.assisted, settings.contest.contest_show_copy,
+            "seed {seed}"
+        );
+        assert_eq!(result.assisted(), run.assisted, "seed {seed}");
         let owned: u32 = run.qsos.iter().map(|qso| qso.g).sum();
         assert_eq!(owned as usize, result.groups.len(), "seed {seed}");
         let limit_ms = u64::from(run.limit_s) * 1_000;

@@ -109,6 +109,8 @@ pub struct SessionHistoryRow {
     pub contest: Option<ContestKind>,
     /// What became of a run's log; none for a session of groups.
     pub log: Option<StoredLog>,
+    /// A contest run had Show copy on.
+    pub assisted: bool,
     /// Where the session sits in the history the rows were made from, so a
     /// row names one session even when two finished in the same millisecond.
     pub index: usize,
@@ -432,6 +434,7 @@ pub fn session_history(sessions: &[SessionResult]) -> Vec<SessionHistoryRow> {
             mode: s.char_set_mode,
             contest: s.contest_kind(),
             log: s.stored_log(),
+            assisted: s.assisted(),
             index,
         })
         .collect();
@@ -593,6 +596,42 @@ mod tests {
             .find(|ch| !"K5XYZ".contains(*ch))
             .expect("a letter K5XYZ lacks");
         assert_eq!(letter(&both, only).map(|diag| diag.avg_ms), Some(0.0));
+    }
+
+    /// A run with Show copy on is assisted, and counts in every stat all
+    /// the same: the calendar, accuracy, Letters, Mistakes and copy speed.
+    #[test]
+    fn an_assisted_run_counts_in_every_stat() {
+        use crate::contest::bot::script::{Habit, run_settings, work};
+        use crate::contest::bot::{Operator, Runtime};
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_minutes = 2;
+        settings.contest.contest_show_copy = true;
+        let sampler = crate::Sampler::new(&[], &settings, 4);
+        let mut runtime = Runtime::start(4, settings.clone(), sampler);
+        // A digit off in every number: mistakes to count.
+        work(&mut runtime, &mut Operator::new(Habit::DigitOff), &[]);
+        let run = runtime.machine.result(2, "2026-10-20".into());
+        assert!(run.assisted(), "{}", run.alphabet_fingerprint);
+        let history = [run.clone()];
+        let days = crate::heatmap::aggregate_heatmap(&history);
+        assert_eq!(days.get("2026-10-20").map(|day| day.sessions), Some(1));
+        assert_eq!(accuracy_chart(&history).len(), 1);
+        let letters = character_diagnostics(&history);
+        let counted: u32 = letters.iter().map(|letter| letter.total).sum();
+        let sent: u32 = run.tally.sent.values().map(|letter| letter.total).sum();
+        assert_eq!(counted, sent, "every character it sent");
+        assert!(
+            mistake_stats(&history, 8)
+                .confusions
+                .iter()
+                .any(|confusion| confusion.sent.is_ascii_digit()),
+            "the digits typed wrong"
+        );
+        assert_eq!(speed_history(&settings, &history).len(), 1);
+        let row = &session_history(&history)[0];
+        assert_eq!(row.contest, Some(ContestKind::Wpx));
+        assert!(row.assisted, "History says so");
     }
 
     #[test]

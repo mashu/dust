@@ -68,8 +68,9 @@ pub fn ContestRunView() -> Element {
         ContestPhase::Paused { why } => Some(why),
         _ => None,
     };
+    let show_copy = ctx.settings.peek().contest.contest_show_copy;
     rsx! {
-        div { class: run_class(paused.is_some()),
+        div { class: run_class(paused.is_some(), show_copy),
             RunBar {
                 now,
                 phase: view.phase,
@@ -103,12 +104,19 @@ pub fn ContestRunView() -> Element {
 /// (`training.rs`), and there the buttons that pause and end the run come
 /// straight under it, the log below them; anywhere else the log comes
 /// first. A paused run has no keypad, and its log comes first everywhere.
-fn run_class(paused: bool) -> &'static str {
+/// With Show copy on, the air takes a line more, which a small phone makes
+/// room for.
+fn run_class(paused: bool, show_copy: bool) -> String {
     let touch = cfg!(any(feature = "mobile", feature = "mobile-silent"));
-    match (touch, paused) {
+    let class = match (touch, paused) {
         (_, true) => "stack train run paused",
         (true, false) => "stack train run touch",
         (false, false) => "stack train run",
+    };
+    if show_copy {
+        format!("{class} shows-copy")
+    } else {
+        class.to_string()
     }
 }
 
@@ -331,22 +339,25 @@ fn HintLine(qso: QsoState, countdown: Option<u32>) -> Element {
 }
 
 /// What is on the air: the part of your message still being sent, and how
-/// many stations are sending. What they send is never shown.
+/// many stations are sending. What they send is shown only with Show copy
+/// on: each station's text a moment after its send ends, in the RX line,
+/// which then takes a line of its own, cut short as every line is.
 #[component]
 fn AirLine(now: Signal<MonoMs>) -> Element {
     let ctx = use_context::<AppCtx>();
     // Worked out on every tick, and drawn only when it changes: a character
-    // gone out, a station starting or stopping.
+    // gone out, a station starting or stopping, a text showing.
     let air = use_memo(move || {
         let now = now();
-        ctx.contest
-            .read()
+        let view = ctx.contest.read();
+        let (sending, calling) = view
             .as_ref()
             .and_then(|view| view.air.as_ref())
             .map(|air| (air.still_sending(now).to_string(), air.calling(now)))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (sending, calling, shown_by(view.as_ref(), now))
     });
-    let (sending, calling) = air();
+    let (sending, calling, shown) = air();
     rsx! {
         div { class: "run-air",
             // Each says "—" when it has nothing, as "Reads as" does.
@@ -358,6 +369,9 @@ fn AirLine(now: Signal<MonoMs>) -> Element {
                     span { class: "mono", "{sending}" }
                 }
             }
+            // Not read out as it changes: a screen reader hears the run's
+            // events in the one polite region, and reads this line when
+            // asked.
             p { class: "run-line run-rx",
                 span { class: "run-tag", "RX" }
                 if calling > 0 {
@@ -366,12 +380,42 @@ fn AirLine(now: Signal<MonoMs>) -> Element {
                         "▮ {calling}"
                         span { class: "run-air-word", " calling" }
                     }
-                } else {
+                }
+                for (at, (text, qrm)) in shown.iter().enumerate() {
+                    if at > 0 || calling > 0 {
+                        span { class: "run-copy-gap", " · " }
+                    }
+                    // A station on your frequency that is not calling you is
+                    // kept back, as Hear a QSO keeps it.
+                    if *qrm {
+                        span { class: "run-copy qrm",
+                            span { class: "run-copy-tag", "QRM " }
+                            "{text}"
+                        }
+                    } else {
+                        span { class: "run-copy mono", "{text}" }
+                    }
+                }
+                if calling == 0 && shown.is_empty() {
                     span { class: "muted", "—" }
                 }
             }
         }
     }
+}
+
+/// With Show copy on, what the stations sent that has shown by `now`, in
+/// the order it showed, each with whether it is a station on your frequency
+/// that is not calling you.
+fn shown_by(view: Option<&ContestView>, now: MonoMs) -> Vec<(String, bool)> {
+    view.map(|view| {
+        view.shown
+            .iter()
+            .filter(|text| text.at <= now)
+            .map(|text| (text.text.clone(), text.qrm))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// The Call field, its border turned to a warning while the station's
@@ -695,6 +739,11 @@ fn paused_why(why: PauseWhy) -> Option<&'static str> {
 /// throws away are not kept anywhere. Asking, Keep it stands where Discard
 /// stood, so the second tap of a double tap keeps the run. Discard and Keep
 /// it leave the cursor in the field, so the run goes on as it was.
+///
+/// Paused, Pause keeps its place, inert, and says so: the paused page is
+/// shorter, so the row may come to rest under the finger that paused, and
+/// the second tap of a double tap must find nothing there, never End run,
+/// which ends the run without asking.
 #[component]
 fn RunActions(paused: bool) -> Element {
     let ctx = use_context::<AppCtx>();
@@ -722,14 +771,13 @@ fn RunActions(paused: bool) -> Element {
     }
     rsx! {
         div { class: "train-actions run-actions",
-            if !paused {
-                button {
-                    id: control_id("btn", "pause"),
-                    class: "btn btn-secondary",
-                    onclick: move |_| pause_run(ctx, PauseWhy::You),
-                    Icon { name: IconName::Pause }
-                    "Pause"
-                }
+            button {
+                id: control_id("btn", "pause"),
+                class: "btn btn-secondary",
+                disabled: html_bool(paused),
+                onclick: move |_| pause_run(ctx, PauseWhy::You),
+                Icon { name: IconName::Pause }
+                if paused { "Paused" } else { "Pause" }
             }
             // Paused, Resume above is the one thing to press.
             button {
@@ -923,9 +971,14 @@ mod tests {
                 }
             }
         }
+        plain_text(&html[inside..end])
+    }
+
+    /// `html` with its tags taken out and the markup's escapes undone.
+    fn plain_text(html: &str) -> String {
         let mut text = String::new();
         let mut in_tag = false;
-        for ch in html[inside..end].chars() {
+        for ch in html.chars() {
             match ch {
                 '<' => in_tag = true,
                 '>' => in_tag = false,
@@ -1434,6 +1487,116 @@ mod tests {
         });
     }
 
+    /// With Show copy on, each caller's text shows in the RX line a moment
+    /// after its send ends, never before, on a line of its own under TX that
+    /// is cut short as every line is and not read out as it changes; the
+    /// run is kept assisted, and its results say so.
+    #[test]
+    fn show_copy_shows_what_each_caller_sent() {
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.contest.contest_show_copy = true;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            // On a touch screen or not, the run's class says so.
+            assert!(
+                ui.has(r#" run shows-copy">"#) || ui.has(r#" run touch shows-copy">"#),
+                "{}",
+                ui.html()
+            );
+            ui.advance(300).await;
+            let call = recorder.starts()[0].transcript.others[0].text.clone();
+            assert!(
+                !text_of(&ui, "run-line run-rx").contains(&call),
+                "not yet sent"
+            );
+            assert!(
+                ui.run_until(10_000, |ui| text_of(ui, "run-line run-rx").contains(&call))
+                    .await
+            );
+            assert!(ui.has(&format!(r#"<span class="run-copy mono">{call}</span>"#)));
+            let rx = ui.html();
+            let rx = &rx[rx.find(r#"class="run-line run-rx""#).expect("RX")..];
+            assert!(!rx[..rx.find('>').expect("closed")].contains("aria-live"));
+            ui.type_into("field-call", &call);
+            ui.press_enter("field-call");
+            let exchange = recorder.starts().last().expect("sent").transcript.others[0]
+                .text
+                .clone();
+            assert!(
+                ui.run_until(15_000, |ui| text_of(ui, "run-line run-rx")
+                    .contains(&exchange))
+                    .await
+            );
+            assert!(
+                !text_of(&ui, "run-line run-rx").contains(&call),
+                "the last turn's gave way"
+            );
+            let serial = exchange
+                .split_whitespace()
+                .last()
+                .unwrap_or_default()
+                .to_string();
+            ui.type_into("field-exchange", &serial);
+            ui.press_enter("field-exchange");
+            assert!(
+                ui.run_until(15_000, |ui| text_of(ui, "log-check") == "clean")
+                    .await
+            );
+            ui.click("btn-end-run");
+            assert!(ui.has("Assisted: Show copy was on."), "{}", ui.html());
+            let stored = ui.store.load_sessions();
+            assert_eq!(stored[0].alphabet_fingerprint, "contest:wpx:a");
+            assert!(stored[0].assisted());
+        });
+    }
+
+    /// A station on your frequency that is not calling you shows, with Show
+    /// copy on, as Hear a QSO shows it: kept back, after a QRM tag, and in
+    /// no count of callers; and a text shows only once its moment has come.
+    #[test]
+    fn show_copy_keeps_qrm_back() {
+        let shown = |at: u64, text: &str, qrm: bool| cw_core::ShownText {
+            at: MonoMs(at),
+            text: text.to_string(),
+            qrm,
+        };
+        let mut late = view(ContestPhase::Running, None);
+        late.shown = vec![
+            shown(1_000, "K5XYZ", false),
+            shown(2_000, "CQ CQ TEST W1AW W1AW TEST", true),
+            shown(9_000, "TU 5NN 214", false),
+        ];
+        assert_eq!(
+            shown_by(Some(&late), MonoMs(2_000)),
+            [
+                ("K5XYZ".to_string(), false),
+                ("CQ CQ TEST W1AW W1AW TEST".to_string(), true)
+            ]
+        );
+        assert!(shown_by(Some(&late), MonoMs(999)).is_empty());
+        assert!(shown_by(None, MonoMs(2_000)).is_empty());
+        run(|| async {
+            let mut settings = contest_settings();
+            settings.contest.contest_show_copy = true;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.with_app(|ctx| {
+                let mut contest = ctx.contest;
+                if let Some(view) = contest.write().as_mut() {
+                    view.shown = vec![shown(0, "CQ CQ TEST W1AW W1AW TEST", true)];
+                }
+            });
+            ui.advance(300).await;
+            assert!(
+                ui.has(r#"<span class="run-copy qrm"><span class="run-copy-tag">QRM </span>CQ CQ TEST W1AW W1AW TEST</span>"#),
+                "{}",
+                ui.html()
+            );
+            assert!(!text_of(&ui, "run-line run-rx").contains("calling"));
+        });
+    }
+
     /// In a pile-up the air counts every station sending at once.
     #[test]
     fn a_pile_up_counts_every_station_sending() {
@@ -1533,7 +1696,7 @@ mod tests {
                 format!("Paused. Your QSO waits: {call} · 1")
             );
             assert!(!ui.shows("field-call") && !ui.shows("key-q"));
-            assert!(!ui.shows("btn-pause"));
+            assert!(ui.input_tag("btn-pause").contains("disabled"));
             assert!(ui.shows("btn-end-run") && ui.shows("btn-discard"));
             assert!(ui.has("Each QSO you log is listed here."));
             assert!(!ui.has("in the background"));
@@ -1550,6 +1713,82 @@ mod tests {
             ui.click("btn-discard");
             ui.click("btn-discard-run");
             assert_eq!(ui.screen(), "home");
+        });
+    }
+
+    /// What the button with this id says, its icon left out.
+    fn button_label(ui: &Ui, id: &str) -> String {
+        let html = ui.html();
+        let tag = ui.input_tag(id);
+        let at = html.find(&tag).expect("drawn") + tag.len();
+        let inside = &html[at..];
+        plain_text(&inside[..inside.find("</button>").expect("closed")])
+    }
+
+    /// Where each of the run's buttons stands in its row, by id.
+    fn action_row(ui: &Ui) -> Vec<String> {
+        let html = ui.html();
+        let row = html
+            .find("train-actions run-actions")
+            .expect("the run's buttons");
+        let mut ids: Vec<(usize, String)> = ["btn-pause", "btn-end-run", "btn-discard"]
+            .iter()
+            .filter_map(|id| Some((html[row..].find(&format!(r#"id="{id}""#))?, id.to_string())))
+            .collect();
+        ids.sort();
+        ids.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// Paused, Pause keeps its place in the row, inert, and says the run is
+    /// paused: the second tap of a double tap on it finds Pause still, never
+    /// End run, and the run stays paused. Discard's question still puts
+    /// Keep it where Discard stood.
+    #[test]
+    fn a_double_tap_on_pause_leaves_the_run_paused() {
+        run(|| async {
+            let (mut ui, _recorder, _call) = first_caller().await;
+            let row = ["btn-pause", "btn-end-run", "btn-discard"];
+            assert_eq!(action_row(&ui), row);
+            assert!(!ui.input_tag("btn-pause").contains("disabled"));
+            ui.tap("btn-pause");
+            assert_eq!(action_row(&ui), row, "End run never takes Pause's place");
+            assert!(ui.input_tag("btn-pause").contains("disabled"));
+            assert_eq!(button_label(&ui, "btn-pause"), "Paused");
+            // A browser sends no click to a disabled button; were one sent,
+            // a paused run stays paused all the same.
+            ui.tap("btn-pause");
+            assert_eq!(ui.screen(), "training");
+            assert!(ui.shows("btn-resume"));
+            assert!(ui.store.load_sessions().is_empty(), "the run goes on");
+            ui.click("btn-discard");
+            let at = |id: &str| ui.html().find(&format!(r#"id="{id}""#)).expect("drawn");
+            assert!(at("btn-discard-run") < at("btn-keep-run"));
+        });
+    }
+
+    /// Resume brings the run screen back to its top, after a pause you
+    /// chose and after the page went out of sight: the paused page is
+    /// shorter, so a phone scrolled down to Pause would carry on with the
+    /// run bar and the fields above its top. Pausing scrolls nothing, so
+    /// nothing moves under the finger that paused.
+    #[test]
+    fn resume_brings_the_run_back_to_its_top() {
+        run(|| async {
+            let (mut ui, _recorder, _call) = first_caller().await;
+            ui.take_scrolls();
+            ui.tap("btn-pause");
+            assert_eq!(ui.take_scrolls(), 0, "a pause scrolls nothing");
+            ui.click("btn-resume");
+            assert_eq!(ui.take_scrolls(), 1);
+            assert!(ui.shows("field-call"));
+            ui.with_app(|ctx| crate::contest_runtime::pause_run(ctx, PauseWhy::Hidden));
+            assert_eq!(ui.take_scrolls(), 0);
+            ui.click("btn-resume");
+            assert_eq!(ui.take_scrolls(), 1);
+            // Resume on a run that is not paused does nothing, and moves
+            // nothing.
+            ui.with_app(crate::contest_runtime::resume_run);
+            assert_eq!(ui.take_scrolls(), 0);
         });
     }
 
@@ -1741,6 +1980,7 @@ mod tests {
             my_wpm: 25.0,
             qso: QsoState::default(),
             air: None,
+            shown: Vec::new(),
             log: Vec::new(),
             qsos: 0,
             clean: 0,

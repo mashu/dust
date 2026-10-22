@@ -344,6 +344,11 @@ pub fn resume_run(ctx: AppCtx) {
         live.lease = lease;
     }
     apply(ctx, Some(ContestEvent::Resume));
+    // The paused page is shorter, so a phone scrolled down to Pause is left
+    // part way down it, the run bar and the fields above the screen's top:
+    // the run carries on from its top, as every screen opens. Pausing
+    // scrolls nothing, so nothing moves under the finger that paused.
+    crate::app::scroll_to_top();
 }
 
 /// The run screen's clock ticked. A tick long after the one before is time

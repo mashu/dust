@@ -310,11 +310,14 @@ fn use_stored_settings(ctx: AppCtx) {
     });
 }
 
-/// Scroll the page back to its top.
-fn scroll_to_top() {
-    // Tests have no page to run it on.
+/// Scroll the page back to its top. The script outlives the component that
+/// asked for it, which a press of Resume takes off the page.
+pub(crate) fn scroll_to_top() {
+    // Tests have no page to run it on: the harness counts the asking.
+    #[cfg(test)]
+    crate::testing::ask_scroll_to_top();
     #[cfg(not(test))]
-    spawn(async {
+    dioxus::core::spawn_forever(async {
         let _ = document::eval("window.scrollTo(0, 0);").await;
     });
 }

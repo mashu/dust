@@ -389,6 +389,29 @@ mod tests {
         assert_eq!(older.contest.contest_habits, CallerHabits::Easy);
     }
 
+    /// Show copy is saved as a switch and read back; anything else in its
+    /// place, or nothing, reads as off rather than costing the rest of the
+    /// save.
+    #[test]
+    fn show_copy_reads_back_and_anything_else_is_off() {
+        let mut shown = TrainingSettings::default();
+        shown.contest.contest_show_copy = true;
+        let json = serde_json::to_value(&shown).expect("settings serialize");
+        assert_eq!(json["contestShowCopy"], true);
+        assert_eq!(load(json), shown);
+        for odd in [
+            serde_json::json!("yes"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let read = load(serde_json::json!({ "contestShowCopy": odd, "contestMinutes": 25 }));
+            assert!(!read.contest.contest_show_copy, "{odd}");
+            assert_eq!(read.contest.contest_minutes, 25, "the rest of the save");
+        }
+        let older = load(serde_json::json!({ "contestMinutes": 25 }));
+        assert!(!older.contest.contest_show_copy);
+    }
+
     /// A build that knows no contests reads Contest as Callsigns at the same
     /// tier: the mode is one it knows, and `contestActive` a key it skips.
     #[test]
