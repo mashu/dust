@@ -9,7 +9,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::elsewhere::{PAIR_CARD, use_click_elsewhere};
-use crate::ui::widgets::{Seg, control_id, html_bool};
+use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
 
 /// A pair as the character before and the one after it.
 type Pair = (char, char);
@@ -177,21 +177,43 @@ fn order(heat: &BigramHeatmap, most_errors: bool) -> (Vec<usize>, Vec<usize>) {
 /// overall, where it is the pair that trips you rather than the letter.
 pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
     rsx! {
-        div { class: "card stack",
-            div { class: "tiny", "Hardest pairs" }
+        div { class: "card stack-sm",
+            CardHead {
+                icon: IconName::Target,
+                title: "Hardest pairs",
+                note: "Where it is the pair that trips you, not the letter",
+            }
             if heat.hardest.is_empty() {
-                p { class: "muted",
+                p { class: "muted", style: "margin: 0;",
                     "None stands out yet. A pair is listed once it has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong more often than its second character does overall."
                 }
             } else {
-                p { class: "muted",
-                    "Pairs that go wrong more often than their second character does overall: there it is the pair that trips you, not the letter."
-                }
-                for pair in heat.hardest.iter() {
-                    div { class: "confuse-row",
-                        span { class: "group-text", "{pair.row}{pair.col}" }
-                        span { class: "muted",
-                            "{percent(pair.rate)} wrong, {pair.wrong} of {pair.total} · {pair.col} {percent(pair.overall)} overall"
+                div { class: "confusions",
+                    for pair in heat.hardest.iter() {
+                        div { class: "confusion",
+                            div { class: "confusion-line",
+                                span { class: "confusion-chars",
+                                    span { class: "letter-key group-text", "{pair.row}" }
+                                    span { class: "letter-key typed group-text", "{pair.col}" }
+                                    span { class: "pair-name", "{pair_name(pair.row, pair.col)}" }
+                                }
+                                span { class: "chip", "{pair.wrong} of {pair.total}" }
+                            }
+                            div { class: "confusion-share",
+                                div { class: "bar-track marked",
+                                    span {
+                                        class: "bar-fill",
+                                        style: "width: {pair.rate.clamp(0.0, 1.0) * 100.0:.1}%;",
+                                    }
+                                    span {
+                                        class: "bar-mark",
+                                        style: "left: {pair.overall.clamp(0.0, 1.0) * 100.0:.1}%;",
+                                    }
+                                }
+                                span { class: "tiny confusion-of",
+                                    "{percent(pair.rate)} here · {pair.col} {percent(pair.overall)} overall"
+                                }
+                            }
                         }
                     }
                 }
@@ -235,8 +257,10 @@ pub fn BigramCard(heat: BigramHeatmap) -> Element {
     let (row_order, col_order) = order(&heat, most_errors());
     rsx! {
         div { class: "card stack",
-            div { class: "row-between",
-                div { class: "tiny", "Bigram error rate" }
+            CardHead {
+                icon: IconName::Chart,
+                title: "Bigram error rate",
+                note: "How often a character goes wrong after each other one",
                 div { class: "segmented",
                     Seg {
                         label: "Taught order",
@@ -250,7 +274,7 @@ pub fn BigramCard(heat: BigramHeatmap) -> Element {
                     }
                 }
             }
-            p { class: "muted",
+            p { class: "muted", style: "margin: 0;",
                 "Rows are the character before ({GROUP_START_BIGRAM_TOKEN} = start of group), columns the one after. Darker means more errors; an empty square is a pair not heard yet."
             }
             div { class: "bigram-scroll",

@@ -2115,14 +2115,14 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 
 .chart-card { padding-bottom: 0.8rem; }
 .sparkline { width: 100%; height: auto; display: block; }
-.letter-row, .confuse-row {
+.letter-row {
   display: grid;
   gap: 0.4rem 0.7rem;
   align-items: center;
   padding: 0.45rem 0;
   border-bottom: 1px solid var(--line-soft);
 }
-.letter-row:last-child, .confuse-row:last-child { border-bottom: 0; }
+.letter-row:last-child { border-bottom: 0; }
 .letter-row { grid-template-columns: 1.7rem 1fr auto; }
 .letter-row .tiny { grid-column: 2 / -1; text-transform: none; letter-spacing: 0.02em; }
 /* A character the current set does not draw: kept, and greyed. */
@@ -2149,7 +2149,29 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   background: linear-gradient(90deg, var(--copper), var(--copper-lift));
 }
 .bar-fill.sample { background: linear-gradient(90deg, var(--info), var(--purple-700)); }
-.confuse-row { grid-template-columns: 1fr auto; }
+/* Common confusions and hardest pairs: the characters as tiles, the one
+   taken for or the one after in copper, each in small Morse with the
+   elements that differ picked out, and a bar of how often, of every one
+   sent; a pair's bar marks where its letter stands overall. */
+.confusions { display: grid; }
+.confusion { display: grid; gap: 0.45rem; padding: 0.7rem 0; border-bottom: 1px solid var(--line-soft); }
+.confusion:last-child { border-bottom: 0; }
+.confusion-line { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.confusion-chars { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; min-width: 0; }
+.letter-key.typed { background: var(--copper-soft); color: var(--copper-deep); }
+.letter-key.left-out { color: var(--ink-dim); }
+.confusion-arrow { color: var(--ink-dim); font-weight: 700; }
+.confusion-left-out, .pair-name { font-size: 0.82rem; color: var(--ink-soft); }
+.morse-mini { display: inline-flex; align-items: center; gap: 3px; }
+.morse-mini i { display: block; height: 6px; border-radius: 3px; background: var(--ink-dim); opacity: 0.5; }
+.morse-mini i.dit { width: 6px; }
+.morse-mini i.dah { width: 18px; }
+.morse-mini i.differs { background: var(--copper); opacity: 1; }
+.confusion-share { display: grid; grid-template-columns: 1fr auto; gap: 0.7rem; align-items: center; }
+.confusion-of { text-transform: none; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
+.bar-track.marked { position: relative; }
+.bar-mark { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--ink); opacity: 0.6; }
+.confusion-once { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; padding-top: 0.6rem; border-top: 1px solid var(--line-soft); }
 .history-acc { text-align: right; }
 .history-acc .value { font-family: Fraunces, Georgia, serif; font-weight: 700; display: block; }
 

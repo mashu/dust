@@ -3,6 +3,7 @@ pub mod backup;
 pub mod band;
 pub mod bigram;
 pub mod chart;
+pub mod confusion;
 pub mod contest;
 pub mod contest_keys;
 pub mod contest_results;
