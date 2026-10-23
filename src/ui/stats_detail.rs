@@ -1,16 +1,17 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    CONTEST_TIMES_NOTE, CharSetMode, ContestKind, GROUP_START_BIGRAM_TOKEN, MasteryStatus,
-    SamplingRow, SessionHistoryRow, SessionResult, SpeedForecast, SpeedPath, StoredLog,
-    TrainingSettings, adapts_speed, character_diagnostics, group_length_forecast, mistake_stats,
-    sampling_rows, session_history, speed_forecast,
+    CONTEST_TIMES_NOTE, CharSetMode, ContestKind, MasteryStatus, SamplingRow, SessionHistoryRow,
+    SessionResult, SpeedForecast, SpeedPath, StoredLog, TrainingSettings, adapts_speed,
+    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
+    speed_forecast,
 };
 use dioxus::prelude::*;
 
 use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
 use crate::ui::backup::{BackupCard, Backups};
+use crate::ui::bigram::{BigramCard, hardest_pairs_card};
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::format::counted;
 use crate::ui::settings_charset::mode_label;
@@ -62,7 +63,6 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
 pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
     let mistakes = mistake_stats(&sessions, 12);
     let (confusion, heat) = (mistakes.confusions, mistakes.bigrams);
-    let n = heat.letters.len();
     rsx! {
         div { class: "stack",
             div { class: "card stack",
@@ -83,42 +83,9 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
                     }
                 }
             }
-            if n > 1 {
-                div { class: "card stack",
-                    div { class: "tiny", "Bigram error rate" }
-                    p { class: "muted", "Rows are the previous character ({GROUP_START_BIGRAM_TOKEN} = start of group). Darker means more errors." }
-                    div { class: "bigram-scroll",
-                        div {
-                            class: "bigram-grid",
-                            style: "grid-template-columns: repeat({n + 1}, minmax(1.35rem, 1fr));",
-                            div { class: "bigram-head" }
-                            for col in heat.letters.iter() {
-                                div { class: "bigram-head group-text", "{col}" }
-                            }
-                            for (idx, cell) in heat.cells.iter().enumerate() {
-                                {
-                                    let show_row = idx % n == 0;
-                                    let alpha = if heat.max_rate <= 0.0 {
-                                        0.0
-                                    } else {
-                                        cell.rate / heat.max_rate
-                                    };
-                                    let row_label = cell.row;
-                                    rsx! {
-                                        if show_row {
-                                            div { class: "bigram-head group-text", "{row_label}" }
-                                        }
-                                        div {
-                                            class: "bigram-cell",
-                                            style: "background: rgba(180, 83, 9, {alpha * 0.85});",
-                                            title: "{cell.row}{cell.col} {cell.wrong}/{cell.total}",
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            if !heat.cols.is_empty() {
+                {hardest_pairs_card(&heat)}
+                BigramCard { heat }
             }
         }
     }

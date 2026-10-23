@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 use crate::state::SessionPick;
 use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
+use crate::ui::endurance::EnduranceCard;
 use crate::ui::format::counted;
 use crate::ui::scores::ScoresTab;
 use crate::ui::settings::aim_label;
@@ -105,7 +106,7 @@ fn trend_words(change: f64, count: usize, decimals: usize) -> String {
 /// history; else the one practised now, if it has any; else the first that
 /// does. Nothing when none has: a set chosen in the settings never hides
 /// another's history.
-fn shown_mode(
+pub(crate) fn shown_mode(
     chosen: Option<CharSetMode>,
     modes: &[CharSetMode],
     current: CharSetMode,
@@ -461,7 +462,8 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                     }
                 }
                 SpanCard { settings: settings.clone(), sessions: sessions.clone() }
-                CopySpeedCard { settings, sessions }
+                CopySpeedCard { settings: settings.clone(), sessions: sessions.clone() }
+                EnduranceCard { settings, sessions }
             }
         }
     }

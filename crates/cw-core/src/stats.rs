@@ -30,6 +30,17 @@ pub const CONTEST_TIMES_NOTE: &str = "Contest runs count towards accuracy here, 
      not only copying.";
 pub const GROUP_START_BIGRAM_TOKEN: char = '▸';
 
+/// How often a pair has to have been heard, and missed, before it can be
+/// called one of the hardest: fewer is chance as often as not.
+pub const HARD_PAIR_MIN_TRIES: u32 = 5;
+const HARD_PAIR_MIN_WRONG: u32 = 2;
+/// How much more often than its character does overall a pair has to go
+/// wrong to be called hard: ten points of error rate, and half as often again.
+const HARD_PAIR_MIN_EXCESS: f64 = 0.10;
+pub const HARD_PAIR_RATIO: f64 = 1.5;
+/// How many of the hardest pairs are listed.
+const HARD_PAIRS_SHOWN: usize = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MasteryStatus {
     Mastered,
@@ -55,6 +66,8 @@ pub struct AccuracyPoint {
     pub timestamp: u64,
 }
 
+/// One pair: `col` heard straight after `row`, and how often `col` was
+/// copied wrong there.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BigramCell {
     pub row: char,
@@ -62,13 +75,69 @@ pub struct BigramCell {
     pub rate: f64,
     pub total: u32,
     pub wrong: u32,
+    /// What `col` was copied as when it went wrong here, most often first:
+    /// the character typed, or none for one left out.
+    pub taken_for: Vec<(Option<char>, u32)>,
+}
+
+/// How often a character went wrong, wherever it came: what a pair is held
+/// against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CharTally {
+    pub wrong: u32,
+    pub total: u32,
+}
+
+impl CharTally {
+    pub fn rate(self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            f64::from(self.wrong) / f64::from(self.total)
+        }
+    }
+}
+
+/// A pair that goes wrong more often than its second character does
+/// overall: the pair is the trouble, not the letter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HardPair {
+    pub row: char,
+    pub col: char,
+    pub wrong: u32,
+    pub total: u32,
+    pub rate: f64,
+    /// How often `col` goes wrong overall.
+    pub overall: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BigramHeatmap {
-    pub letters: Vec<char>,
+    /// The character each pair starts from, a row each: the start of a
+    /// group first, then every character sent, in the order they are taught.
+    pub rows: Vec<char>,
+    /// The character each pair ends on, a column each: every character sent,
+    /// in the same order. Nothing ends on the start of a group.
+    pub cols: Vec<char>,
+    /// One per row and column, row by row.
     pub cells: Vec<BigramCell>,
     pub max_rate: f64,
+    /// How each column's character fares overall, in the order of `cols`.
+    pub overall: Vec<CharTally>,
+    /// The pairs that go wrong most often for their second character, worst
+    /// first, at most a handful.
+    pub hardest: Vec<HardPair>,
+}
+
+impl BigramHeatmap {
+    /// How `col` fares overall.
+    pub fn overall_of(&self, col: char) -> CharTally {
+        self.cols
+            .iter()
+            .position(|c| *c == col)
+            .and_then(|at| self.overall.get(at).copied())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -233,8 +302,7 @@ pub struct MistakeStats {
 pub fn mistake_stats(sessions: &[SessionResult], confusion_limit: usize) -> MistakeStats {
     let mut confused: BTreeMap<(char, Option<char>), u32> = BTreeMap::new();
     let mut sent_totals: BTreeMap<char, u32> = BTreeMap::new();
-    let mut letters = Vec::new();
-    let mut pairs: BTreeMap<(char, char), (u32, u32)> = BTreeMap::new();
+    let mut pairs: BTreeMap<(char, char), PairTally> = BTreeMap::new();
     for group in sessions.iter().flat_map(|session| &session.groups) {
         let mut previous = GROUP_START_BIGRAM_TOKEN;
         for pair in align_group(&group.sent, &group.received) {
@@ -242,26 +310,35 @@ pub fn mistake_stats(sessions: &[SessionResult], confusion_limit: usize) -> Mist
                 continue;
             };
             *sent_totals.entry(sent).or_insert(0) += 1;
+            let entry = pairs.entry((previous, sent)).or_default();
+            entry.total += 1;
             if !pair.matched {
                 *confused.entry((sent, pair.received_char)).or_insert(0) += 1;
-            }
-            for ch in [previous, sent] {
-                if !letters.contains(&ch) {
-                    letters.push(ch);
-                }
-            }
-            let entry = pairs.entry((previous, sent)).or_insert((0, 0));
-            entry.1 += 1;
-            if !pair.matched {
-                entry.0 += 1;
+                *entry.taken_for.entry(pair.received_char).or_insert(0) += 1;
             }
             previous = sent;
         }
     }
-    MistakeStats {
-        confusions: confusion_rows(confused, &sent_totals, confusion_limit),
-        bigrams: bigram_grid(letters, &pairs),
+    let mut sent_wrong: BTreeMap<char, u32> = BTreeMap::new();
+    for ((sent, _), count) in &confused {
+        *sent_wrong.entry(*sent).or_insert(0) += count;
     }
+    let overall = |ch: char| CharTally {
+        wrong: sent_wrong.get(&ch).copied().unwrap_or(0),
+        total: sent_totals.get(&ch).copied().unwrap_or(0),
+    };
+    MistakeStats {
+        bigrams: bigram_grid(sent_totals.keys().copied().collect(), &pairs, overall),
+        confusions: confusion_rows(confused, &sent_totals, confusion_limit),
+    }
+}
+
+/// One pair's tally as the history is read: how often it was heard, and
+/// what its second character was copied as each time it went wrong.
+#[derive(Default)]
+struct PairTally {
+    total: u32,
+    taken_for: BTreeMap<Option<char>, u32>,
 }
 
 fn confusion_rows(
@@ -292,25 +369,41 @@ fn confusion_rows(
     rows
 }
 
+/// The grid of every pair of `sent` characters, and of each one starting a
+/// group, with how each column's character fares overall.
 fn bigram_grid(
-    mut letters: Vec<char>,
-    pairs: &BTreeMap<(char, char), (u32, u32)>,
+    mut cols: Vec<char>,
+    pairs: &BTreeMap<(char, char), PairTally>,
+    overall: impl Fn(char) -> CharTally,
 ) -> BigramHeatmap {
-    // The start-of-group token sorts first, so every real character is shifted
-    // one rank up. `lcwo_index` saturates for characters outside the sequence,
-    // which would otherwise overflow here and panic in a debug build.
-    letters.sort_by_key(|c| {
-        if *c == GROUP_START_BIGRAM_TOKEN {
-            0
-        } else {
-            lcwo_index(*c).saturating_add(1)
-        }
-    });
+    cols.sort_by_key(|c| lcwo_index(*c));
+    let rows: Vec<char> = if cols.is_empty() {
+        Vec::new()
+    } else {
+        std::iter::once(GROUP_START_BIGRAM_TOKEN)
+            .chain(cols.iter().copied())
+            .collect()
+    };
+    let overall: Vec<CharTally> = cols.iter().map(|c| overall(*c)).collect();
     let mut max_rate: f64 = 0.0;
-    let mut cells = Vec::with_capacity(letters.len() * letters.len());
-    for &row in &letters {
-        for &col in &letters {
-            let (wrong, total) = pairs.get(&(row, col)).copied().unwrap_or((0, 0));
+    let mut cells = Vec::with_capacity(rows.len() * cols.len());
+    for &row in &rows {
+        for &col in &cols {
+            let (total, mut taken_for) = match pairs.get(&(row, col)) {
+                Some(tally) => (
+                    tally.total,
+                    tally
+                        .taken_for
+                        .iter()
+                        .map(|(typed, count)| (*typed, *count))
+                        .collect::<Vec<_>>(),
+                ),
+                None => (0, Vec::new()),
+            };
+            // Most often first; a tie keeps the order the map gave, which
+            // puts a character left out before one typed instead.
+            taken_for.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+            let wrong = taken_for.iter().map(|(_, count)| count).sum::<u32>();
             let rate = if total == 0 {
                 0.0
             } else {
@@ -323,14 +416,51 @@ fn bigram_grid(
                 rate,
                 total,
                 wrong,
+                taken_for,
             });
         }
     }
+    let hardest = hardest_pairs(&cells, &cols, &overall);
     BigramHeatmap {
-        letters,
+        rows,
+        cols,
         cells,
         max_rate,
+        overall,
+        hardest,
     }
+}
+
+/// The pairs heard often enough to tell, and missed more than once, that go
+/// wrong at least ten points, and half as often again, more often than their
+/// second character does overall: worst first, by how far over, then by how
+/// often missed.
+fn hardest_pairs(cells: &[BigramCell], cols: &[char], overall: &[CharTally]) -> Vec<HardPair> {
+    let mut hard: Vec<HardPair> = cells
+        .iter()
+        .filter(|cell| cell.total >= HARD_PAIR_MIN_TRIES && cell.wrong >= HARD_PAIR_MIN_WRONG)
+        .filter_map(|cell| {
+            let at = cols.iter().position(|c| *c == cell.col)?;
+            let usual = overall.get(at)?.rate();
+            let over =
+                cell.rate - usual >= HARD_PAIR_MIN_EXCESS && cell.rate >= usual * HARD_PAIR_RATIO;
+            over.then_some(HardPair {
+                row: cell.row,
+                col: cell.col,
+                wrong: cell.wrong,
+                total: cell.total,
+                rate: cell.rate,
+                overall: usual,
+            })
+        })
+        .collect();
+    hard.sort_by(|a, b| {
+        (b.rate - b.overall)
+            .total_cmp(&(a.rate - a.overall))
+            .then(b.wrong.cmp(&a.wrong))
+    });
+    hard.truncate(HARD_PAIRS_SHOWN);
+    hard
 }
 
 /// How often each character actually turns up, measured by running the real
@@ -738,9 +868,10 @@ mod tests {
         // overflow the sort key.
         let session = plain("2026-09-01", 1, &[("K+", "KM")]);
         let heat = mistake_stats(&[session], 8).bigrams;
-        assert_eq!(heat.letters.first(), Some(&GROUP_START_BIGRAM_TOKEN));
-        assert_eq!(heat.letters.last(), Some(&'+'));
-        assert_eq!(heat.cells.len(), heat.letters.len() * heat.letters.len());
+        assert_eq!(heat.rows, [GROUP_START_BIGRAM_TOKEN, 'K', '+']);
+        // Nothing ends on the start of a group, so it has no column.
+        assert_eq!(heat.cols, ['K', '+']);
+        assert_eq!(heat.cells.len(), heat.rows.len() * heat.cols.len());
         // K→+ was copied as K→M: one attempt, one error.
         let cell = heat
             .cells
@@ -749,9 +880,80 @@ mod tests {
             .expect("K+ cell");
         assert_eq!((cell.total, cell.wrong), (1, 1));
         assert_eq!(cell.rate, 1.0);
+        assert_eq!(cell.taken_for, [(Some('M'), 1)]);
         assert_eq!(heat.max_rate, 1.0);
         // An empty history draws no grid at all.
-        assert!(mistake_stats(&[], 8).bigrams.letters.is_empty());
+        let empty = mistake_stats(&[], 8).bigrams;
+        assert!(empty.rows.is_empty() && empty.cols.is_empty() && empty.cells.is_empty());
+    }
+
+    /// A pair says what its second character was taken for there, and each
+    /// column how its character fares overall.
+    #[test]
+    fn a_pair_knows_what_it_was_taken_for_and_its_letter_overall() {
+        let session = plain(
+            "2026-09-01",
+            1,
+            &[
+                ("KM", "KN"),
+                ("KM", "KN"),
+                ("KM", "K"),
+                ("KM", "KM"),
+                ("UM", "UM"),
+            ],
+        );
+        let heat = mistake_stats(&[session], 8).bigrams;
+        let km = heat
+            .cells
+            .iter()
+            .find(|c| (c.row, c.col) == ('K', 'M'))
+            .expect("KM");
+        assert_eq!((km.wrong, km.total), (3, 4));
+        assert_eq!(km.taken_for, [(Some('N'), 2), (None, 1)]);
+        // M went wrong three times in five, wherever it came.
+        assert_eq!(heat.overall_of('M'), CharTally { wrong: 3, total: 5 });
+        assert_eq!(heat.overall_of('K'), CharTally { wrong: 0, total: 4 });
+        assert_eq!(heat.overall_of('X'), CharTally::default());
+        assert_eq!(CharTally::default().rate(), 0.0);
+    }
+
+    /// The hardest pairs are the ones that go wrong more often than their
+    /// second character does overall, heard often enough to tell: a letter
+    /// that is hard everywhere is the Letters tab's, not a pair's.
+    #[test]
+    fn the_hardest_pairs_are_harder_than_their_letter() {
+        let mut groups = Vec::new();
+        // M after K: wrong four times in five. M after U: right six times.
+        groups.extend([("KM", "KN"); 4]);
+        groups.push(("KM", "KM"));
+        groups.extend([("UM", "UM"); 6]);
+        // R is hard everywhere, after K as after U: no pair of it stands out.
+        // Nor does Z after W, missed every time, where Z goes wrong seven
+        // times in ten anyway: that is not half as often again.
+        groups.extend([("WZ", "WX"); 5]);
+        groups.extend([("UZ", "UX"); 2]);
+        groups.extend([("UZ", "UZ"); 3]);
+        groups.extend([("KR", "KS"); 3]);
+        groups.extend([("KR", "KR"); 2]);
+        groups.extend([("UR", "US"); 3]);
+        groups.extend([("UR", "UR"); 2]);
+        // E after U: missed once in five, too seldom to tell.
+        groups.push(("UE", "UT"));
+        groups.extend([("UE", "UE"); 4]);
+        // S starting a group: missed in two of five, and fine after K.
+        groups.extend([("SK", "TK"); 2]);
+        groups.extend([("SK", "SK"); 3]);
+        groups.extend([("KS", "KS"); 10]);
+        let session = plain("2026-09-01", 1, &groups);
+        let hardest = mistake_stats(&[session], 8).bigrams.hardest;
+        let pairs: Vec<(char, char)> = hardest.iter().map(|p| (p.row, p.col)).collect();
+        assert_eq!(pairs, [('K', 'M'), (GROUP_START_BIGRAM_TOKEN, 'S')]);
+        let km = &hardest[0];
+        assert_eq!((km.wrong, km.total), (4, 5));
+        assert!((km.rate - 0.8).abs() < 1e-9);
+        assert!((km.overall - 4.0 / 11.0).abs() < 1e-9);
+        // Nothing heard yet, nothing hard.
+        assert!(mistake_stats(&[], 8).bigrams.hardest.is_empty());
     }
 
     #[test]
@@ -789,7 +991,8 @@ mod tests {
         let diagnostics = character_diagnostics(std::slice::from_ref(&session));
         assert!(diagnostics.iter().all(|d| d.letter != 'X'));
         let mistakes = mistake_stats(&[session], 8);
-        assert!(!mistakes.bigrams.letters.contains(&'X'));
+        assert!(!mistakes.bigrams.rows.contains(&'X'));
+        assert!(!mistakes.bigrams.cols.contains(&'X'));
         assert!(mistakes.confusions.iter().all(|c| c.sent != 'X'));
     }
 

@@ -846,6 +846,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 700;
 }
 .chip.good { background: var(--good-soft); color: var(--good); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
 .chip.speed-chip { font-variant-numeric: tabular-nums; }
 .chip.speed-chip.faster { background: var(--good-soft); color: var(--good); }
 .chip.speed-chip.slower { background: var(--warn-soft); color: var(--warn); }
@@ -2279,10 +2280,58 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   from { opacity: 0; transform: translateY(0.5rem); }
   to { opacity: 1; transform: none; }
 }
+/* The bigram grid: a square per pair, the character before down the side
+   and the one after along the top, and the row labels kept in sight as the
+   grid scrolls sideways. A pair not heard yet is an empty outline. The pair
+   pointed at or tapped lights up its row and column, and its card docks
+   above the nav, as the toast does: a card hung on the square, as the
+   calendar's is, would be cut off by the sideways scroll, and one under the
+   grid would be out of sight below a tall one. */
 .bigram-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .bigram-grid { display: grid; gap: 2px; min-width: min-content; }
-.bigram-head { font-size: 0.65rem; text-align: center; color: var(--ink-dim); font-weight: 700; }
-.bigram-cell { width: 100%; aspect-ratio: 1; min-width: 1.35rem; border-radius: 4px; background: var(--surface-sunken); }
+.bigram-head { font-size: 0.65rem; text-align: center; color: var(--ink-dim); font-weight: 700; border-radius: 4px; }
+.bigram-head.row-head { position: sticky; left: 0; z-index: 2; background: var(--surface); }
+.bigram-head.in-line { color: var(--ink); background: var(--info-soft); }
+.bigram-head.row-head.in-line { background: linear-gradient(var(--info-soft), var(--info-soft)), var(--surface); }
+.bigram-cell {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  min-width: 1.35rem;
+  padding: 0;
+  border-radius: 4px;
+  background-color: var(--surface-sunken);
+}
+.bigram-cell.empty { background: none; box-shadow: inset 0 0 0 1px var(--line); cursor: default; }
+.bigram-cell.in-line { box-shadow: inset 0 0 0 1.5px var(--info); }
+.bigram-cell.shown { position: relative; z-index: 1; outline: 2px solid var(--info); outline-offset: 1px; }
+.bigram-cell.selected { position: relative; z-index: 1; outline: 2px solid var(--ink); outline-offset: 1px; }
+.pair-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(6rem + env(safe-area-inset-bottom));
+  z-index: 34;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.pair-card {
+  width: min(17rem, calc(100% - 2rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  font-size: 0.84rem;
+  line-height: 1.3;
+  pointer-events: none;
+  animation: tip-in 0.12s var(--ease);
+}
+.pair-verdict { color: var(--ink-soft); }
 
 /* Auto level */
 .auto-bars { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; margin-top: 0.5rem; }
@@ -2397,6 +2446,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .tip-fill.fill-groups { background: var(--violet); }
 .tip-fill.fill-speed { background: var(--copper); }
 .tip-fill.fill-score { background: var(--warn); }
+.tip-fill.fill-miss { background: rgb(180, 83, 9); }
+.tip-fill.fill-overall { background: var(--ink-dim); }
 .tip-note { color: var(--ink-dim); font-size: 0.78rem; }
 .tip-empty { color: var(--ink-dim); }
 @keyframes tip-in { from { opacity: 0; } to { opacity: 1; } }

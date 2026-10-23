@@ -14,6 +14,7 @@ mod belief;
 mod board;
 mod callsign;
 mod contest;
+mod endurance;
 mod heatmap;
 mod keyer;
 mod level;
@@ -64,6 +65,10 @@ pub use contest::{
     parse_exchange, place_name, plan_turn, rate_at, read_number, section_name, send_power,
     send_report, send_serial, send_zone, space_to_call,
 };
+pub use endurance::{
+    DROP_POINTS, ENDURANCE_MIN_SESSIONS, Endurance, EndurancePoint, GROUPS_A_STRETCH,
+    MINUTES_A_STRETCH, StretchUnit, endurance,
+};
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
 };
@@ -102,10 +107,11 @@ pub use settings::{
 pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};
 pub use stats::{
-    AccuracyPoint, BigramHeatmap, CONTEST_TIMES_NOTE, CharacterDiagnostic, ConfusionEntry,
-    GROUP_START_BIGRAM_TOKEN, MasteryStatus, MistakeStats, SamplingRow, SessionHistoryRow,
-    accuracy_chart, character_diagnostics, group_length_forecast, mistake_stats, practised_modes,
-    sampling_rows, session_history, span_history, speed_forecast, speed_history,
+    AccuracyPoint, BigramCell, BigramHeatmap, CONTEST_TIMES_NOTE, CharTally, CharacterDiagnostic,
+    ConfusionEntry, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_MIN_TRIES, HARD_PAIR_RATIO, HardPair,
+    MasteryStatus, MistakeStats, SamplingRow, SessionHistoryRow, accuracy_chart,
+    character_diagnostics, group_length_forecast, mistake_stats, practised_modes, sampling_rows,
+    session_history, span_history, speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

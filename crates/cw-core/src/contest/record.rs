@@ -33,7 +33,7 @@ const ASSISTED_MARK: &str = ":a";
 /// The log layout this build writes and reads. It rises only for a change
 /// an older reader would misread; a key added with a default does not
 /// raise it.
-pub(super) const LAYOUT: u32 = 1;
+pub(crate) const LAYOUT: u32 = 1;
 
 /// A QSO's kind, as `k` keeps it: logged is empty.
 pub(super) const LOST: &str = "lost";
