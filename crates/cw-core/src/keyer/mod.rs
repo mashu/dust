@@ -23,7 +23,8 @@
 //!   That last-dash-or-dot rule is how X (`-..-`) and P (`.--.`) are sent.
 //!
 //! [`Keyer`] puts those rules on a clock: it times the elements and the
-//! letter space, and says when the sidetone sounds and which letter was keyed.
+//! letter and word spaces, and says when the sidetone sounds, which letter
+//! was keyed, and when a word ended.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,16 @@ pub fn dit_ms_for_wpm(wpm: f64) -> u64 {
 /// Gap, in dits, at which a letter is over. Intra-character spacing is one
 /// dit; inter-character is three. Two is the split between them.
 const LETTER_GAP_DITS: u64 = 2;
+
+/// Quiet, in dits, after a letter's last element at which its word is over:
+/// a word space. A run takes the word's end as Space, to move between its
+/// fields, so it is the whole of a word space and not the split between a
+/// letter space and a word space: a pause of a few dits between the letters
+/// of a call never moves the cursor out of it. A straight key is held to the
+/// same seven dits, though its letter ends a dit sooner than an electronic
+/// keyer's: its timing is the least even, and a hesitation is likeliest on
+/// it.
+const WORD_GAP_DITS: u64 = 7;
 
 /// Hold longer than this many dits and a straight key is a dah.
 const STRAIGHT_DAH_DITS: u64 = 2;

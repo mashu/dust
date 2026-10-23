@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 
-use crate::contest_runtime::focus_field;
+use crate::contest_runtime::refocus_run;
 use crate::keep_awake::use_keep_awake;
 use crate::routes::Route;
 use crate::session_runtime::finish_run;
@@ -190,9 +190,7 @@ pub fn App() -> Element {
                                 ctx.app().store.save_theme(next.key());
                                 // A run's fields take the cursor back, as
                                 // after any of the run's own buttons.
-                                if screen_now == Screen::Training && ctx.contest.peek().is_some() {
-                                    focus_field(ctx, ctx.entry.focus());
-                                }
+                                refocus_run(ctx);
                             },
                             Icon { name: theme().icon() }
                         }

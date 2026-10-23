@@ -41,13 +41,16 @@ impl Screen {
     }
 }
 
-/// The guided setup (src/ui/tour.rs): the step on screen, and what the
-/// learner has done since it opened, which the steps on the practice side
-/// wait for.
+/// The guided setup (src/ui/tour.rs): which guide, the step on screen, and
+/// what the learner has done since it opened, which the steps on the
+/// practice side wait for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Tour {
+    /// The guide to a contest run, for Contest mode, rather than the one to
+    /// a first session and the settings after it.
+    pub contest: bool,
     pub step: usize,
-    /// A session was started.
+    /// A session, or a run, was started.
     pub started: bool,
     /// One of its groups was answered.
     pub answered: bool,

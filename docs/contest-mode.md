@@ -130,7 +130,13 @@ which the Contester preset turns on (§5.5, §8); and a continuation spliced
 on where your message reaches the start of its next character that the
 player can still take over at, each player starting it at that moment, so
 no character goes out twice (§5.2; risk 2 of §16 narrowed to a lead
-underestimated).
+underestimated). Slice 5b has landed, the rest of phase 5's learning
+items: the guided setup in Contest mode is a run's, its button shown there,
+walking the run screen part by part where it is drawn and leaving the run
+through Discard, its Next never starting a run, whose callers would be
+sound nobody asked for (§2); and the paddles' field space, a word space of
+quiet after a letter pressing Space by the Space key's own rule, so a call
+and its exchange keyed on the paddles land in their own fields (§4.5).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -357,8 +363,39 @@ and, for the section, `EMA` ("K1ABC 1D EMA")
 - Keep-awake follows "a run is live" (countdown or running) instead of the
   screen (`keep_awake.rs:17-27`), so a paused run lets the screen sleep; as
   built (2c), Hear a QSO playing holds it too.
-- The tour targets group inputs (`tour.rs:231-240`), so its button is
-  hidden in Contest mode until phase 5.
+- The tour targets group inputs (`tour.rs:231-240`), so its button was
+  hidden in Contest mode until phase 5. As built (5b), Contest has a guide
+  of its own (`CONTEST_STEPS`, `src/ui/tour.rs`), opened by the same
+  button, shown in Contest now: Start contest, then each part of the run
+  screen in turn, pointed at where it is drawn, by ids the run screen gives
+  its parts (`run-bar`, `run-hint`, `run-air`, `run-fields`, `run-reads`,
+  `run-keys`, `keypad`, `run-log`, `run-actions`): the status and clock,
+  the hint, TX and RX, Call and Exchange, Reads as, the message keys or,
+  where touch is how you type, the keypad (each build saying its own, as it
+  does of what moves between the fields, Space or `␣ Field`), the log, and
+  Pause, End run and Discard; then the run left by its Discard, asked
+  twice, through `abort_run`, and a last word on where the rest is.
+  Next never starts a run, whose callers would be sound nobody asked for,
+  where the first session's Next starts the session: it moves on, and away
+  from the run screen the steps point the way to it, Start contest on
+  Practice and Practice from anywhere else, each saying above its words
+  that a run is what shows it ("To see this, start a run: press Start
+  contest."); Show me presses Start contest when asked to. On a paused
+  run, whose card stands in for the hint, the air, the fields, Reads as and
+  the keys, those steps point at Resume instead and say to resume the run;
+  the clock, the log and the run's buttons are drawn paused and are
+  pointed at as ever. On the run screen the guide docks at the foot while
+  it shows the head of the screen, Resume among it, and over the head
+  otherwise, and its buttons, the last step's Start practising among them,
+  leave the cursor in the run's field, handing it back after a press, as
+  the theme button does, so Enter goes on sending. What it points at is
+  brought into the middle of what the guide leaves clear, not of the
+  window, as a guide docked at the foot covers the middle of a short
+  phone, and with room for the ring it draws; so is the Discard that asks
+  once more, which stands lower than the Discard pressed, guide or no
+  guide (`bring_into_sight`). Picking Contest while the guide is open, or
+  another mode from Contest, starts that mode's guide from its first step
+  (`Tour::contest`).
 - Every screen opens at its top (`src/app.rs`), so a run started from the
   foot of its results begins with its clock and fields in sight. As built
   (4b), so does the run screen on Resume, by either way in (the button, or
@@ -1068,7 +1105,29 @@ key that sends nothing reads no other caller's call into it (9.1).
   is no Enter in the fields; the listener hears it as log without sending.
   With the Command key, which the listener passes by, it is Enter still.
 - Paddles key into the focused field (`paddle.rs:287-299`) and never
-  transmit; phase 5 adds a field space after a 7-dit gap.
+  transmit; phase 5 adds a field space after a 7-dit gap. As built (5b),
+  the keyer ends a word once seven dits of quiet follow a letter's last
+  element, as it ends the letter once three have (`Keyer`, its word gap in
+  `keyer/clock.rs`; a straight key, which keys no space after an element,
+  ends the letter a dit sooner but is held to the same seven dits for the
+  word, as its timing is the least even), and the run takes the word's end
+  as Space, by the Space key's rule (`space_goes_to`): on from Call to
+  Exchange, and from Exchange back to Call where the exchange has one item
+  to type or the items typed read whole, else the space before the next
+  item. So a call and its exchange keyed on the paddles land in their own
+  fields. It is the whole of a word space, not the split between a letter
+  space and a word space, so a hesitation between the letters of a call
+  never moves the cursor out of it; one pause presses Space once, however
+  long it lasts; and a key pressed in it, Enter or any message key, ends
+  the word with no Space after it. So does anything done by hand: Space
+  from the keyboard, the key bar or `␣ Field`, any key of the keypad,
+  typing, or a click, a tap or Tab into the other field
+  (`ContestEntry::finish_letter`), which would otherwise have the word
+  space move the cursor a second time, back to the call from an empty
+  exchange; a letter keyed in full and still waiting out its letter space
+  lands first, in the field it was keyed for. A group's box and the
+  practice pad take no word space, as a group has no spaces
+  (`PaddleKeys::use_fields`, `src/ui/paddle.rs`).
 - **Space** (as built after operator feedback, 2026-10-22) toggles between
   the fields as MorseRunner's and N1MM's space bar does, so going back to
   fix a call is one key. In Call it moves on to Exchange, as a call has no
@@ -1085,26 +1144,27 @@ key that sends nothing reads no other caller's call into it (9.1).
   does so (`focus_end_script`, `src/ui/widgets.rs`), and the app's tests
   see the script that moved it. The keypad's `␣ Field` follows the same
   rule, from one place (`space_goes_to`, `src/ui/contest.rs`), as the key
-  bar's Space and the hint do. The key bar shows Space on a keyboard,
-  desk-only, straight after Enter's chip, saying what it does now: "→
-  Call" from Exchange where it goes back, "→ Exch" from Call, named as a
-  place so it never reads as a message key beside F2 Exch, and "Next
-  item" where it types the space before the exchange's next item; its
-  `aria-label` says the same in words, and it keeps one width whatever it
-  says, so no key changes rows as an exchange is typed. It is lit, as
-  Enter's own keys are, where it takes the cursor back to a call to put
-  right, as Enter's `Fix call` does; a click does what the key does, the
-  move or the space. With the station's correction to put right, the hint
-  reads "They corrected you: fix the call, then Enter", which a phone's
-  line holds whole, naming the Enter key it has, lit as `Fix call ↵`; where
-  Space would go back to the call, a wider screen adds ". Space goes back
-  to it" (`Esm::hint_for`). The cursor is in Exchange after your exchange
-  went out with the call, which is when a correction comes, but a
-  Sprint's or Field Day's correction can carry the exchange, part of which
-  you may have typed: there Space types the space, and neither the hint
-  nor the key says it goes back. Tab and Shift+Tab move as on any page.
-  Before, Space in Exchange typed a space, which the user found confusing
-  beside MorseRunner.
+  bar's Space and the hint do, and as built (5b) the paddles' word space.
+  The key bar shows Space on a keyboard, desk-only, straight after Enter's
+  chip, saying what it does now: "→ Call" from Exchange where it goes
+  back, "→ Exch" from Call, named as a place so it never reads as a
+  message key beside F2 Exch, and "Next item" where it types the space
+  before the exchange's next item; its `aria-label` says the same in
+  words, and it keeps one width whatever it says, so no key changes rows
+  as an exchange is typed. It is lit, as Enter's own keys are, where it
+  takes the cursor back to a call to put right, as Enter's `Fix call`
+  does; a click does what the key does, the move or the space. With the
+  station's correction to put right, the hint reads "They corrected you:
+  fix the call, then Enter", which a phone's line holds whole, naming the
+  Enter key it has, lit as `Fix call ↵`; where Space would go back to the
+  call, a wider screen adds ". Space goes back to it" (`Esm::hint_for`).
+  The cursor is in Exchange after your exchange went out with the call,
+  which is when a correction comes, but a Sprint's or Field Day's
+  correction can carry the exchange, part of which you may have typed:
+  there Space types the space, and neither the hint nor the key says it
+  goes back. Tab and Shift+Tab move as on any page. Before, Space in
+  Exchange typed a space, which the user found confusing beside
+  MorseRunner.
 
 ### 4.6 "Repeat their call on demand"
 
@@ -3323,10 +3383,12 @@ through one entry point, `press_key`, which calls `paddle.finish_letter()`
 (`widgets.rs:67`, shared with the group boxes); `Announce` sets
 `ctx.announced` once nothing is on the air, held until then; the one
 polite region that speaks it sits in the app's frame, so what the run
-says as it ends is still said on the results. One `use_answer_box` registration
-routes paddle letters to the focused field. `app.session` holds
-`Live::{Groups, Contest}`, each boxed; `finish_run` and `abort_run` reach
-whichever is live.
+says as it ends is still said on the results. One `use_fields`
+registration routes paddle letters to the focused field and the paddles'
+word space to `field_space` (5b); a Space, an edit or a field change made
+by hand calls `ContestEntry::finish_letter` first, which also ends the
+paddles' word. `app.session` holds `Live::{Groups, Contest}`, each boxed;
+`finish_run` and `abort_run` reach whichever is live.
 
 **New in cw-core, `crates/cw-core/src/contest/`:**
 
@@ -3361,7 +3423,8 @@ contest speed evidence, `tells_speed`, `whole_evidence`);
 `timing/pileup.rs` (reach helpers `pub(crate)`); `timing/plan.rs`
 (`dry_wanted`, `plan_morse_playback_at`, 1b; `muted_until`, and
 `SEND_RELEASE_SEC` moved here from the app, 5a); `band/qsb.rs`
-(`Qsb::flutter`, 5a); `soak.rs`, `lib.rs` (the contest soak; exports).
+(`Qsb::flutter`, 5a); `keyer/clock.rs` (the word gap the paddles' field
+space keys, 5b); `soak.rs`, `lib.rs` (the contest soak; exports).
 
 **New in the app:** `src/contest_runtime.rs` (`LiveContest`, start,
 dispatch, effects, `play_turn`, finish, the heartbeat check);
@@ -3378,20 +3441,21 @@ Hear a QSO, 2c); `src/ui/scores/runs.rs` (the Runs card, as built 4b);
 `src/state.rs` (`contest: Signal<Option<ContestView>>`, `ContestEntry`,
 `session_running`, the restore message); `src/routes.rs` (Training and
 Results branches); `src/app.rs`, `src/ui/tour.rs` (Exit and Discard,
-contest keys, tour button); `src/keep_awake.rs`; `src/player.rs`,
-`src/audio/mod.rs` (`send_planned`, `start_planned`, `Lease::wake`, a
-recorder that keeps each start's plan and `Qsb`); `src/audio/mixer/*`,
-`src/audio/web/*` (the dry path; the gate and a send started at a given
-time, 5a), `src/audio/shape.rs` (the gate's ramp and the browser's gate
-schedule, `GateSchedule`, 5a), `src/audio/silent.rs`, `src/audio/wait.rs` (a send waiting
-for its moment is not stalling, 5a); `src/ui/training.rs`,
-`widgets.rs` (`Keypad` rows as props, `ProgressHeader { figure, pct }`);
-`settings_charset.rs`, `settings.rs`, `home.rs`; `results.rs`,
-`heatmap.rs`, `stats_detail.rs`, `scores/mod.rs` ("Points", rows that open
-results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
-`docs/privacy.html`; `src/persist/backup.rs`; `assets/styles.css`;
-`docs/platforms.md` (new modes write a legacy name plus a mark);
-`scripts/callsign-prefixes.py` (zones and continents).
+contest keys, tour button; the contest guide, 5b); `src/ui/paddle.rs` (a
+word space keyed to a screen of fields, 5b); `src/keep_awake.rs`;
+`src/player.rs`, `src/audio/mod.rs` (`send_planned`, `start_planned`,
+`Lease::wake`, a recorder that keeps each start's plan and `Qsb`);
+`src/audio/mixer/*`, `src/audio/web/*` (the dry path; the gate and a send
+started at a given time, 5a), `src/audio/shape.rs` (the gate's ramp and
+the browser's gate schedule, `GateSchedule`, 5a), `src/audio/silent.rs`,
+`src/audio/wait.rs` (a send waiting for its moment is not stalling, 5a);
+`src/ui/training.rs`, `widgets.rs` (`Keypad` rows as props,
+`ProgressHeader { figure, pct }`); `settings_charset.rs`, `settings.rs`,
+`home.rs`; `results.rs`, `heatmap.rs`, `stats_detail.rs`, `scores/mod.rs`
+("Points", rows that open results, kinds); `listen.rs`, `playback.rs`;
+`privacy.rs`, `credits.rs`, `docs/privacy.html`; `src/persist/backup.rs`;
+`assets/styles.css`; `docs/platforms.md` (new modes write a legacy name
+plus a mark); `scripts/callsign-prefixes.py` (zones and continents).
 
 ## 13. Testing
 
@@ -3736,6 +3800,12 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   faded, and no continuation set to start sooner than a release after its
   key.
 
+- from 5b: the keyer ends a word seven dits of quiet after a letter's last
+  element, a straight key's too, though its letter ends a dit sooner; a
+  paddle closed before then carries the word on, and a key pressed in it
+  ends the word with no space, as does a pattern that spells no letter;
+  waiting out a word space is no letter keyed (`keyer/clock.rs`).
+
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
 verified, at 3600·n / Σ(planned turns and drawn delays) an hour within 5%,
@@ -3885,6 +3955,27 @@ group answered kept to its slot, what it sent cut short and its
 comparison's two rows on one set of columns that stop narrowing at a
 letter's width; a session drawn on the app has the markup the rule names,
 a `.train` root and the answered group's top row and comparison.
+From 5b, in the desktop and the touch builds alike: in Contest the guide's
+button shows, and its guide walks the run screen by hand, each part's id
+drawn where the guide points (the keypad first where touch is how you
+type, each build's words for it), docked clear of what it shows, then
+Discard, asked twice, keeps nothing; Next from the first step to the last
+starts no run and nothing sounds, the steps pointing the way to the run
+and saying a run shows them; on a paused run the steps for what its card
+stands in for point at Resume and say so, the rest as ever; Show me
+starts the run and, on its step, discards it; picking Contest or leaving
+it starts that mode's guide; on the run screen the guide's buttons, Start
+practising among them, leave the cursor in the run's field and a press
+hands it back; the script that brings a control into sight keeps it clear
+of the dock, at its foot or its head. The paddles keyed into a run at the
+keyer's speed: a word space moves the cursor by the Space key's rule, on
+to Exchange, back to Call from a WPX exchange, a space between a Sprint's
+items, the cursor at the field's end and nothing typed; a hesitation of
+six dits keeps a call whole; a pause presses Space once; and none follows
+Enter. A Space by hand in the word space, from the keyboard, the key bar
+or `␣ Field`, moves the cursor once, and typing or a focus moved to the
+other field leaves it where it is: the word space adds nothing after any
+of them; and a letter still open when Space comes lands first, in Call.
 
 ## 14. Phased build plan
 
@@ -4078,6 +4169,12 @@ copy-speed series; the paddles' field space.
   the one the machine measures; the native mixer's are tested sample by
   sample, and the browser's gate schedule as numbers (`GateSchedule`), not
   as played.
+- The contest tour and the paddles' field space landed as slice 5b: the
+  guide in Contest mode, its button shown there, Start contest, the run
+  screen's parts one at a time on desktop and touch, and Discard through
+  `abort_run`, its Next never starting a run (§2); and a word space keyed
+  on the paddles after a letter, seven dits of quiet, pressing Space by
+  the Space key's rule, the keyer's word gap a cw-core change (§4.5).
 
 **Later, not planned:** Search & Pounce with the Sprint QSY rule, RIT,
 keying with the paddles, a contest level, and more contests.
@@ -4146,6 +4243,9 @@ keying with the paddles, a contest level, and more contests.
 | A continuation (5a) | a timed splice: the turn on the air plays out the character sounding, and any the player has begun, the next starts at the start of the next character, ridden over by then; with none left, half a word space after your message, the next message a word space after it | the next started at once from the character sounding, sent again whole; or started in the past, mid-character | no character twice and no gap; both players start a send at a moment ahead well, and your message is silent where they meet, so nothing clicks |
 | How soon a continuation can take over (5a) | the player's lead, as the last turn started at once found it, and a send's release, after the key | the moment your message is at as it reaches the ear | a player plays ahead of the ear, so a character starting inside its lead has begun already, and taking over there sent its start twice; a lead measured on every turn keeps up with the device |
 | What the turn on the air plays up to the splice (5a) | counted at the key, as planned | counted as it plays | everything is decided when you key; the turn on the air would otherwise stay beside the next for every count and timer. The cost: an Esc, a pause or the run's end before the splice, up to about a second after the key at 25 WPM, leaves counted a caller's send there that never sounded: with full break-in, any; without, only a reply starting in the word space before a splice after your message's last character |
+| The contest guide's Next (5b) | moves on, never starting a run; Show me starts one when asked; away from the run screen its steps point the way to it | Next starting the run, as the first session's Next starts the session | a run's callers are sound nobody asked for, and a run is ten minutes of it, where a session's first group is a few seconds |
+| The paddles' field space (5b) | seven dits of quiet after a letter's last element, a whole word space, then Space by its rule | the split between a letter space and a word space, five dits | a Space moves the cursor out of the call, so a hesitation mid-call must never make one |
+| The guide when the mode changes (5b) | that mode's guide, from its first step | the step it was on | the two guides' steps differ, and a step of one is nothing to point at in the other |
 
 ### 15.2 Decisions taken with the user
 

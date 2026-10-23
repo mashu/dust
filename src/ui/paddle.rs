@@ -2,9 +2,10 @@
 //!
 //! The app has one keyer, so a paddle works on every screen and its sidetone
 //! does not wait on a training session to have opened the player. While a
-//! training group's answer box is open the keyer types into it; on Settings
-//! what it decodes shows on the practice pad. Its timing is cw-core's
-//! [`Keyer`]; this module gives it keys, a clock and a sound.
+//! training group's answer box is open the keyer types into it, and during
+//! a contest run into the field with the cursor, where a word space keyed is
+//! Space; on Settings what it decodes shows on the practice pad. Its timing
+//! is cw-core's [`Keyer`]; this module gives it keys, a clock and a sound.
 
 use std::rc::Rc;
 
@@ -127,11 +128,13 @@ fn paddle_for_key(key: &str, code: &str, shortcut: bool, swap: bool) -> Option<P
 }
 
 /// What a screen taking paddled letters lends the keyer: whether it is
-/// taking them at this moment, and where they go.
+/// taking them at this moment, where they go, and for a screen of fields,
+/// what a word space keyed does there.
 #[derive(Clone, Copy)]
 struct AnswerBox {
     open: CopyValue<bool>,
     letter: Callback<char>,
+    space: Option<Callback>,
 }
 
 /// The app's paddle keyer, as the shell and the screens reach it.
@@ -283,13 +286,39 @@ impl PaddleKeys {
     }
 
     /// Key into an answer box rather than the practice pad, for as long as
-    /// the calling component is mounted, and only while `open`.
+    /// the calling component is mounted, and only while `open`. A group has
+    /// no spaces, so a word space keyed there does nothing.
     pub fn use_answer_box(self, open: bool, letter: impl FnMut(char) + 'static) {
         let letter = use_callback(letter);
+        self.use_lent(open, letter, None);
+    }
+
+    /// The same for a screen of fields, the run's Call and Exchange, where a
+    /// word space keyed — the paddles quiet for seven dits after a letter —
+    /// does what Space does: `space`.
+    pub fn use_fields(
+        self,
+        open: bool,
+        letter: impl FnMut(char) + 'static,
+        mut space: impl FnMut() + 'static,
+    ) {
+        let letter = use_callback(letter);
+        let space = use_callback(move |()| space());
+        self.use_lent(open, letter, Some(space));
+    }
+
+    /// Lend the keyer the calling screen's box, while it is mounted.
+    fn use_lent(self, open: bool, letter: Callback<char>, space: Option<Callback>) {
         let mut gate = use_hook(|| CopyValue::new(open));
         gate.set(open);
         let mut answer = self.answer;
-        use_hook(move || answer.set(Some(AnswerBox { open: gate, letter })));
+        use_hook(move || {
+            answer.set(Some(AnswerBox {
+                open: gate,
+                letter,
+                space,
+            }));
+        });
         use_drop(move || {
             // Only its own: a box that has already taken over stays.
             if answer.peek().is_some_and(|held| held.letter == letter) {
@@ -341,6 +370,9 @@ impl PaddleKeys {
         if let Some(letter) = out.letter {
             self.deliver(letter);
         }
+        if out.space {
+            self.deliver_space();
+        }
         self.arm(out.wake_at);
     }
 
@@ -370,6 +402,20 @@ impl PaddleKeys {
         let excess = heard.chars().count().saturating_sub(HEARD_KEEP);
         if let Some((cut, _)) = heard.char_indices().nth(excess) {
             heard.drain(..cut);
+        }
+    }
+
+    /// A word space keyed, for a screen of fields taking letters now. An
+    /// answer box and the practice pad have no use for one.
+    fn deliver_space(self) {
+        if let Some(AnswerBox {
+            open,
+            space: Some(space),
+            ..
+        }) = *self.answer.peek()
+            && *open.peek()
+        {
+            space.call(());
         }
     }
 

@@ -2493,6 +2493,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 /* A session has no nav, and the foot of the screen is its own: the answers
    and the way out. The guide docks over its head instead. */
 .tour-dock.top { top: calc(0.75rem + env(safe-area-inset-top)); bottom: auto; }
+/* Unless it points at a run's head, its clock, fields and the lines between:
+   then it docks at the foot, which has no nav to clear. */
+.tour-dock.foot { bottom: calc(0.75rem + env(safe-area-inset-bottom)); }
 .tour {
   pointer-events: auto;
   width: min(560px, calc(100% - 1.5rem));
@@ -2509,6 +2512,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .tour-head .icon-btn { width: 1.9rem; height: 1.9rem; box-shadow: none; }
 .tour-title { margin: 0 0 0.2rem; font-size: 1.05rem; letter-spacing: -0.01em; color: var(--ink); }
 .tour-text { margin: 0; font-size: 0.86rem; line-height: 1.45; color: var(--ink-soft); }
+/* What to do first to see what a step is about, where it is not on the
+   screen: the run to start, or to resume. */
+.tour-first { margin: 0 0 0.2rem; font-size: 0.82rem; font-weight: 700; color: var(--copper-deep); }
 .tour-moves { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 .tour-move {
   display: inline-flex;
