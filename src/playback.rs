@@ -603,6 +603,7 @@ mod tests {
             start_sec,
             end_sec,
             fade: None,
+            skip_sec: 0.0,
         };
         let turn = |segments| HeardTurn {
             quiet_ms: 0,

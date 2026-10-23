@@ -104,6 +104,7 @@ mod tests {
             start_sec,
             end_sec: start_sec + plan_morse_playback_for(text, settings, &voice).duration_sec,
             fade: None,
+            skip_sec: 0.0,
         };
         let mine = segment(Sender::You, "CQ TEST", you, 0.0);
         let reply = segment(Sender::Caller(0), "K5XYZ", slow, mine.end_sec + 0.3);

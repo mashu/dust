@@ -1066,6 +1066,23 @@ impl Ui {
         code: dioxus::prelude::Code,
         held: dioxus::prelude::Modifiers,
     ) -> bool {
+        self.key_down(id, key, code, held, false)
+    }
+
+    /// `key` repeating in the element `id`, as a key held down repeats:
+    /// whether the page left the repeat to do what it would.
+    pub fn repeat_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) -> bool {
+        self.key_down(id, key, code, dioxus::prelude::Modifiers::empty(), true)
+    }
+
+    fn key_down(
+        &mut self,
+        id: &str,
+        key: Key,
+        code: dioxus::prelude::Code,
+        held: dioxus::prelude::Modifiers,
+        repeating: bool,
+    ) -> bool {
         self.fire(
             "keydown",
             id,
@@ -1073,7 +1090,7 @@ impl Ui {
                 key,
                 code,
                 dioxus::prelude::Location::Standard,
-                false,
+                repeating,
                 held,
                 false,
             )),

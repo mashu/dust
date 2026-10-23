@@ -873,6 +873,12 @@ fn the_band_card_sets_the_callers_habits_in_a_contest() {
         );
         // At one at a time the band has QRM on it all the same.
         assert!(ui.has("and, with Rough habits, now and then a station that is not calling you"));
+        // And so does a pile-up of one caller at a time.
+        ui.click("style-pile-up");
+        assert!(ui.has(
+            "only one caller at a time, and with Rough habits now and then a station on your frequency that is not calling you"
+        ));
+        ui.click("style-single-caller");
         // Its reset puts them back with the rest of the band.
         ui.click("reset-band-conditions");
         ui.advance(50).await;

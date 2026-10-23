@@ -141,6 +141,7 @@ impl Qrm {
                 start_sec,
                 end_sec,
                 fade: Fade::along(self.qsb, None, station.fade_from_sec, run_ms, start_sec),
+                skip_sec: 0.0,
             });
             self.free_ms = run_ms + whole_ms(end_sec) + gap_ms(&mut self.rng);
             station.left -= 1;
