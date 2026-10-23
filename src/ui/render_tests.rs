@@ -2496,6 +2496,137 @@ mod interactions {
     }
 
     /// A mouse opens a day's card by pointing at the square and closes it by
+    /// M after K copied wrong four times in five, taken for N; M after U
+    /// right six times out of six.
+    #[component]
+    fn MistakesHarness() -> Element {
+        let mut groups = vec![("KM", "KN"); 4];
+        groups.push(("KM", "KM"));
+        groups.extend([("UM", "UM"); 6]);
+        rsx! {
+            crate::ui::stats_detail::MistakesTab { sessions: vec![stored_session("2026-09-08", &groups)] }
+        }
+    }
+
+    /// The pair that goes wrong more often than its letter overall is listed
+    /// as one of the hardest. Every pair has a square, and nothing ends on
+    /// the start of a group; one not heard yet is an empty one that does
+    /// nothing.
+    #[test]
+    fn the_mistakes_tab_lists_the_hardest_pairs_and_grids_them_all() {
+        let ui = Ui::new(MistakesHarness, ());
+        assert!(ui.has("Hardest pairs"));
+        assert!(ui.has(">KM<"), "{}", ui.html());
+        assert!(ui.has("80% wrong, 4 of 5 · M 36% overall"));
+        // ▸, K, M and U before; K, M and U after.
+        assert_eq!(ui.controls("pair-").len(), 4 * 3);
+        assert!(!ui.shows("pair-k-start"));
+        let unheard = ui.input_tag("pair-k-k");
+        assert!(
+            unheard.contains("disabled") && unheard.contains("empty"),
+            "{unheard}"
+        );
+        assert!(unheard.contains("aria-label=\"K after K: not heard yet\""));
+        assert!(
+            ui.input_tag("pair-k-m")
+                .contains("aria-label=\"M after K: 4 of 5 wrong\"")
+        );
+        assert!(ui.has("Tap a pair for details."));
+        assert!(!ui.has("pair-card"));
+    }
+
+    /// A tap pins a pair's card and lights up its row and column; a second
+    /// tap, or a click anywhere else, takes it down, and a tap on another
+    /// pair moves it there.
+    #[test]
+    fn a_tap_on_a_pair_pins_its_card_and_lights_its_row_and_column() {
+        let mut ui = Ui::new(MistakesHarness, ());
+        ui.click("pair-k-m");
+        for text in [
+            ">M after K<",
+            ">Wrong<",
+            ">80%<",
+            ">4 of 5<",
+            ">M overall<",
+            ">36%<",
+            ">4 of 11<",
+            ">Taken for<",
+            ">N 4×<",
+            ">Wrong 2.2× as often as M overall: the pair is the trouble.<",
+        ] {
+            assert!(ui.has(text), "no {text} on the card: {}", ui.html());
+        }
+        assert!(ui.has("class=\"pair-dock\""));
+        let square = ui.input_tag("pair-k-m");
+        assert!(
+            square.contains("selected") && square.contains("shown"),
+            "{square}"
+        );
+        // Its row, K before, and its column, M after, light up; nothing else.
+        for (id, lit) in [
+            ("pair-k-k", true),
+            ("pair-k-u", true),
+            ("pair-start-m", true),
+            ("pair-u-m", true),
+            ("pair-u-k", false),
+            ("pair-start-u", false),
+        ] {
+            assert_eq!(ui.input_tag(id).contains("in-line"), lit, "{id}");
+        }
+        assert!(ui.has("class=\"bigram-head row-head group-text in-line\">K<"));
+        assert!(ui.has("class=\"bigram-head group-text in-line\">M<"));
+        assert_eq!(
+            ui.html().matches("in-line\">").count(),
+            2,
+            "one row, one column"
+        );
+
+        ui.click("pair-k-m");
+        assert!(!ui.has("pair-card"));
+        assert!(!ui.input_tag("pair-k-m").contains("selected"));
+        assert!(!ui.input_tag("pair-k-k").contains("in-line"));
+
+        ui.click("pair-k-m");
+        ui.click("pair-u-m");
+        assert!(ui.has(">M after U<"));
+        assert!(!ui.has(">M after K<"));
+        assert!(ui.has(">Copied right every time here.<"));
+        assert!(!ui.has(">Taken for<"), "nothing was taken for anything");
+        ui.click_elsewhere();
+        assert!(!ui.has("pair-card"));
+        assert!(!ui.input_tag("pair-u-m").contains("selected"));
+    }
+
+    /// A mouse shows a pair's card for as long as it points at the square,
+    /// over a pinned one, which comes back when it leaves. A finger does not
+    /// point, and a pair not heard yet has no card.
+    #[test]
+    fn pointing_at_a_pair_shows_its_card() {
+        let mut ui = Ui::new(MistakesHarness, ());
+        ui.point_at("pair-start-k", "mouse", (40.0, 300.0), (5.0, 5.0));
+        assert!(ui.has(">K at the start of a group<"));
+        assert!(ui.input_tag("pair-start-u").contains("in-line"));
+        ui.point_away("pair-start-k");
+        assert!(!ui.has("pair-card"));
+
+        ui.click("pair-k-m");
+        ui.point_at("pair-u-m", "mouse", (40.0, 300.0), (5.0, 5.0));
+        assert!(ui.has(">M after U<"));
+        assert!(
+            ui.input_tag("pair-k-m").contains("selected"),
+            "still pinned"
+        );
+        ui.point_away("pair-u-m");
+        assert!(ui.has(">M after K<"));
+        ui.click("pair-k-m");
+
+        ui.point_at("pair-u-m", "touch", (40.0, 300.0), (5.0, 5.0));
+        assert!(!ui.has("pair-card"));
+        ui.point_at("pair-k-k", "mouse", (40.0, 300.0), (5.0, 5.0));
+        assert!(!ui.has("pair-card"));
+    }
+
+    /// A mouse opens a day's card by pointing at the square and closes it by
     /// leaving. The browser's own plain tooltip is gone; the label says the
     /// same for a screen reader.
     #[test]
