@@ -2535,6 +2535,73 @@ mod interactions {
         assert!(!ui.has("pair-card"));
     }
 
+    /// Most errors first puts the row and the column with the most errors
+    /// in the top left corner, and taught order puts them back.
+    #[test]
+    fn the_grid_can_put_the_most_errors_first() {
+        let first_square = |ui: &Ui| {
+            let html = ui.html();
+            let at = html.find("id=\"pair-").expect("a square");
+            html[at + 4..].split('"').next().unwrap_or("").to_string()
+        };
+        let mut ui = Ui::new(MistakesHarness, ());
+        assert!(ui.input_tag("seg-taught-order").contains("active"));
+        assert_eq!(first_square(&ui), "pair-start-k");
+        ui.click("seg-most-errors");
+        assert!(ui.input_tag("seg-most-errors").contains("active"));
+        // K before has every error, and M after.
+        assert_eq!(first_square(&ui), "pair-k-m");
+        // A pinned pair stays pinned however the grid is ordered.
+        ui.click("pair-k-m");
+        ui.click("seg-taught-order");
+        assert_eq!(first_square(&ui), "pair-start-k");
+        assert!(ui.input_tag("pair-k-m").contains("selected"));
+    }
+
+    /// Three sessions of twenty groups, the first ten copied clean, then
+    /// two groups in the third five each with a character wrong, and three
+    /// in the last five.
+    #[component]
+    fn EnduranceHarness(long: bool) -> Element {
+        let mut groups = vec![("KM", "KM"); 10];
+        groups.extend([("KM", "KE"); 2]);
+        groups.extend([("KM", "KM"); 3]);
+        groups.extend([("KM", "KE"); 3]);
+        groups.extend([("KM", "KM"); 2]);
+        if !long {
+            groups.truncate(8);
+        }
+        let sessions = (0..3)
+            .map(|_| stored_session("2026-09-08", &groups))
+            .collect();
+        rsx! {
+            crate::ui::endurance::EnduranceCard { settings: test_settings(), sessions }
+        }
+    }
+
+    /// The Endurance card says how far into a session copy holds, and
+    /// before there are sessions long enough, what it takes.
+    #[test]
+    fn the_endurance_card_says_how_far_copy_holds() {
+        let ui = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: true });
+        assert!(ui.has(">Endurance<"));
+        assert!(ui.has("100% at the start · 3 sessions"), "{}", ui.html());
+        assert!(ui.has(">Drops after group 10<"));
+        assert!(ui.has("Groups 1 to 20 · scale -30 to +5 points"));
+        assert!(ui.has(
+            "Your copy holds within 5 points of how you start a session through group 10, and is 30 points down by group 20."
+        ));
+        assert_eq!(ui.html().matches("<circle").count(), 4, "a dot a stretch");
+
+        let short = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: false });
+        assert!(short.has(">Endurance<"));
+        assert!(
+            short
+                .has("After 3 sessions of 10 groups or more, or contest runs of 4 minutes or more")
+        );
+        assert!(!short.has("sparkline"));
+    }
+
     /// A tap pins a pair's card and lights up its row and column; a second
     /// tap, or a click anywhere else, takes it down, and a tap on another
     /// pair moves it there.

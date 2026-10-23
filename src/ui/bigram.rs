@@ -9,7 +9,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::elsewhere::{PAIR_CARD, use_click_elsewhere};
-use crate::ui::widgets::{control_id, html_bool};
+use crate::ui::widgets::{Seg, control_id, html_bool};
 
 /// A pair as the character before and the one after it.
 type Pair = (char, char);
@@ -146,6 +146,33 @@ fn verdict(cell: &BigramCell, overall: CharTally) -> String {
     }
 }
 
+/// The order the grid's rows and columns are drawn in, as indexes into the
+/// heatmap's: as taught, or with the most errors first, which gathers the
+/// darkest squares into the top left corner. A row counts the errors on the
+/// character after it, a column those on its own character; a tie keeps the
+/// order taught. Sorting by count rather than by rate keeps a pair heard
+/// once and missed from leading the grid.
+fn order(heat: &BigramHeatmap, most_errors: bool) -> (Vec<usize>, Vec<usize>) {
+    let cols = heat.cols.len();
+    let mut rows: Vec<usize> = (0..heat.rows.len()).collect();
+    let mut columns: Vec<usize> = (0..cols).collect();
+    if most_errors {
+        let row_errors = |r: usize| -> u32 {
+            heat.cells
+                .iter()
+                .skip(r * cols)
+                .take(cols)
+                .map(|cell| cell.wrong)
+                .sum()
+        };
+        rows.sort_by_key(|r| std::cmp::Reverse(row_errors(*r)));
+        columns.sort_by_key(|c| {
+            std::cmp::Reverse(heat.overall.get(*c).map_or(0, |tally| tally.wrong))
+        });
+    }
+    (rows, columns)
+}
+
 /// The pairs that go wrong more often than their second character does
 /// overall, where it is the pair that trips you rather than the letter.
 pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
@@ -186,6 +213,7 @@ pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
 pub fn BigramCard(heat: BigramHeatmap) -> Element {
     let mut hovered = use_signal(|| None::<Pair>);
     let mut pinned = use_signal(|| None::<Pair>);
+    let mut most_errors = use_signal(|| false);
     use_click_elsewhere(PAIR_CARD, move || {
         if pinned.peek().is_some() {
             pinned.set(None);
@@ -204,9 +232,24 @@ pub fn BigramCard(heat: BigramHeatmap) -> Element {
         .filter(|cell| cell.total > 0);
     let line = shown.map(|cell| (cell.row, cell.col));
     let card = shown.map(|cell| pair_card(cell, heat.overall_of(cell.col)));
+    let (row_order, col_order) = order(&heat, most_errors());
     rsx! {
         div { class: "card stack",
-            div { class: "tiny", "Bigram error rate" }
+            div { class: "row-between",
+                div { class: "tiny", "Bigram error rate" }
+                div { class: "segmented",
+                    Seg {
+                        label: "Taught order",
+                        active: !most_errors(),
+                        onclick: move |_| most_errors.set(false),
+                    }
+                    Seg {
+                        label: "Most errors",
+                        active: most_errors(),
+                        onclick: move |_| most_errors.set(true),
+                    }
+                }
+            }
             p { class: "muted",
                 "Rows are the character before ({GROUP_START_BIGRAM_TOKEN} = start of group), columns the one after. Darker means more errors; an empty square is a pair not heard yet."
             }
@@ -215,18 +258,18 @@ pub fn BigramCard(heat: BigramHeatmap) -> Element {
                     class: "bigram-grid",
                     style: "grid-template-columns: repeat({cols + 1}, minmax(1.35rem, 1fr));",
                     div { class: "bigram-head row-head" }
-                    for col in heat.cols.iter() {
+                    for col in col_order.iter().map(|c| heat.cols[*c]) {
                         div {
-                            class: if line.is_some_and(|(_, c)| c == *col) { "bigram-head group-text in-line" } else { "bigram-head group-text" },
+                            class: if line.is_some_and(|(_, c)| c == col) { "bigram-head group-text in-line" } else { "bigram-head group-text" },
                             "{col}"
                         }
                     }
-                    for (r, row) in heat.rows.iter().enumerate() {
+                    for r in row_order.iter().copied() {
                         div {
-                            class: if line.is_some_and(|(at, _)| at == *row) { "bigram-head row-head group-text in-line" } else { "bigram-head row-head group-text" },
-                            "{row}"
+                            class: if line.is_some_and(|(at, _)| at == heat.rows[r]) { "bigram-head row-head group-text in-line" } else { "bigram-head row-head group-text" },
+                            "{heat.rows[r]}"
                         }
-                        for cell in heat.cells.iter().skip(r * cols).take(cols) {
+                        for cell in col_order.iter().map(|c| &heat.cells[r * cols + c]) {
                             {
                                 let pair = (cell.row, cell.col);
                                 let heard = cell.total > 0;
@@ -325,6 +368,44 @@ mod tests {
             wrong,
             taken_for: Vec::new(),
         }
+    }
+
+    /// Most errors first gathers the worst rows and columns to the top
+    /// left; a tie keeps the order taught, and taught order is the
+    /// heatmap's own.
+    #[test]
+    fn most_errors_first_sorts_by_count_and_keeps_ties_taught() {
+        let rows = vec![GROUP_START_BIGRAM_TOKEN, 'K', 'M'];
+        let cols = vec!['K', 'M'];
+        let wrong = [[0, 1], [0, 5], [2, 0]];
+        let heat = BigramHeatmap {
+            cells: rows
+                .iter()
+                .enumerate()
+                .flat_map(|(r, row)| {
+                    cols.iter()
+                        .enumerate()
+                        .map(move |(c, col)| cell(*row, *col, wrong[r][c], 10))
+                })
+                .collect(),
+            overall: vec![
+                CharTally {
+                    wrong: 2,
+                    total: 30,
+                },
+                CharTally {
+                    wrong: 6,
+                    total: 30,
+                },
+            ],
+            rows,
+            cols,
+            max_rate: 0.5,
+            hardest: Vec::new(),
+        };
+        assert_eq!(order(&heat, false), (vec![0, 1, 2], vec![0, 1]));
+        // K's row has five errors, M's two, the start's one; M's column six.
+        assert_eq!(order(&heat, true), (vec![1, 2, 0], vec![1, 0]));
     }
 
     #[test]

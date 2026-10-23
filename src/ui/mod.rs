@@ -8,6 +8,7 @@ pub mod contest_keys;
 pub mod contest_results;
 pub mod credits;
 pub mod elsewhere;
+pub mod endurance;
 pub mod envelope;
 pub mod file_pick;
 #[cfg(feature = "desktop")]

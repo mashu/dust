@@ -66,6 +66,8 @@ pub use machine::{
 };
 pub use parse::{ExchangeState, ReadField, Reading, normalize_call, parse_exchange};
 pub use place::filter_capacity;
+#[cfg(test)]
+pub(crate) use record::LAYOUT;
 pub(crate) use record::{CONTEST_MARK, GroupCopy};
 pub use record::{ContestLog, ContestRun, QsoRecord, RunErrors, RunQso, RunSummary, StoredLog};
 pub use rules::{ContestRules, Fill, Multiplier, PerSide, Points, Scoring, Side};

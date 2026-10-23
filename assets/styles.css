@@ -846,6 +846,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 700;
 }
 .chip.good { background: var(--good-soft); color: var(--good); }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
 .chip.speed-chip { font-variant-numeric: tabular-nums; }
 .chip.speed-chip.faster { background: var(--good-soft); color: var(--good); }
 .chip.speed-chip.slower { background: var(--warn-soft); color: var(--warn); }

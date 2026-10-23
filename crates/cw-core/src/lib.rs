@@ -14,6 +14,7 @@ mod belief;
 mod board;
 mod callsign;
 mod contest;
+mod endurance;
 mod heatmap;
 mod keyer;
 mod level;
@@ -63,6 +64,10 @@ pub use contest::{
     home_continent, home_country, keyed_token, loggable, message_text, normalize_call,
     parse_exchange, place_name, plan_turn, rate_at, read_number, section_name, send_power,
     send_report, send_serial, send_zone, space_to_call,
+};
+pub use endurance::{
+    DROP_POINTS, ENDURANCE_MIN_SESSIONS, Endurance, EndurancePoint, GROUPS_A_STRETCH,
+    MINUTES_A_STRETCH, StretchUnit, endurance,
 };
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
