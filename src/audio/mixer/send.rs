@@ -116,7 +116,8 @@ struct Fading {
     left: usize,
 }
 
-/// One sample of a send, for the two places the mixer adds it.
+/// One sample of a send, for the two places the mixer adds it, and whether
+/// the receiver is to be muted for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SendSample {
     /// Through the receiver's filter and under the fading, as its AGC hears
@@ -125,12 +126,16 @@ pub struct SendSample {
     /// Past the receiver: your own message in a contest, at the level you
     /// monitor it at, for after the AGC.
     pub dry: f64,
+    /// You are sending, without full break-in: the receiver's output is to
+    /// be muted, after its AGC, as a rig that is not QSK mutes it.
+    pub keyed: bool,
 }
 
 impl AddAssign for SendSample {
     fn add_assign(&mut self, other: Self) {
         self.heard += other.heard;
         self.dry += other.dry;
+        self.keyed |= other.keyed;
     }
 }
 
@@ -154,13 +159,25 @@ pub struct SendVoice {
     /// the path, not of the group: starting every send at the same point of
     /// the fade would give every group an identical one.
     started_at_sec: f64,
-    /// Samples played so far.
+    /// Silence still to play before its first sample: a send that starts at
+    /// a given time, a contest's continuation taking over from the send
+    /// before as that one gives way.
+    wait: usize,
+    /// Samples played so far, its wait aside.
     pos: usize,
+    /// While you send without full break-in, how many samples in the
+    /// receiver is muted till.
+    muted_until: Option<usize>,
     /// Where the sound ends: the last element, its ringing, and the fade.
     end: usize,
     tail_fade: usize,
-    /// Where a stopped send began its release.
+    /// Where a stopped send begins its release, on its own clock: ahead of
+    /// where it has got to for a send that a continuation takes over from.
     released_at: Option<usize>,
+    /// It was told to stop where a send taking over from it starts: your
+    /// message in it goes on muting the receiver to there, so the gate does
+    /// not open between the two.
+    hands_over: bool,
     release_len: usize,
     /// The most other stations calling across this send at once.
     callers: usize,
@@ -184,6 +201,7 @@ impl SendVoice {
             .collect();
         let samples = |seconds: f64| (seconds * sr).round().max(1.0) as usize;
         let length = (plan.wanted.duration_sec.max(0.0) * sr).ceil() as usize;
+        let at = |seconds: f64| (seconds.max(0.0) * sr).round() as usize;
         Self {
             stations,
             dry: plan.dry_wanted.then(|| Station::new(&plan.wanted, sr)),
@@ -197,10 +215,13 @@ impl SendVoice {
             }),
             sample_rate: sr,
             started_at_sec,
+            wait: 0,
             pos: 0,
+            muted_until: plan.muted_until.map(at),
             end: length + samples(TAIL_SEC),
             tail_fade: samples(TAIL_FADE_SEC),
             released_at: None,
+            hands_over: false,
             release_len: samples(SEND_RELEASE_SEC),
             callers: plan.others_at_once(),
             finished: Arc::new(AtomicBool::new(false)),
@@ -213,12 +234,66 @@ impl SendVoice {
         Arc::clone(&self.finished)
     }
 
+    /// Start only after `samples` of silence: a send that starts at a given
+    /// time.
+    pub fn wait(&mut self, samples: usize) {
+        self.wait = samples;
+    }
+
     /// Stop: ride down to silence over the release rather than cutting the
-    /// waveform where it stands, which is a click.
+    /// waveform where it stands, which is a click. Your sending is over, so
+    /// the receiver comes back at once.
     pub fn release(&mut self) {
-        if self.released_at.is_none() && self.pos < self.end {
-            self.released_at = Some(self.pos);
+        self.hands_over = false;
+        self.release_after(0);
+    }
+
+    /// Stop once `samples` more have played, its wait among them: where the
+    /// send that takes over from it starts. One stopped before it starts is
+    /// never heard at all; one stopped already stays stopped.
+    fn release_after(&mut self, samples: usize) {
+        if samples <= self.wait && self.wait > 0 {
+            self.wait = 0;
+            self.end = self.pos;
+            return;
         }
+        let at = self.pos + samples - self.wait;
+        if at < self.end && self.released_at.is_none_or(|before| at < before) {
+            self.released_at = Some(at);
+        }
+    }
+
+    /// Stop so as to be silent once `samples` more have played: ridden down
+    /// over the release before then, as a send that another takes over from
+    /// there is, so the two never sound together. The machine puts that
+    /// moment at the start of a character of your message, or half a word
+    /// space after its last, and no sooner than the player's lead and a
+    /// release after the key, so the ride down falls in a silence of yours
+    /// and takes nothing of it. Your message in it goes on muting the
+    /// receiver to the handover, where the next send's takes over.
+    pub fn release_by(&mut self, samples: usize) {
+        self.hands_over = true;
+        self.release_after(samples.saturating_sub(self.release_len));
+    }
+
+    /// Whether it has been told to stop, now or ahead.
+    pub fn is_released(&self) -> bool {
+        self.released_at.is_some()
+    }
+
+    /// How many samples from now until it reaches `into` samples in: where
+    /// a send that takes over from it at a given time starts. A moment
+    /// within a release of the start of one that has played nothing yet is
+    /// its start: a second key taking over from a continuation at its own
+    /// start goes in its place exactly, not the moment of clock rounding
+    /// after it in which neither would be sending.
+    pub fn samples_until(&self, into: usize) -> usize {
+        let into = if self.pos == 0 && into < self.release_len {
+            0
+        } else {
+            into
+        };
+        (self.wait + into).saturating_sub(self.pos)
     }
 
     /// Where the sound ends, on the send's own sample clock.
@@ -231,7 +306,7 @@ impl SendVoice {
 
     /// Whether anything of it is still to be heard.
     pub fn is_sounding(&self) -> bool {
-        self.pos < self.sound_ends_at()
+        self.wait > 0 || self.pos < self.sound_ends_at()
     }
 
     /// How many stations are calling across it right now: the band's own
@@ -240,17 +315,26 @@ impl SendVoice {
         if self.is_sounding() { self.callers } else { 0 }
     }
 
-    /// The next sample: what the receiver hears of it before its AGC, and
-    /// what of it is played past the receiver.
+    /// The next sample: what the receiver hears of it before its AGC, what
+    /// of it is played past the receiver, and whether you are sending.
     pub fn next(&mut self) -> SendSample {
+        if self.wait > 0 {
+            self.wait -= 1;
+            return SendSample::default();
+        }
         let pos = self.pos;
         self.pos += 1;
         if pos >= self.sound_ends_at() {
             return SendSample::default();
         }
-        let release = self.released_at.map_or(1.0, |at| {
-            release_gain((pos - at) as f64 / self.release_len as f64)
-        });
+        let release = match self.released_at {
+            Some(at) if pos >= at => release_gain((pos - at) as f64 / self.release_len as f64),
+            _ => 1.0,
+        };
+        // A stop is the end of your sending, and the receiver comes back;
+        // handing over to a send that goes on with your message, it is not.
+        let keyed = (self.hands_over || self.released_at.is_none_or(|at| pos < at))
+            && self.muted_until.is_some_and(|until| pos < until);
         let sr = self.sample_rate;
         let on_air: f32 = self
             .stations
@@ -273,6 +357,7 @@ impl SendVoice {
         SendSample {
             heard: heard * self.fading_gain(pos) * release * tail,
             dry: dry * release * tail,
+            keyed,
         }
     }
 
@@ -296,7 +381,7 @@ impl SendVoice {
     /// samples after it was played, which is how far behind the callback the
     /// speaker is. Called once per callback, after the buffer.
     pub fn settle(&self, latency: usize) {
-        if self.pos >= self.sound_ends_at().saturating_add(latency) {
+        if self.wait == 0 && self.pos >= self.sound_ends_at().saturating_add(latency) {
             self.finished.store(true, Ordering::Release);
         }
     }

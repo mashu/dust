@@ -21,8 +21,8 @@ pub use pileup::{Interferer, Transmission};
 pub(crate) use pileup::{PILEUP_CALLER_SEPARATION_HZ, PILEUP_SKIRT_DB, free_room, pick_in_room};
 pub(crate) use plan::plan_morse_playback_at;
 pub use plan::{
-    DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, ToneEvent, plan_morse_playback_for,
-    plan_transmission,
+    DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC, ToneEvent,
+    plan_morse_playback_for, plan_transmission,
 };
 pub(crate) use station::station_speed_grid;
 pub use station::{StationVoice, resolve_station};

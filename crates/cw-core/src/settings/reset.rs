@@ -70,6 +70,7 @@ impl TrainingSettings {
                 self.band.volume_max = d.band.volume_max;
                 self.band.link_volume = d.band.link_volume;
                 self.contest.my_sending_db = d.contest.my_sending_db;
+                self.contest.contest_qsk = d.contest.contest_qsk;
             }
             SettingsSection::BandConditions => {
                 self.band.qsb_enabled = d.band.qsb_enabled;
@@ -87,6 +88,7 @@ impl TrainingSettings {
                 self.band.pileup_spread_hz = d.band.pileup_spread_hz;
                 self.band.pileup_level_db = d.band.pileup_level_db;
                 self.contest.contest_habits = d.contest.contest_habits;
+                self.contest.contest_flutter = d.contest.contest_flutter;
             }
             SettingsSection::AutoLevel => {
                 self.auto_level.auto_adjust_level = d.auto_level.auto_adjust_level;

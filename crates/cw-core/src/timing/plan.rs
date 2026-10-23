@@ -12,6 +12,15 @@ use crate::settings::TrainingSettings;
 /// The level of a station at full volume, before the receiver.
 pub const DEFAULT_TARGET_GAIN: f64 = 0.3;
 
+/// How long a stopped send takes to reach silence, on either player.
+///
+/// Matched to the keying envelope's own rise time: a trainer this careful
+/// about click-free keying should not end a session with a click. Short
+/// enough that "stop" still means stop. Kept with the plans rather than
+/// the players because a contest splices a continuation onto the send
+/// playing, and no sooner than that send can be ridden down.
+pub const SEND_RELEASE_SEC: f64 = 0.008;
+
 #[derive(Clone, Debug)]
 pub struct ToneEvent {
     pub start_sec: f64,
@@ -42,6 +51,14 @@ pub struct PlannedTransmission {
     /// carry the level it is heard at. `others` always come through the
     /// receiver.
     pub dry_wanted: bool,
+    /// While you send in a contest without full break-in: until when, in
+    /// seconds from the start of the send, the receiver's output is muted,
+    /// after its AGC, as a rig that is not QSK mutes its receiver while it
+    /// transmits. The band and every station the receiver hears go quiet
+    /// till then; a dry `wanted`, your own message, and the paddle's
+    /// sidetone do not. None with full break-in, and for every send but a
+    /// contest's turn with a message of yours in it.
+    pub muted_until: Option<f64>,
 }
 
 impl PlannedTransmission {
@@ -104,6 +121,7 @@ pub fn plan_transmission(
         wanted,
         others,
         dry_wanted: false,
+        muted_until: None,
     }
 }
 

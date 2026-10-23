@@ -1,7 +1,8 @@
 //! What Contest mode adds to the settings: which contest a run is, whether
-//! one station calls at a time or a pile-up, how its callers operate and
-//! whether their speed follows your copy, how long a run lasts, how often
-//! your TU signs, how fast and how loud you send, and your station.
+//! one station calls at a time or a pile-up, how its callers operate,
+//! whether some flutter and whether their speed follows your copy, how long
+//! a run lasts, how often your TU signs, how fast and how loud you send,
+//! whether you hear the band while you do, and your station.
 //! Everything else a run uses is shared with group training.
 
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,11 @@ pub struct ContestSettings {
     /// contesters send them, or that with careless operators and stations
     /// on your frequency that are not calling you. Set on the Band card.
     pub contest_habits: CallerHabits,
+    /// Flutter: three callers in ten have a signal that flutters, rising
+    /// and falling 3 to 33 times a second as a signal over a polar path
+    /// does, as MorseRunner's flutter has them. Set on the Band card.
+    #[serde(deserialize_with = "forgiving_off")]
+    pub contest_flutter: bool,
     /// How long a run lasts, in minutes. Zero runs until you stop it, and
     /// ends at [`CONTEST_MINUTES_MAX`] all the same.
     pub contest_minutes: u32,
@@ -120,6 +126,13 @@ pub struct ContestSettings {
     /// and volume card.
     #[serde(deserialize_with = "forgiving_sending")]
     pub my_sending_db: i32,
+    /// Full break-in, QSK: the band is heard through your own messages, as
+    /// a rig with full break-in hears between the elements it sends. Off, as
+    /// MorseRunner ships it, the receiver is muted while you send, as a rig
+    /// without it mutes, and a caller sending across your message is not
+    /// heard. Set on the Tone and volume card.
+    #[serde(deserialize_with = "forgiving_off")]
+    pub contest_qsk: bool,
     /// Your callsign: upper case, letters, digits and single slashes inside
     /// it. Empty until you give one.
     pub my_call: String,
@@ -153,12 +166,14 @@ impl Default for ContestSettings {
             contest_kind: ContestKind::Wpx,
             contest_style: RunStyle::Single,
             contest_habits: CallerHabits::Easy,
+            contest_flutter: false,
             contest_minutes: 10,
             contest_show_copy: false,
             contest_tu_call: TuCall::Third,
             contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
+            contest_qsk: false,
             my_call: String::new(),
             my_name: String::new(),
             my_state: String::new(),

@@ -108,6 +108,19 @@ impl<T: Unplug> Retiring<T> {
         self.0.push((item, silent_at));
     }
 
+    /// Bring forward every fade still to run past `until`: `fade` moves it
+    /// from `now` to then instead, and it is let go once that has run. What
+    /// was to play on, a send a continuation takes over from at a moment
+    /// ahead, falls quiet as soon as a stop does.
+    pub fn hasten(&mut self, now: f64, until: f64, fade: impl Fn(&T, f64, f64)) {
+        for (item, silent_at) in &mut self.0 {
+            if *silent_at > until {
+                fade(item, now, until);
+                *silent_at = until;
+            }
+        }
+    }
+
     /// Unplug whatever has gone quiet by `now`.
     pub fn collect(&mut self, now: f64) {
         self.0.retain(|(item, silent_at)| {

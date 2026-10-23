@@ -59,18 +59,20 @@ impl ScheduledSend {
         Ok(send)
     }
 
-    /// Ramp the send down instead of cutting it, and hand back its gains
-    /// with the context time they are silent by.
+    /// Ramp the send down from `at` on the context clock, now or ahead,
+    /// instead of cutting it, and hand back its gains with the context time
+    /// they are silent by: ahead for a send that a continuation takes over
+    /// from, which plays on to there.
     ///
     /// Disconnecting on the spot is what made the old stop click: the fade
     /// was scheduled and then the node that would have played it was taken
     /// out of the graph in the same breath. The gains stay connected until
     /// the ramp has run.
-    pub fn release(self, ctx: &AudioContext) -> (impl Iterator<Item = GainNode>, f64) {
-        let now = ctx.current_time();
-        let done = now + SEND_RELEASE_SEC;
+    pub fn release_at(self, ctx: &AudioContext, at: f64) -> (impl Iterator<Item = GainNode>, f64) {
+        let at = at.max(ctx.current_time());
+        let done = at + SEND_RELEASE_SEC;
         for gain in self.gains() {
-            ramp_to(&gain.gain(), 0.0, now, done);
+            ramp_to(&gain.gain(), 0.0, at, done);
         }
         (std::iter::once(self.gain).chain(self.dry), done)
     }

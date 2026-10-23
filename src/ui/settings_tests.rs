@@ -799,7 +799,7 @@ fn a_contest_preset_sets_its_fields_and_reads_custom_once_one_changes() {
         assert!(!settings.band.qsb_enabled && !settings.band.qrn_enabled);
 
         ui.click("preset-contester");
-        assert!(ui.has("28–36\u{a0}WPM\u{a0}· tier\u{a0}6\u{a0}calls\u{a0}· 2–5\u{a0}callers\u{a0}· rough\u{a0}habits\u{a0}· deep\u{a0}fading,\u{a0}strong\u{a0}static"));
+        assert!(ui.has("28–36\u{a0}WPM\u{a0}· tier\u{a0}6\u{a0}calls\u{a0}· 2–5\u{a0}callers\u{a0}· rough\u{a0}habits\u{a0}· deep\u{a0}fading\u{a0}and\u{a0}flutter,\u{a0}strong\u{a0}static"));
         // The Band card shows the habits it set.
         assert!(ui.input_tag("habits-rough").contains("active"));
         assert_eq!(value_of(&ui, "field-level"), "6");
@@ -885,6 +885,82 @@ fn the_band_card_sets_the_callers_habits_in_a_contest() {
         ui.advance(50).await;
         assert!(!ui.has("Caller habits"));
         assert!(!ui.shows("habits-easy"));
+    });
+}
+
+/// Flutter is on the Band card in Contest mode only, after the fading,
+/// off until it is turned on, says what it does, is stored, is turned on by
+/// the Contester preset and off by the others, and goes back off with its
+/// card's reset.
+#[test]
+fn flutter_is_a_band_switch_in_contest_mode() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(!ui.shows("switch-flutter"), "not outside Contest");
+
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.shows("switch-flutter"));
+        assert!(!ui.input_tag("switch-flutter").contains("checked"));
+        assert!(ui.has(
+            "Three callers in ten flutter, their signal rising and falling 3 to 33 times a second"
+        ));
+        assert!(ui.has("Stations, callers&#39; habits, fading and flutter"));
+        // It sits on the Band card, after the fading.
+        let html = ui.html();
+        let fading = html.find("QSB fading").expect("the fading");
+        let switch = html.find(r#"id="switch-flutter""#).expect("the switch");
+        let statics = html.find("QRN static").expect("the static");
+        assert!(fading < switch && switch < statics);
+
+        ui.commit("switch-flutter", "true");
+        assert!(ui.stored_settings().await.contest.contest_flutter);
+        ui.click("preset-club");
+        assert!(!ui.stored_settings().await.contest.contest_flutter);
+        ui.click("preset-contester");
+        assert!(ui.stored_settings().await.contest.contest_flutter);
+        assert!(ui.has("deep\u{a0}fading\u{a0}and\u{a0}flutter"));
+        ui.click("reset-band-conditions");
+        assert!(!ui.stored_settings().await.contest.contest_flutter);
+    });
+}
+
+/// Full break-in is on the Tone and volume card in Contest mode only,
+/// after your sending, off as MorseRunner ships it, says what each way
+/// sounds like, is stored, no preset touches it, and the card's reset turns
+/// it back off.
+#[test]
+fn full_break_in_is_a_tone_card_switch_in_contest_mode() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(!ui.shows("switch-full-break-in-qsk"), "not outside Contest");
+
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        assert!(ui.shows("switch-full-break-in-qsk"));
+        assert!(!ui.input_tag("switch-full-break-in-qsk").contains("checked"));
+        assert!(ui.has("Off, the receiver is muted while you send, as on a rig without it"));
+        let html = ui.html();
+        let sending = html
+            .find(r#"id="slider-your-sending""#)
+            .expect("your sending");
+        let switch = html
+            .find(r#"id="switch-full-break-in-qsk""#)
+            .expect("the switch");
+        assert!(sending < switch);
+
+        ui.commit("switch-full-break-in-qsk", "true");
+        assert!(ui.stored_settings().await.contest.contest_qsk);
+        ui.click("preset-first-qso");
+        ui.click("preset-contester");
+        assert!(
+            ui.stored_settings().await.contest.contest_qsk,
+            "a preset leaves it alone"
+        );
+        ui.click("reset-tone-volume");
+        assert!(!ui.stored_settings().await.contest.contest_qsk);
     });
 }
 

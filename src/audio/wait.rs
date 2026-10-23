@@ -166,6 +166,17 @@ fn believed_latency(latency_sec: f64) -> f64 {
     }
 }
 
+/// `seconds` as whole milliseconds, rounded up, for a countdown: none for
+/// what is no length, and no more than a countdown can hold.
+fn whole_ms(seconds: f64) -> u32 {
+    let ms = (seconds * 1000.0).ceil();
+    if ms.is_finite() && ms > 0.0 {
+        ms.min(f64::from(u32::MAX / 4)) as u32
+    } else {
+        0
+    }
+}
+
 /// A send in flight, as the backend sees it.
 pub trait PlaybackSignal {
     fn poll(&self) -> WaitFlags;
@@ -204,21 +215,19 @@ impl PlaybackWait {
     }
 
     fn duration_ms(&self) -> u32 {
-        let ms = (self.duration_sec * 1000.0).ceil();
-        if ms.is_finite() && ms > 0.0 {
-            ms.min(f64::from(u32::MAX / 4)) as u32
-        } else {
-            0
-        }
+        whole_ms(self.duration_sec)
     }
 
     pub async fn wait(self) -> PlaybackOutcome {
         let duration_ms = self.duration_ms();
+        // A send waiting for the moment it was asked to start at, a
+        // contest's continuation, is not stalling meanwhile.
+        let grace_ms = STALL_GRACE_MS.saturating_add(whole_ms(self.heard_after_sec));
         let mut waited = 0u32;
         let mut polled_at = mono_ms();
         loop {
             let flags = self.signal.poll();
-            match next_wait_step(flags, waited, duration_ms, STALL_GRACE_MS) {
+            match next_wait_step(flags, waited, duration_ms, grace_ms) {
                 WaitStep::Done(outcome) => return outcome,
                 WaitStep::KeepWaiting => {}
             }

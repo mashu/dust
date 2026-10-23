@@ -534,10 +534,11 @@ pub enum SettingsSection {
     /// a contest, which one, how it runs and how often your TU signs.
     CharacterSet,
     /// Pitch and level of the station you are copying; in a contest, how
-    /// loud you hear your own sending.
+    /// loud you hear your own sending, and whether the band is heard
+    /// through it.
     ToneAndVolume,
     /// Fading, static, the noise floor, the filter, who else is calling,
-    /// and in a contest how the callers operate.
+    /// and in a contest how the callers operate and whether some flutter.
     BandConditions,
     /// Whether the trainer moves your level for you, and on what evidence.
     AutoLevel,
@@ -905,12 +906,14 @@ mod tests {
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_habits = crate::contest::CallerHabits::Rough;
+        s.contest.contest_flutter = true;
         s.contest.contest_minutes = 9_000;
         s.contest.contest_show_copy = true;
         s.contest.contest_tu_call = crate::contest::TuCall::Never;
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 9_000;
         s.contest.my_sending_db = 9_000;
+        s.contest.contest_qsk = true;
         s.contest.my_call = "//dl1/ abc//qrp é/0123456789/".to_string();
         s.contest.my_name = " jean-luc maximilian ".to_string();
         s.contest.my_state = " p.q. ".to_string();
@@ -1516,12 +1519,14 @@ mod tests {
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_habits = crate::contest::CallerHabits::Real;
+        s.contest.contest_flutter = true;
         s.contest.contest_minutes = 25;
         s.contest.contest_show_copy = true;
         s.contest.contest_tu_call = crate::contest::TuCall::Every;
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 34;
         s.contest.my_sending_db = -21;
+        s.contest.contest_qsk = true;
         s.contest.my_call = "DL1ABC".to_string();
         s.contest.my_name = "MAT".to_string();
         s.contest.my_state = "MA".to_string();
@@ -1580,6 +1585,27 @@ mod tests {
             assert_eq!(
                 easy,
                 section == SettingsSection::BandConditions,
+                "{section:?}"
+            );
+        }
+    }
+
+    /// Flutter is the Band card's, beside the callers' habits, and full
+    /// break-in Tone and volume's, beside your sending: each card's reset
+    /// turns its own off, and no other's touches it.
+    #[test]
+    fn flutter_and_full_break_in_belong_to_their_cards() {
+        for section in SettingsSection::ALL {
+            let mut s = wildly_different();
+            s.reset_section(section);
+            assert_eq!(
+                !s.contest.contest_flutter,
+                section == SettingsSection::BandConditions,
+                "{section:?}"
+            );
+            assert_eq!(
+                !s.contest.contest_qsk,
+                section == SettingsSection::ToneAndVolume,
                 "{section:?}"
             );
         }
@@ -1695,12 +1721,14 @@ mod tests {
         assert_eq!(json["contestKind"], "wpx");
         assert_eq!(json["contestStyle"], "single");
         assert_eq!(json["contestHabits"], "easy");
+        assert_eq!(json["contestFlutter"], false);
         assert_eq!(json["contestMinutes"], 10);
         assert_eq!(json["contestShowCopy"], false);
         assert_eq!(json["contestTuCall"], "third");
         assert_eq!(json["contestAdaptSpeed"], true);
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -9);
+        assert_eq!(json["contestQsk"], false);
         assert_eq!(json["myCall"], "");
         assert_eq!(json["myName"], "");
         assert_eq!(json["myState"], "");

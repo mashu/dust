@@ -3,10 +3,12 @@
 //!
 //! The operators hear the turns and never peek (§13 of the design): what a
 //! caller sent reaches them only as the text of a [`ContestEffect::PlayTurn`]
-//! segment, once that segment has been heard whole. The [`Runtime`] does
+//! segment, once that segment has been heard whole, and never one sent
+//! while the receiver was muted for your message. The [`Runtime`] does
 //! what the app's runtime does with effects: it plays each turn for exactly
-//! its planned length, fires each timer when it is due, and says when a turn
-//! started, ended or was cancelled. Hear a QSO is a few QSOs the perfect
+//! its planned length, from the moment a continuation is to start, fires
+//! each timer when it is due, and says when a turn started, ended or was
+//! cancelled. Hear a QSO is a few QSOs the perfect
 //! operator works so ([`hear_qsos`]), for a learner to hear before working
 //! one. The machine's tests drive runs through it too, and the soak copies
 //! callers as the operators do ([`copy_of`]).
@@ -33,7 +35,7 @@ pub(crate) struct Runtime<S> {
     pub(crate) now: u64,
     /// What the runtime owes the machine, each with when it is due.
     due: Vec<(u64, ContestEvent)>,
-    /// The turn playing, and when it started.
+    /// The turn playing, and when it started, or is to start.
     playing: Option<(u64, Turn)>,
     /// Every turn put on the air, in order.
     pub(crate) turns: Vec<Turn>,
@@ -74,7 +76,8 @@ impl<S: CallSource> Runtime<S> {
             && self.playing.as_ref().is_some_and(|(_, turn)| turn.id == id)
             && let Some((_, turn)) = self.playing.take()
         {
-            self.heard.extend(callers_text(&turn, f64::INFINITY));
+            let qsk = self.settings.contest.contest_qsk;
+            self.heard.extend(callers_text(&turn, f64::INFINITY, qsk));
         }
         let effects = self.machine.apply(event, MonoMs(self.now));
         self.carry_out(effects.clone());
@@ -122,7 +125,10 @@ impl<S: CallSource> Runtime<S> {
         for effect in effects {
             match &effect {
                 ContestEffect::PlayTurn(turn) => {
-                    self.leave_air();
+                    // A continuation starts where the turn before leaves
+                    // off, which plays on till then; any other at once.
+                    let starts = turn.starts_at.map_or(self.now, |at| at.0.max(self.now));
+                    self.leave_air(starts);
                     let planned = plan_turn(turn, &self.settings);
                     let ms = (planned.wanted.duration_sec * 1_000.0).ceil() as u64;
                     let id = turn.id;
@@ -130,15 +136,14 @@ impl<S: CallSource> Runtime<S> {
                         self.now,
                         ContestEvent::TurnStarted {
                             id,
-                            heard_from: MonoMs(self.now),
+                            heard_from: MonoMs(starts),
                         },
                     ));
-                    self.due
-                        .push((self.now + ms, ContestEvent::TurnEnded { id }));
-                    self.playing = Some((self.now, turn.clone()));
+                    self.due.push((starts + ms, ContestEvent::TurnEnded { id }));
+                    self.playing = Some((starts, turn.clone()));
                     self.turns.push(turn.clone());
                 }
-                ContestEffect::StopAudio | ContestEffect::ReleaseAudio => self.leave_air(),
+                ContestEffect::StopAudio | ContestEffect::ReleaseAudio => self.leave_air(self.now),
                 ContestEffect::StartTimer { id, ms } => self.due.push((
                     self.now + u64::from(*ms),
                     ContestEvent::TimerFired { id: *id },
@@ -154,9 +159,9 @@ impl<S: CallSource> Runtime<S> {
         }
     }
 
-    /// The turn on the air stops: what was heard whole of it by now is
-    /// heard, and its send comes back cancelled.
-    fn leave_air(&mut self) {
+    /// The turn on the air stops at `until`: what was heard whole of it by
+    /// then is heard, and its send comes back cancelled.
+    fn leave_air(&mut self, until: u64) {
         let Some((started, turn)) = self.playing.take() else {
             return;
         };
@@ -168,20 +173,24 @@ impl<S: CallSource> Runtime<S> {
                     if *due == id
             )
         });
-        let into = (self.now - started) as f64 / 1_000.0;
-        self.heard.extend(callers_text(&turn, into));
+        let into = until.saturating_sub(started) as f64 / 1_000.0;
+        let qsk = self.settings.contest.contest_qsk;
+        self.heard.extend(callers_text(&turn, into, qsk));
         self.due
             .push((self.now, ContestEvent::TurnCancelled { id }));
     }
 }
 
 /// What callers sent in `turn` that had been heard whole `into` seconds
-/// after it started. QRM is heard too, but an operator knows it is no
-/// caller, as it would by its pitch and its speed, and leaves it.
-fn callers_text(turn: &Turn, into: f64) -> Vec<String> {
+/// after it started, but for what went out while the receiver was muted for
+/// your message, without full break-in (`qsk`). QRM is heard too, but an
+/// operator knows it is no caller, as it would by its pitch and its speed,
+/// and leaves it.
+fn callers_text(turn: &Turn, into: f64, qsk: bool) -> Vec<String> {
     turn.segments
         .iter()
         .filter(|segment| segment.who.is_caller() && segment.end_sec <= into)
+        .filter(|segment| !turn.muted(segment, qsk))
         .map(|segment| segment.text.clone())
         .collect()
 }

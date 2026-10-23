@@ -732,9 +732,33 @@ fn SendingLevel(settings: Signal<TrainingSettings>) -> Element {
     }
 }
 
+/// Whether the band is heard through your own messages, in Contest mode
+/// only: with full break-in, as a rig that has it hears between the
+/// elements it sends; without it, as MorseRunner ships it, the receiver
+/// muted while you send. It reads its own value, so the card around it
+/// never redraws for it.
+#[component]
+fn FullBreakIn(settings: Signal<TrainingSettings>) -> Element {
+    let qsk = use_memo(move || {
+        let all = settings.read();
+        (all.curriculum.char_set_mode == CharSetMode::Contest).then_some(all.contest.contest_qsk)
+    })();
+    let Some(on) = qsk else {
+        return rsx! {};
+    };
+    rsx! {
+        Switch {
+            title: "Full break-in (QSK)",
+            description: "Hear the band through your own messages, and a caller sending across one. Off, the receiver is muted while you send, as on a rig without it, and nothing sent meanwhile reaches you.",
+            checked: on,
+            onchange: move |on| settings.write().contest.contest_qsk = on,
+        }
+    }
+}
+
 /// Nothing but ranges, which read their own values, and in Contest mode
-/// your sending, which reads its own: this card itself never redraws for a
-/// setting.
+/// your sending and full break-in, which read their own: this card itself
+/// never redraws for a setting.
 #[component]
 fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
     rsx! {
@@ -766,6 +790,7 @@ fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
                 step: 0.05,
             }
             SendingLevel { settings }
+            FullBreakIn { settings }
         }
     }
 }

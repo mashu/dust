@@ -5,10 +5,11 @@
 //! Everything the receiver plays is worked out here, a sample at a time and
 //! in one place, as one receiver would: the send through the filter, the
 //! band, the AGC hearing the two together and riding both, bands handing
-//! over to each other. Your own message in a contest joins after all of it,
-//! as a rig's sidetone does. The output stage — the paddle's sidetone, and
-//! the limiter on the lot — is added by the stream, which runs it even when
-//! the UI holds the mixer for a moment.
+//! over to each other, and, without full break-in, its output muted while
+//! you send. Your own message in a contest joins after all of it, as a
+//! rig's sidetone does. The output stage — the paddle's sidetone, and the
+//! limiter on the lot — is added by the stream, which runs it even when the
+//! UI holds the mixer for a moment.
 
 mod band;
 mod send;
@@ -19,6 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 
 use cw_core::band::soft_limit;
+
+use crate::audio::shape::GATE_RAMP_SEC;
 
 pub use band::BandVoice;
 pub use send::SendVoice;
@@ -46,6 +49,10 @@ pub struct Mixer {
     /// How far behind the last callback the speaker was, in frames: how
     /// long a send started now waits to be heard.
     latency: usize,
+    /// How open the receiver's output is: shut while you send without full
+    /// break-in, moving between the two a straight line at a time, over
+    /// [`GATE_RAMP_SEC`], so it never clicks.
+    gate: f64,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -78,6 +85,7 @@ impl Mixer {
             send: None,
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
             latency: 0,
+            gate: 1.0,
         }
     }
 
@@ -106,19 +114,51 @@ impl Mixer {
         self.sweep(swept);
     }
 
-    /// Start a send. One still sounding is not cut off: it rides out its
+    /// Start a send at once, as the player does with none asked to start
+    /// at a given time. One still sounding is not cut off: it rides out its
     /// release beside the new one.
+    #[cfg(test)]
     pub fn start(&mut self, send: SendVoice, swept: &mut Swept) {
+        self.start_at(send, None, 0, swept);
+    }
+
+    /// Start a send at a given time: `into` samples into the send playing,
+    /// which plays on to there, ridden down by then, so the new one takes
+    /// over from it sample for sample and the two never sound together, the
+    /// receiver muted across the handover where your message runs on into
+    /// it; or, with none playing to take over from, or none asked, after
+    /// `wait` samples.
+    /// Hands back how many samples from the next one played the new send
+    /// starts after: none for one asked for where the send playing has
+    /// passed, which rides out its release beside the new one.
+    pub fn start_at(
+        &mut self,
+        mut send: SendVoice,
+        into: Option<usize>,
+        wait: usize,
+        swept: &mut Swept,
+    ) -> usize {
+        let playing = self
+            .send
+            .as_ref()
+            .filter(|playing| playing.is_sounding() && !playing.is_released());
+        let wait = match (into, playing) {
+            (Some(into), Some(playing)) => playing.samples_until(into),
+            _ => wait,
+        };
+        send.wait(wait);
         if let Some(mut old) = self.send.replace(send) {
-            old.release();
+            old.release_by(wait);
             self.retiring.push(old);
         }
         self.sweep(swept);
+        wait
     }
 
-    /// Stop the send, which rides down over its release.
+    /// Stop the send, which rides down over its release, and one a send
+    /// waiting to take over from it was to stop later.
     pub fn stop(&mut self) {
-        if let Some(send) = self.send.as_mut() {
+        for send in self.send.iter_mut().chain(&mut self.retiring) {
             send.release();
         }
     }
@@ -126,6 +166,7 @@ impl Mixer {
     /// Everything out, for a stream at `sample_rate` to start again with.
     pub fn clear(&mut self, sample_rate: u32, swept: &mut Swept) {
         self.sample_rate = sample_rate.max(1);
+        self.gate = 1.0;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
         swept.sends.append(&mut self.retiring);
@@ -164,6 +205,7 @@ impl Mixer {
         if let Some(band) = self.band.as_mut() {
             band.reserve_stations(callers);
         }
+        let gate_step = 1.0 / (GATE_RAMP_SEC * f64::from(self.sample_rate));
         for slot in out.iter_mut() {
             let mut send = self.send.as_mut().map(SendVoice::next).unwrap_or_default();
             for old in &mut self.retiring {
@@ -188,7 +230,13 @@ impl Mixer {
             // hears it, so it neither ducks the reply that follows nor is
             // shaped by the filter, and only the limiter is past it.
             let heard = send.heard * gain.unwrap_or(1.0);
-            *slot += (background + heard + send.dry) as f32;
+            // Without full break-in the receiver's output, the band and the
+            // stations alike, goes quiet while you send, as a rig that is
+            // not QSK mutes it; the AGC runs on under it, and your message
+            // is never muted.
+            let shut = if send.keyed { 0.0 } else { 1.0 };
+            self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
+            *slot += ((background + heard) * self.gate + send.dry) as f32;
         }
         for send in self.send.iter().chain(&self.retiring) {
             send.settle(latency);

@@ -9,12 +9,12 @@
 
 use crate::auto_level::apply_auto_level;
 use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
-use crate::contest::QRS_MOST;
 use crate::contest::bot::{Copied, copy_of};
+use crate::contest::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
-use crate::session::MIN_RESPONSE_MS_PER_CHAR;
-use crate::timing::resolve_pileup;
+use crate::session::{MIN_RESPONSE_MS_PER_CHAR, whole_ms};
+use crate::timing::{SEND_RELEASE_SEC, resolve_pileup};
 use crate::{
     Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CallerHabits, CharSamplingState,
     CharSetMode, ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
@@ -1029,6 +1029,12 @@ fn check_contest_effects(
                 seen.turns.push(turn.id);
                 assert!(!turn.segments.is_empty(), "seed {seed}: an empty turn");
                 let planned = plan_turn(turn, settings);
+                // Without full break-in the receiver is muted from the
+                // turn's start to the end of your message; with it, never.
+                let muted = turn
+                    .your_end_sec()
+                    .filter(|_| !settings.contest.contest_qsk);
+                assert_eq!(planned.muted_until, muted, "seed {seed} step {step}");
                 for other in &planned.others {
                     assert!(
                         other.duration_sec <= planned.wanted.duration_sec + 1e-9,
@@ -1075,7 +1081,22 @@ fn check_contest_effects(
                         continue;
                     }
                     if segment.who == Sender::You {
+                        assert_eq!(segment.fade, None, "seed {seed} step {step}: yours faded");
                         continue;
+                    }
+                    // Some callers flutter, each within flutter's rates and
+                    // depths, under the Band card's flutter alone.
+                    if let Some(flutter) = segment.fade.and_then(|fade| fade.flutter) {
+                        let (slowest, fastest) = FLUTTER_RATE_HZ;
+                        let (shallowest, deepest) = FLUTTER_DEPTH;
+                        assert!(
+                            settings.contest.contest_flutter
+                                && (slowest..=fastest).contains(&flutter.rate_hz())
+                                && (shallowest - 1e-9..=deepest + 1e-9).contains(&flutter.depth()),
+                            "seed {seed} step {step}: a flutter of {:.1} Hz, {:.2} deep",
+                            flutter.rate_hz(),
+                            flutter.depth()
+                        );
                     }
                     // A caller sends within the Speed card's ranges, drawn
                     // evenly or from your copy: its spacing within its own
@@ -1286,6 +1307,18 @@ fn contest_run(
         let was_terminal = machine.is_terminal();
         let lost = machine.nil_and_lost_copies();
         effects = machine.apply(event.clone(), at);
+        // A continuation takes over from the turn on the air where that
+        // one leaves off: never so soon after the key that the turn on the
+        // air could not be ridden down first.
+        for effect in &effects {
+            if let ContestEffect::PlayTurn(turn) = effect {
+                assert!(
+                    turn.starts_at
+                        .is_none_or(|starts| starts >= at.plus(whole_ms(SEND_RELEASE_SEC))),
+                    "seed {seed} step {step}: a turn to start too soon after its key"
+                );
+            }
+        }
         // A station you left for another, or whose QSO ended with another
         // station's call in the Call field, keeps the call you had for it,
         // and a NIL logged for a station you left is no copy of the one you
@@ -1376,6 +1409,11 @@ fn soak_contest_runs(style: RunStyle) {
         // callers' speed follows your copy on every other run, set so too.
         settings.contest.contest_show_copy = seed % 3 == 0;
         settings.contest.contest_adapt_speed = seed % 2 == 0;
+        // Full break-in on half the runs, so callers sending across your
+        // message are heard on some and muted on the rest; flutter on two
+        // in five, drawn from streams of their own as it is.
+        settings.contest.contest_qsk = seed % 4 < 2;
+        settings.contest.contest_flutter = seed % 5 < 2;
         let SoakRun {
             mut events,
             mut machine,

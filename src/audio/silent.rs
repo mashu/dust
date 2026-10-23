@@ -19,11 +19,18 @@ pub struct MorsePlayer {
 
 struct SilentSignal {
     ticket: Ticket,
-    /// When the send started, on the app's monotonic clock.
+    /// When the send starts, on the app's monotonic clock: later than it
+    /// was started for one asked to start at a given time.
     started: u64,
+    /// How long after it was started it starts.
+    wait_ms: u64,
 }
 
 impl PlaybackSignal for SilentSignal {
+    fn heard_after_sec(&self) -> f64 {
+        self.wait_ms as f64 / 1_000.0
+    }
+
     fn poll(&self) -> WaitFlags {
         let elapsed = mono_ms().saturating_sub(self.started);
         WaitFlags {
@@ -55,12 +62,15 @@ impl MorseBackend for MorsePlayer {
         _transmission: &Transmission,
         _plan: &PlannedTransmission,
         _settings: &TrainingSettings,
+        heard_in: Option<f64>,
     ) -> Result<Rc<dyn PlaybackSignal>, String> {
         // Nothing is heard: the plan's length, which the wait already has,
-        // is all there is to a send.
+        // is all there is to a send, from when it was to start.
+        let wait_ms = heard_in.map_or(0, |heard_in| (heard_in.max(0.0) * 1_000.0).round() as u64);
         Ok(Rc::new(SilentSignal {
             ticket: self.epoch.arm(),
-            started: mono_ms(),
+            started: mono_ms() + wait_ms,
+            wait_ms,
         }))
     }
 
@@ -100,6 +110,7 @@ mod tests {
         Turn {
             id: 1,
             at_run_ms: 0,
+            starts_at: None,
             segments: vec![mine, reply],
         }
     }
@@ -122,7 +133,8 @@ mod tests {
 
             let mut player = MorsePlayer::new().expect("a player");
             let started = mono_ms();
-            let wait = start_planned(&mut player, &plan, &transcript, &settings).expect("sent");
+            let wait =
+                start_planned(&mut player, &plan, &transcript, &settings, None).expect("sent");
             assert_eq!(wait.heard_after_sec, 0.0);
             assert_eq!(wait.wait().await, PlaybackOutcome::Completed);
             let took = mono_ms() - started;
@@ -132,7 +144,8 @@ mod tests {
             );
 
             // Part way through, it is stopped.
-            let wait = start_planned(&mut player, &plan, &transcript, &settings).expect("sent");
+            let wait =
+                start_planned(&mut player, &plan, &transcript, &settings, None).expect("sent");
             let mut waiting = std::pin::pin!(wait.wait());
             let first =
                 std::future::poll_fn(|cx| std::task::Poll::Ready(waiting.as_mut().poll(cx))).await;

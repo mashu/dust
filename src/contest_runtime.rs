@@ -553,6 +553,9 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
         return;
     };
     let plan = plan_turn(&turn, &settings);
+    // A continuation starts where the turn before gives way, which plays on
+    // till then: no character of your message goes twice, and none waits.
+    let starts_at = turn.starts_at;
     // Asked for now, as the turn goes on the air, not when its task first
     // runs: a stop handled before then ends it, and a turn before it still
     // waiting out a retry gives up rather than start over it.
@@ -560,13 +563,13 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     spawn_forever(async move {
         let heard = lease.clone();
         // Each attempt, retries too: its sound reaches the ear the player's
-        // lead and latency after it starts.
+        // lead, any wait for its moment and latency after it starts.
         let started = move |heard_after_sec: f64| {
             let heard_from = MonoMs(mono_ms()).plus_sec(heard_after_sec);
             dispatch(ctx, &heard, ContestEvent::TurnStarted { id, heard_from });
         };
         let event = match lease
-            .send_planned(asked, &plan, &transcript, &settings, started)
+            .send_planned(asked, &plan, &transcript, &settings, starts_at, started)
             .await
         {
             Ok(_) => ContestEvent::TurnEnded { id },
@@ -1010,6 +1013,67 @@ mod tests {
                 .and_then(|view| view.air)
                 .expect("the CQ on the air");
             assert_eq!(air.heard_from, MonoMs(300));
+        });
+    }
+
+    /// A key while your message is still going out is spliced on where the
+    /// message reaches the start of its next character: the player is asked
+    /// to start the continuation at that moment, the rest of your message
+    /// going on from that character and the one sounding at the key never
+    /// sent again, and the run hears it from then.
+    #[test]
+    fn a_key_mid_message_is_spliced_on_where_the_message_gives_way() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            h.advance(300).await;
+            let pressed = mono_ms();
+            press(&mut h, OpKey::Again);
+            let starts = h.recorder.starts();
+            let (cq, next) = (&starts[0], starts.last().expect("the continuation"));
+            assert!(
+                cq.transcript.text.starts_with("CQ "),
+                "{}",
+                cq.transcript.text
+            );
+            // The C sounding at the key goes out whole in the CQ's send; the
+            // rest goes on from the Q, the C's four elements before it.
+            assert!(
+                next.transcript.text.starts_with("Q DL1ABC"),
+                "{}",
+                next.transcript.text
+            );
+            let q_at = cq.plan.wanted.events[4].start_sec;
+            let heard_in = next.heard_in.expect("a moment to start at");
+            let meant = q_at - (pressed as f64 / 1_000.0);
+            assert!((heard_in - meant).abs() < 0.002, "{heard_in} for {meant}");
+            let air = view(&h).and_then(|view| view.air).expect("on the air");
+            assert_eq!(air.heard_from, MonoMs(pressed).plus_sec(heard_in));
+        });
+    }
+
+    /// Without full break-in, as it ships, every turn with a message of
+    /// yours mutes the receiver from its start to your message's end, and a
+    /// turn of callers alone none; with full break-in, none does.
+    #[test]
+    fn the_receiver_is_muted_while_you_send_unless_full_break_in() {
+        run(|| async {
+            for qsk in [false, true] {
+                let mut settings = contest_settings();
+                settings.contest.contest_qsk = qsk;
+                let mut h = Harness::with_settings(settings.clone());
+                h.start_training();
+                work(&mut h, 30_000, Some(1)).await;
+                let starts = h.recorder.starts();
+                assert!(starts.len() >= 3, "{} turns", starts.len());
+                for start in &starts {
+                    let yours = &start.transcript;
+                    let muted = (!qsk && !yours.text.is_empty()).then(|| {
+                        plan_morse_playback_for(&yours.text, &settings, &yours.voice).duration_sec
+                    });
+                    assert_eq!(start.plan.muted_until, muted, "{qsk}: {}", yours.text);
+                }
+            }
         });
     }
 

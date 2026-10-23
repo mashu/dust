@@ -301,8 +301,10 @@ async fn play_qsos(
                 ));
             }
         };
+        // The perfect operator keys only once the air is quiet, so no turn
+        // it hears is a continuation: each starts after the quiet before it.
         lease
-            .send_planned(asked, &plan, &transcript, &sound, started)
+            .send_planned(asked, &plan, &transcript, &sound, None, started)
             .await?;
         showing.set(showing.get() + 1);
         show(dialogue, before, &sends);
@@ -607,6 +609,7 @@ mod tests {
             turn: Turn {
                 id: 1,
                 at_run_ms: 0,
+                starts_at: None,
                 segments,
             },
         };

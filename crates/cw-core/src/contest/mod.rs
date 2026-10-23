@@ -47,7 +47,7 @@ use crate::settings::TrainingSettings;
 
 pub use bot::{HeardQsos, HeardTurn, hear_qsos};
 #[cfg(test)]
-pub(crate) use caller::QRS_MOST;
+pub(crate) use caller::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 pub use check::{QsoCheck, QsoError, QsoText, check_qso};
 pub use clock::RunClock;
 pub use data::places::{home_country, place_name};

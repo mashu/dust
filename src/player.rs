@@ -13,7 +13,7 @@ use std::cell::{Cell, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
-use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
+use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 
 use crate::audio::{MorseBackend, PlaybackOutcome, PlaybackWait};
 use crate::time::{POLL_MS, sleep_ms};
@@ -340,22 +340,25 @@ impl Lease {
     /// Send a contest's turn, planned already, and wait for it to be heard:
     /// as [`Lease::send`] does, retries and all, as the send `asked` for
     /// ([`Lease::ask_to_send`]). `transcript` is what the turn says, for a
-    /// player that keeps it.
+    /// player that keeps it. `starts_at`, for a continuation, is when its
+    /// sound is to reach the ear: each attempt asks the player for it, and
+    /// one after it has passed, a retry, starts as soon as it can.
     ///
     /// Each attempt, once started, calls `on_start` with how long after now
     /// its sound reaches the ear, in seconds: the player's lead in starting
-    /// it, and its latency to the ear. No borrow of the player is held then,
-    /// so `on_start` may use it.
+    /// it, any wait for the moment asked, and its latency to the ear. No
+    /// borrow of the player is held then, so `on_start` may use it.
     pub async fn send_planned(
         &self,
         asked: Asked,
         plan: &PlannedTransmission,
         transcript: &Transmission,
         settings: &TrainingSettings,
+        starts_at: Option<MonoMs>,
         mut on_start: impl FnMut(f64),
     ) -> Result<Sent, AudioError> {
         let begin = |backend: &mut dyn MorseBackend| {
-            crate::audio::start_planned(backend, plan, transcript, settings)
+            crate::audio::start_planned(backend, plan, transcript, settings, starts_at)
         };
         self.send_with(asked, &begin, settings, &mut on_start).await
     }
@@ -618,9 +621,16 @@ mod tests {
             recorder.fail_next(1);
             let asked = lease.ask_to_send();
             let sent = lease
-                .send_planned(asked, &plan, &transmission, &settings, |heard_after| {
-                    starts.push(heard_after);
-                })
+                .send_planned(
+                    asked,
+                    &plan,
+                    &transmission,
+                    &settings,
+                    None,
+                    |heard_after| {
+                        starts.push(heard_after);
+                    },
+                )
                 .await;
             assert_eq!(
                 sent.map(|sent| sent.duration_sec),
@@ -631,6 +641,62 @@ mod tests {
             assert_eq!(kept.len(), 2);
             assert_eq!(kept[0].transcript, transmission);
             assert_eq!(kept[0].plan.wanted.duration_sec, plan.wanted.duration_sec);
+        });
+    }
+
+    /// A send asked to start at a given time is started then: the player
+    /// is asked for that moment, its start says its sound is heard then, and
+    /// the wait runs on from there to the end of the send. Asked for a
+    /// moment already past, as a retry is, it starts as soon as it can.
+    #[test]
+    fn a_planned_send_starts_at_its_time() {
+        run(|| async {
+            let (player, recorder) = player();
+            let settings = test_settings();
+            let lease = player.claim(&settings).expect("a player");
+            let transmission = cq();
+            let plan = cw_core::plan_transmission(&transmission, &settings);
+            let began = crate::time::mono_ms();
+            let at = MonoMs(began + 400);
+            let mut starts = Vec::new();
+            let asked = lease.ask_to_send();
+            let sent = lease
+                .send_planned(
+                    asked,
+                    &plan,
+                    &transmission,
+                    &settings,
+                    Some(at),
+                    |heard_after| {
+                        starts.push(heard_after);
+                    },
+                )
+                .await;
+            assert!(sent.is_ok());
+            assert_eq!(starts, [0.4]);
+            assert_eq!(recorder.starts()[0].heard_in, Some(0.4));
+            let took = crate::time::mono_ms() - began;
+            let planned = (plan.wanted.duration_sec * 1_000.0) as u64;
+            assert!(took >= 400 + planned, "done {took} ms in, of {planned}");
+
+            let past = MonoMs(crate::time::mono_ms() - 200);
+            let mut starts = Vec::new();
+            let asked = lease.ask_to_send();
+            let sent = lease
+                .send_planned(
+                    asked,
+                    &plan,
+                    &transmission,
+                    &settings,
+                    Some(past),
+                    |heard_after| {
+                        starts.push(heard_after);
+                    },
+                )
+                .await;
+            assert!(sent.is_ok());
+            assert_eq!(starts, [0.0], "at once");
+            assert_eq!(recorder.starts()[1].heard_in, Some(-0.2));
         });
     }
 
@@ -646,7 +712,7 @@ mod tests {
             let plan = cw_core::plan_transmission(&transmission, &settings);
             let asked = lease.ask_to_send();
             let outcome = lease
-                .send_planned(asked, &plan, &transmission, &settings, |_| {
+                .send_planned(asked, &plan, &transmission, &settings, None, |_| {
                     lease.stop_sending()
                 })
                 .await;
@@ -665,7 +731,8 @@ mod tests {
             let lease = player.claim(&settings).expect("a player");
             let transmission = cq();
             let plan = cw_core::plan_transmission(&transmission, &settings);
-            let send = |asked| lease.send_planned(asked, &plan, &transmission, &settings, |_| {});
+            let send =
+                |asked| lease.send_planned(asked, &plan, &transmission, &settings, None, |_| {});
 
             let asked = lease.ask_to_send();
             lease.stop_sending();
@@ -694,7 +761,7 @@ mod tests {
             let asked = holder.ask_to_send();
             let _ = lease.ask_to_send();
             let sent = holder
-                .send_planned(asked, &plan, &transmission, &settings, |_| {})
+                .send_planned(asked, &plan, &transmission, &settings, None, |_| {})
                 .await;
             assert!(sent.is_ok(), "{sent:?}");
         });

@@ -31,9 +31,12 @@ pub(super) const MULTIPATH_RATES: [f64; QSB_PATHS] = [1.000, 0.633, 1.471, 2.309
 const PATH_WEIGHTS: [f64; QSB_PATHS] = [0.40, 0.28, 0.20, 0.12];
 
 /// Points per second in a [`Qsb::curve`]. The fastest path at the fastest
-/// rate is under 3.5 Hz, so straight lines between points this close follow
-/// the fade to a fraction of a decibel, even at the bottom of the deepest
-/// fade, where it turns sharply as it reaches the end of its range.
+/// rate the Band card's fading goes to is under 3.5 Hz, so straight lines
+/// between points this close follow the fade to a fraction of a decibel,
+/// even at the bottom of the deepest fade, where it turns sharply as it
+/// reaches the end of its range. A flutter's paths run some twenty times
+/// faster, which this would not follow: a flutter is laid into its tones'
+/// envelopes instead, and never made a curve.
 const CURVE_POINTS_PER_SEC: f64 = 200.0;
 
 /// The fading on the Morse, as the settings ask for it: how deep and how
@@ -49,11 +52,7 @@ pub struct Qsb {
 impl Qsb {
     /// The fading `band` asks for, or None when it asks for none.
     pub fn of(band: &BandSettings) -> Option<Self> {
-        let depth = if band.qsb_depth.is_finite() {
-            band.qsb_depth.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let depth = held_depth(band.qsb_depth);
         if !band.qsb_enabled || depth <= 0.0 {
             return None;
         }
@@ -63,9 +62,37 @@ impl Qsb {
             QSB_RATE_MIN_HZ
         };
         Some(Self {
-            floor: 1.0 - depth.min(1.0 - QSB_MIN_GAIN),
+            floor: 1.0 - depth,
             rate_hz,
         })
+    }
+
+    /// A flutter: the same wandering sum of paths, `depth` deep, at a rate
+    /// far past the Band card's fading, as a signal over a polar path
+    /// flutters, several times a second. Held to the depth a fade keeps
+    /// ([`QSB_MIN_GAIN`]) and to a positive, finite rate. Laid into tones'
+    /// envelopes only: too fast for a [`Self::curve`].
+    pub fn flutter(depth: f64, rate_hz: f64) -> Self {
+        let depth = held_depth(depth);
+        let rate_hz = if rate_hz.is_finite() && rate_hz > 0.0 {
+            rate_hz
+        } else {
+            QSB_RATE_MIN_HZ
+        };
+        Self {
+            floor: 1.0 - depth,
+            rate_hz,
+        }
+    }
+
+    /// How deep it fades: from full strength down to `1 - depth`.
+    pub fn depth(&self) -> f64 {
+        1.0 - self.floor
+    }
+
+    /// How fast it wanders, in hertz: the rate of its first path.
+    pub fn rate_hz(&self) -> f64 {
+        self.rate_hz
     }
 
     /// How much of the signal is getting through at `t_sec` on the band's
@@ -102,7 +129,8 @@ impl Qsb {
     /// send's gain, which plays it as straight lines between the points. A
     /// graph of oscillators cannot hold their sum inside the range the way
     /// `gain_at` does, so it is the one function, sampled, rather than a copy
-    /// of it built from nodes.
+    /// of it built from nodes. For the band's fading only: its points are
+    /// too far apart for a flutter ([`CURVE_POINTS_PER_SEC`]).
     pub fn curve(&self, start_sec: f64, duration_sec: f64) -> Vec<f32> {
         let duration = if duration_sec.is_finite() {
             duration_sec.max(0.0)
@@ -113,6 +141,16 @@ impl Qsb {
         (0..=intervals)
             .map(|k| self.gain_at(start_sec + duration * k as f64 / intervals as f64))
             .collect()
+    }
+}
+
+/// `depth` as a fade keeps it: none for what is no number, and never so
+/// deep the signal falls under the weakest a fade leaves it.
+fn held_depth(depth: f64) -> f64 {
+    if depth.is_finite() {
+        depth.clamp(0.0, 1.0 - QSB_MIN_GAIN)
+    } else {
+        0.0
     }
 }
 
@@ -210,6 +248,31 @@ mod tests {
         for t in [0.0, -1.0, 1e9] {
             assert!(qsb(0.6, 1.0).gain_at(t).is_finite());
         }
+    }
+
+    /// A flutter wanders as a fade does, at its own rate, past the Band
+    /// card's range, and is held to the depth a fade keeps.
+    #[test]
+    fn a_flutter_wanders_at_its_own_rate_and_depth() {
+        let flutter = Qsb::flutter(0.6, 20.0);
+        assert_eq!((flutter.depth(), flutter.rate_hz()), (0.6, 20.0));
+        let gains: Vec<f64> = (0..48_000)
+            .map(|i| f64::from(flutter.gain_at(f64::from(i) / 48_000.0)))
+            .collect();
+        let min = gains.iter().copied().fold(f64::MAX, f64::min);
+        let max = gains.iter().copied().fold(f64::MIN, f64::max);
+        assert!((0.4 - 1e-6..0.45).contains(&min), "{min}");
+        assert!(max > 0.97 && max <= 1.0 + 1e-6, "{max}");
+        // Twenty times a second: within one second it falls through the
+        // middle at least as often as its first path does, near forty times.
+        let crossings = gains
+            .windows(2)
+            .filter(|pair| (pair[0] - 0.7) * (pair[1] - 0.7) < 0.0)
+            .count();
+        assert!((25..=120).contains(&crossings), "{crossings}");
+        assert_eq!(Qsb::flutter(2.0, 5.0).depth(), 1.0 - QSB_MIN_GAIN);
+        assert_eq!(Qsb::flutter(f64::NAN, -1.0).depth(), 0.0);
+        assert_eq!(Qsb::flutter(0.5, f64::NAN).rate_hz(), QSB_RATE_MIN_HZ);
     }
 
     /// The browser fades a send by playing a curve of the shared fade, as
