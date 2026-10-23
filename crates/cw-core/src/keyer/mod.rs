@@ -61,8 +61,8 @@ const STRAIGHT_DAH_DITS: u64 = 2;
 #[serde(rename_all = "camelCase")]
 pub enum KeyerMode {
     Straight,
-    #[default]
     IambicA,
+    #[default]
     IambicB,
     Ultimatic,
 }

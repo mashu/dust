@@ -120,6 +120,16 @@ mod tests {
         assert!((snr - 21.0).abs() < 1e-9, "{snr} dB");
     }
 
+    /// Out of the box the hiss is subtle: the Band card reads it as about
+    /// 40 dB S/N through the receiver the defaults build.
+    #[test]
+    fn the_default_noise_floor_is_about_40_db_down() {
+        let settings = crate::settings::TrainingSettings::default();
+        let receiver = super::super::FilterDesign::from_settings(&settings);
+        let snr = heard_snr_db(noise_level(&settings.band), receiver.noise_bandwidth_hz());
+        assert!((40.0..41.5).contains(&snr), "{snr} dB");
+    }
+
     #[test]
     fn a_switched_off_layer_is_silent_whatever_its_level() {
         let mut band = BandSettings {

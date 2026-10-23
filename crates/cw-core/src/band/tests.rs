@@ -432,18 +432,19 @@ fn static_is_as_loud_at_any_sample_rate() {
 
 // ----------------------------------------------------------------- the mixer
 
-/// The intensity controls have to be worth having: quiet enough at their
-/// defaults to copy through comfortably, loud enough at the top to be the
+/// The intensity controls have to be worth having: subtle at their defaults,
+/// a hiss you copy through without effort, loud enough at the top to be the
 /// reason you miss a character. A CW contact at the edge of readability is
 /// around 0 dB signal-to-noise, so that is what the far end aims at — heard
 /// through the 500 Hz filter the control is calibrated in, as its S/N readout
 /// is.
 ///
 /// Through any other receiver both ends move together by what its noise
-/// bandwidth lets in. The default, the peaked 300 Hz filter, passes 163 Hz of
-/// noise against 503, 4.9 dB less, so there the default band is about 26 dB
-/// and the loudest about 6 — which is the reason to reach for a narrow
-/// filter — and the span between them is the same.
+/// bandwidth lets in. The default, the peaked 300 Hz filter built 353 Hz wide
+/// for the default side-tone range, passes 179 Hz of noise against 503,
+/// 4.5 dB less, so there the default band is about 37 dB and the loudest
+/// about 6 — which is the reason to reach for a narrow filter — and the span
+/// between them is the same.
 #[test]
 fn the_band_spans_a_useful_range_of_signal_to_noise() {
     let snr = |settings: &TrainingSettings| {
@@ -467,8 +468,8 @@ fn the_band_spans_a_useful_range_of_signal_to_noise() {
          default receiver {ordinary_heard:.1} and {hard_heard:.1}"
     );
     assert!(
-        (14.0..26.0).contains(&ordinary),
-        "the default band should be present but easy, was {ordinary:.1} dB"
+        (28.0..40.0).contains(&ordinary),
+        "the default band should be present but subtle, was {ordinary:.1} dB"
     );
     assert!(
         hard < 6.0,

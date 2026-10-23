@@ -531,10 +531,15 @@ mod tests {
     /// its own shape.
     #[test]
     fn a_narrower_filter_thins_the_pile_up() {
-        // The real side-tone spread, not a pinned tone: how much room there is
+        // A side-tone spread, not a pinned tone: how much room there is
         // beside you depends on where in the passband you happen to sit.
+        // 400-600 Hz, which a 233 Hz receiver passes: the default 300-600 Hz
+        // holds the receiver at least 353 Hz wide, and the slider narrows
+        // nothing under that.
         let base = {
             let mut s = TrainingSettings::default();
+            s.band.side_tone_min = 400.0;
+            s.band.side_tone_max = 600.0;
             s.band.stations_max = STATIONS_MAX;
             s.clamp()
         };
@@ -578,9 +583,8 @@ mod tests {
         // By the narrowest it goes, most of them are gone. Not three in four
         // of them, as when the receiver could be squeezed to the slider's
         // 150 Hz and nobody sat outside its 3 dB points: it still has to pass
-        // the default 400-600 Hz side-tone range, which takes 233 Hz, and the
-        // callers it leaves sit out on its skirt. Measured, 316 of 843 are
-        // left.
+        // the 400-600 Hz side-tone range, which takes 233 Hz, and the callers
+        // it leaves sit out on its skirt. Measured, 300 of 799 are left.
         assert!(
             narrow * 5 < wide * 2,
             "a {FILTER_WIDTH_MIN:.0} Hz filter still passed {narrow} of {wide} callers"

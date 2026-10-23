@@ -596,10 +596,12 @@ fn the_six_db_points_are_where_the_width_says() {
 
 /// A rig's 300 Hz CW filter, sharp, on a 500 Hz note: about 280 Hz wide at
 /// 3 dB, 373 at 20 and 664 at 60 — a shape factor of 2.2 — and flat across
-/// the default side-tone range either side of the note.
+/// 400-600 Hz either side of the note.
 #[test]
 fn a_sharp_300_hz_filter_is_a_rigs_cw_filter() {
     let mut settings = TrainingSettings::default();
+    settings.band.side_tone_min = 400.0;
+    settings.band.side_tone_max = 600.0;
     settings.band.filter_shape = FilterShape::Sharp;
     let design = FilterDesign::from_settings(&settings);
     assert_eq!(design.shape(), FilterShape::Sharp);
@@ -622,10 +624,11 @@ fn a_sharp_300_hz_filter_is_a_rigs_cw_filter() {
 }
 
 /// The default receiver is that 300 Hz sharp filter with the audio peak
-/// filter in behind it, on the 500 Hz note in the middle of the default
-/// side-tone range. Nothing widens it: its IF filter passes 400-600 Hz flat,
-/// and only the resonance takes the ends of the range down, by the 4 dB the
-/// peak filter costs a station 100 Hz off.
+/// filter in behind it, on the 450 Hz note in the middle of the default
+/// side-tone range. 300-600 Hz is more than 300 Hz passes, so it is built
+/// 353 Hz wide, as wide as its IF filter needs to pass the ends of the range
+/// within [`COVERAGE_DB`], and the resonance takes them down by the 4.9 dB the
+/// peak filter costs a station 150 Hz off: 5.7 dB in all.
 #[test]
 fn the_default_receiver_is_a_peaked_300_hz_filter() {
     let settings = TrainingSettings::default();
@@ -634,30 +637,39 @@ fn the_default_receiver_is_a_peaked_300_hz_filter() {
     assert_eq!(settings.band.filter_shape, FilterShape::Peaked);
     let design = FilterDesign::from_settings(&settings);
     assert_eq!(design.shape(), FilterShape::Peaked);
-    assert_eq!(design.pitch_hz(), 500.0);
-    assert_eq!(design.width_hz(), 300.0);
+    assert_eq!(design.pitch_hz(), 450.0);
     let (w3, w6, w20, w60) = (
         full_width(&design, -3.0),
         full_width(&design, -6.0),
         full_width(&design, -20.0),
         full_width(&design, -60.0),
     );
-    let ends = [db(design.response_at(400.0)), db(design.response_at(600.0))];
-    let if_ends = [400.0, 600.0].map(|hz| db(design.response_at(hz) / apf_gain(hz - 500.0)));
+    let ends = [db(design.response_at(300.0)), db(design.response_at(600.0))];
+    let if_ends = [300.0, 600.0].map(|hz| db(design.response_at(hz) / apf_gain(hz - 450.0)));
     println!(
-        "default (peaked/300): {w3:.1} Hz at 3 dB, {w6:.1} at 6, {w20:.1} at 20, {w60:.1} at 60; \
-         noise bandwidth {:.1} Hz; 400/600 Hz at {ends:.3?} dB, its IF filter {if_ends:.3?}",
+        "default (peaked/300): built {:.1} Hz; {w3:.1} Hz at 3 dB, {w6:.1} at 6, {w20:.1} at 20, \
+         {w60:.1} at 60; noise bandwidth {:.1} Hz; 300/600 Hz at {ends:.3?} dB, its IF filter \
+         {if_ends:.3?}",
+        design.width_hz(),
         design.noise_bandwidth_hz()
     );
+    assert!(
+        (design.width_hz() - 353.0).abs() <= 2.0,
+        "built {:.1} Hz",
+        design.width_hz()
+    );
     assert!((w3 - 141.0).abs() <= 3.0, "{w3:.1} Hz at 3 dB");
-    assert!((w6 - 264.0).abs() <= 3.0, "{w6:.1} Hz at 6 dB");
+    assert!((w6 - 305.0).abs() <= 3.0, "{w6:.1} Hz at 6 dB");
     for level in ends {
-        assert!((level + 3.97).abs() <= 0.15, "{level:.3} dB at an end");
+        assert!((level + 5.73).abs() <= 0.15, "{level:.3} dB at an end");
     }
     for level in if_ends {
-        assert!(level >= -0.1, "the IF filter is {level:.3} dB at an end");
+        assert!(
+            level >= COVERAGE_DB - 1e-6,
+            "the IF filter is {level:.3} dB at an end"
+        );
     }
-    assert!((design.noise_bandwidth_hz() - 163.0).abs() <= 3.0);
+    assert!((design.noise_bandwidth_hz() - 179.0).abs() <= 3.0);
     assert_eq!(design.sections(48_000.0).len(), 9);
 }
 
@@ -857,7 +869,9 @@ fn the_receiver_always_passes_the_side_tone_range() {
     }
     println!("widest receiver the coverage asked for: {widest:.0} Hz");
     // A width already enough is left exactly as it was set.
-    let settings = TrainingSettings::default();
+    let mut settings = TrainingSettings::default();
+    settings.band.side_tone_min = 400.0;
+    settings.band.side_tone_max = 600.0;
     assert_eq!(
         FilterDesign::from_settings(&settings).width_hz(),
         settings.band.filter_width_hz
@@ -920,14 +934,16 @@ fn the_receiver_always_passes_the_side_tone_range() {
 /// the hiss remembers its own waveform — has an envelope that is still above
 /// 0.316 (−10 dB) 2.3 ms on and above 0.1 at 2.9 ms; a 500 Hz sharp filter's
 /// lets go by about 1.5 ms, which is what makes it sound like rushing air. And
-/// it sits at the note, not under it: almost none of its power is below 0.7
-/// of the pitch, where that filter's has nearly a fifth of it as rumble, and
+/// it sits at the note, not under it: little of its power is below 0.7 of
+/// the pitch, where that filter's has nearly a fifth of it as rumble, and
 /// most of it is inside the 6 dB width.
 ///
 /// The default receiver is the peaked 300 Hz one, whose resonance holds the
-/// hiss to the note longer still: measured, the envelope is 0.58 at 2.3 ms and
-/// 0.41 at 2.9 ms, 0.5% of the power is below 350 Hz, and 99% of it is within
-/// 350-650 Hz.
+/// hiss to the note longer still. Built 353 Hz wide on the 450 Hz note of the
+/// default 300-600 Hz range, its lower skirt reaches nearer 0.7 of the pitch
+/// than it would on a higher note: measured, the envelope is 0.48 at 2.3 ms
+/// and 0.30 at 2.9 ms, 5.5% of the power is below 315 Hz, and 99% of it is
+/// within 273-627 Hz.
 #[test]
 fn the_default_hiss_rings_at_the_note() {
     const RATE: u32 = 48_000;
@@ -981,7 +997,7 @@ fn the_default_hiss_rings_at_the_note() {
     );
     assert!(at_2_3 >= 0.316, "the hiss let go by 2.3 ms: {at_2_3:.3}");
     assert!(at_2_9 >= 0.1, "the hiss let go by 2.9 ms: {at_2_9:.3}");
-    assert!(below <= 0.03, "{:.1}% of the hiss is rumble", 100.0 * below);
+    assert!(below <= 0.07, "{:.1}% of the hiss is rumble", 100.0 * below);
     assert!(
         inside >= 0.85,
         "only {:.1}% of the hiss is in the passband",

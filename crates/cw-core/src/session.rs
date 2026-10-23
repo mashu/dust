@@ -14,7 +14,7 @@ use crate::score::{
     GroupCopy, calculate_effective_alphabet_size, calculate_total_chars,
     compute_average_response_ms, copy_speed, session_points,
 };
-use crate::settings::{CharSetMode, LevelAxis, PlaybackSettings, TrainingSettings, mode_on_disk};
+use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
 
 /// The quickest a listener can be said to answer, per character.
 ///
@@ -612,9 +612,10 @@ fn session_mode_legacy() -> CharSetMode {
     CharSetMode::Koch
 }
 
-/// Sessions saved before the speed was recorded were sent at the default.
+/// Sessions saved before the speed was recorded were sent at the default
+/// then, 18 WPM: fixed, so that a later default never changes your history.
 fn session_wpm_default() -> f64 {
-    PlaybackSettings::default().char_wpm_min
+    18.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

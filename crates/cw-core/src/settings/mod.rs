@@ -284,8 +284,8 @@ impl Default for CurriculumSettings {
             callsign_level: LEVEL_MIN,
             word_list: Vec::new(),
             num_groups: 20,
-            min_group_size: 3,
-            max_group_size: 5,
+            min_group_size: 2,
+            max_group_size: 3,
             link_group_size: false,
             adaptive_group_size: false,
             aim: Aim::Balanced,
@@ -310,8 +310,9 @@ pub struct PlaybackSettings {
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
     /// Seconds to sit on the last group after it is sent, so the card can be
-    /// read before the next one starts. Zero is contest pace. This is not
-    /// Morse spacing — repeats of the same group still use a word space.
+    /// read before the next one starts. Zero, the default, is contest pace.
+    /// This is not Morse spacing — repeats of the same group still use a word
+    /// space.
     pub group_pause_sec: f64,
     /// Seconds counted down, out loud on the screen, between Start training
     /// and the first group: time to get the phone in hand and the ear ready.
@@ -320,8 +321,8 @@ pub struct PlaybackSettings {
     pub lock_input_during_group_playback: bool,
     /// `[` is dit and `]` is dah on a USB keyer. Set when the paddles are wired the other way.
     pub paddle_swap: bool,
-    /// How the `[` / `]` paddles time elements. Older saves have no field and
-    /// load as Iambic A — finish the element you were on, then stop.
+    /// How the `[` / `]` paddles time elements. Iambic B unless chosen
+    /// otherwise; older saves have no field and load at it too.
     pub keyer_mode: KeyerMode,
     /// Speed the paddles send at. Independent of the station's character
     /// speed, which can be a random range.
@@ -338,21 +339,21 @@ pub struct PlaybackSettings {
 impl Default for PlaybackSettings {
     fn default() -> Self {
         Self {
-            char_wpm_min: 18.0,
-            char_wpm_max: 25.0,
+            char_wpm_min: 15.0,
+            char_wpm_max: 30.0,
             link_char_wpm: false,
-            effective_wpm_min: 18.0,
-            effective_wpm_max: 25.0,
+            effective_wpm_min: 15.0,
+            effective_wpm_max: 30.0,
             link_effective_wpm: false,
             link_char_to_effective: true,
             adaptive_speed: false,
             extra_word_space_multiplier: 1.0,
             group_timeout: 10.0,
-            group_pause_sec: 2.0,
+            group_pause_sec: 0.0,
             countdown_sec: 3,
             lock_input_during_group_playback: true,
             paddle_swap: false,
-            keyer_mode: KeyerMode::IambicA,
+            keyer_mode: KeyerMode::IambicB,
             keyer_wpm: 20.0,
             fist_variation: 0.35,
             group_repeat_min: 1,
@@ -416,7 +417,9 @@ pub struct BandSettings {
     pub noise_enabled: bool,
     /// How loud the noise floor is. Deliberately not read from the old
     /// receiver-background level: that drove a different sound entirely, and
-    /// its value says nothing about how much hiss someone wants.
+    /// its value says nothing about how much hiss someone wants. Out of the
+    /// box it is a subtle hiss, about 40 dB under the station through the
+    /// default receiver.
     pub noise_level: f64,
     /// The receiver's automatic gain control. Off is a receiver run on its
     /// RF gain, the way contesters often do.
@@ -444,7 +447,7 @@ pub struct BandSettings {
     /// many", which is this floor left at one.
     pub stations_min: u32,
     /// The most that can call at once. With both ends at 1 there is no
-    /// pile-up, which is where this starts.
+    /// pile-up, which is where this starts: one station, fixed.
     pub stations_max: u32,
     /// How far either side of the wanted station the others can land.
     pub pileup_spread_hz: f64,
@@ -455,7 +458,7 @@ pub struct BandSettings {
 impl Default for BandSettings {
     fn default() -> Self {
         Self {
-            side_tone_min: 400.0,
+            side_tone_min: 300.0,
             side_tone_max: 600.0,
             volume_min: 0.7,
             volume_max: 1.0,
@@ -468,7 +471,7 @@ impl Default for BandSettings {
             qrn_enabled: true,
             qrn_level: 0.25,
             noise_enabled: true,
-            noise_level: 0.5,
+            noise_level: 0.1,
             agc_enabled: true,
             filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
             filter_shape: FilterShape::default(),
@@ -502,7 +505,7 @@ impl Default for AutoLevelSettings {
             auto_adjust_level: true,
             auto_adjust_threshold: 90.0,
             auto_adjust_below_threshold_count: 1,
-            auto_adjust_above_threshold_count: 5,
+            auto_adjust_above_threshold_count: 2,
             error_weight_strength: 3.0,
             char_sampling_coverage_strength: 1.0,
             char_sampling_thompson: false,
@@ -836,16 +839,16 @@ mod tests {
         assert!(s.playback.lock_input_during_group_playback);
         assert!(s.playback.link_char_to_effective);
         assert_eq!(s.playback.group_timeout, 10.0);
-        assert_eq!(s.playback.group_pause_sec, 2.0);
+        assert_eq!(s.playback.group_pause_sec, 0.0);
         assert_eq!(s.playback.countdown_sec, 3);
         assert_eq!(s.auto_level.auto_adjust_threshold, 90.0);
         assert_eq!(s.curriculum.num_groups, 20);
         assert_eq!(s.curriculum.digits_level, 1);
-        assert_eq!(s.playback.char_wpm_min, 18.0);
+        assert_eq!(s.playback.char_wpm_min, 15.0);
         assert_eq!(s.playback.group_repeat_min, 1);
         assert_eq!(s.playback.group_repeat_max, 1);
         assert!(s.playback.link_group_repeat);
-        assert_eq!(s.playback.keyer_mode, crate::keyer::KeyerMode::IambicA);
+        assert_eq!(s.playback.keyer_mode, crate::keyer::KeyerMode::IambicB);
         assert_eq!(s.playback.keyer_wpm, 20.0);
         let koch: TrainingSettings = serde_json::from_str(r#"{"charSetMode":"koch"}"#).unwrap();
         assert_eq!(koch.curriculum.char_set_mode, CharSetMode::Koch);
@@ -1106,9 +1109,24 @@ mod tests {
         assert_eq!(CharSetMode::default(), CharSetMode::Mixed);
         assert_eq!(
             crate::keyer::KeyerMode::default(),
-            crate::keyer::KeyerMode::IambicA
+            crate::keyer::KeyerMode::IambicB
         );
         assert_eq!(FilterShape::default(), FilterShape::Peaked);
+        let s = TrainingSettings::default();
+        let range = |min, max, linked| RangeValues { min, max, linked };
+        assert_eq!(s.range(RangeSetting::CharWpm), range(15.0, 30.0, false));
+        assert_eq!(
+            s.range(RangeSetting::EffectiveWpm),
+            range(15.0, 30.0, false)
+        );
+        assert_eq!(s.range(RangeSetting::GroupSize), range(2.0, 3.0, false));
+        assert_eq!(s.range(RangeSetting::SideTone), range(300.0, 600.0, false));
+        assert_eq!(s.range(RangeSetting::Stations), range(1.0, 1.0, true));
+        assert_eq!(s.playback.keyer_mode, crate::keyer::KeyerMode::IambicB);
+        assert_eq!(s.playback.group_pause_sec, 0.0);
+        assert_eq!(s.auto_level.auto_adjust_above_threshold_count, 2);
+        assert_eq!(s.auto_level.auto_adjust_below_threshold_count, 1);
+        assert_eq!(s.clone().clamp(), s, "the defaults are in bounds");
         assert_eq!(MixedAutoLevelAxis::default(), MixedAutoLevelAxis::Letters);
         assert_eq!(
             MixedAutoLevelAxis::Letters.flip(),

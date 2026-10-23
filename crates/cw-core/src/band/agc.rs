@@ -488,7 +488,7 @@ mod tests {
     use std::f64::consts::TAU;
 
     use crate::band::BandMixer;
-    use crate::band::calibration::reference_floor_rms;
+    use crate::band::calibration::{REFERENCE_NOISE_LEVEL, reference_floor_rms};
     use crate::band::knee::{FLOOR_MEASURE_RATE, band_standing_level, reference_floor_level};
     use crate::band::noise::NoiseFloor;
     use crate::band::test_support::{knee_for, receiver_for, rms};
@@ -508,9 +508,11 @@ mod tests {
         CompressorCurve::new(threshold_db, knee_db, ratio).gain_db(input_db)
     }
 
-    /// The default band with nothing on it but the floor, at a fixed pitch.
+    /// The default band with nothing on it but the floor, at the reference
+    /// level, and at a fixed pitch.
     fn floor_only() -> TrainingSettings {
         let mut s = TrainingSettings::default();
+        s.band.noise_level = REFERENCE_NOISE_LEVEL;
         s.band.side_tone_min = 600.0;
         s.band.side_tone_max = 600.0;
         s.band.qrn_enabled = false;
@@ -1072,12 +1074,12 @@ mod tests {
     /// band takes noise out from under the knee and leaves the station as
     /// loud as it was.
     ///
-    /// The knee's floor is the reference floor's: the default noise level
+    /// The knee's floor is the reference floor's: the reference noise level
     /// through the 500 Hz filter. The default receiver, the peaked 300 Hz
     /// one, lets in 163 Hz of noise bandwidth against its 503 — 4.9 dB less —
     /// and the narrower hiss peaks a little less high on the follower too, so
-    /// the default band stands 5.8 dB under that floor and its knee is the
-    /// held one. A louder floor raises it by the 11.4 dB three tenths of the
+    /// that floor through it stands 5.8 dB under and its knee is the held
+    /// one. A louder floor raises it by the 11.4 dB three tenths of the
     /// control add, less the way it had to come up to reach the reference.
     /// A wide filter lets more noise in and raises it — a sharp one 2 kHz wide
     /// by 5 dB; the peak filter's resonance holds the noise bandwidth near the
@@ -1100,8 +1102,8 @@ mod tests {
         let narrow = knee(|s| s.band.filter_width_hz = 150.0);
         let quiet = knee(|s| s.band.noise_level = 0.1);
         let silent = knee(|s| s.band.noise_enabled = false);
-        // The default band is under the reference floor, by about what the
-        // noise bandwidths say.
+        // Through the default receiver the floor is under the reference
+        // floor, by about what the noise bandwidths say.
         let floor = floor_only();
         let receiver = crate::band::FilterDesign::from_settings(&floor);
         let under = db(reference_floor_level()
