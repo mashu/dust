@@ -48,6 +48,8 @@ thread_local! {
     /// How many times the page has asked to be scrolled to its top since a
     /// test last looked.
     static SCROLLS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// What listens for a click anywhere off the calendar's squares.
+    static ELSEWHERE: std::cell::RefCell<Vec<Callback<()>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The page asks for the field with this id to have the cursor, by
@@ -63,6 +65,13 @@ pub fn ask_focus(id: &str, script: &str) {
 /// script; here a [`Ui`] counts it ([`Ui::take_scrolls`]).
 pub fn ask_scroll_to_top() {
     SCROLLS_ASKED.set(SCROLLS_ASKED.get() + 1);
+}
+
+/// The page listens for a click anywhere off the calendar's squares, and for
+/// Escape. In a browser a script listens on the document; here a [`Ui`] calls
+/// `on_elsewhere` when a test clicks elsewhere ([`Ui::click_elsewhere`]).
+pub fn listen_elsewhere(on_elsewhere: Callback<()>) {
+    ELSEWHERE.with_borrow_mut(|heard| heard.push(on_elsewhere));
 }
 
 pub struct Harness {
@@ -619,6 +628,7 @@ impl Ui {
         // What an earlier page asked for is not this one's to do.
         FOCUS_ASKED.take();
         SCROLLS_ASKED.take();
+        ELSEWHERE.take();
         let mut ui = Self {
             dom,
             ids: Vec::new(),
@@ -933,6 +943,18 @@ impl Ui {
             id,
             Box::new(dioxus::html::SerializedMouseData::default()),
         );
+    }
+
+    /// Click the page off every control the calendar's squares make, or
+    /// press Escape: what its listener on the document hears.
+    pub fn click_elsewhere(&mut self) {
+        let heard = ELSEWHERE.with_borrow(Clone::clone);
+        self.dom.in_scope(ScopeId::APP, || {
+            for on_elsewhere in heard {
+                on_elsewhere.call(());
+            }
+        });
+        self.settle();
     }
 
     /// Press a mouse button down on the control with this id, and nothing

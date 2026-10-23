@@ -2475,6 +2475,26 @@ mod interactions {
         assert!(!ui.has("day-tip"));
     }
 
+    /// A pinned card also comes down on a click anywhere off the squares, or
+    /// Escape; a tap on another square moves it there.
+    #[test]
+    fn a_pinned_card_comes_down_on_a_click_elsewhere() {
+        let mut ui = Ui::new(HeatmapHarness, ());
+        ui.click("day-2026-09-08");
+        assert!(ui.has(">Tuesday 8 September 2026<"));
+        ui.click("day-2026-09-07");
+        assert!(ui.has(">Monday 7 September 2026<"));
+        assert!(!ui.has(">Tuesday 8 September 2026<"));
+        ui.click_elsewhere();
+        assert!(!ui.has("day-tip"));
+        assert!(!ui.input_tag("day-2026-09-07").contains("selected"));
+        // With nothing pinned there is nothing to take down, and the next
+        // tap pins as ever.
+        ui.click_elsewhere();
+        ui.click("day-2026-09-08");
+        assert!(ui.has(">Tuesday 8 September 2026<"));
+    }
+
     /// A mouse opens a day's card by pointing at the square and closes it by
     /// leaving. The browser's own plain tooltip is gone; the label says the
     /// same for a screen reader.

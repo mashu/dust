@@ -312,13 +312,83 @@ fn day_tip(label: &str, cell: &HeatmapCell, grid: &HeatmapGrid, at: &TipAt) -> E
     }
 }
 
+/// Where the calendar keeps its listener on the page.
+const ELSEWHERE_SLOT: &str = "__dustDayCard";
+
+/// The script that tells the calendar of each click that lands anywhere but
+/// on a day's square, a button (the legend's swatches are not), and each
+/// press of Escape. A listener left there before is taken off first.
+fn elsewhere_script() -> String {
+    format!(
+        r#"{}
+const clicked = (e) => {{
+    if (!(e.target instanceof Element && e.target.closest("button.heat-cell"))) {{
+        dioxus.send(true);
+    }}
+}};
+const keyed = (e) => {{
+    if (e.key === "Escape") {{
+        dioxus.send(true);
+    }}
+}};
+document.addEventListener("click", clicked);
+document.addEventListener("keydown", keyed);
+window.{ELSEWHERE_SLOT} = () => {{
+    document.removeEventListener("click", clicked);
+    document.removeEventListener("keydown", keyed);
+}};"#,
+        stop_listening()
+    )
+}
+
+/// The script that takes the listener off again.
+fn stop_listening() -> String {
+    format!(
+        r#"if (window.{ELSEWHERE_SLOT}) {{
+    window.{ELSEWHERE_SLOT}();
+    window.{ELSEWHERE_SLOT} = null;
+}}"#
+    )
+}
+
+/// While the calendar is on the page, `on_elsewhere` hears each click that
+/// lands anywhere but on a day's square, and each press of Escape.
+fn use_elsewhere(mut on_elsewhere: impl FnMut() + 'static) {
+    let on_elsewhere = use_callback(move |()| on_elsewhere());
+    // Tests have no page to run it on: they click elsewhere through
+    // [`crate::testing::Ui::click_elsewhere`].
+    #[cfg(not(test))]
+    {
+        use_hook(move || {
+            spawn(async move {
+                let mut page = document::eval(&elsewhere_script());
+                while page.recv::<bool>().await.is_ok() {
+                    on_elsewhere.call(());
+                }
+            })
+        });
+        use_drop(|| {
+            dioxus::core::spawn_forever(async {
+                let _ = document::eval(&stop_listening()).await;
+            });
+        });
+    }
+    #[cfg(test)]
+    use_hook(move || crate::testing::listen_elsewhere(on_elsewhere));
+}
+
 #[component]
 fn HeatmapGridView(grid: HeatmapGrid) -> Element {
     // A mouse pointing at a square opens its card for as long as it stays;
-    // a tap pins one until the same square is tapped again. Touch has no
-    // pointing, so only a mouse's counts.
+    // a tap pins one until the same square is tapped again, or anywhere
+    // else is. Touch has no pointing, so only a mouse's counts.
     let mut hovered = use_signal(|| None::<TipAt>);
     let mut pinned = use_signal(|| None::<TipAt>);
+    use_elsewhere(move || {
+        if pinned.peek().is_some() {
+            pinned.set(None);
+        }
+    });
     let shown = hovered().or_else(&*pinned);
     let pinned_date = pinned().map(|at| at.date);
     rsx! {
@@ -523,6 +593,38 @@ mod tests {
         assert_eq!(share(5.0, 0.0), 0.0);
         assert_eq!(share(f64::NAN, 10.0), 0.0);
         assert_eq!(share(20.0, 10.0), 1.0);
+    }
+
+    /// The harness never mounts anything on a page, so the script is the
+    /// part a test can see: a click off every square tells the calendar, as
+    /// Escape does, a click on one is the square's own, and the listener
+    /// comes off again, one left before first.
+    #[test]
+    fn the_page_says_when_it_is_clicked_off_the_squares() {
+        let script = elsewhere_script();
+        assert!(
+            script.contains(r#"e.target.closest("button.heat-cell")"#),
+            "{script}"
+        );
+        assert!(script.contains(r#"e.key === "Escape""#), "{script}");
+        assert_eq!(script.matches("dioxus.send(true)").count(), 2, "{script}");
+        for (on, off) in [
+            (
+                r#"addEventListener("click", clicked)"#,
+                r#"removeEventListener("click", clicked)"#,
+            ),
+            (
+                r#"addEventListener("keydown", keyed)"#,
+                r#"removeEventListener("keydown", keyed)"#,
+            ),
+        ] {
+            assert!(script.contains(on), "{script}");
+            assert!(script.contains(off), "{script}");
+        }
+        let off = script.find("window.__dustDayCard();").expect("taken off");
+        let on = script.find("addEventListener").expect("put on");
+        assert!(off < on, "{script}");
+        assert!(stop_listening().contains("window.__dustDayCard = null;"));
     }
 
     #[test]
