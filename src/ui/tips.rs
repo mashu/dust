@@ -18,13 +18,17 @@ pub const CONTEST_TIPS: &[&str] = &[
     "Stay relaxed; short, regular sessions work better than long cramming.",
 ];
 
+/// How long each tip stays up before the next: seven seconds, time to read
+/// one that wraps to a few lines on a phone.
+const TIP_MS: u32 = 7_000;
+
 #[component]
 pub fn TipsCarousel(tips: &'static [&'static str]) -> Element {
     let mut index = use_signal(|| 0usize);
     use_hook(|| {
         spawn(async move {
             loop {
-                sleep_ms(5000).await;
+                sleep_ms(TIP_MS).await;
                 let next = *index.peek() + 1;
                 index.set(next);
             }
@@ -50,12 +54,17 @@ mod tests {
         run(|| async {
             let mut ui = Ui::new(TipsCarousel, TipsCarouselProps { tips: TIPS });
             assert!(ui.has(TIPS[0]));
-            for tip in TIPS.iter().skip(1) {
-                ui.advance(5_100).await;
+            // Each one stays up for seven seconds.
+            ui.advance(6_900).await;
+            assert!(ui.has(TIPS[0]), "moved on too soon");
+            ui.advance(200).await;
+            assert!(ui.has(TIPS[1]), "expected the next tip");
+            for tip in TIPS.iter().skip(2) {
+                ui.advance(7_000).await;
                 assert!(ui.has(tip), "expected the next tip");
             }
             // Past the last one it starts again.
-            ui.advance(5_100).await;
+            ui.advance(7_000).await;
             assert!(ui.has(TIPS[0]));
         });
     }

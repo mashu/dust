@@ -2195,14 +2195,16 @@ mod interactions {
         sessions
     }
 
-    /// Stats under the default settings in `mode`, the callers adapting as
-    /// `adapt` says, with one speed set when `one_speed`, after a history of
-    /// Koch sessions and contest runs.
+    /// Stats under the default settings in `mode`, but for speeds from 18 to
+    /// 25 WPM, the callers adapting as `adapt` says, with one speed set when
+    /// `one_speed`, after a history of Koch sessions and contest runs.
     #[component]
     fn ContestStatsHarness(mode: CharSetMode, adapt: bool, one_speed: bool) -> Element {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = mode;
         settings.contest.contest_adapt_speed = adapt;
+        settings.playback.char_wpm_min = 18.0;
+        settings.playback.char_wpm_max = 25.0;
         if one_speed {
             settings.playback.char_wpm_min = 30.0;
             settings.playback.char_wpm_max = 30.0;
@@ -2277,8 +2279,7 @@ mod interactions {
         let mut adapting = contest_stats(CharSetMode::Contest, true, false);
         adapting.click("seg-sampling");
         assert!(adapting.has("Speed, WPM"));
-        // The runs were copied clean at 26 WPM, past the 18 to 25 the
-        // settings ship with.
+        // The runs were copied clean at 26 WPM, past the 18 to 25 set.
         assert!(adapting.has(
             "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen&#39;s − and + move only your own speed. Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster."
         ), "{}", adapting.html());
@@ -2292,8 +2293,8 @@ mod interactions {
         assert!(even.has(&format!(
             "{CALLERS_EVEN} Right is the share of characters you copy at that speed."
         )));
-        // The default speeds are 18 to 25 WPM, a seventh of the range
-        // nearest each whole speed between, and half that at either end.
+        // At 18 to 25 WPM, a seventh of the range is nearest each whole
+        // speed between, and half that at either end.
         assert_eq!(even.html().matches(">14%<").count(), 6, "{}", even.html());
         assert_ne!(adapting.html().matches(">14%<").count(), 6);
     }
@@ -2345,8 +2346,8 @@ mod interactions {
         ui.click("seg-sampling");
         assert!(ui.has("Group length"));
         assert!(ui.has("every length is as likely as the next"));
-        // The default range is 3 to 5 characters: a third each.
-        assert_eq!(ui.html().matches(">33%<").count(), 3);
+        // The default range is 2 to 3 characters: half each.
+        assert_eq!(ui.html().matches(">50%<").count(), 2, "{}", ui.html());
 
         let mut ui = stats(true, CharSetMode::Mixed);
         ui.click("seg-sampling");
@@ -2474,6 +2475,26 @@ mod interactions {
         assert!(!ui.has("day-tip"));
     }
 
+    /// A pinned card also comes down on a click anywhere off the squares, or
+    /// Escape; a tap on another square moves it there.
+    #[test]
+    fn a_pinned_card_comes_down_on_a_click_elsewhere() {
+        let mut ui = Ui::new(HeatmapHarness, ());
+        ui.click("day-2026-09-08");
+        assert!(ui.has(">Tuesday 8 September 2026<"));
+        ui.click("day-2026-09-07");
+        assert!(ui.has(">Monday 7 September 2026<"));
+        assert!(!ui.has(">Tuesday 8 September 2026<"));
+        ui.click_elsewhere();
+        assert!(!ui.has("day-tip"));
+        assert!(!ui.input_tag("day-2026-09-07").contains("selected"));
+        // With nothing pinned there is nothing to take down, and the next
+        // tap pins as ever.
+        ui.click_elsewhere();
+        ui.click("day-2026-09-08");
+        assert!(ui.has(">Tuesday 8 September 2026<"));
+    }
+
     /// A mouse opens a day's card by pointing at the square and closes it by
     /// leaving. The browser's own plain tooltip is gone; the label says the
     /// same for a screen reader.
@@ -2584,9 +2605,16 @@ mod interactions {
         assert!(html.is_empty());
     }
 
+    /// The band card on a 400-600 Hz side-tone range, which the 300 Hz
+    /// filter passes as it is set.
     #[component]
     fn BandHarness(previewing: bool) -> Element {
-        let settings = use_signal(test_settings);
+        let settings = use_signal(|| {
+            let mut settings = test_settings();
+            settings.band.side_tone_min = 400.0;
+            settings.band.side_tone_max = 600.0;
+            settings
+        });
         rsx! {
             BandConditionsCard {
                 settings,
@@ -2595,6 +2623,29 @@ mod interactions {
                 on_stop: move |_| {},
             }
         }
+    }
+
+    #[component]
+    fn DefaultBandHarness() -> Element {
+        let settings = use_signal(TrainingSettings::default);
+        rsx! {
+            BandConditionsCard {
+                settings,
+                previewing: false,
+                on_preview: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    }
+
+    /// Out of the box the band is one station, fixed, under a subtle hiss,
+    /// and the 300 Hz filter is built wider to pass the 300-600 Hz pitches.
+    #[test]
+    fn the_band_card_out_of_the_box() {
+        let ui = Ui::new(DefaultBandHarness, ());
+        assert!(ui.shows("fixed-stations-calling"), "{}", ui.html());
+        assert!(ui.has("class=\"slider-value\">S/N 41 dB<"), "{}", ui.html());
+        assert!(ui.has("300 Hz — widened to 353 Hz to pass your pitch range"));
     }
 
     #[test]

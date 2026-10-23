@@ -107,9 +107,14 @@ fn census(others: u32, seconds: f64, seed: u64) -> (BandActivity, Vec<Emitter>) 
 }
 
 /// `count` stations as they come on to a band with `others` calling, drawn
-/// straight from the generator at an ordinary sample rate.
+/// straight from the generator at an ordinary sample rate, heard on the
+/// 400-600 Hz side-tone range their levels were measured against: a wider
+/// range widens the guard that holds the stations near it under yours.
 fn stations(others: u32, count: usize, seed: u64) -> (BandActivity, Vec<Emitter>) {
-    let mut band = uncapped(48_000, &TrainingSettings::default(), others, seed);
+    let mut settings = TrainingSettings::default();
+    settings.band.side_tone_min = 400.0;
+    settings.band.side_tone_max = 600.0;
+    let mut band = uncapped(48_000, &settings, others, seed);
     let drawn = (0..count).map(|_| band.new_station()).collect();
     (band, drawn)
 }

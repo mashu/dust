@@ -53,7 +53,7 @@ fn typing_into_one_end_of_the_side_tone_keeps_its_box() {
         ui.type_into("to-side-tone", "700");
         ui.commit("to-side-tone", "700");
         ui.advance(50).await;
-        assert_eq!(value_of(&ui, "from-side-tone"), "400");
+        assert_eq!(value_of(&ui, "from-side-tone"), "300");
         assert_eq!(value_of(&ui, "to-side-tone"), "700");
     });
 }

@@ -1402,6 +1402,9 @@ mod tests {
         run(|| async {
             let mut settings = test_settings();
             settings.playback.lock_input_during_group_playback = false;
+            // A pause after the group, so no next one is sent in the half
+            // second watched for a second send of this one.
+            settings.playback.group_pause_sec = 2.0;
             let mut h = Harness::with_settings(settings);
             h.recorder.fail_next(1);
             h.start_training();

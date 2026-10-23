@@ -559,6 +559,7 @@ impl Flash {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::band::calibration::REFERENCE_NOISE_LEVEL;
     use crate::band::test_support::{receiver_for, source_for};
     use crate::settings::TrainingSettings;
 
@@ -648,7 +649,8 @@ mod tests {
     }
 
     /// What a crash sounds like, measured the way the real ones were: ten
-    /// minutes of the default band through the receiver with no AGC, events
+    /// minutes of the default band, at the reference floor the static is set
+    /// against, through the receiver with no AGC, events
     /// where the envelope stands 13 dB over its median, a crash wherever three
     /// or more come within 100 ms of each other. Real crashes (KiwiSDR and
     /// Hermes-Lite 2 off-air IQ, 20 m) hold the band +5 to +9.5 dB up between
@@ -662,6 +664,7 @@ mod tests {
         // keeps ten minutes quick.
         const RATE: u32 = 16_000;
         let mut settings = TrainingSettings::default();
+        settings.band.noise_level = REFERENCE_NOISE_LEVEL;
         settings.band.side_tone_min = 600.0;
         settings.band.side_tone_max = 600.0;
         let settings = settings.clamp();

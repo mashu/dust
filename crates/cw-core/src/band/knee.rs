@@ -117,11 +117,14 @@ pub fn band_standing_level(sample_rate: u32, band: &BandSettings, receiver: &Fil
 
 /// [`band_standing_level`] of the reference floor alone
 /// ([`REFERENCE_NOISE_LEVEL`]), through the reference filter: a sharp one
-/// 500 Hz wide at 3 dB, on the default pitch. Measured once.
+/// 500 Hz wide at 3 dB, on a 500 Hz note whatever the default pitch. Measured
+/// once.
 pub fn reference_floor_level() -> f64 {
     static LEVEL: OnceLock<f64> = OnceLock::new();
     *LEVEL.get_or_init(|| {
         let mut settings = TrainingSettings::default();
+        settings.band.side_tone_min = 500.0;
+        settings.band.side_tone_max = 500.0;
         settings.band.noise_enabled = true;
         settings.band.noise_level = REFERENCE_NOISE_LEVEL;
         settings.band.qrn_enabled = false;
