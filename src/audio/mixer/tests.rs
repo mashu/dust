@@ -241,6 +241,7 @@ fn segment(
         start_sec,
         end_sec,
         fade: None,
+        skip_sec: 0.0,
     }
 }
 

@@ -1392,7 +1392,15 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   stops and hears you. As built (2a), they carry on under a CQ, TU or NIL
   too, which they hear from a fragment, and answer once done (4.3); one
   carried on whose rest has not reached the ear yet, inside the player's
-  lead, still goes on whole at the next key, as it began before.
+  lead, still goes on whole at the next key, as it began before. As built
+  (2026-10-23), a caller's character, or QRM's, is sent again whole once:
+  carried on again while the character a splice before sent again is
+  still going, it goes on from where it is (`Segment::skip_sec`, which
+  `plan_turn` starts its tones from, the tone sounding then going on to
+  its end with a rise of its own). A splice falls between your
+  characters, so keys over a caller sending slower than you used to land
+  in its re-sent character every time and start it over, holding it on
+  that character for as long as they came.
 - **Only Esc cuts.** StopTx emits `StopAudio` (an 8 ms release,
   `SEND_RELEASE_SEC`, `timing/plan.rs`), which cuts a send a continuation
   was to take over from later too, on both players; a call or exchange not fully sent counts as not

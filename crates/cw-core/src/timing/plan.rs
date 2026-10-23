@@ -227,6 +227,47 @@ pub(crate) fn plan_morse_playback_at(
     }
 }
 
+/// `plan` from `from_sec` into it on, moved to start at nothing: for a send
+/// that goes on from where one cut short was. A tone sounding at `from_sec`
+/// goes on to its end, with a rise of its own rather than starting on a
+/// step, unless less is left of it than a rise and a fall; tones before it
+/// are gone.
+pub(crate) fn plan_from(
+    plan: PlaybackPlan,
+    from_sec: f64,
+    settings: &TrainingSettings,
+) -> PlaybackPlan {
+    if !from_sec.is_finite() || from_sec <= 0.0 {
+        return plan;
+    }
+    let rise_time = settings.band.steepness / 1000.0;
+    let smoothing = settings.band.envelope_smoothing.clamp(0.0, 1.0);
+    let events = plan
+        .events
+        .into_iter()
+        .filter_map(|mut tone| {
+            let end = tone.start_sec + tone.duration_sec;
+            if tone.start_sec < from_sec {
+                let left = end - from_sec;
+                if left < 2.0 * rise_time.max(0.0) || left <= 0.0 {
+                    return None;
+                }
+                tone.start_sec = from_sec;
+                tone.duration_sec = left;
+                tone.envelope =
+                    build_envelope_curve(left, rise_time, tone.target_gain, smoothing).into();
+            }
+            tone.start_sec -= from_sec;
+            Some(tone)
+        })
+        .collect();
+    PlaybackPlan {
+        events,
+        duration_sec: (plan.duration_sec - from_sec).max(0.0),
+        ..plan
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

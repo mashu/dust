@@ -901,6 +901,8 @@ struct Overlapping {
     text: String,
     /// The whole of what it sends, of which `text` is the rest.
     whole: String,
+    /// How far into `text` it goes on from ([`Segment::skip_sec`]).
+    skip_sec: f64,
     /// How it was sending: a caller that slowed down for you since goes on
     /// at the speed its send began at.
     voice: StationVoice,
@@ -1980,7 +1982,9 @@ impl<S: CallSource> ContestMachine<S> {
         let done_first: Vec<usize> = callers
             .iter()
             .filter(|over| deaf.contains(&over.reply.station))
-            .filter(|over| sending_sec(&over.text, &self.settings, &over.voice) < your_end)
+            .filter(|over| {
+                sending_sec(&over.text, &self.settings, &over.voice) - over.skip_sec < your_end
+            })
             .map(|over| over.reply.station)
             .collect();
         done_first
@@ -2436,6 +2440,7 @@ impl<S: CallSource> ContestMachine<S> {
                 start_sec: lead_sec,
                 end_sec: your_end,
                 fade: None,
+                skip_sec: 0.0,
             });
             texts.push(String::new());
         }
@@ -2448,7 +2453,7 @@ impl<S: CallSource> ContestMachine<S> {
         for over in mine.callers {
             let station = over.reply.station;
             let caller = &self.stations[station].caller;
-            let end_sec = sending_sec(&over.text, &self.settings, &over.voice);
+            let end_sec = sending_sec(&over.text, &self.settings, &over.voice) - over.skip_sec;
             segments.push(Segment {
                 who: sender(station),
                 text: over.text,
@@ -2456,6 +2461,7 @@ impl<S: CallSource> ContestMachine<S> {
                 start_sec: 0.0,
                 end_sec,
                 fade: self.fade(caller, start_run, 0.0),
+                skip_sec: over.skip_sec,
             });
             texts.push(over.whole);
             replies.push((over.reply, over.says));
@@ -2511,6 +2517,7 @@ impl<S: CallSource> ContestMachine<S> {
                 start_sec,
                 end_sec,
                 fade: self.fade(caller, start_run, start_sec),
+                skip_sec: 0.0,
             });
             replies.push((replying, says));
             counted.push(Counted::Nothing);
@@ -2714,6 +2721,7 @@ impl<S: CallSource> ContestMachine<S> {
                 start_sec,
                 end_sec,
                 fade: self.fade(caller, run_ms, start_sec),
+                skip_sec: 0.0,
             });
             replies.push((Replying::on_time_out(index), says));
             counted.push(Counted::Nothing);
@@ -2851,8 +2859,9 @@ impl<S: CallSource> ContestMachine<S> {
     /// character sounding then, sent again whole, as a pile-up caller's
     /// rest is: a station on your frequency that is not calling you does
     /// not stop for you. One at the start of the turn whose sound has not
-    /// reached the ear yet goes on whole; one that had not begun is gone
-    /// with the turn.
+    /// reached the ear yet goes on as it was, and one whose first character
+    /// is still sounding from where it is ([`Self::going_on_from`]); one
+    /// that had not begun is gone with the turn.
     fn qrm_going_on(&self, air: &Air, run_now: u64) -> Option<(Segment, String)> {
         let heard_run = air.heard_run();
         let (segment, whole) = air
@@ -2868,28 +2877,52 @@ impl<S: CallSource> ContestMachine<S> {
                 }
             })?;
         let start = heard_run + whole_ms(segment.start_sec);
-        let at_sec = run_now.saturating_sub(start) as f64 / 1_000.0;
-        let spans = char_spans(&segment.text, &self.settings, &segment.voice);
-        let from = sounding_at(&spans, at_sec)?;
+        let elapsed = run_now.saturating_sub(start) as f64 / 1_000.0;
+        let (from, skip_sec) = self.going_on_from(segment, elapsed)?;
         let text = segment.text[from..].to_string();
         let rest = Segment {
             who: Sender::Qrm,
-            end_sec: sending_sec(&text, &self.settings, &segment.voice),
+            end_sec: sending_sec(&text, &self.settings, &segment.voice) - skip_sec,
             text,
             voice: segment.voice,
             start_sec: 0.0,
             fade: segment.fade.map(|fade| Fade {
-                from_sec: fade.from_sec + at_sec,
+                from_sec: fade.from_sec + elapsed,
                 ..fade
             }),
+            skip_sec,
         };
         Some((rest, whole.clone()))
     }
 
+    /// Where a caller's or QRM's `segment` goes on from, carried on
+    /// `elapsed` seconds after its sound began to reach you: the byte of its
+    /// text the rest starts at, and how far into that rest it starts
+    /// ([`Segment::skip_sec`]). The character sounding then goes again
+    /// whole; but a rest the turn began with, whose first character a key
+    /// sent again whole already, carried on while that character is still
+    /// going goes on from where it is. Keys over a station sending a
+    /// character slower than yours would otherwise start that character
+    /// over at every splice, and never let it get any further. None once
+    /// all of it has been sent.
+    fn going_on_from(&self, segment: &Segment, elapsed: f64) -> Option<(usize, f64)> {
+        let spans = char_spans(&segment.text, &self.settings, &segment.voice);
+        let at_sec = elapsed.max(0.0) + segment.skip_sec;
+        let from = sounding_at(&spans, at_sec)?;
+        let first = spans.first().map(|(at, ..)| *at);
+        if segment.start_sec == 0.0 && Some(from) == first {
+            Some((0, at_sec))
+        } else {
+            Some((from, 0.0))
+        }
+    }
+
     /// The callers in `air` still sending at `run_now`, each with what is
-    /// left of its message from the character sounding then. One carried on
-    /// from an earlier turn whose rest has not reached the ear yet goes on
-    /// whole: it began before, and the player's lead is no gap in it. A
+    /// left of its message from the character sounding then, or, still on
+    /// the character a splice before sent again, from where it is
+    /// ([`Self::going_on_from`]). One carried on from an earlier turn whose
+    /// rest has not reached the ear yet goes on as it was: it began before,
+    /// and the player's lead is no gap in it. A
     /// station goes on with one send: a later one, counted as begun before
     /// a retry of the sound moved the ear back, is no second voice of it.
     fn overlapping(&self, air: &Air, run_now: u64) -> Vec<Overlapping> {
@@ -2913,15 +2946,15 @@ impl<S: CallSource> ContestMachine<S> {
                         counted: *counted,
                         text: segment.text.clone(),
                         whole: whole.clone(),
+                        skip_sec: segment.skip_sec,
                         voice: segment.voice,
                     });
                 }
                 if start >= run_now || end <= run_now {
                     return None;
                 }
-                let spans = char_spans(&segment.text, &self.settings, &segment.voice);
-                let at_sec = (run_now - start) as f64 / 1_000.0;
-                let from = sounding_at(&spans, at_sec)?;
+                let elapsed = (run_now - start) as f64 / 1_000.0;
+                let (from, skip_sec) = self.going_on_from(segment, elapsed)?;
                 // An exchange yet to reach you starts as far into what is
                 // left.
                 let counted = match *counted {
@@ -2936,6 +2969,7 @@ impl<S: CallSource> ContestMachine<S> {
                     counted,
                     text: segment.text[from..].to_string(),
                     whole: whole.clone(),
+                    skip_sec,
                     voice: segment.voice,
                 })
             })
@@ -3065,11 +3099,13 @@ impl<S: CallSource> ContestMachine<S> {
             // partial or a slip asks for the call alone.
             if let Counted::CallBegun { exchange_from } = *counted {
                 let spans = char_spans(&segment.text, &self.settings, &segment.voice);
-                let from_sec = spans
+                let begins_sec = spans
                     .iter()
                     .find(|(at, ..)| *at >= exchange_from)
-                    .map_or(segment.end_sec - segment.start_sec, |(_, from, _)| *from);
-                if upto.is_none_or(|upto| start + whole_ms(from_sec) < upto) {
+                    .map_or(segment.end_sec - segment.start_sec, |(_, from, _)| {
+                        (*from - segment.skip_sec).max(0.0)
+                    });
+                if upto.is_none_or(|upto| start + whole_ms(begins_sec) < upto) {
                     *counted = Counted::Begun;
                     if let Some(keyed) = &reply.keyed
                         && reply.again
@@ -7989,6 +8025,47 @@ mod tests {
             runtime.machine.stations[0].caller.state,
             CallerState::NeedQso
         );
+    }
+
+    /// Keyed over again and again while it sends a character slower than
+    /// yours, a caller still sending goes on all the same: the character
+    /// sounding at a splice goes again whole once, and a splice while it
+    /// does carries it on from where it is rather than starting it over.
+    /// Its call gets through however long you keep keying, where it used to
+    /// send that one character for as long as the keys kept coming.
+    #[test]
+    fn keys_over_a_slow_caller_never_hold_it_back() {
+        let mut settings = run_settings(12.0);
+        settings.contest.contest_style = RunStyle::Pileup;
+        settings.contest.my_wpm = 40;
+        settings.band.stations_min = 1;
+        settings.band.stations_max = 1;
+        settings.band.filter_width_hz = crate::settings::FILTER_WIDTH_MAX;
+        let mut runtime = Runtime::start(1, settings.clamp(), ScriptCalls::new(&["K5XYZ"]));
+        let cq = runtime.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        let spans = char_spans(&call.text, &runtime.machine.settings, &call.voice);
+        // Halfway into its second character, longer than your own.
+        let (_, from, to) = spans[1];
+        assert!(to - from > 0.8, "{:?}", spans[1]);
+        runtime.run_to(runtime.now + ms(call.start_sec + (from + to) / 2.0));
+        let keyed = runtime.now;
+        let whole = call.end_sec - call.start_sec;
+        loop {
+            runtime.key(OpKey::Again, "", "");
+            let carried = sent_by(runtime.last_turn(), 0)
+                .iter()
+                .any(|segment| segment.start_sec == 0.0);
+            if !carried {
+                break;
+            }
+            runtime.run_to(runtime.now + 100);
+            let sending = (runtime.now - keyed) as f64 / 1_000.0;
+            assert!(
+                sending < whole + 2.0,
+                "still sending its call {sending:.1} s after the first key, {whole:.1} s long"
+            );
+        }
     }
 
     /// One caller at a time is one: your TU keyed over the station you

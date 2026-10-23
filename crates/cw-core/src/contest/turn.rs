@@ -24,7 +24,7 @@ use crate::session::MonoMs;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
 use crate::timing::{
     Interferer, PlannedTransmission, PlaybackPlan, StationVoice, ToneEvent, Transmission,
-    plan_morse_playback_at, plan_morse_playback_for,
+    plan_from, plan_morse_playback_at, plan_morse_playback_for,
 };
 
 /// The loudest you hear your own message, as a peak of full scale: your
@@ -119,6 +119,13 @@ pub struct Segment {
     pub end_sec: f64,
     /// A caller's fading; none for your message, or with fading off.
     pub fade: Option<Fade>,
+    /// How far into its text it starts, in seconds. A caller or QRM your
+    /// key carries on sends the character sounding at the splice again
+    /// whole; carried on again while that character is still going, it
+    /// goes on from where it is rather than start it over, so keys over a
+    /// station sending slower than you never hold it back ([`plan_turn`]).
+    /// Nothing for a text sent from its start.
+    pub skip_sec: f64,
 }
 
 /// One send: your message, if there is one, and the replies to it.
@@ -313,7 +320,9 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
                 plan
             }
             Sender::Caller(_) | Sender::Qrm => {
-                let mut plan = plan_morse_playback_for(&segment.text, settings, &segment.voice);
+                let plan = plan_morse_playback_for(&segment.text, settings, &segment.voice);
+                // A rest goes on from where it was.
+                let mut plan = plan_from(plan, segment.skip_sec, settings);
                 if let Some(fade) = segment.fade {
                     fade_tones(&mut plan.events, fade);
                 }
@@ -409,6 +418,7 @@ mod tests {
             start_sec,
             end_sec,
             fade: None,
+            skip_sec: 0.0,
         }
     }
 
@@ -444,6 +454,75 @@ mod tests {
         for other in &planned.others {
             assert!(other.duration_sec <= planned.wanted.duration_sec + 1e-9);
         }
+    }
+
+    /// A caller's rest that goes on from part way into its text plays the tones of
+    /// the whole text from there, at the times they had: those over before
+    /// it are gone, the one sounding goes on to its end with a rise of its
+    /// own, and it lasts as long as its segment says.
+    #[test]
+    fn a_rest_goes_on_from_where_it_was() {
+        let settings = settings();
+        let voice = resolve_station(&settings, &mut SplitMix64::new(3));
+        let whole = segment(Sender::Caller(0), "K5XYZ", voice, 0.0);
+        let all = plan_turn(
+            &Turn {
+                id: 1,
+                at_run_ms: 0,
+                starts_at: None,
+                segments: vec![whole.clone()],
+            },
+            &settings,
+        );
+        let tones = &all.others[0].events;
+        // Part way into the third tone.
+        let at = tones[2].start_sec + tones[2].duration_sec * 0.4;
+        let rest = Segment {
+            end_sec: whole.end_sec - at,
+            skip_sec: at,
+            ..whole.clone()
+        };
+        let turn = Turn {
+            id: 2,
+            at_run_ms: 0,
+            starts_at: None,
+            segments: vec![rest.clone()],
+        };
+        let planned = plan_turn(&turn, &settings);
+        let played = &planned.others[0];
+        assert!((played.duration_sec - (rest.end_sec - rest.start_sec)).abs() < 1e-9);
+        assert_eq!(played.events.len(), tones.len() - 2);
+        let sounding = &played.events[0];
+        assert_eq!(sounding.start_sec, 0.0);
+        let left = tones[2].duration_sec * 0.6;
+        assert!((sounding.duration_sec - left).abs() < 1e-9);
+        assert_eq!(sounding.envelope.first(), Some(&0.0), "it rises");
+        assert!(sounding.envelope.iter().any(|level| *level > 0.0));
+        for (later, was) in played.events[1..].iter().zip(&tones[3..]) {
+            assert!((later.start_sec - (was.start_sec - at)).abs() < 1e-9);
+            assert_eq!(later.duration_sec, was.duration_sec);
+        }
+        // Between two tones, nothing is cut, and a rest from its start is
+        // the text as ever.
+        let gap = tones[2].start_sec + tones[2].duration_sec + 1e-4;
+        let between = Turn {
+            segments: vec![Segment {
+                end_sec: whole.end_sec - gap,
+                skip_sec: gap,
+                ..whole.clone()
+            }],
+            ..turn
+        };
+        let planned = plan_turn(&between, &settings);
+        assert_eq!(planned.others[0].events.len(), tones.len() - 3);
+        let from_start = Turn {
+            segments: vec![whole],
+            ..turn
+        };
+        assert_eq!(
+            plan_turn(&from_start, &settings).others[0].events.len(),
+            tones.len()
+        );
     }
 
     /// The band makes room for the callers sounding at once, not for every
