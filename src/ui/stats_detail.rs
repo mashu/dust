@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    CONTEST_TIMES_NOTE, CharSetMode, ContestKind, MasteryStatus, SamplingRow, SessionHistoryRow,
-    SessionResult, SpeedForecast, SpeedPath, StoredLog, TrainingSettings, adapts_speed,
-    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
-    speed_forecast,
+    CONTEST_TIMES_NOTE, CharSetMode, ContestKind, MasteryStatus, SessionHistoryRow, SessionResult,
+    SpeedForecast, SpeedPath, StoredLog, TrainingSettings, adapts_speed, character_diagnostics,
+    group_length_forecast, mistake_stats, session_history, speed_forecast,
 };
 use dioxus::prelude::*;
 
@@ -15,6 +14,7 @@ use crate::ui::bigram::{BigramCard, hardest_pairs_card};
 use crate::ui::confusion::confusions_card;
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::format::counted;
+use crate::ui::sampling::SamplingTilesCard;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
@@ -79,65 +79,9 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
 pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     rsx! {
         div { class: "stack",
-            {character_sampling_card(&settings, &sessions)}
+            SamplingTilesCard { settings: settings.clone(), sessions: sessions.clone() }
             {group_length_card(&settings, &sessions)}
             {speed_card(&settings, &sessions)}
-        }
-    }
-}
-
-/// What the sampler makes of each character. A plain function rather than a
-/// component: it holds no state, and is drawn from the tab's own settings and
-/// history without copying them.
-fn character_sampling_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
-    let rows = sampling_rows(settings, sessions);
-    let max_p = rows
-        .iter()
-        .map(|r| r.sampling_prob)
-        .fold(0.0_f64, f64::max)
-        .max(0.0001);
-    let (drawn, others): (Vec<&SamplingRow>, Vec<&SamplingRow>) =
-        rows.iter().partition(|row| row.drawn_now);
-    // A contest draws its callers' calls; their exchanges are not drawn.
-    let next = if settings.curriculum.char_set_mode == CharSetMode::Contest {
-        "of turning up in the next caller's call"
-    } else {
-        "of being drawn in the next group"
-    };
-    rsx! {
-        div { class: "card stack",
-            div { class: "tiny", "Sampling snapshot" }
-            p { class: "muted", "Posterior error vs chance {next} (mean weights, not Thompson draws). What every character you have practised has taught counts, whatever set it was sent in." }
-            if drawn.is_empty() {
-                p { class: "muted", "Pool is empty." }
-            }
-            for row in drawn {
-                {
-                    let width = (row.sampling_prob / max_p * 100.0).clamp(4.0, 100.0);
-                    rsx! {
-                        div { class: "letter-row",
-                            span { class: "letter-key group-text", "{row.character}" }
-                            div { class: "bar-track",
-                                span { class: "bar-fill sample", style: "width: {width}%;" }
-                            }
-                            span { class: "mono muted", "{(row.sampling_prob * 100.0).round()}%" }
-                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "p(err) {(row.p_error * 100.0).round()}%" }
-                        }
-                    }
-                }
-            }
-            if !others.is_empty() {
-                div { class: "tiny", "Not in the current set" }
-                p { class: "muted", "Practised before, and not drawn now. What you learned of them is kept, and counts again when they come back." }
-                for row in others {
-                    div { class: "letter-row not-drawn",
-                        span { class: "letter-key group-text", "{row.character}" }
-                        div { class: "bar-track" }
-                        span { class: "mono muted", "—" }
-                        span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "p(err) {(row.p_error * 100.0).round()}%" }
-                    }
-                }
-            }
         }
     }
 }

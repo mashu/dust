@@ -83,6 +83,8 @@
 
   /* The third accent: the score tile and the sampling bars */
   --purple-700: #5c3d70;
+  /* The lightness of text in a tile's own hue: dark on paper, light on night. */
+  --heat-ink-l: 34%;
 
   font-family: Figtree, "Segoe UI", system-ui, sans-serif;
 }
@@ -148,6 +150,8 @@
     --sheen: rgba(255, 255, 255, 0.07);
 
     --purple-700: #b79bd0;
+    /* The lightness of text in a tile's own hue: dark on paper, light on night. */
+    --heat-ink-l: 68%;
   }
 }
 
@@ -211,6 +215,8 @@
   --sheen: rgba(255, 255, 255, 0.07);
 
   --purple-700: #b79bd0;
+  /* The lightness of text in a tile's own hue: dark on paper, light on night. */
+  --heat-ink-l: 68%;
 }
 
 /* The page behind the app — its scrollbar, and whatever shows past an
@@ -2125,8 +2131,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .letter-row:last-child { border-bottom: 0; }
 .letter-row { grid-template-columns: 1.7rem 1fr auto; }
 .letter-row .tiny { grid-column: 2 / -1; text-transform: none; letter-spacing: 0.02em; }
-/* A character the current set does not draw: kept, and greyed. */
-.letter-row.not-drawn { opacity: 0.55; }
 .letter-key {
   display: grid;
   place-items: center;
@@ -2149,6 +2153,33 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   background: linear-gradient(90deg, var(--copper), var(--copper-lift));
 }
 .bar-fill.sample { background: linear-gradient(90deg, var(--info), var(--purple-700)); }
+/* What comes up next: a tile per character, coloured by how often you get
+   it wrong, green through yellow to red (--hue, set on each tile), with a
+   bar of its chance of coming up next. A character never heard is a dashed
+   outline marked new; one the set does not draw now is greyed. */
+.sample-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(4.4rem, 1fr)); gap: 0.45rem; }
+.sample-tile {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 0.3rem 0.3rem;
+  padding: 0.5rem 0.55rem 0.5rem;
+  border: 1px solid hsl(var(--hue) 70% 45% / 0.45);
+  border-radius: var(--r-sm);
+  background: hsl(var(--hue) 70% 45% / 0.13);
+}
+.sample-char { font-size: 1.3rem; font-weight: 700; line-height: 1; }
+.sample-err { font-size: 0.72rem; font-weight: 700; color: hsl(var(--hue) 70% var(--heat-ink-l)); }
+.sample-bar { grid-column: 1 / -1; height: 5px; border-radius: var(--pill); background: var(--surface-sunken); overflow: hidden; }
+.sample-fill { display: block; height: 100%; border-radius: var(--pill); background: linear-gradient(90deg, var(--info), var(--purple-700)); }
+.sample-next { grid-column: 1 / -1; font-size: 0.72rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.sample-tile.new { border-style: dashed; border-color: var(--line-strong); background: none; }
+.sample-tile.new .sample-err { color: var(--ink-dim); }
+.sample-tile.not-drawn { opacity: 0.5; }
+.sample-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.45rem; }
+.sample-legend .tiny { text-transform: none; letter-spacing: 0.02em; }
+.sample-swatch { width: 14px; height: 14px; border-radius: 4px; background: hsl(var(--hue) 70% 45% / 0.6); }
+.sample-swatch.new { background: none; border: 1px dashed var(--line-strong); }
 /* Common confusions and hardest pairs: the characters as tiles, the one
    taken for or the one after in copper, each in small Morse with the
    elements that differ picked out, and a bar of how often, of every one

@@ -8,10 +8,10 @@ use crate::contest::{ContestKind, StoredLog};
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
-    CharSamplingConfig, CharSamplingState, adaptive_bounds, adapts_speed, belief_for,
-    beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,
-    generate_callsign_group, generate_contest_call, generate_word_group, group_size_bounds,
-    normalize_weights,
+    CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
+    adaptive_bounds, adapts_speed, belief_for, beta_posterior_mean_error,
+    compute_raw_sampling_weights, config_from_settings, generate_callsign_group,
+    generate_contest_call, generate_word_group, group_size_bounds, normalize_weights,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -160,6 +160,16 @@ pub struct SamplingRow {
     pub is_letter: bool,
     /// Whether the current set draws it at all.
     pub drawn_now: bool,
+}
+
+impl SamplingRow {
+    /// How much the history has said of the character: the weight of what
+    /// it was copied right and wrong, beyond the flat prior every character
+    /// starts from. Nothing for one never heard, whose error is the prior's
+    /// even chance rather than anything measured.
+    pub fn evidence(&self) -> f64 {
+        (self.alpha + self.beta - CHAR_SAMPLING_PRIOR_ALPHA - CHAR_SAMPLING_PRIOR_BETA).max(0.0)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -994,6 +1004,25 @@ mod tests {
         assert!(!mistakes.bigrams.rows.contains(&'X'));
         assert!(!mistakes.bigrams.cols.contains(&'X'));
         assert!(mistakes.confusions.iter().all(|c| c.sent != 'X'));
+    }
+
+    /// A character never heard has no evidence; one heard has the weight of
+    /// what was heard.
+    #[test]
+    fn a_sampling_row_knows_how_much_was_heard() {
+        let mut row = SamplingRow {
+            character: 'K',
+            p_error: 0.5,
+            sampling_prob: 0.1,
+            alpha: CHAR_SAMPLING_PRIOR_ALPHA,
+            beta: CHAR_SAMPLING_PRIOR_BETA,
+            is_letter: true,
+            drawn_now: true,
+        };
+        assert_eq!(row.evidence(), 0.0);
+        row.alpha += 3.0;
+        row.beta += 1.0;
+        assert_eq!(row.evidence(), 4.0);
     }
 
     #[test]

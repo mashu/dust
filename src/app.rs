@@ -1846,7 +1846,7 @@ mod ui_tests {
             for (tab, marker) in [
                 ("seg-letters", "Letter accuracy"),
                 ("seg-mistakes", "Common confusions"),
-                ("seg-sampling", "Sampling snapshot"),
+                ("seg-sampling", "What comes up next"),
                 ("seg-history", "Session history"),
                 ("seg-overview", "Accuracy over time"),
             ] {

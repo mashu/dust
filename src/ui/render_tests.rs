@@ -2414,13 +2414,88 @@ mod interactions {
         let mut ui = two_sets(CharSetMode::Koch);
         ui.click("seg-sampling");
         assert!(ui.has("Not in the current set"));
-        assert!(ui.has("letter-row not-drawn"));
-        for character in ["Q", "U", "R"] {
+        // Q was missed in the Koch session, and is not drawn now.
+        let q = ui.input_tag("sample-q");
+        assert!(q.contains("sample-tile not-drawn"), "{q}");
+        assert!(q.contains("aria-label=\"Q: wrong"), "{q}");
+        for character in ["u", "r"] {
             assert!(
-                ui.has(&format!("letter-key group-text\">{character}<")),
+                ui.shows(&format!("sample-{character}")),
                 "{character} is listed"
             );
         }
+    }
+
+    /// Koch at level 3, K and M heard, M often missed.
+    #[component]
+    fn SamplingHarness() -> Element {
+        let mut settings = test_settings();
+        settings.curriculum.level = 3;
+        let sessions = vec![stored_session(
+            "2026-09-08",
+            &[("KM", "KX"), ("KM", "KX"), ("KM", "KM"), ("KK", "KK")],
+        )];
+        rsx! {
+            crate::ui::sampling::SamplingTilesCard { settings, sessions }
+        }
+    }
+
+    /// Every character the next group can draw is a tile: one never heard
+    /// is new, one missed is redder than one copied, and Most likely puts
+    /// the likeliest first.
+    #[test]
+    fn what_comes_up_next_is_a_tile_a_character() {
+        let first_tile = |ui: &Ui| {
+            let html = ui.html();
+            let at = html.find("id=\"sample-").expect("a tile");
+            html[at + 4..].split('"').next().unwrap_or("").to_string()
+        };
+        let mut ui = Ui::new(SamplingHarness, ());
+        assert!(ui.has(">What comes up next<"));
+        let hue = |ui: &Ui, id: &str| -> f64 {
+            let tag = ui.input_tag(id);
+            let at = tag.find("--hue: ").expect("a hue") + 7;
+            tag[at..]
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .parse()
+                .expect("a number")
+        };
+        assert!(
+            hue(&ui, "sample-k") > hue(&ui, "sample-m"),
+            "M is the redder"
+        );
+        assert!(ui.input_tag("sample-k").contains("aria-label=\"K: wrong"));
+        // U, the third Koch character, was never heard.
+        let u = ui.input_tag("sample-u");
+        assert!(u.contains("sample-tile new"), "{u}");
+        assert!(u.contains("aria-label=\"U: not heard yet,"), "{u}");
+        assert_eq!(first_tile(&ui), "sample-k", "taught order");
+
+        let likeliest = cw_core::sampling_rows(
+            &{
+                let mut settings = test_settings();
+                settings.curriculum.level = 3;
+                settings
+            },
+            &[stored_session(
+                "2026-09-08",
+                &[("KM", "KX"), ("KM", "KX"), ("KM", "KM"), ("KK", "KK")],
+            )],
+        )
+        .into_iter()
+        .filter(|row| row.drawn_now)
+        .max_by(|a, b| a.sampling_prob.total_cmp(&b.sampling_prob))
+        .expect("a row")
+        .character;
+        ui.click("seg-sample-likely");
+        assert!(ui.input_tag("seg-sample-likely").contains("active"));
+        assert_eq!(
+            first_tile(&ui),
+            format!("sample-{}", likeliest.to_ascii_lowercase())
+        );
+        assert_ne!(likeliest, 'K', "the order did change");
     }
 
     /// Choosing another set never hides the span and speed of the ones

@@ -26,7 +26,7 @@ fn pair_name(row: char, col: char) -> String {
 /// A character as part of a control's id: itself where it is a letter or a
 /// digit, `start` for the start of a group, and its code point otherwise,
 /// so that `/` and `?` never share an id.
-fn id_part(ch: char) -> String {
+pub(crate) fn id_part(ch: char) -> String {
     if ch == GROUP_START_BIGRAM_TOKEN {
         "start".to_string()
     } else if ch.is_ascii_alphanumeric() {
