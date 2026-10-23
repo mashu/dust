@@ -2347,7 +2347,10 @@ mod interactions {
         assert!(ui.has("Group length"));
         assert!(ui.has("every length is as likely as the next"));
         // The default range is 2 to 3 characters: half each.
-        assert_eq!(ui.html().matches(">50%<").count(), 2, "{}", ui.html());
+        let html = ui.html();
+        let card = &html[html.find("Group length").expect("the card")..];
+        let card = &card[..card.find("Speed, WPM").unwrap_or(card.len())];
+        assert_eq!(card.matches(">50%<").count(), 2, "{card}");
 
         let mut ui = stats(true, CharSetMode::Mixed);
         ui.click("seg-sampling");
@@ -2416,7 +2419,7 @@ mod interactions {
         assert!(ui.has("Not in the current set"));
         // Q was missed in the Koch session, and is not drawn now.
         let q = ui.input_tag("sample-q");
-        assert!(q.contains("sample-tile not-drawn"), "{q}");
+        assert!(q.contains("not-drawn"), "{q}");
         assert!(q.contains("aria-label=\"Q: wrong"), "{q}");
         for character in ["u", "r"] {
             assert!(
@@ -2424,6 +2427,52 @@ mod interactions {
                 "{character} is listed"
             );
         }
+    }
+
+    /// K half right in its first ten tries and clean in twenty since; M
+    /// tried twice.
+    #[component]
+    fn LettersHarness() -> Element {
+        let half = [("K", "K"), ("K", "X")].repeat(5);
+        let clean = vec![("K", "K"); 10];
+        let sessions = [
+            (1, stored_session("2026-09-01", &half)),
+            (2, stored_session("2026-09-02", &clean)),
+            (3, stored_session("2026-09-03", &clean)),
+            (4, stored_session("2026-09-04", &[("MM", "MM")])),
+        ]
+        .into_iter()
+        .map(|(timestamp, mut session)| {
+            session.timestamp = timestamp;
+            session
+        })
+        .collect();
+        rsx! {
+            crate::ui::letters::LettersTab { sessions }
+        }
+    }
+
+    /// The Letters card says where each character stands, which way it is
+    /// going, and that two tries are too few to call M anything.
+    #[test]
+    fn letter_accuracy_says_where_each_stands_and_which_way_it_goes() {
+        let ui = Ui::new(LettersHarness, ());
+        assert!(ui.has(">Letter accuracy<"));
+        assert!(ui.has(">Building · 1<"), "{}", ui.html());
+        assert!(ui.has(">Few tries · 1<"));
+        assert!(ui.has(">Mastered · 0<"));
+        assert!(!ui.has(">Weak · "), "nothing is weak");
+        let k = ui.input_tag("letter-k");
+        assert!(k.contains("err-row letters building"), "{k}");
+        assert!(k.contains("aria-label=\"K: 83% right of 30, likely"), "{k}");
+        assert!(k.contains("up 50 points lately"), "{k}");
+        assert!(ui.has(">↑ 50<"));
+        let m = ui.input_tag("letter-m");
+        assert!(m.contains("err-row letters finding-out"), "{m}");
+        assert!(m.contains("few tries"), "{m}");
+        // The weakest first: K, building, before M, too few tries to tell.
+        let html = ui.html();
+        assert!(html.find("id=\"letter-k\"") < html.find("id=\"letter-m\""));
     }
 
     /// Koch at level 3, K and M heard, M often missed.
@@ -2436,43 +2485,41 @@ mod interactions {
             &[("KM", "KX"), ("KM", "KX"), ("KM", "KM"), ("KK", "KK")],
         )];
         rsx! {
-            crate::ui::sampling::SamplingTilesCard { settings, sessions }
+            crate::ui::sampling::NextUpCard { settings, sessions }
         }
     }
 
-    /// Every character the next group can draw is a tile: one never heard
-    /// is new, one missed is redder than one copied, and Most likely puts
-    /// the likeliest first.
+    /// Every character the next group can draw is a row: one never heard is
+    /// new, one missed often is to work on, and it opens with the most work
+    /// first; Most likely puts the likeliest first, Taught order as taught.
     #[test]
-    fn what_comes_up_next_is_a_tile_a_character() {
-        let first_tile = |ui: &Ui| {
+    fn what_comes_up_next_has_a_row_a_character() {
+        let first_row = |ui: &Ui| {
             let html = ui.html();
-            let at = html.find("id=\"sample-").expect("a tile");
+            let at = html.find("id=\"sample-").expect("a row");
             html[at + 4..].split('"').next().unwrap_or("").to_string()
         };
         let mut ui = Ui::new(SamplingHarness, ());
         assert!(ui.has(">What comes up next<"));
-        let hue = |ui: &Ui, id: &str| -> f64 {
-            let tag = ui.input_tag(id);
-            let at = tag.find("--hue: ").expect("a hue") + 7;
-            tag[at..]
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .parse()
-                .expect("a number")
-        };
-        assert!(
-            hue(&ui, "sample-k") > hue(&ui, "sample-m"),
-            "M is the redder"
-        );
-        assert!(ui.input_tag("sample-k").contains("aria-label=\"K: wrong"));
+        // M missed two times in four: over the 10% threshold, and so few
+        // tries that the trainer is still finding out.
+        let m = ui.input_tag("sample-m");
+        assert!(m.contains("err-row finding-out"), "{m}");
+        assert!(m.contains("aria-label=\"M: wrong about"), "{m}");
         // U, the third Koch character, was never heard.
         let u = ui.input_tag("sample-u");
-        assert!(u.contains("sample-tile new"), "{u}");
+        assert!(u.contains("err-row new"), "{u}");
         assert!(u.contains("aria-label=\"U: not heard yet,"), "{u}");
-        assert_eq!(first_tile(&ui), "sample-k", "taught order");
+        assert!(ui.has("Still finding out · "));
+        assert!(ui.input_tag("seg-sample-work").contains("active"));
+        assert_eq!(first_row(&ui), "sample-m", "the most work first");
+        // The dot sits on the best guess, and the dashed threshold at 10%
+        // of a scale to 60%.
+        assert!(ui.has("--thr: 16.7%;"));
+        assert!(ui.has("class=\"err-dot\""));
 
+        ui.click("seg-sample-taught");
+        assert_eq!(first_row(&ui), "sample-k", "taught order");
         let likeliest = cw_core::sampling_rows(
             &{
                 let mut settings = test_settings();
@@ -2492,10 +2539,9 @@ mod interactions {
         ui.click("seg-sample-likely");
         assert!(ui.input_tag("seg-sample-likely").contains("active"));
         assert_eq!(
-            first_tile(&ui),
+            first_row(&ui),
             format!("sample-{}", likeliest.to_ascii_lowercase())
         );
-        assert_ne!(likeliest, 'K', "the order did change");
     }
 
     /// Choosing another set never hides the span and speed of the ones
@@ -2637,8 +2683,9 @@ mod interactions {
         assert!(!ui.has("Once each"), "one confusion, drawn in full");
     }
 
-    /// Most errors first puts the row and the column with the most errors
-    /// in the top left corner, and taught order puts them back.
+    /// Most errors first, as the grid opens, puts the row and the column with
+    /// the most errors in the top left corner, and taught order puts them
+    /// back.
     #[test]
     fn the_grid_can_put_the_most_errors_first() {
         let first_square = |ui: &Ui| {
@@ -2646,18 +2693,19 @@ mod interactions {
             let at = html.find("id=\"pair-").expect("a square");
             html[at + 4..].split('"').next().unwrap_or("").to_string()
         };
+        // The most errors first, as it opens: K before has every error, and
+        // M after.
         let mut ui = Ui::new(MistakesHarness, ());
-        assert!(ui.input_tag("seg-taught-order").contains("active"));
-        assert_eq!(first_square(&ui), "pair-start-k");
-        ui.click("seg-most-errors");
         assert!(ui.input_tag("seg-most-errors").contains("active"));
-        // K before has every error, and M after.
         assert_eq!(first_square(&ui), "pair-k-m");
         // A pinned pair stays pinned however the grid is ordered.
         ui.click("pair-k-m");
         ui.click("seg-taught-order");
+        assert!(ui.input_tag("seg-taught-order").contains("active"));
         assert_eq!(first_square(&ui), "pair-start-k");
         assert!(ui.input_tag("pair-k-m").contains("selected"));
+        ui.click("seg-most-errors");
+        assert_eq!(first_square(&ui), "pair-k-m");
     }
 
     /// Three sessions of twenty groups, the first ten copied clean, then

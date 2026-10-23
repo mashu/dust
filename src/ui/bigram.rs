@@ -235,7 +235,9 @@ pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
 pub fn BigramCard(heat: BigramHeatmap) -> Element {
     let mut hovered = use_signal(|| None::<Pair>);
     let mut pinned = use_signal(|| None::<Pair>);
-    let mut most_errors = use_signal(|| false);
+    // The most errors first, as every list of characters on Stats starts
+    // with the ones that need the most work.
+    let mut most_errors = use_signal(|| true);
     use_click_elsewhere(PAIR_CARD, move || {
         if pinned.peek().is_some() {
             pinned.set(None);

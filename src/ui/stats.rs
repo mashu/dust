@@ -10,10 +10,11 @@ use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
 use crate::ui::format::counted;
+use crate::ui::letters::LettersTab;
 use crate::ui::scores::ScoresTab;
 use crate::ui::settings::aim_label;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::stats_detail::{HistoryTab, LettersTab, MistakesTab, SamplingTab};
+use crate::ui::stats_detail::{HistoryTab, MistakesTab, SamplingTab};
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 
 #[derive(Clone, Copy, PartialEq, Eq)]

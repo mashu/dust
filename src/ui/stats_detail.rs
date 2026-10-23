@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    CONTEST_TIMES_NOTE, CharSetMode, ContestKind, MasteryStatus, SessionHistoryRow, SessionResult,
-    SpeedForecast, SpeedPath, StoredLog, TrainingSettings, adapts_speed, character_diagnostics,
-    group_length_forecast, mistake_stats, session_history, speed_forecast,
+    CharSetMode, ContestKind, SessionHistoryRow, SessionResult, SpeedForecast, SpeedPath,
+    StoredLog, TrainingSettings, adapts_speed, group_length_forecast, mistake_stats,
+    session_history, speed_forecast,
 };
 use dioxus::prelude::*;
 
@@ -14,51 +14,10 @@ use crate::ui::bigram::{BigramCard, hardest_pairs_card};
 use crate::ui::confusion::confusions_card;
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::format::counted;
-use crate::ui::sampling::SamplingTilesCard;
+use crate::ui::sampling::NextUpCard;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
-
-#[component]
-pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
-    let letters = character_diagnostics(&sessions);
-    if letters.is_empty() {
-        return rsx! {
-            div { class: "card", p { class: "muted", "No letter data yet." } }
-        };
-    }
-    let contest = sessions
-        .iter()
-        .any(|session| session.char_set_mode == CharSetMode::Contest);
-    rsx! {
-        div { class: "card stack",
-            div { class: "tiny", "Letter accuracy" }
-            if contest {
-                p { class: "muted", "{CONTEST_TIMES_NOTE}" }
-            }
-            for row in letters.iter() {
-                {
-                    let status = match row.status {
-                        MasteryStatus::Mastered => "Mastered",
-                        MasteryStatus::Building => "Building",
-                        MasteryStatus::Weak => "Weak",
-                    };
-                    let slow = if row.is_slow { " · slow" } else { "" };
-                    rsx! {
-                        div { class: "letter-row",
-                            span { class: "letter-key group-text", "{row.letter}" }
-                            div { class: "bar-track",
-                                span { class: "bar-fill", style: "width: {row.accuracy_pct.clamp(0.0, 100.0)}%;" }
-                            }
-                            span { class: "mono muted", "{row.accuracy_pct.round() as i32}%" }
-                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "{status}{slow} · {row.total}" }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 #[component]
 pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
@@ -79,7 +38,7 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
 pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     rsx! {
         div { class: "stack",
-            SamplingTilesCard { settings: settings.clone(), sessions: sessions.clone() }
+            NextUpCard { settings: settings.clone(), sessions: sessions.clone() }
             {group_length_card(&settings, &sessions)}
             {speed_card(&settings, &sessions)}
         }

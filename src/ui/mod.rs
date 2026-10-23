@@ -18,6 +18,7 @@ pub mod format;
 pub mod hear_qso;
 pub mod heatmap;
 pub mod home;
+pub mod letters;
 pub mod listen;
 pub mod paddle;
 pub mod privacy;
