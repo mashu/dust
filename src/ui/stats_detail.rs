@@ -12,6 +12,7 @@ use crate::persist::backup::sessions_since;
 use crate::state::SessionPick;
 use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::bigram::{BigramCard, hardest_pairs_card};
+use crate::ui::confusion::confusions_card;
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::format::counted;
 use crate::ui::settings_charset::mode_label;
@@ -65,24 +66,7 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
     let (confusion, heat) = (mistakes.confusions, mistakes.bigrams);
     rsx! {
         div { class: "stack",
-            div { class: "card stack",
-                div { class: "tiny", "Common confusions" }
-                if confusion.is_empty() {
-                    p { class: "muted", "No substitution errors yet." }
-                } else {
-                    for row in confusion.iter() {
-                        {
-                            let typed = row.typed.map(|c| c.to_string()).unwrap_or_else(|| "—".into());
-                            rsx! {
-                                div { class: "confuse-row",
-                                    span { class: "group-text", "{row.sent} → {typed}" }
-                                    span { class: "muted", "{row.count}× · {row.percentage.round()}%" }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            {confusions_card(&confusion)}
             if !heat.cols.is_empty() {
                 {hardest_pairs_card(&heat)}
                 BigramCard { heat }

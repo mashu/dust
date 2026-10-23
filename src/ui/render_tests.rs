@@ -2516,8 +2516,11 @@ mod interactions {
     fn the_mistakes_tab_lists_the_hardest_pairs_and_grids_them_all() {
         let ui = Ui::new(MistakesHarness, ());
         assert!(ui.has("Hardest pairs"));
-        assert!(ui.has(">KM<"), "{}", ui.html());
-        assert!(ui.has("80% wrong, 4 of 5 · M 36% overall"));
+        assert!(ui.has("class=\"pair-name\">M after K<"), "{}", ui.html());
+        assert!(ui.has(">4 of 5<"));
+        assert!(ui.has(">80% here · M 36% overall<"));
+        // The bar marks where M stands overall.
+        assert!(ui.has("class=\"bar-mark\" style=\"left: 36.4%;\""));
         // ▸, K, M and U before; K, M and U after.
         assert_eq!(ui.controls("pair-").len(), 4 * 3);
         assert!(!ui.shows("pair-k-start"));
@@ -2533,6 +2536,30 @@ mod interactions {
         );
         assert!(ui.has("Tap a pair for details."));
         assert!(!ui.has("pair-card"));
+    }
+
+    /// Each confusion shows the two characters in Morse, the elements that
+    /// differ picked out, how often it happened and of every one sent.
+    #[test]
+    fn a_confusion_shows_both_characters_in_morse() {
+        let ui = Ui::new(MistakesHarness, ());
+        assert!(ui.has(">Common confusions<"));
+        let html = ui.html();
+        let at = html
+            .find("aria-label=\"M taken for N: 4 times, 36% of every M sent\"")
+            .expect("M taken for N");
+        let row = &html[at..];
+        let row = &row[..row.find("of every M<").expect("its share")];
+        // M is dah dah, N dah dit: the second element is where they part.
+        let marks: Vec<&str> = row
+            .split("<i class=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap_or(""))
+            .collect();
+        assert_eq!(marks, ["dah", "dah differs", "dah", "dit differs"]);
+        assert!(row.contains(">4×<"));
+        assert!(row.contains("width: 36.4%;"));
+        assert!(!ui.has("Once each"), "one confusion, drawn in full");
     }
 
     /// Most errors first puts the row and the column with the most errors
@@ -2610,7 +2637,7 @@ mod interactions {
         let mut ui = Ui::new(MistakesHarness, ());
         ui.click("pair-k-m");
         for text in [
-            ">M after K<",
+            "class=\"tip-date\">M after K<",
             ">Wrong<",
             ">80%<",
             ">4 of 5<",
@@ -2655,8 +2682,8 @@ mod interactions {
 
         ui.click("pair-k-m");
         ui.click("pair-u-m");
-        assert!(ui.has(">M after U<"));
-        assert!(!ui.has(">M after K<"));
+        assert!(ui.has("class=\"tip-date\">M after U<"));
+        assert!(!ui.has("class=\"tip-date\">M after K<"));
         assert!(ui.has(">Copied right every time here.<"));
         assert!(!ui.has(">Taken for<"), "nothing was taken for anything");
         ui.click_elsewhere();
@@ -2671,20 +2698,20 @@ mod interactions {
     fn pointing_at_a_pair_shows_its_card() {
         let mut ui = Ui::new(MistakesHarness, ());
         ui.point_at("pair-start-k", "mouse", (40.0, 300.0), (5.0, 5.0));
-        assert!(ui.has(">K at the start of a group<"));
+        assert!(ui.has("class=\"tip-date\">K at the start of a group<"));
         assert!(ui.input_tag("pair-start-u").contains("in-line"));
         ui.point_away("pair-start-k");
         assert!(!ui.has("pair-card"));
 
         ui.click("pair-k-m");
         ui.point_at("pair-u-m", "mouse", (40.0, 300.0), (5.0, 5.0));
-        assert!(ui.has(">M after U<"));
+        assert!(ui.has("class=\"tip-date\">M after U<"));
         assert!(
             ui.input_tag("pair-k-m").contains("selected"),
             "still pinned"
         );
         ui.point_away("pair-u-m");
-        assert!(ui.has(">M after K<"));
+        assert!(ui.has("class=\"tip-date\">M after K<"));
         ui.click("pair-k-m");
 
         ui.point_at("pair-u-m", "touch", (40.0, 300.0), (5.0, 5.0));
