@@ -2462,7 +2462,26 @@ impl<S: CallSource> ContestMachine<S> {
             counted.push(over.counted);
             busy.push((station, end_sec));
         }
-        for replying in replying.into_iter().chain(garbled) {
+        // A station leaving the frequency, your message sending it on its
+        // way while it was still sending, is heard out before anyone calls:
+        // the rest it goes on with, and its sign-off. Calling across it,
+        // the next caller made one more station at once than the Band card
+        // lets call.
+        let leaving: Vec<bool> = self
+            .stations
+            .iter()
+            .map(|station| !station.caller.state.active())
+            .collect();
+        let mut left_sec = busy
+            .iter()
+            .filter(|(station, _)| leaving[*station])
+            .fold(0.0, |left, (_, end)| f64::max(left, *end));
+        let (gone, staying): (Vec<Replying>, Vec<Replying>) = replying
+            .into_iter()
+            .chain(garbled)
+            .partition(|replying| leaving[replying.station]);
+        for replying in gone.into_iter().chain(staying) {
+            let goes = leaving[replying.station];
             let caller = &mut self.stations[replying.station].caller;
             let Some((said, says)) = caller.reply(self.rules, self.side, &self.my_call, start_run)
             else {
@@ -2472,9 +2491,17 @@ impl<S: CallSource> ContestMachine<S> {
                 .iter()
                 .filter(|(station, _)| *station == replying.station)
                 .fold(your_end, |free, (_, end)| free.max(*end));
+            let free_sec = if goes {
+                free_sec
+            } else {
+                free_sec.max(left_sec)
+            };
             let start_sec = free_sec + caller.draw_delay_sec();
             let voice = caller.sending_voice();
             let end_sec = start_sec + sending_sec(&said, &self.settings, &voice);
+            if goes {
+                left_sec = left_sec.max(end_sec);
+            }
             let caller = &self.stations[replying.station].caller;
             texts.push(said.clone());
             segments.push(Segment {
@@ -7961,6 +7988,46 @@ mod tests {
         assert_eq!(
             runtime.machine.stations[0].caller.state,
             CallerState::NeedQso
+        );
+    }
+
+    /// One caller at a time is one: your TU keyed over the station you
+    /// work, still sending its exchange, sends it on its way and brings
+    /// the next caller, who calls once that exchange is over rather than
+    /// across it. Both stations heard at once was two callers at once,
+    /// with the Band card holding them to one.
+    #[test]
+    fn the_next_caller_waits_for_a_station_leaving_to_finish() {
+        let mut runtime = pileup(&["K5XYZ", "W7ABC"], 1, 1);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        let turn = runtime.last_turn().clone();
+        let exchange = sent_by(&turn, 0)[0].clone();
+        // Halfway through its exchange, your TU.
+        runtime.run_to(runtime.now + ms((exchange.start_sec + exchange.end_sec) / 2.0));
+        runtime.key(OpKey::Tu, "K5XYZ", "");
+        let turn = runtime.last_turn().clone();
+        let rest = sent_by(&turn, 0)
+            .into_iter()
+            .find(|segment| segment.start_sec == 0.0)
+            .expect("its exchange goes on over your TU")
+            .clone();
+        assert!(
+            !runtime.machine.stations[0].caller.state.active(),
+            "it heard your TU"
+        );
+        let next = sent_by(&turn, 1)
+            .first()
+            .map(|call| (*call).clone())
+            .expect("the next caller calls");
+        assert_eq!(next.text, "W7ABC");
+        assert!(
+            next.start_sec >= rest.end_sec + 0.1 - 1e-9,
+            "{} calls at {:.2} s over the end of {:?} at {:.2} s",
+            next.text,
+            next.start_sec,
+            rest.text,
+            rest.end_sec
         );
     }
 

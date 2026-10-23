@@ -626,6 +626,12 @@ settings so scores compare between people.
   call alone (F4) brings callers too once a QSO is in the log, as MRCE's
   (`Contest.pas:1001-1025`). A pile-up of one caller is none, so picking
   Pile-up while the stations range holds one station opens it to 1–3 (8).
+  As built (2026-10-23), the callers a message brings, and every other
+  caller answering it, start no sooner than a station leaving has
+  finished: one your CQ, TU or NIL sent on its way while it was still
+  sending, which goes on with its rest (5.2), and its sign-off. They used
+  to call across it, so a pile-up held to one caller at a time was heard
+  as two, in about one run in seventeen worked at a person's pace.
 - **No Search & Pounce,** which neither MorseRunner nor Morse Walker
   simulates.
 
@@ -1070,7 +1076,12 @@ key that sends nothing reads no other caller's call into it (9.1).
   key, and Shift of any key but a typed character (below), so those are
   passed by, Enter held with Shift, Ctrl or Alt aside. F1–F10 and F12 join
   the list as their keys ship.
-  Alt+P pauses, and on a paused run carries on.
+  Alt+P pauses, and on a paused run carries on. As built (2026-10-23),
+  Enter in the Call and Exchange fields, which the fields hear rather
+  than the listener, is told once when held down too: it heard every
+  repeat, about 30 a second, each keying a message more. MorseRunner's
+  `FormKeyDown` acts on every repeat (`Main.pas:950`); Dust's keys never
+  have.
 - Every key has a button. The key bar's "Enter · TU & log" chip names what
   Enter sends, and F3 reads "F3 TU (no log)". After Enter come F1 CQ, F2
   Exch, F3 TU (no log), F5 His, F7 ? Again, `;` His + exch, `.` TU & log,

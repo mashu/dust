@@ -520,11 +520,15 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
             onkeydown: move |e| {
                 // Enter, or Enter with the Command key, which the run's keys
                 // pass by; held with Shift, Ctrl or Alt it logs without
-                // sending, which the run's keys hear on the page.
+                // sending, which the run's keys hear on the page. Held
+                // down, it is pressed once, as the run's keys are: each
+                // repeat would key one more message.
                 let held = Modifiers::SHIFT | Modifiers::CONTROL | Modifiers::ALT;
                 if e.key() == Key::Enter && !e.modifiers().intersects(held) {
                     e.prevent_default();
-                    press_key(ctx, OpKey::Esm);
+                    if !e.is_auto_repeating() {
+                        press_key(ctx, OpKey::Esm);
+                    }
                 } else if e.code() == Code::Space {
                     // A letter keyed in full lands first, here, and the
                     // paddles' word is over, so Space moves the cursor once.
@@ -2591,6 +2595,26 @@ mod tests {
             ui.tap("more-wpm");
             assert!(ui.has(r#"run-wpm-value">32<"#), "{}", ui.html());
             assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), EntryField::Exchange);
+        });
+    }
+
+    /// Enter held down in a field sends once, as the run's other keys do:
+    /// the repeats of a key held a moment too long are kept from the page
+    /// and key nothing.
+    #[test]
+    fn enter_held_down_sends_once() {
+        run(|| async {
+            let (mut ui, recorder, call) = first_caller().await;
+            ui.type_into("field-call", &call);
+            ui.press_enter("field-call");
+            let sent = recorder.starts().len();
+            for _ in 0..10 {
+                assert!(!ui.repeat_key("field-call", Key::Enter, Code::Enter));
+                assert!(!ui.repeat_key("field-exchange", Key::Enter, Code::Enter));
+            }
+            assert_eq!(recorder.starts().len(), sent, "a repeat keyed a message");
+            ui.press_enter("field-call");
+            assert_eq!(recorder.starts().len(), sent + 1, "the next press is one");
         });
     }
 

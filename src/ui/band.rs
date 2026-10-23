@@ -133,8 +133,14 @@ pub fn BandConditionsCard(
         )
     });
     // Rough habits bring QRM whatever the band's own traffic, so the hint
-    // of a run of single callers cannot say its band is empty at 1.
+    // of a run of single callers cannot say its band is empty at 1, nor a
+    // pile-up's that one caller is all you hear.
     let rough = matches!(view.habits, Some((CallerHabits::Rough, _)));
+    let callers = if b.stations_max == STATIONS_MIN {
+        "caller"
+    } else {
+        "callers"
+    };
     // A run of single callers has the band around it, and no pile-up; a
     // pile-up's range is its callers.
     let (stations, unit, stations_hint) = match view.run {
@@ -148,13 +154,14 @@ pub fn BandConditionsCard(
             "at once",
             "How busy the band is around your run, your caller counted. At 1 there is nobody on it but your caller; above that other stations work each other at their own pitches and speeds, never more of them keying at once than the rest of the count.",
         ),
+        Some(RunStyle::Pileup) if rough => (
+            "Callers at once",
+            callers,
+            "How many call you after each CQ or TU, drawn afresh each time; those you do not work keep calling while their patience lasts. Hold both ends together for the same number every time; at 1 there is no pile-up, only one caller at a time, and with Rough habits now and then a station on your frequency that is not calling you.",
+        ),
         Some(RunStyle::Pileup) => (
             "Callers at once",
-            if b.stations_max == STATIONS_MIN {
-                "caller"
-            } else {
-                "callers"
-            },
+            callers,
             "How many call you after each CQ or TU, drawn afresh each time; those you do not work keep calling while their patience lasts. Hold both ends together for the same number every time; at 1 there is no pile-up, only one caller at a time.",
         ),
         None => (
