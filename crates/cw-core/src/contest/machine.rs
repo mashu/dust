@@ -138,7 +138,9 @@ pub enum ContestEvent {
         fields: Fields,
     },
     /// A turn's sound has started, on each attempt, retries too:
-    /// `heard_from` is when it reaches the ear.
+    /// `heard_from` is when it reaches the ear, as the player reckons it,
+    /// the very moment the player takes a continuation against; a
+    /// continuation's own may come a little either side of its moment.
     TurnStarted {
         id: u64,
         heard_from: MonoMs,
@@ -778,8 +780,14 @@ struct Air {
 impl Air {
     /// Run time when its sound reached the ear. No pause can come between
     /// its key and its start without taking it off the air.
+    ///
+    /// A continuation's stamp may come a few milliseconds before its
+    /// moment, as well as after: a player works it out afresh from its own
+    /// clocks, and takes the next continuation against it. The machine goes
+    /// by it either way, so a splice off the continuation lands where the
+    /// player will put it.
     fn heard_run(&self) -> u64 {
-        self.turn.at_run_ms + self.heard_from.since(self.keyed_at)
+        (self.turn.at_run_ms + self.heard_from.0).saturating_sub(self.keyed_at.0)
     }
 
     /// The callers a pause `why` at `run_now` cuts short, to send again
@@ -1004,10 +1012,10 @@ pub struct ContestMachine<S> {
     /// The speed of each message you sent.
     sent_wpm: Vec<f64>,
     /// How long after a key its turn's sound reaches the ear, in
-    /// milliseconds, as the last turn started at once found it: the
-    /// player's lead and latency, and the moment it took to start. No
-    /// continuation can take over from the turn on the air any sooner
-    /// ([`Self::splice`]).
+    /// milliseconds, as the last turn started at once found it: the moment
+    /// the turn took to reach the player, and the player's lead and latency
+    /// from there. No continuation can take over from the turn on the air
+    /// any sooner ([`Self::splice`]).
     lead_ms: u64,
     /// Run time and time paused, once the run is over.
     ended: Option<(u64, u64)>,
@@ -5009,6 +5017,86 @@ mod tests {
         };
         assert!(held.apply(held_up).is_empty());
         assert_eq!(held.machine.lead_ms, LEAD_MOST_MS);
+    }
+
+    /// A continuation's start says it is heard a few milliseconds either
+    /// side of the moment it was asked for, as a player working it out
+    /// afresh from its own clocks does, and the player takes the next
+    /// continuation against that stamp. The machine goes by it too, either
+    /// way, so a key during the continuation splices the next on where one
+    /// of its characters starts by that stamp, not as far into one as the
+    /// stamp was early.
+    #[test]
+    fn a_splice_off_a_continuation_goes_by_its_heard_stamp() {
+        let settings = run_settings(25.0);
+        let fields = |at: u64| Fields {
+            call: "K5XYZ".to_string(),
+            exch: String::new(),
+            call_edited: MonoMs(at),
+            exch_complete: None,
+            earlier: Vec::new(),
+        };
+        for off in [-6, 0, 6] {
+            let mut runtime = runtime(&["K5XYZ"]);
+            runtime.finish_turn();
+            let machine = &mut runtime.machine;
+            let keyed = runtime.now;
+            let effects = machine.apply(
+                ContestEvent::Key {
+                    key: OpKey::HisCall,
+                    fields: fields(keyed),
+                },
+                MonoMs(keyed),
+            );
+            let call = played(&effects).expect("your call").clone();
+            let started = ContestEvent::TurnStarted {
+                id: call.id,
+                heard_from: MonoMs(keyed),
+            };
+            assert!(machine.apply(started, MonoMs(keyed)).is_empty());
+            // The exchange keyed early in the call: the first continuation,
+            // heard `off` from its moment.
+            let at = keyed + 40;
+            let effects = machine.apply(
+                ContestEvent::Key {
+                    key: OpKey::Exchange,
+                    fields: fields(at),
+                },
+                MonoMs(at),
+            );
+            let first = played(&effects).expect("your exchange").clone();
+            let asked = first.starts_at.expect("spliced on");
+            let heard_from = MonoMs(asked.0.saturating_add_signed(off));
+            let started = ContestEvent::TurnStarted {
+                id: first.id,
+                heard_from,
+            };
+            assert!(machine.apply(started, MonoMs(at)).is_empty());
+            // Keyed again early in it.
+            let at = asked.0 + 100;
+            let effects = machine.apply(
+                ContestEvent::Key {
+                    key: OpKey::Exchange,
+                    fields: fields(at),
+                },
+                MonoMs(at),
+            );
+            let next = played(&effects).expect("your exchange again");
+            let starts = next.starts_at.expect("spliced on").0;
+            let mine = first
+                .segments
+                .iter()
+                .find(|segment| segment.who == Sender::You)
+                .expect("your exchange");
+            let characters: Vec<u64> = char_spans(&mine.text, &settings, &mine.voice)
+                .iter()
+                .map(|(_, start, _)| heard_from.0 + whole_ms(mine.start_sec + start))
+                .collect();
+            assert!(
+                characters.contains(&starts),
+                "heard {off} ms off its moment: spliced on at {starts}, characters at {characters:?}"
+            );
+        }
     }
 
     /// Your exchange sent in one message with a TU that logs carries this

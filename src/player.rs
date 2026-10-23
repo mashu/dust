@@ -344,10 +344,12 @@ impl Lease {
     /// sound is to reach the ear: each attempt asks the player for it, and
     /// one after it has passed, a retry, starts as soon as it can.
     ///
-    /// Each attempt, once started, calls `on_start` with how long after now
-    /// its sound reaches the ear, in seconds: the player's lead in starting
-    /// it, any wait for the moment asked, and its latency to the ear. No
-    /// borrow of the player is held then, so `on_start` may use it.
+    /// Each attempt, once started, calls `on_start` with when its sound
+    /// reaches the ear, as the player reckons it
+    /// ([`crate::audio::PlaybackSignal::heard_from`]): the clock the player
+    /// read to time the send, its lead in starting it, any wait for the
+    /// moment asked, and its latency to the ear. No borrow of the player is
+    /// held then, so `on_start` may use it.
     pub async fn send_planned(
         &self,
         asked: Asked,
@@ -355,7 +357,7 @@ impl Lease {
         transcript: &Transmission,
         settings: &TrainingSettings,
         starts_at: Option<MonoMs>,
-        mut on_start: impl FnMut(f64),
+        mut on_start: impl FnMut(MonoMs),
     ) -> Result<Sent, AudioError> {
         let begin = |backend: &mut dyn MorseBackend| {
             crate::audio::start_planned(backend, plan, transcript, settings, starts_at)
@@ -373,7 +375,7 @@ impl Lease {
         asked: Asked,
         begin: &Begin<'_>,
         settings: &TrainingSettings,
-        on_start: &mut dyn FnMut(f64),
+        on_start: &mut dyn FnMut(MonoMs),
     ) -> Result<Sent, AudioError> {
         let ticket = Ticket {
             lease: self,
@@ -433,14 +435,14 @@ impl Ticket<'_> {
     async fn attempt(
         &self,
         begin: &Begin<'_>,
-        on_start: &mut dyn FnMut(f64),
+        on_start: &mut dyn FnMut(MonoMs),
     ) -> Result<Sent, AudioError> {
         let player = &self.lease.player;
         self.check()?;
         // In a statement of its own: the player is borrowed only while the
         // send starts, never while `on_start` runs.
         let wait = player.start(begin)?;
-        on_start(wait.heard_after_sec);
+        on_start(wait.heard_from);
         let sent = Sent {
             duration_sec: wait.duration_sec,
             char_wpm: wait.char_wpm,
@@ -606,8 +608,7 @@ mod tests {
     }
 
     /// A turn planned already plays as planned, and each attempt says when
-    /// it started and how long its sound takes to reach the ear, retries
-    /// too.
+    /// its sound reaches the ear, its latency after it started, retries too.
     #[test]
     fn a_planned_send_says_when_each_attempt_starts() {
         run(|| async {
@@ -621,22 +622,15 @@ mod tests {
             recorder.fail_next(1);
             let asked = lease.ask_to_send();
             let sent = lease
-                .send_planned(
-                    asked,
-                    &plan,
-                    &transmission,
-                    &settings,
-                    None,
-                    |heard_after| {
-                        starts.push(heard_after);
-                    },
-                )
+                .send_planned(asked, &plan, &transmission, &settings, None, |heard_from| {
+                    starts.push(heard_from.since(MonoMs(crate::time::mono_ms())));
+                })
                 .await;
             assert_eq!(
                 sent.map(|sent| sent.duration_sec),
                 Ok(plan.wanted.duration_sec)
             );
-            assert_eq!(starts, [0.25, 0.25], "one call for each attempt");
+            assert_eq!(starts, [250, 250], "one call for each attempt");
             let kept = recorder.starts();
             assert_eq!(kept.len(), 2);
             assert_eq!(kept[0].transcript, transmission);
@@ -667,19 +661,20 @@ mod tests {
                     &transmission,
                     &settings,
                     Some(at),
-                    |heard_after| {
-                        starts.push(heard_after);
+                    |heard_from| {
+                        starts.push(heard_from);
                     },
                 )
                 .await;
             assert!(sent.is_ok());
-            assert_eq!(starts, [0.4]);
-            assert_eq!(recorder.starts()[0].heard_in, Some(0.4));
+            assert_eq!(starts, [at]);
+            assert_eq!(recorder.starts()[0].starts_at, Some(at));
             let took = crate::time::mono_ms() - began;
             let planned = (plan.wanted.duration_sec * 1_000.0) as u64;
             assert!(took >= 400 + planned, "done {took} ms in, of {planned}");
 
-            let past = MonoMs(crate::time::mono_ms() - 200);
+            let now = MonoMs(crate::time::mono_ms());
+            let past = MonoMs(now.0 - 200);
             let mut starts = Vec::new();
             let asked = lease.ask_to_send();
             let sent = lease
@@ -689,14 +684,56 @@ mod tests {
                     &transmission,
                     &settings,
                     Some(past),
-                    |heard_after| {
-                        starts.push(heard_after);
+                    |heard_from| {
+                        starts.push(heard_from);
                     },
                 )
                 .await;
             assert!(sent.is_ok());
-            assert_eq!(starts, [0.0], "at once");
-            assert_eq!(recorder.starts()[1].heard_in, Some(-0.2));
+            assert_eq!(starts, [now], "at once");
+            assert_eq!(recorder.starts()[1].starts_at, Some(past));
+        });
+    }
+
+    /// A start goes on a while once the player has read the clock it times
+    /// the send from: a browser schedules a pile-up's tones and remakes the
+    /// band's buffers for them. The send says it is heard by that reading,
+    /// not by when the start came back, so the moment it says is the one the
+    /// player takes the next send against: a send started at once is heard
+    /// its latency after the reading, and one asked for a moment at that
+    /// moment.
+    #[test]
+    fn a_slow_start_says_when_it_is_heard_by_the_clock_it_read() {
+        run(|| async {
+            let (player, recorder) = player();
+            let settings = test_settings();
+            let lease = player.claim(&settings).expect("a player");
+            recorder.latency_sec.set(0.05);
+            recorder.start_takes_ms.set(30);
+            let transmission = cq();
+            let plan = cw_core::plan_transmission(&transmission, &settings);
+            for asked_for in [None, Some(400)] {
+                let read = MonoMs(crate::time::mono_ms());
+                let at = asked_for.map(|ms| read.plus(ms));
+                let mut starts = Vec::new();
+                let asked = lease.ask_to_send();
+                let sent = lease
+                    .send_planned(asked, &plan, &transmission, &settings, at, |heard_from| {
+                        starts.push((heard_from, crate::time::mono_ms()));
+                    })
+                    .await;
+                assert!(sent.is_ok());
+                let heard_from = at.unwrap_or(read.plus(50));
+                assert_eq!(
+                    starts,
+                    [(heard_from, read.0 + 30)],
+                    "heard by the clock read, though the start came back 30 ms on"
+                );
+                assert_eq!(
+                    recorder.starts().last().map(|s| s.heard_from),
+                    Some(heard_from)
+                );
+            }
         });
     }
 

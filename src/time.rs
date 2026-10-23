@@ -63,6 +63,23 @@ pub fn reset_mono_clock() {
     CLOCK_ORIGIN.with(|origin| origin.set(None));
 }
 
+/// Move the monotonic clock on by `ms` at once, as a call that keeps the
+/// thread busy that long moves it while nothing else runs: a test's paused
+/// clock only moves while the test waits. The clock runs on from there,
+/// with the test's timers.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub fn skip_mono_clock(ms: u64) {
+    let _ = mono_ms();
+    CLOCK_ORIGIN.with(|origin| {
+        let moved = origin
+            .get()
+            .and_then(|start| start.checked_sub(std::time::Duration::from_millis(ms)));
+        if moved.is_some() {
+            origin.set(moved);
+        }
+    });
+}
+
 pub fn local_date_string() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
@@ -136,6 +153,16 @@ mod tests {
             assert!(now >= last);
             last = now;
         }
+    }
+
+    /// A skip moves the clock on at once, and it runs on from there.
+    #[test]
+    fn a_skip_moves_the_monotonic_clock_on() {
+        let before = super::mono_ms();
+        super::skip_mono_clock(30);
+        let after = super::mono_ms();
+        assert!(after >= before + 30, "{before} then {after}");
+        assert!(super::mono_ms() >= after);
     }
 
     /// A pinned seed starts the same sequence every time, another seed

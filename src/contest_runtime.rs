@@ -569,10 +569,11 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     let asked = lease.ask_to_send();
     spawn_forever(async move {
         let heard = lease.clone();
-        // Each attempt, retries too: its sound reaches the ear the player's
-        // lead, any wait for its moment and latency after it starts.
-        let started = move |heard_after_sec: f64| {
-            let heard_from = MonoMs(mono_ms()).plus_sec(heard_after_sec);
+        // Each attempt, retries too, says when its sound reaches the ear by
+        // the player's own reckoning (`PlaybackSignal::heard_from`), the
+        // moment it takes a continuation against; the clock read here,
+        // after the start, would be late by however long the start went on.
+        let started = move |heard_from: MonoMs| {
             dispatch(ctx, &heard, ContestEvent::TurnStarted { id, heard_from });
         };
         let event = match lease
@@ -1043,7 +1044,6 @@ mod tests {
             let mut h = Harness::with_settings(contest_settings());
             h.start_training();
             h.advance(300).await;
-            let pressed = mono_ms();
             press(&mut h, OpKey::Again);
             let starts = h.recorder.starts();
             let (cq, next) = (&starts[0], starts.last().expect("the continuation"));
@@ -1060,11 +1060,82 @@ mod tests {
                 next.transcript.text
             );
             let q_at = cq.plan.wanted.events[4].start_sec;
-            let heard_in = next.heard_in.expect("a moment to start at");
-            let meant = q_at - (pressed as f64 / 1_000.0);
-            assert!((heard_in - meant).abs() < 0.002, "{heard_in} for {meant}");
+            let at = next.starts_at.expect("a moment to start at");
+            let meant = cq.heard_from.0 as f64 + q_at * 1_000.0;
+            assert!((at.0 as f64 - meant).abs() <= 1.0, "{at:?} for {meant}");
             let air = view(&h).and_then(|view| view.air).expect("on the air");
-            assert_eq!(air.heard_from, MonoMs(pressed).plus_sec(heard_in));
+            assert_eq!(air.heard_from, at);
+        });
+    }
+
+    /// Where `next`, a continuation, takes over from `before`, the send on
+    /// the air at its key: when the first character of the rest of your
+    /// message it goes on from was to sound in `before`, by when `before`
+    /// said it is heard from.
+    fn where_next_character_sounds(
+        before: &crate::audio::fake::Started,
+        next: &crate::audio::fake::Started,
+        settings: &TrainingSettings,
+    ) -> f64 {
+        let (yours, rest) = (&before.transcript.text, &next.transcript.text);
+        let from = (1..yours.len())
+            .find(|&from| rest.starts_with(&yours[from..]))
+            .unwrap_or_else(|| panic!("{rest:?} goes on from none of {yours:?}"));
+        let sent = &yours[..from];
+        let elements = plan_morse_playback_for(sent, settings, &before.transcript.voice);
+        let starts_sec = before.plan.wanted.events[elements.events.len()].start_sec;
+        before.heard_from.0 as f64 + starts_sec * 1_000.0
+    }
+
+    /// In a pile-up, a start goes on a while once the player has read its
+    /// clock: a browser schedules the callers' tones and remakes the band's
+    /// queued buffers for them, 10 to 40 ms on a phone. The run hears when
+    /// a turn reaches the ear by the player's own reckoning, so a key during
+    /// your message, and another during the continuation, each splices on
+    /// within a millisecond of where its next character starts, not that
+    /// while into it, which then sounded twice. The continuation says it is
+    /// heard a little before its moment or after, as a real player working
+    /// it out afresh does, and the second splice goes by that, as the player
+    /// does.
+    #[test]
+    fn a_pile_up_splice_lands_where_the_next_character_starts() {
+        run(|| async {
+            for off in [-5, 5] {
+                let mut settings = contest_settings();
+                settings.contest.contest_style = cw_core::RunStyle::Pileup;
+                settings.band.stations_min = 3;
+                settings.band.stations_max = 3;
+                settings.band.filter_width_hz = cw_core::FILTER_WIDTH_MAX;
+                let mut h = Harness::with_settings(settings.clone());
+                h.recorder.latency_sec.set(0.05);
+                h.recorder.start_takes_ms.set(30);
+                h.recorder.heard_off_ms.set(off);
+                h.start_training();
+                assert!(
+                    h.recorder.starts()[0].transcript.others.len() >= 3,
+                    "a pile-up answers the CQ"
+                );
+                h.advance(300).await;
+                press(&mut h, OpKey::Again);
+                h.advance(400).await;
+                press(&mut h, OpKey::MyCall);
+                let starts = h.recorder.starts();
+                assert_eq!(starts.len(), 3, "the CQ and two continuations");
+                for pair in starts.windows(2) {
+                    let (before, next) = (&pair[0], &pair[1]);
+                    let meant = where_next_character_sounds(before, next, &settings);
+                    let at = next.starts_at.expect("spliced on");
+                    assert!(
+                        (at.0 as f64 - meant).abs() <= 1.0,
+                        "heard {off} ms off: {:?} spliced on at {at:?}, its next character at {meant}",
+                        next.transcript.text
+                    );
+                    let heard_from = MonoMs(at.0.saturating_add_signed(off));
+                    assert_eq!(next.heard_from, heard_from, "started at its moment");
+                }
+                let air = view(&h).and_then(|view| view.air).expect("on the air");
+                assert_eq!(air.heard_from, starts[2].heard_from);
+            }
         });
     }
 

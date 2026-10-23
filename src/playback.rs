@@ -6,8 +6,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, Sampler, Sender,
-    SplitMix64, TrainingSettings, Transmission, compute_after_group_gap_ms,
+    CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, MonoMs, Sampler,
+    Sender, SplitMix64, TrainingSettings, Transmission, compute_after_group_gap_ms,
     compute_group_gap_for_wpm, generate_callsign, generate_training_group, hear_qsos, plan_turn,
     resolve_station,
 };
@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 
 use crate::player::{AudioError, Lease};
 use crate::state::AppCtx;
-use crate::time::seed_rng;
+use crate::time::{mono_ms, seed_rng};
 
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
@@ -288,14 +288,14 @@ async fn play_qsos(
         let asked = lease.ask_to_send();
         let started = {
             let (lease, showing, sends) = (lease.clone(), showing.clone(), sends.clone());
-            move |heard_after_sec: f64| {
+            move |heard_from: MonoMs| {
                 showing.set(showing.get() + 1);
                 let shows = (showing.clone(), showing.get());
                 spawn_forever(show_sends(
                     lease.clone(),
                     sends.clone(),
                     before,
-                    heard_after_sec,
+                    heard_from,
                     shows,
                     dialogue,
                 ));
@@ -386,20 +386,23 @@ fn lines_of(sends: &[HeardSend]) -> Vec<DialogueLine> {
 }
 
 /// Show `sends`, those of a turn after the `before` lines of the turns
-/// before it, each as it is heard whole, `heard_after_sec` after now, for
-/// as long as `shows` is the start of the send that may show them.
+/// before it, each as it is heard whole, the turn's sound reaching the ear
+/// from `heard_from`, for as long as `shows` is the start of the send that
+/// may show them.
 async fn show_sends(
     lease: Lease,
     sends: Vec<HeardSend>,
     before: usize,
-    heard_after_sec: f64,
+    heard_from: MonoMs,
     shows: (Rc<Cell<u64>>, u64),
     dialogue: Signal<Option<Dialogue>>,
 ) {
     let (showing, mine) = shows;
+    let begun = mono_ms() as f64;
     let mut waited_ms = 0;
     for heard in 1..=sends.len() {
-        let due_ms = ((heard_after_sec + sends[heard - 1].end_sec) * 1_000.0).ceil() as u32;
+        let ends = heard_from.0 as f64 + sends[heard - 1].end_sec * 1_000.0;
+        let due_ms = (ends - begun).max(0.0).ceil() as u32;
         if due_ms > waited_ms {
             if lease.sleep(due_ms - waited_ms).await.is_err() {
                 return;

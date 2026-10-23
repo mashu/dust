@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
+use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 
 use super::epoch::{Epoch, Ticket};
 use super::{MorseBackend, PlaybackSignal, WaitFlags};
@@ -20,19 +20,18 @@ pub struct MorsePlayer {
 struct SilentSignal {
     ticket: Ticket,
     /// When the send starts, on the app's monotonic clock: later than it
-    /// was started for one asked to start at a given time.
-    started: u64,
-    /// How long after it was started it starts.
-    wait_ms: u64,
+    /// was started for one asked to start at a given time. Nothing is heard,
+    /// so it is "heard" from then.
+    started: MonoMs,
 }
 
 impl PlaybackSignal for SilentSignal {
-    fn heard_after_sec(&self) -> f64 {
-        self.wait_ms as f64 / 1_000.0
+    fn heard_from(&self) -> MonoMs {
+        self.started
     }
 
     fn poll(&self) -> WaitFlags {
-        let elapsed = mono_ms().saturating_sub(self.started);
+        let elapsed = MonoMs(mono_ms()).since(self.started);
         WaitFlags {
             cancelled: self.ticket.is_cancelled(),
             finished: false,
@@ -62,15 +61,15 @@ impl MorseBackend for MorsePlayer {
         _transmission: &Transmission,
         _plan: &PlannedTransmission,
         _settings: &TrainingSettings,
-        heard_in: Option<f64>,
+        starts_at: Option<MonoMs>,
     ) -> Result<Rc<dyn PlaybackSignal>, String> {
         // Nothing is heard: the plan's length, which the wait already has,
-        // is all there is to a send, from when it was to start.
-        let wait_ms = heard_in.map_or(0, |heard_in| (heard_in.max(0.0) * 1_000.0).round() as u64);
+        // is all there is to a send, from when it was to start, or now once
+        // that is past.
+        let now = MonoMs(mono_ms());
         Ok(Rc::new(SilentSignal {
             ticket: self.epoch.arm(),
-            started: mono_ms() + wait_ms,
-            wait_ms,
+            started: starts_at.map_or(now, |at| at.max(now)),
         }))
     }
 
@@ -135,7 +134,7 @@ mod tests {
             let started = mono_ms();
             let wait =
                 start_planned(&mut player, &plan, &transcript, &settings, None).expect("sent");
-            assert_eq!(wait.heard_after_sec, 0.0);
+            assert_eq!(wait.heard_from, MonoMs(started));
             assert_eq!(wait.wait().await, PlaybackOutcome::Completed);
             let took = mono_ms() - started;
             assert!(

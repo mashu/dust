@@ -21,7 +21,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use cw_core::band::{BandKey, Qsb};
-use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
+use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 use gloo_timers::callback::Timeout;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -58,7 +58,7 @@ pub struct MorsePlayer {
     /// When the send playing is heard from, on the app's clock, as this
     /// player said it would be, and where it starts on the context's: what
     /// a send asked to start at a given time takes over from it against.
-    heard: Option<(f64, f64)>,
+    heard: Option<(MonoMs, f64)>,
     /// Gains fading out: a stopped send's, or a band that was replaced.
     released: Retiring<GainNode>,
     /// The gains of a send a continuation takes over from, playing on to
@@ -90,14 +90,15 @@ struct WebSignal {
     ctx: AudioContext,
     ticket: Ticket,
     started_at: f64,
-    /// How long after it was started the send reaches the ear: its lead on
-    /// the clock, and the latency the browser reports, read as it started.
-    heard_after_sec: f64,
+    /// When the send reaches the ear, on the app's clock: the clock as the
+    /// start read it, its lead on the context's, and the latency the
+    /// browser reports, read as it started.
+    heard_from: MonoMs,
 }
 
 impl PlaybackSignal for WebSignal {
-    fn heard_after_sec(&self) -> f64 {
-        self.heard_after_sec
+    fn heard_from(&self) -> MonoMs {
+        self.heard_from
     }
 
     fn poll(&self) -> WaitFlags {
@@ -279,30 +280,32 @@ impl MorseBackend for MorsePlayer {
         _transmission: &Transmission,
         plan: &PlannedTransmission,
         settings: &TrainingSettings,
-        heard_in: Option<f64>,
+        starts_at: Option<MonoMs>,
     ) -> Result<Rc<dyn PlaybackSignal>, String> {
         self.resume_from_gesture();
         let ticket = self.epoch.arm();
         // One reading of the clock, for the tones, the fading, the pile-up
-        // and the waiter alike.
+        // and the waiter alike, with the app's clock beside it: the send is
+        // timed from here, however long scheduling it takes after.
         let now = self.ctx.current_time();
+        let now_heard = MonoMs(mono_ms());
         let lead = schedule_lead_sec(reported_latency(&self.ctx, "baseLatency"));
         let latency = heard_latency(&self.ctx);
         let soonest = now + lead;
-        let now_heard = mono_ms() as f64 / 1_000.0;
+        let seconds = |from: MonoMs, to: MonoMs| (to.0 as f64 - from.0 as f64) / 1_000.0;
         // A send asked to start at a given time takes over from the one
         // playing where that one is then, on the clock it plays on, which
         // runs on to there; with nothing playing, it waits out the time
         // from now. Never sooner than a send can start.
-        let start = match (heard_in, self.heard) {
-            (Some(heard_in), Some((playing_heard, playing_start))) if self.send.is_some() => {
-                playing_start + (now_heard + heard_in - playing_heard)
+        let start = match (starts_at, self.heard) {
+            (Some(at), Some((playing_heard, playing_start))) if self.send.is_some() => {
+                playing_start + seconds(playing_heard, at)
             }
-            (Some(heard_in), _) => now + heard_in - latency,
+            (Some(at), _) => now + seconds(now_heard, at) - latency,
             (None, _) => soonest,
         }
         .max(soonest);
-        let takes_over = heard_in.is_some() && self.send.is_some();
+        let takes_over = starts_at.is_some() && self.send.is_some();
         // The send taken over from is ridden down by the moment the new one
         // starts, your message in it silent then, so the two never sound
         // together.
@@ -329,13 +332,17 @@ impl MorseBackend for MorsePlayer {
                 start + plan.wanted.duration_sec,
             ));
         }
-        let heard_after_sec = heard_after_sec(start - now, latency);
-        self.heard = Some((now_heard + heard_after_sec, start));
+        // Heard from the one reading above, so the run is told the very
+        // moment this player takes the next send against: the time spent
+        // scheduling the callers' tones and remaking the band's queued
+        // buffers for them is no part of it.
+        let heard_from = now_heard.plus_sec(heard_after_sec(start - now, latency));
+        self.heard = Some((heard_from, start));
         Ok(Rc::new(WebSignal {
             ctx: self.ctx.clone(),
             ticket,
             started_at: start,
-            heard_after_sec,
+            heard_from,
         }))
     }
 

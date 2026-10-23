@@ -13,11 +13,12 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample};
 use cw_core::band::{BandMixer, FilterDesign, Qsb};
-use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
+use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 
 use super::mixer::{BandVoice, Mixer, Output, SendVoice, SidetoneControl, Swept};
 use super::shape::ToneRequest;
 use super::{MorseBackend, PlaybackSignal};
+use crate::time::mono_ms;
 use state::{PlayerState, ToneSignal};
 
 /// The furthest behind the callback the speaker is believed to be. A host
@@ -51,10 +52,10 @@ pub struct MorsePlayer {
     opened_at: Instant,
     /// When the device last refused to open.
     refused_at: Option<Instant>,
-    /// When the send playing is heard from, as this player said it would
-    /// be: what a send asked to start at a given time takes over from it
-    /// against.
-    heard_at: Option<Instant>,
+    /// When the send playing is heard from, on the app's clock, as this
+    /// player said it would be: what a send asked to start at a given time
+    /// takes over from it against.
+    heard: Option<MonoMs>,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -110,7 +111,7 @@ impl MorsePlayer {
             stream: None,
             opened_at: Instant::now(),
             refused_at: None,
-            heard_at: None,
+            heard: None,
         };
         if let Err(err) = player.open(&device, &supported) {
             eprintln!("audio output: {err}");
@@ -225,7 +226,7 @@ impl MorseBackend for MorsePlayer {
         _transmission: &Transmission,
         plan: &PlannedTransmission,
         settings: &TrainingSettings,
-        heard_in: Option<f64>,
+        starts_at: Option<MonoMs>,
     ) -> Result<Rc<dyn PlaybackSignal>, String> {
         if let Err(err) = self.ensure_output() {
             self.state.retire();
@@ -244,41 +245,45 @@ impl MorseBackend for MorsePlayer {
             let mixer = self.mixer();
             (mixer.sample_rate(), mixer.latency_sec())
         };
-        let now = Instant::now();
         let sr = f64::from(rate);
         // A send asked to start at a given time takes over from the one
         // playing where that one is then, on the mixer's own clock, sample
-        // for sample; with nothing playing, it waits out the time from now.
-        let wait_sec = heard_in.map_or(0.0, |heard_in| (heard_in - latency_sec).max(0.0));
-        let into = heard_in.zip(self.heard_at).map(|(heard_in, playing)| {
-            let asked = now + Duration::from_secs_f64(heard_in.max(0.0));
-            (asked.saturating_duration_since(playing).as_secs_f64() * sr).round() as usize
-        });
+        // for sample; with nothing playing, it waits out the time from when
+        // it goes in.
+        let into = starts_at
+            .zip(self.heard)
+            .map(|(at, playing)| (at.since(playing) as f64 / 1_000.0 * sr).round() as usize);
+        let wait_sec = |now: MonoMs| {
+            starts_at.map_or(0.0, |at| {
+                (at.since(now) as f64 / 1_000.0 - latency_sec).max(0.0)
+            })
+        };
         let voice = SendVoice::new(
             plan,
             &FilterDesign::from_settings(settings),
             Qsb::of(&settings.band),
             rate,
-            self.opened_at.elapsed().as_secs_f64() + wait_sec,
+            self.opened_at.elapsed().as_secs_f64() + wait_sec(MonoMs(mono_ms())),
         );
         let finished = voice.finished_flag();
         let armed = self.state.arm();
         let mut waits = 0;
+        let mut went_in = MonoMs(0);
         self.with_mixer(|mixer, swept| {
-            waits = mixer.start_at(voice, into, (wait_sec * sr).round() as usize, swept);
+            // The moment the send is timed from: as it goes in, its voice
+            // built, which for a pile-up's turn takes a while.
+            went_in = MonoMs(mono_ms());
+            let wait = (wait_sec(went_in) * sr).round() as usize;
+            waits = mixer.start_at(voice, into, wait, swept);
         });
-        let heard_after_sec = latency_sec + waits as f64 / sr;
-        self.heard_at = Some(now + Duration::from_secs_f64(heard_after_sec));
-        Ok(Rc::new(ToneSignal::new(
-            armed,
-            finished,
-            failed,
-            heard_after_sec,
-        )))
+        let heard_from = went_in.plus_sec(latency_sec + waits as f64 / sr);
+        self.heard = Some(heard_from);
+        let signal = ToneSignal::new(armed, finished, failed, heard_from);
+        Ok(Rc::new(signal))
     }
 
     fn stop(&mut self) {
-        self.heard_at = None;
+        self.heard = None;
         self.state.retire();
         // The send rides its own release down to silence.
         self.mixer().stop();

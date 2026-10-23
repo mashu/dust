@@ -137,6 +137,13 @@ through Discard, its Next never starting a run, whose callers would be
 sound nobody asked for (§2); and the paddles' field space, a word space of
 quiet after a letter pressing Space by the Space key's own rule, so a call
 and its exchange keyed on the paddles land in their own fields (§4.5).
+A fix from a fourth browser test, of a web build of slice 5a, followed:
+the run is told when a turn reaches the ear by the player's own
+reckoning, from the clock it read to time the send, on every player, and
+the machine goes by a continuation's stamp whether it comes a little
+before the moment asked or after, so a key during your message in a
+pile-up is spliced on where its next character starts, not 10 to 40 ms
+into it, which then sounded twice (§5.2).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -1340,8 +1347,10 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   (`SEND_RELEASE_SEC`, 8 ms, kept with the plans in cw-core for this), so
   the continuation takes over no sooner than both after the key: the
   machine learns the lead from each turn started at once, on its first
-  try, as `heard_from` less the moment it was keyed (the player's lead,
-  its latency, and the moment the start took), held to a second, past any
+  try, as `heard_from` less the moment it was keyed (the moment the turn
+  took to reach the player, and the player's lead and latency from there,
+  but not the time its start went on after it read its clock, which no
+  continuation waits for: see Heard time, below), held to a second, past any
   lead and latency a player believes, so a start held up longer, as by a
   device opening, does not hold up every continuation after it; a
   character starting sooner after the key than that goes out with the turn
@@ -1435,20 +1444,52 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   failed.
 - **Heard time.** `send_planned` calls `on_start` after each attempt starts,
   with no `Player` borrow held (`player.rs:194-212`). The runtime dispatches
-  `TurnStarted{id, heard_from}`: the start plus the player's lead and
-  latency estimate (web `schedule_lead_sec` and `heard_latency`,
-  `wait.rs:124-132`, `web/mod.rs:122`; native `latency_frames`,
-  `audio/native.rs:272-280`), and, as built (5a), for a continuation the
-  wait for the moment asked, so `heard_from` is the splice the machine
-  planned wherever the player could honour it; that of a turn started at
-  once, on its first try, is how the machine learns the lead a splice
-  waits out. A
+  `TurnStarted{id, heard_from}`: the start, by the clock the player read
+  for it, plus the player's lead and latency estimate (web
+  `schedule_lead_sec` and `heard_latency`, `wait.rs:124-132`,
+  `web/mod.rs:122`; native `latency_frames`, `audio/native.rs:272-280`),
+  and, as built (5a), for a continuation the wait for the moment asked, so
+  `heard_from` is, to a few milliseconds, the splice the machine planned
+  wherever the player could honour it; that of a turn started at once, on
+  its first try, is how the machine learns the lead a splice waits out. A
   caller's segment counts as heard once it has reached the ear, unless the
   receiver was muted for it (5.3); your own count from the start, which is
-  lenient. Each player's send says it as
-  `PlaybackSignal::heard_after_sec`: the browser's lead and believed
-  latency, read as the send is scheduled; natively, the latency the mixer's
-  last callback found; nothing for the silent player and the recorder.
+  lenient. Each player's send says it as `PlaybackSignal::heard_from`, a
+  moment on the app's clock, and `heard_from` is that moment as it stands:
+  the browser's, the clock it read before it scheduled anything, plus its
+  lead and believed latency; natively, the moment the send went into the
+  mixer, its voice built, plus any wait for its moment and the latency the
+  mixer's last callback found; the silent player's and the recorder's,
+  their clock as they started plus any wait (and the recorder's latency,
+  which a test may set). The player keeps the same moment for the send
+  playing and takes a continuation against it, `starts_at` handed to it as
+  a moment on the same clock. A continuation's own `heard_from`, worked
+  out afresh from the player's clocks, comes a few milliseconds either
+  side of its `starts_at`: in a browser the audio clock and the app's step
+  apart between two readings, and natively the mixer's next callback
+  falls anywhere within a period, up to about 20 ms, of the reading. The
+  machine goes by it either way, earlier as well as later
+  (`Air::heard_run`), so the two go by the same moment for where your
+  message is, and a key during the continuation splices on where the
+  player will put the next (a test has the recorder say it 5 ms either
+  side, `Recorder::heard_off_ms`). As built after the fourth browser test,
+  which found it: the runtime used to stamp `heard_from` itself, reading
+  the clock in `on_start` once the start had come back and adding the
+  player's lead and latency, while the player timed the send, and the
+  continuation after it, from its own reading before it scheduled anything.
+  All a start did between (the callers' tones, and in a pile-up the band's
+  queued buffers remade for them, `web/stream.rs`) went into the machine's
+  idea of when your message began, 10 to 40 ms in a phone's browser, and
+  the splice was planned that late, into the next character, which then
+  sounded twice: in 23 of 26 pile-up splices; with a single caller 2 to 8
+  ms, mostly under the 8 ms release, but 19 to 33 ms with the page busy.
+  Natively the mixer read its clock before building the send's voice, a
+  while too for a pile-up's turn, so there its own reckoning ran early,
+  with the same result. The lead the machine learns from `heard_from` less
+  the key means what it meant, how long after a key the turn's sound
+  reaches the ear, now without a start's own scheduling in it: the player
+  times a continuation from its own reading as well, and clamps it there to
+  the soonest it can start.
 
 ### 5.3 Your own transmission
 
@@ -1732,9 +1773,15 @@ always has.
 The silent player completes a turn at its planned length; the app's tests
 use the fake recorder (`src/testing.rs:131-133`). As built (5a), both start
 a continuation at its moment too: the silent player waits it out, and the
-recorder keeps how long after its start the send was to be heard
-(`Started::heard_in`) and plays from then. On a hidden page the web
-clock parks and a send waits (`wait.rs:88-107`); the run pauses first.
+recorder keeps when the send was to be heard (`Started::starts_at`) and
+when it said it is (`Started::heard_from`), and plays from then. As built
+after the fourth browser test, a test can have every start of the
+recorder go on a while once it has read its clock, as a browser's start
+does (`Recorder::start_takes_ms`), and have a send it starts at its moment
+say it is heard a few milliseconds before or after it, as a real player's
+fresh reading of its clocks does (`Recorder::heard_off_ms`). On a hidden
+page the web clock parks and a send waits (`wait.rs:88-107`); the run
+pauses first.
 
 ### 5.8 Later
 
@@ -3362,8 +3409,11 @@ Effects carry `Turn`, which derives `PartialEq` (as `StationVoice` does,
 `station.rs:12`), so machine tests compare effects as the group tests do
 (`machine.rs:622-628`). The runtime calls `plan_turn(&turn, &settings)`,
 then `lease.send_planned(asked, &plan, &transcript, &settings, turn.starts_at,
-on_start)` with `on_start: impl FnMut(f64)` taking lead plus latency in
-seconds, a continuation's wait for its moment among it (as built, 5a), and
+on_start)` with `on_start: impl FnMut(MonoMs)` taking when the attempt's
+sound reaches the ear as the player reckons it (as built after the fourth
+browser test, §5.2; it took the lead and latency in seconds, a
+continuation's wait for its moment among it, which the runtime added to
+the moment `on_start` ran), and
 `asked` from `lease.ask_to_send()` as the turn goes on the air (5.2). The
 view holds no caller truth until a row's check resolves, but for what Show
 copy shows, each text with the moment it may show, and is published only
@@ -3448,7 +3498,9 @@ word space keyed to a screen of fields, 5b); `src/keep_awake.rs`;
 `src/audio/mixer/*`, `src/audio/web/*` (the dry path; the gate and a send
 started at a given time, 5a), `src/audio/shape.rs` (the gate's ramp and
 the browser's gate schedule, `GateSchedule`, 5a), `src/audio/silent.rs`,
-`src/audio/wait.rs` (a send waiting for its moment is not stalling, 5a);
+`src/audio/wait.rs` (a send waiting for its moment is not stalling, 5a; a
+send saying when it is heard as a moment on the app's clock,
+`PlaybackSignal::heard_from`, after the fourth browser test);
 `src/ui/training.rs`, `widgets.rs` (`Keypad` rows as props,
 `ProgressHeader { figure, pct }`); `settings_charset.rs`, `settings.rs`,
 `home.rs`; `results.rs`, `heatmap.rs`, `stats_detail.rs`, `scores/mod.rs`
@@ -3926,7 +3978,15 @@ was to take over from is heard. The recorder keeps when a continuation was
 to start: a key mid-CQ is spliced on where the Q starts and the run hears
 it from then; every turn with a message of yours mutes the receiver to its
 end without full break-in and none with it; a planned send asked to start
-at a given time starts then, one asked for a moment past at once. The
+at a given time starts then, one asked for a moment past at once. From the
+fourth browser test: a start that goes on 30 ms once the player has read
+its clock says it is heard by that reading, started at once or at a moment
+asked for; and in a pile-up whose every start goes on 30 ms so, a key
+during the CQ and another during the continuation each splice on within a
+millisecond of where the next character starts, on the recorder, with the
+continuation said to be heard 5 ms before its moment and 5 ms after; in
+cw-core, a key during a continuation stamped 6 ms early or late splices
+on at one of its characters by that stamp. The
 settings screen's Flutter on the Band card and Full break-in on Tone and
 volume, in Contest mode only, stored, flutter written by the presets and
 full break-in left alone, and each card's reset.
@@ -4175,6 +4235,15 @@ copy-speed series; the paddles' field space.
   `abort_run`, its Next never starting a run (§2); and a word space keyed
   on the paddles after a letter, seven dits of quiet, pressing Space by
   the Space key's rule, the keyer's word gap a cw-core change (§4.5).
+- A fix from a fourth browser test, of a web build of 5a: each player says
+  when a send reaches the ear as a moment on the app's clock, read to time
+  the send (`PlaybackSignal::heard_from`), the run's `TurnStarted` carries
+  that moment as it stands, and the player takes a continuation's moment
+  as one on the same clock, on the browser's player, the native one, the
+  silent one and the recorder; the machine goes by a continuation's stamp
+  a few milliseconds before its moment as well as after, as the player
+  does; so a pile-up's splices land where the next character starts, not
+  10 to 40 ms into it, where a start's own scheduling had put them (§5.2).
 
 **Later, not planned:** Search & Pounce with the Sprint QSY rule, RIT,
 keying with the paddles, a contest level, and more contests.
@@ -4242,6 +4311,7 @@ keying with the paddles, a contest level, and more contests.
 | Flutter (5a) | a switch of its own on the Band card in Contest mode, three callers in ten at 3–33 Hz, half to three quarters deep, over the fading or alone; Contester turns it on | MorseRunner's: a quicker fading in place of a station's, full depth, only with QSB on | the switch does what it says, and no caller is fluttered out of hearing |
 | A continuation (5a) | a timed splice: the turn on the air plays out the character sounding, and any the player has begun, the next starts at the start of the next character, ridden over by then; with none left, half a word space after your message, the next message a word space after it | the next started at once from the character sounding, sent again whole; or started in the past, mid-character | no character twice and no gap; both players start a send at a moment ahead well, and your message is silent where they meet, so nothing clicks |
 | How soon a continuation can take over (5a) | the player's lead, as the last turn started at once found it, and a send's release, after the key | the moment your message is at as it reaches the ear | a player plays ahead of the ear, so a character starting inside its lead has begun already, and taking over there sent its start twice; a lead measured on every turn keeps up with the device |
+| When a turn is heard from (fourth browser test) | the player's own reckoning, a moment on the app's clock read to time the send, which it keeps for the send and takes a continuation against; the machine goes by it, a continuation's a little before its moment or after | the runtime's clock once the start came back, plus the player's lead and latency | a start goes on after the player reads its clock (a pile-up's tones and the band's buffers remade, 10–40 ms in a phone's browser); stamped after it, every splice landed that late, into the next character, which sounded twice |
 | What the turn on the air plays up to the splice (5a) | counted at the key, as planned | counted as it plays | everything is decided when you key; the turn on the air would otherwise stay beside the next for every count and timer. The cost: an Esc, a pause or the run's end before the splice, up to about a second after the key at 25 WPM, leaves counted a caller's send there that never sounded: with full break-in, any; without, only a reply starting in the word space before a splice after your message's last character |
 | The contest guide's Next (5b) | moves on, never starting a run; Show me starts one when asked; away from the run screen its steps point the way to it | Next starting the run, as the first session's Next starts the session | a run's callers are sound nobody asked for, and a run is ten minutes of it, where a session's first group is a few seconds |
 | The paddles' field space (5b) | seven dits of quiet after a letter's last element, a whole word space, then Space by its rule | the split between a letter space and a word space, five dits | a Space moves the cursor out of the call, so a hesitation mid-call must never make one |
@@ -4330,12 +4400,17 @@ as their calls are copied clean, as an option on by default:
    a run, and a session of groups, to the keypad's last row; a 320×568 one
    does not yet), a 360 px render test, a style test of the rule, a small
    phone.
-2. **A continuation can still send part of a character twice** where the
-   player's lead at the key is longer than the lead the machine last
-   measured, as when the output device changes during a run or a start is
-   slow, and a continuation asked for a moment the player has passed
-   starts at once. *Mitigation:* the lead is measured afresh on every turn
-   started at once (§5.2); listen on each player.
+2. **A continuation can still send part of a character twice** where it
+   reaches the player later after its key than the turn the lead was last
+   measured on did (a busy page, a heavier turn to plan), or the player's
+   own lead grows (the output device changing during a run): a
+   continuation asked for a moment the player has passed starts at once.
+   The time a start goes on after the player reads its clock no longer
+   moves a splice (fourth browser test): the machine hears when a send is
+   heard by the player's own reckoning, and goes by a continuation's
+   stamp before its moment as well as after (§5.2). *Mitigation:* the
+   lead is measured afresh on every turn started at once, with a release
+   of slack; listen on each player.
 3. **Latency estimates** may be wrong. *Mitigation:* capped at 0.5 s
    (`wait.rs:114`); measure on low-end phones.
 4. **Hidden-page detection.** *Mitigation:* three signals; test a locked

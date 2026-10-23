@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use cw_core::PlaybackPlan;
+use cw_core::{MonoMs, PlaybackPlan};
 
 use crate::time::{POLL_MS, mono_ms, sleep_ms};
 
@@ -181,13 +181,18 @@ fn whole_ms(seconds: f64) -> u32 {
 pub trait PlaybackSignal {
     fn poll(&self) -> WaitFlags;
 
-    /// How long after it was started the send's first sound reaches the ear,
-    /// in seconds, as the player reckons it: how far ahead it was scheduled,
-    /// and the delay from the player's output to the ear. Nothing, for a
-    /// player with no sound to be late.
-    fn heard_after_sec(&self) -> f64 {
-        0.0
-    }
+    /// When the send's first sound reaches the ear, on the app's monotonic
+    /// clock, as the player reckons it: the clock as the player read it to
+    /// time the send, just before it handed the send to its output (the
+    /// browser before it schedules the tones, the mixer as the built voice
+    /// goes in), plus how far ahead it scheduled it and the delay from its
+    /// output to the ear. It is the moment the player takes a send asked to
+    /// start at a given time against, so it says nothing of how long the
+    /// start went on after that reading: a browser scheduling a pile-up's
+    /// tones and remaking the band's buffers for them. Worked out afresh
+    /// from the player's clocks, a continuation's may come a little either
+    /// side of the moment it was asked for.
+    fn heard_from(&self) -> MonoMs;
 }
 
 /// Morse already scheduled; wait without holding the player borrow.
@@ -195,9 +200,8 @@ pub struct PlaybackWait {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
-    /// How long after it was started the send reaches the ear
-    /// ([`PlaybackSignal::heard_after_sec`]).
-    pub heard_after_sec: f64,
+    /// When the send reaches the ear ([`PlaybackSignal::heard_from`]).
+    pub heard_from: MonoMs,
     signal: Rc<dyn PlaybackSignal>,
 }
 
@@ -209,7 +213,7 @@ impl PlaybackWait {
             duration_sec: plan.duration_sec,
             char_wpm: plan.resolved_char_wpm,
             effective_wpm: plan.resolved_effective_wpm,
-            heard_after_sec: signal.heard_after_sec(),
+            heard_from: signal.heard_from(),
             signal,
         }
     }
@@ -220,11 +224,12 @@ impl PlaybackWait {
 
     pub async fn wait(self) -> PlaybackOutcome {
         let duration_ms = self.duration_ms();
+        let mut polled_at = mono_ms();
         // A send waiting for the moment it was asked to start at, a
         // contest's continuation, is not stalling meanwhile.
-        let grace_ms = STALL_GRACE_MS.saturating_add(whole_ms(self.heard_after_sec));
+        let to_ear = self.heard_from.since(MonoMs(polled_at));
+        let grace_ms = STALL_GRACE_MS.saturating_add(u32::try_from(to_ear).unwrap_or(u32::MAX));
         let mut waited = 0u32;
-        let mut polled_at = mono_ms();
         loop {
             let flags = self.signal.poll();
             match next_wait_step(flags, waited, duration_ms, grace_ms) {
@@ -376,6 +381,11 @@ mod tests {
             } else {
                 steps.first().copied().unwrap_or_default()
             }
+        }
+
+        /// Heard as soon as it starts: nothing to wait for before then.
+        fn heard_from(&self) -> MonoMs {
+            MonoMs(0)
         }
     }
 

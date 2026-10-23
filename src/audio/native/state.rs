@@ -6,8 +6,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cw_core::TrainingSettings;
 use cw_core::band::BandKey;
+use cw_core::{MonoMs, TrainingSettings};
 
 use crate::audio::epoch::{Epoch, Ticket};
 use crate::audio::{PlaybackSignal, WaitFlags};
@@ -60,9 +60,10 @@ pub struct ToneSignal {
     /// is never moved to another stream: one that replaces a broken stream
     /// may run at another rate.
     stream_failed: Arc<AtomicBool>,
-    /// How far behind the stream's callback the speaker was as the send
-    /// started, in seconds: how long it waits to be heard.
-    latency_sec: f64,
+    /// When the send is heard from, on the app's clock: as it went into the
+    /// mixer, plus any wait for its moment and how far behind the stream's
+    /// callback the speaker was then.
+    heard_from: MonoMs,
 }
 
 impl ToneSignal {
@@ -70,20 +71,20 @@ impl ToneSignal {
         ticket: Ticket,
         finished: Arc<AtomicBool>,
         stream_failed: Arc<AtomicBool>,
-        latency_sec: f64,
+        heard_from: MonoMs,
     ) -> Self {
         Self {
             ticket,
             finished,
             stream_failed,
-            latency_sec,
+            heard_from,
         }
     }
 }
 
 impl PlaybackSignal for ToneSignal {
-    fn heard_after_sec(&self) -> f64 {
-        self.latency_sec
+    fn heard_from(&self) -> MonoMs {
+        self.heard_from
     }
 
     fn poll(&self) -> WaitFlags {
@@ -144,8 +145,14 @@ mod tests {
         let armed = state.arm();
         let finished = Arc::new(AtomicBool::new(false));
         let broken = Arc::new(AtomicBool::new(false));
-        let signal = ToneSignal::new(armed, Arc::clone(&finished), Arc::clone(&broken), 0.04);
-        assert_eq!(signal.heard_after_sec(), 0.04);
+        let heard_from = MonoMs(1_040);
+        let signal = ToneSignal::new(
+            armed,
+            Arc::clone(&finished),
+            Arc::clone(&broken),
+            heard_from,
+        );
+        assert_eq!(signal.heard_from(), heard_from);
         assert_eq!(
             signal.poll(),
             WaitFlags {
