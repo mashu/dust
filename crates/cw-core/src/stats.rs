@@ -402,7 +402,7 @@ fn bigram_grid(
             };
             // Most often first; a tie keeps the order the map gave, which
             // puts a character left out before one typed instead.
-            taken_for.sort_by(|a, b| b.1.cmp(&a.1));
+            taken_for.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
             let wrong = taken_for.iter().map(|(_, count)| count).sum::<u32>();
             let rate = if total == 0 {
                 0.0

@@ -85,7 +85,7 @@ pub fn MistakesTab(sessions: Vec<SessionResult>) -> Element {
             }
             if !heat.cols.is_empty() {
                 {hardest_pairs_card(&heat)}
-                BigramCard { heat: heat.clone() }
+                BigramCard { heat }
             }
         }
     }
