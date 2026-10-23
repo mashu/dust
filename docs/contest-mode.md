@@ -112,6 +112,25 @@ own, from off to the loudest, on the Tone and volume card (§5.3, §8); your
 speed is a setting of its own, kept from run to run as − and + leave it,
 the callers' speeds staying the Speed card's (§6.6, §8); and how often
 your TU signs with your call in a pile-up is yours to choose (§3, §8).
+Phase 5's adaptive caller speed followed, brought forward at the user's
+asking and decided with the user on 2026-10-22 (§15.2): each new caller
+comes at a speed drawn from your copy speed in contests, within the Speed
+card's ranges, faster as you copy calls and numbers clean and slower as
+you miss them, by the Bayesian belief group training's adaptive speed
+uses, started from the Contest copy-speed series and learning within the
+run; a switch of its own on the Speed card, on as it ships (§6.6, §8,
+§10). Slice 5a has landed, phase 5's sound: without full break-in, as
+MorseRunner ships it, the receiver is muted while you send, after its
+AGC, on both players, and nothing a caller sends across your message
+reaches you, for Enter, the copies or Show copy (§5.3); "Full break-in
+(QSK)" on the Tone and volume card in Contest mode hears the band through
+your message, as runs did before (§8); flutter, three callers in ten
+fluttering at 3 to 33 Hz under the Band card's flutter in Contest mode,
+which the Contester preset turns on (§5.5, §8); and a continuation spliced
+on where your message reaches the start of its next character that the
+player can still take over at, each player starting it at that moment, so
+no character goes out twice (§5.2; risk 2 of §16 narrowed to a lead
+underestimated).
 
 This is the plan for contest and pile-up training in Dust. References are
 `file:line` in this repository unless they name MorseRunner CE ("MRCE",
@@ -280,13 +299,18 @@ hidden, as for Words (`auto_level_progress` is `None` in Contest,
 
 **Listen** treats Contest like Callsigns (`src/ui/listen.rs:30-222`), as
 does the one fork in group generation (`sampling.rs:503-507`). Phase 2 adds
-"Hear a QSO".
+"Hear a QSO". As built with adaptive callers' speed (2026-10-22), Listen's
+stream of groups comes in Contest mode at speeds drawn evenly from the
+Speed card's ranges, as it did before: the callers' switch is theirs alone
+(§6.6), and group training's is not shown in Contest, so the sampler's
+`GroupSource::next_speed` draws none there.
 
 **Hear a QSO** (as built, 2c) is offered where a learner meets the
 contest: first on Listen in Contest mode ("Hear a few QSOs of CQ WPX, or
 play one character, the pool, or a stream of groups"), and beside the
 QSO's eyebrow on the Character set card. It plays three QSOs of the chosen
-contest, in its run style, speeds and band, worked by the perfect operator
+contest, in its run style, speeds (drawn as a run's, §6.6) and band,
+worked by the perfect operator
 (`hear_qsos`, `contest/bot.rs`), which hears the turns only, as in a run.
 They are worked through before the first plays, on a run clock of their
 own, from a sampler built from the history as a run's is and let go of
@@ -736,7 +760,11 @@ contest; MRCE's sources are the reference for the numbers below.
   speed is credited at that, and a slow reply you keyed over before it
   began credits nothing (9.1). As built (4a), callers do so under easy
   habits only, a courtesy to a learner; under real and rough habits they
-  keep their speed, as contesters do.
+  keep their speed, as contesters do. As built with adaptive callers'
+  speed (2026-10-22), a caller slows from the speed it came with, drawn
+  from your copy speed while the callers adapt, and the belief never
+  touches it once it calls, so the two never pull against each other
+  (§6.6).
 - **Calling twice.** 10% of pile-up callers send their call twice; single
   callers never do (`DxOper.pas:500-502`). As built, a caller that calls
   twice sends its call twice where the contest's answer has it once
@@ -781,30 +809,33 @@ From phase 2, in pile-ups only:
 
 - **Collisions.** A caller still sending when your message starts does not
   hear it and keeps sending over you, except CQ, TU and NIL, which are heard
-  from a fragment (`DxStn.pas:240-253`).
+  from a fragment (`DxStn.pas:240-253`). As built (5a), without full
+  break-in you do not hear it either: the receiver is muted while you send
+  (§5.3).
 - **Missed exchanges.** 10% of the time a caller misses your exchange and
   sends `NR?` or `AGN` (`DxOper.pas:762-770, 844-849`).
 
-As built (2a): a caller still sending at your key goes on from the
-character sounding then, sent again whole and heard over your message, as
-your own rest is (5.2), its start charged already, and the ranking of the
-call you send counts it (4.7). One that never heard you and is done before
-you are heard only your message's tail: it calls again 0.1–0.6 s after you,
-a try spent, as MRCE's callers do on hearing garbage (`DxStn.pas:249-253`),
-but only after it takes two more tries, up to four, as MRCE's
-`MorePatience` (`DxOper.pas:412-427, 805-808`), so being keyed over sends
-no caller away. One still sending as you end waits from the end of its
-send. A CQ, TU or NIL is heard from a fragment: the caller goes on over it
-all the same, and answers once you and it are both done. Esc takes the rest
-back with the message, but what of it had reached you stays heard (5.2). A
-missed exchange is not taken, so N stays false and
-Enter sends the call and exchange again, though the call that went with it
-is the call's copy, as first sent with your exchange (9.1); a caller that
-answered your partial and then missed your exchange puts its call right
-meanwhile (`NeedCallNr`). Your call alone (F4) brings a caller still
-calling back as a CQ does, unless it heard you start a QSO with someone
-else; a single caller's call brought so is a `?` by another key, as a CQ's
-is (4.6). In a pile-up, no call brought again by CQ, TU or F4 is charged.
+As built (2a): a caller still sending at your key goes on from the character
+sounding then, sent again whole and, with full break-in, heard over your
+message (without it, as it ships from 5a, the receiver is muted while you
+send and nothing of it reaches you, §5.3), its start charged already, and
+the ranking of the call you send counts it (4.7). One that never heard you
+and is done before you are heard only your message's tail: it calls again
+0.1–0.6 s after you, a try spent, as MRCE's callers do on hearing garbage
+(`DxStn.pas:249-253`), but only after it takes two more tries, up to four,
+as MRCE's `MorePatience` (`DxOper.pas:412-427, 805-808`), so being keyed
+over sends no caller away. One still sending as you end waits from the end
+of its send. A CQ, TU or NIL is heard from a fragment: the caller goes on
+over it all the same, and answers once you and it are both done. Esc takes
+the rest back with the message, but what of it had reached you stays heard
+(5.2). A missed exchange is not taken, so N stays false and Enter sends the
+call and exchange again, though the call that went with it is the call's
+copy, as first sent with your exchange (9.1); a caller that answered your
+partial and then missed your exchange puts its call right meanwhile
+(`NeedCallNr`). Your call alone (F4) brings a caller still calling back as a
+CQ does, unless it heard you start a QSO with someone else; a single
+caller's call brought so is a `?` by another key, as a CQ's is (4.6). In a
+pile-up, no call brought again by CQ, TU or F4 is charged.
 
 A pile-up caller that hears you start a QSO with someone else waits for it
 to end, as MRCE's `osNeedPrevEnd`: it has no timeout, so it neither calls
@@ -1225,8 +1256,10 @@ all seconds long, and the heard timer, which only brings Enter, the
 screen and the log's checks up to what the turn has played (4.2), so it
 may fire late. The app gains `start_planned` beside `start_send`
 (`audio/mod.rs:81-90`) and `Lease::send_planned` beside `Lease::send`
-(`player.rs:289-314`), keeping leases, stall
-detection and retries (§12). What the turn says goes to the player as
+(`player.rs:289-314`), keeping leases, stall detection and retries (§12);
+as built (5a), both take the moment a continuation is to start
+(`Turn::starts_at`), which every player honours (5.2), and the stall budget
+waits that moment out. What the turn says goes to the player as
 `Turn::transcript()`, a `Transmission` of your message with each reply as a
 station calling across it after its delay: the real players play only the
 plan, and the test recorder keeps both, with the `Qsb` the send was given.
@@ -1235,21 +1268,63 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
 
 - **A key during a turn** does not cut your message, as MRCE queues a
   message keyed while you send (`MyStn.pas:119-136, 177-187`). The machine
-  plans a continuation, a new turn: the rest of your message from the
-  character sounding at the key, sent again whole; then the new message;
-  then the replies to it, which the callers decide on the new message alone,
-  having heard the rest when it was keyed (4.3). Starting it releases the
-  old send at once, while the new one starts a player's lead later, so the
-  rest starts from the key, not from when the new send can start; and
-  `heard_from` includes the lead and latency, so a character is sent again
-  rather than lost. In a pile-up, callers still sounding carry on from their
-  character at that moment, re-based, so collisions stay audible; a single
-  caller stops and hears you. As built (2a), they carry on under a CQ, TU
-  or NIL too, which they hear from a fragment, and answer once done (4.3);
-  one carried on whose rest has not reached the ear yet, inside the
-  player's lead, still goes on whole at the next key, as it began before.
+  plans a continuation, a new turn: the rest of your message; then the new
+  message; then the replies to it, which the callers decide on the new
+  message alone, having heard the rest when it was keyed (4.3). As built
+  (5a), it is a timed splice (`Splice`, `contest/machine.rs`): the turn on
+  the air sends the character sounding at the key to its end, and the
+  continuation takes over at the start of the first character of your
+  message yet to begin, the moment it would have sounded, so no character
+  goes out twice and none waits. A player plays ahead of the ear, by its
+  lead and latency, and has to ride the send it takes over from down first
+  (`SEND_RELEASE_SEC`, 8 ms, kept with the plans in cw-core for this), so
+  the continuation takes over no sooner than both after the key: the
+  machine learns the lead from each turn started at once, on its first
+  try, as `heard_from` less the moment it was keyed (the player's lead,
+  its latency, and the moment the start took), held to a second, past any
+  lead and latency a player believes, so a start held up longer, as by a
+  device opening, does not hold up every continuation after it; a
+  character starting sooner after the key than that goes out with the turn
+  on the air, which the player has already begun to play. With no
+  character of it left to start so, the turn on the air finishes your
+  message and the continuation takes over half a word space after its last
+  character, so the send before is ridden down in silence, and the new
+  message starts a word space after that character, as one message would
+  have it, or as soon after as the player can start it; with your message
+  gone out, it starts at once, as before. The turn says when
+  (`Turn::starts_at`), and the player starts the new send then against the
+  clock the old one plays on, which plays on to there and is ridden down
+  by then, your message silent there, so the two never sound together:
+  natively the mixer starts it that many samples into the send playing
+  (`Mixer::start_at`), and the browser at that time on the context's
+  clock. A moment already past, a retry's, starts it as soon as it can.
+  Everything is decided when you key, so what the turn on the air plays up
+  to the splice counts at the key, as planned. That is from the key to the
+  splice: the rest of the character sounding then, any the player had
+  already begun, and the gap after, or half a word space after your
+  message's last character, which is up to about a second for a `0` at 25
+  WPM, more at lower speeds or with a long lead. An Esc, a pause or the
+  run's end in that time takes the turn off the air early but leaves it
+  counted, so with full break-in a caller's send that would have reached
+  you in it counts as heard though it never did, and without it, a reply
+  starting in the word space before such a splice does too (nothing else
+  of the callers is heard while you send, 5.3). Counting it as it plays
+  would keep the turn on the air beside the next till the splice, for
+  every count and timer, which is left for later. Before 5a, starting a
+  continuation released the old send at once while the new one started a
+  player's lead later, and the rest went on from the character sounding at
+  the key, sent again whole, so one character went out twice. In a
+  pile-up, callers still sounding at the splice carry on from their
+  character at that moment, sent again whole, re-based to the
+  continuation's start; with full break-in collisions stay audible, and
+  without it they are muted under your message (5.3); a single caller
+  stops and hears you. As built (2a), they carry on under a CQ, TU or NIL
+  too, which they hear from a fragment, and answer once done (4.3); one
+  carried on whose rest has not reached the ear yet, inside the player's
+  lead, still goes on whole at the next key, as it began before.
 - **Only Esc cuts.** StopTx emits `StopAudio` (an 8 ms release,
-  `audio/shape.rs:13`); a call or exchange not fully sent counts as not
+  `SEND_RELEASE_SEC`, `timing/plan.rs`), which cuts a send a continuation
+  was to take over from later too, on both players; a call or exchange not fully sent counts as not
   sent, as MRCE's Esc resets CallSent and NrSent (`Main.pas:884-891`). The
   callers heard the message when you keyed it (4.3), so Esc takes back what
   had not gone out whole: they are as they were before the message keyed
@@ -1303,9 +1378,14 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   `TurnStarted{id, heard_from}`: the start plus the player's lead and
   latency estimate (web `schedule_lead_sec` and `heard_latency`,
   `wait.rs:124-132`, `web/mod.rs:122`; native `latency_frames`,
-  `audio/native.rs:272-280`). A
-  caller's segment counts as heard once it has reached the ear; your own
-  count from the start, which is lenient. Each player's send says it as
+  `audio/native.rs:272-280`), and, as built (5a), for a continuation the
+  wait for the moment asked, so `heard_from` is the splice the machine
+  planned wherever the player could honour it; that of a turn started at
+  once, on its first try, is how the machine learns the lead a splice
+  waits out. A
+  caller's segment counts as heard once it has reached the ear, unless the
+  receiver was muted for it (5.3); your own count from the start, which is
+  lenient. Each player's send says it as
   `PlaybackSignal::heard_after_sec`: the browser's lead and believed
   latency, read as the send is scheduled; natively, the latency the mixer's
   last callback found; nothing for the silent player and the recorder.
@@ -1396,6 +1476,61 @@ spacing and no fist variation.
   that keeps it heard. Should keying with the paddles transmit one day
   (§14, later), their sidetone in a run would be your sending, and should
   follow it then.
+- **The receiver gate** (as built, 5a). A rig without full break-in mutes
+  its receiver while it transmits, as MorseRunner's does unless its QSK is
+  on (`Contest.pas:806-834`; `Qsk`, `Ini.pas:251`, off as it ships).
+  Without full break-in, `plan_turn` marks the receiver muted from the
+  turn's start to the end of your message
+  (`PlannedTransmission::muted_until`, from `Turn::muted_until`, the one
+  place the rule is written), your sending off or not, as a rig is muted
+  while it transmits whether you monitor it or not: the gate keys off that
+  span of the dry plan, not off its tones, which your sending off leaves
+  none of. A turn of callers alone mutes nothing. Both players mute the
+  receiver's output after its AGC, the band, its audio-stage floor and
+  every station alike, and never your message nor the paddle's sidetone,
+  which come in past it. Natively `Mixer::render` multiplies what the
+  receiver gives by a gate that moves a straight line at a time, over
+  `GATE_RAMP_SEC` (5 ms), toward shut while a send says you are sending
+  (`SendSample::keyed`) and back once none does, so it never clicks; a
+  send handing over to a continuation goes on saying so to the handover,
+  its release and all, as your message runs on into the next, so the gate
+  stays shut across a splice part way through your message. At a splice in
+  the word space after your message's last character the gate opens in
+  that space, as the machine hears a reply that starts in it, and shuts
+  again from the takeover. A second key taking over from a continuation at
+  its own start goes in its place exactly, a moment of clock rounding past
+  it being no moment at all (`SendVoice::samples_until`), so neither
+  leaves the gate a sample in which nobody is sending. In the browser two
+  gains after the compressor, one on the receiver's output and one on the
+  band's floor, play the same shape (`gate_steps`). The player keeps the
+  gate's schedule as it scheduled it (`GateSchedule`, `audio/shape.rs`),
+  and each send's steps go on from where that leaves the gate at its
+  start, by a line to that level, which is the very line the steps it
+  replaces were drawing, so a continuation taking over part way through
+  your message keeps the gate shut, a second taking over from the first at
+  its own start too, and one taking over after your message finds it
+  open, as natively; one evaluator (`gate_at`) reads the schedule. The
+  AGC runs on under the gate, so the band comes back as it would have
+  been. A stop opens it from where it stands.
+  - What callers sending across your message sound like with it shut:
+    nothing, as in MorseRunner. So nothing they send while you send counts
+    as heard: a caller's send any of which falls under your message (the
+    rest of a call keyed over, or a call on its timeout that comes before
+    your message ends) is no send heard at all (`Turn::muted`), as a call
+    heard in part is no call heard. It starts and ends no copy, charges no
+    repeat, credits no speed, tells Enter nothing (no answer taken, no
+    correction), shows no text with Show copy, and the operators never
+    hear it; RX counts a caller only from your message's end, and the heard
+    timer looks only at sends that reach you. What it costs its caller is
+    spent all the same, a try on its timeout among it, as it was sent
+    (`Counted::Muted`). Collisions are as they were for the callers: one
+    still sending at your key never hears you and goes on over you (4.3),
+    now unheard, and calls again a moment after you, which is heard. Every
+    reply comes after your message, a tenth of a second at least, so the
+    gate, open again 5 ms after your message ends, takes none of one.
+  - With full break-in (`contestQsk`, §8) nothing is muted: the band and a
+    caller sending across your message are heard through it, as every run
+    was before 5a.
 
 The turn plays from a copy of the run settings with `qsb_enabled = false`:
 QSB is attached per send (`Qsb::of`, `audio/native.rs:244`) and `BandKey`
@@ -1452,8 +1587,29 @@ is never faded, whatever it carries. The QSB control runs
 0.03–1.5 Hz (`settings/mod.rs:47-48`) with components up to 2.3× that
 (`band/qsb.rs:26`), so a fade held per tone would step audibly. The web
 curve cache (`web/send.rs:128-143`) then holds a few hundred entries per
-turn. No player changes. Flutter (3–33 Hz, `DxStn.pas:97-99`) waits for
-phase 5.
+turn. No player changes.
+
+As built (5a), flutter: under the Band card's flutter (`contestFlutter`,
+§8, in Contest mode), three callers in ten flutter, as MorseRunner's
+flutter has them (`DxStn.pas:97-99`): a caller's signal rises and falls at
+a rate drawn for it from 3 to 33 Hz, from half to three quarters of the way
+down, as deep as the band's fading ever goes, so a fluttering caller is
+rough but never lost. MorseRunner's flutter only quickens a station's
+fading, full depth, and acts only with its QSB on; here it is a flutter of
+its own, the band's wandering multipath fading at the flutter's rate
+(`Qsb::flutter`), over the band's fading where that is on and alone where it
+is off, so the switch does what it says. Each caller draws its flutter once,
+from a stream forked off its own generator (`draw_flutter`,
+`contest/caller.rs`), so a run under a seed is reproducible and one with
+flutter off draws as it always has. A segment's fade carries it (`Fade {
+qsb, flutter, from_sec }`), read along the caller's own path, so it carries
+through continuations and a dupe calling again keeps it; `plan_turn` lays it
+into the tones' envelopes as it lays the fading, and your message never
+flutters, nor QRM. The envelopes are sampled at 1,200 points a second,
+sixteen to a cycle of the fastest path of the fastest flutter (2.3 × 33 Hz),
+and both players play them as they are, so no player changes for it. A
+flutter is never made the browser's fading curve (`Qsb::curve`, 200 points
+a second, for the band's fading only), which could not follow it.
 
 ### 5.6 QRM and the background
 
@@ -1514,7 +1670,10 @@ always has.
 ### 5.7 Native, web and silent
 
 The silent player completes a turn at its planned length; the app's tests
-use the fake recorder (`src/testing.rs:131-133`). On a hidden page the web
+use the fake recorder (`src/testing.rs:131-133`). As built (5a), both start
+a continuation at its moment too: the silent player waits it out, and the
+recorder keeps how long after its start the send was to be heard
+(`Started::heard_in`) and plays from then. On a hidden page the web
 clock parks and a send waits (`wait.rs:88-107`); the run pauses first.
 
 ### 5.8 Later
@@ -1526,7 +1685,10 @@ gain into `floor_in` in the browser), so the gate keys off the dry plan and
 closes only the receiver's output; until then the band runs on under your
 message, as with full break-in. Phase 5 also adds per-station gain for
 flutter, and a player that starts a send at a given time, so a continuation
-splices in a gap.
+splices in a gap. All three landed as slice 5a: the gate, with full
+break-in a choice (5.3, §8), off by default as in MorseRunner; flutter
+(5.5); and the timed splice (5.2), at the start of the next character of
+your message that the player can still take over at.
 
 ## 6. Clock, pause and counters
 
@@ -1606,8 +1768,10 @@ flight, which Dust's "a logged QSO is final" rule covers.
 - **Rate:** QSOs per hour over the last 5 minutes of run time, as MRCE's
   `ShowRate` (`Log.pas:1133-1147`), shown after the first minute; Simple QSO
   shows minutes per QSO.
-- **Speed.** Callers' speeds are drawn from the Speed card's ranges,
-  through `resolve_station` (`timing/station.rs:33-47`). As built after
+- **Speed.** Callers' speeds are drawn from the Speed card's ranges:
+  evenly, through `resolve_station` (`timing/station.rs:33-47`), or, as
+  built with adaptive callers' speed (2026-10-22), from your copy speed
+  within them while the callers adapt (below). As built after
   operator feedback (2026-10-22), you send at your speed, "Your speed" on
   the Speed card in Contest mode (`myWpm`, §8), a setting of its own as
   MorseRunner's `Wpm` is (`Ini.pas:237`, saved); until you set one (0) you
@@ -1628,6 +1792,94 @@ flight, which Dust's "a logged QSO is final" rule covers.
   your speed (`DxOper.pas:235-250`), as they have no range of their own.
   The stored run's `my_wpm` is the mean of the speeds your messages went
   out at, what you sent.
+- **Callers' speed from your copy** (as built, phase 5's adaptive caller
+  speed brought forward and decided with the user on 2026-10-22, §15.2).
+  The user asked for callers that speed up as you copy their calls clean,
+  as an option on by default. MorseRunner's callers move only by your keys
+  (its HST mode sends them at your speed), and RufzXP steps its speed up on
+  each right call and down on a miss; Dust draws each new caller's speed
+  from the Bayesian copy-speed belief group training's adaptive speed uses
+  (`SpeedBelief`, `speed.rs`), so the speed moves smoothly as the posterior
+  does, and a few lucky calls move it less than many. While "Adapt
+  callers' speed to me" is on (`contestAdaptSpeed`, §8), the call source
+  draws each newcomer's character speed and spacing with `draw_speed`
+  along the Speed card's line from its slowest corner to its fastest
+  (`SpeedPath`), its spacing kept within the Effective speed range
+  wherever the characters are as fast as its slowest, as an even draw
+  keeps it, so every caller comes within the card's ranges, but for QRS
+  (below), aiming for the share of characters right that "Aim for"
+  asks (94% at Balanced), the target group training's adaptive speed
+  aims for: one setting for every adaptive feature, shown on the Speed
+  card beside the switch while the callers adapt, as it is in Callsigns
+  mode while speed adapts (`aim_section`). A contest's own fixed target
+  was the other choice; it would have been a second, hidden notion of how
+  hard to push, and the copy-speed card reads its series at the Aim's
+  share. Off, the callers' speeds are drawn evenly from the ranges, as
+  before: the source draws nothing, so the run is the very run it always
+  was. One speed set leaves nothing to adapt, and the switch says so.
+  - The belief starts each run from the Contest copy-speed series in the
+    history (§10): the calls and numbers (NR, ZN) of every contest run, by
+    its log's layout (`ContestRun::group_copies`), faded one session as a
+    run starts (`SpeedBelief::for_session`, as a group session's). An
+    assisted run counts as any run does, as group training's rules count
+    every session of its set whatever it was sent with (blind to `sends`),
+    and its copies are what you had by ear when each text showed (§9.1).
+  - It learns within the run from every call and number copy as its QSO
+    becomes final, when the call source is taught its groups
+    (`ContestMachine::teach`, `CallSource::learn_speed`): the very groups,
+    at the very speeds, the stored run keeps, so the belief at the run's
+    end is the one the next run starts from, but for that fade. A field
+    from a short list (a name, a state, a section, a class, a power, a
+    report) is half guessed and says nothing of speed. A QSO a message on
+    the air lost waits, as Esc may take it back.
+  - Each call and number counts whole (`whole_evidence`,
+    `SpeedBelief::learn_whole`), live and in the history alike: a
+    character lost off its end is a miss. A group session's lost end is
+    its length's to answer for, which the copy span learns from
+    (`speed_evidence`), but a call or a number is as long as it is and no
+    span learns from a run, so a busted call (K5XY for K5XYZ), a number
+    short a digit, the partial a lost QSO keeps (K5) and a Show copy text
+    frozen while your typing lagged all slow the callers. Counted as
+    group training counts them, they read as clean copies, and faster
+    callers, losing more ends, would push the speed up further. A field
+    left empty still says nothing: the run keeps no word of whether it was
+    heard at all, and a caller gone before its exchange reached you leaves
+    one as a send too fast to follow does.
+  - Asking again never slows the callers: a copy counts as it ends, at
+    the slowest send of it that began to reach you (§9.1), as the series
+    counts it, blind to sends as group training's is, so a call got after
+    a partial or a `?` counts as one got first time. What asking costs
+    shows in the rate and the points; a call asked for and still busted or
+    lost counts against the speed (above). Under easy habits QRS adds to
+    this, as the copy is credited at the slowed speed. Counting a repeat
+    as a partial miss would need the record to keep what each send gave
+    you, which it does not.
+  - A caller too fast to work at all, one you never answer, leaves no
+    copy when it gives up, as the stored run's rules say (§9.1), so it
+    teaches the belief nothing. Early on, while the belief is wide, a few
+    such callers can come before ones you can partly copy narrow it, and
+    an early run may stall for a while; the Speed card's Max bounds them.
+    Counting them would need the run's log to keep callers it never
+    worked, so that the history replays them; a known limit, as built.
+  - Callers already calling keep their speed; only a newcomer's is drawn,
+    and a dupe calling again is the same operator at its old speed. The
+    rest of a caller comes from its own generator as ever, its speed alone
+    set over the one `resolve_station` drew (`Caller::send_at`).
+  - QRS under easy habits (§4.3) still slows a caller down for you, from
+    the speed it came with. The two never pull against each other: the
+    belief picks only a newcomer's speed and never touches a caller once
+    it calls, and QRS slows one caller within its QSO and is gone with it;
+    the copy is credited at the slowest send of it that began to reach you
+    (§9.1), which is the speed the belief learns it at.
+  - − / + move only your speed (`myWpm`), and the draw keeps within the
+    Speed card's ranges, so they leave it alone.
+  - The speed is drawn from the call source's generator, seeded for each
+    run as its calls are, so a seed and the keys pressed give one run.
+  - Hear a QSO (§2) draws its callers so too, from a sampler built from
+    the history as a run's is, which learns within it what the perfect
+    operator copies, as it does the characters, and is let go of after.
+    Listen's stream of groups is no caller, and keeps to an even draw in
+    Contest mode (§2).
 
 ## 7. Screen layout
 
@@ -1690,7 +1942,9 @@ in place of `current/total`.
   3 s"), as a phone shows the log's place, where the countdown stands, only
   below the keypad.
 - **The air line** shows only your own message, the part still being sent.
-  RX counts the callers sending, QRM none of them (as built, 4a), but
+  RX counts the callers sending, QRM none of them (as built, 4a), and,
+  without full break-in, none while the receiver is muted for your message
+  (as built, 5a), but
   never shows what they send (Show copy, phase 4, is the exception). As
   built (4b), with Show copy on, RX takes a line of its own under TX and
   shows each station's text a moment after its send ends (a second,
@@ -1899,7 +2153,9 @@ exchange as callers send it, each copied field's example
 (`Field::example`). The callsign tier's examples ("What this tier sends")
 are not shown: the dialogue shows a call. Session shape's countdown reads
 "Countdown before the first CQ", and the Speed card says the callers come
-at speeds drawn from its ranges in place of Adapt speed to me.
+at speeds drawn from its ranges; as built with adaptive callers' speed,
+"Adapt callers' speed to me" stands in place of Adapt speed to me, with
+"Aim for" under it while it adapts (§8).
 
 ## 8. Settings
 
@@ -1916,7 +2172,7 @@ fist variation.
 
 | Setting | In Contest |
 |---|---|
-| Character and effective speed ranges | the callers' speeds; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
+| Character and effective speed ranges | the callers' speeds, drawn within them from your copy speed while the callers adapt (`contestAdaptSpeed`, on as it ships), evenly otherwise; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
 | `callsignLevel` | the callers' call shapes, shared with Callsigns mode |
 | `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept |
 | `pileupSpreadHz` | Pile-up only: how far either side of the centre callers land; hidden for Single, where it does nothing |
@@ -1925,12 +2181,18 @@ fist variation.
 **Hidden in Contest mode** (`app.rs:1606-1635`): Experience presets; the
 group fields (groups per session, group size, adaptive size, Aim, sends,
 answer timeout, pause after a group, lock typing); Pile-up level, which
-needs a wanted station; Adapt speed to me, until phase 5; Auto level; the
-alphabet controls.
+needs a wanted station; Adapt speed to me, group training's switch, in
+whose place the callers' own shows (as built, adaptive callers' speed,
+below); Auto level; the alphabet controls. As built, the Aim shows on the
+Speed card while the callers adapt, as it does in Callsigns mode while
+speed adapts, and that card's reset puts it back: whenever the card shows
+it before the reset or after it, as the reset turns the callers' switch
+back on and so can bring the Aim onto the card (`reset_section`).
 
 **Presets** (phase 2): First QSO, Club and Contester on the contest card.
 Each writes shared fields (speed ranges, tier, stations, QSB, QRN) and
-the contest's run style and Caller habits (as built, 4a), and reads
+the contest's run style and Caller habits (as built, 4a), and flutter (as
+built, 5a), and reads
 "Custom" once any is edited, as Experience does (`experience.rs:83,
 98-110`, `settings.rs:135-177`). No level is stored.
 
@@ -1951,11 +2213,11 @@ Character set card between the Contest and Run style pills, three short
 names that fit on a phone's line, and the Run style pill a preset flips
 shows at once what it set.
 
-| Preset | Callers' speed | Tier | Run style | Habits | Stations | QSB depth | QRN level |
-|---|---|---|---|---|---|---|---|
-| First QSO | 15–18 WPM | 1 | Single caller | easy | 1 | off | off |
-| Club | 20–26 WPM | 3 | Pile-up | real | 1–3 | 0.35 | 0.25 |
-| Contester | 28–36 WPM | 6 | Pile-up | rough | 2–5 | 0.5 | 0.4 |
+| Preset | Callers' speed | Tier | Run style | Habits | Stations | QSB depth | Flutter | QRN level |
+|---|---|---|---|---|---|---|---|---|
+| First QSO | 15–18 WPM | 1 | Single caller | easy | 1 | off | off | off |
+| Club | 20–26 WPM | 3 | Pile-up | real | 1–3 | 0.35 | off | 0.25 |
+| Contester | 28–36 WPM | 6 | Pile-up | rough | 2–5 | 0.5 | on | 0.4 |
 
 First QSO is a beginner's first contest QSO: one caller at a time, a
 little faster than a Koch learner's 15 WPM, with the plainest calls
@@ -1975,7 +2237,15 @@ Callers space at the speed they key, as contest callers
 do: the character range is written, and with the speeds tied the spacing
 follows it; with Farnsworth spacing set, the same range goes in the
 spacing's range too (the switch is left as it is), and a spacing changed
-after reads Custom.
+after reads Custom. As built with adaptive callers' speed, no preset
+touches "Adapt callers' speed to me": a preset says how fast the callers
+may come, and whether they are drawn within that from your copy is yours,
+so turning it on or off keeps the preset. As built (5a), Contester's band
+flutters too, the hardest band taking the fastest fading, its line reading
+"deep fading and flutter, strong static", and First QSO and Club turn
+flutter off. Full break-in is the rig's way of working, as your sending is
+its monitor's level: no preset touches it, and turning it on or off keeps
+the preset.
 
 **New fields.** One flattened struct, `ContestSettings`
 (`settings/contest.rs`), joins `TrainingSettings`, `SettingsSave` and its
@@ -1998,8 +2268,11 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 (as built, 4a) |
 | `contestShowCopy` | bool | false | — | Session shape | 4 (as built, 4b) |
 | `contestTuCall` | `every` `third` `never` | `third` | forgiving | Character set | operator feedback |
+| `contestAdaptSpeed` | bool | true | — (read back, anything but true or false is on) | Speed | adaptive callers' speed |
 | `myWpm` | u32 | 0 | 0 (the callers' middle) or 5..=80; read back, anything but a number is 0 | Speed | operator feedback |
 | `mySendingDb` | i32 | -9 | -60..=0 (-60 is off); read back, anything but a number is -9 | Tone and volume | operator feedback |
+| `contestFlutter` | bool | false | — (read back, anything but true or false is off) | Band conditions | 5 (as built, 5a) |
+| `contestQsk` | bool | false | — (read back, anything but true or false is off) | Tone and volume | 5 (as built, 5a) |
 
 - **Caller habits.** `easy`: plain digits, no LIDs. `real`: numbers as
   MRCE's callers send them (11.6). `rough`: LIDs and on-frequency QRM. As
@@ -2056,6 +2329,24 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   drawn from these ranges." Read back, a number is kept for the clamp to
   bound and anything else is 0. The card's reset puts it back to 0, and so
   does a preset (above).
+- **Adapt callers' speed to me** (as built, adaptive callers' speed,
+  2026-10-22). A switch on the Speed card in Contest mode, where group
+  training's "Adapt speed to me" sits and in its place, after the line
+  under the ranges ("Callers come at speeds drawn from these ranges.") and
+  before your speed: "New callers come faster while you copy calls and
+  numbers clean, slower when you miss them; those already calling keep
+  their speed. Your copy speed is under Stats." With one speed set it
+  says, as group training's does, "Give Character speed a range to use
+  this: one speed leaves nothing to adapt.", naming Effective speed too
+  ("Give Character speed or Effective speed a range…") only while the
+  speeds are untied and its range shows. On, "Aim for" shows under it
+  (§6.6). It is the contest's own (`contestAdaptSpeed`), on as it ships,
+  so group training's switch (`adaptiveSpeed`, off as it ships) is left as
+  it was, and neither steers the other's mode (`adaptive_speed_on` reads
+  the mode's, for the sampler and the card alike). Read back, anything but
+  true or false is on, as it ships, costing the rest of the save nothing;
+  the Speed card's reset turns it back on, and puts the Aim back with it
+  (above); `clamp()` has nothing to bound; no preset touches it.
 - **Your sending** (as built after operator feedback). On the Tone and
   volume card, where the volume range lives, in Contest mode only, after
   the volume: a slider "Your sending" in 3 dB steps from Off to 0 dB,
@@ -2067,6 +2358,28 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   run keeping its time", its −9 dB the default cw-core keeps. Read back, a
   number is kept for the clamp to bound and anything else is -9 dB. The
   card's reset puts -9 dB back; no preset touches it.
+- **Full break-in (QSK)** (as built, 5a). On the Tone and volume card in
+  Contest mode only, after your sending, as both say what you hear while
+  you send: a switch "Full break-in (QSK)", with "Hear the band through
+  your own messages, and a caller sending across one. Off, the receiver is
+  muted while you send, as on a rig without it, and nothing sent meanwhile
+  reaches you." Off as it ships, as MorseRunner's `Qsk` is (`Ini.pas:251`,
+  saved), so the receiver is muted while you send (§5.3); on, the band is
+  heard through your message, as every run was before. MorseRunner keeps
+  it with its station's settings; Dust's Your station card holds your call
+  and exchange, which are no rig's, and its reset would take them with it.
+  Read back, anything but true or false is off, costing the rest of the
+  save nothing; the card's reset turns it off; `clamp()` has nothing to
+  bound; no preset touches it.
+- **Flutter** (as built, 5a). On the Band card in Contest mode only, after
+  the fading, beside which it plays: a switch "Flutter", with "Three callers in ten
+  flutter, their signal rising and falling 3 to 33 times a second, as over
+  a polar path, fading or not. Your own message never does." (§5.5). Off as
+  it ships, as MorseRunner's `Flutter` is (`Ini.pas:265`); Contester turns
+  it on and First QSO and Club off, and the Band card's note in Contest
+  mode names it ("fading and flutter"). Read back, anything but true or
+  false is off; its card's reset turns it off; `clamp()` has nothing to
+  bound.
 - **On disk, Contest is written like a session (9.1):** `"charSetMode":
   "callsign"` plus `"contestActive": true`, a key that exists only on disk
   and that `From<SettingsSave>` reads back as Contest. An older build opens
@@ -2349,7 +2662,11 @@ exactly as it was while the run went on.
   A send on a caller's timeout restarts neither: waiting costs time, not
   sends. `Fields` carries both stamps; the 100 ms a character floor
   applies (`session.rs:26, 177`). Both ends are in run time, so a pause
-  between the edit and the key neither shortens nor lengthens a copy.
+  between the edit and the key neither shortens nor lengthens a copy. As
+  built (5a), without full break-in a send that went out under your
+  message, the receiver muted, was never heard (§5.3): it ends no copy's
+  time and starts none, is no repeat, credits no speed, and Show copy never
+  shows it.
 - **Speeds.** Each group carries the caller's speeds to 0.1 WPM, as of
   the slowest a send of it began to reach you at, so a caller that slowed
   down for you (QRS, 4.3) credits the copy at the speed it may have been
@@ -2360,7 +2677,9 @@ exactly as it was while the run went on.
   that owns no groups, a station logged again, shows no speed in either:
   its copy, and the speed that is credited at, are the earlier QSO's. The
   session's are their mean, as `GroupSession::result` does
-  (`session.rs:478-491`), never `my_wpm`. `digits_level` comes from the
+  (`session.rs:478-491`), never `my_wpm`. A call's and a number's
+  speeds are what the copy-speed belief learns them at, live as their QSO
+  is final and from the history after (§6.6). `digits_level` comes from the
   settings, `level` is the callsign tier, `score` is `points()`, and the
   tally and accuracy are worked out as for groups (`session.rs:458-521`).
 - **Show copy** (as built, 4b). A station's text shows a second after its
@@ -2490,10 +2809,10 @@ out of the Callsign series (`belief.rs:134-145`, `stats.rs:420-429`,
 | Calendar, streak, accuracy | Count; character accuracy covers calls and fields, lost copies included. A day's best reads "Best points" (`heatmap.rs:231`). |
 | Letters (`stats.rs:136-198`) | Accuracy counts every keyed character. Contest timings stay out of `avg_ms` and the slow flag, which measure answers after a send; the note says so ("left out of the average time that marks a letter slow"). |
 | Mistakes, sampler beliefs | Count, on keyed tokens: K5XYC for K5XYZ is Z→C, `1T5` for `1N5` is N→T. |
-| Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. |
+| Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. As built with adaptive callers' speed, its chances are the next caller's as the run would draw it (`speed_forecast`, by `adaptive_speed_path`, which reads the callers' switch in Contest): leaning on your copy speed while they adapt, and even across the range while not. Adapting, its line reads "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed.", as the chances are the belief the run starts from (`SpeedBelief::from_history`), and it adds "Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster." when more than half the chance sits on the range's top speed, or the same of its bottom ("…below this range, so most come at its bottom: … lets them go slower."). With the switch on and one speed set it reads "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed."; either then "Right is the share of characters you copy at that speed." |
 | Copy span, group-length forecast | Not contest measures, as for Callsigns (`ui/stats.rs:211-245`). |
-| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` is `None` in Contest until phase 5; the card reads "Callers' speeds are drawn evenly from your range; − and + move only your own" (as built after operator feedback; it said − / + shifted them during a run), its chip "Not adaptive". |
-| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form: as built (4b), a whole run with Show copy on is listed after the places on every board that holds it, its place a dashed `—` read as "Not placed", its figures greyed and "· assisted" after them, with a line saying why (`assisted_runs`); it marks nothing on the timeline. As built (4b), the Contest pill shows once the history holds a run, placed or not, with a chip for every contest it holds runs of (`board_modes`, `run_kinds`; the first with a run on the board is chosen until another is), as the Runs card is under it: a board of runs alone offers All modes and Contest. |
+| Copy speed (`speed.rs:285-310`) | A Contest pill and series, from call groups and numeric fields (NR, ZN) only, found by the log's layout (`ContestRun::group_copies`); a stripped run, or one whose log this build cannot read, uses the groups `parse_callsign` accepts. `adaptive_speed_path` was `None` in Contest until adaptive caller speed came, and the card read "Callers' speeds are drawn evenly from your range; − and + move only your own" (as built after operator feedback; it said − / + shifted them during a run), its chip "Not adaptive". As built with adaptive callers' speed (2026-10-22), the series is what each run's callers start from (§6.6), each call and number counted whole, a character lost off its end a miss (`whole_evidence`), and `adaptive_speed_path` reports them: in Contest it follows the callers' switch, `contestAdaptSpeed`, not group training's (`adaptive_speed_on`). While they adapt the card's chip reads "Adapting · Balanced", as the aim steers them, and its line "Each new caller's speed is drawn from your copy speed, within your range: faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed."; with the switch on and one speed set the chip reads "One speed set", as nothing adapts but the switch is not off (group training's card reads so too with its switch on and one speed), and the line "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, the chip reads "Adaptive callers off" and the line "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed." A run whose callers adapted is a run like any other in the series, its copies what it copied. |
+| Board (`board.rs`) | A Contest pill with a chip per kind (`BoardOf::Contest`, `board_kinds`; the first kind is chosen until another is), and the pills show when there is more than one mode or kind; `board_place` keys on the mark's kind. A run whose callers adapted to your copy is placed as any run is: points per group already weigh the speed each copy was sent at (§10, below), so faster callers copied clean earn more, and a run is not marked for how its callers' speeds were drawn. Ranked by points per group within a kind; a run qualifies when its log reads and it ran 5 minutes or more, to a limit of 5 minutes or more, with a clean QSO and the 10 groups every session needs (a WPX QSO owns two); a run whose log an older build dropped is unplaced. A board of runs alone, whichever pill is chosen, names that rule in its note, and an empty one whose scored sessions are all runs says it with Minutes per run in place of a longer session. Under All, WPX runs sit about 30% under Callsigns per group, since fields are short; the note says so when the board mixes runs with group sessions. The kind chips are tinted when chosen, not filled as the mode pills are. Assisted runs are greyed, unplaced, and out of record and form: as built (4b), a whole run with Show copy on is listed after the places on every board that holds it, its place a dashed `—` read as "Not placed", its figures greyed and "· assisted" after them, with a line saying why (`assisted_runs`); it marks nothing on the timeline. As built (4b), the Contest pill shows once the history holds a run, placed or not, with a chip for every contest it holds runs of (`board_modes`, `run_kinds`; the first with a run on the board is chosen until another is), as the Runs card is under it: a board of runs alone offers All modes and Contest. |
 | History (`ui/stats_detail.rs:362-371`) | Every row names its mode (phase 0); a contest row opens its results; a stripped run says "log not kept by an older version". As built (4b), an assisted run says "assisted" after its contest, by its log or its mark, and its results say "Assisted: Show copy was on. The run counts in every stat, and is never placed on the board." |
 | Auto level | Untouched: the contest finish never calls `complete_session` (`auto_level.rs:285-308`). |
 | Runs card (phase 4) | Every run per kind: date, length, QSOs, rate, both scores, error share, best verified per kind and length. As built (4b), on Stats → Scores under the Contest pill, for the contest its chip chooses, below the board (`src/ui/scores/runs.rs`, `contest_runs`): newest first, each row dated as the board dates it, day and time ("Mon 5 Oct 2026 · 14:13"), so runs of one day tell apart, then "10 min" or how far a run ended early went ("03:12 of 10 min"), clean and logged QSOs, the rate (a Simple QSO's minutes a QSO), the share of QSOs logged with an error and its Points, and at its end the verified contest score over the raw one (a Simple QSO's Points; a run of a scored contest whose log does not read, "—" over its Points, so the column holds scores alone). The best verified run of each length (the limit it was set to), Show copy off and above zero, is marked Best, the first to reach it holding it; a contest without a score marks none. An assisted run is marked "assisted" and is never Best. A run whose log this build cannot read, or an older one dropped, is listed with History's words and opens nothing; any other row opens the run's results in the tab's place, with Scores at its top and Back at its foot, as a History row opens them in its list's place. History's words for a log, and its QSOs and rate, are History's own (`log_parts`). The card lists the newest 40 runs, and the best of each length wherever it falls, with "Show n more" for the rest, as History pages its sessions. Each part of a row is kept whole, so at 360 px a row takes three lines and nothing scrolls sideways. |
@@ -2946,13 +3265,19 @@ pub trait CallSource {
     fn next_call(&mut self, s: &TrainingSettings, spec: CallSpec,
                  avoid: &dyn Fn(&str) -> bool) -> GeneratedCall;
     fn learn(&mut self, answered: Answered<'_>);        // session.rs:97-102
+    // As built, adaptive callers' speed (2026-10-22): calls and numbers
+    // teach the copy speed, and a newcomer's speed may be the source's.
+    fn learn_speed(&mut self, _answered: Answered<'_>) {}
+    fn next_speed(&mut self, _s: &TrainingSettings) -> Option<(f64, f64)> { None }
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct Turn { pub id: u64, pub at_run_ms: u64, pub segments: Vec<Segment> }
+pub struct Turn { pub id: u64, pub at_run_ms: u64,
+                  pub starts_at: Option<MonoMs> /* a continuation's splice (5a, 5.2) */,
+                  pub segments: Vec<Segment> }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment { pub who: Sender /* You | Caller(u32) */, pub text: String,
                      pub voice: StationVoice, pub start_sec: f64, pub end_sec: f64,
-                     pub fade: Option<Fade> /* from phase 2 (5.5) */ }
+                     pub fade: Option<Fade> /* from phase 2, flutter in it from 5a (5.5) */ }
 pub struct Fields { pub call: String, pub exch: String,
                     pub call_edited: MonoMs, pub exch_complete: Option<MonoMs> }
 pub struct ContestView {
@@ -2976,8 +3301,9 @@ line what is still to go of your message.
 Effects carry `Turn`, which derives `PartialEq` (as `StationVoice` does,
 `station.rs:12`), so machine tests compare effects as the group tests do
 (`machine.rs:622-628`). The runtime calls `plan_turn(&turn, &settings)`,
-then `lease.send_planned(asked, &plan, &transcript, &settings, on_start)`
-with `on_start: impl FnMut(f64)` taking lead plus latency in seconds, and
+then `lease.send_planned(asked, &plan, &transcript, &settings, turn.starts_at,
+on_start)` with `on_start: impl FnMut(f64)` taking lead plus latency in
+seconds, a continuation's wait for its moment among it (as built, 5a), and
 `asked` from `lease.ask_to_send()` as the turn goes on the air (5.2). The
 view holds no caller truth until a row's check resolves, but for what Show
 copy shows, each text with the moment it may show, and is published only
@@ -3010,7 +3336,7 @@ whichever is live.
 | `rules.rs`, `esm.rs`, `clock.rs` | the `ContestRules` table, `tu_adds_call` (operator feedback); `esm()`, `Fields::edit`, `space_to_call` (operator feedback); `RunClock` |
 | `machine.rs` | `ContestMachine`, events, effects, `ContestView` |
 | `caller.rs` | caller states, patience, matching, replies, collisions, QRS |
-| `turn.rs` | `Turn`, segments, continuations, `plan_turn`, `MONITOR_LEVEL` (your sending's loudest, operator feedback), per-caller fades |
+| `turn.rs` | `Turn`, segments, continuations, `plan_turn`, `MONITOR_LEVEL` (your sending's loudest, operator feedback), per-caller fades and flutter, the receiver muted while you send (`Turn::muted_until`, `Turn::muted`, 5a) |
 | `place.rs` | `place_contest_caller`, `filter_capacity` (phase 2); `place_qrm` (4a) |
 | `qrm.rs` | the QRM of rough habits: when a station starts up, what it sends and where in a turn (as built, 4a) |
 | `exchange.rs`, `parse.rs` | canonical forms, cut numbers, keyed tokens; `parse_exchange` |
@@ -3027,11 +3353,15 @@ disk, `Station`, `wild`); `settings/curriculum.rs` (Contest → `LevelAxis::Call
 `:49-56`); `session.rs` (`StoredSession`, `mode_on_disk`, `recorded_mode`,
 `contest`, a test constructor, `MonoMs::plus_sec`); `callsign.rs` (`generate_call`, `CallSpec`, public
 `parse_callsign`, `wpx_prefix`, `country_of`); `sampling.rs`, `pool.rs`,
-`auto_level.rs` (Contest arms; `impl CallSource for Sampler`); `stats.rs`,
-`board.rs`, `speed.rs` (history rows, kinds, assisted runs, contest speed
-evidence, no adaptive path); `timing/pileup.rs` (reach helpers
-`pub(crate)`); `timing/plan.rs` (`dry_wanted`, `plan_morse_playback_at`,
-1b); `soak.rs`, `lib.rs` (the contest soak; exports).
+`auto_level.rs` (Contest arms; `impl CallSource for Sampler`, and, as built
+with adaptive callers' speed, its callers' speeds from the copy-speed
+belief, `adaptive_speed_on` reading the callers' switch in Contest);
+`stats.rs`, `board.rs`, `speed.rs` (history rows, kinds, assisted runs,
+contest speed evidence, `tells_speed`, `whole_evidence`);
+`timing/pileup.rs` (reach helpers `pub(crate)`); `timing/plan.rs`
+(`dry_wanted`, `plan_morse_playback_at`, 1b; `muted_until`, and
+`SEND_RELEASE_SEC` moved here from the app, 5a); `band/qsb.rs`
+(`Qsb::flutter`, 5a); `soak.rs`, `lib.rs` (the contest soak; exports).
 
 **New in the app:** `src/contest_runtime.rs` (`LiveContest`, start,
 dispatch, effects, `play_turn`, finish, the heartbeat check);
@@ -3051,7 +3381,10 @@ Results branches); `src/app.rs`, `src/ui/tour.rs` (Exit and Discard,
 contest keys, tour button); `src/keep_awake.rs`; `src/player.rs`,
 `src/audio/mod.rs` (`send_planned`, `start_planned`, `Lease::wake`, a
 recorder that keeps each start's plan and `Qsb`); `src/audio/mixer/*`,
-`src/audio/web/*` (the dry path, later the gate); `src/ui/training.rs`,
+`src/audio/web/*` (the dry path; the gate and a send started at a given
+time, 5a), `src/audio/shape.rs` (the gate's ramp and the browser's gate
+schedule, `GateSchedule`, 5a), `src/audio/silent.rs`, `src/audio/wait.rs` (a send waiting
+for its moment is not stalling, 5a); `src/ui/training.rs`,
 `widgets.rs` (`Keypad` rows as props, `ProgressHeader { figure, pct }`);
 `settings_charset.rs`, `settings.rs`, `home.rs`; `results.rs`,
 `heatmap.rs`, `stats_detail.rs`, `scores/mod.rs` ("Points", rows that open
@@ -3140,7 +3473,12 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   message is dry and the callers are not; callers fade independently and
   smoothly; a continuation keeps every character of your message;
   capacity follows reach ÷ 60 Hz + 1; the band makes room for the callers
-  sounding at once.
+  sounding at once; from 5a, without full break-in the receiver is muted
+  from the turn's start to your message's end, your sending off or not,
+  and a caller's send any of which falls in it is lost to it, a reply after
+  it is not, and nothing is muted with full break-in nor in a turn of
+  callers alone; a flutter is laid in over the fading or alone, and never
+  into your message; the word gap is a space's.
 
 **Machine tests** (fixed seeds, a script source):
 
@@ -3344,6 +3682,60 @@ results, kinds); `listen.rs`, `playback.rs`; `privacy.rs`, `credits.rs`,
   card in Contest mode only (the TU's in a pile-up only), and their
   resets.
 
+- from adaptive callers' speed (2026-10-22): a run copied clean draws
+  faster callers than one whose numbers are missed, and by its end its
+  source draws faster than a fresh one, the missed run's slower, every
+  caller within the Speed card's range; callers already calling keep the
+  speed they came with, and newcomers' differ; under easy habits a caller
+  whose speed was drawn still slows down for you from it, back on track
+  at it, its call credited at its slowest, the next caller within the
+  range; a seed gives one run; with the switch off the run is the very run
+  of a source that chooses no speed; the source learns the copy speed
+  from calls and numbers, not from a report or a name, once the QSO is
+  logged. Unit tests: the callers' switch is their own, group training's
+  saying nothing of a contest nor theirs of a group session or of
+  Listen's stream of groups, and one speed leaves nothing to adapt; calls
+  and numbers copied clean draw faster callers and misses slower, a name
+  nothing; a call or number copied without its end is a miss, live and
+  from the history, an empty field nothing (`whole_evidence`); a run's
+  callers start from the contest runs in the history, an assisted run as
+  any, a Callsigns session not at all; the speed line keeps the spacing
+  within the Effective range wherever the characters allow it, sending at
+  the copy speed asked; the Sampling forecast follows the callers' switch;
+  the switch's serde (forgiving, on), its section and reset, the reset
+  putting back the Aim it brings onto the card, the presets leaving it
+  alone; the Speed card's switch in Contest only, its words, the one-speed
+  words naming only the ranges shown, the aim beside it while it adapts,
+  and its reset; the copy speed and Sampling cards' words and chips,
+  adapting, at one speed with the switch on, and off, the Sampling card
+  saying when the copy speed is past the range.
+
+- from 5a: without full break-in a pile-up caller sending across your
+  message is not heard: its rest ends no copy's time, the copy timed from
+  its call after you, RX counts it only from your message's end, the
+  operators never hear it and Show copy never shows it, all of which full
+  break-in hears; the station you work keyed over while its call put right
+  goes out tells Enter and the hint nothing of the correction, begins no
+  exchange, credits no speed and arms no heard timer for its rest, all of
+  which full break-in hears; however late in your call the next key comes,
+  the turn on the air sends every character begun before the continuation
+  can take over and the continuation the rest, from where its first
+  character starts, or half a word space after the call, the exchange a
+  word space after it, or at once once the call has gone out, none twice
+  and no gap; a turn started at once says the player's lead, a retry's or
+  a continuation's start does not, and a splice waits out that lead and a
+  release after the key; F5 then F2, Enter then Enter, and a `?` mid-CQ
+  splice on from the next character. Unit tests: three callers in ten flutter under flutter,
+  each its own rate and depth within range, the same seed alike, none with
+  it off and every other draw of a caller the same; a flutter wanders at
+  its own rate and depth; flutter and full break-in's serde (forgiving,
+  off), their sections and resets; the presets writing flutter and leaving
+  full break-in alone. The soak runs full break-in on half its seeds and
+  flutter on two in five, each turn's muted span what full break-in says,
+  every flutter within its range and only under flutter, your message never
+  faded, and no continuation set to start sooner than a release after its
+  key.
+
 **Operators hear, never peek:** they read callers' text from `PlayTurn` in
 cw-core and from the recorder's transcript in the app. Perfect: all
 verified, at 3600·n / Σ(planned turns and drawn delays) an hour within 5%,
@@ -3380,7 +3772,13 @@ current turn events, timers by any id, pause, resume, hide and finish.
   only under the habits that bring them, and callers' numbers in plain
   digits under easy ones. As built, a widened run on seeds of its own
   (9,000 single from seed 50,000 and 13,500 pile-up from seed 90,000)
-  passed with QRM held to it too.
+  passed with QRM held to it too. As built with adaptive callers' speed,
+  the callers adapt on every other seed, and every caller sends within
+  the Speed card's ranges: its characters within Character speed, its
+  spacing within Effective speed wherever its characters are as fast as
+  its slowest, and never outrunning them; slower only as it slows down for
+  you under easy habits, by at most 22% (`QRS_MOST`, skill 1's 20% and
+  2% more), and never under the card's slowest speed.
 - The end: serial = QSOs logged + 1; QSO times rise and stay within
   `run_ms` ≤ the limit; `run_ms + paused_ms` is the wall-clock span, or at
   most that when time ran out, as a run noticed past its limit ends at the
@@ -3432,6 +3830,36 @@ finishes once its last reply is heard, dry or not; over a band whose
 static and a full-level caller pull the AGC well down, your message adds
 exactly its own tones to what is heard, unridden; and a dry send gives
 your tones out unfiltered and unfaded, and stops them with the rest.
+From 5a: without full break-in, once the gate has shut only your message
+is heard, sample for sample, and once it has opened again after your
+message the receiver is heard exactly as with full break-in, its AGC having
+run on; the gate moves a straight line at a time, the same step a sample,
+and never steps, a stop opening it; with your sending off nothing is heard
+while you send; the paddle's sidetone is never muted; a fluttering caller
+rises and falls with its own flutter, at 3 and at 33 Hz, half and three
+quarters deep, two callers each with their own, the same turn the same
+twice, and your message never fluttered; a continuation taking over where
+the send playing gives way sounds every element where one send of the whole
+message has it, to a sample or two, none twice and no gap; under a band and
+a loud caller sending across, with your sending off, nothing at all is heard
+and the gate never moves from the first send's gate shut to the end of the
+continuation's message, a second key taking over from the first
+continuation at its own start included, asked for a millisecond past it;
+one taking over half a word space after your last character leaves that
+element sample for sample as one send has it, the receiver back in that
+word space and muted again from the takeover; the browser's gate schedule, a send on top going on from where
+the gate stands without a step, a takeover of a takeover a millisecond
+either side of its start, and a stop part way down a ramp; a send asked for
+once the moment has passed starts at once, with nothing playing it waits
+what it was asked, and stopped before its time neither it nor the send it
+was to take over from is heard. The recorder keeps when a continuation was
+to start: a key mid-CQ is spliced on where the Q starts and the run hears
+it from then; every turn with a message of yours mutes the receiver to its
+end without full break-in and none with it; a planned send asked to start
+at a given time starts then, one asked for a moment past at once. The
+settings screen's Flutter on the Band card and Full break-in on Tone and
+volume, in Contest mode only, stored, flutter written by the presets and
+full break-in left alone, and each card's reset.
 
 **Render tests:** from 4b, a double tap on Pause leaves the run paused,
 Pause's place inert and End run where it was; Resume, by its button, Alt+P
@@ -3618,7 +4046,40 @@ against the published rules and pinned before it ships.
 for continuations; contest tour steps; adaptive caller speed from the Contest
 copy-speed series; the paddles' field space.
 
-**Later, not planned:** Search & Pounce with the Sprint QSY rule, QSK, RIT,
+- Adaptive caller speed was brought forward at the user's asking and has
+  landed (2026-10-22, §15.2): `contestAdaptSpeed` on the Speed card, on as
+  it ships, beside "Aim for" while it adapts and in place of group
+  training's switch (§8); each newcomer's speed drawn by the call source
+  from the copy-speed belief (`CallSource::next_speed`), started from the
+  Contest series and taught the run's calls and numbers as each QSO is
+  final (`CallSource::learn_speed`), each counted whole, a lost end a
+  miss (`whole_evidence`), QRS slowing a caller from the speed it came
+  with (§6.6); `adaptive_speed_path` reading the mode's switch
+  (`adaptive_speed_on`), so the Sampling and copy-speed cards say how the
+  callers come (§10), and Listen's stream of groups kept to an even draw
+  (§2); and the soak's runs adapting on every other seed, every caller's
+  speed held to the Speed card's ranges but for QRS under easy habits,
+  which slows it by at most 22% (§13).
+- The receiver gate, flutter and the timed splice landed as slice 5a, on
+  both players and the recorder: without full break-in the receiver muted
+  after its AGC while you send, nothing sent across your message counted
+  as heard, and "Full break-in (QSK)" on the Tone and volume card, off as
+  in MorseRunner (§5.3, §8); flutter on three callers in ten under the Band
+  card's flutter, which Contester turns on (§5.5, §8); and a continuation
+  spliced on at the start of your message's next character, each player
+  starting it at that moment against the send it takes over from, no
+  sooner than the player's lead and a release after the key, the lease,
+  stall detection and retries kept (§5.2). The soak runs full break-in on
+  half its seeds and flutter on two in five (§13). What could not be
+  checked here: how the gate, a flutter and a splice sound by ear, on any
+  player, and above all in a browser, whose gains, context clock and
+  scheduling no test reaches, a stop cutting a send a continuation was to
+  take over from among them; nor how long a real device's lead is, against
+  the one the machine measures; the native mixer's are tested sample by
+  sample, and the browser's gate schedule as numbers (`GateSchedule`), not
+  as played.
+
+**Later, not planned:** Search & Pounce with the Sprint QSY rule, RIT,
 keying with the paddles, a contest level, and more contests.
 
 ## 15. Decisions
@@ -3670,6 +4131,21 @@ keying with the paddles, a contest level, and more contests.
 | Your sending (operator feedback) | a level of its own, off to the loudest in dB, -9 dB to start | a fixed monitor level | painfully loud against weak callers; -9 dB is level with an average caller as heard through the AGC |
 | The paddles' sidetone (operator feedback; for the user to confirm) | the volume floor, in every mode | your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The cost: at the defaults the paddles sound about 12 dB over your messages and 9 dB over an average caller, turned down only with the volume floor, which moves the callers too (§5.3) |
 | Your call in TU (operator feedback) | every QSO, every third or never, in a pile-up, where the contest's TU leaves it; the callers call after every TU | every third, always | MorseRunner's station ID rate is a setting; its callers come on every TU, signed or not, so none waits for your call |
+| Callers' speed (2026-10-22) | each newcomer's drawn from the copy-speed belief within the Speed card's ranges, on as it ships, a switch of the contest's own; aiming at the Aim's share of characters right; QRS slowing from that speed | MorseRunner's keys alone; RufzXP's step up on a right call and down on a miss; group training's switch; a fixed contest target | the user asked for callers that speed up as calls are copied clean; Dust's speeds come from a posterior, so they move smoothly and as surely as the copies say; group training's switch stays off and its own; one aim for every adaptive feature, shown where it steers |
+| Presets and the callers' speed (2026-10-22) | leave the switch alone | each set it | a preset says how fast callers may come; how they are drawn within that is yours, and toggling it keeps the preset |
+| Assisted runs in the callers' belief (2026-10-22) | counted, as every session of the set is | left out | group training's belief is blind to sends; a copy kept when its text showed is what was heard by ear |
+| A call's or number's lost end in the copy speed (2026-10-22) | a miss, live and in the history (`whole_evidence`) | the group's rule, its length's to answer for | no copy span learns from a run, so a busted call would read as clean, and faster callers, losing more ends, would push the speed up further |
+| Asking again and the callers' speed (2026-10-22) | not counted: a copy counts as it ends | a repeat counted as a partial miss at the first send's speed | the series is blind to sends, as group training's is, and the record keeps the copy at its end, not what each send gave; asking costs rate and points, and a call still busted counts |
+| Callers too fast to work (2026-10-22) | no evidence, a known limit | a speed-only miss kept in the run's log; a cap on the draw while the belief is wide | the record keeps only callers worked; a cap would put a rule of thumb over the posterior |
+| Listen's stream in Contest (2026-10-22) | drawn evenly from the ranges, as before | following the callers' switch | the stream is no caller, and the switch speaks of callers |
+| The receiver while you send (5a) | muted after the AGC, as MorseRunner's is with its QSK off; "Full break-in (QSK)" on Tone and volume a choice, off as it ships | always muted; never muted, as before | MorseRunner's `Qsk` is a saved choice, off by default; those who liked the band under their message keep it |
+| Where full break-in sits (5a) | the Tone and volume card, after your sending | Band conditions; Your station | it says what you hear while you send, as your sending does; Your station holds your call and exchange, and its reset would take the switch with them |
+| What the gate keys off (5a) | your message's span in the plan, from the turn's start to its end, your sending off or not | the dry tones | with your sending off there are no tones, and a rig transmits, and mutes, all the same |
+| A caller sending across your message, muted (5a) | unheard, the whole send: no copy, repeat, speed, Enter or Show copy, RX counting it from your message's end; its cost to its caller spent | its tail after your message counted | nothing you cannot hear may count as heard, and a call heard in part is no call heard |
+| Flutter (5a) | a switch of its own on the Band card in Contest mode, three callers in ten at 3–33 Hz, half to three quarters deep, over the fading or alone; Contester turns it on | MorseRunner's: a quicker fading in place of a station's, full depth, only with QSB on | the switch does what it says, and no caller is fluttered out of hearing |
+| A continuation (5a) | a timed splice: the turn on the air plays out the character sounding, and any the player has begun, the next starts at the start of the next character, ridden over by then; with none left, half a word space after your message, the next message a word space after it | the next started at once from the character sounding, sent again whole; or started in the past, mid-character | no character twice and no gap; both players start a send at a moment ahead well, and your message is silent where they meet, so nothing clicks |
+| How soon a continuation can take over (5a) | the player's lead, as the last turn started at once found it, and a send's release, after the key | the moment your message is at as it reaches the ear | a player plays ahead of the ear, so a character starting inside its lead has begun already, and taking over there sent its start twice; a lead measured on every turn keeps up with the device |
+| What the turn on the air plays up to the splice (5a) | counted at the key, as planned | counted as it plays | everything is decided when you key; the turn on the air would otherwise stay beside the next for every count and timer. The cost: an Esc, a pause or the run's end before the splice, up to about a second after the key at 25 WPM, leaves counted a caller's send there that never sounded: with full break-in, any; without, only a reply starting in the word space before a splice after your message's last character |
 
 ### 15.2 Decisions taken with the user
 
@@ -3729,6 +4205,24 @@ the design where it says so:
     Callers call after your TU whether it signs or not, as MorseRunner's
     do, so a pile-up that never hears your call goes on as ever (§3, §8).
 
+Decided with the user on 2026-10-22, who asked for callers that speed up
+as their calls are copied clean, as an option on by default:
+
+13. "Adapt callers' speed to me" (`contestAdaptSpeed`) on the Speed card in
+    Contest mode, on by default, a switch of its own, so group training's
+    "Adapt speed to me" stays off and as it was. Each new caller's speed is
+    drawn from the Bayesian copy-speed belief within the Speed card's
+    ranges, aiming at the share of characters "Aim for" asks, shown beside
+    the switch while it adapts; the belief starts each run from the
+    Contest copy-speed series and learns within it from every call and
+    number copied as its QSO is final, so clean calls speed callers up and
+    misses slow them down, smoothly. Callers already calling keep their
+    speed; QRS under easy habits slows a caller from the speed it came
+    with; − and + move only your own speed; no preset touches the switch.
+    Off, callers' speeds are drawn evenly from the ranges as before. Phase
+    5's adaptive caller speed, brought forward (§6.6, §8, §10, §14); how
+    each copy counts towards it is in §6.6 and §15.1.
+
 ## 16. Risks
 
 1. **Phone height.** *Mitigation:* fixed one-line slots, the log below the
@@ -3736,8 +4230,12 @@ the design where it says so:
    a run, and a session of groups, to the keypad's last row; a 320×568 one
    does not yet), a 360 px render test, a style test of the rule, a small
    phone.
-2. **A continuation re-sends one character** until phase 5's timed splice.
-   *Mitigation:* the message counts as sent whole; listen on each player.
+2. **A continuation can still send part of a character twice** where the
+   player's lead at the key is longer than the lead the machine last
+   measured, as when the output device changes during a run or a start is
+   slow, and a continuation asked for a moment the player has passed
+   starts at once. *Mitigation:* the lead is measured afresh on every turn
+   started at once (§5.2); listen on each player.
 3. **Latency estimates** may be wrong. *Mitigation:* capped at 0.5 s
    (`wait.rs:114`); measure on low-end phones.
 4. **Hidden-page detection.** *Mitigation:* three signals; test a locked

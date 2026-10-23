@@ -9,11 +9,18 @@
 //! Each caller fades on a path of its own: the band's fading, from a point of
 //! its own in it, laid into the envelope of every tone it sends, so that two
 //! callers in one turn rise and fall apart and your own message never fades.
+//! Some flutter too, under the Band card's flutter, in the same way.
+//!
+//! Without full break-in the receiver is muted while you send, as a rig that
+//! is not QSK mutes it: a turn's plan says until when
+//! ([`PlannedTransmission::muted_until`]), and nothing a caller sends while it
+//! is muted reaches you.
 
 use std::sync::Arc;
 
 use crate::band::Qsb;
 use crate::morse::morse_for;
+use crate::session::MonoMs;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
 use crate::timing::{
     Interferer, PlannedTransmission, PlaybackPlan, StationVoice, ToneEvent, Transmission,
@@ -61,29 +68,43 @@ impl Sender {
 }
 
 /// How a caller's segment fades, or QRM's: the band's fading, as the Band
-/// card sets it, read from `from_sec` on its clock where the segment
-/// starts. Each station reads it from a point of its own, so no two fade
-/// together.
+/// card sets it, and a caller's flutter, if it has one, read from
+/// `from_sec` on its clock where the segment starts. Each station reads
+/// them from a point of its own, so no two fade together.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fade {
-    pub qsb: Qsb,
+    /// The band's fading; none with the Band card's QSB off.
+    pub qsb: Option<Qsb>,
+    /// The station's flutter; none for most, and for all with the Band
+    /// card's flutter off.
+    pub flutter: Option<Qsb>,
     pub from_sec: f64,
 }
 
 impl Fade {
-    /// How a segment starting `start_sec` into a turn keyed at `run_ms`
-    /// fades, sent by a station whose path through the band's fading `qsb`
-    /// starts `path_sec` in; none with the band's fading off.
+    /// How a segment starting `start_sec` into a turn starting at `run_ms`
+    /// fades, sent by a station whose path through the band's fading `qsb`,
+    /// and its own `flutter`, starts `path_sec` in; none with neither.
     pub(super) fn along(
         qsb: Option<Qsb>,
+        flutter: Option<Qsb>,
         path_sec: f64,
         run_ms: u64,
         start_sec: f64,
     ) -> Option<Self> {
-        qsb.map(|qsb| Self {
+        (qsb.is_some() || flutter.is_some()).then(|| Self {
             qsb,
+            flutter,
             from_sec: path_sec + run_ms as f64 / 1_000.0 + start_sec,
         })
+    }
+
+    /// How much of the signal gets through `t_sec` into the segment: the
+    /// band's fading and the flutter, one over the other.
+    pub fn gain_at(&self, t_sec: f64) -> f32 {
+        let at = self.from_sec + t_sec;
+        let gain = |fading: Option<Qsb>| fading.map_or(1.0, |fading| fading.gain_at(at));
+        gain(self.qsb) * gain(self.flutter)
     }
 }
 
@@ -104,8 +125,15 @@ pub struct Segment {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn {
     pub id: u64,
-    /// Run time when it was keyed.
+    /// Run time when it starts: when it was keyed, or, for a continuation,
+    /// when it takes over from the turn before ([`Self::starts_at`]).
     pub at_run_ms: u64,
+    /// When its sound is to reach the ear, for a continuation: the moment
+    /// the turn before has played your message up to where this one goes
+    /// on with it, so no character of it goes out twice and none waits
+    /// (§5.2 of the design). None for a turn that starts as soon as the
+    /// player can start it.
+    pub starts_at: Option<MonoMs>,
     pub segments: Vec<Segment>,
 }
 
@@ -116,6 +144,37 @@ impl Turn {
             .iter()
             .map(|segment| segment.end_sec)
             .fold(0.0, f64::max)
+    }
+
+    /// Where your message in it ends, in seconds from its start; none for a
+    /// turn of callers alone.
+    pub fn your_end_sec(&self) -> Option<f64> {
+        self.segments
+            .iter()
+            .filter(|segment| segment.who == Sender::You)
+            .map(|segment| segment.end_sec)
+            .reduce(f64::max)
+    }
+
+    /// Until when the receiver is muted in it, in seconds from its start:
+    /// without full break-in (`qsk`), from the start of a turn holding a
+    /// message of yours to that message's end, as a rig that is not QSK
+    /// mutes it while it transmits. None with full break-in, or for a turn
+    /// of callers alone.
+    pub fn muted_until(&self, qsk: bool) -> Option<f64> {
+        self.your_end_sec().filter(|_| !qsk)
+    }
+
+    /// Whether `segment` of it is lost to the receiver's gate
+    /// ([`Self::muted_until`]): a caller's send, or QRM's, any of which
+    /// falls while the receiver is muted is not heard. Nothing of it is: a
+    /// call or an exchange heard in part is no call or exchange heard. Your
+    /// own message is never lost to it.
+    pub fn muted(&self, segment: &Segment, qsk: bool) -> bool {
+        segment.who != Sender::You
+            && self
+                .muted_until(qsk)
+                .is_some_and(|until| segment.start_sec < until)
     }
 
     /// What the turn says, as a send is written down: your message from your
@@ -171,6 +230,17 @@ pub(super) fn sending_sec(text: &str, settings: &TrainingSettings, voice: &Stati
     plan_morse_playback_for(text, settings, voice).duration_sec
 }
 
+/// The gap `voice` leaves between the end of a word's last element and the
+/// first of the next: where a message sent after one that has just ended
+/// would start, as the two were one text.
+pub(super) fn word_gap_sec(settings: &TrainingSettings, voice: &StationVoice) -> f64 {
+    let spans = char_spans("E E", settings, voice);
+    match spans[..] {
+        [(_, _, first_end), (_, second_start, _)] => second_start - first_end,
+        _ => 0.0,
+    }
+}
+
 /// Where each character of `text` that sounds starts and ends, in seconds
 /// from the start of the text: its byte index, start and end.
 pub(super) fn char_spans(
@@ -219,6 +289,13 @@ pub(super) fn sounding_at(spans: &[(usize, f64, f64)], at_sec: f64) -> Option<us
 /// A caller's fade is laid into its tones' envelopes ([`fade_tones`]), as
 /// both players play a tone at its envelope; the send itself carries no
 /// fading, so none reaches your message.
+///
+/// Without full break-in the receiver is muted while you send
+/// ([`PlannedTransmission::muted_until`]): from the turn's start to the end of
+/// your message, your sending off or not, as a rig is muted while it
+/// transmits whether or not you monitor it. The players mute the receiver's
+/// output, after its AGC, and leave your message and the paddle's sidetone
+/// alone.
 pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmission {
     let level = settings.contest.sending_level();
     let mut wanted: Option<PlaybackPlan> = None;
@@ -278,6 +355,7 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
         wanted,
         others,
         dry_wanted: true,
+        muted_until: turn.muted_until(settings.contest.contest_qsk),
     }
 }
 
@@ -297,8 +375,7 @@ fn fade_tones(tones: &mut [ToneEvent], fade: Fade) {
             } else {
                 0.5
             };
-            fade.qsb
-                .gain_at(fade.from_sec + tone.start_sec + tone.duration_sec * through)
+            fade.gain_at(tone.start_sec + tone.duration_sec * through)
         };
         let faded: Vec<f32> = tone
             .envelope
@@ -307,10 +384,7 @@ fn fade_tones(tones: &mut [ToneEvent], fade: Fade) {
             .map(|(point, level)| level * at(point))
             .collect();
         tone.envelope = Arc::from(faded);
-        tone.target_gain *= f64::from(
-            fade.qsb
-                .gain_at(fade.from_sec + tone.start_sec + tone.duration_sec / 2.0),
-        );
+        tone.target_gain *= f64::from(fade.gain_at(tone.start_sec + tone.duration_sec / 2.0));
     }
 }
 
@@ -354,6 +428,7 @@ mod tests {
         Turn {
             id: 1,
             at_run_ms: 0,
+            starts_at: None,
             segments: vec![you, reply],
         }
     }
@@ -385,6 +460,7 @@ mod tests {
         let turn = Turn {
             id: 1,
             at_run_ms: 0,
+            starts_at: None,
             segments: vec![first, over, again],
         };
         let planned = plan_turn(&turn, &settings);
@@ -477,7 +553,8 @@ mod tests {
     fn faded(from_sec: f64) -> Turn {
         let mut turn = turn();
         turn.segments[1].fade = Some(Fade {
-            qsb: deep_fast_fade(),
+            qsb: Some(deep_fast_fade()),
+            flutter: None,
             from_sec,
         });
         turn
@@ -553,7 +630,8 @@ mod tests {
     fn your_tones_stay_unfaded_beside_faded_callers() {
         let mut turn = faded(12.0);
         turn.segments[0].fade = Some(Fade {
-            qsb: deep_fast_fade(),
+            qsb: Some(deep_fast_fade()),
+            flutter: None,
             from_sec: 3.0,
         });
         let planned = plan_turn(&turn, &settings());
@@ -665,6 +743,126 @@ mod tests {
         let alone = plan_turn(&cq, &settings);
         assert!(alone.wanted.events.is_empty());
         assert!((alone.wanted.duration_sec - cq.duration_sec()).abs() < 1e-9);
+    }
+
+    /// Without full break-in the receiver is muted from the turn's start to
+    /// the end of your message, your sending off or not, and a caller's send
+    /// any of which falls in that time is lost to it; a reply after your
+    /// message is not. With full break-in nothing is muted, nor in a turn of
+    /// callers alone.
+    #[test]
+    fn the_receiver_is_muted_while_you_send_without_full_break_in() {
+        let mut turn = turn();
+        let settings = settings();
+        assert!(!settings.contest.contest_qsk, "off as it ships");
+        let your_end = turn.segments[0].end_sec;
+        assert_eq!(turn.your_end_sec(), Some(your_end));
+        assert_eq!(turn.muted_until(false), Some(your_end));
+        assert_eq!(plan_turn(&turn, &settings).muted_until, Some(your_end));
+        let mut silent = settings.clone();
+        silent.contest.my_sending_db = crate::settings::MY_SENDING_OFF_DB;
+        assert_eq!(
+            plan_turn(&turn, &silent).muted_until,
+            Some(your_end),
+            "you transmit all the same"
+        );
+        let mut qsk = settings.clone();
+        qsk.contest.contest_qsk = true;
+        assert_eq!(turn.muted_until(true), None);
+        assert_eq!(plan_turn(&turn, &qsk).muted_until, None);
+
+        // The reply after your message is heard; a caller sending across it
+        // is not, though most of it comes after.
+        let reply = turn.segments[1].clone();
+        assert!(!turn.muted(&reply, false));
+        let mut across = reply.clone();
+        across.start_sec = your_end - 0.05;
+        across.end_sec = across.start_sec + 2.0;
+        assert!(turn.muted(&across, false));
+        assert!(!turn.muted(&across, true), "heard through it with QSK");
+        assert!(!turn.muted(&turn.segments[0], false), "never your own");
+        turn.segments.push(across);
+
+        // A continuation whose message starts a word space in is muted from
+        // its start, the rig still sending.
+        let mut continuation = turn.clone();
+        continuation.segments[0].start_sec = 0.3;
+        continuation.segments[0].end_sec += 0.3;
+        assert_eq!(
+            plan_turn(&continuation, &settings).muted_until,
+            Some(your_end + 0.3)
+        );
+
+        let mut callers = turn;
+        callers.segments.remove(0);
+        assert_eq!(callers.your_end_sec(), None);
+        assert_eq!(callers.muted_until(false), None);
+        assert_eq!(plan_turn(&callers, &settings).muted_until, None);
+        assert!(!callers.muted(&reply, false));
+    }
+
+    /// A fluttering caller's tones carry its flutter, laid in over the
+    /// band's fading as the band's fading is, and a caller with flutter and
+    /// no fading still flutters; your message flutters no more than it
+    /// fades.
+    #[test]
+    fn a_flutter_is_laid_in_and_your_message_never_flutters() {
+        let settings = settings();
+        let flutter = Qsb::flutter(0.6, 25.0);
+        let plain = plan_turn(&turn(), &settings);
+        for qsb in [None, Some(deep_fast_fade())] {
+            let mut fluttering = turn();
+            let fade = Fade {
+                qsb,
+                flutter: Some(flutter),
+                from_sec: 11.0,
+            };
+            fluttering.segments[1].fade = Some(fade);
+            fluttering.segments[0].fade = Some(fade);
+            let planned = plan_turn(&fluttering, &settings);
+            let reply = &fluttering.segments[1];
+            let (tones, unfaded) = (&planned.others[0].events, &plain.others[0].events);
+            let mut heard = Vec::new();
+            for (tone, base) in tones.iter().zip(unfaded) {
+                let start = tone.start_sec - reply.start_sec;
+                let points = tone.envelope.len() - 1;
+                for (point, (level, level_then)) in
+                    tone.envelope.iter().zip(base.envelope.iter()).enumerate()
+                {
+                    let t = start + tone.duration_sec * point as f64 / points as f64;
+                    let both =
+                        qsb.map_or(1.0, |qsb| qsb.gain_at(11.0 + t)) * flutter.gain_at(11.0 + t);
+                    assert!((level - level_then * both).abs() < 1e-6);
+                    assert!((fade.gain_at(t) - both).abs() < 1e-6);
+                }
+                heard.push(fade.gain_at(start + tone.duration_sec / 2.0));
+            }
+            let (low, high) = heard
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), g| (lo.min(*g), hi.max(*g)));
+            assert!(high - low > 0.2, "it flutters: {low:.2}..{high:.2}");
+            for (tone, base) in planned.wanted.events.iter().zip(&plain.wanted.events) {
+                assert_eq!(&tone.envelope[..], &base.envelope[..], "yours unfluttered");
+            }
+        }
+        // Neither fading nor flutter: no fade at all.
+        assert_eq!(Fade::along(None, None, 3.0, 1_000, 0.5), None);
+        let along = Fade::along(None, Some(flutter), 3.0, 1_000, 0.5).expect("a flutter");
+        assert!((along.from_sec - 4.5).abs() < 1e-12);
+    }
+
+    /// The gap a voice leaves between two words: what a message sent after
+    /// one that has just ended starts after.
+    #[test]
+    fn the_word_gap_is_what_a_space_leaves() {
+        let settings = settings();
+        let voice = your_voice(&settings, 25.0);
+        let gap = word_gap_sec(&settings, &voice);
+        let one = sending_sec("K", &settings, &voice);
+        let two = sending_sec("K K", &settings, &voice);
+        assert!((two - (2.0 * one + gap)).abs() < 1e-9);
+        // Seven dots at a keyer's weight.
+        assert!((gap - 7.0 * 1.2 / 25.0).abs() < 1e-9, "{gap}");
     }
 
     #[test]

@@ -23,7 +23,9 @@ pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
 
 use std::rc::Rc;
 
-use cw_core::{PlannedTransmission, TrainingSettings, Transmission, plan_transmission};
+use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission, plan_transmission};
+
+use crate::time::mono_ms;
 
 /// True when the build has no audio output and only simulates the timing of a
 /// session.
@@ -50,11 +52,21 @@ pub trait MorseBackend {
     /// being copied, and whoever else is calling across it. `plan` is how it
     /// plays — every station's tones against one clock — and is all a player
     /// needs; it is planned once, by [`start_send`], for every backend.
+    ///
+    /// `heard_in`, for a send that is to start at a given time, is how long
+    /// from now its sound should reach the ear: a contest's continuation,
+    /// which takes over from the send playing where that one gives way
+    /// ([`cw_core::Turn::starts_at`]). The player lets the send playing run
+    /// on to there and starts the new one then, against the clock the old
+    /// one plays on; once that moment is past, or with nothing playing, as
+    /// near it as it can. Its signal says when it is really heard. None
+    /// starts it as soon as it can.
     fn start(
         &mut self,
         transmission: &Transmission,
         plan: &PlannedTransmission,
         settings: &TrainingSettings,
+        heard_in: Option<f64>,
     ) -> Result<Rc<dyn PlaybackSignal>, String>;
 
     /// Silence the Morse, leaving the background alone.
@@ -84,14 +96,15 @@ pub fn start_send(
     settings: &TrainingSettings,
 ) -> Result<PlaybackWait, String> {
     let plan = plan_transmission(transmission, settings);
-    start_planned(player, &plan, transmission, settings)
+    start_planned(player, &plan, transmission, settings, None)
 }
 
 /// Send a send planned already on `player`, and hand back something to wait
 /// on: a contest's turn, every reply in it whole and your message stretched
 /// to the last of them, which [`plan_transmission`] would cut. `transcript`
 /// is what the turn says, for a player that keeps it; `plan` is all a player
-/// plays.
+/// plays. `starts_at`, for a continuation, is when its sound is to reach
+/// the ear ([`MorseBackend::start`]).
 ///
 /// The band is brought in line first, as for any send, and the wait reads
 /// its length off the plan.
@@ -100,9 +113,11 @@ pub fn start_planned(
     plan: &PlannedTransmission,
     transcript: &Transmission,
     settings: &TrainingSettings,
+    starts_at: Option<MonoMs>,
 ) -> Result<PlaybackWait, String> {
     player.apply_band(settings);
-    let signal = player.start(transcript, plan, settings)?;
+    let heard_in = starts_at.map(|at| (at.0 as f64 - mono_ms() as f64) / 1_000.0);
+    let signal = player.start(transcript, plan, settings, heard_in)?;
     Ok(PlaybackWait::new(&plan.wanted, signal))
 }
 
@@ -156,14 +171,18 @@ pub mod fake {
     }
 
     /// One send as the player was handed it: what it plays, the fading it
-    /// plays with, and what it says.
+    /// plays with, what it says, and when it was to start.
     #[derive(Clone, Debug)]
     pub struct Started {
-        /// What it plays, and whether its wanted send went past the
-        /// receiver, as your message in a contest does.
+        /// What it plays, whether its wanted send went past the receiver,
+        /// as your message in a contest does, and when the receiver was to
+        /// be muted.
         pub plan: PlannedTransmission,
         pub qsb: Option<Qsb>,
         pub transcript: Transmission,
+        /// For a send that was to start at a given time, how long after it
+        /// was started its sound was to reach the ear.
+        pub heard_in: Option<f64>,
     }
 
     #[derive(Default)]
@@ -284,11 +303,14 @@ pub mod fake {
         duration_ms: u32,
         played: Cell<u32>,
         latency_sec: f64,
+        /// How long it waits before it starts, a send asked to start at a
+        /// given time, in the ticks of its clock.
+        wait_ms: u32,
     }
 
     impl PlaybackSignal for FakeSignal {
         fn heard_after_sec(&self) -> f64 {
-            self.latency_sec
+            self.latency_sec + f64::from(self.wait_ms) / 1_000.0
         }
 
         fn poll(&self) -> WaitFlags {
@@ -327,15 +349,16 @@ pub mod fake {
                 },
                 _ => {
                     // Each poll advances the "audio clock" by one tick, so a
-                    // send takes as long as its plan says it does.
-                    let played = self
-                        .played
-                        .get()
-                        .saturating_add(crate::time::POLL_MS)
-                        .min(self.duration_ms.saturating_add(wait::PLAYBACK_TAIL_MS));
+                    // send takes as long as its plan says it does, from when
+                    // it was to start.
+                    let played = self.played.get().saturating_add(crate::time::POLL_MS).min(
+                        self.duration_ms
+                            .saturating_add(wait::PLAYBACK_TAIL_MS)
+                            .saturating_add(self.wait_ms),
+                    );
                     self.played.set(played);
                     WaitFlags {
-                        played_ms: Some(played),
+                        played_ms: Some(played.saturating_sub(self.wait_ms)),
                         ..Default::default()
                     }
                 }
@@ -359,6 +382,7 @@ pub mod fake {
             transmission: &Transmission,
             plan: &PlannedTransmission,
             settings: &TrainingSettings,
+            heard_in: Option<f64>,
         ) -> Result<Rc<dyn PlaybackSignal>, String> {
             self.recorder
                 .calls
@@ -368,18 +392,24 @@ pub mod fake {
                 plan: plan.clone(),
                 qsb: Qsb::of(&settings.band),
                 transcript: transmission.clone(),
+                heard_in,
             });
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
             }
             // The wanted station sets the length; the others are laid over it.
             let duration_ms = (plan.wanted.duration_sec * 1000.0).ceil().max(0.0) as u32;
+            // Started at its time, as a real player starts a continuation,
+            // or at once once that is past.
+            let latency_sec = self.recorder.latency_sec.get();
+            let wait_sec = heard_in.map_or(0.0, |heard_in| (heard_in - latency_sec).max(0.0));
             Ok(Rc::new(FakeSignal {
                 recorder: Rc::clone(&self.recorder),
                 ticket: self.epoch.arm(),
                 duration_ms,
                 played: Cell::new(0),
-                latency_sec: self.recorder.latency_sec.get(),
+                latency_sec,
+                wait_ms: (wait_sec * 1_000.0).round() as u32,
             }))
         }
 

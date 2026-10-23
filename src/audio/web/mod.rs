@@ -29,11 +29,12 @@ use web_sys::{AudioContext, AudioContextState, GainNode};
 
 use super::band_queue::Reservation;
 use super::epoch::{Epoch, Ticket};
-use super::shape::ToneRequest;
+use super::shape::{GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest};
 use super::wait::{heard_after_sec, heard_ms, schedule_lead_sec};
 use super::{MorseBackend, PlaybackSignal, WaitFlags};
+use crate::time::mono_ms;
 use chain::Chain;
-use param::Retiring;
+use param::{Retiring, ramp_to};
 use receiver::Receiver;
 use send::ScheduledSend;
 use sidetone::Sidetone;
@@ -54,8 +55,18 @@ pub struct MorsePlayer {
     /// What the band, and the AGC set for it, were built from.
     band_key: Option<BandKey>,
     send: Option<ScheduledSend>,
+    /// When the send playing is heard from, on the app's clock, as this
+    /// player said it would be, and where it starts on the context's: what
+    /// a send asked to start at a given time takes over from it against.
+    heard: Option<(f64, f64)>,
     /// Gains fading out: a stopped send's, or a band that was replaced.
     released: Retiring<GainNode>,
+    /// The gains of a send a continuation takes over from, playing on to
+    /// where it does: a stop cuts them short with the rest.
+    taken_over: Retiring<GainNode>,
+    /// The receiver's gate as its gains have been told to play it, for each
+    /// send to go on from where it stands.
+    gate: GateSchedule,
     sidetone: Sidetone,
     /// Kept so the listener can be taken off again when this player goes.
     on_visibility: Option<Closure<dyn FnMut()>>,
@@ -146,7 +157,10 @@ impl MorsePlayer {
             band: None,
             band_key: None,
             send: None,
+            heard: None,
             released: Retiring::new(),
+            taken_over: Retiring::new(),
+            gate: GateSchedule::default(),
             sidetone: Sidetone::default(),
             on_visibility,
             sleep: None,
@@ -167,10 +181,11 @@ impl MorsePlayer {
             return Ok(());
         }
         if settings.band.has_background() {
+            // Its floor is the receiver's, muted with it while you send.
             self.band = Some(BandStream::start(
                 &self.ctx,
                 &self.chain.mix,
-                &self.chain.floor_in,
+                &self.chain.band_floor,
                 settings,
                 pileup,
             )?);
@@ -193,13 +208,42 @@ impl MorsePlayer {
         }
     }
 
-    /// Ramp the send down instead of cutting it.
-    fn release_send(&mut self) {
-        self.released.collect(self.ctx.current_time());
+    /// Ramp the send down instead of cutting it: now, or, for one a
+    /// continuation takes over from, ahead at `at` on the context's clock,
+    /// where it does.
+    fn release_send(&mut self, at: Option<f64>) {
+        let now = self.ctx.current_time();
+        self.released.collect(now);
+        self.taken_over.collect(now);
+        self.heard = None;
         if let Some(send) = self.send.take() {
-            let (gains, done) = send.release(&self.ctx);
+            let (gains, done) = send.release_at(&self.ctx, at.unwrap_or(now));
+            let into = if at.is_some() {
+                &mut self.taken_over
+            } else {
+                &mut self.released
+            };
             for gain in gains {
-                self.released.retire(gain, done);
+                into.retire(gain, done);
+            }
+        }
+    }
+
+    /// Mute the receiver from `start` on the context's clock until
+    /// `muted_until` seconds in, while you send without full break-in, or
+    /// open it there with nothing muted: from wherever its gate stands then
+    /// as scheduled, so it never steps.
+    fn schedule_gate(&mut self, start: f64, muted_until: Option<f64>) {
+        let steps = self
+            .gate
+            .schedule(start, muted_until, self.ctx.current_time());
+        for param in self.chain.gates() {
+            let _ = param.cancel_scheduled_values(start);
+            for step in &steps {
+                let _ = match *step {
+                    GateStep::Set(level, at) => param.set_value_at_time(level, at),
+                    GateStep::Ramp(level, at) => param.linear_ramp_to_value_at_time(level, at),
+                };
             }
         }
     }
@@ -235,14 +279,34 @@ impl MorseBackend for MorsePlayer {
         _transmission: &Transmission,
         plan: &PlannedTransmission,
         settings: &TrainingSettings,
+        heard_in: Option<f64>,
     ) -> Result<Rc<dyn PlaybackSignal>, String> {
         self.resume_from_gesture();
-        self.release_send();
         let ticket = self.epoch.arm();
         // One reading of the clock, for the tones, the fading, the pile-up
         // and the waiter alike.
+        let now = self.ctx.current_time();
         let lead = schedule_lead_sec(reported_latency(&self.ctx, "baseLatency"));
-        let start = self.ctx.current_time() + lead;
+        let latency = heard_latency(&self.ctx);
+        let soonest = now + lead;
+        let now_heard = mono_ms() as f64 / 1_000.0;
+        // A send asked to start at a given time takes over from the one
+        // playing where that one is then, on the clock it plays on, which
+        // runs on to there; with nothing playing, it waits out the time
+        // from now. Never sooner than a send can start.
+        let start = match (heard_in, self.heard) {
+            (Some(heard_in), Some((playing_heard, playing_start))) if self.send.is_some() => {
+                playing_start + (now_heard + heard_in - playing_heard)
+            }
+            (Some(heard_in), _) => now + heard_in - latency,
+            (None, _) => soonest,
+        }
+        .max(soonest);
+        let takes_over = heard_in.is_some() && self.send.is_some();
+        // The send taken over from is ridden down by the moment the new one
+        // starts, your message in it silent then, so the two never sound
+        // together.
+        self.release_send(takes_over.then_some(start - SEND_RELEASE_SEC));
         // Your own message in a contest goes where the paddle's sidetone
         // goes: around the receiver, whose filter and AGC are for what you
         // copy, but through the limiter.
@@ -254,6 +318,10 @@ impl MorseBackend for MorsePlayer {
             Qsb::of(&settings.band),
             start,
         )?;
+        // The receiver muted while you send, without full break-in, from
+        // where the gate stands as the send starts: shut still, when it
+        // takes over from your message going on.
+        self.schedule_gate(start, plan.muted_until);
         self.send = Some(send);
         if let Some(stream) = &self.band {
             stream.reserve(Reservation::new(
@@ -261,17 +329,27 @@ impl MorseBackend for MorsePlayer {
                 start + plan.wanted.duration_sec,
             ));
         }
+        let heard_after_sec = heard_after_sec(start - now, latency);
+        self.heard = Some((now_heard + heard_after_sec, start));
         Ok(Rc::new(WebSignal {
             ctx: self.ctx.clone(),
             ticket,
             started_at: start,
-            heard_after_sec: heard_after_sec(lead, heard_latency(&self.ctx)),
+            heard_after_sec,
         }))
     }
 
     fn stop(&mut self) {
         self.epoch.bump();
-        self.release_send();
+        self.release_send(None);
+        // A send a continuation was to take over from later stops now too,
+        // as natively, and the receiver comes back from where it stands.
+        let now = self.ctx.current_time();
+        self.taken_over
+            .hasten(now, now + SEND_RELEASE_SEC, |gain, from, until| {
+                ramp_to(&gain.gain(), 0.0, from, until);
+            });
+        self.schedule_gate(now, None);
         if let Some(stream) = &self.band {
             stream.reserve(None);
         }

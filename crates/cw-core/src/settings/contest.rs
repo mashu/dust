@@ -1,8 +1,9 @@
 //! What Contest mode adds to the settings: which contest a run is, whether
-//! one station calls at a time or a pile-up, how its callers operate, how
-//! long a run lasts, how often your TU signs, how fast and how loud you
-//! send, and your station. Everything else a run uses is shared with group
-//! training.
+//! one station calls at a time or a pile-up, how its callers operate,
+//! whether some flutter and whether their speed follows your copy, how long
+//! a run lasts, how often your TU signs, how fast and how loud you send,
+//! whether you hear the band while you do, and your station.
+//! Everything else a run uses is shared with group training.
 
 use serde::{Deserialize, Serialize};
 
@@ -90,18 +91,30 @@ pub struct ContestSettings {
     /// contesters send them, or that with careless operators and stations
     /// on your frequency that are not calling you. Set on the Band card.
     pub contest_habits: CallerHabits,
+    /// Flutter: three callers in ten have a signal that flutters, rising
+    /// and falling 3 to 33 times a second as a signal over a polar path
+    /// does, as MorseRunner's flutter has them. Set on the Band card.
+    #[serde(deserialize_with = "forgiving_off")]
+    pub contest_flutter: bool,
     /// How long a run lasts, in minutes. Zero runs until you stop it, and
     /// ends at [`CONTEST_MINUTES_MAX`] all the same.
     pub contest_minutes: u32,
     /// Show each caller's text on the run screen once it has been sent. A
     /// run with it on is assisted: counted in every stat, but never placed
     /// on the board.
-    #[serde(deserialize_with = "forgiving_bool")]
+    #[serde(deserialize_with = "forgiving_off")]
     pub contest_show_copy: bool,
     /// How often your TU signs with your call in a pile-up, where the
     /// contest's TU does not sign by its own rules: every QSO, every third,
     /// or never. Set on the contest card, with the run style.
     pub contest_tu_call: TuCall,
+    /// Each new caller's speed drawn from your copy speed in contests, within
+    /// the Speed card's ranges: faster as you copy calls and numbers clean,
+    /// slower as you miss them. Off, it is drawn evenly from the ranges. A
+    /// switch of its own, so group training's adaptive speed is left as it
+    /// is. Set on the Speed card.
+    #[serde(deserialize_with = "forgiving_on")]
+    pub contest_adapt_speed: bool,
     /// Your speed, in words a minute, kept from run to run as − and + leave
     /// it. Zero, until you set it, sends at the middle of the callers'
     /// character speed range ([`TrainingSettings::my_wpm`]). Set on the
@@ -113,6 +126,13 @@ pub struct ContestSettings {
     /// and volume card.
     #[serde(deserialize_with = "forgiving_sending")]
     pub my_sending_db: i32,
+    /// Full break-in, QSK: the band is heard through your own messages, as
+    /// a rig with full break-in hears between the elements it sends. Off, as
+    /// MorseRunner ships it, the receiver is muted while you send, as a rig
+    /// without it mutes, and a caller sending across your message is not
+    /// heard. Set on the Tone and volume card.
+    #[serde(deserialize_with = "forgiving_off")]
+    pub contest_qsk: bool,
     /// Your callsign: upper case, letters, digits and single slashes inside
     /// it. Empty until you give one.
     pub my_call: String,
@@ -146,11 +166,14 @@ impl Default for ContestSettings {
             contest_kind: ContestKind::Wpx,
             contest_style: RunStyle::Single,
             contest_habits: CallerHabits::Easy,
+            contest_flutter: false,
             contest_minutes: 10,
             contest_show_copy: false,
             contest_tu_call: TuCall::Third,
+            contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
+            contest_qsk: false,
             my_call: String::new(),
             my_name: String::new(),
             my_state: String::new(),
@@ -163,11 +186,24 @@ impl Default for ContestSettings {
 }
 
 /// A switch saved as true or false. Anything else, a save edited by hand,
-/// reads as off rather than costing the rest of the save, as a contest this
-/// build does not know does.
-fn forgiving_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+/// reads as the switch ships, `fallback`, rather than costing the rest of
+/// the save, as a contest this build does not know does.
+fn forgiving_switch<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    fallback: bool,
+) -> Result<bool, D::Error> {
     let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(value.as_bool().unwrap_or(false))
+    Ok(value.as_bool().unwrap_or(fallback))
+}
+
+/// A switch that ships off, as saved; anything else is off.
+fn forgiving_off<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    forgiving_switch(deserializer, false)
+}
+
+/// A switch that ships on, as saved; anything else is on.
+fn forgiving_on<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    forgiving_switch(deserializer, true)
 }
 
 /// A whole number saved as one, as `whole` reads it; anything else, a save

@@ -2,9 +2,9 @@ use std::collections::BTreeSet;
 
 use cw_core::{
     CONTEST_TIMES_NOTE, CharSetMode, ContestKind, GROUP_START_BIGRAM_TOKEN, MasteryStatus,
-    SamplingRow, SessionHistoryRow, SessionResult, SpeedPath, StoredLog, TrainingSettings,
-    character_diagnostics, group_length_forecast, mistake_stats, sampling_rows, session_history,
-    speed_forecast,
+    SamplingRow, SessionHistoryRow, SessionResult, SpeedForecast, SpeedPath, StoredLog,
+    TrainingSettings, adapts_speed, character_diagnostics, group_length_forecast, mistake_stats,
+    sampling_rows, session_history, speed_forecast,
 };
 use dioxus::prelude::*;
 
@@ -14,7 +14,7 @@ use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::contest_results::{opened_results, use_opened_run};
 use crate::ui::format::counted;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::stats::CONTEST_SPEEDS;
+use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
@@ -249,8 +249,14 @@ fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Elemen
         .fold(0.0_f64, f64::max)
         .max(0.0001);
     let playback = &settings.playback;
-    let mut note = if settings.curriculum.char_set_mode == CharSetMode::Contest {
-        format!("{CONTEST_SPEEDS} Right is the share of characters you copy at that speed.")
+    let contest = settings.curriculum.char_set_mode == CharSetMode::Contest;
+    let mut note = if contest && adapts_speed(settings) {
+        adapting_callers_note(&rows)
+    } else if contest {
+        format!(
+            "{} Right is the share of characters you copy at that speed.",
+            contest_speeds(settings)
+        )
     } else if !playback.adaptive_speed {
         "Adaptive speed is off, so each group's speed is drawn evenly from your range. Right is the share of characters you copy at that speed.".to_string()
     } else if !SpeedPath::of(settings).has_room() {
@@ -285,6 +291,23 @@ fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Elemen
             }
         }
     }
+}
+
+/// What the speed card says of a contest's callers while their speed
+/// adapts: its chances are the first callers' of the next run, which the
+/// run moves on from, and when most of them sit at an end of the range, the
+/// copy speed is past it.
+fn adapting_callers_note(rows: &[SpeedForecast]) -> String {
+    let mut note = format!(
+        "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. {YOUR_SPEED_KEYS}"
+    );
+    let most = |row: Option<&SpeedForecast>| row.is_some_and(|row| row.drawn > 0.5);
+    if most(rows.last()) {
+        note.push_str(" Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster.");
+    } else if most(rows.first()) {
+        note.push_str(" Your copy speed is below this range, so most come at its bottom: a wider range on the Speed card lets them go slower.");
+    }
+    note
 }
 
 /// How many sessions the history lists before it offers more, as the Runs

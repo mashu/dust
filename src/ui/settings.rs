@@ -11,7 +11,7 @@ use cw_core::{
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
     KeyerMode, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting,
     SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX,
-    VOLUME_MIN, WPM_MAX, WPM_MIN, adapts_group_size, adapts_speed, aim_section,
+    VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section,
 };
 use dioxus::prelude::*;
 
@@ -490,6 +490,8 @@ struct Speed {
     tied: bool,
     fist_variation: f64,
     extra_word_space: f64,
+    /// The switch that has the speed adapt: group training's, or in Contest
+    /// mode the callers' own.
     adaptive: bool,
     /// More than one speed to choose from.
     room: bool,
@@ -497,8 +499,18 @@ struct Speed {
     /// The aim is set here, not under Session shape.
     aim_here: bool,
     aim: Aim,
-    /// The ranges are a contest's callers', which no copy speed steers yet.
+    /// The ranges are a contest's callers'.
     contest: bool,
+}
+
+/// Why an adaptive speed switch does nothing with one speed set, naming
+/// only the ranges the card shows: tied, Effective speed is hidden.
+fn one_speed(tied: bool) -> &'static str {
+    if tied {
+        "Give Character speed a range to use this: one speed leaves nothing to adapt."
+    } else {
+        "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
+    }
 }
 
 #[component]
@@ -506,16 +518,17 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
     let speed = use_memo(move || {
         let all = settings.read();
         let p = &all.playback;
+        let contest = all.curriculum.char_set_mode == CharSetMode::Contest;
         Speed {
             tied: p.link_char_to_effective,
             fist_variation: p.fist_variation,
             extra_word_space: p.extra_word_space_multiplier,
-            adaptive: p.adaptive_speed,
+            adaptive: adaptive_speed_on(&all),
             room: SpeedPath::of(&all).has_room(),
             adapts: adapts_speed(&all),
             aim_here: aim_section(&all) == SettingsSection::Speed,
             aim: all.curriculum.aim,
-            contest: all.curriculum.char_set_mode == CharSetMode::Contest,
+            contest,
         }
     })();
     let note = if speed.contest {
@@ -557,14 +570,23 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
                     "Callers come at speeds drawn from these ranges."
                 }
-                YourSpeed { settings }
+                Switch {
+                    title: "Adapt callers' speed to me",
+                    description: if speed.room {
+                        "New callers come faster while you copy calls and numbers clean, slower when you miss them; those already calling keep their speed. Your copy speed is under Stats."
+                    } else {
+                        one_speed(speed.tied)
+                    },
+                    checked: speed.adaptive,
+                    onchange: move |on| settings.write().contest.contest_adapt_speed = on,
+                }
             } else {
                 Switch {
                     title: "Adapt speed to me",
                     description: if speed.room {
                         "Within these speeds: faster while you copy the characters, slower when you miss them. Your copy speed is under Stats."
                     } else {
-                        "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
+                        one_speed(speed.tied)
                     },
                     checked: speed.adaptive,
                     onchange: move |on| settings.write().playback.adaptive_speed = on,
@@ -580,6 +602,9 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
                     "{aim_note(speed.aim, false, true)} Aim for is set under Session shape, for group size and speed together."
                 }
+            }
+            if speed.contest {
+                YourSpeed { settings }
             }
             SliderField {
                 label: "Operator fists",
@@ -707,9 +732,33 @@ fn SendingLevel(settings: Signal<TrainingSettings>) -> Element {
     }
 }
 
+/// Whether the band is heard through your own messages, in Contest mode
+/// only: with full break-in, as a rig that has it hears between the
+/// elements it sends; without it, as MorseRunner ships it, the receiver
+/// muted while you send. It reads its own value, so the card around it
+/// never redraws for it.
+#[component]
+fn FullBreakIn(settings: Signal<TrainingSettings>) -> Element {
+    let qsk = use_memo(move || {
+        let all = settings.read();
+        (all.curriculum.char_set_mode == CharSetMode::Contest).then_some(all.contest.contest_qsk)
+    })();
+    let Some(on) = qsk else {
+        return rsx! {};
+    };
+    rsx! {
+        Switch {
+            title: "Full break-in (QSK)",
+            description: "Hear the band through your own messages, and a caller sending across one. Off, the receiver is muted while you send, as on a rig without it, and nothing sent meanwhile reaches you.",
+            checked: on,
+            onchange: move |on| settings.write().contest.contest_qsk = on,
+        }
+    }
+}
+
 /// Nothing but ranges, which read their own values, and in Contest mode
-/// your sending, which reads its own: this card itself never redraws for a
-/// setting.
+/// your sending and full break-in, which read their own: this card itself
+/// never redraws for a setting.
 #[component]
 fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
     rsx! {
@@ -741,6 +790,7 @@ fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
                 step: 0.05,
             }
             SendingLevel { settings }
+            FullBreakIn { settings }
         }
     }
 }

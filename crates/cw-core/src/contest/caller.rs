@@ -19,6 +19,7 @@ use super::rules::{ContestRules, Side};
 use super::serial::SerialModel;
 use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
+use crate::band::Qsb;
 use crate::callsign::{GeneratedCall, parse_callsign};
 use crate::rng::{Rng, SplitMix64};
 use crate::settings::{TrainingSettings, WPM_MIN};
@@ -273,6 +274,20 @@ const MISSES_EXCHANGE: f64 = 0.1;
 /// a path of its own, so no two fade together.
 pub(super) const FADE_OFFSET_MAX_SEC: f64 = 3_600.0;
 
+/// Under the Band card's flutter, how many callers' signals flutter, and
+/// how fast, in hertz: three in ten, at 3 to 33, as MorseRunner's flutter
+/// has them (`DxStn.pas:97-99`). Its flutter fades as deep as a fade can;
+/// here each flutters from half to three quarters of the way down, as deep
+/// as the band's fading ever goes, so a fluttering caller is rough but
+/// never lost.
+const FLUTTER_SHARE: f64 = 0.3;
+pub(crate) const FLUTTER_RATE_HZ: (f64, f64) = (3.0, 33.0);
+pub(crate) const FLUTTER_DEPTH: (f64, f64) = (0.5, 0.75);
+
+/// The stream, forked off a caller's own generator, that its flutter is
+/// drawn from, apart from the rest of its draws.
+const FLUTTER_STREAM: u64 = u64::MAX;
+
 /// How often the first exchange a caller sends starts with the first of
 /// the contest's words for it rather than the second: `TU 5NN 214` rather
 /// than `R 5NN 214`.
@@ -304,6 +319,10 @@ const QRS_AFTER_SKILLED: u32 = 4;
 const QRS_DROP: [f64; 3] = [0.20, 0.16, 0.12];
 const QRS_MORE_FROM: u32 = 4;
 const QRS_MORE: f64 = 0.02;
+/// The most a caller slows down for you, at skill 1 from its fourth
+/// incomplete try on: for a test to bound it.
+#[cfg(test)]
+pub(crate) const QRS_MOST: f64 = QRS_DROP[0] + QRS_MORE;
 
 /// Under rough habits, how many callers fumble a digit of the first serial
 /// they send, then send `EEEEE` and the serial right, as MorseRunner's LIDs
@@ -396,6 +415,10 @@ pub(super) struct Caller {
     /// Where on the band's fading it is at the start of the run, in
     /// seconds: its own path, faded apart from every other caller's.
     pub(super) fade_from_sec: f64,
+    /// Its signal's flutter, read along the same path: for three callers
+    /// in ten under the Band card's flutter ([`FLUTTER_SHARE`]), none for
+    /// the rest.
+    pub(super) flutter: Option<Qsb>,
     /// Its incomplete tries ([`QRS_AFTER`]), counted afresh as its QSO
     /// moves on, as MorseRunner's `FIncompleteCallCount`.
     incomplete: u32,
@@ -418,6 +441,13 @@ impl Caller {
         placed: Placement,
         mut rng: SplitMix64,
     ) -> Self {
+        // From a stream of its own, and only with flutter on, so a run
+        // without it draws as it always has.
+        let flutter = settings
+            .contest
+            .contest_flutter
+            .then(|| draw_flutter(&mut rng.fork(FLUTTER_STREAM)))
+            .flatten();
         let mut voice = resolve_station(settings, &mut rng);
         voice.tone_hz = placed.tone_hz;
         voice.volume = placed.volume;
@@ -464,6 +494,7 @@ impl Caller {
             de_first,
             fixes_with_exchange,
             fade_from_sec,
+            flutter,
             incomplete: 0,
             qrs: 0.0,
             rng,
@@ -499,6 +530,15 @@ impl Caller {
         for (_, token) in fields.filter(|(field, _)| *field == Field::Nr) {
             *token = send_serial(serial, self.habits, self.cuts_serial, &mut self.rng);
         }
+    }
+
+    /// It sends at `char_wpm`, spaced at `effective_wpm`, the speed the call
+    /// source drew from your copy speed as it arrived, in place of the one
+    /// drawn from the Speed card's ranges; the rest of it is as drawn, from
+    /// its own generator.
+    pub(super) fn send_at(&mut self, (char_wpm, effective_wpm): (f64, f64)) {
+        self.voice.char_wpm = char_wpm;
+        self.voice.effective_wpm = effective_wpm;
     }
 
     /// How it sounds in its next send: its own voice, slowed down while it
@@ -1223,6 +1263,16 @@ fn slowed(mut voice: StationVoice, drop: f64) -> StationVoice {
     voice
 }
 
+/// A caller's flutter, from `rng`: none for most ([`FLUTTER_SHARE`]), and
+/// for the rest a flutter of its own rate and depth.
+fn draw_flutter(rng: &mut impl Rng) -> Option<Qsb> {
+    (rng.f64() < FLUTTER_SHARE).then(|| {
+        let rate_hz = rng.pick_in_range(FLUTTER_RATE_HZ.0, FLUTTER_RATE_HZ.1);
+        let depth = rng.pick_in_range(FLUTTER_DEPTH.0, FLUTTER_DEPTH.1);
+        Qsb::flutter(depth, rate_hz)
+    })
+}
+
 /// How many tries a caller makes, from `rng`.
 fn draw_patience(rng: &mut impl Rng) -> u32 {
     // MorseRunner's `RndRayleigh(m)` is `m·√(−ln u₁ − ln u₂)`
@@ -1774,6 +1824,71 @@ mod tests {
 
     fn pileup_caller(seed: u64, call: &str) -> Caller {
         caller_as(seed, call, RunStyle::Pileup, CallerHabits::Easy)
+    }
+
+    /// A pile-up caller from `seed`, under the Band card's flutter or not.
+    fn fluttering(seed: u64, flutter: bool) -> Caller {
+        let mut rng = SplitMix64::new(seed);
+        let generated = generate_call(3, CallSpec::default(), &mut rng);
+        let mut settings = TrainingSettings::default();
+        settings.contest.contest_flutter = flutter;
+        Caller::arrive(
+            generated,
+            &settings.clamp(),
+            rules(),
+            10,
+            RunStyle::Pileup,
+            centre(),
+            rng.fork(1),
+        )
+    }
+
+    /// Under the Band card's flutter, three callers in ten flutter, each
+    /// at a rate from 3 to 33 Hz and a depth from half to three quarters of
+    /// its own, the same caller from the same seed alike; with it off none
+    /// does. The flutter is drawn from a stream of its own, so every other
+    /// draw of a caller is as it would be without it.
+    #[test]
+    fn three_callers_in_ten_flutter_each_its_own_way() {
+        let callers: Vec<Caller> = (0..4_000).map(|seed| fluttering(seed, true)).collect();
+        let flutters: Vec<Qsb> = callers.iter().filter_map(|caller| caller.flutter).collect();
+        let share = flutters.len() as f64 / callers.len() as f64;
+        assert!((share - FLUTTER_SHARE).abs() < 0.03, "{share:.3}");
+        for flutter in &flutters {
+            assert!(
+                (FLUTTER_RATE_HZ.0..=FLUTTER_RATE_HZ.1).contains(&flutter.rate_hz()),
+                "{}",
+                flutter.rate_hz()
+            );
+            assert!(
+                (FLUTTER_DEPTH.0 - 1e-9..=FLUTTER_DEPTH.1 + 1e-9).contains(&flutter.depth()),
+                "{}",
+                flutter.depth()
+            );
+        }
+        // Spread over the range, each its own.
+        let (slowest, fastest) = flutters.iter().fold((f64::MAX, f64::MIN), |(lo, hi), f| {
+            (lo.min(f.rate_hz()), hi.max(f.rate_hz()))
+        });
+        assert!(
+            slowest < 5.0 && fastest > 31.0,
+            "{slowest:.1}..{fastest:.1}"
+        );
+        let distinct: std::collections::BTreeSet<u64> = flutters
+            .iter()
+            .map(|flutter| flutter.rate_hz().to_bits())
+            .collect();
+        assert_eq!(distinct.len(), flutters.len());
+        for seed in 0..200 {
+            let (with, without) = (fluttering(seed, true), fluttering(seed, false));
+            assert_eq!(with.flutter, fluttering(seed, true).flutter, "seed {seed}");
+            assert_eq!(without.flutter, None, "seed {seed}");
+            let unfluttered = Caller {
+                flutter: None,
+                ..with
+            };
+            assert_eq!(unfluttered, without, "seed {seed}: the rest drawn alike");
+        }
     }
 
     /// Only the best match answers: a partial goes to the callers whose

@@ -6,8 +6,10 @@
 //! applied once, through the same calls the settings screen makes, and no
 //! level of it is stored: the settings are on a preset for exactly as long
 //! as everything it set is still what it set. All it sets is shared with
-//! the other modes but the run style and the callers' habits, which are the
-//! contest's own.
+//! the other modes but the run style, the callers' habits and their
+//! flutter, which are the contest's own. Full break-in is a rig's way of
+//! working, as your sending is its monitor's level, and no preset touches
+//! either.
 
 use super::experience::{holds, put};
 use super::{LevelAxis, RangeSetting, TrainingSettings};
@@ -25,7 +27,8 @@ pub enum ContestPreset {
     Club,
     /// A contester's: callers fast and with every shape of call, careless
     /// ones among them, a pile-up of up to five, stations on your frequency
-    /// that are not calling you, and a band that fades deep and crackles.
+    /// that are not calling you, and a band that fades deep, flutters and
+    /// crackles.
     Contester,
 }
 
@@ -99,6 +102,12 @@ impl ContestPreset {
         }
     }
 
+    /// Whether three callers in ten flutter: only on a contester's band,
+    /// whose fading is the deepest.
+    pub fn flutter(self) -> bool {
+        self == Self::Contester
+    }
+
     /// How loud the band's static crashes are, if it has any.
     pub fn qrn_level(self) -> Option<f64> {
         match self {
@@ -110,12 +119,16 @@ impl ContestPreset {
 
     /// Put the settings on this preset: the callers' speed and yours,
     /// their calls and their habits, the run style and how many call, and
-    /// the band's fading and static, the way the settings screen sets each.
+    /// the band's fading, flutter and static, the way the settings screen
+    /// sets each.
     /// The spacing goes with the characters: tied, it follows them; with
     /// Farnsworth spacing set, the same range goes there, as callers in a
     /// contest space at the speed they key. Your speed goes back to the
     /// middle of the callers' range, no speed of your own: so the settings
     /// a preset left before your speed was a setting are on it still.
+    /// Whether the callers' speed follows your copy within that range is
+    /// yours, and left as it is: a preset says how fast the callers may
+    /// come, not how they are drawn in it.
     pub fn apply(self, settings: &mut TrainingSettings) {
         let (slowest, fastest) = self.char_wpm();
         put(settings, RangeSetting::CharWpm, slowest, fastest);
@@ -135,6 +148,7 @@ impl ContestPreset {
         band.qsb_depth = self.qsb_depth().unwrap_or(band.qsb_depth);
         band.qrn_enabled = self.qrn_level().is_some();
         band.qrn_level = self.qrn_level().unwrap_or(band.qrn_level);
+        settings.contest.contest_flutter = self.flutter();
     }
 
     /// The preset the settings are on: the one whose every setting they
@@ -154,6 +168,7 @@ impl ContestPreset {
                 && settings.level(LevelAxis::Callsign) == preset.tier()
                 && settings.contest.contest_style == preset.style()
                 && settings.contest.contest_habits == preset.habits()
+                && settings.contest.contest_flutter == preset.flutter()
                 && (band.stations_min, band.stations_max) == preset.stations()
                 && level(band.qsb_enabled, band.qsb_depth, preset.qsb_depth())
                 && level(band.qrn_enabled, band.qrn_level, preset.qrn_level())
@@ -216,6 +231,7 @@ mod tests {
         for (preset, speed, tier, style, habits, stations, qsb, qrn) in cases {
             let mut settings = contest();
             settings.contest.my_wpm = 40;
+            settings.contest.contest_flutter = true;
             preset.apply(&mut settings);
             assert_eq!(settings.range(RangeSetting::CharWpm), speed, "{preset:?}");
             assert_eq!(settings.contest.my_wpm, 0, "{preset:?}: your speed follows");
@@ -224,6 +240,11 @@ mod tests {
             assert_eq!(settings.active_level(), tier, "the tier is Contest's level");
             assert_eq!(settings.contest.contest_style, style, "{preset:?}");
             assert_eq!(settings.contest.contest_habits, habits, "{preset:?}");
+            assert_eq!(
+                settings.contest.contest_flutter,
+                preset == ContestPreset::Contester,
+                "{preset:?}: only a contester's band flutters"
+            );
             let band = &settings.band;
             assert_eq!((band.stations_min, band.stations_max), stations);
             assert_eq!(
@@ -276,6 +297,9 @@ mod tests {
         settings.band.qsb_depth = 0.8;
         settings.band.noise_level = 0.9;
         settings.band.pileup_spread_hz = 200.0;
+        settings.contest.contest_adapt_speed = false;
+        settings.contest.contest_qsk = true;
+        settings.contest.my_sending_db = -21;
         for preset in ContestPreset::ALL {
             let mut applied = settings.clone();
             preset.apply(&mut applied);
@@ -298,6 +322,10 @@ mod tests {
             assert_eq!(band.qsb_rate_hz, 0.4);
             assert_eq!(band.noise_level, 0.9);
             assert_eq!(band.pileup_spread_hz, 200.0);
+            assert!(!applied.contest.contest_adapt_speed, "{preset:?}");
+            // Full break-in and your sending are the rig's, not the band's.
+            assert!(applied.contest.contest_qsk, "{preset:?}");
+            assert_eq!(applied.contest.my_sending_db, -21, "{preset:?}");
         }
         // Switched off, the fading keeps its depth for when it is on again.
         let mut first = settings;
@@ -314,10 +342,12 @@ mod tests {
         settings.contest.contest_kind = ContestKind::SimpleQso;
         settings.band.side_tone_max = 900.0;
         settings.band.qsb_rate_hz = 0.5;
+        settings.contest.contest_adapt_speed = !settings.contest.contest_adapt_speed;
+        settings.contest.contest_qsk = !settings.contest.contest_qsk;
         assert_eq!(ContestPreset::of(&settings), Some(ContestPreset::Club));
         // Each a change made as a screen makes it.
         type Change = fn(&mut TrainingSettings);
-        let changes: [(&str, Change); 12] = [
+        let changes: [(&str, Change); 13] = [
             ("speed", |s| s.set_range_min(RangeSetting::CharWpm, 21.0)),
             ("your speed", |s| s.contest.my_wpm = 23),
             ("fixed speed", |s| {
@@ -336,6 +366,7 @@ mod tests {
             ("fading depth", |s| s.band.qsb_depth = 0.36),
             ("static off", |s| s.band.qrn_enabled = false),
             ("static level", |s| s.band.qrn_level = 0.3),
+            ("flutter", |s| s.contest.contest_flutter = true),
         ];
         for (what, change) in changes {
             let mut changed = settings.clone();

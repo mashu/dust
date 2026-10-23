@@ -249,6 +249,7 @@ fn planned_turn(settings: &TrainingSettings, segments: &[&Segment]) -> PlannedTr
     let turn = Turn {
         id: 1,
         at_run_ms: 0,
+        starts_at: None,
         segments: segments.iter().map(|segment| (*segment).clone()).collect(),
     };
     plan_turn(&turn, settings)
@@ -393,13 +394,15 @@ fn your_message_never_ducks_the_reply_after_it() {
 /// Your message joins after the AGC, not under its gain: on a band whose
 /// static, and a caller at full level calling across you, pull the gain
 /// well down, what your message adds to the receiver's output is its own
-/// tones at your sending's level, sample for sample. Ridden by the gain, it
-/// would duck on every crash.
+/// tones at your sending's level, sample for sample, the band heard under it
+/// with full break-in. Ridden by the gain, it would duck on every crash.
 #[test]
 fn your_message_is_not_ridden_by_the_agc() {
     let mut settings = TrainingSettings::default();
     settings.band.qsb_enabled = false;
     settings.band.qrn_level = 1.0;
+    // With full break-in, so the band is heard under your message.
+    settings.contest.contest_qsk = true;
     let centre = settings.side_tone_center();
     let mine = segment(
         &settings,
@@ -794,4 +797,553 @@ fn the_audio_callback_never_allocates_or_frees() {
         "no send was heard out"
     );
     assert!(peak > 0.1, "nothing much played: a peak of {peak}");
+}
+
+/// How many samples the receiver's gate takes to move all the way.
+fn gate_ramp() -> usize {
+    (GATE_RAMP_SEC * f64::from(SR)).round() as usize
+}
+
+/// Your message, and a loud caller calling across it and on past it.
+fn sending_across(settings: &TrainingSettings) -> (Segment, Segment) {
+    let centre = settings.side_tone_center();
+    let mine = segment(
+        settings,
+        Sender::You,
+        "K5XYZ 5NN TT7",
+        keyer(centre, 1.0),
+        0.0,
+    );
+    let across = segment(
+        settings,
+        Sender::Caller(0),
+        "K5XYZ K5XYZ",
+        keyer(centre + 150.0, VOLUME_MAX),
+        0.2,
+    );
+    assert!(across.end_sec > mine.end_sec);
+    (mine, across)
+}
+
+/// Without full break-in the receiver is muted while you send, after its
+/// AGC: once the gate has shut, all that is heard is your message, sample
+/// for sample, the band and the caller across it gone; once it has opened
+/// again after your message, the receiver is heard exactly as with full
+/// break-in, its AGC having run on under the gate. Your message is never
+/// muted, and with full break-in the band is heard through it.
+#[test]
+fn the_receiver_is_muted_while_you_send_and_never_your_message() {
+    let settings = hiss();
+    assert!(!settings.contest.contest_qsk, "off as it ships");
+    let (mine, across) = sending_across(&settings);
+    let gated = planned_turn(&settings, &[&mine, &across]);
+    assert_eq!(gated.muted_until, Some(mine.end_sec));
+    let mut qsk = settings.clone();
+    qsk.contest.contest_qsk = true;
+    let open = planned_turn(&qsk, &[&mine, &across]);
+    assert_eq!(open.muted_until, None);
+    let on_band = || Some(band(&settings, 3));
+    let shut = hear(&settings, &gated, on_band());
+    let through = hear(&settings, &open, on_band());
+    let alone = PlannedTransmission {
+        others: Vec::new(),
+        muted_until: None,
+        ..gated
+    };
+    let yours = hear(&settings, &alone, None);
+    assert_eq!(shut.len(), through.len());
+    let ramp = gate_ramp();
+    let ends = (mine.end_sec * f64::from(SR)).round() as usize;
+    for i in ramp + 1..ends {
+        assert_eq!(shut[i], yours[i], "at {i}: muted, only your message");
+    }
+    for i in ends + ramp + 1..shut.len() {
+        assert_eq!(shut[i], through[i], "at {i}: open again, as with QSK");
+    }
+    let band_under = power(&through[ramp..ends]) - power(&yours[ramp..ends]);
+    assert!(band_under > 1e-4, "with QSK the band is heard under you");
+    assert!(
+        loudest(&yours[ramp..ends]) > 0.1,
+        "your message is never muted"
+    );
+}
+
+/// The gate moves a straight line at a time, the same small step a
+/// sample, shutting over the ramp from your message's start, shut to its
+/// end, open again over the ramp after it; a stop opens it from where it
+/// stands, your sending over. It never steps.
+#[test]
+fn the_gate_ramps_and_never_steps() {
+    let settings = hiss();
+    let (mine, across) = sending_across(&settings);
+    let gated = planned_turn(&settings, &[&mine, &across]);
+    let receiver = FilterDesign::from_settings(&settings);
+    let step = 1.0 / (GATE_RAMP_SEC * f64::from(SR));
+    let ramp = gate_ramp();
+    let ends = (mine.end_sec * f64::from(SR)).round() as usize;
+    let gates = |stop_at: Option<usize>| {
+        let mut mixer = Mixer::new(SR);
+        let mut swept = Swept::new();
+        mixer.set_band(Some(band(&settings, 4)), &mut swept);
+        mixer.start(SendVoice::new(&gated, &receiver, None, SR, 0.0), &mut swept);
+        let mut gates = Vec::new();
+        for at in 0..ends + 4 * ramp {
+            if Some(at) == stop_at {
+                mixer.stop();
+            }
+            render(&mut mixer, 1);
+            gates.push(mixer.gate);
+        }
+        gates
+    };
+    let played = gates(None);
+    assert!(
+        played
+            .windows(2)
+            .all(|pair| (pair[1] - pair[0]).abs() <= step + 1e-12),
+        "a step"
+    );
+    assert!(
+        played[ramp - 2] > 0.0 && played[ramp] == 0.0,
+        "shut over the ramp"
+    );
+    assert!(played[ramp..ends].iter().all(|gate| *gate == 0.0));
+    assert!(played[ends + ramp - 2] < 1.0 && played[ends + ramp] == 1.0);
+    assert!(played[ends + ramp..].iter().all(|gate| *gate == 1.0));
+    // Stopped half way through your message, the receiver comes back.
+    let stopped = gates(Some(ends / 2));
+    assert_eq!(stopped[ends / 2 - 1], 0.0);
+    assert_eq!(stopped[ends / 2 + ramp], 1.0);
+    assert!(
+        stopped
+            .windows(2)
+            .all(|pair| (pair[1] - pair[0]).abs() <= step + 1e-12)
+    );
+}
+
+/// With your sending off you still transmit: the receiver is muted all
+/// the same, and nothing at all is heard while you send.
+#[test]
+fn your_sending_off_still_mutes_the_receiver() {
+    let mut settings = hiss();
+    settings.contest.my_sending_db = cw_core::MY_SENDING_OFF_DB;
+    let (mine, across) = sending_across(&settings);
+    let gated = planned_turn(&settings, &[&mine, &across]);
+    assert!(gated.wanted.events.is_empty());
+    let shut = hear(&settings, &gated, Some(band(&settings, 5)));
+    let ends = (mine.end_sec * f64::from(SR)).round() as usize;
+    assert!(shut[gate_ramp() + 1..ends].iter().all(|s| *s == 0.0));
+    assert!(loudest(&shut[ends + gate_ramp()..]) > 0.0, "and back after");
+}
+
+/// The paddle's sidetone is never muted: while the receiver is shut for
+/// your message, with your sending off, the stream plays the sidetone and
+/// nothing else.
+#[test]
+fn the_paddle_sidetone_is_never_muted() {
+    let mut settings = hiss();
+    settings.contest.my_sending_db = cw_core::MY_SENDING_OFF_DB;
+    let (mine, across) = sending_across(&settings);
+    let gated = planned_turn(&settings, &[&mine, &across]);
+    let receiver = FilterDesign::from_settings(&settings);
+    let fill = |sidetone: bool| {
+        let mixer = Arc::new(Mutex::new(Mixer::new(SR)));
+        let control = Arc::new(SidetoneControl::new());
+        {
+            let mut mixer = mixer.lock().expect("the mixer");
+            let mut swept = Swept::new();
+            mixer.set_band(Some(band(&settings, 6)), &mut swept);
+            mixer.start(SendVoice::new(&gated, &receiver, None, SR, 0.0), &mut swept);
+        }
+        control.set(crate::audio::shape::ToneRequest::new(sidetone, 700.0, 0.4));
+        let mut output = Output::new(mixer, control, Arc::new(AtomicBool::new(false)), SR);
+        let mut out = vec![0.0f32; SR as usize / 2];
+        output.fill(&mut out, 0);
+        out
+    };
+    let ramp = gate_ramp();
+    let quiet = fill(false);
+    assert!(
+        quiet[ramp + 1..].iter().all(|s| *s == 0.0),
+        "the band muted"
+    );
+    let keyed = fill(true);
+    assert!(loudest(&keyed[ramp + 1..]) > 0.1, "the sidetone sounds");
+}
+
+/// Where a turn's caller flutters, the mixer plays it rising and falling
+/// with its flutter, at the slowest and the fastest rate and the shallowest
+/// and the deepest depth flutter goes to: the slowest to a few hundredths
+/// of its level, but for the filter's moment of delay, the fastest in step
+/// with its own flutter and with no other; never deeper than its depth, and
+/// near the bottom of it. Two callers in one turn each follow their own;
+/// the same turn plays the same twice; and your message, whatever fade it
+/// is handed, never flutters.
+#[test]
+fn a_fluttering_caller_flutters_at_its_own_rate_and_depth() {
+    use cw_core::Fade;
+    let mut settings = hiss();
+    settings.band.filter_width_hz = cw_core::FILTER_WIDTH_MAX;
+    let centre = settings.side_tone_center();
+    let steady = StationVoice {
+        char_wpm: 8.0,
+        effective_wpm: 8.0,
+        ..keyer(centre, 1.0)
+    };
+    let flutters = [Qsb::flutter(0.5, 3.0), Qsb::flutter(0.75, 33.0)];
+    let mut first = segment(&settings, Sender::Caller(0), "TTTTTT", steady, 0.0);
+    let mut second = segment(
+        &settings,
+        Sender::Caller(1),
+        "TTTTTT",
+        steady,
+        first.end_sec + 0.5,
+    );
+    let plain = planned_turn(&settings, &[&first, &second]);
+    let along = |flutter: Qsb, from_sec: f64| Fade {
+        qsb: None,
+        flutter: Some(flutter),
+        from_sec,
+    };
+    first.fade = Some(along(flutters[0], 0.0));
+    second.fade = Some(along(flutters[1], 0.0));
+    let fluttered = planned_turn(&settings, &[&first, &second]);
+    let (x, y) = (
+        hear(&settings, &plain, None),
+        hear(&settings, &fluttered, None),
+    );
+    assert_eq!(y, hear(&settings, &fluttered, None), "the same twice");
+    let sr = f64::from(SR);
+    for (at, (segment, flutter)) in [(&first, flutters[0]), (&second, flutters[1])]
+        .into_iter()
+        .enumerate()
+    {
+        let from = (segment.start_sec * sr) as usize;
+        let to = (segment.end_sec * sr) as usize;
+        let peak = loudest(&x[from..to]);
+        // Where the tone is well clear of nothing, and the level played there
+        // against the unfluttered tone's.
+        let clear: Vec<usize> = (from + 48..to)
+            .filter(|i| x[*i].abs() > 0.3 * peak)
+            .collect();
+        let ratios: Vec<f64> = clear.iter().map(|i| f64::from(y[*i] / x[*i])).collect();
+        // Each flutter as it would be heard `lag` samples late, the filter's
+        // moment of delay.
+        let along = |flutter: Qsb, lag: usize| -> Vec<f64> {
+            clear
+                .iter()
+                .map(|i| f64::from(flutter.gain_at((i - lag) as f64 / sr - segment.start_sec)))
+                .collect()
+        };
+        let lags = || 0..48usize;
+        let worst = |lag: usize| {
+            ratios
+                .iter()
+                .zip(along(flutter, lag))
+                .map(|(played, meant)| (played - meant).abs())
+                .fold(0.0, f64::max)
+        };
+        let in_step = |flutter: Qsb| {
+            lags()
+                .map(|lag| correlation(&ratios, &along(flutter, lag)))
+                .fold(f64::MIN, f64::max)
+        };
+        if at == 0 {
+            let fit = lags().map(worst).fold(f64::MAX, f64::min);
+            assert!(fit < 0.06, "3 Hz: off by {fit:.3}");
+        }
+        let own = in_step(flutter);
+        let other = in_step(flutters[1 - at]);
+        assert!(own > 0.9, "{:.0} Hz: in step {own:.2}", flutter.rate_hz());
+        assert!(
+            other < 0.5,
+            "{:.0} Hz: in step with the other {other:.2}",
+            flutter.rate_hz()
+        );
+        let (low, high) = ratios
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(lo, hi), r| (lo.min(*r), hi.max(*r)));
+        assert!(
+            low < 1.0 - 0.8 * flutter.depth() && high > 0.95,
+            "{:.0} Hz: {low:.2}..{high:.2}",
+            flutter.rate_hz()
+        );
+        assert!(
+            low > 1.0 - flutter.depth() - 0.05,
+            "never deeper than its depth"
+        );
+    }
+    // Your message, handed a flutter, plays as it would without one.
+    let mine = segment(&settings, Sender::You, "TTT", keyer(centre, 1.0), 0.0);
+    let mut fluttering = mine.clone();
+    fluttering.fade = Some(along(flutters[1], 0.0));
+    assert_eq!(
+        hear(&settings, &planned_turn(&settings, &[&fluttering]), None),
+        hear(&settings, &planned_turn(&settings, &[&mine]), None)
+    );
+}
+
+/// How closely two series rise and fall together, from -1 to 1.
+fn correlation(a: &[f64], b: &[f64]) -> f64 {
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let (ma, mb) = (mean(a), mean(b));
+    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        ab += (x - ma) * (y - mb);
+        aa += (x - ma).powi(2);
+        bb += (y - mb).powi(2);
+    }
+    ab / (aa * bb).sqrt()
+}
+
+/// Where each element starts sounding in `samples`: a rise out of a
+/// silence longer than a cycle of the tone.
+fn onsets(samples: &[f32]) -> Vec<usize> {
+    let peak = loudest(samples);
+    let quiet = SR as usize / 500;
+    (quiet..samples.len())
+        .filter(|i| samples[*i].abs() > 0.05 * peak)
+        .filter(|i| {
+            samples[i - quiet..*i]
+                .iter()
+                .all(|s| s.abs() <= 0.05 * peak)
+        })
+        .collect()
+}
+
+/// A continuation taking over where the send playing gives way, at the
+/// start of the first character of your message yet to sound, plays on from
+/// there: every element of your message sounds where one send of the whole
+/// of it has it, to a sample or two of rounding, none twice and no gap; the
+/// send it takes over from rides out its release from there, silent by then.
+#[test]
+fn a_continuation_takes_over_where_the_send_before_gives_way() {
+    let settings = hiss();
+    let voice = keyer(settings.side_tone_center(), 1.0);
+    let receiver = FilterDesign::from_settings(&settings);
+    let whole = planned_turn(
+        &settings,
+        &[&segment(&settings, Sender::You, "K5XYZ 5NN", voice, 0.0)],
+    );
+    let reference = hear(&settings, &whole, None);
+    let first = planned_turn(
+        &settings,
+        &[&segment(&settings, Sender::You, "K5XYZ", voice, 0.0)],
+    );
+    let rest = planned_turn(
+        &settings,
+        &[&segment(&settings, Sender::You, "5XYZ 5NN", voice, 0.0)],
+    );
+    let sr = f64::from(SR);
+    // The 5 starts with the fourth element of the call.
+    let into = (first.wanted.events[3].start_sec * sr).round() as usize;
+    for key_ms in [20, 120, 300] {
+        let key = SR as usize * key_ms / 1_000;
+        let mut mixer = Mixer::new(SR);
+        let mut swept = Swept::new();
+        mixer.start(SendVoice::new(&first, &receiver, None, SR, 0.0), &mut swept);
+        let mut played = render(&mut mixer, key);
+        let next = SendVoice::new(&rest, &receiver, None, SR, 0.0);
+        let waits = mixer.start_at(next, Some(into), 0, &mut swept);
+        assert_eq!(waits, into - key, "{key_ms} ms in");
+        played.extend(render(&mut mixer, reference.len() - key));
+        let (heard, meant) = (onsets(&played), onsets(&reference));
+        assert_eq!(
+            heard.len(),
+            meant.len(),
+            "{key_ms} ms in: {heard:?} {meant:?}"
+        );
+        for (at, should) in heard.iter().zip(&meant) {
+            assert!(
+                at.abs_diff(*should) <= 2,
+                "{key_ms} ms in: {at} for {should}"
+            );
+        }
+    }
+}
+
+/// Without full break-in the receiver stays muted across a continuation
+/// taking over part way through your message: from the first send's gate
+/// shut to the end of the continuation's message nothing of the band, nor
+/// of a loud caller sending across, is heard, and the gate never moves, a
+/// second key taking over from the first continuation at its own start
+/// included, a moment of clock rounding past it or not. With your sending
+/// off, all that is heard meanwhile is nothing; the receiver comes back
+/// after your message.
+#[test]
+fn the_gate_stays_shut_across_a_splice() {
+    let mut settings = hiss();
+    settings.contest.my_sending_db = cw_core::MY_SENDING_OFF_DB;
+    let centre = settings.side_tone_center();
+    let voice = keyer(centre, 1.0);
+    let loud = keyer(centre + 150.0, VOLUME_MAX);
+    let turn = |text: &str| {
+        let mine = segment(&settings, Sender::You, text, voice, 0.0);
+        let across = segment(&settings, Sender::Caller(0), "K5XYZ K5XYZ", loud, 0.0);
+        planned_turn(&settings, &[&mine, &across])
+    };
+    let (first, rest, again) = (turn("K5XYZ"), turn("5XYZ 5NN"), turn("5XYZ 5NN TT1"));
+    let receiver = FilterDesign::from_settings(&settings);
+    let sr = f64::from(SR);
+    // The 5 starts with the fourth element of the call.
+    let call = plan_morse_playback_for("K5XYZ", &settings, &voice);
+    let into = (call.events[3].start_sec * sr).round() as usize;
+    let key = SR as usize * 120 / 1_000;
+    let ramp = gate_ramp();
+    for chained in [false, true] {
+        let mut mixer = Mixer::new(SR);
+        let mut swept = Swept::new();
+        mixer.set_band(Some(band(&settings, 3)), &mut swept);
+        mixer.start(SendVoice::new(&first, &receiver, None, SR, 0.0), &mut swept);
+        let (mut played, mut gates) = (Vec::new(), Vec::new());
+        let mut play = |mixer: &mut Mixer, frames: usize| {
+            for _ in 0..frames {
+                played.extend(render(mixer, 1));
+                gates.push(mixer.gate);
+            }
+        };
+        play(&mut mixer, key);
+        let next = SendVoice::new(&rest, &receiver, None, SR, 0.0);
+        assert_eq!(mixer.start_at(next, Some(into), 0, &mut swept), into - key);
+        let (mut last, mut so_far) = (&rest, key);
+        if chained {
+            let half = (into - key) / 2;
+            play(&mut mixer, half);
+            so_far += half;
+            // A second key before the first continuation is heard, asked
+            // for a millisecond past its start.
+            let next = SendVoice::new(&again, &receiver, None, SR, 0.0);
+            let waits = mixer.start_at(next, Some(SR as usize / 1_000), 0, &mut swept);
+            assert_eq!(waits, into - key - half, "at the first's own start");
+            last = &again;
+        }
+        let ends = into + (last.muted_until.expect("muted") * sr).round() as usize;
+        play(&mut mixer, ends + 4 * ramp - so_far);
+        let opened = gates[ramp..ends].iter().position(|gate| *gate != 0.0);
+        assert_eq!(opened, None, "chained {chained}: the gate moved");
+        let heard = played[ramp + 1..ends].iter().position(|s| *s != 0.0);
+        assert_eq!(heard, None, "chained {chained}: the receiver heard");
+        assert_eq!(gates[ends + ramp], 1.0, "chained {chained}: open after");
+        assert!(loudest(&played[ends + ramp..]) > 0.0);
+    }
+}
+
+/// A continuation that takes over once your message has gone out, half a
+/// word space after its last character, as the machine puts it, leaves
+/// that character whole: the send it takes over from is ridden down in the
+/// silence after it, so your last element plays sample for sample as one
+/// send of the whole would play it, and the next message starts a word
+/// space after it, as one message would have it. The receiver comes back in
+/// that word space, as the machine hears a reply that starts in it, and is
+/// muted again from the takeover.
+#[test]
+fn a_continuation_after_your_last_character_leaves_it_whole() {
+    let settings = hiss();
+    let voice = keyer(settings.side_tone_center(), 1.0);
+    let receiver = FilterDesign::from_settings(&settings);
+    let sr = f64::from(SR);
+    let whole = planned_turn(
+        &settings,
+        &[&segment(&settings, Sender::You, "K5XYZ 5NN", voice, 0.0)],
+    );
+    let reference = hear(&settings, &whole, None);
+    // The call's twenty elements, then the 5 of the exchange.
+    let events = &whole.wanted.events;
+    let z_ends = events[19].start_sec + events[19].duration_sec;
+    let gap = events[20].start_sec - z_ends;
+    let takes_over = z_ends + gap / 2.0;
+    let first = planned_turn(
+        &settings,
+        &[&segment(&settings, Sender::You, "K5XYZ", voice, 0.0)],
+    );
+    let next = planned_turn(
+        &settings,
+        &[&segment(
+            &settings,
+            Sender::You,
+            "5NN",
+            voice,
+            gap - gap / 2.0,
+        )],
+    );
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.start(SendVoice::new(&first, &receiver, None, SR, 0.0), &mut swept);
+    let (mut played, mut gates) = (Vec::new(), Vec::new());
+    let mut play = |mixer: &mut Mixer, frames: usize| {
+        for _ in 0..frames {
+            played.extend(render(mixer, 1));
+            gates.push(mixer.gate);
+        }
+    };
+    let key = (events[19].start_sec * sr) as usize;
+    play(&mut mixer, key);
+    let into = (takes_over * sr).round() as usize;
+    let continuation = SendVoice::new(&next, &receiver, None, SR, 0.0);
+    assert_eq!(
+        mixer.start_at(continuation, Some(into), 0, &mut swept),
+        into - key
+    );
+    play(&mut mixer, reference.len() - key);
+    let ramp = gate_ramp();
+    let yours_end = (first.muted_until.expect("muted") * sr).round() as usize;
+    let next_end = into + (next.muted_until.expect("muted") * sr).round() as usize;
+    assert!(gates[ramp..yours_end].iter().all(|gate| *gate == 0.0));
+    assert!(
+        gates[yours_end + ramp..into]
+            .iter()
+            .all(|gate| *gate == 1.0)
+    );
+    assert!(gates[into + ramp..next_end].iter().all(|gate| *gate == 0.0));
+    let z = (z_ends * sr).ceil() as usize + 1;
+    assert_eq!(
+        played[..z],
+        reference[..z],
+        "your last element as one send has it"
+    );
+    assert!(
+        loudest(&played[z..into + 1]) < 1e-6,
+        "ridden down in silence"
+    );
+    let (heard, meant) = (onsets(&played), onsets(&reference));
+    assert_eq!(heard.len(), meant.len(), "{heard:?} {meant:?}");
+    for (at, should) in heard.iter().zip(&meant) {
+        assert!(at.abs_diff(*should) <= 2, "{at} for {should}");
+    }
+}
+
+/// A send waiting to take over is put off by nothing but its time: asked
+/// for once the send playing has passed the moment, it starts at once; with
+/// nothing playing, it waits what it was asked to; and stopped before it
+/// starts, neither it nor the send it was to take over from is heard again.
+#[test]
+fn a_send_waiting_to_take_over_starts_on_time_or_not_at_all() {
+    let settings = hiss();
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    assert_eq!(
+        mixer.start_at(send(&settings, "T"), Some(400), 250, &mut swept),
+        250,
+        "nothing to take over from"
+    );
+    render(&mut mixer, SR as usize);
+    let mut mixer = Mixer::new(SR);
+    mixer.start(send(&settings, "TTTTT"), &mut swept);
+    render(&mut mixer, 1_000);
+    assert_eq!(
+        mixer.start_at(send(&settings, "T"), Some(600), 0, &mut swept),
+        0,
+        "late, at once"
+    );
+    // Stopped before its time.
+    let mut mixer = Mixer::new(SR);
+    mixer.start(send(&settings, "TTTTT"), &mut swept);
+    render(&mut mixer, 1_000);
+    let waits = mixer.start_at(send(&settings, "TTTTT"), Some(3_000), 0, &mut swept);
+    assert_eq!(waits, 2_000);
+    render(&mut mixer, 500);
+    mixer.stop();
+    let release = (crate::audio::shape::SEND_RELEASE_SEC * f64::from(SR)).ceil() as usize;
+    render(&mut mixer, release + 1);
+    assert!(render(&mut mixer, SR as usize).iter().all(|s| *s == 0.0));
 }

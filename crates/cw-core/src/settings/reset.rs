@@ -10,10 +10,10 @@ impl TrainingSettings {
     /// the character set under a level, say — is never left half valid.
     pub fn reset_section(&mut self, which: SettingsSection) {
         let d = Self::default();
-        // The aim is shared, and goes back with whichever card shows it.
-        if crate::sampling::aim_section(self) == which {
-            self.curriculum.aim = d.curriculum.aim;
-        }
+        // The aim is shared, and goes back with whichever card shows it:
+        // before the reset, or after it, as a switch the reset turns back on
+        // can bring the aim onto the card just reset.
+        let shown = crate::sampling::aim_section(self) == which;
         match which {
             SettingsSection::SessionShape => {
                 self.curriculum.num_groups = d.curriculum.num_groups;
@@ -44,6 +44,7 @@ impl TrainingSettings {
                 self.playback.link_effective_wpm = d.playback.link_effective_wpm;
                 self.playback.link_char_to_effective = d.playback.link_char_to_effective;
                 self.playback.adaptive_speed = d.playback.adaptive_speed;
+                self.contest.contest_adapt_speed = d.contest.contest_adapt_speed;
                 self.playback.extra_word_space_multiplier = d.playback.extra_word_space_multiplier;
                 self.playback.fist_variation = d.playback.fist_variation;
                 self.contest.my_wpm = d.contest.my_wpm;
@@ -69,6 +70,7 @@ impl TrainingSettings {
                 self.band.volume_max = d.band.volume_max;
                 self.band.link_volume = d.band.link_volume;
                 self.contest.my_sending_db = d.contest.my_sending_db;
+                self.contest.contest_qsk = d.contest.contest_qsk;
             }
             SettingsSection::BandConditions => {
                 self.band.qsb_enabled = d.band.qsb_enabled;
@@ -86,6 +88,7 @@ impl TrainingSettings {
                 self.band.pileup_spread_hz = d.band.pileup_spread_hz;
                 self.band.pileup_level_db = d.band.pileup_level_db;
                 self.contest.contest_habits = d.contest.contest_habits;
+                self.contest.contest_flutter = d.contest.contest_flutter;
             }
             SettingsSection::AutoLevel => {
                 self.auto_level.auto_adjust_level = d.auto_level.auto_adjust_level;
@@ -114,5 +117,8 @@ impl TrainingSettings {
             }
         }
         *self = std::mem::take(self).clamp();
+        if shown || crate::sampling::aim_section(self) == which {
+            self.curriculum.aim = d.curriculum.aim;
+        }
     }
 }

@@ -80,6 +80,9 @@ struct Band {
     /// In Contest mode, how the callers operate, and the line that says
     /// what each habit does in the contest chosen; none in group training.
     habits: Option<(CallerHabits, String)>,
+    /// In Contest mode, whether some callers flutter; none in group
+    /// training.
+    flutter: Option<bool>,
 }
 
 impl Band {
@@ -97,6 +100,7 @@ impl Band {
                 let line = habits_line(rules, settings.contest.side());
                 (settings.contest.contest_habits, line)
             }),
+            flutter: contest.then_some(settings.contest.contest_flutter),
         }
     }
 }
@@ -170,7 +174,7 @@ pub fn BandConditionsCard(
                 icon: IconName::Waves,
                 title: "Band conditions",
                 note: if view.habits.is_some() {
-                    "Stations, callers' habits, fading, static, noise and the receiver that hears them"
+                    "Stations, callers' habits, fading and flutter, static, noise and the receiver that hears them"
                 } else {
                     "Stations, fading, static, noise and the receiver that hears them"
                 },
@@ -339,6 +343,14 @@ pub fn BandConditionsCard(
                     step: 0.01,
                     disabled: !b.qsb_enabled,
                     onchange: move |v| settings.write().band.qsb_rate_hz = v,
+                }
+            }
+            if let Some(flutter) = view.flutter {
+                Switch {
+                    title: "Flutter".to_string(),
+                    description: "Three callers in ten flutter, their signal rising and falling 3 to 33 times a second, as over a polar path, fading or not. Your own message never does.".to_string(),
+                    checked: flutter,
+                    onchange: move |on| settings.write().contest.contest_flutter = on,
                 }
             }
             Switch {

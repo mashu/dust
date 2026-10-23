@@ -412,6 +412,65 @@ mod tests {
         assert!(!older.contest.contest_show_copy);
     }
 
+    /// Flutter and full break-in are saved as switches and read back; both
+    /// ship off, so a save from before them, or anything but true or false
+    /// in their place, reads as off, costing the rest of the save nothing.
+    #[test]
+    fn flutter_and_full_break_in_read_back_and_anything_else_is_off() {
+        let mut on = TrainingSettings::default();
+        on.contest.contest_flutter = true;
+        on.contest.contest_qsk = true;
+        let json = serde_json::to_value(&on).expect("settings serialize");
+        assert_eq!(
+            (&json["contestFlutter"], &json["contestQsk"]),
+            (&true.into(), &true.into())
+        );
+        assert_eq!(load(json), on);
+        for odd in [
+            serde_json::json!("yes"),
+            serde_json::json!(1),
+            serde_json::Value::Null,
+        ] {
+            let read = load(serde_json::json!({
+                "contestFlutter": odd,
+                "contestQsk": odd,
+                "contestMinutes": 25,
+            }));
+            assert!(!read.contest.contest_flutter, "{odd}");
+            assert!(!read.contest.contest_qsk, "{odd}");
+            assert_eq!(read.contest.contest_minutes, 25, "the rest of the save");
+        }
+        let older = load(serde_json::json!({ "contestMinutes": 25 }));
+        assert!(!older.contest.contest_flutter && !older.contest.contest_qsk);
+    }
+
+    /// The callers' adaptive speed is saved as a switch and read back; it
+    /// ships on, so a save from before it, or anything but true or false in
+    /// its place, reads as on, costing the rest of the save nothing.
+    #[test]
+    fn the_callers_adaptive_speed_reads_back_and_anything_else_is_on() {
+        let mut fixed = TrainingSettings::default();
+        fixed.contest.contest_adapt_speed = false;
+        let json = serde_json::to_value(&fixed).expect("settings serialize");
+        assert_eq!(json["contestAdaptSpeed"], false);
+        assert_eq!(load(json), fixed);
+        for odd in [
+            serde_json::json!("no"),
+            serde_json::json!(0),
+            serde_json::Value::Null,
+        ] {
+            let read = load(serde_json::json!({ "contestAdaptSpeed": odd, "contestMinutes": 25 }));
+            assert!(read.contest.contest_adapt_speed, "{odd}");
+            assert_eq!(read.contest.contest_minutes, 25, "the rest of the save");
+        }
+        let older = load(serde_json::json!({ "contestMinutes": 25 }));
+        assert!(older.contest.contest_adapt_speed);
+        assert!(
+            !older.playback.adaptive_speed,
+            "group training's is its own"
+        );
+    }
+
     /// A build that knows no contests reads Contest as Callsigns at the same
     /// tier: the mode is one it knows, and `contestActive` a key it skips.
     #[test]

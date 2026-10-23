@@ -13,12 +13,14 @@ use crate::session::{Answered, MonoMs};
 use crate::settings::{CharSetMode, TrainingSettings};
 
 /// Hands out the calls it is given, then `W1AW`, `W2AW`… for ever, and
-/// remembers what it was taught.
+/// remembers what it was taught, and what of it taught your copy speed. It
+/// never chooses a caller's speed.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ScriptCalls {
     calls: VecDeque<String>,
     handed: u32,
     pub(crate) learned: Vec<(String, String)>,
+    pub(crate) learned_speed: Vec<(String, String)>,
 }
 
 impl ScriptCalls {
@@ -53,6 +55,11 @@ impl CallSource for ScriptCalls {
 
     fn learn(&mut self, answered: Answered<'_>) {
         self.learned
+            .push((answered.sent.to_string(), answered.received.to_string()));
+    }
+
+    fn learn_speed(&mut self, answered: Answered<'_>) {
+        self.learned_speed
             .push((answered.sent.to_string(), answered.received.to_string()));
     }
 }

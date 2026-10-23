@@ -74,6 +74,10 @@ pub fn local_date_string() -> String {
 /// two launches in the same millisecond, and a counter the same seed to the
 /// first session of every launch.
 pub fn seed_rng() -> u64 {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    if let Some(seed) = next_pinned_seed() {
+        return seed;
+    }
     #[cfg(target_arch = "wasm32")]
     {
         // The browser build's std has no entropy source; the page has one.
@@ -91,6 +95,36 @@ pub fn seed_rng() -> u64 {
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+std::thread_local! {
+    /// While a test has pinned its seeds, the state the next is drawn from.
+    static PINNED_SEEDS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pin every seed [`seed_rng`] hands out on this thread to the sequence
+/// `seed` starts, or, with none, go back to fresh entropy. A test that pins
+/// its seeds meets the same stations, the same calls and the same timing
+/// on every run, so what it checks can never depend on a lucky draw. Only
+/// tests can: the app always seeds from the platform.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub fn pin_seeds(seed: Option<u64>) {
+    PINNED_SEEDS.with(|pinned| pinned.set(seed));
+}
+
+/// The next of the pinned seeds, as SplitMix64 steps from the one pinned;
+/// none while nothing is pinned.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn next_pinned_seed() -> Option<u64> {
+    PINNED_SEEDS.with(|pinned| {
+        let state = pinned.get()?.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        pinned.set(Some(state));
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        Some(z ^ (z >> 31))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     /// Outside any runtime too: the clock runs forward, never back.
@@ -102,6 +136,23 @@ mod tests {
             assert!(now >= last);
             last = now;
         }
+    }
+
+    /// A pinned seed starts the same sequence every time, another seed
+    /// another one, and unpinned the seeds are fresh again.
+    #[test]
+    fn pinned_seeds_repeat() {
+        let draw = |seed| {
+            super::pin_seeds(Some(seed));
+            let seeds: Vec<u64> = (0..3).map(|_| super::seed_rng()).collect();
+            super::pin_seeds(None);
+            seeds
+        };
+        assert_eq!(draw(7), draw(7));
+        assert_ne!(draw(7), draw(8));
+        let seeds = draw(7);
+        assert_ne!(seeds[0], seeds[1], "a sequence, not one seed again");
+        assert!(!seeds.contains(&super::seed_rng()), "fresh once unpinned");
     }
 
     #[test]

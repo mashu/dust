@@ -306,7 +306,7 @@ fn preset_summary(preset: ContestPreset) -> String {
     let band = match preset {
         ContestPreset::FirstQso => "no fading or static",
         ContestPreset::Club => "QSB fading and QRN static",
-        ContestPreset::Contester => "deep fading, strong static",
+        ContestPreset::Contester => "deep fading and flutter, strong static",
     };
     let parts = [
         format!("{} WPM", range_label(slowest, fastest)),

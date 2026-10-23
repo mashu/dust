@@ -10,18 +10,19 @@
 use crate::auto_level::apply_auto_level;
 use crate::callsign::{CALLSIGN_TIER_MIN, parse_callsign};
 use crate::contest::bot::{Copied, copy_of};
+use crate::contest::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
-use crate::session::MIN_RESPONSE_MS_PER_CHAR;
-use crate::timing::resolve_pileup;
+use crate::session::{MIN_RESPONSE_MS_PER_CHAR, whole_ms};
+use crate::timing::{SEND_RELEASE_SEC, resolve_pileup};
 use crate::{
     Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CallerHabits, CharSamplingState,
     CharSetMode, ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Fields, MonoMs, OpKey, PILEUP_LEVEL_MAX_DB,
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError, Rng, RowStatus,
     RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso, Sender, SessionId, SessionPhase,
-    SessionResult, SplitMix64, TrainingSettings, Transmission, align_group, compute_char_pool,
-    contest_score, evaluate_auto_level, generate_training_group, parse_exchange,
+    SessionResult, SplitMix64, TrainingSettings, Transmission, WPM_MIN, align_group,
+    compute_char_pool, contest_score, evaluate_auto_level, generate_training_group, parse_exchange,
     plan_morse_playback_for, plan_transmission, plan_turn, read_number, resolve_station,
 };
 
@@ -1028,6 +1029,12 @@ fn check_contest_effects(
                 seen.turns.push(turn.id);
                 assert!(!turn.segments.is_empty(), "seed {seed}: an empty turn");
                 let planned = plan_turn(turn, settings);
+                // Without full break-in the receiver is muted from the
+                // turn's start to the end of your message; with it, never.
+                let muted = turn
+                    .your_end_sec()
+                    .filter(|_| !settings.contest.contest_qsk);
+                assert_eq!(planned.muted_until, muted, "seed {seed} step {step}");
                 for other in &planned.others {
                     assert!(
                         other.duration_sec <= planned.wanted.duration_sec + 1e-9,
@@ -1074,8 +1081,48 @@ fn check_contest_effects(
                         continue;
                     }
                     if segment.who == Sender::You {
+                        assert_eq!(segment.fade, None, "seed {seed} step {step}: yours faded");
                         continue;
                     }
+                    // Some callers flutter, each within flutter's rates and
+                    // depths, under the Band card's flutter alone.
+                    if let Some(flutter) = segment.fade.and_then(|fade| fade.flutter) {
+                        let (slowest, fastest) = FLUTTER_RATE_HZ;
+                        let (shallowest, deepest) = FLUTTER_DEPTH;
+                        assert!(
+                            settings.contest.contest_flutter
+                                && (slowest..=fastest).contains(&flutter.rate_hz())
+                                && (shallowest - 1e-9..=deepest + 1e-9).contains(&flutter.depth()),
+                            "seed {seed} step {step}: a flutter of {:.1} Hz, {:.2} deep",
+                            flutter.rate_hz(),
+                            flutter.depth()
+                        );
+                    }
+                    // A caller sends within the Speed card's ranges, drawn
+                    // evenly or from your copy: its spacing within its own
+                    // wherever its characters are as fast as its slowest,
+                    // and never outrunning them. It is slower only as it
+                    // slows down for you under easy habits, by QRS_MOST at
+                    // most, and never under the card's slowest speed.
+                    let (voice, p) = (segment.voice, &settings.playback);
+                    let slack = if easy { 1.0 - QRS_MOST } else { 1.0 };
+                    let floor = |wpm: f64| (wpm * slack).max(WPM_MIN).min(wpm);
+                    assert!(
+                        voice.char_wpm <= p.char_wpm_max + 1e-9
+                            && voice.char_wpm >= floor(p.char_wpm_min) - 1e-9
+                            && voice.effective_wpm
+                                <= voice.char_wpm.min(p.effective_wpm_max) + 1e-9
+                            && voice.effective_wpm
+                                >= floor(p.effective_wpm_min).min(voice.char_wpm) - 1e-9,
+                        "seed {seed} step {step}: a caller at {:.2}/{:.2} WPM, the ranges \
+                         {}–{} and {}–{}",
+                        voice.char_wpm,
+                        voice.effective_wpm,
+                        p.char_wpm_min,
+                        p.char_wpm_max,
+                        p.effective_wpm_min,
+                        p.effective_wpm_max
+                    );
                     let words: Vec<&str> = segment.text.split_whitespace().collect();
                     let fumbled = words.iter().any(|word| word.ends_with("EEEEE"));
                     let enn = words.contains(&"ENN");
@@ -1260,6 +1307,18 @@ fn contest_run(
         let was_terminal = machine.is_terminal();
         let lost = machine.nil_and_lost_copies();
         effects = machine.apply(event.clone(), at);
+        // A continuation takes over from the turn on the air where that
+        // one leaves off: never so soon after the key that the turn on the
+        // air could not be ridden down first.
+        for effect in &effects {
+            if let ContestEffect::PlayTurn(turn) = effect {
+                assert!(
+                    turn.starts_at
+                        .is_none_or(|starts| starts >= at.plus(whole_ms(SEND_RELEASE_SEC))),
+                    "seed {seed} step {step}: a turn to start too soon after its key"
+                );
+            }
+        }
         // A station you left for another, or whose QSO ended with another
         // station's call in the Call field, keeps the call you had for it,
         // and a NIL logged for a station you left is no copy of the one you
@@ -1346,8 +1405,15 @@ fn soak_contest_runs(style: RunStyle) {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x2F7A_9C35).wrapping_add(37));
         let mut settings = contest_settings(&mut rng, style);
         // Show copy on every third run, set by the seed so that every other
-        // draw is as it was: it changes only the copies the groups keep.
+        // draw is as it was: it changes only the copies the groups keep. The
+        // callers' speed follows your copy on every other run, set so too.
         settings.contest.contest_show_copy = seed % 3 == 0;
+        settings.contest.contest_adapt_speed = seed % 2 == 0;
+        // Full break-in on half the runs, so callers sending across your
+        // message are heard on some and muted on the rest; flutter on two
+        // in five, drawn from streams of their own as it is.
+        settings.contest.contest_qsk = seed % 4 < 2;
+        settings.contest.contest_flutter = seed % 5 < 2;
         let SoakRun {
             mut events,
             mut machine,
