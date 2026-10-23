@@ -846,7 +846,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 700;
 }
 .chip.good { background: var(--good-soft); color: var(--good); }
-.chip.warn { background: var(--warn-soft); color: var(--warn); }
 .chip.speed-chip { font-variant-numeric: tabular-nums; }
 .chip.speed-chip.faster { background: var(--good-soft); color: var(--good); }
 .chip.speed-chip.slower { background: var(--warn-soft); color: var(--warn); }
@@ -1941,6 +1940,23 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .board-score { font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .board-when { font-size: 0.78rem; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .board-detail { font-size: 0.8rem; color: var(--ink-soft); text-align: right; font-variant-numeric: tabular-nums; }
+/* On a board of every mode, each row says what it was: a contest run
+   flagged copper with its contest, a session in plain ink with its mode. */
+.board-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-right: 0.45rem;
+  padding: 0.12rem 0.5rem;
+  border-radius: var(--pill);
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
+.board-badge .icon { width: 0.8rem; height: 0.8rem; }
+.board-badge.contest { background: var(--copper-soft); color: var(--copper-deep); }
 .board-more { align-self: flex-start; }
 /* An assisted run, Show copy on: listed greyed after the places, with no
    place of its own, and nothing to point at on the timeline. */
@@ -2249,6 +2265,22 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
    taken for or the one after in copper, each in small Morse with the
    elements that differ picked out, and a bar of how often, of every one
    sent; a pair's bar marks where its letter stands overall. */
+/* Endurance: the verdict in words, then a bar a stretch of the session
+   with its accuracy over it, the first how you start and a dashed line at
+   its level; a stretch five points or more under it is copper. */
+.endu-headline { font-family: Fraunces, Georgia, serif; font-size: 1.35rem; font-weight: 700; line-height: 1.2; }
+.endu-headline.good { color: var(--good); }
+.endu-headline.fades { color: var(--copper-deep); }
+.endu-summary { margin: 0; font-size: 0.9rem; color: var(--ink-soft); line-height: 1.45; }
+.endu-chart { position: relative; display: grid; gap: 0.6rem; height: 9rem; margin-top: 0.4rem; border-bottom: 1px solid var(--line); }
+.endu-col { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 0.2rem; min-width: 0; }
+.endu-value { font-size: 0.8rem; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+.endu-bar { width: min(100%, 3.2rem); border-radius: 6px 6px 0 0; background: var(--violet); opacity: 0.85; }
+.endu-bar.first { background: var(--ink-dim); opacity: 0.6; }
+.endu-bar.fades { background: var(--copper); opacity: 0.9; }
+.endu-start { position: absolute; left: 0; right: 0; border-top: 1.5px dashed var(--ink-dim); pointer-events: none; }
+.endu-labels { display: grid; gap: 0.6rem; text-align: center; font-size: 0.75rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.endu-axis { text-align: center; font-size: 0.7rem; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; }
 .confusions { display: grid; }
 .confusion { display: grid; gap: 0.45rem; padding: 0.7rem 0; border-bottom: 1px solid var(--line-soft); }
 .confusion:last-child { border-bottom: 0; }

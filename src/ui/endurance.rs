@@ -1,21 +1,31 @@
 //! The Endurance card: how far into a session your copy holds before it
 //! drops, for each character set with sessions long enough to tell.
+//!
+//! It says it first in words, "Steady through 20 groups" or "Fades after
+//! group 10", then shows it: a bar a stretch of the session with your
+//! accuracy over it, the first bar how you start and a dashed line at its
+//! level across the rest, so a stretch that sinks below it, or a warm-up
+//! that climbs above it, shows at a glance.
 
 use cw_core::{
-    DROP_POINTS, ENDURANCE_MIN_SESSIONS, Endurance, GROUPS_A_STRETCH, MINUTES_A_STRETCH,
-    SessionResult, StretchUnit, TrainingSettings, endurance, practised_modes,
+    DROP_POINTS, ENDURANCE_MIN_SESSIONS, Endurance, EndurancePoint, GROUPS_A_STRETCH,
+    MINUTES_A_STRETCH, SessionResult, StretchUnit, TrainingSettings, endurance, practised_modes,
 };
 use dioxus::prelude::*;
 
-use crate::ui::chart::{CHART_H, CHART_W, marks, path, series};
+use crate::ui::format::counted;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::stats::shown_mode;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 
-/// Room above and below the line, so its dots are not cut by the edge.
-const PAD: f64 = 8.0;
+/// The tallest a bar stands, as a share of the chart: room above it for
+/// its figure.
+const TALLEST: f64 = 82.0;
+/// A stretch this many points or more over the start is a warm-up worth
+/// saying so of.
+const WARM_UP_POINTS: f64 = 3.0;
 
-/// How a session's place reads: "group 20", "minute 6".
+/// How far into a session a place is: "group 20", "minute 6".
 fn place(unit: StretchUnit, at: u32) -> String {
     match unit {
         StretchUnit::Groups => format!("group {at}"),
@@ -23,82 +33,94 @@ fn place(unit: StretchUnit, at: u32) -> String {
     }
 }
 
-/// What the curve says: how far your copy holds within [`DROP_POINTS`] of
-/// how you start, and where it goes from there.
-fn verdict(curve: &Endurance) -> String {
-    let holds = place(curve.unit, curve.holds_to());
-    let last = curve.points.last().map_or(0, |point| point.to);
-    let of = match curve.unit {
-        StretchUnit::Groups => "a session",
-        StretchUnit::Minutes => "a run",
+/// A stretch's label under its bar: "6–10", "2–4 min".
+fn stretch_label(unit: StretchUnit, point: &EndurancePoint) -> String {
+    match unit {
+        StretchUnit::Groups => format!("{}–{}", point.from, point.to),
+        StretchUnit::Minutes => format!("{}–{} min", point.from, point.to),
+    }
+}
+
+/// Accuracy over a stretch, in percent.
+fn accuracy(curve: &Endurance, point: &EndurancePoint) -> f64 {
+    (curve.opening_pct + point.change).clamp(0.0, 100.0)
+}
+
+/// The headline, and whether it is good news.
+fn headline(curve: &Endurance) -> (String, bool) {
+    let held = place(curve.unit, curve.holds_to());
+    match curve.first_drop() {
+        Some(_) => (format!("Fades after {held}"), false),
+        None => (format!("Steady through {held}"), true),
+    }
+}
+
+/// The line under the headline: where it ends up against how you start,
+/// any warm-up, and what to try.
+fn summary(curve: &Endurance) -> String {
+    let start = curve.opening_pct;
+    let session = match curve.unit {
+        StretchUnit::Groups => "session",
+        StretchUnit::Minutes => "run",
     };
+    let warm = curve
+        .points
+        .iter()
+        .skip(1)
+        .max_by(|a, b| a.change.total_cmp(&b.change))
+        .filter(|point| point.change >= WARM_UP_POINTS)
+        .map(|point| {
+            let unit = match curve.unit {
+                StretchUnit::Groups => "groups",
+                StretchUnit::Minutes => "minutes",
+            };
+            format!(
+                " You warm up: you are at your best over {unit} {}–{}, {:.0} points above your start.",
+                point.from, point.to, point.change
+            )
+        })
+        .unwrap_or_default();
     match curve.first_drop() {
         Some(_) => {
-            let lowest = curve
+            let low = curve
                 .points
                 .iter()
-                .map(|point| point.change)
-                .fold(0.0_f64, f64::min);
-            let low_at = curve
-                .points
-                .iter()
-                .find(|point| point.change == lowest)
-                .map_or(last, |point| point.to);
+                .min_by(|a, b| a.change.total_cmp(&b.change))
+                .expect("a drop is a point");
             format!(
-                "Your copy holds within {DROP_POINTS:.0} points of how you start {of} through {holds}, and is {:.0} points down by {}.",
-                -lowest,
-                place(curve.unit, low_at)
+                "You start a {session} copying {start:.0}%; by {} you are down to {:.0}%, {:.0} points lower.{warm}",
+                place(curve.unit, low.to),
+                accuracy(curve, low),
+                -low.change
             )
         }
         None => format!(
-            "Your copy holds within {DROP_POINTS:.0} points of how you start {of} through {holds}, as far as your sessions go: longer ones would show where it drops."
+            "You start a {session} copying {start:.0}% and stay within {DROP_POINTS:.0} points of it all the way.{warm} Longer {session}s would show where you tire."
         ),
     }
 }
 
-/// The short form, for the chip.
-fn chip(curve: &Endurance) -> (String, &'static str) {
-    let holds = place(curve.unit, curve.holds_to());
-    match curve.first_drop() {
-        Some(_) => (format!("Drops after {holds}"), "chip warn"),
-        None => (format!("Holds to {holds}"), "chip good"),
+/// Where the bars' scale starts, in percent: ten below the lowest bar, in
+/// tens, so that a few points show without a small dip looking like a fall.
+fn floor(curve: &Endurance) -> f64 {
+    let lowest = curve
+        .points
+        .iter()
+        .map(|point| accuracy(curve, point))
+        .fold(100.0_f64, f64::min);
+    ((lowest / 10.0).floor() * 10.0 - 10.0).max(0.0)
+}
+
+/// How tall a bar of `accuracy` stands, in percent of the chart.
+fn height(accuracy: f64, floor: f64) -> f64 {
+    if floor >= 100.0 {
+        return TALLEST;
     }
-}
-
-/// The chart's scale, in points, bottom to top: whole fives, never less
-/// than ten below the start and five above it.
-fn scale(curve: &Endurance) -> (f64, f64) {
-    let changes = curve.points.iter().map(|point| point.change);
-    let low = changes.clone().fold(-10.0_f64, f64::min);
-    let high = changes.fold(5.0_f64, f64::max);
-    // A hair of give, so that thirty points down, worked out as a hair
-    // past thirty, still scales to thirty.
-    const GIVE: f64 = 1e-9;
-    (
-        ((low + GIVE) / 5.0).floor() * 5.0,
-        ((high - GIVE) / 5.0).ceil() * 5.0,
-    )
-}
-
-/// Where a change of `points` sits on a chart scaled `low` to `high`.
-fn y_at(points: f64, low: f64, high: f64) -> f64 {
-    PAD + (high - points) / (high - low) * (CHART_H - 2.0 * PAD)
-}
-
-/// What the line is measured against, in words.
-fn against(unit: StretchUnit) -> String {
-    match unit {
-        StretchUnit::Groups => format!(
-            "Change in character accuracy from each session's first {GROUPS_A_STRETCH} groups"
-        ),
-        StretchUnit::Minutes => format!(
-            "Change in character accuracy from each run's first {MINUTES_A_STRETCH} minutes"
-        ),
-    }
+    ((accuracy - floor) / (100.0 - floor) * TALLEST).clamp(2.0, TALLEST)
 }
 
 /// How copy holds up through a session, for each character set with enough
-/// long sessions, against the session's own start; and before there are,
+/// long sessions, against how the session starts; and before there are,
 /// what it takes.
 #[component]
 pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
@@ -116,36 +138,29 @@ pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -
             div { class: "card",
                 CardHead { icon: IconName::Timer, title: "Endurance" }
                 p { class: "muted", style: "margin: 0;",
-                    "After {ENDURANCE_MIN_SESSIONS} sessions of {2 * GROUPS_A_STRETCH} groups or more, or contest runs of {2 * MINUTES_A_STRETCH} minutes or more, this shows how far into a session your copy holds before it drops."
+                    "How long you can keep copying at your best. After {ENDURANCE_MIN_SESSIONS} sessions of {2 * GROUPS_A_STRETCH} groups or more, or contest runs of {2 * MINUTES_A_STRETCH} minutes or more, this shows whether your accuracy holds up as a session goes on, or where it starts to slip."
                 }
             }
         };
     };
     let mode = *mode;
-    let (low, high) = scale(curve);
-    let changes: Vec<f64> = curve.points.iter().map(|point| point.change).collect();
-    let coords = series(&changes, |points| y_at(points, low, high));
-    let dots = marks(&coords, coords.len());
-    let zero = y_at(0.0, low, high);
-    let drop = y_at(-DROP_POINTS, low, high);
-    let (first, last) = (
-        curve.points.first().map_or(0, |point| point.from),
-        curve.points.last().map_or(0, |point| point.to),
-    );
-    let span = match curve.unit {
-        StretchUnit::Groups => format!("Groups {first} to {last}"),
-        StretchUnit::Minutes => format!("Minutes {first} to {last}"),
+    let (title, good) = headline(curve);
+    let floor = floor(curve);
+    let start = height(curve.opening_pct, floor);
+    let axis = match curve.unit {
+        StretchUnit::Groups => "Groups into the session",
+        StretchUnit::Minutes => "Minutes into the run",
     };
-    let (chip_text, chip_class) = chip(curve);
+    let count = curve.points.len();
     rsx! {
-        div { class: "card chart-card",
+        div { class: "card stack-sm",
             CardHead {
                 icon: IconName::Timer,
                 title: "Endurance",
                 note: format!(
-                    "{:.0}% at the start · {}",
-                    curve.opening_pct,
-                    crate::ui::format::counted(curve.sessions, "session"),
+                    "Accuracy as a session goes on · {} · last {}",
+                    mode_label(mode),
+                    counted(curve.sessions, "session"),
                 ),
             }
             if modes.len() > 1 {
@@ -161,54 +176,41 @@ pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -
                     }
                 }
             }
-            svg {
-                class: "sparkline",
-                view_box: "0 0 420 96",
-                rect {
-                    x: "0",
-                    y: "{drop:.1}",
-                    width: "{CHART_W}",
-                    height: "{(CHART_H - drop).max(0.0):.1}",
-                    fill: "var(--bad)",
-                    fill_opacity: "0.07",
-                }
-                line {
-                    x1: "0",
-                    y1: "{zero:.1}",
-                    x2: "420",
-                    y2: "{zero:.1}",
-                    stroke: "var(--ink-dim)",
-                    stroke_width: "1",
-                    stroke_dasharray: "4 4",
-                    opacity: "0.65",
-                }
-                path {
-                    d: "{path(coords.iter().copied())}",
-                    fill: "none",
-                    stroke: "var(--violet)",
-                    stroke_width: "2.2",
-                    stroke_linecap: "round",
-                    stroke_linejoin: "round",
-                }
-                for (x, y) in dots.iter() {
-                    circle {
-                        cx: "{x:.1}",
-                        cy: "{y:.1}",
-                        r: "3",
-                        fill: "var(--violet)",
-                        stroke: "var(--surface)",
-                        stroke_width: "1.5",
+            div { class: if good { "endu-headline good" } else { "endu-headline fades" }, "{title}" }
+            p { class: "endu-summary", "{summary(curve)}" }
+            div {
+                class: "endu-chart",
+                style: "grid-template-columns: repeat({count}, minmax(0, 1fr));",
+                div { class: "endu-start", style: "bottom: {start:.1}%;" }
+                for (n , point) in curve.points.iter().enumerate() {
+                    {
+                        let value = accuracy(curve, point);
+                        let class = if n == 0 {
+                            "endu-bar first"
+                        } else if point.change <= -DROP_POINTS {
+                            "endu-bar fades"
+                        } else {
+                            "endu-bar"
+                        };
+                        rsx! {
+                            div { class: "endu-col",
+                                span { class: "endu-value", "{value:.0}%" }
+                                span { class: class, style: "height: {height(value, floor):.1}%;" }
+                            }
+                        }
                     }
                 }
             }
-            div { class: "row-between",
-                span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
-                    "{span} · scale {low:+.0} to {high:+.0} points"
+            div {
+                class: "endu-labels",
+                style: "grid-template-columns: repeat({count}, minmax(0, 1fr));",
+                for point in curve.points.iter() {
+                    span { "{stretch_label(curve.unit, point)}" }
                 }
-                span { class: chip_class, "{chip_text}" }
             }
-            p { class: "muted", style: "margin: 0.6rem 0 0; font-size: 0.85rem;",
-                "{against(curve.unit)}, the dashed line; the shaded band is {DROP_POINTS:.0} points or more below it. {verdict(curve)}"
+            div { class: "endu-axis", "{axis}" }
+            p { class: "muted", style: "margin: 0; font-size: 0.85rem;",
+                "Each bar is your character accuracy over that stretch, averaged over your last sessions long enough to tell, each measured against its own start: the first bar, and the dashed line at its level. A bar {DROP_POINTS:.0} points or more below the line is where you start to tire."
             }
         }
     }
@@ -217,7 +219,6 @@ pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cw_core::EndurancePoint;
 
     fn curve(unit: StretchUnit, changes: &[f64]) -> Endurance {
         let size = match unit {
@@ -226,7 +227,7 @@ mod tests {
         };
         Endurance {
             unit,
-            opening_pct: 92.0,
+            opening_pct: 89.0,
             points: changes
                 .iter()
                 .enumerate()
@@ -244,54 +245,51 @@ mod tests {
                     }
                 })
                 .collect(),
-            sessions: 3,
+            sessions: 5,
         }
     }
 
     #[test]
-    fn the_card_says_how_far_copy_holds_and_where_it_goes() {
-        let dropping = curve(StretchUnit::Groups, &[0.0, -1.0, -6.0, -9.0, -7.0]);
+    fn the_card_says_it_first_in_words() {
+        let fading = curve(StretchUnit::Groups, &[0.0, -1.0, -6.0, -9.0]);
         assert_eq!(
-            verdict(&dropping),
-            "Your copy holds within 5 points of how you start a session through group 10, and is 9 points down by group 20."
+            headline(&fading),
+            ("Fades after group 10".to_string(), false)
         );
         assert_eq!(
-            chip(&dropping),
-            ("Drops after group 10".to_string(), "chip warn")
+            summary(&fading),
+            "You start a session copying 89%; by group 20 you are down to 80%, 9 points lower."
         );
-        let holding = curve(StretchUnit::Groups, &[0.0, 2.0, -3.0, -4.0]);
+        let steady = curve(StretchUnit::Groups, &[0.0, 2.0, 4.0, 1.0]);
         assert_eq!(
-            verdict(&holding),
-            "Your copy holds within 5 points of how you start a session through group 20, as far as your sessions go: longer ones would show where it drops."
+            headline(&steady),
+            ("Steady through group 20".to_string(), true)
         );
         assert_eq!(
-            chip(&holding),
-            ("Holds to group 20".to_string(), "chip good")
+            summary(&steady),
+            "You start a session copying 89% and stay within 5 points of it all the way. You warm up: you are at your best over groups 11–15, 4 points above your start. Longer sessions would show where you tire."
         );
         let run = curve(StretchUnit::Minutes, &[0.0, -5.5]);
+        assert_eq!(headline(&run), ("Fades after minute 2".to_string(), false));
         assert_eq!(
-            verdict(&run),
-            "Your copy holds within 5 points of how you start a run through minute 2, and is 6 points down by minute 4."
+            stretch_label(StretchUnit::Minutes, &run.points[1]),
+            "2–4 min"
+        );
+        assert_eq!(
+            stretch_label(StretchUnit::Groups, &steady.points[1]),
+            "6–10"
         );
     }
 
-    /// The scale is whole fives, ten below the start and five above it at
-    /// the least, and wider for a curve that goes further.
+    /// The bars stand on a floor ten below the lowest, in tens, the
+    /// tallest leaving room for its figure.
     #[test]
-    fn the_scale_takes_in_the_whole_curve() {
-        assert_eq!(
-            scale(&curve(StretchUnit::Groups, &[0.0, -2.0])),
-            (-10.0, 5.0)
-        );
-        assert_eq!(
-            scale(&curve(StretchUnit::Groups, &[0.0, 7.0, -12.5])),
-            (-15.0, 10.0)
-        );
-        assert_eq!(
-            scale(&curve(StretchUnit::Groups, &[0.0, 100.0 * (0.7 - 1.0)])),
-            (-30.0, 5.0)
-        );
-        assert_eq!(y_at(5.0, -10.0, 5.0), PAD);
-        assert_eq!(y_at(-10.0, -10.0, 5.0), CHART_H - PAD);
+    fn the_bars_stand_on_a_floor_below_the_lowest() {
+        let fading = curve(StretchUnit::Groups, &[0.0, -1.0, -6.0, -9.0]);
+        // 80% at the lowest: the floor is 70%.
+        assert_eq!(floor(&fading), 70.0);
+        assert_eq!(height(100.0, 70.0), TALLEST);
+        assert!((height(85.0, 70.0) - TALLEST / 2.0).abs() < 1e-9);
+        assert_eq!(height(50.0, 70.0), 2.0, "never quite nothing");
     }
 }

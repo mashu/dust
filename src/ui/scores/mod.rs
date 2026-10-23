@@ -285,6 +285,8 @@ mod tests {
             accuracy: 0.95,
             groups: 20,
             mode: CharSetMode::Callsign,
+            contest: None,
+            qsos: None,
         };
         assert_eq!(speed(&entry), "25 WPM");
         entry.effective_wpm = 15.0;

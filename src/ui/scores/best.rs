@@ -50,7 +50,9 @@ pub(super) fn BestCard(
                     span { class: "chip", "{speed(&best)}" }
                     span { class: "chip good", "{(best.accuracy * 100.0).round()}% accuracy" }
                     if show_mode {
-                        span { class: "chip", "{mode_label(best.mode)}" }
+                        span { class: "chip",
+                            "{best.contest.map_or(mode_label(best.mode), |kind| kind.label())}"
+                        }
                     }
                 }
             }

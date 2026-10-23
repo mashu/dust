@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 use super::{Medal, mode_label, per_group_label, run_rule, speed};
 use crate::ui::format::day_and_clock;
 use crate::ui::stats_detail::ASSISTED;
-use crate::ui::widgets::{CardHead, IconName, control_id};
+use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 
 /// The rows the board shows before it is asked for all of them.
 const BOARD_TOP: usize = 10;
@@ -18,6 +18,22 @@ const CONTEST_RUNS_NOTE: &str = "A WPX run earns about 30% less a group than a \
 
 /// What a board says when it lists assisted runs.
 const ASSISTED_NOTE: &str = "Runs with Show copy on are assisted: listed greyed after the places, never placed, and kept out of the record and the form.";
+
+/// What a row of a board of every mode was: a contest run, flagged with
+/// its contest, or a session of its mode.
+fn badge(entry: &BoardEntry) -> Element {
+    match (entry.mode, entry.contest) {
+        (CharSetMode::Contest, contest) => rsx! {
+            span { class: "board-badge contest",
+                Icon { name: IconName::Flag }
+                "{contest.map_or(\"Contest\", |kind| kind.label())}"
+            }
+        },
+        (mode, _) => rsx! {
+            span { class: "board-badge", "{mode_label(mode)}" }
+        },
+    }
+}
 
 /// The board itself, best first: the top ten until asked for every row,
 /// then the assisted runs, greyed and with no place. Pointing at a row with
@@ -62,17 +78,17 @@ pub(super) fn BoardList(
         rows.truncate(BOARD_TOP);
         greyed.truncate(BOARD_TOP - rows.len());
     }
+    // A run counts its QSOs, where its log reads; a session its groups.
     let detail = |entry: &BoardEntry| {
-        let mut detail = format!(
-            "{} groups · {} · {}%",
-            entry.groups,
+        let count = match entry.qsos {
+            Some(qsos) => format!("{qsos} QSO{}", if qsos == 1 { "" } else { "s" }),
+            None => format!("{} groups", entry.groups),
+        };
+        format!(
+            "{count} · {} · {}%",
             speed(entry),
             (entry.accuracy * 100.0).round()
-        );
-        if show_mode {
-            detail.push_str(&format!(" · {}", mode_label(entry.mode)));
-        }
-        detail
+        )
     };
     let when = |entry: &BoardEntry| day_and_clock(&entry.date, entry.timestamp);
     rsx! {
@@ -130,7 +146,12 @@ pub(super) fn BoardList(
                                     span { class: "board-score", "{per_group_label(entry.per_group)}" }
                                     span { class: "board-when", "{when}" }
                                 }
-                                span { class: "board-detail", "{detail}" }
+                                span { class: "board-detail",
+                                    if show_mode {
+                                        {badge(&entry)}
+                                    }
+                                    "{detail}"
+                                }
                             }
                         }
                     }
@@ -146,7 +167,12 @@ pub(super) fn BoardList(
                             span { class: "board-score", "{per_group_label(entry.per_group)}" }
                             span { class: "board-when", "{when(&entry)}" }
                         }
-                        span { class: "board-detail", "{detail(&entry)} · {ASSISTED}" }
+                        span { class: "board-detail",
+                            if show_mode {
+                                {badge(&entry)}
+                            }
+                            "{detail(&entry)} · {ASSISTED}"
+                        }
                     }
                 }
             }

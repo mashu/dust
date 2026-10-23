@@ -2299,6 +2299,33 @@ mod interactions {
         assert_ne!(adapting.html().matches(">14%<").count(), 6);
     }
 
+    /// On a board of every mode, a run is flagged with its contest and
+    /// counts its QSOs; a session says its mode and counts its groups.
+    #[test]
+    fn a_board_of_every_mode_flags_its_contest_runs() {
+        use crate::ui::scores::{ScoresTab, ScoresTabProps};
+        let mut ui = Ui::new(
+            ScoresTab,
+            ScoresTabProps {
+                sessions: contest_history(3),
+            },
+        );
+        // The personal best names its contest.
+        assert!(ui.has("<span class=\"chip\">CQ WPX</span>"));
+        ui.click("board-all");
+        let html = ui.html();
+        assert!(
+            html.contains("class=\"board-badge contest\"><svg"),
+            "{html}"
+        );
+        assert!(html.contains("</svg>CQ WPX</span>5 QSOs · "), "{html}");
+        assert!(
+            html.contains("class=\"board-badge\">Koch</span>10 groups · "),
+            "{html}"
+        );
+        assert!(!html.contains("· Contest<"), "no mode tacked on at the end");
+    }
+
     /// Under All, the board says where contest runs sit; under Contest, a
     /// chip for each contest ranks runs within it.
     #[test]
@@ -2735,13 +2762,22 @@ mod interactions {
     fn the_endurance_card_says_how_far_copy_holds() {
         let ui = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: true });
         assert!(ui.has(">Endurance<"));
-        assert!(ui.has("100% at the start · 3 sessions"), "{}", ui.html());
-        assert!(ui.has(">Drops after group 10<"));
-        assert!(ui.has("Groups 1 to 20 · scale -30 to +5 points"));
+        assert!(
+            ui.has("Accuracy as a session goes on · Koch · last 3 sessions"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has("class=\"endu-headline fades\">Fades after group 10<"));
         assert!(ui.has(
-            "Your copy holds within 5 points of how you start a session through group 10, and is 30 points down by group 20."
+            "You start a session copying 100%; by group 20 you are down to 70%, 30 points lower."
         ));
-        assert_eq!(ui.html().matches("<circle").count(), 4, "a dot a stretch");
+        // A bar a stretch, with its accuracy over it and its groups under it;
+        // the first how you start, the last two copper.
+        for text in [">100%<", ">80%<", ">70%<", ">1–5<", ">16–20<"] {
+            assert!(ui.has(text), "no {text}");
+        }
+        assert_eq!(ui.html().matches("class=\"endu-bar fades\"").count(), 2);
+        assert_eq!(ui.html().matches("class=\"endu-bar first\"").count(), 1);
 
         let short = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: false });
         assert!(short.has(">Endurance<"));
@@ -2749,7 +2785,7 @@ mod interactions {
             short
                 .has("After 3 sessions of 10 groups or more, or contest runs of 4 minutes or more")
         );
-        assert!(!short.has("sparkline"));
+        assert!(!short.has("endu-chart"));
     }
 
     /// A tap pins a pair's card and lights up its row and column; a second
