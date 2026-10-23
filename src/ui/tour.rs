@@ -15,21 +15,28 @@
 //! training, types the group it heard into the box the way a keyed letter
 //! goes in, discards the session, and sets each setting as its control does.
 //!
-//! It points by the ids the controls carry already ([`control_id`]), in a
-//! style rule of its own, and needs nothing from the screens.
+//! In Contest mode the guide is a run's: start one, then each part of the run
+//! screen in turn, the clock to the way out, then discard the run. Next never
+//! starts it, as a run's sound is not to come unasked: away from the run
+//! screen, its steps point the way to Start contest instead.
+//!
+//! It points by the ids the controls carry ([`control_id`]), the run screen's
+//! parts among them, in a style rule of its own.
 
 use cw_core::{
-    CharSetMode, GroupSession, PresetId, RangeSetting, SequenceChoice, SessionPhase,
-    TrainingSettings,
+    CharSetMode, ContestPhase, ContestView, GroupSession, PresetId, RangeSetting, SequenceChoice,
+    SessionPhase, TrainingSettings,
 };
 use dioxus::core::Task;
 use dioxus::prelude::*;
 
+use crate::contest_runtime::refocus_run;
 use crate::session_runtime::{abort_run, start_session};
 use crate::state::{AppCtx, Screen, Tour};
 use crate::time::{POLL_MS, sleep_ms};
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::widgets::{Icon, IconName, control_id, html_bool, pretty_number};
+use crate::ui::training::TOUCH_BUILD;
+use crate::ui::widgets::{Icon, IconName, control_id, html_bool, keep_focus, pretty_number};
 
 /// How long Show me points at a control before it makes the move there.
 const POINT_MS: u32 = 700;
@@ -69,12 +76,14 @@ const LEVEL_UP_FIELD: &str = "Sessions above to level up";
 const LEVEL_DOWN_FIELD: &str = "Sessions below to level down";
 
 /// What a step goes by: the settings, the screen, what the learner has done
-/// since the guide opened, and the group a running session is on.
+/// since the guide opened, the group a running session is on, and whether a
+/// run is paused.
 struct Seen<'a> {
     settings: &'a TrainingSettings,
     screen: Screen,
     tour: Tour,
     group: Option<usize>,
+    paused: bool,
 }
 
 /// One thing to do, on one control.
@@ -84,8 +93,10 @@ enum Move {
     Start,
     /// Copy a group into its box.
     Answer,
-    /// Leave the session without keeping it.
+    /// Leave the session, or the run, without keeping it.
     Discard,
+    /// Start a contest run: by its own button, or Show me's press of it.
+    StartRun,
     /// Go to the settings screen.
     OpenSettings,
     /// Open a range up, so every group draws its own value from it.
@@ -133,6 +144,7 @@ impl Move {
             Self::Start => "Start training".to_string(),
             Self::Answer => "Type the group".to_string(),
             Self::Discard => "Discard".to_string(),
+            Self::StartRun => "Start contest".to_string(),
             Self::OpenSettings => "Settings".to_string(),
             Self::Random(_) => "Random".to_string(),
             Self::Min(range, value) => format!("Min {} {}", pretty_number(value), range.unit),
@@ -153,7 +165,7 @@ impl Move {
         let settings = seen.settings;
         let auto = &settings.auto_level;
         match self {
-            Self::Start => seen.tour.started,
+            Self::Start | Self::StartRun => seen.tour.started,
             Self::Answer => seen.tour.answered,
             Self::Discard => seen.tour.left,
             Self::OpenSettings => seen.screen == Screen::Settings,
@@ -182,7 +194,11 @@ impl Move {
     async fn make(self, ctx: AppCtx, keys: PaddleKeys) {
         let mut settings = ctx.settings;
         match self {
-            Self::Start | Self::Discard | Self::OpenSettings => self.take_there(ctx),
+            Self::Start | Self::Discard | Self::OpenSettings => {
+                self.take_there(ctx);
+            }
+            // Show me was asked to start it, and its sound with it.
+            Self::StartRun => start_session(ctx),
             Self::Answer => copy_group(ctx, keys).await,
             Self::Random(range) => settings.write().set_range_linked(range.which, false),
             Self::Min(range, value) => settings.write().set_range_min(range.which, value),
@@ -215,7 +231,9 @@ impl Move {
     /// Make a move that takes the learner somewhere, at once: what Next does
     /// for a step left undone, so the step after it is on the screen it
     /// expects. A group copied would have to wait for its send, so Next
-    /// leaves that one to the learner, and nothing else needs doing.
+    /// leaves that one to the learner, and nothing else needs doing. A run
+    /// is left to the learner to start too: its callers would be sound
+    /// nobody asked for, and the steps after point the way to it instead.
     fn take_there(self, ctx: AppCtx) {
         match self {
             Self::Start => start_session(ctx),
@@ -229,14 +247,19 @@ impl Move {
     fn targets(self, seen: &Seen) -> Vec<String> {
         let settings = seen.settings;
         match self {
-            Self::Start => vec![control_id("btn", "start training")],
+            Self::Start | Self::StartRun => vec![control_id("btn", "start training")],
             // The box of the group being sent, which opens once it is.
             Self::Answer => seen
                 .group
                 .map(|index| format!("group-input-{index}"))
                 .into_iter()
                 .collect(),
-            Self::Discard => vec![control_id("btn", "discard")],
+            // A run's Discard asks once more, and the Discard that confirms
+            // it stands in its row.
+            Self::Discard => vec![
+                control_id("btn", "discard"),
+                control_id("btn", "discard run"),
+            ],
             Self::OpenSettings => vec![control_id("nav", "settings")],
             Self::Random(range) => vec![control_id("link", range.label)],
             Self::Min(range, _) => vec![control_id("from", range.label)],
@@ -252,6 +275,69 @@ impl Move {
             Self::UpAfter(_) => vec![control_id("number", LEVEL_UP_FIELD)],
             Self::DownAfter(_) => vec![control_id("number", LEVEL_DOWN_FIELD)],
         }
+    }
+}
+
+/// A part of the run screen, which a step of the contest guide shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunPart {
+    /// What the run is, its clock, the QSOs, the rate and your speed.
+    Bar,
+    /// What to do next, and what Enter sends.
+    Hint,
+    /// TX and RX.
+    Air,
+    /// The Call and Exchange fields.
+    Fields,
+    /// What the exchange reads as.
+    Reading,
+    /// The message keys, and the keypad where touch is how you type.
+    Keys,
+    /// The log.
+    Log,
+    /// Pause, End run and Discard.
+    Actions,
+}
+
+impl RunPart {
+    /// Whether a paused run draws it. What you type with, and the lines
+    /// about what you type, give way to the paused card and its Resume.
+    fn drawn_paused(self) -> bool {
+        matches!(self, Self::Bar | Self::Log | Self::Actions)
+    }
+
+    /// The ids it is drawn with, the one to bring into sight first: where
+    /// touch is how you type, the keypad before the keys left beside it,
+    /// and elsewhere the keys, the keypad showing only on a touch screen.
+    /// While the run is `paused`, a part it does not draw is pointed at by
+    /// Resume, which brings it back.
+    fn targets(self, paused: bool) -> Vec<String> {
+        let run = |part| control_id("run", part);
+        if paused && !self.drawn_paused() {
+            return vec![control_id("btn", "resume")];
+        }
+        match self {
+            Self::Bar => vec![run("bar")],
+            Self::Hint => vec![run("hint")],
+            Self::Air => vec![run("air")],
+            Self::Fields => vec![run("fields")],
+            Self::Reading => vec![run("reads")],
+            Self::Keys if TOUCH_BUILD => vec!["keypad".to_string(), run("keys")],
+            Self::Keys => vec![run("keys"), "keypad".to_string()],
+            Self::Log => vec![run("log")],
+            Self::Actions => vec![run("actions")],
+        }
+    }
+
+    /// Whether what points at it is drawn near the head of the screen, where
+    /// the guide, docked over the head of a session, would cover it: Resume
+    /// is, at the top of a paused run's card.
+    fn near_head(self, paused: bool) -> bool {
+        (paused && !self.drawn_paused())
+            || matches!(
+                self,
+                Self::Bar | Self::Hint | Self::Air | Self::Fields | Self::Reading
+            )
     }
 }
 
@@ -295,8 +381,14 @@ fn made_now(ctx: AppCtx, step_move: Move) -> bool {
         screen: *ctx.screen.peek(),
         tour: ctx.tour.peek().unwrap_or_default(),
         group: ctx.runtime.peek().as_ref().map(GroupSession::current_group),
+        paused: run_paused(ctx.contest.peek().as_ref()),
     };
     step_move.done(&seen)
+}
+
+/// Whether the run `view` shows, where there is one, is paused.
+fn run_paused(view: Option<&ContestView>) -> bool {
+    view.is_some_and(|view| matches!(view.phase, ContestPhase::Paused { .. }))
 }
 
 /// One stop on the guide.
@@ -304,6 +396,9 @@ struct Step {
     title: &'static str,
     text: &'static str,
     moves: &'static [Move],
+    /// What it shows of the run screen, for a step with nothing to do but
+    /// look.
+    shows: Option<RunPart>,
     /// The screen its controls are on, where it has one of its own.
     screen: Option<Screen>,
     /// It moves on by itself once its moves are made, as making them takes
@@ -319,6 +414,7 @@ const STEPS: &[Step] = &[
         title: "Start a session",
         text: "Press Start training. The trainer sends a group of characters, and you copy it by ear.",
         moves: &[Move::Start],
+        shows: None,
         screen: Some(Screen::Home),
         moves_on: true,
     },
@@ -326,6 +422,7 @@ const STEPS: &[Step] = &[
         title: "Copy a group",
         text: "Listen to the group. When it finishes the box opens: type what you heard, on the keypad or a keyboard. Take your time — it waits for you.",
         moves: &[Move::Answer],
+        shows: None,
         screen: Some(Screen::Training),
         moves_on: true,
     },
@@ -333,6 +430,7 @@ const STEPS: &[Step] = &[
         title: "Discard the session",
         text: "That is the whole drill: hear a group, type it. Press Discard to leave without keeping this session.",
         moves: &[Move::Discard],
+        shows: None,
         screen: Some(Screen::Training),
         moves_on: true,
     },
@@ -340,6 +438,7 @@ const STEPS: &[Step] = &[
         title: "Open Settings",
         text: "Now set the trainer up for you. Settings is at the foot of the screen.",
         moves: &[Move::OpenSettings],
+        shows: None,
         screen: None,
         moves_on: true,
     },
@@ -347,6 +446,7 @@ const STEPS: &[Step] = &[
         title: "Unlock order",
         text: "The order new characters arrive in, one per level. MorseMania is the classic Koch order, from K M R S U; CW Academy starts with the commonest letters, E T A O N.",
         moves: &[Move::Order(&[PresetId::MorseMania, PresetId::CwAcademy])],
+        shows: None,
         screen: ON_SETTINGS,
         moves_on: false,
     },
@@ -358,6 +458,7 @@ const STEPS: &[Step] = &[
             Move::Min(CHARACTER_SPEED, 15.0),
             Move::Max(CHARACTER_SPEED, 25.0),
         ],
+        shows: None,
         screen: ON_SETTINGS,
         moves_on: false,
     },
@@ -369,6 +470,7 @@ const STEPS: &[Step] = &[
             Move::Min(GROUP_SIZE, 2.0),
             Move::Max(GROUP_SIZE, 3.0),
         ],
+        shows: None,
         screen: ON_SETTINGS,
         moves_on: false,
     },
@@ -380,6 +482,7 @@ const STEPS: &[Step] = &[
             Move::Min(SIDE_TONE, 500.0),
             Move::Max(SIDE_TONE, 700.0),
         ],
+        shows: None,
         screen: ON_SETTINGS,
         moves_on: false,
     },
@@ -387,6 +490,7 @@ const STEPS: &[Step] = &[
         title: "Auto level",
         text: "Let the trainer move the level: three good sessions unlock the next character, and one poor session takes it back. A session is good at or above the accuracy threshold.",
         moves: &[Move::AutoLevel, Move::UpAfter(3), Move::DownAfter(1)],
+        shows: None,
         screen: ON_SETTINGS,
         moves_on: false,
     },
@@ -394,14 +498,127 @@ const STEPS: &[Step] = &[
         title: "All set",
         text: "Every change is saved as you make it, and the reset button on each card puts that card back as it shipped. Start a session from Practice.",
         moves: &[],
+        shows: None,
         screen: None,
         moves_on: false,
     },
 ];
 
+/// The guide in Contest mode: a run started, each part of its screen in
+/// turn, and the run discarded. A run's screen has a keypad where touch is
+/// how you type, and message keys elsewhere.
+const CONTEST_STEPS: &[Step] = &[
+    Step {
+        title: "Start a run",
+        text: "Press Start contest. Home first asks for anything your contest sends that is missing, such as your call. After the countdown your first CQ goes out by itself, and a station answers.",
+        moves: &[Move::StartRun],
+        shows: None,
+        screen: Some(Screen::Home),
+        moves_on: true,
+    },
+    Step {
+        title: "The clock",
+        text: "What you are running, and the clock against the run's length. Under the bar, the QSOs you have logged, your own speed, which − and + move, and in time your rate or pace.",
+        moves: &[],
+        shows: Some(RunPart::Bar),
+        screen: Some(Screen::Training),
+        moves_on: false,
+    },
+    Step {
+        title: "What Enter does",
+        text: "This line says what to do next. Enter always sends what the QSO needs: CQ, the call you typed with your exchange, ? for what you missed, or TU, which logs the QSO.",
+        moves: &[],
+        shows: Some(RunPart::Hint),
+        screen: Some(Screen::Training),
+        moves_on: false,
+    },
+    Step {
+        title: "TX and RX",
+        text: "TX is what is still to go of your message; RX counts the stations sending. What they send is yours to copy by ear, unless Show copy is on.",
+        moves: &[],
+        shows: Some(RunPart::Air),
+        screen: Some(Screen::Training),
+        moves_on: false,
+    },
+    Step {
+        title: "Call and Exchange",
+        text: if TOUCH_BUILD {
+            "Type the call you hear, then what the station sends you. ␣\u{a0}Field moves between the two."
+        } else {
+            "Type the call you hear, then what the station sends you. Space moves between the two, and on the paddles, so does a word-length pause after a letter."
+        },
+        moves: &[],
+        shows: Some(RunPart::Fields),
+        screen: Some(Screen::Training),
+        moves_on: false,
+    },
+    Step {
+        title: "Reads as",
+        text: "How the exchange reads as you type it, field by field. While part of it cannot be read, Enter sends nothing: put it right first.",
+        moves: &[],
+        shows: Some(RunPart::Reading),
+        screen: Some(Screen::Training),
+        moves_on: false,
+    },
+    Step {
+        title: if TOUCH_BUILD {
+            "The keypad"
+        } else {
+            "Message keys"
+        },
+        text: if TOUCH_BUILD {
+            "The keypad types into the field with the cursor, and ␣\u{a0}Field moves between the fields. Its big key sends what Enter would, and says what. CQ, ?\u{a0}Again and Wipe stay above it."
+        } else {
+            "Every message has a key and a button: F1\u{a0}CQ, F7\u{a0}?\u{a0}Again, Esc\u{a0}stops what you send. The buttons Enter would press now are lit. On a touch screen, a keypad shows; its big key sends what Enter would."
+        },
+        moves: &[],
+        shows: Some(RunPart::Keys),
+        screen: Some(Screen::Training),
+        moves_on: false,
+    },
+    Step {
+        title: "The log",
+        text: "Each QSO you log, newest first. Once the station is done with you, it says how the QSO checked: clean, or what you copied wrong.",
+        moves: &[],
+        shows: Some(RunPart::Log),
+        screen: Some(Screen::Training),
+        moves_on: false,
+    },
+    Step {
+        title: "Pause and end",
+        text: "Pause stops the clock and the band, and so does leaving the app. End run keeps the run and shows its results, with both scores; Discard throws it away.",
+        moves: &[],
+        shows: Some(RunPart::Actions),
+        screen: Some(Screen::Training),
+        moves_on: false,
+    },
+    Step {
+        title: "Discard the run",
+        text: "That is the whole run screen. Press Discard, then Discard again, to leave without keeping this run.",
+        moves: &[Move::Discard],
+        shows: None,
+        screen: Some(Screen::Training),
+        moves_on: true,
+    },
+    Step {
+        title: "All set",
+        text: "Your call and exchange, the contest, and how the callers come are all on Settings. Every run you keep is under Stats → History, with its log. Start a run from Practice.",
+        moves: &[],
+        shows: None,
+        screen: None,
+        moves_on: false,
+    },
+];
+
+/// The steps of the guide `tour` is: a contest run's, or a first session's
+/// and the settings after it.
+fn steps(tour: Tour) -> &'static [Step] {
+    if tour.contest { CONTEST_STEPS } else { STEPS }
+}
+
 /// Whether every move of step `at` is made.
 fn step_done(at: usize, seen: &Seen) -> bool {
-    STEPS
+    steps(seen.tour)
         .get(at)
         .is_some_and(|step| step.moves.iter().all(|step_move| step_move.done(seen)))
 }
@@ -416,26 +633,53 @@ fn pointed(step: &Step, seen: &Seen, showing: Option<usize>) -> Option<usize> {
     })
 }
 
-/// The nav button that goes to `screen`, where there is one.
-fn way_to(screen: Screen) -> Option<String> {
+/// The control that goes to `screen` from `from`, where there is one: its
+/// nav button, or for the training screen, Start on the practice screen,
+/// and the way to that from anywhere else.
+fn way_to(screen: Screen, from: Screen) -> Option<String> {
     match screen {
         Screen::Home => Some(control_id("nav", "practice")),
         Screen::Settings => Some(control_id("nav", "settings")),
         Screen::Stats => Some(control_id("nav", "stats")),
-        Screen::Training | Screen::Results | Screen::Listen => None,
+        Screen::Training if from == Screen::Home => Some(control_id("btn", "start training")),
+        Screen::Training => way_to(Screen::Home, from),
+        Screen::Results | Screen::Listen => None,
     }
 }
 
-/// The controls to point at for move `index` of `step`: its own, on the
+/// The controls to point at for move `index` of `step`, or for a step with
+/// nothing to do, the part of the run screen it shows: its own, on the
 /// screen they are on, and from anywhere else the way to that screen.
 fn aim(step: &Step, seen: &Seen, index: usize) -> Vec<String> {
-    match step.screen {
-        Some(screen) if screen != seen.screen => way_to(screen).into_iter().collect(),
+    match (step.screen, step.shows) {
+        (Some(screen), _) if screen != seen.screen => {
+            way_to(screen, seen.screen).into_iter().collect()
+        }
+        (_, Some(part)) => part.targets(seen.paused),
         _ => step
             .moves
             .get(index)
             .map(|step_move| step_move.targets(seen))
             .unwrap_or_default(),
+    }
+}
+
+/// What the learner has to do to see what `step` is about, where it is not
+/// on the screen: a run, or a session, to start first, or a paused run to
+/// carry on. The guide points the way, and this says why.
+fn to_see(step: &Step, seen: &Seen) -> Option<&'static str> {
+    let to_do = step.moves.iter().any(|step_move| !step_move.done(seen));
+    if step.screen != Some(Screen::Training) || !(to_do || step.shows.is_some()) {
+        return None;
+    }
+    let contest = seen.tour.contest;
+    match seen.screen {
+        Screen::Training => (seen.paused && step.shows.is_some_and(|part| !part.drawn_paused()))
+            .then_some("To see this, resume the run."),
+        Screen::Home if contest => Some("To see this, start a run: press Start contest."),
+        Screen::Home => Some("To see this, start a session: press Start training."),
+        _ if contest => Some("To see this, start a run from Practice."),
+        _ => Some("To see this, start a session from Practice."),
     }
 }
 
@@ -469,9 +713,10 @@ fn pointer_css(ids: &[String]) -> String {
 }
 
 /// The script that brings the first control of `ids` the page has into
-/// sight, clear of the guide's dock, and leaves it where it is if it is in
-/// sight already: a move made by hand points at the control next to it, and
-/// the page should not jump for that.
+/// sight, clear of the guide's dock and with room for the ring it draws,
+/// and leaves it where it is if it is in sight already: a move made by hand
+/// points at the control next to it, and the page should not jump for
+/// that.
 fn scroll_script(ids: &[String]) -> String {
     let ids: Vec<String> = ids.iter().map(|id| format!("{id:?}")).collect();
     format!(
@@ -479,22 +724,39 @@ fn scroll_script(ids: &[String]) -> String {
 if (!target) {{
     return;
 }}
-// The dock covers the foot of the window, or its head during a session:
-// what is under it is out of sight.
+// The ring the guide draws reaches 7px past the control.
+const ring = 8;
+// The dock covers the foot or the head of the window, whichever it is
+// nearer: what is under it, and the nav under a dock at the foot, is out of
+// sight, and the rest is clear.
 const dock = document.getElementById("tour-dock");
 const cover = dock ? dock.getBoundingClientRect() : null;
+let top = 0;
+let bottom = window.innerHeight;
+if (cover !== null && cover.top - top > bottom - cover.bottom) {{
+    bottom = cover.top;
+}} else if (cover !== null) {{
+    top = cover.bottom;
+}}
 const box = target.getBoundingClientRect();
-const inWindow = box.top >= 0 && box.bottom <= window.innerHeight;
-const underDock = cover !== null && box.bottom > cover.top && box.top < cover.bottom;
-if (inWindow && !underDock) {{
+if (box.top - ring >= top && box.bottom + ring <= bottom) {{
     return;
 }}
-target.scrollIntoView({{ block: "center", inline: "nearest", behavior: "smooth" }});"#,
+// Into the middle of what is clear, or its head for a control taller than
+// that. A guide docked at the foot covers the middle of a short window, so
+// centring in the window would put the control behind it.
+const by = box.height + 2 * ring > bottom - top
+    ? box.top - ring - top
+    : (box.top + box.bottom - top - bottom) / 2;
+window.scrollBy({{ top: by, behavior: "smooth" }});"#,
         ids.join(", ")
     )
 }
 
-fn bring_into_sight(ids: &[String]) {
+/// Bring the first control of `ids` the page draws into sight, clear of the
+/// guide where it is open ([`scroll_script`]): what the guide points at, or
+/// a control a press has just put in place of the one it pointed at.
+pub(crate) fn bring_into_sight(ids: &[String]) {
     // Tests have no page to run it on.
     #[cfg(not(test))]
     {
@@ -508,8 +770,8 @@ fn bring_into_sight(ids: &[String]) {
 }
 
 /// Open the guide at its start, on the practice screen where a first session
-/// starts, and remember that it has been opened: it opens by itself only on
-/// a first launch.
+/// starts, or in Contest mode a run, and remember that it has been opened:
+/// it opens by itself only on a first launch.
 fn open(ctx: AppCtx) {
     if ctx.session_running() {
         return;
@@ -519,7 +781,15 @@ fn open(ctx: AppCtx) {
     }
     ctx.app().store.mark_tutorial_done();
     let mut tour = ctx.tour;
-    tour.set(Some(Tour::default()));
+    tour.set(Some(Tour {
+        contest: in_contest(&ctx.settings.peek()),
+        ..Tour::default()
+    }));
+}
+
+/// Whether the guide for `settings` is the contest run's.
+fn in_contest(settings: &TrainingSettings) -> bool {
+    settings.curriculum.char_set_mode == CharSetMode::Contest
 }
 
 /// Open the guide, or close it if it is open.
@@ -541,9 +811,11 @@ fn first_launch(ctx: AppCtx) -> bool {
 
 /// Move on from step `at`. A step that takes the learner somewhere, left
 /// undone, is done on the way: Next out of a session discards it, rather
-/// than leaving it running under a step that points at Settings.
+/// than leaving it running under a step that points at Settings. A run is
+/// the exception, left to the learner to start ([`Move::take_there`]).
 fn next(ctx: AppCtx, at: usize) {
-    if let Some(step) = STEPS.get(at).filter(|step| step.moves_on) {
+    let now = ctx.tour.peek().unwrap_or_default();
+    if let Some(step) = steps(now).get(at).filter(|step| step.moves_on) {
         for step_move in step.moves.iter().copied() {
             if !made_now(ctx, step_move) {
                 step_move.take_there(ctx);
@@ -564,14 +836,7 @@ fn go_to_step(mut tour: Signal<Option<Tour>>, at: usize) {
 #[component]
 pub fn TourButton() -> Element {
     let ctx = use_context::<AppCtx>();
-    // The guide's steps point at a session's group boxes, which a contest
-    // run has none of: in Contest it waits for steps of its own (phase 5).
-    let contest =
-        use_memo(move || ctx.settings.read().curriculum.char_set_mode == CharSetMode::Contest);
     let open = ctx.tour.read().is_some();
-    if contest() && !open {
-        return rsx! {};
-    }
     rsx! {
         button {
             id: control_id("btn", "guided setup"),
@@ -586,8 +851,9 @@ pub fn TourButton() -> Element {
     }
 }
 
-/// The guide itself, docked above the nav, or at the head of the screen
-/// during a session, and the rule that points at the control it means.
+/// The guide itself, docked above the nav, or during a session at the head
+/// of the screen, or at its foot while it shows a run's head; and the rule
+/// that points at the control it means.
 #[component]
 pub fn TourDock() -> Element {
     let ctx = use_context::<AppCtx>();
@@ -605,12 +871,26 @@ pub fn TourDock() -> Element {
     let at = use_memo(move || tour().map(|now| now.step));
     let group = use_memo(move || runtime.read().as_ref().map(GroupSession::current_group));
     let answered = use_memo(move || runtime.read().as_ref().is_some_and(any_answered));
+    let paused = use_memo(move || run_paused(ctx.contest.read().as_ref()));
 
     // A first launch opens the guide by itself. After that it waits for the
     // button in the header.
     use_effect(move || {
         if first_launch(ctx) {
             open(ctx);
+        }
+    });
+
+    // The guide follows the mode: picking Contest while it is open, or
+    // another mode from Contest, starts that mode's guide from its start.
+    let contest = use_memo(move || in_contest(&settings.read()));
+    use_effect(move || {
+        let contest = contest();
+        if tour.peek().is_some_and(|now| now.contest != contest) {
+            tour.set(Some(Tour {
+                contest,
+                ..Tour::default()
+            }));
         }
     });
 
@@ -643,9 +923,10 @@ pub fn TourDock() -> Element {
             screen,
             tour: now,
             group: *group.peek(),
+            paused: *paused.peek(),
         };
         let done = step_done(now.step, &seen);
-        let moves_on = STEPS.get(now.step).is_some_and(|step| step.moves_on);
+        let moves_on = steps(now).get(now.step).is_some_and(|step| step.moves_on);
         if done && moves_on && *last.peek() == Some((now.step, false)) {
             now.step += 1;
             seen.tour = now;
@@ -662,7 +943,7 @@ pub fn TourDock() -> Element {
         let Some(now) = tour() else {
             return Vec::new();
         };
-        let Some(step) = STEPS.get(now.step) else {
+        let Some(step) = steps(now).get(now.step) else {
             return Vec::new();
         };
         let settings = settings.read();
@@ -671,6 +952,7 @@ pub fn TourDock() -> Element {
             screen: screen(),
             tour: now,
             group: group(),
+            paused: paused(),
         };
         let shown = showing_on(showing(), now.step);
         let index = pointed(step, &seen, shown).unwrap_or_default();
@@ -687,18 +969,21 @@ pub fn TourDock() -> Element {
         return rsx! {};
     };
     let at = now.step;
-    let Some(step) = STEPS.get(at) else {
+    let guide = steps(now);
+    let Some(step) = guide.get(at) else {
         return rsx! {};
     };
     let screen_now = screen();
     let shown = showing_on(showing(), at);
-    let (chips, pointer) = {
+    let paused_now = paused();
+    let (chips, pointer, first) = {
         let settings = settings.read();
         let seen = Seen {
             settings: &settings,
             screen: screen_now,
             tour: now,
             group: group(),
+            paused: paused_now,
         };
         let pointing = pointed(step, &seen, shown);
         let chips: Vec<(String, &'static str)> = step
@@ -716,24 +1001,40 @@ pub fn TourDock() -> Element {
                 (step_move.label(), class)
             })
             .collect();
-        let pointer = pointing
-            .map(|index| pointer_css(&aim(step, &seen, index)))
-            .unwrap_or_default();
-        (chips, pointer)
+        // A step with nothing to do points at what it shows.
+        let pointer = match pointing {
+            Some(index) => pointer_css(&aim(step, &seen, index)),
+            None if step.shows.is_some() => pointer_css(&aim(step, &seen, 0)),
+            None => String::new(),
+        };
+        (chips, pointer, to_see(step, &seen))
     };
     let all_made = chips.iter().all(|(_, class)| *class == "tour-move done");
-    let last_step = at + 1 == STEPS.len();
-    let total = STEPS.len();
-    // A session has the foot of the screen: its answers, and the way out.
-    let dock_class = if screen_now == Screen::Training {
-        "tour-dock top"
-    } else {
-        "tour-dock"
+    let last_step = at + 1 == guide.len();
+    let total = guide.len();
+    // A session has the foot of the screen: its answers, and the way out. A
+    // step that shows what is drawn near its head docks at its foot instead,
+    // clear of it, as a run's screen has no nav there either.
+    let shows_head = step.shows.is_some_and(|part| part.near_head(paused_now));
+    let dock_class = match screen_now {
+        Screen::Training if shows_head => "tour-dock foot",
+        Screen::Training => "tour-dock top",
+        _ => "tour-dock",
+    };
+    // On the training screen a click on the guide leaves the cursor where
+    // it is being typed, as the header's theme button does, and a press
+    // hands a run's field the cursor back: Enter goes on sending or
+    // answering, not pressing the guide's button again.
+    let hold = move |e: MouseEvent| {
+        if screen_now == Screen::Training {
+            keep_focus(e);
+        }
     };
 
     let show_me = move |_| {
+        refocus_run(ctx);
         let task = spawn(async move {
-            let moves = STEPS.get(at).map_or(&[][..], |step| step.moves);
+            let moves = steps(now).get(at).map_or(&[][..], |step| step.moves);
             for (index, step_move) in moves.iter().copied().enumerate() {
                 if made_now(ctx, step_move) {
                     continue;
@@ -763,12 +1064,19 @@ pub fn TourDock() -> Element {
                         r#type: "button",
                         title: "Close the guided setup",
                         aria_label: "Close the guided setup",
-                        onclick: move |_| tour.set(None),
+                        onmousedown: hold,
+                        onclick: move |_| {
+                            tour.set(None);
+                            refocus_run(ctx);
+                        },
                         Icon { name: IconName::X }
                     }
                 }
                 div { aria_live: "polite",
                     h3 { class: "tour-title", "{step.title}" }
+                    if let Some(first) = first {
+                        p { class: "tour-first", "{first}" }
+                    }
                     p { class: "tour-text", "{step.text}" }
                 }
                 if !chips.is_empty() {
@@ -789,7 +1097,11 @@ pub fn TourDock() -> Element {
                         class: "btn btn-secondary btn-sm",
                         r#type: "button",
                         disabled: html_bool(at == 0),
-                        onclick: move |_| go_to_step(tour, at.saturating_sub(1)),
+                        onmousedown: hold,
+                        onclick: move |_| {
+                            go_to_step(tour, at.saturating_sub(1));
+                            refocus_run(ctx);
+                        },
                         Icon { name: IconName::Back }
                         "Back"
                     }
@@ -799,6 +1111,7 @@ pub fn TourDock() -> Element {
                             class: "btn btn-secondary btn-sm",
                             r#type: "button",
                             disabled: html_bool(all_made || shown.is_some()),
+                            onmousedown: hold,
                             onclick: show_me,
                             Icon { name: IconName::Play }
                             "Show me"
@@ -809,9 +1122,13 @@ pub fn TourDock() -> Element {
                             id: control_id("tour", "start practising"),
                             class: "btn btn-primary btn-sm tour-next",
                             r#type: "button",
+                            onmousedown: hold,
+                            // A run keeps the screen, and its field the
+                            // cursor.
                             onclick: move |_| {
                                 tour.set(None);
                                 ctx.go_to(Screen::Home);
+                                refocus_run(ctx);
                             },
                             "Start practising"
                         }
@@ -820,7 +1137,11 @@ pub fn TourDock() -> Element {
                             id: control_id("tour", "next"),
                             class: if all_made { "btn btn-primary btn-sm tour-next" } else { "btn btn-secondary btn-sm tour-next" },
                             r#type: "button",
-                            onclick: move |_| next(ctx, at),
+                            onmousedown: hold,
+                            onclick: move |_| {
+                                next(ctx, at);
+                                refocus_run(ctx);
+                            },
                             "Next"
                         }
                     }
@@ -838,13 +1159,17 @@ mod tests {
     use cw_core::{
         CharSetMode, PresetId, RangeSetting, RangeValues, SequenceChoice, TrainingSettings,
     };
+    use dioxus::prelude::ReadableExt;
 
-    use super::{LETTER_MS, Move, POINT_MS, SHOWN_MS, STEPS, Seen, pointer_css, scroll_script};
-    use crate::audio::fake::Recorder;
+    use super::{
+        CONTEST_STEPS, LETTER_MS, Move, POINT_MS, SHOWN_MS, STEPS, Seen, pointer_css, scroll_script,
+    };
+    use crate::audio::fake::{Call, Recorder};
     use crate::persist::Store;
     use crate::persist::memory::MemoryStore;
     use crate::state::{Screen, Tour};
-    use crate::testing::{Ui, run, stored_session, test_settings};
+    use crate::testing::{Ui, contest_settings, run, stored_session, test_settings};
+    use crate::ui::training::TOUCH_BUILD;
     use crate::ui::widgets::pretty_number;
 
     /// Settings on which every move the guide asks for is still to make: a
@@ -896,6 +1221,7 @@ mod tests {
             screen: Screen::Settings,
             tour: Tour::default(),
             group: None,
+            paused: false,
         }
     }
 
@@ -908,7 +1234,7 @@ mod tests {
             Move::UpAfter(sessions) | Move::DownAfter(sessions) => {
                 ui.commit(id, &sessions.to_string());
             }
-            Move::Start | Move::Answer | Move::Discard | Move::OpenSettings => {
+            Move::Start | Move::Answer | Move::Discard | Move::StartRun | Move::OpenSettings => {
                 panic!("{step_move:?} is not made on the settings screen")
             }
         }
@@ -921,6 +1247,23 @@ mod tests {
     /// Whether the guide shows step `at`.
     fn on_step(ui: &Ui, at: usize) -> bool {
         ui.has(&format!("Guided setup · {} of {}", at + 1, STEPS.len()))
+    }
+
+    /// Whether the guide shows step `at` of the contest guide.
+    fn on_contest_step(ui: &Ui, at: usize) -> bool {
+        ui.has(&format!(
+            "Guided setup · {} of {}",
+            at + 1,
+            CONTEST_STEPS.len()
+        ))
+    }
+
+    /// Whether nothing has sounded: no send, and no band.
+    fn silent(recorder: &Recorder) -> bool {
+        recorder
+            .calls()
+            .iter()
+            .all(|call| !matches!(call, Call::Start(_) | Call::Band(_)))
     }
 
     /// The first step on the settings screen.
@@ -979,7 +1322,7 @@ mod tests {
             "{}",
             ui.html()
         );
-        assert!(ui.has("#btn-discard {"), "{}", ui.html());
+        assert!(ui.has("#btn-discard, #btn-discard-run {"), "{}", ui.html());
         ui.click("btn-discard");
         assert_eq!(ui.screen(), "home");
         assert!(on_step(ui, 3), "{}", ui.html());
@@ -1354,17 +1697,18 @@ mod tests {
             "{script}"
         );
         // Under the dock is out of sight, whether it is docked at the foot
-        // or the head of the window.
+        // or the head of the window, and so is the ring past the control.
         let under = script
-            .find("box.bottom > cover.top && box.top < cover.bottom")
+            .find("if (cover !== null && cover.top - top > bottom - cover.bottom)")
             .expect("a control under the dock is not in sight");
         let in_sight = script
-            .find("if (inWindow && !underDock)")
+            .find("if (box.top - ring >= top && box.bottom + ring <= bottom)")
             .expect("a control in sight is left where it is");
         let scroll = script
-            .find(r#"target.scrollIntoView({ block: "center""#)
-            .expect("it is centred");
+            .find("(box.top + box.bottom - top - bottom) / 2")
+            .expect("it is brought to the middle of what is clear");
         assert!(under < in_sight && in_sight < scroll, "{script}");
+        assert!(script.contains("window.scrollBy("), "{script}");
     }
 
     /// Every move reads as what it does.
@@ -1394,5 +1738,292 @@ mod tests {
                 vec![],
             ]
         );
+        let contest: Vec<String> = CONTEST_STEPS
+            .iter()
+            .flat_map(|step| step.moves.iter().map(|step_move| step_move.label()))
+            .collect();
+        assert_eq!(contest, ["Start contest", "Discard"]);
+    }
+
+    /// In Contest mode the header offers the guide, and it is a run's:
+    /// Start contest, then each part of the run screen in turn, pointed at
+    /// where it is drawn, the dock clear of it, then the run left by its own
+    /// Discard, asked twice, and nothing kept. A part renamed on the run
+    /// screen and not here would leave the guide pointing at nothing, and
+    /// fails this in either build: where touch is how you type, the keypad.
+    #[test]
+    fn the_contest_guide_walks_the_run_screen_and_discards_the_run() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(contest_settings());
+            assert!(ui.shows("btn-guided-setup"), "no guide in Contest");
+            ui.click("btn-guided-setup");
+            assert!(on_contest_step(&ui, 0), "{}", ui.html());
+            assert!(ui.has(CONTEST_STEPS[0].title));
+            assert!(ui.has("#btn-start-training {"), "{}", ui.html());
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            for (at, step) in CONTEST_STEPS.iter().enumerate() {
+                let Some(part) = step.shows else {
+                    continue;
+                };
+                assert!(
+                    on_contest_step(&ui, at),
+                    "not on {}: {}",
+                    step.title,
+                    ui.html()
+                );
+                assert!(ui.has(step.title), "{}", step.title);
+                assert!(!ui.has("tour-first"), "{}: it is on the screen", step.title);
+                let ids = part.targets(false);
+                assert!(
+                    ui.shows(&ids[0]),
+                    "{}: no {} to bring into sight",
+                    step.title,
+                    ids[0]
+                );
+                assert!(
+                    ui.has(&format!("#{} {{", ids.join(", #"))),
+                    "{} does not point at {ids:?}: {}",
+                    step.title,
+                    ui.html()
+                );
+                let head = part.near_head(false);
+                assert_eq!(ui.has("tour-dock foot"), head, "{}", step.title);
+                assert_eq!(ui.has("tour-dock top"), !head, "{}", step.title);
+                ui.click("tour-next");
+            }
+            let discard = CONTEST_STEPS.len() - 2;
+            assert!(on_contest_step(&ui, discard), "{}", ui.html());
+            assert!(ui.has("#btn-discard, #btn-discard-run {"), "{}", ui.html());
+            ui.click("btn-discard");
+            assert_eq!(ui.screen(), "training", "Discard asks once more");
+            assert!(ui.shows("btn-discard-run"));
+            ui.click("btn-discard-run");
+            assert_eq!(ui.screen(), "home");
+            assert!(on_contest_step(&ui, discard + 1), "{}", ui.html());
+            assert!(ui.store.load_sessions().is_empty(), "the run was kept");
+            ui.click("tour-start-practising");
+            assert!(!ui.shows("tour-next"));
+        });
+    }
+
+    /// The keys a run's screen shows are the keypad where touch is how you
+    /// type, first, as its step's words say; elsewhere the message keys.
+    #[test]
+    fn the_keys_step_names_what_this_build_types_with() {
+        let shows = |part| {
+            CONTEST_STEPS
+                .iter()
+                .find(|step| step.shows == Some(part))
+                .expect("a step for it")
+        };
+        let keys = shows(super::RunPart::Keys);
+        let fields = shows(super::RunPart::Fields);
+        let first = super::RunPart::Keys.targets(false)[0].clone();
+        if TOUCH_BUILD {
+            assert_eq!((keys.title, first.as_str()), ("The keypad", "keypad"));
+            assert!(keys.text.contains("␣\u{a0}Field"), "{}", keys.text);
+            assert!(fields.text.contains("␣\u{a0}Field"), "{}", fields.text);
+            assert!(!fields.text.contains("Space"), "{}", fields.text);
+        } else {
+            assert_eq!((keys.title, first.as_str()), ("Message keys", "run-keys"));
+            assert!(keys.text.contains("F1\u{a0}CQ"), "{}", keys.text);
+            assert!(fields.text.contains("Space"), "{}", fields.text);
+        }
+    }
+
+    /// Next never starts a run, whose callers would be sound nobody asked
+    /// for: it moves on, and the steps on the run screen point the way
+    /// there, Start contest on Practice and Practice from anywhere else,
+    /// each saying that a run shows what it is about. Nothing sounds from
+    /// the first step to the last.
+    #[test]
+    fn next_never_starts_a_run() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-guided-setup");
+            for (at, step) in CONTEST_STEPS
+                .iter()
+                .enumerate()
+                .take(CONTEST_STEPS.len() - 1)
+            {
+                assert!(on_contest_step(&ui, at), "{}", ui.html());
+                if step.screen.is_some() {
+                    assert!(
+                        ui.has("#btn-start-training {"),
+                        "{}: {}",
+                        step.title,
+                        ui.html()
+                    );
+                }
+                let away = step.screen == Some(Screen::Training);
+                assert_eq!(
+                    ui.has("To see this, start a run: press Start contest."),
+                    away,
+                    "{}",
+                    step.title
+                );
+                ui.click("tour-next");
+                ui.advance(500).await;
+                assert_eq!(ui.screen(), "home", "{}", step.title);
+            }
+            assert!(on_contest_step(&ui, CONTEST_STEPS.len() - 1));
+            assert!(ui.with_app(|ctx| ctx.contest.peek().is_none()));
+            assert!(silent(&recorder), "{:?}", recorder.calls());
+            ui.click("tour-back");
+            ui.click("tour-back");
+            ui.click("nav-stats");
+            assert!(ui.has("#nav-practice {"), "{}", ui.html());
+            assert!(
+                ui.has("To see this, start a run from Practice."),
+                "{}",
+                ui.html()
+            );
+        });
+    }
+
+    /// On a paused run, the parts the paused card stands in for are pointed
+    /// at by Resume, which brings them back, and their steps say so, the
+    /// dock at the foot clear of it; the parts still drawn are pointed at
+    /// as ever.
+    #[test]
+    fn on_a_paused_run_the_guide_points_at_resume() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-guided-setup");
+            ui.click("btn-start-training");
+            ui.click("btn-pause");
+            assert!(ui.shows("btn-resume"), "{}", ui.html());
+            for (at, step) in CONTEST_STEPS.iter().enumerate() {
+                let Some(part) = step.shows else {
+                    continue;
+                };
+                assert!(on_contest_step(&ui, at), "{}", ui.html());
+                let hidden = !part.drawn_paused();
+                let ids = part.targets(true);
+                assert!(ui.shows(&ids[0]), "{}: no {}", step.title, ids[0]);
+                assert_eq!(ids == ["btn-resume"], hidden, "{}", step.title);
+                assert!(
+                    ui.has(&format!("#{} {{", ids.join(", #"))),
+                    "{}: {}",
+                    step.title,
+                    ui.html()
+                );
+                assert_eq!(
+                    ui.has("To see this, resume the run."),
+                    hidden,
+                    "{}",
+                    step.title
+                );
+                if hidden {
+                    assert!(ui.has("tour-dock foot"), "{}", step.title);
+                }
+                ui.click("tour-next");
+            }
+            ui.click("btn-resume");
+            ui.click("tour-back");
+            assert!(ui.has("#run-actions {"), "{}", ui.html());
+            ui.click("tour-back");
+            assert!(ui.has("#run-log {"), "{}", ui.html());
+            ui.click("tour-back");
+            assert!(!ui.has("tour-first"), "{}", ui.html());
+        });
+    }
+
+    /// Show me starts the run, as it was asked to, pointing at Start contest
+    /// first; and on the Discard step it leaves the run without keeping it.
+    #[test]
+    fn show_me_starts_a_run_and_discards_it() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-guided-setup");
+            ui.click("tour-show-me");
+            assert_eq!(ui.screen(), "home", "it pressed before it pointed");
+            assert!(
+                ui.run_until(u64::from(3 * POINT_MS), |ui| on_contest_step(ui, 1))
+                    .await,
+                "{}",
+                ui.html()
+            );
+            assert_eq!(ui.screen(), "training");
+            assert!(!silent(&recorder), "the run it was asked to start");
+            let discard = CONTEST_STEPS.len() - 2;
+            for _ in 1..discard {
+                ui.click("tour-next");
+            }
+            assert!(on_contest_step(&ui, discard), "{}", ui.html());
+            ui.click("tour-show-me");
+            assert!(
+                ui.run_until(u64::from(3 * POINT_MS), |ui| on_contest_step(
+                    ui,
+                    discard + 1
+                ))
+                .await,
+                "{}",
+                ui.html()
+            );
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.store.load_sessions().is_empty(), "the run was kept");
+        });
+    }
+
+    /// The guide follows the mode: picking Contest while it is open starts
+    /// the contest guide from its start, and picking another mode the guide
+    /// to a first session.
+    #[test]
+    fn picking_contest_or_leaving_it_starts_that_modes_guide() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.click("btn-guided-setup");
+            ui.click("nav-settings");
+            for _ in 0..first_on_settings() {
+                ui.click("tour-next");
+            }
+            assert!(on_step(&ui, first_on_settings()), "{}", ui.html());
+            ui.click("seg-contest");
+            assert!(on_contest_step(&ui, 0), "{}", ui.html());
+            assert!(ui.has("#nav-practice {"), "{}", ui.html());
+            ui.click("seg-callsigns");
+            assert!(on_step(&ui, 0), "{}", ui.html());
+        });
+    }
+
+    /// On the run screen a click on the guide leaves the cursor in the
+    /// run's field, and a press hands it back there, so Enter goes on
+    /// sending rather than pressing the guide's button again. Elsewhere a
+    /// click is a click.
+    #[test]
+    fn on_the_run_screen_the_guide_leaves_the_cursor_in_the_field() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-guided-setup");
+            assert!(ui.mouse_down("tour-next"), "on Practice a click is a click");
+            ui.click("btn-start-training");
+            for id in ["tour-back", "tour-next", "tour-close"] {
+                assert!(!ui.mouse_down(id), "{id} took the cursor");
+            }
+            ui.take_focused();
+            ui.click("tour-next");
+            assert_eq!(ui.take_focused(), ["field-call"]);
+
+            // A run started under the last step: Start practising closes
+            // the guide over it, and the run keeps the cursor.
+            let (mut ui, _recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-guided-setup");
+            for _ in 1..CONTEST_STEPS.len() {
+                ui.click("tour-next");
+            }
+            assert!(ui.mouse_down("tour-start-practising"), "on Practice");
+            ui.click("btn-start-training");
+            assert!(
+                !ui.mouse_down("tour-start-practising"),
+                "it took the cursor"
+            );
+            ui.take_focused();
+            ui.click("tour-start-practising");
+            assert_eq!(ui.screen(), "training");
+            assert!(!ui.shows("tour-next"), "the guide stayed open");
+            assert_eq!(ui.take_focused(), ["field-call"]);
+        });
     }
 }

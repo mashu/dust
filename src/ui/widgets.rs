@@ -375,6 +375,8 @@ pub enum StatusDot {
 /// a figure and a bar, and anything the screen adds under the bar.
 #[component]
 pub fn ProgressHeader(
+    /// What a guide points at it by, where one does: a run's.
+    id: Option<String>,
     status: String,
     dot: StatusDot,
     /// How far it has come: "3 / 20", or a run's clock.
@@ -398,7 +400,7 @@ pub fn ProgressHeader(
         StatusDot::Waiting => "status-dot",
     };
     rsx! {
-        div { class: "card",
+        div { id, class: "card",
             div { class: "row-between progress-head",
                 div { class: "train-status",
                     span { class: dot }

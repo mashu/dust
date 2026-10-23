@@ -374,6 +374,10 @@ fn AnswerBox(
     }
 }
 
+/// Whether touch is how this build types: the phone and tablet builds,
+/// where the keypad always shows. Elsewhere it shows only on a touch screen.
+pub(crate) const TOUCH_BUILD: bool = cfg!(any(feature = "mobile", feature = "mobile-silent"));
+
 /// A key on the keypad.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PadKey {
@@ -496,7 +500,7 @@ fn pad_face(key: &PadKey) -> (String, String, String, &'static str) {
 /// screen. A desktop with only a mouse and keyboard has no use for it.
 #[component]
 pub(crate) fn Keypad(open: bool, rows: Vec<PadRow>, on_key: Callback<PadKey>) -> Element {
-    let class = if cfg!(any(feature = "mobile", feature = "mobile-silent")) {
+    let class = if TOUCH_BUILD {
         "keypad"
     } else {
         "keypad touch-only"
@@ -538,7 +542,7 @@ pub(crate) fn Keypad(open: bool, rows: Vec<PadRow>, on_key: Callback<PadKey>) ->
         }
     };
     rsx! {
-        div { class, role: "group", aria_label: "Keypad",
+        div { id: "keypad", class, role: "group", aria_label: "Keypad",
             for row in rows {
                 div { class: row.class,
                     for pressed in row.keys {

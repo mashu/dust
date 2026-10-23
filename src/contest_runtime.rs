@@ -238,11 +238,18 @@ impl ContestEntry {
         });
     }
 
-    fn finish_letter(self) {
+    /// End a paddle letter keyed in full now, in the field it was keyed for,
+    /// and the paddles' word with it, so no word space after it presses
+    /// Space: before a key, and before anything typed, pressed or tapped by
+    /// hand, which would otherwise come before the letter, or have the word
+    /// space move the cursor a second time. Whether a letter landed.
+    pub fn finish_letter(self) -> bool {
         let finish = *self.finish.peek();
+        let typed = *self.typed.peek();
         if let Some(finish) = finish {
             finish.call(());
         }
+        *self.typed.peek() != typed
     }
 }
 
@@ -598,6 +605,15 @@ pub fn focus_field(ctx: AppCtx, field: EntryField) {
     spawn_forever(async move {
         let _ = document::eval(&script).await;
     });
+}
+
+/// While a run has the training screen, the cursor back in its field, as it
+/// was: after a press of a button that is not the run's own, which a
+/// keyboard may have moved the cursor to.
+pub fn refocus_run(ctx: AppCtx) {
+    if *ctx.screen.peek() == Screen::Training && ctx.contest.peek().is_some() {
+        focus_field(ctx, ctx.entry.focus());
+    }
 }
 
 /// The run, taken out of the app, with the audio given back. Its sound has

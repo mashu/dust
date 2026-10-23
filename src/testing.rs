@@ -1009,6 +1009,16 @@ impl Ui {
         self.fire("input", id, Self::form(value));
     }
 
+    /// Give the field with this id the cursor, the way a click, a tap or Tab
+    /// into it does.
+    pub fn focus(&mut self, id: &str) {
+        self.fire(
+            "focus",
+            id,
+            Box::new(dioxus::html::SerializedFocusData::default()),
+        );
+    }
+
     /// Commit a field, the way leaving it does.
     pub fn commit(&mut self, id: &str, value: &str) {
         self.fire("change", id, Self::form(value));

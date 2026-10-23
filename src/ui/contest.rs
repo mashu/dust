@@ -22,7 +22,8 @@ use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
 use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow};
+use crate::ui::tour::bring_into_sight;
+use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow, TOUCH_BUILD};
 use crate::ui::widgets::{
     Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool, keep_focus,
 };
@@ -46,8 +47,14 @@ pub fn ContestRunView() -> Element {
         .as_ref()
         .is_some_and(|view| view.phase == ContestPhase::Running);
     // The paddles key into the field with the cursor while the run is on,
-    // and a key takes a letter keyed in full with it.
-    keys.use_answer_box(running, move |letter| entry.push(letter));
+    // and a key takes a letter keyed in full with it. Quiet for a word space
+    // after a letter, they press Space: a call and its exchange keyed on the
+    // paddles land in their own fields.
+    keys.use_fields(
+        running,
+        move |letter| entry.push(letter),
+        move || field_space(ctx),
+    );
     entry.use_letters(move || keys.finish_letter());
     use_pause_when_hidden(ctx);
     use_run_keys(ctx);
@@ -109,8 +116,7 @@ pub fn ContestRunView() -> Element {
 /// With Show copy on, the air takes a line more, which a small phone makes
 /// room for.
 fn run_class(paused: bool, show_copy: bool) -> String {
-    let touch = cfg!(any(feature = "mobile", feature = "mobile-silent"));
-    let class = match (touch, paused) {
+    let class = match (TOUCH_BUILD, paused) {
         (_, true) => "stack train run paused",
         (true, false) => "stack train run touch",
         (false, false) => "stack train run",
@@ -179,6 +185,7 @@ fn RunBar(now: Signal<MonoMs>, phase: ContestPhase, qsos: u32, clean: u32, my_wp
     let wpm = my_wpm.round();
     rsx! {
         ProgressHeader {
+            id: control_id("run", "bar"),
             status,
             dot,
             figure,
@@ -298,7 +305,7 @@ fn EntryCard(qso: QsoState, running: bool, countdown: Option<u32>, now: Signal<M
         div { class: "card run-entry",
             HintLine { qso: qso.clone(), countdown }
             AirLine { now }
-            div { class: fields,
+            div { id: control_id("run", "fields"), class: fields,
                 CallField { qso: qso.clone(), disabled: countdown.is_some() }
                 div { class: "field",
                     label { r#for: exchange_id, "{exchange}" }
@@ -342,7 +349,7 @@ fn HintLine(qso: QsoState, countdown: Option<u32>) -> Element {
             .unwrap_or_default()
     };
     rsx! {
-        p { class: "run-line run-hint",
+        p { id: control_id("run", "hint"), class: "run-line run-hint",
             "{hint}"
             // What Enter then does, where a phone's line has no room for it.
             if !more.is_empty() {
@@ -373,7 +380,7 @@ fn AirLine(now: Signal<MonoMs>) -> Element {
     });
     let (sending, calling, shown) = air();
     rsx! {
-        div { class: "run-air",
+        div { id: control_id("run", "air"), class: "run-air",
             // Each says "—" when it has nothing, as "Reads as" does.
             p { class: "run-line run-tx",
                 span { class: "run-tag", "TX ▸" }
@@ -494,8 +501,22 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
             enterkeyhint: "send",
             inputmode: ANSWER_INPUT_MODE,
             lang: "zxx",
-            oninput: move |e| entry.edit(field, e.value()),
-            onfocus: move |_| entry.set_focus(field),
+            oninput: move |e| {
+                entry.edit(field, e.value());
+                // Typing ends the paddles' word: their word space is not to
+                // move the cursor from what is being typed. A letter keyed
+                // in full lands after it, as the page has it already.
+                entry.finish_letter();
+            },
+            onfocus: move |_| {
+                // A click, a tap or Tab into the other field: a letter keyed
+                // in full lands in the field it was keyed for, and the
+                // paddles' word is over.
+                if entry.focus() != field {
+                    entry.finish_letter();
+                }
+                entry.set_focus(field);
+            },
             onkeydown: move |e| {
                 // Enter, or Enter with the Command key, which the run's keys
                 // pass by; held with Shift, Ctrl or Alt it logs without
@@ -504,12 +525,25 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
                 if e.key() == Key::Enter && !e.modifiers().intersects(held) {
                     e.prevent_default();
                     press_key(ctx, OpKey::Esm);
-                } else if e.code() == Code::Space
-                    && let Some(to) = space_goes_to(ctx, field)
-                {
-                    // The cursor moves, and no space is typed.
-                    e.prevent_default();
-                    focus_field(ctx, to);
+                } else if e.code() == Code::Space {
+                    // A letter keyed in full lands first, here, and the
+                    // paddles' word is over, so Space moves the cursor once.
+                    let landed = entry.finish_letter();
+                    match space_goes_to(ctx, field) {
+                        // The cursor moves, and no space is typed.
+                        Some(to) => {
+                            e.prevent_default();
+                            focus_field(ctx, to);
+                        }
+                        // The input is drawn again for the letter, which
+                        // would drop the space the page types: it is typed
+                        // here instead, after the letter.
+                        None if landed => {
+                            e.prevent_default();
+                            entry.push(' ');
+                        }
+                        None => {}
+                    }
                 }
             },
         }
@@ -517,16 +551,28 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
 }
 
 /// Where Space in `field` takes the cursor, the keyboard's, the keypad's
-/// ␣ Field and the key bar's alike: from Call on to Exchange, as a call has
-/// no spaces; from Exchange back to Call, as MorseRunner's and N1MM's space
-/// bar goes, so a call is put right with one key, but where it separates
-/// the exchange's next item
+/// ␣ Field, the key bar's and the paddles' word space alike: from Call on to
+/// Exchange, as a call has no spaces; from Exchange back to Call, as
+/// MorseRunner's and N1MM's space bar goes, so a call is put right with one
+/// key, but where it separates the exchange's next item
 /// ([`crate::contest_runtime::ContestEntry::space_to_call`]): nowhere, and
 /// it is a space. Moved, the cursor lands at the end of the field.
 fn space_goes_to(ctx: AppCtx, field: EntryField) -> Option<EntryField> {
     match field {
         EntryField::Call => Some(EntryField::Exchange),
         EntryField::Exchange => ctx.entry.space_to_call().then_some(EntryField::Call),
+    }
+}
+
+/// A word space keyed on the paddles, or Space from the keypad's ␣ Field:
+/// where [`space_goes_to`] says, or else the space before the exchange's
+/// next item, typed. A Space pressed by hand ends the paddles' word first
+/// ([`crate::contest_runtime::ContestEntry::finish_letter`]), so their word
+/// space does not follow it with another.
+fn field_space(ctx: AppCtx) {
+    match space_goes_to(ctx, ctx.entry.focus()) {
+        Some(to) => focus_field(ctx, to),
+        None => ctx.entry.push(' '),
     }
 }
 
@@ -545,7 +591,9 @@ pub fn field_name(field: EntryField) -> (String, &'static str) {
 fn ReadsAs() -> Element {
     let ctx = use_context::<AppCtx>();
     let Some(reading) = ctx.entry.reading() else {
-        return rsx! { p { class: "run-line run-reads" } };
+        return rsx! {
+            p { id: control_id("run", "reads"), class: "run-line run-reads" }
+        };
     };
     let read: Vec<String> = reading
         .fields
@@ -558,7 +606,7 @@ fn ReadsAs() -> Element {
     let between = if read.is_empty() { "" } else { " · " };
     let read = read.join(" · ");
     rsx! {
-        p { class: "run-line run-reads",
+        p { id: control_id("run", "reads"), class: "run-line run-reads",
             span { class: "muted", "Reads as: " }
             if nothing {
                 span { class: "muted", "—" }
@@ -611,7 +659,11 @@ fn KeyBar(qso: QsoState, live: bool) -> Element {
     let loggable = ctx.entry.loggable();
     let query = ctx.settings.peek().contest.contest_kind.rules().query;
     rsx! {
-        div { class: "run-keys", role: "group", aria_label: "Messages",
+        div {
+            id: control_id("run", "keys"),
+            class: "run-keys",
+            role: "group",
+            aria_label: "Messages",
             EnterChip { qso: qso.clone(), live }
             SpaceKey { qso, live }
             for (key, keyboard, label, touch) in KEY_BAR {
@@ -711,9 +763,12 @@ fn SpaceKey(qso: QsoState, live: bool) -> Element {
             aria_label: says,
             disabled: html_bool(!live),
             onmousedown: keep_focus,
-            onclick: move |_| match space_goes_to(ctx, ctx.entry.focus()) {
-                Some(to) => focus_field(ctx, to),
-                None => from_button(ctx, || ctx.entry.push(' ')),
+            onclick: move |_| {
+                ctx.entry.finish_letter();
+                match space_goes_to(ctx, ctx.entry.focus()) {
+                    Some(to) => focus_field(ctx, to),
+                    None => from_button(ctx, || ctx.entry.push(' ')),
+                }
             },
             kbd { "Space" }
             span { class: "run-key-label", "{label}" }
@@ -731,14 +786,16 @@ fn RunKeypad(qso: QsoState, open: bool) -> Element {
         .enter(&qso)
         .map(|enter| enter.label)
         .unwrap_or_default();
-    let on_key = use_callback(move |pressed: PadKey| match pressed {
-        PadKey::Char(ch) => entry.push(ch),
-        PadKey::Back => entry.pop(),
-        PadKey::Field => match space_goes_to(ctx, entry.focus()) {
-            Some(to) => focus_field(ctx, to),
-            None => entry.push(' '),
-        },
-        PadKey::Send(_) | PadKey::Next => press_key(ctx, OpKey::Esm),
+    let on_key = use_callback(move |pressed: PadKey| {
+        // A letter keyed in full on the paddles lands before the key's own,
+        // and their word is over, so no word space follows the key.
+        entry.finish_letter();
+        match pressed {
+            PadKey::Char(ch) => entry.push(ch),
+            PadKey::Back => entry.pop(),
+            PadKey::Field => field_space(ctx),
+            PadKey::Send(_) | PadKey::Next => press_key(ctx, OpKey::Esm),
+        }
     });
     rsx! {
         Keypad { open, rows: pad_rows(label), on_key }
@@ -819,9 +876,19 @@ fn paused_why(why: PauseWhy) -> Option<&'static str> {
 fn RunActions(paused: bool) -> Element {
     let ctx = use_context::<AppCtx>();
     let mut asking = use_signal(|| false);
+    // The question takes more room than the row it replaces, and its Discard
+    // can land below the window, or under the guide: it is brought into
+    // sight once the page has it.
+    use_effect(move || {
+        if asking() {
+            bring_into_sight(&[control_id("btn", "discard run")]);
+        }
+    });
     if asking() {
         return rsx! {
-            div { class: "train-actions run-actions asking",
+            div {
+                id: control_id("run", "actions"),
+                class: "train-actions run-actions asking",
                 p { class: "run-ask", role: "alert", "Discard this run? Its QSOs are not kept" }
                 button {
                     id: control_id("btn", "discard run"),
@@ -841,7 +908,7 @@ fn RunActions(paused: bool) -> Element {
         };
     }
     rsx! {
-        div { class: "train-actions run-actions",
+        div { id: control_id("run", "actions"), class: "train-actions run-actions",
             button {
                 id: control_id("btn", "pause"),
                 class: "btn btn-secondary",
@@ -876,7 +943,7 @@ fn RunActions(paused: bool) -> Element {
 fn RunLog(rows: Vec<LogRow>, countdown: Option<u32>, qsos: u32, clean: u32) -> Element {
     let head = format!("{} · {clean} clean", counted(qsos, "QSO"));
     rsx! {
-        div { class: "card run-log",
+        div { id: control_id("run", "log"), class: "card run-log",
             div { class: "row-between run-log-head",
                 h3 { class: "card-title", "Log" }
                 span { class: "muted mono", "{head}" }
@@ -2206,6 +2273,174 @@ mod tests {
         });
     }
 
+    /// A dit at 20 WPM, the paddle tests' keyer speed.
+    const DIT_MS: u64 = 60;
+
+    /// Settings for a run of `kind` keyed on the paddles: an iambic keyer
+    /// at 20 WPM, and the station a Sprint sends.
+    fn paddled(kind: cw_core::ContestKind) -> cw_core::TrainingSettings {
+        let mut settings = contest_settings();
+        settings.contest.contest_kind = kind;
+        settings.contest.my_call = "K1ABC".to_string();
+        settings.contest.my_name = "MIKE".to_string();
+        settings.contest.my_state = "MA".to_string();
+        settings.playback.keyer_mode = cw_core::KeyerMode::IambicA;
+        settings.playback.keyer_wpm = 20.0;
+        settings
+    }
+
+    /// Key the elements of `letter` on the paddles from the field `on`: each
+    /// its own close of its paddle, the next closed as the space after it
+    /// ends, so the letter goes on. It is left open, a dit after its last
+    /// element.
+    async fn key_elements(ui: &mut Ui, on: &str, letter: char) {
+        let pattern = cw_core::morse_for(letter).expect("a character");
+        for mark in pattern.chars() {
+            let (key, code, dits) = match mark {
+                '.' => ("[", Code::BracketLeft, 1),
+                _ => ("]", Code::BracketRight, 3),
+            };
+            ui.press_key(on, Key::Character(key.into()), code);
+            ui.advance(20).await;
+            ui.release_key(on, Key::Character(key.into()), code);
+            ui.advance((dits + 1) * DIT_MS - 20).await;
+        }
+    }
+
+    /// Key `letter` on the paddles from the field `on`, then quiet until its
+    /// letter space has ended it, three dits after its last element.
+    async fn key_letter(ui: &mut Ui, on: &str, letter: char) {
+        key_elements(ui, on, letter).await;
+        ui.advance(2 * DIT_MS + 8).await;
+    }
+
+    /// From the letter space that ended a letter on to the end of its word
+    /// space, seven dits after the letter's last element, and a step more.
+    const TO_WORD_SPACE_MS: u64 = 4 * DIT_MS + 8;
+
+    /// The paddles key into the field with the cursor, and quiet for a word
+    /// space after a letter, seven dits at the keyer's speed, they press
+    /// Space: on from Call to Exchange, back to Call from a WPX
+    /// exchange, the cursor at the end of the field each time and nothing
+    /// typed, and in a Sprint's exchange the space before its next item, as
+    /// the Space key does. A hesitation of six dits between two letters
+    /// keeps them in one field, quiet after the word presses Space once, and
+    /// a key pressed in the word space ends the word with no Space after it.
+    #[test]
+    fn a_word_space_on_the_paddles_is_space() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(paddled(cw_core::ContestKind::Wpx));
+            ui.click("btn-start-training");
+            let field = |ui: &mut Ui, field| ui.with_app(|ctx| ctx.entry.shown(field));
+            key_letter(&mut ui, "field-call", 'K').await;
+            ui.advance(3 * DIT_MS).await;
+            key_letter(&mut ui, "field-call", '1').await;
+            assert_eq!(field(&mut ui, EntryField::Call), "K1");
+            ui.take_focused();
+            ui.advance(TO_WORD_SPACE_MS).await;
+            assert_eq!(
+                ui.take_focus_scripts(),
+                [(
+                    "field-exchange".to_string(),
+                    focus_end_script("field-exchange")
+                )]
+            );
+            key_letter(&mut ui, "field-exchange", '5').await;
+            ui.advance(TO_WORD_SPACE_MS).await;
+            assert_eq!(ui.take_focused(), ["field-call"], "back to the call");
+            assert_eq!(field(&mut ui, EntryField::Call), "K1");
+            assert_eq!(field(&mut ui, EntryField::Exchange), "5");
+            ui.advance(20 * DIT_MS).await;
+            assert!(ui.take_focused().is_empty(), "one Space a word");
+
+            // Enter in the word space: the cursor stays where Enter left it.
+            key_letter(&mut ui, "field-call", 'A').await;
+            ui.press_enter("field-call");
+            let after_enter = ui.with_app(|ctx| ctx.entry.focus());
+            ui.take_focused();
+            ui.advance(TO_WORD_SPACE_MS).await;
+            assert!(ui.take_focused().is_empty(), "a Space after Enter");
+            assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), after_enter);
+
+            let (mut ui, _recorder) = Ui::app_with_settings(paddled(cw_core::ContestKind::Sprint));
+            ui.click("btn-start-training");
+            ui.with_app(|ctx| focus_field(ctx, EntryField::Exchange));
+            ui.take_focused();
+            key_letter(&mut ui, "field-exchange", '7').await;
+            ui.advance(TO_WORD_SPACE_MS).await;
+            assert_eq!(field(&mut ui, EntryField::Exchange), "7 ");
+            assert_eq!(
+                ui.with_app(|ctx| ctx.entry.focus()),
+                EntryField::Exchange,
+                "a name and a state to come"
+            );
+            ui.advance(20 * DIT_MS).await;
+            assert_eq!(field(&mut ui, EntryField::Exchange), "7 ", "one space");
+            assert!(ui.take_focused().is_empty());
+        });
+    }
+
+    /// A Space pressed by hand while the paddles wait out a word space, on
+    /// the keyboard, the key bar or the keypad's ␣ Field, ends their word:
+    /// the cursor moves once, as pressed, and the word space does not move
+    /// it again, back to the call from an empty WPX exchange. So does
+    /// anything typed, and a click or Tab into the other field. A letter
+    /// still waiting out its letter space when Space comes lands first, in
+    /// the field it was keyed for.
+    #[test]
+    fn a_space_by_hand_ends_the_paddles_word() {
+        run(|| async {
+            let space = Key::Character(" ".into());
+            for by in ["keyboard", "btn-space", "key-field", "focus", "typed"] {
+                for open in [false, true] {
+                    let (mut ui, _recorder) =
+                        Ui::app_with_settings(paddled(cw_core::ContestKind::Wpx));
+                    ui.click("btn-start-training");
+                    key_letter(&mut ui, "field-call", 'K').await;
+                    ui.advance(3 * DIT_MS).await;
+                    if open {
+                        key_elements(&mut ui, "field-call", '1').await;
+                    } else {
+                        key_letter(&mut ui, "field-call", '1').await;
+                        ui.advance(DIT_MS).await;
+                    }
+                    ui.take_focused();
+                    match by {
+                        "keyboard" => {
+                            ui.press_key("field-call", space.clone(), Code::Space);
+                        }
+                        "focus" => ui.focus("field-exchange"),
+                        // An A typed after the paddles' 1, which lands after
+                        // it where it was still open: out of turn, but kept.
+                        "typed" => ui.type_into("field-call", if open { "KA" } else { "K1A" }),
+                        id => ui.click(id),
+                    }
+                    let (to, moved, call) = match by {
+                        "typed" if open => (EntryField::Call, &[][..], "KA1"),
+                        "typed" => (EntryField::Call, &[][..], "K1A"),
+                        // The page moved the cursor itself.
+                        "focus" => (EntryField::Exchange, &[][..], "K1"),
+                        _ => (EntryField::Exchange, &["field-exchange"][..], "K1"),
+                    };
+                    let what = format!("{by}, the letter open: {open}");
+                    ui.advance(TO_WORD_SPACE_MS + 10 * DIT_MS).await;
+                    assert_eq!(ui.with_app(|ctx| ctx.entry.focus()), to, "{what}");
+                    assert_eq!(ui.take_focused(), moved, "{what}");
+                    assert_eq!(
+                        ui.with_app(|ctx| ctx.entry.shown(EntryField::Call)),
+                        call,
+                        "{what}"
+                    );
+                    assert_eq!(
+                        ui.with_app(|ctx| ctx.entry.shown(EntryField::Exchange)),
+                        "",
+                        "{what}"
+                    );
+                }
+            }
+        });
+    }
+
     /// A correction to put right with the cursor in Exchange: a wider
     /// screen's hint says Space goes back to the call, the part a phone's
     /// line leaves out, and the key bar lights Space, named for the Call
@@ -2378,18 +2613,6 @@ mod tests {
             ui.click("btn-end-run");
             assert_eq!(ui.screen(), "results");
             assert_eq!(ui.stored_settings().await.contest.my_wpm, 32);
-        });
-    }
-
-    /// The guided setup points at a session's group boxes, which a run does
-    /// not have: in Contest mode its button waits.
-    #[test]
-    fn the_guided_setup_waits_in_contest_mode() {
-        run(|| async {
-            let (ui, _recorder) = Ui::app_with_settings(contest_settings());
-            assert!(!ui.shows("btn-guided-setup"));
-            let (ui, _recorder) = Ui::app();
-            assert!(ui.shows("btn-guided-setup"));
         });
     }
 
