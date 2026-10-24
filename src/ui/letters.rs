@@ -2,10 +2,11 @@
 //! sure that figure is, which way it is going, and how fast you answer it,
 //! the ones that need the most work first.
 //!
-//! It is drawn the way "What comes up next" is: a band a row, inked where
-//! the accuracy is likely and fading where it is not, a dot at what was
-//! measured, and the part of the scale under the Mastered line washed
-//! copper. A summary above names the weak, the building and the ones with
+//! A row is a bar, drawn as "What comes up next" draws its own: as long as
+//! the share copied right, in the colour of where the character stands,
+//! with a notch at the Mastered line and a paler stretch past the bar to
+//! the top of where the accuracy likely is. The line under it says the
+//! rest. A summary above names the weak, the building and the ones with
 //! too few tries to tell; a character tried once is no longer called weak.
 
 use cw_core::{
@@ -19,11 +20,6 @@ use crate::ui::widgets::{CardHead, IconName, control_id};
 
 /// The share of the belief the likely range holds.
 const LIKELY: f64 = 0.8;
-/// Steps the belief is read in, and stops the band is drawn with.
-const GRID: usize = 600;
-const STOPS: usize = 40;
-/// The density the band is at its darkest from.
-const FULL_INK: f64 = 8.0;
 /// How far recent accuracy has to move from earlier, in points, to be a
 /// trend rather than noise.
 const TREND_POINTS: f64 = 5.0;
@@ -44,21 +40,6 @@ fn status_word(status: MasteryStatus) -> &'static str {
         MasteryStatus::Weak => "weak",
         MasteryStatus::FewTries => "few tries",
     }
-}
-
-/// The left end of the scale: half right, or lower, in tens, when a
-/// character is worse than that.
-fn scale_bottom(letters: &[CharacterDiagnostic]) -> f64 {
-    let worst = letters
-        .iter()
-        .map(|letter| letter.accuracy_pct / 100.0)
-        .fold(1.0_f64, f64::min);
-    ((worst * 10.0).floor() / 10.0).clamp(0.0, 0.5)
-}
-
-/// Where along the scale from `bottom` to all right, in percent.
-fn along(accuracy: f64, bottom: f64) -> f64 {
-    ((accuracy - bottom) / (1.0 - bottom) * 100.0).clamp(0.0, 100.0)
 }
 
 /// Which way a character is going: up or down by enough points, steady, or
@@ -86,6 +67,27 @@ fn trend(letter: &CharacterDiagnostic) -> Trend {
 
 fn seconds(ms: f64) -> String {
     format!("{:.1} s", ms / 1000.0)
+}
+
+/// The start of the line under a row's bar: where it stands, how often it
+/// was tried, and where its accuracy likely is.
+fn letter_note(letter: &CharacterDiagnostic) -> String {
+    let (low, high) = letter.accuracy_interval(LIKELY);
+    let word = status_word(letter.status);
+    let mut status = word.chars();
+    let status = status
+        .next()
+        .map(|first| first.to_uppercase().chain(status).collect::<String>())
+        .unwrap_or_default();
+    let tries = match letter.total {
+        1 => "1 try".to_string(),
+        total => format!("{total} tries"),
+    };
+    format!(
+        "{status} · {tries} · likely {:.0}–{:.0}%",
+        low * 100.0,
+        high * 100.0
+    )
 }
 
 /// What a screen reader hears for a row.
@@ -116,73 +118,57 @@ fn letter_label(letter: &CharacterDiagnostic) -> String {
     text
 }
 
-/// The band: where along the scale, in percent, and how dark.
-fn band(letter: &CharacterDiagnostic, bottom: f64) -> Vec<(f64, f64)> {
-    let density = letter.accuracy_density(GRID);
-    (0..STOPS)
-        .map(|stop| {
-            let along = stop as f64 / (STOPS - 1) as f64;
-            let accuracy = bottom + along * (1.0 - bottom);
-            let at = ((accuracy * GRID as f64) as usize).min(GRID - 1);
-            let ink = (density[at] / FULL_INK).min(1.0);
-            (along * 100.0, 0.06 + 0.64 * ink)
-        })
-        .collect()
+/// A share as a place along the bar, in percent.
+fn along(share: f64) -> f64 {
+    (share * 100.0).clamp(0.0, 100.0)
 }
 
-fn row_view(letter: &CharacterDiagnostic, bottom: f64) -> Element {
-    let gradient = format!("acc-{}", u32::from(letter.letter));
-    let (trend_class, trend_text) = match trend(letter) {
-        Trend::Up(points) => ("acc-trend up", format!("↑ {points:.0}")),
-        Trend::Down(points) => ("acc-trend down", format!("↓ {points:.0}")),
-        Trend::Steady => ("acc-trend", "→".to_string()),
-        Trend::Unknown => ("acc-trend", String::new()),
-    };
+fn row_view(letter: &CharacterDiagnostic) -> Element {
+    let (low, high) = letter.accuracy_interval(LIKELY);
+    let (low, high) = (along(low), along(high));
     rsx! {
         div {
             id: control_id("letter", &id_part(letter.letter)),
-            class: "err-row letters {status_class(letter.status)}",
+            class: "letter-row stat-row {status_class(letter.status)}",
             role: "listitem",
             aria_label: "{letter_label(letter)}",
-            span { class: "letter-key err-key group-text", "{letter.letter}" }
-            div {
-                class: "err-plot below",
-                style: "--thr: {along(MASTERED_MIN_ACCURACY, bottom):.1}%;",
-                svg {
-                    class: "err-band",
-                    view_box: "0 0 100 10",
-                    preserve_aspect_ratio: "none",
-                    defs {
-                        linearGradient { id: "{gradient}", x1: "0", x2: "1",
-                            for (offset, ink) in band(letter, bottom) {
-                                stop {
-                                    offset: "{offset:.1}%",
-                                    style: "stop-color: var(--tone); stop-opacity: {ink:.3};",
-                                }
-                            }
-                        }
-                    }
-                    rect {
-                        x: "0",
-                        y: "2",
-                        width: "100",
-                        height: "6",
-                        rx: "1.2",
-                        ry: "3",
-                        fill: "url(#{gradient})",
-                    }
+            span { class: "letter-key group-text", "{letter.letter}" }
+            div { class: "bar-track marked",
+                span {
+                    class: "stat-range",
+                    style: "left: {low:.1}%; width: {high - low:.1}%;",
                 }
                 span {
-                    class: "err-dot",
-                    style: "left: {along(letter.accuracy_pct / 100.0, bottom):.1}%;",
+                    class: "bar-fill stat-fill",
+                    style: "width: {letter.accuracy_pct.clamp(0.0, 100.0):.1}%;",
+                }
+                span {
+                    class: "bar-mark",
+                    style: "left: {along(MASTERED_MIN_ACCURACY):.1}%;",
                 }
             }
-            span { class: trend_class, "{trend_text}" }
-            span { class: if letter.is_slow { "acc-time slow" } else { "acc-time" },
+            span { class: "mono muted stat-value", "{letter.accuracy_pct.round()}%" }
+            span { class: "tiny",
+                "{letter_note(letter)}"
+                match trend(letter) {
+                    Trend::Up(points) => rsx! {
+                        " · "
+                        b { class: "acc-trend up", "↑ {points:.0}" }
+                        " lately"
+                    },
+                    Trend::Down(points) => rsx! {
+                        " · "
+                        b { class: "acc-trend down", "↓ {points:.0}" }
+                        " lately"
+                    },
+                    Trend::Steady => rsx! { " · steady lately" },
+                    Trend::Unknown => rsx! {},
+                }
                 if letter.avg_ms > 0.0 {
-                    "{seconds(letter.avg_ms)}"
-                } else {
-                    "—"
+                    " · "
+                    span { class: if letter.is_slow { "acc-time slow" } else { "acc-time" },
+                        "{seconds(letter.avg_ms)} to answer"
+                    }
                 }
             }
         }
@@ -209,21 +195,13 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
     let contest = sessions
         .iter()
         .any(|session| session.char_set_mode == CharSetMode::Contest);
-    let bottom = scale_bottom(&letters);
-    let step = if bottom < 0.4 { 0.2 } else { 0.1 };
-    let ticks: Vec<f64> = (0..)
-        .map(|n| 1.0 - f64::from(n) * step)
-        .take_while(|tick| *tick >= bottom - 1e-9)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
     let groups = [
         (MasteryStatus::Weak, "Weak"),
         (MasteryStatus::Building, "Building"),
         (MasteryStatus::FewTries, "Few tries"),
     ];
     let mastered = with_status(&letters, MasteryStatus::Mastered).len();
+    let line = MASTERED_MIN_ACCURACY * 100.0;
     rsx! {
         div { class: "card stack-sm",
             CardHead {
@@ -254,33 +232,20 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
                 }
             }
             div { class: "err-legend", aria_hidden: "true",
-                span { i { class: "err-swatch solid" } "mastered, {MASTERED_MIN_ACCURACY * 100.0:.0}% or more" }
+                span { i { class: "err-swatch solid" } "mastered" }
                 span { i { class: "err-swatch building" } "building" }
                 span { i { class: "err-swatch to-work-on" } "weak" }
-                span { i { class: "err-swatch new" } "few tries" }
-                span { i { class: "err-swatch band" } "where it likely is" }
-                span {
-                    b { class: "acc-trend up", "↑ 8 " }
-                    "points better lately than before"
-                }
+                span { i { class: "err-swatch finding-out" } "few tries" }
+                span { i { class: "err-swatch range" } "where it likely is" }
+                span { i { class: "err-swatch mark" } "mastered from {line:.0}%" }
             }
             if contest {
                 p { class: "muted", style: "margin: 0;", "{CONTEST_TIMES_NOTE}" }
             }
-            div { class: "err-rows", role: "list",
+            div { class: "stat-rows", role: "list",
                 for letter in letters.iter() {
-                    {row_view(letter, bottom)}
+                    {row_view(letter)}
                 }
-            }
-            div { class: "err-axis letters", aria_hidden: "true",
-                span {}
-                span { class: "err-ticks",
-                    for tick in ticks.iter() {
-                        span { style: "left: {along(*tick, bottom):.1}%;", "{tick * 100.0:.0}%" }
-                    }
-                }
-                span { class: "err-next", "trend" }
-                span { class: "err-next", "time" }
             }
         }
     }
@@ -319,6 +284,13 @@ mod tests {
             letter_label(&p),
             "P: 50% right of 2, likely 20% to 80%, few tries, answered in 0.7 s"
         );
+        assert_eq!(letter_note(&p), "Few tries · 2 tries · likely 20–80%");
+        p = letter(1, 1);
+        assert!(
+            letter_note(&p).contains(" · 1 try · "),
+            "{}",
+            letter_note(&p)
+        );
         p = letter(27, 30);
         p.recent_pct = Some(95.0);
         p.earlier_pct = Some(80.0);
@@ -328,6 +300,7 @@ mod tests {
             "{}",
             letter_label(&p)
         );
+        assert!(letter_note(&p).starts_with("Mastered · 30 tries · likely "));
     }
 
     /// A trend needs five points to be one; less is steady, and without
@@ -343,15 +316,5 @@ mod tests {
         assert_eq!(trend(&p), Trend::Up(12.0));
         p.earlier_pct = Some(99.0);
         assert_eq!(trend(&p), Trend::Down(7.0));
-    }
-
-    /// The scale starts at half right, or at the ten below the worst
-    /// character when it is worse.
-    #[test]
-    fn the_scale_takes_in_the_worst_character() {
-        assert_eq!(scale_bottom(&[letter(9, 10), letter(6, 10)]), 0.5);
-        assert_eq!(scale_bottom(&[letter(3, 10)]), 0.3);
-        assert_eq!(along(0.9, 0.5), 80.0);
-        assert_eq!(along(0.2, 0.5), 0.0);
     }
 }

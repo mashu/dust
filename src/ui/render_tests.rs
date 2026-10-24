@@ -1485,7 +1485,7 @@ fn a_simple_qso_run_has_results_without_a_score() {
 }
 
 /// A run long enough for the board says where it stands among runs of its
-/// own contest.
+/// own contest and length, by its verified score.
 #[test]
 fn a_contest_run_is_placed_among_runs_of_its_contest() {
     let html = render(|| {
@@ -1506,7 +1506,11 @@ fn a_contest_run_is_placed_among_runs_of_its_contest() {
             }
         }
     });
-    assert!(html.contains("3rd best of your 14 CQ WPX runs"), "{html}");
+    assert!(
+        html.contains("3rd best of your 14 CQ WPX runs of 10 minutes — "),
+        "{html}"
+    );
+    assert!(html.contains(" verified points<"), "{html}");
     assert!(html.contains("100%"), "every QSO clean");
     assert!(html.contains("Every one logged clean."));
 }
@@ -2327,7 +2331,8 @@ mod interactions {
     }
 
     /// Under All, the board says where contest runs sit; under Contest, a
-    /// chip for each contest ranks runs within it.
+    /// chip for each contest ranks runs within it, by the verified score of
+    /// runs of one length or by QSOs logged clean an hour.
     #[test]
     fn the_board_ranks_contest_runs_within_their_contest() {
         use crate::ui::scores::{ScoresTab, ScoresTabProps};
@@ -2347,7 +2352,19 @@ mod interactions {
             ui.html()
         );
         assert!(!ui.has("A WPX run earns about 30% less a group"));
-        assert!(ui.has("over runs of 5 minutes or more that hold 10 groups or more"));
+        assert!(ui.has("Ranked by verified contest score, of what was logged clean, among runs set to 10 minutes."));
+        assert!(ui.has("The board takes runs of 5 minutes or more that hold 10 groups or more"));
+        assert!(ui.has(" verified points</span>"), "{}", ui.html());
+        assert!(ui.has(">Verified score over time<"));
+        assert!(ui.has(">Best runs<"));
+        assert!(ui.input_tag("rank-verified-score").contains("active"));
+        assert!(ui.has("5 of 5 QSOs clean · 10-minute run"));
+        assert_eq!(ui.controls("board-").len(), 10, "every run, ranked");
+        ui.click("rank-clean-qsos-an-hour");
+        assert!(ui.input_tag("rank-clean-qsos-an-hour").contains("active"));
+        assert!(ui.has("Ranked by QSOs logged clean an hour, fair between runs of any length."));
+        assert!(ui.has(" clean QSOs an hour</span>"));
+        assert!(ui.has(">Clean QSOs an hour over time<"));
         assert_eq!(ui.controls("board-").len(), 10, "every run, ranked");
         ui.click("pill-koch");
         assert!(!ui.shows("kind-cq-wpx"));
@@ -2490,12 +2507,17 @@ mod interactions {
         assert!(ui.has(">Mastered · 0<"));
         assert!(!ui.has(">Weak · "), "nothing is weak");
         let k = ui.input_tag("letter-k");
-        assert!(k.contains("err-row letters building"), "{k}");
+        assert!(k.contains("letter-row stat-row building"), "{k}");
         assert!(k.contains("aria-label=\"K: 83% right of 30, likely"), "{k}");
         assert!(k.contains("up 50 points lately"), "{k}");
         assert!(ui.has(">↑ 50<"));
+        assert!(ui.has("Building · 30 tries · likely "), "{}", ui.html());
+        // The bar is as long as the share right, with a notch at the
+        // Mastered line.
+        assert!(ui.has("width: 83.3%;"));
+        assert!(ui.has("class=\"bar-mark\" style=\"left: 90.0%;\""));
         let m = ui.input_tag("letter-m");
-        assert!(m.contains("err-row letters finding-out"), "{m}");
+        assert!(m.contains("letter-row stat-row finding-out"), "{m}");
         assert!(m.contains("few tries"), "{m}");
         // The weakest first: K, building, before M, too few tries to tell.
         let html = ui.html();
@@ -2531,19 +2553,24 @@ mod interactions {
         // M missed two times in four: over the 10% threshold, and so few
         // tries that the trainer is still finding out.
         let m = ui.input_tag("sample-m");
-        assert!(m.contains("err-row finding-out"), "{m}");
+        assert!(m.contains("letter-row stat-row finding-out"), "{m}");
         assert!(m.contains("aria-label=\"M: wrong about"), "{m}");
         // U, the third Koch character, was never heard.
-        let u = ui.input_tag("sample-u");
-        assert!(u.contains("err-row new"), "{u}");
-        assert!(u.contains("aria-label=\"U: not heard yet,"), "{u}");
+        // and has no row: the summary names it, with the rest the set draws
+        // and nothing has been heard of.
+        assert!(!ui.shows("sample-u"));
+        assert!(ui.has(">Not heard yet · "), "{}", ui.html());
+        assert!(ui.has("class=\"err-chip finding-out group-text\">U<"));
         assert!(ui.has("Still finding out · "));
+        // Each row is a bar, the line under it saying where its rate
+        // likely is and its chance next.
+        assert!(ui.has("class=\"bar-track marked\""));
+        assert!(ui.has("% wrong · "), "{}", ui.html());
+        assert!(ui.has(" chance next<"));
         assert!(ui.input_tag("seg-sample-work").contains("active"));
         assert_eq!(first_row(&ui), "sample-m", "the most work first");
-        // The dot sits on the best guess, and the dashed threshold at 10%
-        // of a scale to 60%.
-        assert!(ui.has("--thr: 16.7%;"));
-        assert!(ui.has("class=\"err-dot\""));
+        // The notch is at the 10% threshold, on bars that run to 60%.
+        assert!(ui.has("class=\"bar-mark\" style=\"left: 16.7%;\""));
 
         ui.click("seg-sample-taught");
         assert_eq!(first_row(&ui), "sample-k", "taught order");

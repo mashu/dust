@@ -101,10 +101,16 @@ fn a_board_can_be_narrowed_to_one_mode() {
     assert_eq!(ui.controls("board-").len(), 3);
 }
 
+/// The Contest pill is there before any run is: it says how a run gets
+/// on a board of its own.
 #[test]
-fn one_mode_needs_no_choice_of_mode() {
-    let ui = board(vec![koch(1, 30.0), koch(2, 50.0)]);
-    assert!(!ui.shows("pill-all-modes"));
+fn the_contest_pill_is_there_before_any_run() {
+    let mut ui = board(vec![koch(1, 30.0), koch(2, 50.0)]);
+    assert!(ui.shows("pill-all-modes") && ui.shows("pill-koch"));
+    ui.click("pill-contest");
+    assert!(ui.has(">No contest runs yet<"), "{}", ui.html());
+    assert!(ui.has("Choose Contest under Settings → Character set"));
+    assert!(!ui.shows("rank-verified-score"), "nothing to rank yet");
 }
 
 #[test]

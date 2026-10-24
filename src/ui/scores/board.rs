@@ -1,7 +1,7 @@
-use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode};
+use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode, Ranking};
 use dioxus::prelude::*;
 
-use super::{Medal, mode_label, per_group_label, run_rule, speed};
+use super::{Medal, mode_label, rating_label, run_rule, speed};
 use crate::ui::format::day_and_clock;
 use crate::ui::stats_detail::ASSISTED;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
@@ -35,6 +35,28 @@ fn badge(entry: &BoardEntry) -> Element {
     }
 }
 
+/// What the board's note says it ranks by, and which sessions it takes.
+fn ranked_by(ranking: Ranking, runs_only: bool) -> String {
+    match ranking {
+        Ranking::Verified(length) => format!(
+            "Ranked by verified contest score, of what was logged clean, among runs set to {} minutes. The board takes {}; deleting a run takes it off.",
+            length / 60,
+            run_rule()
+        ),
+        Ranking::CleanRate => format!(
+            "Ranked by QSOs logged clean an hour, fair between runs of any length. The board takes {}; deleting a run takes it off.",
+            run_rule()
+        ),
+        Ranking::PerGroup if runs_only => format!(
+            "Ranked by points a group, over {}. Deleting a run takes it off.",
+            run_rule()
+        ),
+        Ranking::PerGroup => format!(
+            "Ranked by points a group, over sessions of {BOARD_MIN_GROUPS} groups or more. Deleting a session takes it off."
+        ),
+    }
+}
+
 /// The board itself, best first: the top ten until asked for every row,
 /// then the assisted runs, greyed and with no place. Pointing at a row with
 /// a mouse marks it on the timeline for as long as it stays; a tap keeps it
@@ -53,6 +75,8 @@ pub(super) fn BoardList(
     pinned: Signal<Option<u64>>,
     /// The board is of every mode, so each row says which it was.
     show_mode: bool,
+    /// What it ranks by.
+    ranking: Ranking,
 ) -> Element {
     let (mut hovered, mut pinned) = (hovered, pinned);
     let mut show_all = use_signal(|| false);
@@ -63,26 +87,23 @@ pub(super) fn BoardList(
     let is_run = |entry: &BoardEntry| entry.mode == CharSetMode::Contest;
     let runs_only = board.iter().chain(&assisted).all(is_run);
     let runs_among_others = !runs_only && board.iter().any(is_run);
-    let note = if runs_only {
-        format!(
-            "Ranked by points a group, over {}. Deleting a run takes it off.",
-            run_rule()
-        )
-    } else {
-        format!(
-            "Ranked by points a group, over sessions of {BOARD_MIN_GROUPS} groups or more. Deleting a session takes it off."
-        )
-    };
+    let note = ranked_by(ranking, runs_only);
     let (mut rows, mut greyed) = (board, assisted);
     if !show_all() {
         rows.truncate(BOARD_TOP);
         greyed.truncate(BOARD_TOP - rows.len());
     }
-    // A run counts its QSOs, where its log reads; a session its groups.
+    // A run counts its QSOs and says its length, where its log reads; a
+    // session counts its groups.
     let detail = |entry: &BoardEntry| {
-        let count = match entry.qsos {
-            Some(qsos) => format!("{qsos} QSO{}", if qsos == 1 { "" } else { "s" }),
-            None => format!("{} groups", entry.groups),
+        let count = match (entry.qsos, entry.limit_s) {
+            (Some(qsos), Some(limit_s)) => format!(
+                "{qsos} QSO{} · {} min",
+                if qsos == 1 { "" } else { "s" },
+                limit_s / 60
+            ),
+            (Some(qsos), None) => format!("{qsos} QSO{}", if qsos == 1 { "" } else { "s" }),
+            (None, _) => format!("{} groups", entry.groups),
         };
         format!(
             "{count} · {} · {}%",
@@ -95,7 +116,7 @@ pub(super) fn BoardList(
         div { class: "card stack-sm",
             CardHead {
                 icon: IconName::Medal,
-                title: "Best sessions",
+                title: if ranking == Ranking::PerGroup { "Best sessions" } else { "Best runs" },
                 note,
             }
             if runs_among_others {
@@ -143,7 +164,7 @@ pub(super) fn BoardList(
                                     }
                                 }
                                 span { class: "board-main",
-                                    span { class: "board-score", "{per_group_label(entry.per_group)}" }
+                                    span { class: "board-score", "{rating_label(ranking, entry.rating)}" }
                                     span { class: "board-when", "{when}" }
                                 }
                                 span { class: "board-detail",
@@ -164,7 +185,7 @@ pub(super) fn BoardList(
                             span { class: "board-number unplaced", aria_label: "Not placed", "—" }
                         }
                         span { class: "board-main",
-                            span { class: "board-score", "{per_group_label(entry.per_group)}" }
+                            span { class: "board-score", "{rating_label(ranking, entry.rating)}" }
                             span { class: "board-when", "{when(&entry)}" }
                         }
                         span { class: "board-detail",

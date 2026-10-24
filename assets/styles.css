@@ -1854,6 +1854,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   color: var(--copper-deep);
   box-shadow: none;
 }
+/* Under a contest with a score, what its board ranks by, named first. */
+.rank-pills { align-items: center; }
+.rank-label { margin-right: 0.15rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
 .best-card {
   display: flex;
   align-items: center;
@@ -2131,16 +2134,23 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 
 .chart-card { padding-bottom: 0.8rem; }
 .sparkline { width: 100%; height: auto; display: block; }
+/* A row of a bar card, lit under the pointer so the bar read is plain: it
+   reaches a little past the card's text either side for the light. */
 .letter-row {
   display: grid;
   gap: 0.4rem 0.7rem;
   align-items: center;
-  padding: 0.45rem 0;
+  margin: 0 -0.5rem;
+  padding: 0.45rem 0.5rem;
   border-bottom: 1px solid var(--line-soft);
+  transition: background 0.15s var(--ease);
 }
 .letter-row:last-child { border-bottom: 0; }
 .letter-row { grid-template-columns: 1.7rem 1fr auto; }
 .letter-row .tiny { grid-column: 2 / -1; text-transform: none; letter-spacing: 0.02em; }
+@media (hover: hover) {
+  .letter-row:hover { background: var(--surface-2); }
+}
 .letter-key {
   display: grid;
   place-items: center;
@@ -2163,13 +2173,12 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   background: linear-gradient(90deg, var(--copper), var(--copper-lift));
 }
 .bar-fill.sample { background: linear-gradient(90deg, var(--info), var(--purple-700)); }
-/* What comes up next: a row per character. Its band is the trainer's
-   belief in how often you get it wrong, inked where the rate is likely and
-   fading where it is not (the stops are drawn in the row's --tone), with a
-   dot at the best guess; the part of the scale over your level-up
-   threshold (--thr) is washed copper behind a dashed line. Green is under
-   it, copper over it, and grey still finding out, dashed when never
-   heard. A summary above names them; chance next is on the right. */
+/* What comes up next and Letter accuracy: a summary naming where the
+   characters stand, then a bar a character, drawn as the speed and length
+   bars are, in the colour of where it stands (--tone): green under your
+   line, copper over it, amber building, grey still finding out. A paler
+   stretch past the bar runs to the top of where it likely is, and a notch
+   marks the line. */
 .err-summary {
   display: grid;
   gap: 0.45rem;
@@ -2194,73 +2203,27 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .err-swatch.solid { background: var(--good); }
 .err-swatch.to-work-on { background: var(--copper); }
 .err-swatch.building { background: var(--warn); }
-.err-swatch.new { border: 1.5px solid var(--ink-dim); }
-.err-swatch.band { width: 26px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, transparent, var(--ink-dim), transparent); }
-.err-rows { display: grid; }
-.err-row, .err-axis { display: grid; grid-template-columns: 1.55rem 1fr 4.2rem; align-items: center; gap: 0.6rem; }
-.err-row { height: 24px; --tone: var(--ink-dim); }
-.err-row.solid { --tone: var(--good); }
-.err-row.to-work-on { --tone: var(--copper); }
-.err-row.building { --tone: var(--warn); }
-.err-row.not-drawn { opacity: 0.5; }
-.err-key { width: 1.55rem; height: 1.3rem; border-radius: 6px; font-size: 0.85rem; }
-.err-row.solid .err-key { background: var(--good-soft); color: var(--good); }
-.err-row.to-work-on .err-key { background: var(--copper-soft); color: var(--copper-deep); }
-.err-row.building .err-key { background: var(--warn-soft); color: var(--warn); }
-.err-row.finding-out .err-key, .err-row.new .err-key { background: none; border: 1px dashed var(--line-strong); color: var(--ink-soft); }
-.err-plot {
-  position: relative;
-  height: 100%;
-  background: linear-gradient(90deg, transparent var(--thr), var(--copper-soft));
-}
-/* For accuracy the side to stay out of is the left, under the line. */
-.err-plot.below { background: linear-gradient(90deg, var(--copper-soft), transparent var(--thr)); }
-.err-plot::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: var(--thr);
-  border-left: 1.5px dashed var(--good);
-  opacity: 0.75;
-}
-.err-band { position: absolute; inset: 7px 0; width: 100%; height: 10px; }
-.err-dot {
-  position: absolute;
-  top: 50%;
-  width: 9px;
-  height: 9px;
-  border: 1.5px solid var(--surface);
-  border-radius: 50%;
-  background: var(--tone);
-  transform: translate(-50%, -50%);
-}
-.err-row.new .err-dot { border-color: var(--ink-dim); background: var(--surface); }
-.err-chance { display: flex; align-items: center; justify-content: flex-end; gap: 0.35rem; font-size: 0.75rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
-.err-cbar { width: 1.8rem; height: 4px; border-radius: 2px; background: var(--surface-sunken); overflow: hidden; }
-.err-cbar span { display: block; height: 100%; background: linear-gradient(90deg, var(--info), var(--purple-700)); }
-.err-axis { margin-top: 0.2rem; font-size: 0.7rem; color: var(--ink-dim); }
-.err-ticks { position: relative; height: 1rem; }
-.err-ticks span { position: absolute; transform: translate(-50%, 0); white-space: nowrap; }
-.err-ticks span:first-child { transform: none; }
-.err-ticks span:last-child { transform: translate(-100%, 0); }
-.err-next { text-align: right; }
-/* Letter accuracy has two columns on the right: which way a character is
-   going lately, and how fast it is answered, copper when slow. */
-.err-row.letters, .err-axis.letters { grid-template-columns: 1.55rem 1fr 2.4rem 3rem; }
-.acc-trend { font-size: 0.75rem; font-weight: 700; color: var(--ink-dim); text-align: center; font-variant-numeric: tabular-nums; }
+.err-swatch.finding-out { background: var(--ink-dim); }
+.err-swatch.range { width: 26px; height: 7px; border-radius: var(--pill); background: linear-gradient(90deg, var(--ink-dim) 55%, var(--line-strong) 55%); }
+.err-swatch.mark { width: 2px; height: 11px; border-radius: 1px; background: var(--ink); opacity: 0.6; }
+.err-legend > span { white-space: nowrap; }
+.stat-rows { display: grid; }
+.letter-row.stat-row { grid-template-columns: 1.7rem 1fr 3rem; --tone: var(--ink-dim); }
+.stat-row.solid { --tone: var(--good); }
+.stat-row.to-work-on { --tone: var(--copper); }
+.stat-row.building { --tone: var(--warn); }
+.stat-row.not-drawn { opacity: 0.55; }
+.stat-row.solid .letter-key { background: var(--good-soft); color: var(--good); }
+.stat-row.to-work-on .letter-key { background: var(--copper-soft); color: var(--copper-deep); }
+.stat-row.building .letter-key { background: var(--warn-soft); color: var(--warn); }
+.stat-row.finding-out .letter-key { background: none; border: 1px dashed var(--line-strong); color: var(--ink-soft); }
+.stat-range { position: absolute; top: 0; bottom: 0; border-radius: var(--pill); background: var(--tone); opacity: 0.3; }
+.stat-fill { position: relative; background: var(--tone); }
+.stat-value { text-align: right; }
+.acc-trend { font-weight: 700; }
 .acc-trend.up { color: var(--good); }
 .acc-trend.down { color: var(--copper-deep); }
-.acc-time { font-size: 0.75rem; color: var(--ink-soft); text-align: right; font-variant-numeric: tabular-nums; }
 .acc-time.slow { color: var(--copper-deep); font-weight: 700; }
-.err-legend > span { white-space: nowrap; }
-/* A phone gives the scale the room: narrower columns either side of it,
-   and every other tick, so their labels never run into each other. */
-@media (max-width: 480px) {
-  .err-row, .err-axis { grid-template-columns: 1.45rem 1fr 3.4rem; gap: 0.45rem; }
-  .err-row.letters, .err-axis.letters { grid-template-columns: 1.45rem 1fr 1.7rem 2.5rem; }
-  .err-ticks span:nth-child(even) { display: none; }
-}
 /* Common confusions and hardest pairs: the characters as tiles, the one
    taken for or the one after in copper, each in small Morse with the
    elements that differ picked out, and a bar of how often, of every one

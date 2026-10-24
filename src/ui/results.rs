@@ -8,23 +8,25 @@ use crate::ui::widgets::{CardHead, GroupResultRow, Icon, IconName, ScoreRing, co
 
 /// What the session's place on the score board says, and the medal it
 /// earns, if any: among the `noun` sessions kept on this device, or the
-/// `noun` runs, by what each earned a group.
+/// `noun` runs, those of the length `of_length` says where they are ranked
+/// by it, by what each is ranked by, said in `rating`: "72.4 points a
+/// group", "1312 verified points".
 pub(crate) fn place_line(
     place: usize,
     of: usize,
     noun: &str,
     unit: &str,
-    per_group: f64,
+    of_length: &str,
+    rating: &str,
 ) -> (String, Option<usize>) {
     let medal = (place <= 3).then_some(place);
-    let rating = per_group_label(per_group);
     let text = if of == 1 {
-        format!("Your first {noun} {unit} on the board — {rating} points a group")
+        format!("Your first {noun} {unit}{of_length} on the board — {rating}")
     } else if place == 1 {
-        format!("New personal best — {rating} points a group, the top of your {of} {noun} {unit}s")
+        format!("New personal best — {rating}, the top of your {of} {noun} {unit}s{of_length}")
     } else {
         format!(
-            "{} best of your {of} {noun} {unit}s — {rating} points a group",
+            "{} best of your {of} {noun} {unit}s{of_length} — {rating}",
             ordinal(place)
         )
     };
@@ -54,31 +56,55 @@ mod tests {
     #[test]
     fn a_place_is_said_among_the_sessions_of_its_mode() {
         assert_eq!(
-            place_line(1, 1, "callsign", "session", 64.0),
+            place_line(1, 1, "callsign", "session", "", "64.0 points a group"),
             (
                 "Your first callsign session on the board — 64.0 points a group".to_string(),
                 Some(1)
             )
         );
         assert_eq!(
-            place_line(1, 8, "Koch", "session", 72.44).0,
+            place_line(1, 8, "Koch", "session", "", "72.4 points a group").0,
             "New personal best — 72.4 points a group, the top of your 8 Koch sessions"
         );
         assert_eq!(
-            place_line(3, 8, "Koch", "session", 60.0),
+            place_line(3, 8, "Koch", "session", "", "60.0 points a group"),
             (
                 "3rd best of your 8 Koch sessions — 60.0 points a group".to_string(),
                 Some(3)
             )
         );
         assert_eq!(
-            place_line(12, 40, "word", "session", 10.0).1,
+            place_line(12, 40, "word", "session", "", "10.0 points a group").1,
             None,
             "medals go to three"
         );
         assert_eq!(
-            place_line(3, 14, "CQ WPX", "run", 20.7).0,
+            place_line(3, 14, "CQ WPX", "run", "", "20.7 points a group").0,
             "3rd best of your 14 CQ WPX runs — 20.7 points a group"
+        );
+        assert_eq!(
+            place_line(
+                1,
+                1,
+                "CQ WPX",
+                "run",
+                " of 10 minutes",
+                "312 verified points"
+            )
+            .0,
+            "Your first CQ WPX run of 10 minutes on the board — 312 verified points"
+        );
+        assert_eq!(
+            place_line(
+                2,
+                5,
+                "CQ WPX",
+                "run",
+                " of 10 minutes",
+                "280 verified points"
+            )
+            .0,
+            "2nd best of your 5 CQ WPX runs of 10 minutes — 280 verified points"
         );
     }
 }
@@ -136,7 +162,8 @@ pub fn ResultsView(
             }
             if let (Some((place, of)), Some(per_group)) = (place, cw_core::per_group(&result)) {
                 {
-                    let (text, medal) = place_line(place, of, mode_noun(result.char_set_mode), "session", per_group);
+                    let rating = format!("{} points a group", per_group_label(per_group));
+                    let (text, medal) = place_line(place, of, mode_noun(result.char_set_mode), "session", "", &rating);
                     rsx! {
                         PlaceBanner { text, place, medal }
                     }
