@@ -55,6 +55,10 @@ pub struct MorsePlayer {
     /// be: what a send asked to start at a given time takes over from it
     /// against.
     heard_at: Option<Instant>,
+    /// The volume the mixer was last asked to play at, as its gain, so it
+    /// is locked for it only when that moves: a callback that finds it held
+    /// plays a buffer without it.
+    volume: f64,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -111,6 +115,7 @@ impl MorsePlayer {
             opened_at: Instant::now(),
             refused_at: None,
             heard_at: None,
+            volume: 1.0,
         };
         if let Err(err) = player.open(&device, &supported) {
             eprintln!("audio output: {err}");
@@ -203,6 +208,11 @@ impl MorseBackend for MorsePlayer {
     fn apply_band(&mut self, settings: &TrainingSettings) {
         // A stream that will not open is reported by the next send.
         self.ensure_output_unless_refused();
+        let volume = settings.output_gain();
+        if volume != self.volume {
+            self.mixer().set_volume(volume);
+            self.volume = volume;
+        }
         if !self.state.band_needs_rebuild(settings) {
             return;
         }

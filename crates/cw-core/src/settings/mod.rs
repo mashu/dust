@@ -37,9 +37,14 @@ pub const COUNTDOWN_MAX_SEC: u32 = 10;
 /// The side tone: where on the dial a station can be heard.
 pub const SIDE_TONE_MIN_HZ: f64 = 200.0;
 pub const SIDE_TONE_MAX_HZ: f64 = 1_200.0;
-/// A station's level, as a share of full scale.
+/// A station's strength, as a share of the strongest: how far it stands
+/// over the band's noise, which is not how loud the app plays.
 pub const VOLUME_MIN: f64 = 0.1;
 pub const VOLUME_MAX: f64 = 1.0;
+/// How loud everything is played, as a share of full volume: the loudest
+/// the output stage plays clean ([`crate::band::FULL_VOLUME_GAIN`]).
+pub const MASTER_VOLUME_MIN: f64 = 0.05;
+pub const MASTER_VOLUME_MAX: f64 = 1.0;
 /// The keying envelope's rise and fall, in milliseconds.
 pub const STEEPNESS_MIN_MS: f64 = 1.0;
 pub const STEEPNESS_MAX_MS: f64 = 50.0;
@@ -398,9 +403,18 @@ pub const PILEUP_LEVEL_MAX_DB: f64 = 20.0;
 pub struct BandSettings {
     pub side_tone_min: f64,
     pub side_tone_max: f64,
+    /// The strength of the station you are copying, drawn from this range
+    /// for each group: how far it stands over the band's noise. How loud
+    /// everything plays is [`Self::master_volume`].
     pub volume_min: f64,
     pub volume_max: f64,
     pub link_volume: bool,
+    /// How loud everything is played, as a share of full volume: the band,
+    /// the Morse and your own messages, lifted together after the AGC and
+    /// before the limiter ([`TrainingSettings::output_gain`]), and the
+    /// paddle's sidetone with them. Full, out of the box, is as loud as the
+    /// output stage plays clean; older saves have no field and load at it.
+    pub master_volume: f64,
     /// The keying envelope's rise and fall, in milliseconds. A rig keys in
     /// four to eight; ten sounded soft.
     pub steepness: f64,
@@ -463,6 +477,7 @@ impl Default for BandSettings {
             volume_min: 0.7,
             volume_max: 1.0,
             link_volume: false,
+            master_volume: MASTER_VOLUME_MAX,
             steepness: 6.0,
             envelope_smoothing: 0.75,
             qsb_enabled: true,
@@ -536,9 +551,9 @@ pub enum SettingsSection {
     /// Which characters are practised, and how far into them you are; in
     /// a contest, which one, how it runs and how often your TU signs.
     CharacterSet,
-    /// Pitch and level of the station you are copying; in a contest, how
-    /// loud you hear your own sending, and whether the band is heard
-    /// through it.
+    /// How loud everything plays, and the pitch and strength of the station
+    /// you are copying; in a contest, how loud you hear your own sending,
+    /// and whether the band is heard through it.
     ToneAndVolume,
     /// Fading, static, the noise floor, the filter, who else is calling,
     /// and in a contest how the callers operate and whether some flutter.
@@ -752,6 +767,31 @@ mod tests {
         );
     }
 
+    /// The volume is a share of full volume, at full out of the box and in
+    /// a save from before it, and full lifts the band as it is calibrated;
+    /// nothing set takes it past full or under its floor.
+    #[test]
+    fn the_volume_is_a_share_of_full_volume() {
+        let full = crate::band::FULL_VOLUME_GAIN;
+        let mut s = TrainingSettings::default();
+        assert_eq!(s.band.master_volume, 1.0);
+        assert_eq!(s.output_gain(), full);
+        assert!(full > 1.0, "full is louder than the band as calibrated");
+        s.band.master_volume = 0.5;
+        assert_eq!((s.master_volume(), s.output_gain()), (0.5, 0.5 * full));
+        for wild in [90.0, -9.0, 0.0, f64::NAN, f64::INFINITY] {
+            s.band.master_volume = wild;
+            let share = s.master_volume();
+            assert!(
+                (MASTER_VOLUME_MIN..=1.0).contains(&share),
+                "{wild}: {share}"
+            );
+        }
+        let old: TrainingSettings =
+            serde_json::from_str(r#"{"volumeMin":0.5}"#).expect("an old save");
+        assert_eq!(old.band.master_volume, 1.0);
+    }
+
     #[test]
     fn a_level_is_read_inside_its_alphabet() {
         let mut s = TrainingSettings::default();
@@ -894,6 +934,7 @@ mod tests {
         s.band.side_tone_max = 1.0;
         s.band.volume_min = 9.0;
         s.band.volume_max = -9.0;
+        s.band.master_volume = 900.0;
         s.band.steepness = 900.0;
         s.band.envelope_smoothing = 9.0;
         s.band.qsb_depth = 9.0;
@@ -969,6 +1010,7 @@ mod tests {
             s.band.side_tone_max = bad;
             s.band.volume_min = bad;
             s.band.volume_max = bad;
+            s.band.master_volume = bad;
             s.band.steepness = bad;
             s.band.envelope_smoothing = bad;
             s.band.qsb_depth = bad;
@@ -1009,6 +1051,7 @@ mod tests {
         assert_eq!(s.playback.group_pause_sec, 15.0);
         assert_eq!(s.playback.countdown_sec, COUNTDOWN_MAX_SEC);
         assert_eq!(s.playback.group_repeat_max, GROUP_REPEAT_MAX);
+        assert_eq!(s.band.master_volume, MASTER_VOLUME_MAX);
         assert_eq!(s.band.steepness, 50.0);
         assert_eq!(s.band.envelope_smoothing, 1.0);
         assert_eq!(s.band.noise_level, 1.0);
@@ -1510,6 +1553,7 @@ mod tests {
         s.band.volume_min = 0.3;
         s.band.volume_max = 0.6;
         s.band.link_volume = true;
+        s.band.master_volume = 0.5;
         s.band.steepness = 7.0;
         s.band.envelope_smoothing = 0.7;
         s.band.qsb_enabled = false;

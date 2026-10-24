@@ -3,11 +3,11 @@ use super::{
     COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
     EXTRA_WORD_SPACE_MIN, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, GROUP_PAUSE_MAX_SEC,
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    LETTER_LEVEL_CEILING, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN,
-    NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
-    PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
-    STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX,
-    VOLUME_MIN, WPM_MAX, WPM_MIN,
+    LETTER_LEVEL_CEILING, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, MY_SENDING_MAX_DB,
+    MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
+    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
+    STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 use crate::callsign::{CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN};
 use crate::level::LEVEL_MIN;
@@ -93,6 +93,7 @@ impl TrainingSettings {
         if b.link_volume {
             b.volume_max = b.volume_min;
         }
+        b.master_volume = b.master_volume.clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX);
         b.steepness = b.steepness.clamp(STEEPNESS_MIN_MS, STEEPNESS_MAX_MS);
         b.envelope_smoothing = b.envelope_smoothing.clamp(0.0, 1.0);
         b.qsb_depth = b.qsb_depth.clamp(0.0, 1.0);
@@ -165,6 +166,7 @@ impl TrainingSettings {
         fix(&mut b.side_tone_max, db.side_tone_max);
         fix(&mut b.volume_min, db.volume_min);
         fix(&mut b.volume_max, db.volume_max);
+        fix(&mut b.master_volume, db.master_volume);
         fix(&mut b.steepness, db.steepness);
         fix(&mut b.envelope_smoothing, db.envelope_smoothing);
         fix(&mut b.qsb_depth, db.qsb_depth);

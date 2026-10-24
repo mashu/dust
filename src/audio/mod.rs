@@ -38,7 +38,9 @@ pub trait MorseBackend {
     /// does nothing.
     fn resume_from_gesture(&mut self) {}
 
-    /// Bring the background layers in line with the settings.
+    /// Bring the background layers in line with the settings, and the
+    /// volume everything but the paddle's sidetone is played at; the
+    /// sidetone comes at the level it is heard at.
     ///
     /// Never fails. A device that will not open is not the band's failure:
     /// the band is in place for when it does, and the next send reports the

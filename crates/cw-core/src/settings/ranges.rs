@@ -1,9 +1,10 @@
 use std::ops::RangeInclusive;
 
 use super::{
-    RangeSetting, RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN,
-    TrainingSettings, VOLUME_MAX, VOLUME_MIN,
+    MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
+    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, TrainingSettings, VOLUME_MAX, VOLUME_MIN,
 };
+use crate::band::FULL_VOLUME_GAIN;
 
 /// How far apart the side tone bounds are pushed when a fixed pitch is opened
 /// back up into a range.
@@ -169,6 +170,22 @@ impl TrainingSettings {
             finite_within(self.band.volume_max, min, VOLUME_MAX)
         };
         min..=max
+    }
+
+    /// How loud everything plays, as a share of full volume, inside the
+    /// control's range whatever is set.
+    pub fn master_volume(&self) -> f64 {
+        finite_within(
+            self.band.master_volume,
+            MASTER_VOLUME_MIN,
+            MASTER_VOLUME_MAX,
+        )
+    }
+
+    /// What the output stage multiplies the band, the Morse and your own
+    /// messages by before the limiter: that share of full volume's gain.
+    pub fn output_gain(&self) -> f64 {
+        self.master_volume() * FULL_VOLUME_GAIN
     }
 
     /// The middle of the side-tone range: where the receiver is tuned.

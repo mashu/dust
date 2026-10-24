@@ -613,7 +613,7 @@ fn settings_renders_every_card() {
         "Ultimatic",
         "Speed",
         // dioxus-ssr escapes the ampersand, so match the card note instead.
-        "Side tone pitch and sending level",
+        "Volume, pitch and station strength",
         "Keying envelope",
         "Auto level",
         "Character sampling",

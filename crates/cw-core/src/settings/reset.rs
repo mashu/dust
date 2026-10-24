@@ -69,6 +69,7 @@ impl TrainingSettings {
                 self.band.volume_min = d.band.volume_min;
                 self.band.volume_max = d.band.volume_max;
                 self.band.link_volume = d.band.link_volume;
+                self.band.master_volume = d.band.master_volume;
                 self.contest.my_sending_db = d.contest.my_sending_db;
                 self.contest.contest_qsk = d.contest.contest_qsk;
             }

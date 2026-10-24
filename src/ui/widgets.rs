@@ -829,21 +829,25 @@ pub fn SettingsRange(
     max_bound: f64,
     step: f64,
     hint: Option<&'static str>,
+    /// A share from 0 to 1, shown and typed as a percentage of it.
+    #[props(default)]
+    percent: bool,
 ) -> Element {
     let range = use_memo(move || settings.read().range(which))();
+    let scale = if percent { 100.0 } else { 1.0 };
     rsx! {
         LinkedRange {
             label,
             unit,
-            min_value: range.min,
-            max_value: range.max,
+            min_value: range.min * scale,
+            max_value: range.max * scale,
             linked: range.linked,
-            min_bound,
-            max_bound,
-            step,
+            min_bound: min_bound * scale,
+            max_bound: max_bound * scale,
+            step: step * scale,
             hint: hint.map(str::to_string),
-            on_min: move |v| settings.write().set_range_min(which, v),
-            on_max: move |v| settings.write().set_range_max(which, v),
+            on_min: move |v: f64| settings.write().set_range_min(which, v / scale),
+            on_max: move |v: f64| settings.write().set_range_max(which, v / scale),
             on_link: move |on| settings.write().set_range_linked(which, on),
         }
     }

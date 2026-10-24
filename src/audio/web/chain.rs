@@ -1,7 +1,8 @@
 //! The receiver's output stage in nodes: where everything is mixed, the AGC
 //! as a compressor, the gate that mutes the receiver while you send without
-//! full break-in, and the soft limiter last of all, with the audio-stage
-//! floor's way around the compressor.
+//! full break-in, the volume, and the soft limiter last of all, with the
+//! audio-stage floor's way around the compressor and the paddle's
+//! sidetone's around the volume.
 
 use cw_core::TrainingSettings;
 use cw_core::band::{
@@ -9,6 +10,9 @@ use cw_core::band::{
     agc_knee, limiter_feed, soft_limit_curve,
 };
 use web_sys::{AudioContext, AudioParam, DynamicsCompressorNode, GainNode};
+
+use super::param::ramp_to;
+use crate::audio::shape::GATE_RAMP_SEC;
 
 /// Points in the soft limiter's lookup table.
 const LIMITER_POINTS: usize = 4_097;
@@ -25,15 +29,22 @@ pub struct Chain {
     /// compressor adds of its own accord.
     limiter_in: GainNode,
     /// The way into the limiter around the compressor: for the audio-stage
-    /// floor, which the native player adds after its AGC, for the paddle's
-    /// sidetone, and for your own message in a contest. None of them has
-    /// make-up gain to take back.
+    /// floor, which the native player adds after its AGC, and for your own
+    /// message in a contest. Neither has make-up gain to take back.
     pub floor_in: GainNode,
+    /// The way into the limiter around the volume as well, for the paddle's
+    /// sidetone, which the native player adds after its mixer: it is set at
+    /// the level it is heard at.
+    pub sidetone_in: GainNode,
+    /// The volume: what the receiver's output and `floor_in` are multiplied
+    /// by on their way into the limiter, and what it was last set to.
+    volume: GainNode,
+    volume_gain: f64,
     /// The receiver's gate, after the AGC: shut while you send without
     /// full break-in, as a rig that is not QSK mutes its receiver. One on
     /// the receiver's output, one on the band's audio-stage floor, which
-    /// is the receiver's too; the paddle's sidetone and your own message go
-    /// into `floor_in` around both.
+    /// is the receiver's too; your own message goes into `floor_in` around
+    /// both, and the paddle's sidetone into `sidetone_in`.
     gate: GainNode,
     /// The band's floor goes in here, through the gate's second half.
     pub band_floor: GainNode,
@@ -88,6 +99,9 @@ impl Chain {
         let feed = limiter_feed(&agc_compressor(None));
         let limiter_in = gain(ctx, feed.receiver, "limiter gain")?;
         let floor_in = gain(ctx, feed.audio_floor, "floor gain")?;
+        let sidetone_in = gain(ctx, feed.audio_floor, "sidetone gain")?;
+        // The band as calibrated, until the settings say how loud.
+        let volume = gain(ctx, 1.0, "volume")?;
         // Open until a send of yours shuts it.
         let gate = gain(ctx, 1.0, "gate")?;
         let band_floor = gain(ctx, 1.0, "band floor gate")?;
@@ -104,11 +118,17 @@ impl Chain {
             .connect_with_audio_node(&floor_in)
             .map_err(|e| format!("band floor connect: {e:?}"))?;
         limiter_in
+            .connect_with_audio_node(&volume)
+            .map_err(|e| format!("volume connect: {e:?}"))?;
+        floor_in
+            .connect_with_audio_node(&volume)
+            .map_err(|e| format!("floor connect: {e:?}"))?;
+        volume
             .connect_with_audio_node(&limiter)
             .map_err(|e| format!("limiter connect: {e:?}"))?;
-        floor_in
+        sidetone_in
             .connect_with_audio_node(&limiter)
-            .map_err(|e| format!("floor connect: {e:?}"))?;
+            .map_err(|e| format!("sidetone connect: {e:?}"))?;
         limiter
             .connect_with_audio_node(&ctx.destination())
             .map_err(|e| format!("mix connect: {e:?}"))?;
@@ -118,9 +138,26 @@ impl Chain {
             agc,
             limiter_in,
             floor_in,
+            sidetone_in,
+            volume,
+            volume_gain: 1.0,
             gate,
             band_floor,
         })
+    }
+
+    /// Play everything but the paddle's sidetone at `gain` from now on: the
+    /// volume, as the output stage's gain. It moves at the receiver gate's
+    /// pace, a whole unit of gain over [`GATE_RAMP_SEC`], as the native
+    /// mixer moves it, so a slider moved under a tone never clicks.
+    pub fn set_volume(&mut self, ctx: &AudioContext, gain: f64) {
+        if gain == self.volume_gain || !gain.is_finite() {
+            return;
+        }
+        let now = ctx.current_time();
+        let until = now + GATE_RAMP_SEC * (gain - self.volume_gain).abs();
+        ramp_to(&self.volume.gain(), gain as f32, now, until);
+        self.volume_gain = gain;
     }
 
     /// The receiver's gate, both halves of it, to schedule alike.
@@ -165,9 +202,8 @@ impl Chain {
             .limiter_in
             .gain()
             .set_value_at_time(feed.receiver as f32, now);
-        let _ = self
-            .floor_in
-            .gain()
-            .set_value_at_time(feed.audio_floor as f32, now);
+        for path in [&self.floor_in, &self.sidetone_in] {
+            let _ = path.gain().set_value_at_time(feed.audio_floor as f32, now);
+        }
     }
 }
