@@ -31,6 +31,22 @@ use crate::time::mono_ms;
 /// session.
 pub const AUDIO_IS_SILENT: bool = cfg!(feature = "silent-audio");
 
+/// How long one meter frame covers: short enough to show a dit at the
+/// fastest speed as a dit, long enough that the scope is a few hundred
+/// points.
+pub const METER_FRAME_SEC: f64 = 0.01;
+
+/// What the receiver did over one short stretch, for the level scope: the
+/// loudest of what reached its AGC, the band and the Morse together through
+/// the filter; the gain the AGC rode at, at its lowest; and the loudest of
+/// what it played, at the volume, before the limiter.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MeterFrame {
+    pub input: f32,
+    pub gain: f32,
+    pub output: f32,
+}
+
 /// What the session runtime needs from a player. Object-safe on purpose: the
 /// runtime holds one boxed backend and tests put their own in its place.
 pub trait MorseBackend {
@@ -81,6 +97,12 @@ pub trait MorseBackend {
     /// squeeze is one buffer of latency, not a stream start.
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
         let _ = (on, frequency_hz, gain);
+    }
+
+    /// The receiver's meter frames since the last were taken, oldest first,
+    /// appended to `into`. None from a player with nothing to meter.
+    fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
+        let _ = into;
     }
 }
 
@@ -210,6 +232,8 @@ pub mod fake {
         /// How long after it starts each send says it reaches the ear: none,
         /// unless a test asks for some.
         pub latency_sec: Cell<f64>,
+        /// Meter frames for the level scope to take, as a test puts them.
+        pub meter: RefCell<Vec<MeterFrame>>,
     }
 
     impl Recorder {
@@ -428,6 +452,10 @@ pub mod fake {
 
         fn set_live_tone(&mut self, on: bool, _frequency_hz: f64, _gain: f64) {
             self.recorder.calls.borrow_mut().push(Call::LiveTone(on));
+        }
+
+        fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
+            into.append(&mut self.recorder.meter.borrow_mut());
         }
     }
 }

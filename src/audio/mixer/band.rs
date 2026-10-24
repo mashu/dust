@@ -38,6 +38,8 @@ pub struct Played {
     /// How much of the band is being played: one when steady, falling to
     /// nothing as it goes.
     pub weight: f64,
+    /// What reached the receiver's AGC, for its meter.
+    pub input: f64,
 }
 
 impl BandVoice {
@@ -89,6 +91,7 @@ impl BandVoice {
                     band: 0.0,
                     gain: 1.0,
                     weight: 0.0,
+                    input: send,
                 };
             }
             Fade::Steady => (1.0, Fade::Steady),
@@ -98,11 +101,12 @@ impl BandVoice {
             Fade::Out(done) => (fade_in_gain(1.0 - progress(done)), Fade::Out(done + 1)),
         };
         self.fade = fade;
-        let Received { band, gain } = self.mixer.next(send);
+        let Received { band, gain, input } = self.mixer.next(send);
         Played {
             band: band * weight,
             gain,
             weight,
+            input,
         }
     }
 }

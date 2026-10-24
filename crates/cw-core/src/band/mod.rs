@@ -97,6 +97,9 @@ pub struct Received {
     /// one gain for everything it hears, so a crash ducks the station you are
     /// copying with the noise.
     pub gain: f64,
+    /// What reached the AGC: the band and the send together, through the
+    /// filter, before any gain. What a level meter on the receiver reads.
+    pub input: f64,
 }
 
 impl BandMixer {
@@ -131,12 +134,14 @@ impl BandMixer {
         // it quiets the whole band at once rather than one layer of it.
         let heard = self.receiver.process(self.source.next_sample());
         let ridden = self.agc.process(heard, send);
+        let input = heard + send;
         // The audio stage's own hiss comes in after all of that: the filter
         // never had it, so it runs on outside the passband, and the AGC never
         // saw it, so it neither moves the gain nor ducks under a station.
         Received {
             band: ridden + self.audio_floor.next_sample(),
             gain: self.agc.gain(),
+            input,
         }
     }
 

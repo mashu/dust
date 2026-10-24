@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 
 use crate::ui::format::counted;
 use crate::ui::help;
+use crate::ui::scope::LevelScope;
 use crate::ui::widgets::{
     CardHead, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch, control_id,
 };
@@ -400,6 +401,13 @@ pub fn BandConditionsCard(
                     "How strong a signal has to be before the AGC turns it down. Back it off and the AGC works less: strong stations are squeezed less and the band breathes less between overs. The volume follows, so the strongest station stays as loud."
                 } else {
                     "With the AGC off, nothing rides the gain, and the volume is all the level there is."
+                }
+            }
+            if previewing {
+                LevelScope { settings }
+            } else {
+                p { id: "scope-hint", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "Play the live preview to watch the band reach the AGC, and set the RF gain by it: the station's peaks over the dashed line are ridden by the AGC, under it they come through as they are."
                 }
             }
         }

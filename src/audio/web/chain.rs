@@ -9,13 +9,17 @@ use cw_core::band::{
     AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, FilterDesign, agc_compressor,
     limiter_feed, receiver_knee, soft_limit_curve,
 };
-use web_sys::{AudioContext, AudioParam, DynamicsCompressorNode, GainNode};
+use web_sys::{AnalyserNode, AudioContext, AudioParam, DynamicsCompressorNode, GainNode};
 
 use super::param::ramp_to;
 use crate::audio::shape::{GATE_RAMP_SEC, Volume};
 
 /// Points in the soft limiter's lookup table.
 const LIMITER_POINTS: usize = 4_097;
+
+/// How many of the latest samples each of the meter's analysers holds:
+/// more than a poll of the level scope apart at any rate a browser runs.
+pub const METER_WINDOW: u32 = 4_096;
 
 /// The fixed part of the graph, built once with the player.
 pub struct Chain {
@@ -54,6 +58,10 @@ pub struct Chain {
     gate: GainNode,
     /// The band's floor goes in here, through the gate's second half.
     pub band_floor: GainNode,
+    /// The level scope's taps: what reaches the AGC, and what comes out of
+    /// both volumes on the way to the limiter.
+    pub meter_input: AnalyserNode,
+    pub meter_output: AnalyserNode,
 }
 
 fn gain(ctx: &AudioContext, value: f64, what: &str) -> Result<GainNode, String> {
@@ -145,6 +153,24 @@ impl Chain {
         limiter
             .connect_with_audio_node(&ctx.destination())
             .map_err(|e| format!("mix connect: {e:?}"))?;
+        // An analyser is always listening, connected onward or not.
+        let analyser = |what: &str| -> Result<AnalyserNode, String> {
+            let node = ctx
+                .create_analyser()
+                .map_err(|e| format!("{what}: {e:?}"))?;
+            node.set_fft_size(METER_WINDOW);
+            Ok(node)
+        };
+        let meter_input = analyser("meter input")?;
+        let meter_output = analyser("meter output")?;
+        receiver_out
+            .connect_with_audio_node(&meter_input)
+            .map_err(|e| format!("meter input connect: {e:?}"))?;
+        for volume in [&received, &monitored] {
+            volume
+                .connect_with_audio_node(&meter_output)
+                .map_err(|e| format!("meter output connect: {e:?}"))?;
+        }
         Ok(Self {
             mix,
             receiver_out,
@@ -158,7 +184,15 @@ impl Chain {
             volume: Volume::UNITY,
             gate,
             band_floor,
+            meter_input,
+            meter_output,
         })
+    }
+
+    /// The gain the AGC is riding at right now, as a gain: one with nothing
+    /// to ride.
+    pub fn agc_gain(&self) -> f64 {
+        10f64.powf(f64::from(self.agc.reduction()) / 20.0)
     }
 
     /// Play what is received and what is monitored at `volume` from now on.

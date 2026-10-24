@@ -14,6 +14,7 @@
 //! moment.
 
 mod band;
+mod meter;
 mod send;
 mod sidetone;
 
@@ -26,6 +27,8 @@ use cw_core::band::soft_limit;
 use crate::audio::shape::{GATE_RAMP_SEC, Volume};
 
 pub use band::BandVoice;
+pub use meter::Meter;
+use meter::Metering;
 pub use send::SendVoice;
 pub use sidetone::{Sidetone, SidetoneControl};
 
@@ -61,6 +64,8 @@ pub struct Mixer {
     /// never clicks.
     volume: Volume,
     volume_asked: Volume,
+    /// What the receiver did, a frame at a time, for the level scope.
+    metering: Metering,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -87,6 +92,7 @@ impl Swept {
 impl Mixer {
     pub fn new(sample_rate: u32) -> Self {
         Self {
+            metering: Metering::new(Arc::new(Meter::new()), sample_rate),
             sample_rate: sample_rate.max(1),
             band: None,
             fading: Vec::with_capacity(FADING_BANDS + 1),
@@ -101,6 +107,11 @@ impl Mixer {
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// The meter the mixer writes its frames to, for the UI to read.
+    pub fn meter(&self) -> Arc<Meter> {
+        self.metering.meter()
     }
 
     /// How long after it starts a send is heard, in seconds, as the last
@@ -187,6 +198,7 @@ impl Mixer {
         self.sample_rate = sample_rate.max(1);
         self.gate = 1.0;
         self.volume = self.volume_asked;
+        self.metering.restart(self.sample_rate);
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
         swept.sends.append(&mut self.retiring);
@@ -236,10 +248,14 @@ impl Mixer {
             // last one's as it goes, easing back to nothing at all to duck
             // behind.
             let mut gain = None;
+            // What reached the AGC, for the meter: the send alone, with no
+            // band to meet it.
+            let mut input = send.heard;
             if let Some(band) = self.band.as_mut() {
                 let played = band.next(send.heard);
                 background += played.band;
                 gain = Some(played.gain);
+                input = played.input;
             }
             for band in self.fading.iter_mut().rev() {
                 let played = band.next(send.heard);
@@ -260,8 +276,9 @@ impl Mixer {
             let (asked, now) = (self.volume_asked, &mut self.volume);
             now.received += (asked.received - now.received).clamp(-gate_step, gate_step);
             now.monitored += (asked.monitored - now.monitored).clamp(-gate_step, gate_step);
-            *slot +=
-                ((background + heard) * self.gate * now.received + send.dry * now.monitored) as f32;
+            let played = (background + heard) * self.gate * now.received + send.dry * now.monitored;
+            *slot += played as f32;
+            self.metering.add(input, gain.unwrap_or(1.0), played);
         }
         for send in self.send.iter().chain(&self.retiring) {
             send.settle(latency);

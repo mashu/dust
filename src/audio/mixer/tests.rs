@@ -180,6 +180,46 @@ fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
     }
 }
 
+/// The meter reads a frame every ten milliseconds of what the mixer
+/// plays: the station at its strength where it reaches the AGC, the gain
+/// the AGC ducks it to, and the loudest of what was played, to the sample.
+#[test]
+fn the_meter_reads_the_agcs_input_its_gain_and_what_was_played() {
+    let settings = hiss();
+    let mut mixer = Mixer::new(SR);
+    let meter = mixer.meter();
+    let mut swept = Swept::new();
+    mixer.set_band(Some(band(&settings, 4)), &mut swept);
+    mixer.set_volume(Volume::of(&settings));
+    let (mut seen, mut frames) = (0, Vec::new());
+    render(&mut mixer, SR as usize / 2);
+    meter.read_since(&mut seen, &mut frames);
+    assert_eq!(frames.len(), 50, "a frame every 10 ms");
+    assert!(
+        frames.iter().all(|f| f.gain == 1.0),
+        "the hiss moved the AGC"
+    );
+    frames.clear();
+
+    mixer.start(send(&settings, "TEST"), &mut swept);
+    let played = render(&mut mixer, SR as usize);
+    meter.read_since(&mut seen, &mut frames);
+    assert_eq!(frames.len(), 100);
+    let input = frames.iter().fold(0.0f32, |a, f| a.max(f.input));
+    let gain = frames.iter().fold(1.0f32, |a, f| a.min(f.gain));
+    let output = frames.iter().fold(0.0f32, |a, f| a.max(f.output));
+    // The station's own level, as its plan keys it: what `send` sends.
+    let voice = resolve_station(&settings, &mut SplitMix64::new(5));
+    let plan = plan_transmission(&Transmission::alone("TEST", voice), &settings);
+    let at_strength = plan.wanted.events[0].target_gain as f32;
+    assert!(
+        (input / at_strength - 1.0).abs() < 0.15,
+        "{input} at the AGC, against {at_strength}"
+    );
+    assert!(gain < 0.8, "the AGC took {gain} off the station");
+    assert_eq!(output, loudest(&played));
+}
+
 /// Bands rebuilt faster than one can fade out each fade out in full: none is
 /// dropped part of the way down, which is a step in the waveform.
 #[test]

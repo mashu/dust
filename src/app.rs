@@ -1415,6 +1415,42 @@ mod ui_tests {
         (ui, recorder)
     }
 
+    /// While the band preview plays, the Band card's scope takes what the
+    /// player metered and reads it against the AGC's line; stopped, the
+    /// scope goes and says what it is for.
+    #[test]
+    fn the_level_scope_reads_the_receiver_while_the_band_plays() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            assert!(ui.shows("level-scope"), "{}", ui.html());
+            assert!(!ui.shows("scope-hint"));
+            let db = |db: f64| 10f64.powf(db / 20.0) as f32;
+            let line = crate::ui::scope::threshold(&with_receiver().clamp()) as f32;
+            recorder.meter.borrow_mut().extend(std::iter::repeat_n(
+                crate::audio::MeterFrame {
+                    input: line * db(9.0),
+                    gain: db(-4.0),
+                    output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
+                },
+                60,
+            ));
+            ui.advance(120).await;
+            assert!(
+                ui.has("Peaks 9 dB over the AGC · AGC takes 4 dB · 3 dB under the limiter"),
+                "{}",
+                ui.html()
+            );
+            assert!(
+                recorder.meter.borrow().is_empty(),
+                "the scope took the frames"
+            );
+
+            ui.click("btn-band-stop");
+            assert!(!ui.shows("level-scope"));
+            assert!(ui.shows("scope-hint"));
+        });
+    }
+
     /// A follow measures the band's AGC before it takes the settings, so a
     /// stop can land in between. The band must not come back up behind it.
     #[test]
