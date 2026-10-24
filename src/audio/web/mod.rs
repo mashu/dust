@@ -29,7 +29,7 @@ use web_sys::{AudioContext, AudioContextState, GainNode};
 
 use super::band_queue::Reservation;
 use super::epoch::{Epoch, Ticket};
-use super::shape::{GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest, Volume};
+use super::shape::{Gains, GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest};
 use super::wait::{heard_after_sec, heard_ms, schedule_lead_sec};
 use super::{METER_FRAME_SEC, MeterFrame, MorseBackend, PlaybackSignal, WaitFlags};
 use crate::time::mono_ms;
@@ -177,7 +177,7 @@ impl MorsePlayer {
     }
 
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.chain.set_volume(&self.ctx, Volume::of(settings));
+        self.chain.set_gains(&self.ctx, Gains::of(settings));
         self.receiver.tune(&self.ctx, &self.chain, settings)?;
         let key = BandKey::of(&settings.band);
         if self.band_key == Some(key) {

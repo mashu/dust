@@ -22,26 +22,30 @@ pub const BAND_FADE_SEC: f64 = 0.02;
 /// tone it catches clicks.
 pub const GATE_RAMP_SEC: f64 = 0.005;
 
-/// How loud a player plays the two things it plays: what it receives, the
-/// band and the stations, at the receiver's AF gain, which full volume sizes
-/// to the receiver; and what it monitors, your own messages, at the volume
-/// alone, as they are set at the level they are heard at.
+/// The gains a player plays at: the receiver's RF gain, on everything
+/// reaching its AGC; what it receives, the band and the stations, at the
+/// receiver's AF gain after the AGC, which full volume sizes to the
+/// receiver; and what it monitors, your own messages, at the volume alone,
+/// as they are set at the level they are heard at.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Volume {
+pub struct Gains {
+    pub rf: f64,
     pub received: f64,
     pub monitored: f64,
 }
 
-impl Volume {
-    /// Both at one: the band as it is calibrated, and your messages at their
+impl Gains {
+    /// All at one: the band as it is calibrated, and your messages at their
     /// level.
     pub const UNITY: Self = Self {
+        rf: 1.0,
         received: 1.0,
         monitored: 1.0,
     };
 
     pub fn of(settings: &TrainingSettings) -> Self {
         Self {
+            rf: settings.rf_gain(),
             received: settings.af_gain(),
             monitored: settings.master_volume(),
         }

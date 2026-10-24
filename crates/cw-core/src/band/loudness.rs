@@ -59,7 +59,8 @@ const HISS_CREST: f64 = 3.5;
 const FULL_VOLUME_GAIN_MAX: f64 = 10.0;
 
 /// What the loudest station is remembered by: everything the receiver and
-/// the keying are made of, and nothing else.
+/// the keying are made of, and nothing else. Not the RF gain: the station
+/// is listened to at full, which is the loudest any RF gain plays it.
 #[derive(Clone, Debug, PartialEq)]
 struct LoudestAsk {
     receiver: FilterDesign,
@@ -115,8 +116,10 @@ impl LoudestAsk {
 /// The loudest a station at full strength comes out of the receiver these
 /// settings describe, before the volume, as a peak of full scale: through
 /// its filter at every pitch the side-tone range can draw, keyed as the
-/// settings key it at the fastest speed they send, ridden by its AGC, with
-/// the band's hiss cresting on top of it. The static and the band's other
+/// settings key it at the fastest speed they send, at full RF gain, ridden
+/// by its AGC, with the band's hiss cresting on top of it. Backing the RF
+/// gain off only ever plays it quieter: below the AGC's threshold by as
+/// much, above it by less, never by nothing. The static and the band's other
 /// stations are left out: their crests are what the limiter is for.
 ///
 /// Remembered, like the AGC's knee, because it takes a few milliseconds of
@@ -132,7 +135,9 @@ pub fn loudest_station(settings: &TrainingSettings) -> f64 {
 /// hiss by, before the limiter: as far as takes the loudest a station comes
 /// out of this receiver ([`loudest_station`]) to just short of where the
 /// limiter starts to bend, so that no receiver and no volume ever bends the
-/// Morse, and every receiver plays it as loud as it can clean.
+/// Morse, and every receiver plays it as loud as it can clean at full RF
+/// gain. It does not follow the RF gain: backed off, the band plays
+/// quieter, as a rig's does.
 pub fn full_volume_gain(settings: &TrainingSettings) -> f64 {
     let loudest = loudest_station(settings);
     if loudest.is_finite() && loudest > 0.0 {
@@ -256,15 +261,15 @@ mod tests {
         );
     }
 
-    /// Backing the RF gain off lets the strongest station through the AGC
-    /// with less taken off, so full volume lifts it less, down to what it
-    /// lifts a receiver with no AGC at all by once the station never
-    /// reaches the knee.
+    /// Raising the AGC's threshold lets the strongest station through with
+    /// less taken off, so full volume lifts it less, down to what it lifts a
+    /// receiver with no AGC at all by once the station never reaches the
+    /// threshold.
     #[test]
-    fn backing_the_rf_gain_off_takes_full_volume_down_to_the_agc_off_gain() {
+    fn raising_the_threshold_takes_full_volume_down_to_the_agc_off_gain() {
         let full = gain(|_| {});
-        let backed_off = gain(|s| s.band.rf_gain_db = -10.0);
-        let all_the_way = gain(|s| s.band.rf_gain_db = crate::settings::RF_GAIN_MIN_DB);
+        let backed_off = gain(|s| s.band.agc_threshold_db = 10.0);
+        let all_the_way = gain(|s| s.band.agc_threshold_db = crate::settings::AGC_THRESHOLD_MAX_DB);
         let off = gain(|s| s.band.agc_enabled = false);
         assert!(
             full > backed_off && backed_off > all_the_way,
@@ -310,7 +315,8 @@ mod tests {
     }
 
     /// Asked again of the same receiver, the answer is the one remembered,
-    /// whatever else moved; anything the receiver is made of asks anew.
+    /// whatever else moved, the RF gain included; anything the receiver is
+    /// made of asks anew.
     #[test]
     fn only_the_receiver_and_the_keying_ask_again() {
         let base = TrainingSettings::default();
@@ -318,6 +324,7 @@ mod tests {
         louder.band.volume_min = 0.2;
         louder.band.qsb_depth = 0.9;
         louder.band.master_volume = 0.3;
+        louder.band.rf_gain_db = -20.0;
         assert_eq!(LoudestAsk::of(&base), LoudestAsk::of(&louder));
         for edit in [
             (|s: &mut TrainingSettings| s.band.filter_width_hz = 500.0)
@@ -325,7 +332,7 @@ mod tests {
             |s| s.band.steepness = 2.0,
             |s| s.band.side_tone_max = 900.0,
             |s| s.band.agc_enabled = false,
-            |s| s.band.rf_gain_db = -6.0,
+            |s| s.band.agc_threshold_db = 6.0,
             |s| s.playback.char_wpm_max = 40.0,
         ] {
             let mut moved = base.clone();

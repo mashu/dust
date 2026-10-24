@@ -1,11 +1,12 @@
 //! The receiver's level scope: what reaches its AGC over the last few
-//! seconds, against where the AGC starts to act, and how far the AGC takes
-//! it down. What the RF gain is set by: a station's peaks above the line are
-//! ridden by the AGC, under it they come through as they are.
+//! seconds, through the RF gain, against where the AGC starts to act, and
+//! how far the AGC takes it down. What the RF gain and the AGC's threshold
+//! are set by: a station's peaks above the line are ridden by the AGC,
+//! under it they come through as they are.
 
 use std::collections::VecDeque;
 
-use cw_core::band::{FilterDesign, SOFT_LIMIT_KNEE, agc_knee, rf_gain};
+use cw_core::band::{FilterDesign, SOFT_LIMIT_KNEE, agc_knee, threshold_raise};
 use cw_core::{BandSettings, TrainingSettings};
 use dioxus::prelude::*;
 
@@ -24,8 +25,8 @@ const READ_OVER: usize = (0.5 / METER_FRAME_SEC) as usize;
 const POLL_MS: u32 = 50;
 
 /// The levels the scope spans, in decibels over the AGC's threshold: the
-/// strongest station at full RF gain stands about ten over it, and the
-/// default band's hiss well under the bottom.
+/// strongest station stands about ten over its lowest, and the default
+/// band's hiss well under the bottom.
 const TOP_DB: f64 = 18.0;
 const BOTTOM_DB: f64 = -36.0;
 
@@ -40,22 +41,17 @@ const LANE_TOP: f64 = 78.0;
 const LANE_HEIGHT: f64 = 18.0;
 
 /// Where the AGC starts to act for these settings, as the amplitude of a
-/// steady tone at the AGC, the RF gain backed off from it: what the scope's
-/// line is drawn at. With the AGC off, where it would act if it were on,
-/// so the line still says where a station stands.
+/// steady tone at the AGC, after the RF gain: what the scope's line is
+/// drawn at. The RF gain moves what reaches the line, not the line. With
+/// the AGC off, where it would act if it were switched on, so the line
+/// still says where a station stands.
 pub(crate) fn threshold(settings: &TrainingSettings) -> f64 {
     let receiver = FilterDesign::from_settings(settings);
     let on = BandSettings {
         agc_enabled: true,
         ..settings.band.clone()
     };
-    let knee = agc_knee(&on, &receiver).unwrap_or(1.0);
-    let rf = if settings.band.agc_enabled {
-        rf_gain(&settings.band)
-    } else {
-        1.0
-    };
-    knee / rf
+    agc_knee(&on, &receiver).unwrap_or(1.0) * threshold_raise(&settings.band)
 }
 
 fn db(ratio: f64) -> f64 {
@@ -246,15 +242,19 @@ mod tests {
         assert_eq!(Reading::of(&frames(&[(0.0, 1.0, 0.0)]), threshold), None);
     }
 
-    /// The line sits where the AGC starts, the RF gain backing it off; with
-    /// the AGC off, where it would start, whatever the RF gain says.
+    /// The line sits where the AGC starts, as far over its lowest as the
+    /// threshold is raised, wherever the RF gain is; with the AGC off, where
+    /// it would start were it switched on.
     #[test]
-    fn the_line_is_the_agc_threshold_backed_off_by_the_rf_gain() {
+    fn the_line_is_the_agc_threshold() {
         let mut settings = TrainingSettings::default();
-        let full = threshold(&settings);
-        settings.band.rf_gain_db = -10.0;
-        assert!((db(threshold(&settings) / full) - 10.0).abs() < 1e-9);
+        let lowest = threshold(&settings);
+        settings.band.agc_threshold_db = 10.0;
+        let raised = threshold(&settings);
+        assert!((db(raised / lowest) - 10.0).abs() < 1e-9);
+        settings.band.rf_gain_db = -20.0;
+        assert_eq!(threshold(&settings), raised);
         settings.band.agc_enabled = false;
-        assert_eq!(threshold(&settings), full);
+        assert_eq!(threshold(&settings), raised);
     }
 }

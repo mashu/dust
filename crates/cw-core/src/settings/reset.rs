@@ -81,8 +81,9 @@ impl TrainingSettings {
                 self.band.qrn_level = d.band.qrn_level;
                 self.band.noise_enabled = d.band.noise_enabled;
                 self.band.noise_level = d.band.noise_level;
-                self.band.agc_enabled = d.band.agc_enabled;
                 self.band.rf_gain_db = d.band.rf_gain_db;
+                self.band.agc_enabled = d.band.agc_enabled;
+                self.band.agc_threshold_db = d.band.agc_threshold_db;
                 self.band.filter_width_hz = d.band.filter_width_hz;
                 self.band.filter_shape = d.band.filter_shape;
                 self.band.stations_min = d.band.stations_min;

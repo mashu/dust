@@ -6,9 +6,10 @@
 //! in one place, as one receiver would: the send through the filter, the
 //! band, the AGC hearing the two together and riding both, bands handing
 //! over to each other, and, without full break-in, its output muted while
-//! you send. Your own message in a contest joins after all of it, as a
-//! rig's sidetone does, at the volume, and the receiver's AF gain sets how
-//! loud the rest is played. The
+//! you send. The RF gain turns down all the receiver hears before its AGC
+//! does. Your own message in a contest joins after all of it, as a rig's
+//! sidetone does, at the volume, and the receiver's AF gain sets how loud
+//! the rest is played. The
 //! output stage — the paddle's sidetone, and the limiter on everything — is
 //! added by the stream, which runs it even when the UI holds the mixer for a
 //! moment.
@@ -24,7 +25,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 
 use cw_core::band::soft_limit;
 
-use crate::audio::shape::{GATE_RAMP_SEC, Volume};
+use crate::audio::shape::{GATE_RAMP_SEC, Gains};
 
 pub use band::BandVoice;
 pub use meter::Meter;
@@ -58,12 +59,12 @@ pub struct Mixer {
     /// break-in, moving between the two a straight line at a time, over
     /// [`GATE_RAMP_SEC`], so it never clicks.
     gate: f64,
-    /// What it plays what it receives and what it monitors at, and what it
-    /// was last asked to: moving between the two at the gate's pace, a whole
-    /// unit of gain over [`GATE_RAMP_SEC`], so a slider moved under a tone
-    /// never clicks.
-    volume: Volume,
-    volume_asked: Volume,
+    /// The gains it plays at, the RF gain ahead of the AGC and the two after
+    /// it, and what it was last asked to: each moving between the two at the
+    /// gate's pace, a whole unit of gain over [`GATE_RAMP_SEC`], so a slider
+    /// moved under a tone never clicks.
+    gains: Gains,
+    gains_asked: Gains,
     /// What the receiver did, a frame at a time, for the level scope.
     metering: Metering,
 }
@@ -100,8 +101,8 @@ impl Mixer {
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
             latency: 0,
             gate: 1.0,
-            volume: Volume::UNITY,
-            volume_asked: Volume::UNITY,
+            gains: Gains::UNITY,
+            gains_asked: Gains::UNITY,
         }
     }
 
@@ -120,12 +121,13 @@ impl Mixer {
         self.latency as f64 / f64::from(self.sample_rate)
     }
 
-    /// Play what it receives and what it monitors at `volume` from here on.
-    pub fn set_volume(&mut self, volume: Volume) {
+    /// Play at `gains` from here on.
+    pub fn set_gains(&mut self, gains: Gains) {
         let held = |gain: f64| if gain.is_finite() { gain.max(0.0) } else { 1.0 };
-        self.volume_asked = Volume {
-            received: held(volume.received),
-            monitored: held(volume.monitored),
+        self.gains_asked = Gains {
+            rf: held(gains.rf),
+            received: held(gains.received),
+            monitored: held(gains.monitored),
         };
     }
 
@@ -197,7 +199,7 @@ impl Mixer {
     pub fn clear(&mut self, sample_rate: u32, swept: &mut Swept) {
         self.sample_rate = sample_rate.max(1);
         self.gate = 1.0;
-        self.volume = self.volume_asked;
+        self.gains = self.gains_asked;
         self.metering.restart(self.sample_rate);
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
@@ -239,6 +241,11 @@ impl Mixer {
         }
         let gate_step = 1.0 / (GATE_RAMP_SEC * f64::from(self.sample_rate));
         for slot in out.iter_mut() {
+            let (asked, now) = (self.gains_asked, &mut self.gains);
+            now.rf += (asked.rf - now.rf).clamp(-gate_step, gate_step);
+            now.received += (asked.received - now.received).clamp(-gate_step, gate_step);
+            now.monitored += (asked.monitored - now.monitored).clamp(-gate_step, gate_step);
+            let now = *now;
             let mut send = self.send.as_mut().map(SendVoice::next).unwrap_or_default();
             for old in &mut self.retiring {
                 send += old.next();
@@ -248,34 +255,33 @@ impl Mixer {
             // last one's as it goes, easing back to nothing at all to duck
             // behind.
             let mut gain = None;
-            // What reached the AGC, for the meter: the send alone, with no
-            // band to meet it.
-            let mut input = send.heard;
+            // What reached the AGC, for the meter: the send alone, through
+            // the RF gain, with no band to meet it.
+            let mut input = send.heard * now.rf;
             if let Some(band) = self.band.as_mut() {
-                let played = band.next(send.heard);
+                let played = band.next(send.heard, now.rf);
                 background += played.band;
                 gain = Some(played.gain);
                 input = played.input;
             }
             for band in self.fading.iter_mut().rev() {
-                let played = band.next(send.heard);
+                let played = band.next(send.heard, now.rf);
                 background += played.band;
                 gain.get_or_insert(1.0 + (played.gain - 1.0) * played.weight);
             }
-            // Your own message comes in after the AGC: the receiver never
-            // hears it, so it neither ducks the reply that follows nor is
-            // shaped by the filter, and it is monitored at the volume alone,
-            // set at the level it is heard at, not at the AF gain.
-            let heard = send.heard * gain.unwrap_or(1.0);
+            // The send the receiver hears comes through its RF gain, as the
+            // band did, and rides the AGC's gain with it. Your own message
+            // comes in after the AGC: the receiver never hears it, so it
+            // neither ducks the reply that follows nor is shaped by the
+            // filter, and it is monitored at the volume alone, set at the
+            // level it is heard at, not at the RF or the AF gain.
+            let heard = send.heard * now.rf * gain.unwrap_or(1.0);
             // Without full break-in the receiver's output, the band and the
             // stations alike, goes quiet while you send, as a rig that is
             // not QSK mutes it; the AGC runs on under it, and your message
             // is never muted.
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
-            let (asked, now) = (self.volume_asked, &mut self.volume);
-            now.received += (asked.received - now.received).clamp(-gate_step, gate_step);
-            now.monitored += (asked.monitored - now.monitored).clamp(-gate_step, gate_step);
             let played = (background + heard) * self.gate * now.received + send.dry * now.monitored;
             *slot += played as f32;
             self.metering.add(input, gain.unwrap_or(1.0), played);

@@ -434,7 +434,7 @@ pub fn tone() -> Element {
     rsx! {
         dl { class: "help-terms",
             dt { "Volume" }
-            dd { "How loud Dust plays everything: the band, the stations, your sending and the paddle's sidetone. 100% is as loud as it plays without distorting; your device's volume does the rest." }
+            dd { "How loud Dust plays everything: the band, the stations, your sending and the paddle's sidetone. For the band it is the receiver's AF gain, after the AGC. 100% is as loud as the strongest station plays without distorting at full RF gain; your device's volume does the rest." }
             dt { "Side tone" }
             dd { "The pitch you hear the Morse at. A range picks a fresh pitch for each group, as different stations sound." }
             dt { "Station strength" }
@@ -512,10 +512,12 @@ pub fn band() -> Element {
             dd { "Slow swells and dips of the signal." }
             dt { "QRN static" }
             dd { "Lightning: the crackle of distant storms and the crash of a near one." }
+            dt { "RF gain" }
+            dd { "Turns down everything reaching the receiver, ahead of the AGC: the noise, the static and every station alike. With the AGC on, the strong stations it was riding stay nearly as loud while the noise and the weak ones drop; with it off, the whole band gets quieter. The volume does not make it up, as on a rig." }
             dt { "AGC" }
             dd { "The receiver rides its gain: the band ducks under a strong station and behind a crash." }
-            dt { "RF gain" }
-            dd { "How strong a signal has to be before the AGC acts. Full starts it just above the band's hiss; backed off, it acts only on stronger signals, or on none. The volume follows, so it changes how hard the AGC works, not how loud the band is." }
+            dt { "AGC threshold" }
+            dd { "How strong a signal has to be before the AGC acts. Lowest starts it just above the band's hiss; raised, it acts only on stronger signals, or on none. The volume follows, so it changes how hard the AGC works, not how loud the band is." }
             dt { "Live preview" }
             dd { "Loops a CQ through the band as it is set, so you hear each change at once." }
         }

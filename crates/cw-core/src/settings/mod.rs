@@ -398,9 +398,14 @@ pub const PILEUP_SPREAD_MAX: f64 = 800.0;
 /// close in pitch, is simply masked rather than quiet.
 pub const PILEUP_LEVEL_MIN_DB: f64 = 3.0;
 pub const PILEUP_LEVEL_MAX_DB: f64 = 20.0;
-/// How far the receiver's RF gain backs off from full, in decibels. Full is
-/// where the AGC starts just above the band's own hiss; thirty down, the
-/// default station never reaches it.
+/// How far over its lowest the AGC's threshold can be raised, in decibels.
+/// The lowest is just above the band's own hiss; thirty over it, the default
+/// station never reaches it.
+pub const AGC_THRESHOLD_MIN_DB: f64 = 0.0;
+pub const AGC_THRESHOLD_MAX_DB: f64 = 30.0;
+/// How far the receiver's RF gain backs off from full, in decibels. Thirty
+/// down, the default station reaches the AGC twenty under its lowest
+/// threshold and the band's hiss is all but gone.
 pub const RF_GAIN_MIN_DB: f64 = -30.0;
 pub const RF_GAIN_MAX_DB: f64 = 0.0;
 
@@ -444,16 +449,23 @@ pub struct BandSettings {
     /// from the quiet end, which the default receiver hears about 40 dB
     /// under the station.
     pub noise_level: f64,
+    /// The receiver's RF gain, in decibels from full: how far everything
+    /// reaching the AGC is turned down, the band's noise and static and the
+    /// stations alike ([`TrainingSettings::rf_gain`]). Full, out of the box,
+    /// is the receiver as calibrated; older saves have no field and load at
+    /// it. The volume does not follow it: backed off, the band plays
+    /// quieter, as a rig's does, and the AGC has less to ride.
+    pub rf_gain_db: f64,
     /// The receiver's automatic gain control. Off is a receiver run on its
     /// RF gain, the way contesters often do.
     pub agc_enabled: bool,
-    /// The receiver's RF gain, in decibels from full: how much lower
-    /// everything reaches the AGC, so how much stronger a signal has to be
-    /// before the AGC turns it down ([`crate::band::receiver_knee`]). Full,
-    /// out of the box, starts the AGC just above the band's own hiss; older
-    /// saves have no field and load at it. The volume follows it, so backing
-    /// it off changes how hard the AGC works, not how loud the band plays.
-    pub rf_gain_db: f64,
+    /// Where the AGC starts to turn signals down, in decibels over the lowest
+    /// it goes: how much stronger a signal has to be before the AGC acts
+    /// ([`crate::band::receiver_knee`]). The lowest, out of the box, starts
+    /// the AGC just above the band's own hiss; older saves have no field and
+    /// load at it. The volume follows it, so raising it changes how hard the
+    /// AGC works, not how loud the band plays.
+    pub agc_threshold_db: f64,
     /// The receiver's selectivity: its width in hertz between its 6 dB
     /// points, the way a rig quotes a CW filter. Everything you hear goes
     /// through it — the Morse as much as the noise — so narrowing it does what
@@ -503,8 +515,9 @@ impl Default for BandSettings {
             qrn_level: 0.25,
             noise_enabled: true,
             noise_level: crate::band::NOISE_LEVEL_PER_DB,
-            agc_enabled: true,
             rf_gain_db: RF_GAIN_MAX_DB,
+            agc_enabled: true,
+            agc_threshold_db: AGC_THRESHOLD_MIN_DB,
             filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
             filter_shape: FilterShape::default(),
             stations_min: STATIONS_MIN,
@@ -809,6 +822,31 @@ mod tests {
         assert_eq!(old.band.master_volume, 1.0);
     }
 
+    /// The RF gain is decibels from full, at full out of the box and in a
+    /// save from before it, and inside its range whatever is set; full
+    /// volume is the receiver's at full RF gain, so backing it off leaves
+    /// the AF gain where it was.
+    #[test]
+    fn the_rf_gain_is_decibels_from_full_and_full_volume_does_not_follow_it() {
+        let mut s = TrainingSettings::default();
+        assert_eq!((s.band.rf_gain_db, s.rf_gain()), (RF_GAIN_MAX_DB, 1.0));
+        let af = s.af_gain();
+        s.band.rf_gain_db = -20.0;
+        assert!((s.rf_gain() - 0.1).abs() < 1e-12);
+        assert_eq!(s.af_gain(), af);
+        for (wild, reads) in [
+            (-90.0, RF_GAIN_MIN_DB),
+            (9.0, RF_GAIN_MAX_DB),
+            (f64::NAN, RF_GAIN_MAX_DB),
+        ] {
+            s.band.rf_gain_db = wild;
+            assert_eq!(s.rf_gain(), 10f64.powf(reads / 20.0), "{wild}");
+        }
+        let old: TrainingSettings =
+            serde_json::from_str(r#"{"volumeMin":0.5}"#).expect("an old save");
+        assert_eq!(old.band.rf_gain_db, RF_GAIN_MAX_DB);
+    }
+
     #[test]
     fn a_level_is_read_inside_its_alphabet() {
         let mut s = TrainingSettings::default();
@@ -958,6 +996,7 @@ mod tests {
         s.band.qsb_rate_hz = 9.0;
         s.band.qrn_level = 9.0;
         s.band.noise_level = 9.0;
+        s.band.agc_threshold_db = 900.0;
         s.band.rf_gain_db = 900.0;
         s.band.filter_width_hz = 90_000.0;
         s.auto_level.auto_adjust_threshold = 900.0;
@@ -1038,6 +1077,7 @@ mod tests {
             s.band.filter_width_hz = bad;
             s.band.pileup_spread_hz = bad;
             s.band.pileup_level_db = bad;
+            s.band.agc_threshold_db = bad;
             s.band.rf_gain_db = bad;
             s.auto_level.auto_adjust_threshold = bad;
             s.auto_level.error_weight_strength = bad;
@@ -1074,6 +1114,7 @@ mod tests {
         assert_eq!(s.band.steepness, 50.0);
         assert_eq!(s.band.envelope_smoothing, 1.0);
         assert_eq!(s.band.noise_level, 1.0);
+        assert_eq!(s.band.agc_threshold_db, AGC_THRESHOLD_MAX_DB);
         assert_eq!(s.band.rf_gain_db, RF_GAIN_MAX_DB);
         assert_eq!(s.band.filter_width_hz, FILTER_WIDTH_MAX);
         assert_eq!(s.playback.extra_word_space_multiplier, EXTRA_WORD_SPACE_MIN);
@@ -1584,6 +1625,7 @@ mod tests {
         s.band.noise_enabled = false;
         s.band.noise_level = 0.9;
         s.band.agc_enabled = false;
+        s.band.agc_threshold_db = 12.0;
         s.band.rf_gain_db = -12.0;
         s.band.filter_width_hz = 250.0;
         s.band.filter_shape = FilterShape::Soft;

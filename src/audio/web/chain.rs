@@ -1,8 +1,8 @@
-//! The receiver's output stage in nodes: where everything is mixed, the AGC
-//! as a compressor, the gate that mutes the receiver while you send without
-//! full break-in, the volume, and the soft limiter last of all, with the
-//! audio-stage floor's way around the compressor and the paddle's
-//! sidetone's around the volume.
+//! The receiver's output stage in nodes: where everything is mixed, the RF
+//! gain, the AGC as a compressor, the gate that mutes the receiver while you
+//! send without full break-in, the volume, and the soft limiter last of all,
+//! with the audio-stage floor's way around the RF gain and the compressor
+//! and the paddle's sidetone's around the volume.
 
 use cw_core::TrainingSettings;
 use cw_core::band::{
@@ -12,7 +12,7 @@ use cw_core::band::{
 use web_sys::{AnalyserNode, AudioContext, AudioParam, DynamicsCompressorNode, GainNode};
 
 use super::param::ramp_to;
-use crate::audio::shape::{GATE_RAMP_SEC, Volume};
+use crate::audio::shape::{GATE_RAMP_SEC, Gains};
 
 /// Points in the soft limiter's lookup table.
 const LIMITER_POINTS: usize = 4_097;
@@ -28,6 +28,9 @@ pub struct Chain {
     pub mix: GainNode,
     /// Where the receiver's filter sections meet, on their way to the AGC.
     pub receiver_out: GainNode,
+    /// The RF gain, between the filter and the AGC: the filter is linear, so
+    /// turning everything down after it is turning it down before.
+    rf: GainNode,
     agc: DynamicsCompressorNode,
     /// The gain into the limiter, which also takes back the make-up gain the
     /// compressor adds of its own accord.
@@ -45,11 +48,11 @@ pub struct Chain {
     /// the level it is heard at.
     pub sidetone_in: GainNode,
     /// The AF gain on the receiver's output and `floor_in`, the volume on
-    /// `monitor_in`, on their way into the limiter, and what they were last
-    /// set to.
+    /// `monitor_in`, on their way into the limiter, and what they and the RF
+    /// gain were last set to.
     received: GainNode,
     monitored: GainNode,
-    volume: Volume,
+    gains: Gains,
     /// The receiver's gate, after the AGC: shut while you send without
     /// full break-in, as a rig that is not QSK mutes its receiver. One on
     /// the receiver's output, one on the band's audio-stage floor, which
@@ -58,8 +61,8 @@ pub struct Chain {
     gate: GainNode,
     /// The band's floor goes in here, through the gate's second half.
     pub band_floor: GainNode,
-    /// The level scope's taps: what reaches the AGC, and what comes out of
-    /// both volumes on the way to the limiter.
+    /// The level scope's taps: what reaches the AGC, after the RF gain, and
+    /// what comes out of both volumes on the way to the limiter.
     pub meter_input: AnalyserNode,
     pub meter_output: AnalyserNode,
 }
@@ -83,6 +86,8 @@ impl Chain {
         // say what to build ([`super::receiver::Receiver::tune`]).
         let mix = gain(ctx, 1.0, "mix gain")?;
         let receiver_out = gain(ctx, 1.0, "receiver gain")?;
+        // Full, until the settings say otherwise.
+        let rf = gain(ctx, 1.0, "rf gain")?;
         // The receiver's AGC, in the one place the browser can put it: after
         // the filter, with the send and the background already together. The
         // native player works the same gain out in Rust, sample by sample,
@@ -104,7 +109,9 @@ impl Chain {
                 .map_err(|e| format!("{what}: {e:?}"))?;
         }
         receiver_out
-            .connect_with_audio_node(&agc)
+            .connect_with_audio_node(&rf)
+            .map_err(|e| format!("rf gain connect: {e:?}"))?;
+        rf.connect_with_audio_node(&agc)
             .map_err(|e| format!("agc connect: {e:?}"))?;
         // And the native player's soft limiter, as a shaper. A compressor's
         // attack lets the first milliseconds of a crash through, and a crash
@@ -163,8 +170,7 @@ impl Chain {
         };
         let meter_input = analyser("meter input")?;
         let meter_output = analyser("meter output")?;
-        receiver_out
-            .connect_with_audio_node(&meter_input)
+        rf.connect_with_audio_node(&meter_input)
             .map_err(|e| format!("meter input connect: {e:?}"))?;
         for volume in [&received, &monitored] {
             volume
@@ -174,6 +180,7 @@ impl Chain {
         Ok(Self {
             mix,
             receiver_out,
+            rf,
             agc,
             limiter_in,
             floor_in,
@@ -181,7 +188,7 @@ impl Chain {
             sidetone_in,
             received,
             monitored,
-            volume: Volume::UNITY,
+            gains: Gains::UNITY,
             gate,
             band_floor,
             meter_input,
@@ -195,15 +202,15 @@ impl Chain {
         10f64.powf(f64::from(self.agc.reduction()) / 20.0)
     }
 
-    /// Play what is received and what is monitored at `volume` from now on.
-    /// Each moves at the receiver gate's pace, a whole unit of gain over
-    /// [`GATE_RAMP_SEC`], as the native mixer moves it, so a slider moved
-    /// under a tone never clicks.
-    pub fn set_volume(&mut self, ctx: &AudioContext, volume: Volume) {
+    /// Play at `gains` from now on. Each moves at the receiver gate's pace,
+    /// a whole unit of gain over [`GATE_RAMP_SEC`], as the native mixer
+    /// moves it, so a slider moved under a tone never clicks.
+    pub fn set_gains(&mut self, ctx: &AudioContext, gains: Gains) {
         let now = ctx.current_time();
         for (node, to, from) in [
-            (&self.received, volume.received, self.volume.received),
-            (&self.monitored, volume.monitored, self.volume.monitored),
+            (&self.rf, gains.rf, self.gains.rf),
+            (&self.received, gains.received, self.gains.received),
+            (&self.monitored, gains.monitored, self.gains.monitored),
         ] {
             if to != from && to.is_finite() {
                 ramp_to(
@@ -214,7 +221,7 @@ impl Chain {
                 );
             }
         }
-        self.volume = volume;
+        self.gains = gains;
     }
 
     /// The receiver's gate, both halves of it, to schedule alike.
