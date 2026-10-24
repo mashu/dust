@@ -3097,7 +3097,7 @@ mod interactions {
     fn the_band_card_out_of_the_box() {
         let mut ui = Ui::new(DefaultBandHarness, ());
         assert!(ui.shows("fixed-stations-calling"), "{}", ui.html());
-        assert!(ui.has("class=\"slider-value\">S/N 40 dB<"), "{}", ui.html());
+        assert!(ui.has("class=\"slider-value\">S/N 41 dB<"), "{}", ui.html());
         assert!(ui.has("300 Hz — widened to 353 Hz to pass your pitch range"));
         // The 6 dB is where the width is read, not a loss, and the label
         // does not make it look like one.
@@ -3105,6 +3105,7 @@ mod interactions {
         assert!(!ui.has("-6 dB") && !ui.has("−6 dB"));
         assert!(ui.has("Its width is read between the points 6 dB down"));
         for (button, reading) in [
+            ("more-slider-noise-level", 40),
             ("more-slider-noise-level", 39),
             ("more-slider-noise-level", 38),
             ("less-slider-noise-level", 39),
@@ -3115,6 +3116,9 @@ mod interactions {
             let says = format!("class=\"slider-value\">S/N {reading} dB<");
             assert!(ui.has(&says), "{button}: {}", ui.html());
         }
+        // A step under the quietest hiss there is, it is off.
+        ui.click("less-slider-noise-level");
+        assert!(ui.has("class=\"slider-value\">Off<"));
     }
 
     #[test]
@@ -3146,8 +3150,8 @@ mod interactions {
         );
 
         // The filter shape is a real choice, and it shows which one is in:
-        // the peaked one out of the box.
-        assert!(ui.has("id=\"seg-filter-peaked\" class=\"seg active\""));
+        // the sharp one out of the box.
+        assert!(ui.has("id=\"seg-filter-sharp\" class=\"seg active\""));
         ui.click("seg-filter-soft");
         assert!(ui.has("id=\"seg-filter-soft\" class=\"seg active\""));
         ui.click("seg-filter-sharp");

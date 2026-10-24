@@ -1094,7 +1094,10 @@ mod tests {
         let held = AGC_TRIGGER * reference_floor_level();
         let reference = knee(|_| {});
         let loud = knee(|s| s.band.noise_level = 0.8);
-        let wide = knee(|s| s.band.filter_width_hz = FILTER_WIDTH_MAX);
+        let wide = knee(|s| {
+            s.band.filter_width_hz = FILTER_WIDTH_MAX;
+            s.band.filter_shape = FilterShape::Peaked;
+        });
         let wide_sharp = knee(|s| {
             s.band.filter_width_hz = FILTER_WIDTH_MAX;
             s.band.filter_shape = FilterShape::Sharp;
@@ -1109,7 +1112,7 @@ mod tests {
         let under = db(reference_floor_level()
             / band_standing_level(FLOOR_MEASURE_RATE, &floor.band, &receiver));
         assert!(
-            (4.5..7.0).contains(&under),
+            (2.5..3.5).contains(&under),
             "the default floor is {under:.2} dB under"
         );
         // Below the reference floor the knee holds at the reference floor's.

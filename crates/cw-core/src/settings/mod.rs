@@ -91,15 +91,16 @@ impl MixedAutoLevelAxis {
 /// switched in as well: a resonance at the pitch that makes the hiss sing at
 /// the note and leaves a station off the pitch a few decibels weaker.
 ///
-/// Peaked is the default: chosen by ear, against the other two at the same
-/// width, as the one that sounds like a receiver rather than a noise
-/// generator.
+/// Sharp is the default: flat across the pitch range a station is drawn
+/// from, so every station comes through at its own strength. The peak
+/// filter, which was, left one at the ends of the default range nearly 6 dB
+/// down.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterShape {
     Soft,
-    Sharp,
     #[default]
+    Sharp,
     Peaked,
 }
 
@@ -433,8 +434,8 @@ pub struct BandSettings {
     /// signal-to-noise ([`crate::band::NOISE_LEVEL_PER_DB`]). Deliberately
     /// not read from the old receiver-background level: that drove a
     /// different sound entirely, and its value says nothing about how much
-    /// hiss someone wants. Out of the box it is a subtle hiss, four decibels
-    /// in from the quiet end, which the default receiver hears about 40 dB
+    /// hiss someone wants. Out of the box it is a subtle hiss, a decibel in
+    /// from the quiet end, which the default receiver hears about 40 dB
     /// under the station.
     pub noise_level: f64,
     /// The receiver's automatic gain control. Off is a receiver run on its
@@ -488,7 +489,7 @@ impl Default for BandSettings {
             qrn_enabled: true,
             qrn_level: 0.25,
             noise_enabled: true,
-            noise_level: 4.0 * crate::band::NOISE_LEVEL_PER_DB,
+            noise_level: crate::band::NOISE_LEVEL_PER_DB,
             agc_enabled: true,
             filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
             filter_shape: FilterShape::default(),
@@ -1156,7 +1157,7 @@ mod tests {
             crate::keyer::KeyerMode::default(),
             crate::keyer::KeyerMode::IambicB
         );
-        assert_eq!(FilterShape::default(), FilterShape::Peaked);
+        assert_eq!(FilterShape::default(), FilterShape::Sharp);
         let s = TrainingSettings::default();
         let range = |min, max, linked| RangeValues { min, max, linked };
         assert_eq!(s.range(RangeSetting::CharWpm), range(15.0, 30.0, false));
