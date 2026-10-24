@@ -453,11 +453,12 @@ impl Ticket<'_> {
         // send starts, never while `on_start` runs.
         let wait = player.start(begin)?;
         let output_from = wait.started.plus_sec(wait.sent_after_sec);
+        let heard_from = wait.started.plus_sec(wait.heard_after_sec);
         // When the player said the send would be over, heard to its end.
-        let due = wait
-            .started
-            .plus_sec(wait.heard_after_sec + wait.duration_sec);
-        on_start(wait.heard_after_sec);
+        let due = heard_from.plus_sec(wait.duration_sec);
+        // How long from now, as `on_start` runs: a device the player opened
+        // as it started is behind us already.
+        on_start(heard_from.0.saturating_sub(mono_ms()) as f64 / 1_000.0);
         let mut sent = Sent {
             duration_sec: wait.duration_sec,
             char_wpm: wait.char_wpm,

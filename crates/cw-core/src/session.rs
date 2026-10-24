@@ -235,9 +235,12 @@ impl Group {
     ///   whole by ear and typed after — and every one with the box shut
     ///   while it was sent — says how fast you recall, not recognise;
     /// - the character typed right, in its place, no sooner than it was
-    ///   heard (sooner is a guess), and
-    ///   the one before it typed by the time this one ended (or the box
-    ///   open, for the first), so the gap is not a backlog caught up on.
+    ///   heard (sooner is a guess), and past the first, the one before it
+    ///   typed by the time this one ended, so the gap is not a backlog
+    ///   caught up on. The first waits on nothing typed: a shut box opens
+    ///   once the send is over, which on a device that reports a delay is
+    ///   that much after its sound went to the output, the same for every
+    ///   character.
     ///
     /// A gap past [`RECOGNITION_MAX_MS`] counts as that, as slow as a time
     /// says, rather than going untimed and leaving the slowest tries out.
@@ -245,7 +248,7 @@ impl Group {
     /// timed.
     fn recognition(&self, locked: bool) -> Vec<Option<u32>> {
         let sent: Vec<char> = self.sent.chars().map(|c| c.to_ascii_uppercase()).collect();
-        let (Some(end), true, true) = (
+        let (Some(_), true, true) = (
             self.end_at,
             self.repeats <= 1,
             self.heard_at.len() == sent.len(),
@@ -261,7 +264,6 @@ impl Group {
             return Vec::new();
         }
         let typed: Vec<char> = self.input.chars().collect();
-        let open = if locked { end } else { self.start_at };
         let mut measured: Vec<Option<u32>> = sent
             .iter()
             .enumerate()
@@ -269,12 +271,12 @@ impl Group {
                 let key = *self.keyed_at.get(at)?;
                 let heard = self.heard_at[at];
                 let ready = match at {
-                    0 => open,
-                    _ => *self.keyed_at.get(at - 1)?,
+                    0 => None,
+                    _ => Some(*self.keyed_at.get(at - 1)?),
                 };
                 (typed.get(at) == Some(ch)
                     && key >= heard
-                    && ready <= heard.plus(KEEPING_UP_SLACK_MS))
+                    && ready.is_none_or(|ready| ready <= heard.plus(KEEPING_UP_SLACK_MS)))
                 .then(|| key.since(heard).min(RECOGNITION_MAX_MS) as u32)
             })
             .collect();
@@ -1322,6 +1324,21 @@ mod tests {
         assert_eq!(
             result(&session).group_timings[0].recognition_ms,
             [Some(320)]
+        );
+        // On a device that reports a delay, the box opens that much after
+        // the sound went to the output: timed all the same, from the output.
+        let mut settings = TrainingSettings::default();
+        settings.playback.lock_input_during_group_playback = true;
+        let mut session = GroupSession::new(SessionId::new(1), 1, settings);
+        session.set_group(0, "K".into(), 1);
+        session.begin_group(0, MonoMs(1_000));
+        session.end_playback(0, MonoMs(1_540), 20.0, 20.0, vec![MonoMs(1_300)]);
+        session.set_input(0, "K");
+        session.note_keys(0, &[MonoMs(1_820)]);
+        session.confirm(0, MonoMs(2_000));
+        assert_eq!(
+            result(&session).group_timings[0].recognition_ms,
+            [Some(520)]
         );
     }
 

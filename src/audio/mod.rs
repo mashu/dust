@@ -362,15 +362,18 @@ pub mod fake {
                 _ => {
                     // Each poll advances the "audio clock" by one tick, so a
                     // send takes as long as its plan says it does, from when
-                    // it was to start.
+                    // it was to start, and is heard its latency after, as a
+                    // real player counts it.
+                    let latency_ms = (self.latency_sec * 1_000.0).round() as u32;
+                    let held = self.wait_ms.saturating_add(latency_ms);
                     let played = self.played.get().saturating_add(crate::time::POLL_MS).min(
                         self.duration_ms
                             .saturating_add(wait::PLAYBACK_TAIL_MS)
-                            .saturating_add(self.wait_ms),
+                            .saturating_add(held),
                     );
                     self.played.set(played);
                     WaitFlags {
-                        played_ms: Some(played.saturating_sub(self.wait_ms)),
+                        played_ms: Some(played.saturating_sub(held)),
                         ..Default::default()
                     }
                 }

@@ -693,16 +693,17 @@ mod tests {
         });
     }
 
-    /// A character typed as soon as it is heard is timed from where it
-    /// finished sounding, as the audio plan has it, to its key in the box:
-    /// one-character groups, which a box shut while sending can time.
-    #[test]
-    fn a_key_is_timed_from_the_end_of_its_character() {
+    /// One-character group 0, a box shut while sending, its sound reaching
+    /// the ear `latency_ms` after it goes out, keyed 300 ms after the box
+    /// is seen open: its recognition time, and what was sent.
+    fn keyed_after_the_box_opens(latency_ms: u32) -> (u32, String) {
+        let mut took = (0, String::new());
         run(|| async {
             let mut settings = test_settings();
             settings.curriculum.min_group_size = 1;
             settings.curriculum.max_group_size = 1;
             let mut h = Harness::with_settings(settings);
+            h.recorder.latency_sec.set(f64::from(latency_ms) / 1_000.0);
             h.start_training();
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
             h.advance(300).await;
@@ -711,21 +712,37 @@ mod tests {
             h.send(SessionEvent::Confirm);
             let session = h.ctx.runtime.peek().clone().expect("the session");
             let timing = &session.result(0, "2026-10-24".into()).group_timings[0];
-            let took = timing
+            let timed = timing
                 .recognition_ms
                 .first()
                 .copied()
                 .flatten()
                 .expect("timed");
-            // Keyed 300 ms after the box was seen open, which is up to a
-            // poll of the send's wait, and one of this harness's, after the
-            // sound ended.
-            let seen_late = 2 * crate::time::POLL_MS;
-            assert!(
-                (300..=300 + seen_late).contains(&took),
-                "{took} ms for {sent}"
-            );
+            took = (timed, sent);
         });
+        took
+    }
+
+    /// A character typed as soon as it is heard is timed from where it
+    /// finished sounding, as the audio plan has it, gone to the output, to
+    /// its key in the box: one-character groups, which a box shut while
+    /// sending can time. A device that says its sound reaches the ear later
+    /// opens the box that much later, and the time is that much longer, as
+    /// the delay is in every time alike.
+    #[test]
+    fn a_key_is_timed_from_the_end_of_its_character() {
+        // Keyed 300 ms after the box was seen open, which is up to a poll
+        // of the send's wait, and one of this harness's, after the sound
+        // ended.
+        let seen_late = 2 * crate::time::POLL_MS;
+        for latency in [0, 200] {
+            let (took, sent) = keyed_after_the_box_opens(latency);
+            let from = 300 + latency;
+            assert!(
+                (from..=from + seen_late).contains(&took),
+                "{took} ms for {sent}, {latency} ms to the ear"
+            );
+        }
     }
 
     /// Nothing typed: the answer window moves the session on by itself.
