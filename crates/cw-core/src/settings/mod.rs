@@ -768,16 +768,17 @@ mod tests {
     }
 
     /// The volume is a share of full volume, at full out of the box and in
-    /// a save from before it, and full is four times the band as it is
-    /// calibrated; nothing set takes it past full or under its floor.
+    /// a save from before it, and full lifts the band as it is calibrated;
+    /// nothing set takes it past full or under its floor.
     #[test]
-    fn the_volume_is_a_share_of_full_and_full_is_four_times_the_band() {
+    fn the_volume_is_a_share_of_full_volume() {
+        let full = crate::band::FULL_VOLUME_GAIN;
         let mut s = TrainingSettings::default();
         assert_eq!(s.band.master_volume, 1.0);
-        assert_eq!(s.output_gain(), crate::band::FULL_VOLUME_GAIN);
-        assert_eq!(crate::band::FULL_VOLUME_GAIN, 4.0);
+        assert_eq!(s.output_gain(), full);
+        assert!(full > 1.0, "full is louder than the band as calibrated");
         s.band.master_volume = 0.5;
-        assert_eq!((s.master_volume(), s.output_gain()), (0.5, 2.0));
+        assert_eq!((s.master_volume(), s.output_gain()), (0.5, 0.5 * full));
         for wild in [90.0, -9.0, 0.0, f64::NAN, f64::INFINITY] {
             s.band.master_volume = wild;
             let share = s.master_volume();

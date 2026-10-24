@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
+use cw_core::band::SOFT_LIMIT_KNEE;
 use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 
 use crate::audio::{MorseBackend, PlaybackOutcome, PlaybackWait};
@@ -225,11 +226,15 @@ fn unavailable() -> AudioError {
 }
 
 /// The live sidetone's pitch and level for `settings`: at full volume the
-/// floor of the station strength range, never below [`SIDETONE_FLOOR`], as
-/// it always played, and turned down with the volume. The players add it
-/// after their volume, so this is the level it is heard at.
+/// floor of the station strength range, never below [`SIDETONE_FLOOR`] and
+/// never past where the limiter starts to bend, and turned down with the
+/// volume. The players add it after their volume, so this is the level it
+/// is heard at.
 fn live_tone(settings: &TrainingSettings) -> (f64, f64) {
-    let level = settings.band.volume_min.max(SIDETONE_FLOOR);
+    let level = settings
+        .band
+        .volume_min
+        .clamp(SIDETONE_FLOOR, SOFT_LIMIT_KNEE);
     (
         settings.side_tone_center(),
         level * settings.master_volume(),
@@ -524,13 +529,16 @@ mod tests {
 
     /// The volume turns the paddle's sidetone down with everything else:
     /// at full volume it is the strength range's floor, as it always was,
-    /// and at half volume half that, its own floor turned down too.
+    /// though never past where the limiter starts to bend, and at half
+    /// volume half that, its own floor turned down too.
     #[test]
     fn the_volume_turns_the_sidetone_down_with_the_rest() {
         let mut settings = TrainingSettings::default();
         assert_eq!(live_tone(&settings).1, 0.7);
+        settings.band.volume_min = 1.0;
+        assert_eq!(live_tone(&settings).1, SOFT_LIMIT_KNEE);
         settings.band.master_volume = 0.5;
-        assert_eq!(live_tone(&settings).1, 0.35);
+        assert_eq!(live_tone(&settings).1, SOFT_LIMIT_KNEE * 0.5);
         settings.band.volume_min = 0.1;
         assert_eq!(live_tone(&settings).1, SIDETONE_FLOOR * 0.5);
     }

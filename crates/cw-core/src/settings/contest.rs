@@ -33,9 +33,10 @@ pub const MY_SENDING_OFF_DB: i32 = -60;
 /// Your sending until you set it: level with an average caller as you hear
 /// it. The loudest stands about 6 dB over an average caller before the
 /// receiver's AGC, which ducks that caller some 4 dB more, so a caller is
-/// heard about 10 dB under it (§5.3 of the design); 9 dB down, your message
-/// sits a decibel over the caller, as a rig's sidetone set to the receiver's
-/// audio does, and still stands well clear of the default band's noise.
+/// heard about 7 dB under it (§5.3 of the design); 9 dB down, your message
+/// sits a couple of decibels under the caller, about level, as a rig's
+/// sidetone set to the receiver's audio is, and still stands well clear of
+/// the default band's noise.
 const MY_SENDING_DEFAULT_DB: i32 = -9;
 
 /// The longest callsign kept: room for a host and a marker around a call,
@@ -1084,6 +1085,13 @@ mod tests {
         );
         settings.my_sending_db = MY_SENDING_OFF_DB;
         assert_eq!(settings.sending_level(), 0.0);
+        // At full volume the top is where the limiter starts to bend, and
+        // no further.
+        let heard = level(MY_SENDING_MAX_DB) * crate::band::FULL_VOLUME_GAIN;
+        assert!(
+            (heard - crate::band::SOFT_LIMIT_KNEE).abs() < 1e-12,
+            "{heard}"
+        );
     }
 
     /// Your speed is the one you set; until then, the middle of the

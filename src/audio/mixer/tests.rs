@@ -123,31 +123,56 @@ fn the_volume_moves_all_the_receiver_plays_without_a_step() {
     }
 }
 
-/// Full volume is full: the strongest station on the default band, as the
-/// AGC rides it, peaks about where the limiter starts to bend, rather than
-/// some 15 dB under full scale, where the band is calibrated.
+/// Full volume is as loud as the Morse plays clean, through any receiver:
+/// a station at full strength, on its own, never reaches where the limiter
+/// starts to bend, whatever the AGC, the filter's shape and width, the
+/// keying's edges or the pitch, and through the receiver it peaks highest
+/// in, it comes close.
 #[test]
-fn at_full_volume_the_strongest_station_reaches_the_limiters_knee() {
-    let mut settings = hiss();
-    settings.band.link_volume = true;
-    settings.band.volume_min = VOLUME_MAX;
-    assert_eq!(settings.master_volume(), 1.0, "full out of the box");
-    let mut mixer = Mixer::new(SR);
-    let mut swept = Swept::new();
-    mixer.set_band(Some(band(&settings, 9)), &mut swept);
-    mixer.set_volume(settings.output_gain());
-    render(&mut mixer, SR as usize);
-    mixer.start(send(&settings, "TEST TEST TEST"), &mut swept);
-    let mut heard: Vec<f32> = render(&mut mixer, SR as usize * 3)
-        .iter()
-        .map(|s| s.abs())
-        .collect();
-    heard.sort_by(f32::total_cmp);
-    let loudest = f64::from(heard[heard.len() - 1]);
-    let crest = f64::from(heard[heard.len() * 999 / 1000]);
+fn at_full_volume_no_station_reaches_the_limiter() {
+    use cw_core::FilterShape;
+    let mut loudest_of_all = 0.0f64;
+    for agc in [true, false] {
+        for shape in [FilterShape::Peaked, FilterShape::Sharp, FilterShape::Soft] {
+            for width in [FILTER_WIDTH_MIN, 2_000.0] {
+                for (low, high) in [(300.0, 600.0), (200.0, 200.0), (1_200.0, 1_200.0)] {
+                    let mut settings = hiss();
+                    settings.band.agc_enabled = agc;
+                    settings.band.filter_shape = shape;
+                    settings.band.filter_width_hz = width;
+                    settings.band.steepness = cw_core::STEEPNESS_MIN_MS;
+                    settings.band.side_tone_min = low;
+                    settings.band.side_tone_max = high;
+                    settings.band.link_volume = true;
+                    settings.band.volume_min = VOLUME_MAX;
+                    let settings = settings.clamp();
+                    assert_eq!(settings.master_volume(), 1.0, "full out of the box");
+                    let receiver = FilterDesign::from_settings(&settings);
+                    for seed in 0..5 {
+                        let mut mixer = Mixer::new(SR);
+                        let mut swept = Swept::new();
+                        mixer.set_band(Some(band(&settings, seed)), &mut swept);
+                        mixer.set_volume(settings.output_gain());
+                        render(&mut mixer, SR as usize / 2);
+                        let voice = resolve_station(&settings, &mut SplitMix64::new(seed));
+                        let plan =
+                            plan_transmission(&Transmission::alone("TEST EE", voice), &settings);
+                        mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
+                        let frames = ((plan.wanted.duration_sec + 0.2) * f64::from(SR)) as usize;
+                        let peak = f64::from(loudest(&render(&mut mixer, frames)));
+                        assert!(
+                            peak < SOFT_LIMIT_KNEE,
+                            "{peak:.3} with the AGC {agc}, {shape:?} {width} Hz, {low}-{high} Hz, seed {seed}"
+                        );
+                        loudest_of_all = loudest_of_all.max(peak);
+                    }
+                }
+            }
+        }
+    }
     assert!(
-        loudest > 0.8 * SOFT_LIMIT_KNEE && crest < SOFT_LIMIT_KNEE,
-        "loudest {loudest:.3}, 99.9% under {crest:.3}"
+        loudest_of_all > 0.9 * SOFT_LIMIT_KNEE,
+        "{loudest_of_all:.3}"
     );
 }
 
