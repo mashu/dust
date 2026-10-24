@@ -110,7 +110,11 @@ fn the_volume_moves_all_the_receiver_plays_without_a_step() {
         let mut swept = Swept::new();
         mixer.set_band(Some(band(&settings, 9)), &mut swept);
         mixer.start(send(&settings, "TEST"), &mut swept);
-        mixer.set_volume(volume);
+        mixer.set_gains(Gains {
+            rf: 1.0,
+            received: volume,
+            monitored: 1.0,
+        });
         render(&mut mixer, SR as usize)
     };
     let (plain, lifted) = (play(1.0), play(4.0));
@@ -123,21 +127,83 @@ fn the_volume_moves_all_the_receiver_plays_without_a_step() {
     }
 }
 
-/// Full volume is as loud as the Morse plays clean, through any receiver:
-/// a station at full strength, on its own, never reaches where the limiter
-/// starts to bend, whatever the AGC, the filter's shape and width, the
-/// keying's edges or the pitch, and through the receiver it peaks highest
-/// in, it comes close.
+/// The RF gain turns down all the receiver hears ahead of its AGC, the band
+/// and the station on it alike, and the AF gain does not make it up. With
+/// the AGC off the station plays as many decibels down as the RF gain was
+/// turned; with it on, by fewer, as the AGC lets go of what it was taking
+/// off; and backed off a little, nothing plays louder than at full.
 #[test]
-fn at_full_volume_no_station_reaches_the_limiter() {
+fn the_rf_gain_turns_the_receiver_down_ahead_of_its_agc() {
+    let mut settings = hiss();
+    settings.band.link_volume = true;
+    settings.band.volume_min = VOLUME_MAX;
+    // What reached the AGC under the station at its loudest, how loud the
+    // station played on average, and its loudest sample.
+    let play = |agc: bool, rf_gain_db: f64| {
+        let mut settings = settings.clone();
+        settings.band.agc_enabled = agc;
+        settings.band.rf_gain_db = rf_gain_db;
+        let mut mixer = Mixer::new(SR);
+        let meter = mixer.meter();
+        let mut swept = Swept::new();
+        mixer.set_band(Some(band(&settings, 3)), &mut swept);
+        mixer.set_gains(Gains::of(&settings));
+        render(&mut mixer, SR as usize / 2);
+        let (mut seen, mut frames) = (0, Vec::new());
+        meter.read_since(&mut seen, &mut frames);
+        frames.clear();
+        mixer.start(send(&settings, "TEST"), &mut swept);
+        let played = render(&mut mixer, SR as usize);
+        meter.read_since(&mut seen, &mut frames);
+        let reached = frames.iter().fold(0.0f32, |most, f| most.max(f.input));
+        (
+            f64::from(reached),
+            power(&played),
+            f64::from(loudest(&played)),
+        )
+    };
+    let mut drops = Vec::new();
+    for agc in [false, true] {
+        let (full_in, full, full_peak) = play(agc, 0.0);
+        let (backed_in, backed, _) = play(agc, -20.0);
+        let reached = db((backed_in / full_in).powi(2));
+        assert!(
+            (reached + 20.0).abs() < 0.01,
+            "the AGC {agc}: {reached:.3} dB"
+        );
+        drops.push(-db(backed / full));
+        let (_, _, nearly_peak) = play(agc, -6.0);
+        assert!(
+            nearly_peak < full_peak,
+            "the AGC {agc}: {nearly_peak:.3} backed off against {full_peak:.3}"
+        );
+    }
+    let (off, on) = (drops[0], drops[1]);
+    assert!(
+        (19.0..20.5).contains(&off),
+        "{off:.2} dB down with the AGC off"
+    );
+    assert!(
+        on > 10.0 && on < off - 3.0,
+        "{on:.2} dB down with the AGC on, {off:.2} off"
+    );
+}
+
+/// Full volume is as loud as the Morse plays clean, through whatever
+/// receiver is set: a station at full strength, on its own, never reaches
+/// where the limiter starts to bend, whatever the AGC and its threshold, the
+/// filter's shape and width, the keying's edges or the pitch, and through
+/// every one of them it comes close, full volume sized to that receiver.
+#[test]
+fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
     use cw_core::FilterShape;
-    let mut loudest_of_all = 0.0f64;
-    for agc in [true, false] {
+    for (agc, threshold_db) in [(true, 0.0), (true, 6.0), (false, 0.0)] {
         for shape in [FilterShape::Peaked, FilterShape::Sharp, FilterShape::Soft] {
             for width in [FILTER_WIDTH_MIN, 2_000.0] {
                 for (low, high) in [(300.0, 600.0), (200.0, 200.0), (1_200.0, 1_200.0)] {
                     let mut settings = hiss();
                     settings.band.agc_enabled = agc;
+                    settings.band.agc_threshold_db = threshold_db;
                     settings.band.filter_shape = shape;
                     settings.band.filter_width_hz = width;
                     settings.band.steepness = cw_core::STEEPNESS_MIN_MS;
@@ -148,11 +214,12 @@ fn at_full_volume_no_station_reaches_the_limiter() {
                     let settings = settings.clamp();
                     assert_eq!(settings.master_volume(), 1.0, "full out of the box");
                     let receiver = FilterDesign::from_settings(&settings);
+                    let mut loudest_here = 0.0f64;
                     for seed in 0..5 {
                         let mut mixer = Mixer::new(SR);
                         let mut swept = Swept::new();
                         mixer.set_band(Some(band(&settings, seed)), &mut swept);
-                        mixer.set_volume(settings.output_gain());
+                        mixer.set_gains(Gains::of(&settings));
                         render(&mut mixer, SR as usize / 2);
                         let voice = resolve_station(&settings, &mut SplitMix64::new(seed));
                         let plan =
@@ -160,20 +227,60 @@ fn at_full_volume_no_station_reaches_the_limiter() {
                         mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
                         let frames = ((plan.wanted.duration_sec + 0.2) * f64::from(SR)) as usize;
                         let peak = f64::from(loudest(&render(&mut mixer, frames)));
-                        assert!(
-                            peak < SOFT_LIMIT_KNEE,
-                            "{peak:.3} with the AGC {agc}, {shape:?} {width} Hz, {low}-{high} Hz, seed {seed}"
+                        let at = format!(
+                            "the AGC {agc} at +{threshold_db} dB, {shape:?} {width} Hz, {low}-{high} Hz"
                         );
-                        loudest_of_all = loudest_of_all.max(peak);
+                        assert!(peak < SOFT_LIMIT_KNEE, "{peak:.3} with {at}, seed {seed}");
+                        loudest_here = loudest_here.max(peak);
                     }
+                    assert!(
+                        loudest_here > 0.8 * SOFT_LIMIT_KNEE,
+                        "only {loudest_here:.3} with the AGC {agc} at +{threshold_db} dB, {shape:?} {width} Hz, {low}-{high} Hz"
+                    );
                 }
             }
         }
     }
+}
+
+/// The meter reads a frame every ten milliseconds of what the mixer
+/// plays: the station at its strength where it reaches the AGC, the gain
+/// the AGC ducks it to, and the loudest of what was played, to the sample.
+#[test]
+fn the_meter_reads_the_agcs_input_its_gain_and_what_was_played() {
+    let settings = hiss();
+    let mut mixer = Mixer::new(SR);
+    let meter = mixer.meter();
+    let mut swept = Swept::new();
+    mixer.set_band(Some(band(&settings, 4)), &mut swept);
+    mixer.set_gains(Gains::of(&settings));
+    let (mut seen, mut frames) = (0, Vec::new());
+    render(&mut mixer, SR as usize / 2);
+    meter.read_since(&mut seen, &mut frames);
+    assert_eq!(frames.len(), 50, "a frame every 10 ms");
     assert!(
-        loudest_of_all > 0.9 * SOFT_LIMIT_KNEE,
-        "{loudest_of_all:.3}"
+        frames.iter().all(|f| f.gain == 1.0),
+        "the hiss moved the AGC"
     );
+    frames.clear();
+
+    mixer.start(send(&settings, "TEST"), &mut swept);
+    let played = render(&mut mixer, SR as usize);
+    meter.read_since(&mut seen, &mut frames);
+    assert_eq!(frames.len(), 100);
+    let input = frames.iter().fold(0.0f32, |a, f| a.max(f.input));
+    let gain = frames.iter().fold(1.0f32, |a, f| a.min(f.gain));
+    let output = frames.iter().fold(0.0f32, |a, f| a.max(f.output));
+    // The station's own level, as its plan keys it: what `send` sends.
+    let voice = resolve_station(&settings, &mut SplitMix64::new(5));
+    let plan = plan_transmission(&Transmission::alone("TEST", voice), &settings);
+    let at_strength = plan.wanted.events[0].target_gain as f32;
+    assert!(
+        (input / at_strength - 1.0).abs() < 0.15,
+        "{input} at the AGC, against {at_strength}"
+    );
+    assert!(gain < 0.8, "the AGC took {gain} off the station");
+    assert_eq!(output, loudest(&played));
 }
 
 /// Bands rebuilt faster than one can fade out each fade out in full: none is
@@ -520,7 +627,7 @@ fn your_message_is_not_ridden_by_the_agc() {
     let mut voice = SendVoice::new(&callers, &receiver, None, SR, 0.0);
     ridden.reserve_stations(voice.callers_now());
     let lowest = (0..(mine.end_sec * f64::from(SR)) as usize)
-        .map(|_| ridden.next(voice.next().heard).gain)
+        .map(|_| ridden.next(voice.next().heard, 1.0).gain)
         .fold(1.0, f64::min);
     assert!(
         lowest < 0.5,

@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use crate::band::{FULL_VOLUME_GAIN, Qsb, SOFT_LIMIT_KNEE};
+use crate::band::{Qsb, SOFT_LIMIT_KNEE};
 use crate::morse::morse_for;
 use crate::session::MonoMs;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
@@ -27,23 +27,23 @@ use crate::timing::{
     plan_from, plan_morse_playback_at, plan_morse_playback_for,
 };
 
-/// The loudest you hear your own message, as a peak of full scale before the
+/// The loudest you hear your own message, as a peak of full scale at full
 /// volume: your sending at 0 dB, which the Tone and volume card turns down
-/// from here ([`crate::ContestSettings::sending_level`]). It is played past
-/// the receiver, as a rig's sidetone is, so no band setting moves its level
-/// or takes any of it away.
+/// from here ([`crate::ContestSettings::sending_level`]). It is monitored,
+/// not received, as a rig's sidetone is: played past the receiver and past
+/// its AF gain, at the level it is heard at, turned down by the volume alone,
+/// so no band setting moves its level or takes any of it away.
 ///
-/// Where the output stage's limiter starts to bend, less what full volume
-/// lifts it by: at full volume your sending at its loudest peaks right
-/// there, so no setting of it or of the volume ever bends it on its own,
-/// and it is then as loud as the paddle's sidetone at the default strength
-/// floor (0.7). About 2 dB over the loudest caller before the AGC (0.3).
+/// Where the output stage's limiter starts to bend: at its loudest your
+/// message peaks right there and never past it, as loud as the strongest
+/// station a receiver plays at full volume and as the paddle's sidetone at
+/// the default strength floor (0.7).
 ///
 /// On the worst band, the widest filter at the hardest noise and static,
 /// the limiter takes the band's crests on top of it some of the time, as it
 /// always has: a steady tone still stands clear of hiss spread over two
 /// kilohertz, and going louder would only bend more of it.
-pub const MONITOR_LEVEL: f64 = SOFT_LIMIT_KNEE / FULL_VOLUME_GAIN;
+pub const MONITOR_LEVEL: f64 = SOFT_LIMIT_KNEE;
 
 /// Who sends a segment of a turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

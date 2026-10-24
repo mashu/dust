@@ -8,23 +8,6 @@ use super::dsp::db_to_gain;
 /// whatever is played comes out exactly as it went in.
 pub const SOFT_LIMIT_KNEE: f64 = 0.7;
 
-/// What the output stage lifts the band, the Morse and your own messages by
-/// at full volume, before the limiter: as far as a station goes without
-/// reaching where the limiter starts to bend ([`SOFT_LIMIT_KNEE`]), through
-/// any receiver.
-///
-/// The band is calibrated with the strongest station peaking at 0.3 of full
-/// scale, and the AGC rides it some 5 dB lower: played as it is, full
-/// volume came out about 15 dB under what the speaker can give, and a phone
-/// at its own top volume was too quiet. A station on its own peaks highest,
-/// at about 0.35, through the sharp filter at its narrowest with the AGC
-/// off and the keying's edges at their hardest, where the filter overshoots
-/// each one; nearly twice that, 5.6 dB, still leaves it a little under the
-/// knee, so no volume and no receiver bends the Morse. What the limiter is
-/// left to catch is what it always caught: crashes, and the crests of a hard
-/// band or of several stations keying at once.
-pub const FULL_VOLUME_GAIN: f64 = 1.9;
-
 /// What a receiver does with a loud crash: catches it, rather than letting it
 /// square off. Linear up to the knee, asymptotic to full scale above it — so
 /// the biggest static is loud without turning into a buzz.

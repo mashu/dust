@@ -495,7 +495,7 @@ mod tests {
             cw_core::DEFAULT_FILTER_WIDTH_HZ
         );
         assert_eq!(settings.band.qrn_level, 0.4);
-        assert_eq!(settings.band.filter_shape, cw_core::FilterShape::Peaked);
+        assert_eq!(settings.band.filter_shape, cw_core::FilterShape::Sharp);
 
         // And the new ones round-trip.
         let mut fresh = TrainingSettings::default();

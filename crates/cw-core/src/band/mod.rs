@@ -17,15 +17,20 @@
 //!    makes every crash and every dit ring; narrowing it quiets the band,
 //!    pushes off-frequency stations down and lengthens the ringing, all at
 //!    once, because those are one thing.
-//! 3. The AGC rides the gain: a steady few decibels down under a keyed
-//!    station, back up in the pauses, and only a moment's duck for a crash.
-//!    Its knee is set from the band's own floor ([`agc_knee`]).
+//! 3. The RF gain turns all of it down by the same decibels on its way to
+//!    the AGC ([`crate::TrainingSettings::rf_gain`]), and the AGC rides the
+//!    gain: a steady few decibels down under a keyed station, back up in the
+//!    pauses, and only a moment's duck for a crash. Its knee is set from the
+//!    band's own floor ([`agc_knee`]), raised by its threshold
+//!    ([`receiver_knee`]).
 //! 4. The receiver's audio stage adds a very faint, wide hiss of its own
 //!    ([`AudioFloor`]), after the filter and the AGC, so the band is never
 //!    quite silent outside the passband — as no real receiver is.
 //! 5. A soft limiter ([`soft_limit`]) catches whatever is still too loud,
 //!    once, on everything the player is about to play, after the volume
-//!    ([`crate::TrainingSettings::output_gain`]) has set how loud it is.
+//!    ([`crate::TrainingSettings::af_gain`]) has set how loud it is: as loud
+//!    as the strongest station comes out of this receiver clean at full RF
+//!    gain ([`full_volume_gain`]), at full.
 //!
 //! QSB is applied to the Morse alone ([`Qsb`]): fading is a property of the
 //! path a station arrives on, not of the noise around it.
@@ -43,6 +48,7 @@ mod dsp;
 mod filter;
 mod key;
 mod knee;
+mod loudness;
 mod memo;
 mod noise;
 mod output;
@@ -61,11 +67,10 @@ pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
 };
 pub use key::BandKey;
-pub use knee::agc_knee;
+pub use knee::{agc_knee, receiver_knee, threshold_raise};
+pub use loudness::{full_volume_gain, loudest_station};
 pub use noise::AudioFloor;
-pub use output::{
-    FULL_VOLUME_GAIN, LimiterFeed, SOFT_LIMIT_KNEE, limiter_feed, soft_limit, soft_limit_curve,
-};
+pub use output::{LimiterFeed, SOFT_LIMIT_KNEE, limiter_feed, soft_limit, soft_limit_curve};
 pub use qsb::Qsb;
 pub use source::BandSource;
 
@@ -80,6 +85,9 @@ use calibration::{noise_level, qrn_level};
 pub struct BandMixer {
     source: BandSource,
     receiver: ReceiverFilter,
+    /// The RF gain, as a gain: what the band and the send are multiplied by
+    /// on their way to the AGC.
+    rf: f64,
     agc: Agc,
     /// The receiver's audio stage, joining after the AGC.
     audio_floor: AudioFloor,
@@ -91,10 +99,14 @@ pub struct Received {
     /// The band: its noise, static and stations through the filter and the
     /// AGC, and the audio stage's own floor.
     pub band: f64,
-    /// The gain the AGC is riding at. The send is played at it: one receiver,
-    /// one gain for everything it hears, so a crash ducks the station you are
-    /// copying with the noise.
+    /// The gain the AGC is riding at. The send is played at it, after the
+    /// RF gain: one receiver, one gain for everything it hears, so a crash
+    /// ducks the station you are copying with the noise.
     pub gain: f64,
+    /// What reached the AGC: the band and the send together, through the
+    /// filter and the RF gain, before the AGC's. What a level meter on the
+    /// receiver reads.
+    pub input: f64,
 }
 
 impl BandMixer {
@@ -108,7 +120,8 @@ impl BandMixer {
         Self {
             source: BandSource::new(sample_rate, band, &receiver, seed),
             receiver: ReceiverFilter::new(sample_rate, &receiver),
-            agc: match agc_knee(band, &receiver) {
+            rf: settings.rf_gain(),
+            agc: match receiver_knee(band, &receiver) {
                 Some(knee) => Agc::new(sample_rate, knee),
                 None => Agc::off(),
             },
@@ -126,15 +139,30 @@ impl BandMixer {
     pub fn next(&mut self, send: f64) -> Received {
         let send = if send.is_finite() { send } else { 0.0 };
         // Everything meets at the receiver's filter, which is why narrowing
-        // it quiets the whole band at once rather than one layer of it.
-        let heard = self.receiver.process(self.source.next_sample());
+        // it quiets the whole band at once rather than one layer of it; and
+        // the RF gain turns all of it down alike, so backing it off lowers
+        // the station and the noise together and leaves the AGC less to do.
+        let heard = self.rf * self.receiver.process(self.source.next_sample());
+        let send = self.rf * send;
         let ridden = self.agc.process(heard, send);
+        let input = heard + send;
         // The audio stage's own hiss comes in after all of that: the filter
         // never had it, so it runs on outside the passband, and the AGC never
         // saw it, so it neither moves the gain nor ducks under a station.
         Received {
             band: ridden + self.audio_floor.next_sample(),
             gain: self.agc.gain(),
+            input,
+        }
+    }
+
+    /// Hear the band and the send at RF gain `rf` from the next sample on,
+    /// as a gain: the player moves it a sample at a time as the control
+    /// moves, so turning it neither rebuilds the band nor clicks. Anything
+    /// that is not a number, or is less than nothing, is left alone.
+    pub fn set_rf_gain(&mut self, rf: f64) {
+        if rf.is_finite() && rf >= 0.0 {
+            self.rf = rf;
         }
     }
 

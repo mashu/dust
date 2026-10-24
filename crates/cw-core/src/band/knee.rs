@@ -7,7 +7,10 @@ use super::calibration::{REFERENCE_NOISE_LEVEL, noise_level, qrn_level};
 use super::filter::{FilterDesign, ReceiverFilter, reference_width_hz};
 use super::memo::{Exact, LastAnswer};
 use super::source::BandSource;
-use crate::settings::{BandSettings, FilterShape, STATIONS_MIN, TrainingSettings};
+use crate::settings::{
+    AGC_THRESHOLD_MAX_DB, AGC_THRESHOLD_MIN_DB, BandSettings, FilterShape, STATIONS_MIN,
+    TrainingSettings,
+};
 
 /// The rate the floor is measured at for the AGC's knee. Both backends use
 /// it, so both arrive at the same knee to the bit; it is low because the
@@ -42,6 +45,29 @@ pub fn agc_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
             band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(reference_floor_level());
         AGC_TRIGGER * floor
     }))
+}
+
+/// Where the receiver's AGC starts to turn the gain down for these band
+/// settings, heard through `receiver`, at the threshold they set: the band's
+/// own knee ([`agc_knee`]), the lowest it goes, raised by the threshold
+/// ([`threshold_raise`]). The volume after it makes up what the AGC no
+/// longer takes off. `None` with the AGC switched off.
+///
+/// What both players set their AGC by.
+pub fn receiver_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
+    agc_knee(band, receiver).map(|knee| knee * threshold_raise(band))
+}
+
+/// How many times over its lowest these settings put the AGC's threshold:
+/// one at the lowest, inside its range whatever is set.
+pub fn threshold_raise(band: &BandSettings) -> f64 {
+    let db = if band.agc_threshold_db.is_finite() {
+        band.agc_threshold_db
+            .clamp(AGC_THRESHOLD_MIN_DB, AGC_THRESHOLD_MAX_DB)
+    } else {
+        AGC_THRESHOLD_MIN_DB
+    };
+    10f64.powf(db / 20.0)
 }
 
 /// What the knee is measured from, and so what it is remembered by: the
@@ -143,6 +169,34 @@ mod tests {
     use crate::settings::{FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ};
 
     const SR: u32 = 48_000;
+
+    /// Raising the threshold raises the knee the players set their AGC by
+    /// as far as it is raised, from the band's own knee at the lowest; with
+    /// the AGC off there is none, and a threshold no setting allows reads as
+    /// the nearest one that does.
+    #[test]
+    fn the_threshold_raises_the_knee_as_far_as_it_is_raised() {
+        let mut settings = TrainingSettings::default();
+        let receiver = FilterDesign::from_settings(&settings);
+        let lowest = agc_knee(&settings.band, &receiver).expect("the AGC is on");
+        assert_eq!(receiver_knee(&settings.band, &receiver), Some(lowest));
+        settings.band.agc_threshold_db = 10.0;
+        let raised = receiver_knee(&settings.band, &receiver).expect("still on");
+        assert!((20.0 * (raised / lowest).log10() - 10.0).abs() < 1e-9);
+        for wild in [f64::NAN, -40.0] {
+            settings.band.agc_threshold_db = wild;
+            assert_eq!(
+                receiver_knee(&settings.band, &receiver),
+                Some(lowest),
+                "{wild}"
+            );
+        }
+        settings.band.agc_threshold_db = 90.0;
+        let highest = receiver_knee(&settings.band, &receiver).expect("still on");
+        assert!((20.0 * (highest / lowest).log10() - AGC_THRESHOLD_MAX_DB).abs() < 1e-9);
+        settings.band.agc_enabled = false;
+        assert_eq!(receiver_knee(&settings.band, &receiver), None);
+    }
 
     /// The band preview measures the knee ahead of building the band, for
     /// the settings as the app holds them — clamped once — and the band then

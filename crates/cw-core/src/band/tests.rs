@@ -576,6 +576,37 @@ fn a_loud_send_rides_the_gain_down_too() {
     }
 }
 
+/// The RF gain turns everything reaching the AGC down by its decibels, the
+/// band and the send alike, so the AGC has less to ride; set on a band
+/// already running, it is the same receiver as one built with it.
+#[test]
+fn the_rf_gain_turns_down_what_reaches_the_agc() {
+    let settings = only_noise(0.3);
+    // Half a second under a send at full scale: the loudest that reached
+    // the AGC, and the lowest it took the gain to.
+    let run = |mixer: &mut BandMixer| {
+        (0..SR as usize / 2).fold((0.0f64, 1.0f64), |(input, gain), i| {
+            let received = mixer.next(tone(1.0, i));
+            (input.max(received.input.abs()), gain.min(received.gain))
+        })
+    };
+    let (full_in, full_gain) = run(&mut BandMixer::new(SR, &settings, 7));
+    let mut backed = settings.clone();
+    backed.band.rf_gain_db = -20.0;
+    let (backed_in, backed_gain) = run(&mut BandMixer::new(SR, &backed, 7));
+    let backed_off = 20.0 * (backed_in / full_in).log10();
+    assert!((backed_off + 20.0).abs() < 1e-6, "{backed_off:.3} dB");
+    assert!(
+        full_gain < 0.8 && backed_gain > full_gain,
+        "the AGC rode {full_gain:.3} at full and {backed_gain:.3} backed off"
+    );
+    let mut turned = BandMixer::new(SR, &settings, 7);
+    turned.set_rf_gain(0.1);
+    turned.set_rf_gain(f64::NAN);
+    turned.set_rf_gain(-1.0);
+    assert_eq!(run(&mut turned), (backed_in, backed_gain));
+}
+
 /// The send is ducked with the band sample by sample, from its first
 /// element: the gain it rides never jumps.
 ///

@@ -16,7 +16,7 @@ use std::rc::Rc;
 use cw_core::band::SOFT_LIMIT_KNEE;
 use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 
-use crate::audio::{MorseBackend, PlaybackOutcome, PlaybackWait};
+use crate::audio::{MeterFrame, MorseBackend, PlaybackOutcome, PlaybackWait};
 use crate::time::{POLL_MS, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
@@ -124,6 +124,12 @@ impl Player {
         // A slider move has no one to tell. A band that cannot open is
         // reported by the next send, which rebuilds the player.
         self.with_backend(|backend| backend.apply_band(settings));
+    }
+
+    /// The receiver's meter frames since they were last taken, onto `into`,
+    /// for the level scope: none while there is no player.
+    pub fn take_meter(&self, into: &mut Vec<MeterFrame>) {
+        self.with_backend(|backend| backend.take_meter(into));
     }
 
     /// Gate the live sidetone for paddle practice. Opens the player if there

@@ -623,18 +623,41 @@ fn a_sharp_300_hz_filter_is_a_rigs_cw_filter() {
     assert!(at400 >= -0.1 && at600 >= -0.1);
 }
 
-/// The default receiver is that 300 Hz sharp filter with the audio peak
-/// filter in behind it, on the 450 Hz note in the middle of the default
-/// side-tone range. 300-600 Hz is more than 300 Hz passes, so it is built
-/// 353 Hz wide, as wide as its IF filter needs to pass the ends of the range
-/// within [`COVERAGE_DB`], and the resonance takes them down by the 4.9 dB the
-/// peak filter costs a station 150 Hz off: 5.7 dB in all.
+/// The default receiver is that 300 Hz sharp filter on the 450 Hz note in
+/// the middle of the default side-tone range. 300-600 Hz is more than 300 Hz
+/// passes, so it is built 353 Hz wide, as wide as it needs to pass the ends
+/// of the range within [`COVERAGE_DB`]: a station anywhere in the range comes
+/// through within a decibel of its strength.
 #[test]
-fn the_default_receiver_is_a_peaked_300_hz_filter() {
+fn the_default_receiver_is_a_sharp_300_hz_filter() {
     let settings = TrainingSettings::default();
     assert_eq!(settings.band.filter_width_hz, DEFAULT_FILTER_WIDTH_HZ);
     assert_eq!(DEFAULT_FILTER_WIDTH_HZ, 300.0);
-    assert_eq!(settings.band.filter_shape, FilterShape::Peaked);
+    assert_eq!(settings.band.filter_shape, FilterShape::Sharp);
+    let design = FilterDesign::from_settings(&settings);
+    assert_eq!(design.shape(), FilterShape::Sharp);
+    assert_eq!(design.pitch_hz(), 450.0);
+    assert!(
+        (design.width_hz() - 353.0).abs() <= 2.0,
+        "built {:.1} Hz",
+        design.width_hz()
+    );
+    for hz in [300.0, 375.0, 450.0, 525.0, 600.0] {
+        let level = db(design.response_at(hz));
+        assert!(level >= COVERAGE_DB - 1e-6, "{level:.3} dB at {hz} Hz");
+    }
+    assert_eq!(design.sections(48_000.0).len(), 8);
+}
+
+/// The peaked receiver on the default range is that sharp filter with the
+/// audio peak filter in behind it. Built as wide, its resonance takes the
+/// ends of the range down by the 4.9 dB the peak filter costs a station
+/// 150 Hz off: 5.7 dB in all, which is why it is no longer the default.
+#[test]
+fn the_peaked_receiver_takes_the_ends_of_the_default_range_down() {
+    let mut settings = TrainingSettings::default();
+    settings.band.filter_shape = FilterShape::Peaked;
+    assert_eq!(settings.band.filter_width_hz, DEFAULT_FILTER_WIDTH_HZ);
     let design = FilterDesign::from_settings(&settings);
     assert_eq!(design.shape(), FilterShape::Peaked);
     assert_eq!(design.pitch_hz(), 450.0);
@@ -647,7 +670,7 @@ fn the_default_receiver_is_a_peaked_300_hz_filter() {
     let ends = [db(design.response_at(300.0)), db(design.response_at(600.0))];
     let if_ends = [300.0, 600.0].map(|hz| db(design.response_at(hz) / apf_gain(hz - 450.0)));
     println!(
-        "default (peaked/300): built {:.1} Hz; {w3:.1} Hz at 3 dB, {w6:.1} at 6, {w20:.1} at 20, \
+        "peaked/300 on the default range: built {:.1} Hz; {w3:.1} Hz at 3 dB, {w6:.1} at 6, {w20:.1} at 20, \
          {w60:.1} at 60; noise bandwidth {:.1} Hz; 300/600 Hz at {ends:.3?} dB, its IF filter \
          {if_ends:.3?}",
         design.width_hz(),
@@ -938,17 +961,18 @@ fn the_receiver_always_passes_the_side_tone_range() {
 /// the pitch, where that filter's has nearly a fifth of it as rumble, and
 /// most of it is inside the 6 dB width.
 ///
-/// The default receiver is the peaked 300 Hz one, whose resonance holds the
-/// hiss to the note longer still. Built 353 Hz wide on the 450 Hz note of the
-/// default 300-600 Hz range, its lower skirt reaches nearer 0.7 of the pitch
-/// than it would on a higher note: measured, the envelope is 0.48 at 2.3 ms
-/// and 0.30 at 2.9 ms, 5.5% of the power is below 315 Hz, and 99% of it is
-/// within 273-627 Hz.
+/// The peaked 300 Hz receiver, the default before the sharp one, is the one
+/// whose resonance holds the hiss to the note longest. Built 353 Hz wide on
+/// the 450 Hz note of the default 300-600 Hz range, its lower skirt reaches
+/// nearer 0.7 of the pitch than it would on a higher note: measured, the
+/// envelope is 0.48 at 2.3 ms and 0.30 at 2.9 ms, 5.5% of the power is below
+/// 315 Hz, and 99% of it is within 273-627 Hz.
 #[test]
-fn the_default_hiss_rings_at_the_note() {
+fn the_peaked_hiss_rings_at_the_note() {
     const RATE: u32 = 48_000;
     const POINTS: usize = 8_192;
     let mut settings = TrainingSettings::default();
+    settings.band.filter_shape = FilterShape::Peaked;
     settings.band.qrn_enabled = false;
     settings.band.noise_enabled = true;
     settings.band.agc_enabled = true;

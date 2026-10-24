@@ -29,9 +29,9 @@ use web_sys::{AudioContext, AudioContextState, GainNode};
 
 use super::band_queue::Reservation;
 use super::epoch::{Epoch, Ticket};
-use super::shape::{GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest};
+use super::shape::{Gains, GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest};
 use super::wait::{heard_after_sec, heard_ms, schedule_lead_sec};
-use super::{MorseBackend, PlaybackSignal, WaitFlags};
+use super::{METER_FRAME_SEC, MeterFrame, MorseBackend, PlaybackSignal, WaitFlags};
 use crate::time::mono_ms;
 use chain::Chain;
 use param::{Retiring, ramp_to};
@@ -77,6 +77,11 @@ pub struct MorsePlayer {
     /// Set while the context is suspended because nothing is playing, so
     /// the page coming back into view does not wake it for nothing.
     asleep: Rc<Cell<bool>>,
+    /// When the meter was last read, on the context's clock, and the
+    /// analysers' samples read into.
+    metered_at: Option<f64>,
+    meter_input: Vec<f32>,
+    meter_output: Vec<f32>,
 }
 
 /// What a scheduled send looks like to a waiter.
@@ -165,11 +170,14 @@ impl MorsePlayer {
             on_visibility,
             sleep: None,
             asleep,
+            metered_at: None,
+            meter_input: vec![0.0; chain::METER_WINDOW as usize],
+            meter_output: vec![0.0; chain::METER_WINDOW as usize],
         })
     }
 
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.chain.set_volume(&self.ctx, settings.output_gain());
+        self.chain.set_gains(&self.ctx, Gains::of(settings));
         self.receiver.tune(&self.ctx, &self.chain, settings)?;
         let key = BandKey::of(&settings.band);
         if self.band_key == Some(key) {
@@ -309,13 +317,13 @@ impl MorseBackend for MorsePlayer {
         // together.
         self.release_send(takes_over.then_some(start - SEND_RELEASE_SEC));
         // Your own message in a contest goes around the receiver, whose
-        // filter and AGC are for what you copy, as the paddle's sidetone
-        // does; but through the volume, as the native mixer plays it, and
-        // the limiter.
+        // filter, AGC and AF gain are for what you copy, as the paddle's
+        // sidetone does; at the volume alone, as the native mixer monitors
+        // it, and through the limiter.
         let send = ScheduledSend::schedule(
             &self.ctx,
             &self.chain.mix,
-            &self.chain.floor_in,
+            &self.chain.monitor_in,
             plan,
             Qsb::of(&settings.band),
             start,
@@ -383,6 +391,40 @@ impl MorseBackend for MorsePlayer {
         self.resume_from_gesture();
         let tone = ToneRequest::new(on, frequency_hz, gain);
         let _ = self.sidetone.set(&self.ctx, &self.chain.sidetone_in, tone);
+    }
+
+    /// The analysers hold the latest stretch of samples, not a queue of
+    /// frames: as many frames as the context's clock has moved since the
+    /// last look are cut from the end of what they hold, the AGC's gain
+    /// read once for all of them.
+    fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
+        let now = self.ctx.current_time();
+        let Some(last) = self.metered_at.replace(now) else {
+            return;
+        };
+        let frame_len = ((METER_FRAME_SEC * f64::from(self.ctx.sample_rate())) as usize).max(1);
+        let held = self.meter_input.len() / frame_len;
+        let frames = (((now - last) / METER_FRAME_SEC).round().max(0.0) as usize).min(held);
+        if frames == 0 {
+            return;
+        }
+        self.chain
+            .meter_input
+            .get_float_time_domain_data(&mut self.meter_input);
+        self.chain
+            .meter_output
+            .get_float_time_domain_data(&mut self.meter_output);
+        let gain = self.chain.agc_gain() as f32;
+        let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        let end = self.meter_input.len();
+        for k in (0..frames).rev() {
+            let span = end - (k + 1) * frame_len..end - k * frame_len;
+            into.push(MeterFrame {
+                input: peak(&self.meter_input[span.clone()]),
+                gain,
+                output: peak(&self.meter_output[span]),
+            });
+        }
     }
 }
 
