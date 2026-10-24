@@ -26,7 +26,7 @@ fn pair_name(row: char, col: char) -> String {
 /// A character as part of a control's id: itself where it is a letter or a
 /// digit, `start` for the start of a group, and its code point otherwise,
 /// so that `/` and `?` never share an id.
-fn id_part(ch: char) -> String {
+pub(crate) fn id_part(ch: char) -> String {
     if ch == GROUP_START_BIGRAM_TOKEN {
         "start".to_string()
     } else if ch.is_ascii_alphanumeric() {
@@ -235,7 +235,9 @@ pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
 pub fn BigramCard(heat: BigramHeatmap) -> Element {
     let mut hovered = use_signal(|| None::<Pair>);
     let mut pinned = use_signal(|| None::<Pair>);
-    let mut most_errors = use_signal(|| false);
+    // The most errors first, as every list of characters on Stats starts
+    // with the ones that need the most work.
+    let mut most_errors = use_signal(|| true);
     use_click_elsewhere(PAIR_CARD, move || {
         if pinned.peek().is_some() {
             pinned.set(None);

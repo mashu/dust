@@ -57,6 +57,10 @@ pub struct BoardEntry {
     pub accuracy: f64,
     pub groups: usize,
     pub mode: CharSetMode,
+    /// The contest a run was of, when this build knows it.
+    pub contest: Option<ContestKind>,
+    /// The QSOs a run logged, where its log reads.
+    pub qsos: Option<usize>,
 }
 
 /// What a session earned a group, if it can go on the board: a score that
@@ -173,6 +177,10 @@ fn entry(place: usize, index: usize, session: &SessionResult, per_group: f64) ->
         accuracy: session.accuracy,
         groups: session.groups.len(),
         mode: session.char_set_mode,
+        contest: session.contest_kind(),
+        qsos: session
+            .contest_run()
+            .map(|run| run.qsos.iter().filter(|qso| qso.k.is_empty()).count()),
     }
 }
 

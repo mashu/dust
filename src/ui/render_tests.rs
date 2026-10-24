@@ -2299,6 +2299,33 @@ mod interactions {
         assert_ne!(adapting.html().matches(">14%<").count(), 6);
     }
 
+    /// On a board of every mode, a run is flagged with its contest and
+    /// counts its QSOs; a session says its mode and counts its groups.
+    #[test]
+    fn a_board_of_every_mode_flags_its_contest_runs() {
+        use crate::ui::scores::{ScoresTab, ScoresTabProps};
+        let mut ui = Ui::new(
+            ScoresTab,
+            ScoresTabProps {
+                sessions: contest_history(3),
+            },
+        );
+        // The personal best names its contest.
+        assert!(ui.has("<span class=\"chip\">CQ WPX</span>"));
+        ui.click("board-all");
+        let html = ui.html();
+        assert!(
+            html.contains("class=\"board-badge contest\"><svg"),
+            "{html}"
+        );
+        assert!(html.contains("</svg>CQ WPX</span>5 QSOs · "), "{html}");
+        assert!(
+            html.contains("class=\"board-badge\">Koch</span>10 groups · "),
+            "{html}"
+        );
+        assert!(!html.contains("· Contest<"), "no mode tacked on at the end");
+    }
+
     /// Under All, the board says where contest runs sit; under Contest, a
     /// chip for each contest ranks runs within it.
     #[test]
@@ -2347,7 +2374,10 @@ mod interactions {
         assert!(ui.has("Group length"));
         assert!(ui.has("every length is as likely as the next"));
         // The default range is 2 to 3 characters: half each.
-        assert_eq!(ui.html().matches(">50%<").count(), 2, "{}", ui.html());
+        let html = ui.html();
+        let card = &html[html.find("Group length").expect("the card")..];
+        let card = &card[..card.find("Speed, WPM").unwrap_or(card.len())];
+        assert_eq!(card.matches(">50%<").count(), 2, "{card}");
 
         let mut ui = stats(true, CharSetMode::Mixed);
         ui.click("seg-sampling");
@@ -2414,13 +2444,131 @@ mod interactions {
         let mut ui = two_sets(CharSetMode::Koch);
         ui.click("seg-sampling");
         assert!(ui.has("Not in the current set"));
-        assert!(ui.has("letter-row not-drawn"));
-        for character in ["Q", "U", "R"] {
+        // Q was missed in the Koch session, and is not drawn now.
+        let q = ui.input_tag("sample-q");
+        assert!(q.contains("not-drawn"), "{q}");
+        assert!(q.contains("aria-label=\"Q: wrong"), "{q}");
+        for character in ["u", "r"] {
             assert!(
-                ui.has(&format!("letter-key group-text\">{character}<")),
+                ui.shows(&format!("sample-{character}")),
                 "{character} is listed"
             );
         }
+    }
+
+    /// K half right in its first ten tries and clean in twenty since; M
+    /// tried twice.
+    #[component]
+    fn LettersHarness() -> Element {
+        let half = [("K", "K"), ("K", "X")].repeat(5);
+        let clean = vec![("K", "K"); 10];
+        let sessions = [
+            (1, stored_session("2026-09-01", &half)),
+            (2, stored_session("2026-09-02", &clean)),
+            (3, stored_session("2026-09-03", &clean)),
+            (4, stored_session("2026-09-04", &[("MM", "MM")])),
+        ]
+        .into_iter()
+        .map(|(timestamp, mut session)| {
+            session.timestamp = timestamp;
+            session
+        })
+        .collect();
+        rsx! {
+            crate::ui::letters::LettersTab { sessions }
+        }
+    }
+
+    /// The Letters card says where each character stands, which way it is
+    /// going, and that two tries are too few to call M anything.
+    #[test]
+    fn letter_accuracy_says_where_each_stands_and_which_way_it_goes() {
+        let ui = Ui::new(LettersHarness, ());
+        assert!(ui.has(">Letter accuracy<"));
+        assert!(ui.has(">Building · 1<"), "{}", ui.html());
+        assert!(ui.has(">Few tries · 1<"));
+        assert!(ui.has(">Mastered · 0<"));
+        assert!(!ui.has(">Weak · "), "nothing is weak");
+        let k = ui.input_tag("letter-k");
+        assert!(k.contains("err-row letters building"), "{k}");
+        assert!(k.contains("aria-label=\"K: 83% right of 30, likely"), "{k}");
+        assert!(k.contains("up 50 points lately"), "{k}");
+        assert!(ui.has(">↑ 50<"));
+        let m = ui.input_tag("letter-m");
+        assert!(m.contains("err-row letters finding-out"), "{m}");
+        assert!(m.contains("few tries"), "{m}");
+        // The weakest first: K, building, before M, too few tries to tell.
+        let html = ui.html();
+        assert!(html.find("id=\"letter-k\"") < html.find("id=\"letter-m\""));
+    }
+
+    /// Koch at level 3, K and M heard, M often missed.
+    #[component]
+    fn SamplingHarness() -> Element {
+        let mut settings = test_settings();
+        settings.curriculum.level = 3;
+        let sessions = vec![stored_session(
+            "2026-09-08",
+            &[("KM", "KX"), ("KM", "KX"), ("KM", "KM"), ("KK", "KK")],
+        )];
+        rsx! {
+            crate::ui::sampling::NextUpCard { settings, sessions }
+        }
+    }
+
+    /// Every character the next group can draw is a row: one never heard is
+    /// new, one missed often is to work on, and it opens with the most work
+    /// first; Most likely puts the likeliest first, Taught order as taught.
+    #[test]
+    fn what_comes_up_next_has_a_row_a_character() {
+        let first_row = |ui: &Ui| {
+            let html = ui.html();
+            let at = html.find("id=\"sample-").expect("a row");
+            html[at + 4..].split('"').next().unwrap_or("").to_string()
+        };
+        let mut ui = Ui::new(SamplingHarness, ());
+        assert!(ui.has(">What comes up next<"));
+        // M missed two times in four: over the 10% threshold, and so few
+        // tries that the trainer is still finding out.
+        let m = ui.input_tag("sample-m");
+        assert!(m.contains("err-row finding-out"), "{m}");
+        assert!(m.contains("aria-label=\"M: wrong about"), "{m}");
+        // U, the third Koch character, was never heard.
+        let u = ui.input_tag("sample-u");
+        assert!(u.contains("err-row new"), "{u}");
+        assert!(u.contains("aria-label=\"U: not heard yet,"), "{u}");
+        assert!(ui.has("Still finding out · "));
+        assert!(ui.input_tag("seg-sample-work").contains("active"));
+        assert_eq!(first_row(&ui), "sample-m", "the most work first");
+        // The dot sits on the best guess, and the dashed threshold at 10%
+        // of a scale to 60%.
+        assert!(ui.has("--thr: 16.7%;"));
+        assert!(ui.has("class=\"err-dot\""));
+
+        ui.click("seg-sample-taught");
+        assert_eq!(first_row(&ui), "sample-k", "taught order");
+        let likeliest = cw_core::sampling_rows(
+            &{
+                let mut settings = test_settings();
+                settings.curriculum.level = 3;
+                settings
+            },
+            &[stored_session(
+                "2026-09-08",
+                &[("KM", "KX"), ("KM", "KX"), ("KM", "KM"), ("KK", "KK")],
+            )],
+        )
+        .into_iter()
+        .filter(|row| row.drawn_now)
+        .max_by(|a, b| a.sampling_prob.total_cmp(&b.sampling_prob))
+        .expect("a row")
+        .character;
+        ui.click("seg-sample-likely");
+        assert!(ui.input_tag("seg-sample-likely").contains("active"));
+        assert_eq!(
+            first_row(&ui),
+            format!("sample-{}", likeliest.to_ascii_lowercase())
+        );
     }
 
     /// Choosing another set never hides the span and speed of the ones
@@ -2562,8 +2710,9 @@ mod interactions {
         assert!(!ui.has("Once each"), "one confusion, drawn in full");
     }
 
-    /// Most errors first puts the row and the column with the most errors
-    /// in the top left corner, and taught order puts them back.
+    /// Most errors first, as the grid opens, puts the row and the column with
+    /// the most errors in the top left corner, and taught order puts them
+    /// back.
     #[test]
     fn the_grid_can_put_the_most_errors_first() {
         let first_square = |ui: &Ui| {
@@ -2571,18 +2720,19 @@ mod interactions {
             let at = html.find("id=\"pair-").expect("a square");
             html[at + 4..].split('"').next().unwrap_or("").to_string()
         };
+        // The most errors first, as it opens: K before has every error, and
+        // M after.
         let mut ui = Ui::new(MistakesHarness, ());
-        assert!(ui.input_tag("seg-taught-order").contains("active"));
-        assert_eq!(first_square(&ui), "pair-start-k");
-        ui.click("seg-most-errors");
         assert!(ui.input_tag("seg-most-errors").contains("active"));
-        // K before has every error, and M after.
         assert_eq!(first_square(&ui), "pair-k-m");
         // A pinned pair stays pinned however the grid is ordered.
         ui.click("pair-k-m");
         ui.click("seg-taught-order");
+        assert!(ui.input_tag("seg-taught-order").contains("active"));
         assert_eq!(first_square(&ui), "pair-start-k");
         assert!(ui.input_tag("pair-k-m").contains("selected"));
+        ui.click("seg-most-errors");
+        assert_eq!(first_square(&ui), "pair-k-m");
     }
 
     /// Three sessions of twenty groups, the first ten copied clean, then
@@ -2612,13 +2762,22 @@ mod interactions {
     fn the_endurance_card_says_how_far_copy_holds() {
         let ui = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: true });
         assert!(ui.has(">Endurance<"));
-        assert!(ui.has("100% at the start · 3 sessions"), "{}", ui.html());
-        assert!(ui.has(">Drops after group 10<"));
-        assert!(ui.has("Groups 1 to 20 · scale -30 to +5 points"));
+        assert!(
+            ui.has("Accuracy as a session goes on · Koch · last 3 sessions"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has("class=\"endu-headline fades\">Fades after group 10<"));
         assert!(ui.has(
-            "Your copy holds within 5 points of how you start a session through group 10, and is 30 points down by group 20."
+            "You start a session copying 100%; by group 20 you are down to 70%, 30 points lower."
         ));
-        assert_eq!(ui.html().matches("<circle").count(), 4, "a dot a stretch");
+        // A bar a stretch, with its accuracy over it and its groups under it;
+        // the first how you start, the last two copper.
+        for text in [">100%<", ">80%<", ">70%<", ">1–5<", ">16–20<"] {
+            assert!(ui.has(text), "no {text}");
+        }
+        assert_eq!(ui.html().matches("class=\"endu-bar fades\"").count(), 2);
+        assert_eq!(ui.html().matches("class=\"endu-bar first\"").count(), 1);
 
         let short = Ui::new(EnduranceHarness, EnduranceHarnessProps { long: false });
         assert!(short.has(">Endurance<"));
@@ -2626,7 +2785,7 @@ mod interactions {
             short
                 .has("After 3 sessions of 10 groups or more, or contest runs of 4 minutes or more")
         );
-        assert!(!short.has("sparkline"));
+        assert!(!short.has("endu-chart"));
     }
 
     /// A tap pins a pair's card and lights up its row and column; a second

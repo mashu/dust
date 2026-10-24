@@ -8,10 +8,10 @@ use crate::contest::{ContestKind, StoredLog};
 use crate::morse::LCWO_SEQUENCE;
 use crate::pool::compute_char_pool;
 use crate::sampling::{
-    CharSamplingConfig, CharSamplingState, adaptive_bounds, adapts_speed, belief_for,
-    beta_posterior_mean_error, compute_raw_sampling_weights, config_from_settings,
-    generate_callsign_group, generate_contest_call, generate_word_group, group_size_bounds,
-    normalize_weights,
+    CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
+    adaptive_bounds, adapts_speed, belief_for, beta_posterior_mean_error,
+    compute_raw_sampling_weights, config_from_settings, generate_callsign_group,
+    generate_contest_call, generate_word_group, group_size_bounds, normalize_weights,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -46,7 +46,16 @@ pub enum MasteryStatus {
     Mastered,
     Building,
     Weak,
+    /// Heard fewer than [`MASTERED_MIN_ATTEMPTS`] times: too few to call it
+    /// anything, right every time or not.
+    FewTries,
 }
+
+/// How many of a character's latest tries count as recent: whole sessions,
+/// newest first, until there are this many.
+pub const RECENT_TRIES: u32 = 20;
+/// The fewest tries before them for there to be an earlier to compare with.
+const EARLIER_MIN_TRIES: u32 = 10;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CharacterDiagnostic {
@@ -57,6 +66,25 @@ pub struct CharacterDiagnostic {
     pub correct: u32,
     pub status: MasteryStatus,
     pub is_slow: bool,
+    /// Accuracy over the latest sessions that hold [`RECENT_TRIES`] tries of
+    /// it, and over the tries before them, in percent: which way it is going.
+    /// None until there are enough of both.
+    pub recent_pct: Option<f64>,
+    pub earlier_pct: Option<f64>,
+}
+
+impl CharacterDiagnostic {
+    /// The belief in how often it is copied right ([`rate_density`]).
+    pub fn accuracy_density(&self, steps: usize) -> Vec<f64> {
+        let wrong = self.total.saturating_sub(self.correct);
+        rate_density(f64::from(self.correct) + 1.0, f64::from(wrong) + 1.0, steps)
+    }
+
+    /// The range its accuracy is likely in ([`rate_interval`]).
+    pub fn accuracy_interval(&self, mass: f64) -> (f64, f64) {
+        let wrong = self.total.saturating_sub(self.correct);
+        rate_interval(f64::from(self.correct) + 1.0, f64::from(wrong) + 1.0, mass)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -162,6 +190,74 @@ pub struct SamplingRow {
     pub drawn_now: bool,
 }
 
+impl SamplingRow {
+    /// How much the history has said of the character: the weight of what
+    /// it was copied right and wrong, beyond the flat prior every character
+    /// starts from. Nothing for one never heard, whose error is the prior's
+    /// even chance rather than anything measured.
+    pub fn evidence(&self) -> f64 {
+        (self.alpha + self.beta - CHAR_SAMPLING_PRIOR_ALPHA - CHAR_SAMPLING_PRIOR_BETA).max(0.0)
+    }
+
+    /// The belief in the character's error rate as a density: a Beta of
+    /// what was missed against what was copied ([`rate_density`]). A
+    /// character never heard reads one everywhere; a well known one peaks
+    /// high and narrow.
+    pub fn error_density(&self, steps: usize) -> Vec<f64> {
+        rate_density(self.beta, self.alpha, steps)
+    }
+
+    /// The range the error rate is likely in ([`rate_interval`]).
+    pub fn error_interval(&self, mass: f64) -> (f64, f64) {
+        rate_interval(self.beta, self.alpha, mass)
+    }
+}
+
+/// A belief in a rate, from how often things went `toward` it and `away`
+/// from it, each counted with the flat prior's one: a Beta of the two, read
+/// as a density at the middle of each of `steps` equal steps from none of
+/// the time to all of it, and scaled to take in one over the whole range.
+///
+/// Worked out on the grid, its scale from the grid's own sum, so no gamma
+/// function is needed; a few hundred steps put it within a fraction of a
+/// percent of the exact density.
+pub fn rate_density(toward: f64, away: f64, steps: usize) -> Vec<f64> {
+    let steps = steps.max(1);
+    let (toward, away) = (toward.max(1e-9), away.max(1e-9));
+    let log: Vec<f64> = (0..steps)
+        .map(|step| {
+            let x = (step as f64 + 0.5) / steps as f64;
+            (toward - 1.0) * x.ln() + (away - 1.0) * (1.0 - x).ln()
+        })
+        .collect();
+    let top = log.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let raw: Vec<f64> = log.iter().map(|value| (value - top).exp()).collect();
+    let area = raw.iter().sum::<f64>() / steps as f64;
+    raw.into_iter().map(|value| value / area).collect()
+}
+
+/// The range a rate believed as [`rate_density`] says is likely: the
+/// central `mass` of the belief, from the rate below which half of the rest
+/// lies to the one above which the other half does.
+pub fn rate_interval(toward: f64, away: f64, mass: f64) -> (f64, f64) {
+    const STEPS: usize = 2_000;
+    let tail = (1.0 - mass.clamp(0.0, 1.0)) / 2.0;
+    let density = rate_density(toward, away, STEPS);
+    let (mut low, mut high) = (0.0, 1.0);
+    let mut below = 0.0;
+    for (step, value) in density.iter().enumerate() {
+        let next = below + value / STEPS as f64;
+        if below < tail && next >= tail {
+            low = step as f64 / STEPS as f64;
+        }
+        if below < 1.0 - tail && next >= 1.0 - tail {
+            high = (step + 1) as f64 / STEPS as f64;
+        }
+        below = next;
+    }
+    (low, high)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionHistoryRow {
     pub date: String,
@@ -197,7 +293,7 @@ fn lcwo_index(ch: char) -> usize {
 
 pub fn classify_mastery(accuracy01: f64, attempts: u32) -> MasteryStatus {
     if attempts < MASTERED_MIN_ATTEMPTS {
-        MasteryStatus::Weak
+        MasteryStatus::FewTries
     } else if accuracy01 >= MASTERED_MIN_ACCURACY {
         MasteryStatus::Mastered
     } else if accuracy01 >= BUILDING_MIN_ACCURACY {
@@ -222,11 +318,18 @@ pub fn accuracy_chart(sessions: &[SessionResult]) -> Vec<AccuracyPoint> {
 pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnostic> {
     let mut totals: BTreeMap<char, (u32, u32)> = BTreeMap::new();
     let mut timings: BTreeMap<char, Vec<f64>> = BTreeMap::new();
+    // Each character's tallies by session, newest first, for its trend.
+    let mut by_session: BTreeMap<char, Vec<(u64, u32, u32)>> = BTreeMap::new();
     for session in sessions {
         for (letter, stats) in session.letter_accuracy().iter() {
             let entry = totals.entry(*letter).or_insert((0, 0));
             entry.0 += stats.correct;
             entry.1 += stats.total;
+            by_session.entry(*letter).or_default().push((
+                session.timestamp,
+                stats.correct,
+                stats.total,
+            ));
         }
         // A contest's times run from a station's send to an edit, waiting
         // and typing included: not answers after a send (§10 of the design).
@@ -262,6 +365,7 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
             let status = classify_mastery(accuracy01, total);
             let is_slow = matches!(status, MasteryStatus::Mastered | MasteryStatus::Building)
                 && avg_ms >= SLOW_AVG_MS;
+            let (recent_pct, earlier_pct) = trend(by_session.remove(&letter).unwrap_or_default());
             CharacterDiagnostic {
                 letter,
                 accuracy_pct: accuracy01 * 100.0,
@@ -270,6 +374,8 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
                 correct,
                 status,
                 is_slow,
+                recent_pct,
+                earlier_pct,
             }
         })
         .collect();
@@ -277,7 +383,8 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
         let rank = |s: MasteryStatus| match s {
             MasteryStatus::Weak => 0,
             MasteryStatus::Building => 1,
-            MasteryStatus::Mastered => 2,
+            MasteryStatus::FewTries => 2,
+            MasteryStatus::Mastered => 3,
         };
         rank(a.status).cmp(&rank(b.status)).then(
             a.accuracy_pct
@@ -286,6 +393,30 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
         )
     });
     out
+}
+
+/// A character's accuracy over its latest sessions that hold
+/// [`RECENT_TRIES`] tries, and over the tries before them, in percent, from
+/// its tallies by session as (when, correct, tries). None for either until
+/// there are enough of both.
+fn trend(mut sessions: Vec<(u64, u32, u32)>) -> (Option<f64>, Option<f64>) {
+    sessions.sort_by_key(|(when, _, _)| std::cmp::Reverse(*when));
+    let (mut recent, mut earlier) = ((0u32, 0u32), (0u32, 0u32));
+    for (_, correct, tries) in sessions {
+        let into = if recent.1 < RECENT_TRIES {
+            &mut recent
+        } else {
+            &mut earlier
+        };
+        into.0 += correct;
+        into.1 += tries;
+    }
+    let pct = |(correct, tries): (u32, u32)| 100.0 * f64::from(correct) / f64::from(tries);
+    if recent.1 >= RECENT_TRIES && earlier.1 >= EARLIER_MIN_TRIES {
+        (Some(pct(recent)), Some(pct(earlier)))
+    } else {
+        (None, None)
+    }
 }
 
 /// What the mistakes screen shows: which characters are taken for which,
@@ -810,7 +941,7 @@ mod tests {
 
     #[test]
     fn mastery_needs_both_attempts_and_accuracy() {
-        assert_eq!(classify_mastery(1.0, 4), MasteryStatus::Weak);
+        assert_eq!(classify_mastery(1.0, 4), MasteryStatus::FewTries);
         assert_eq!(
             classify_mastery(MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS),
             MasteryStatus::Mastered
@@ -994,6 +1125,94 @@ mod tests {
         assert!(!mistakes.bigrams.rows.contains(&'X'));
         assert!(!mistakes.bigrams.cols.contains(&'X'));
         assert!(mistakes.confusions.iter().all(|c| c.sent != 'X'));
+    }
+
+    /// A character never heard has no evidence; one heard has the weight of
+    /// what was heard.
+    #[test]
+    fn a_sampling_row_knows_how_much_was_heard() {
+        let mut row = SamplingRow {
+            character: 'K',
+            p_error: 0.5,
+            sampling_prob: 0.1,
+            alpha: CHAR_SAMPLING_PRIOR_ALPHA,
+            beta: CHAR_SAMPLING_PRIOR_BETA,
+            is_letter: true,
+            drawn_now: true,
+        };
+        assert_eq!(row.evidence(), 0.0);
+        // Never heard: even everywhere, its likely range most of the way.
+        let flat = row.error_density(100);
+        assert!(flat.iter().all(|d| (d - 1.0).abs() < 1e-9));
+        let (low, high) = row.error_interval(0.8);
+        assert!((low - 0.1).abs() < 0.002 && (high - 0.9).abs() < 0.002);
+        row.alpha += 3.0;
+        row.beta += 1.0;
+        assert_eq!(row.evidence(), 4.0);
+    }
+
+    /// A character copied 190 times in 200 is believed wrong about one time
+    /// in twenty, within a few points: a peak there, high and narrow, the
+    /// density taking in one over the range.
+    #[test]
+    fn a_well_known_character_has_a_narrow_likely_range() {
+        let row = SamplingRow {
+            character: 'K',
+            p_error: 11.0 / 202.0,
+            sampling_prob: 0.1,
+            alpha: CHAR_SAMPLING_PRIOR_ALPHA + 190.0,
+            beta: CHAR_SAMPLING_PRIOR_BETA + 10.0,
+            is_letter: true,
+            drawn_now: true,
+        };
+        let density = row.error_density(1_000);
+        let area = density.iter().sum::<f64>() / 1_000.0;
+        assert!((area - 1.0).abs() < 1e-9);
+        let peak = density
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(step, _)| (step as f64 + 0.5) / 1_000.0)
+            .expect("a peak");
+        assert!((peak - 0.05).abs() < 0.002, "peak at {peak}");
+        let (low, high) = row.error_interval(0.8);
+        assert!(low < row.p_error && row.p_error < high);
+        assert!((0.03..0.045).contains(&low), "{low}");
+        assert!((0.065..0.08).contains(&high), "{high}");
+        // More of the belief is a wider range.
+        let (wide_low, wide_high) = row.error_interval(0.95);
+        assert!(wide_low < low && wide_high > high);
+    }
+
+    /// A character's recent tries are its latest sessions' until there are
+    /// twenty, and its earlier ones the rest; both are needed for a trend.
+    #[test]
+    fn a_character_knows_which_way_it_is_going() {
+        // Ten tries of K a session: an early run half right, then clean.
+        let half: Vec<(&str, &str)> = [("K", "K"), ("K", "X")].repeat(5);
+        let clean = vec![("K", "K"); 10];
+        let sessions = [
+            plain("2026-09-01", 10, &half),
+            plain("2026-09-02", 20, &clean),
+            plain("2026-09-03", 30, &clean),
+        ];
+        let k = |sessions: &[SessionResult]| {
+            character_diagnostics(sessions)
+                .into_iter()
+                .find(|d| d.letter == 'K')
+                .expect("K")
+        };
+        let now = k(&sessions);
+        assert_eq!(now.recent_pct, Some(100.0));
+        assert_eq!(now.earlier_pct, Some(50.0));
+        // Twenty tries in all: recent, and nothing earlier to compare with.
+        let young = k(&sessions[1..]);
+        assert_eq!((young.recent_pct, young.earlier_pct), (None, None));
+        // The likely range takes in what was measured.
+        let (low, high) = now.accuracy_interval(0.8);
+        assert!(low < now.accuracy_pct / 100.0 && now.accuracy_pct / 100.0 < high);
+        let density = now.accuracy_density(100);
+        assert!((density.iter().sum::<f64>() / 100.0 - 1.0).abs() < 1e-9);
     }
 
     #[test]
