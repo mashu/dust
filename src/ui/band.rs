@@ -1,4 +1,4 @@
-use cw_core::band::{FilterDesign, heard_snr_db};
+use cw_core::band::{FilterDesign, NOISE_LEVEL_PER_DB, heard_snr_db};
 use cw_core::{
     BandSettings, CallerHabits, CharSetMode, ContestRules, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN,
     Field, FilterShape, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
@@ -216,7 +216,7 @@ pub fn BandConditionsCard(
             }
             div { class: "field-grid",
                 SliderField {
-                    label: "Filter width (-6 dB)".to_string(),
+                    label: "Filter width".to_string(),
                     id: "slider-filter-width".to_string(),
                     value_label: format!("{:.0} Hz", b.filter_width_hz),
                     value: b.filter_width_hz,
@@ -244,7 +244,7 @@ pub fn BandConditionsCard(
                 }
             }
             p { class: "muted", style: "margin: 0;",
-                "Everything you hear comes through this. Narrow it and less noise gets in and the filter rings longer, but a station off your pitch fades with it. Sharp: a modern DSP filter, flat with steep sides. Soft: rounded like an older crystal filter. Peaked: Sharp plus the rig's audio peak filter — a resonance at your pitch; stations off your pitch come out a few dB weaker."
+                "Everything you hear comes through this. Its width is read between the points 6 dB down, as a rig quotes a CW filter, and it costs a station on your pitch nothing: narrow it and less noise gets in, so the S/N of the band noise rises, while that station stays as strong. It rings longer, and a station off your pitch fades with it. Sharp: a modern DSP filter, flat with steep sides. Soft: rounded like an older crystal filter. Peaked: Sharp plus the rig's audio peak filter — a resonance at your pitch; stations off your pitch come out a few dB weaker."
             }
             SettingsRange {
                 settings,
@@ -374,7 +374,7 @@ pub fn BandConditionsCard(
                 value: b.noise_level,
                 min: 0.0,
                 max: 1.0,
-                step: 0.05,
+                step: NOISE_LEVEL_PER_DB,
                 disabled: !b.noise_enabled,
                 onchange: move |v| settings.write().band.noise_level = v,
             }

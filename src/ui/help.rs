@@ -503,7 +503,7 @@ pub fn band() -> Element {
         }
         dl { class: "help-terms",
             dt { "Filter width · shape" }
-            dd { "Narrow it and less noise gets in, but it rings longer and a station off your pitch fades. Sharp is a modern DSP filter, Soft an older crystal one, Peaked adds a rig's audio peak at your pitch." }
+            dd { "The width is read between the points 6 dB down, as rigs quote CW filters. Narrow it and less noise gets in while a station on your pitch stays as strong, so its S/N rises; it rings longer, and a station off your pitch fades. Sharp is a modern DSP filter, Soft an older crystal one, Peaked adds a rig's audio peak at your pitch." }
             dt { "Stations" }
             dd { "How many call at once. More than one is a pile-up, spread either side of your pitch." }
             dt { "Band noise" }
