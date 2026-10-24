@@ -4,6 +4,23 @@
 use super::agc::CompressorSetting;
 use super::dsp::db_to_gain;
 
+/// Where [`soft_limit`] starts to bend, as a share of full scale: below it
+/// whatever is played comes out exactly as it went in.
+pub const SOFT_LIMIT_KNEE: f64 = 0.7;
+
+/// What the output stage lifts the band, the Morse and your own messages by
+/// at full volume, before the limiter.
+///
+/// The band is calibrated with the strongest station peaking at 0.3 of full
+/// scale, and the AGC rides it some 5 dB lower: played as it is, full
+/// volume came out about 15 dB under what the speaker can give, and a phone
+/// at its own top volume was too quiet. Four times, 12 dB, takes the
+/// strongest station on the default band to about where the limiter starts
+/// to bend ([`SOFT_LIMIT_KNEE`]), as loud as it plays clean. Crashes, a
+/// pile-up's peaks and your own sending above about −9 dB go past it there,
+/// and are the limiter's to round off.
+pub const FULL_VOLUME_GAIN: f64 = 4.0;
+
 /// What a receiver does with a loud crash: catches it, rather than letting it
 /// square off. Linear up to the knee, asymptotic to full scale above it — so
 /// the biggest static is loud without turning into a buzz.
@@ -12,13 +29,12 @@ use super::dsp::db_to_gain;
 /// the band, the Morse over it and the paddle's sidetone. Limited apart and
 /// then added, any two of them could still square off.
 pub fn soft_limit(x: f64) -> f64 {
-    const KNEE: f64 = 0.7;
     let magnitude = x.abs();
-    if magnitude <= KNEE {
+    if magnitude <= SOFT_LIMIT_KNEE {
         return x;
     }
-    let over = (magnitude - KNEE) / (1.0 - KNEE);
-    (KNEE + (1.0 - KNEE) * over.tanh()).copysign(x)
+    let over = (magnitude - SOFT_LIMIT_KNEE) / (1.0 - SOFT_LIMIT_KNEE);
+    (SOFT_LIMIT_KNEE + (1.0 - SOFT_LIMIT_KNEE) * over.tanh()).copysign(x)
 }
 
 /// How far past full scale [`soft_limit_curve`] reaches before it simply holds

@@ -169,6 +169,7 @@ impl MorsePlayer {
     }
 
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
+        self.chain.set_volume(&self.ctx, settings.output_gain());
         self.receiver.tune(&self.ctx, &self.chain, settings)?;
         let key = BandKey::of(&settings.band);
         if self.band_key == Some(key) {
@@ -307,9 +308,10 @@ impl MorseBackend for MorsePlayer {
         // starts, your message in it silent then, so the two never sound
         // together.
         self.release_send(takes_over.then_some(start - SEND_RELEASE_SEC));
-        // Your own message in a contest goes where the paddle's sidetone
-        // goes: around the receiver, whose filter and AGC are for what you
-        // copy, but through the limiter.
+        // Your own message in a contest goes around the receiver, whose
+        // filter and AGC are for what you copy, as the paddle's sidetone
+        // does; but through the volume, as the native mixer plays it, and
+        // the limiter.
         let send = ScheduledSend::schedule(
             &self.ctx,
             &self.chain.mix,
@@ -374,13 +376,13 @@ impl MorseBackend for MorsePlayer {
     }
 
     /// Around the receiver — its filter and AGC are for what you copy, not
-    /// for the sidetone of the key in your hand — but through the limiter,
-    /// the way the floor goes: added after it, a squeeze on top of a crash
-    /// squared off.
+    /// for the sidetone of the key in your hand — and around the volume, as
+    /// it comes at the level it is heard at, but through the limiter: added
+    /// after it, a squeeze on top of a crash squared off.
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
         self.resume_from_gesture();
         let tone = ToneRequest::new(on, frequency_hz, gain);
-        let _ = self.sidetone.set(&self.ctx, &self.chain.floor_in, tone);
+        let _ = self.sidetone.set(&self.ctx, &self.chain.sidetone_in, tone);
     }
 }
 

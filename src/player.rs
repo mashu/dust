@@ -27,8 +27,8 @@ pub type BackendFactory = Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>>;
 /// was swapped, unplugged or suspended mid-send.
 const SEND_ATTEMPTS: u32 = 3;
 
-/// The quietest the live sidetone is played, whatever the band's volume
-/// floor: a paddle you cannot hear is no use.
+/// The quietest the live sidetone is played at full volume, whatever the
+/// floor of the station strength range: a paddle you cannot hear is no use.
 const SIDETONE_FLOOR: f64 = 0.15;
 
 /// Why audio did not happen.
@@ -224,11 +224,15 @@ fn unavailable() -> AudioError {
     AudioError::Device("Audio is unavailable.".into())
 }
 
-/// The live sidetone's pitch and level for `settings`.
+/// The live sidetone's pitch and level for `settings`: at full volume the
+/// floor of the station strength range, never below [`SIDETONE_FLOOR`], as
+/// it always played, and turned down with the volume. The players add it
+/// after their volume, so this is the level it is heard at.
 fn live_tone(settings: &TrainingSettings) -> (f64, f64) {
+    let level = settings.band.volume_min.max(SIDETONE_FLOOR);
     (
         settings.side_tone_center(),
-        settings.band.volume_min.max(SIDETONE_FLOOR),
+        level * settings.master_volume(),
     )
 }
 
@@ -516,6 +520,19 @@ mod tests {
             );
             assert!(!first.is_current());
         });
+    }
+
+    /// The volume turns the paddle's sidetone down with everything else:
+    /// at full volume it is the strength range's floor, as it always was,
+    /// and at half volume half that, its own floor turned down too.
+    #[test]
+    fn the_volume_turns_the_sidetone_down_with_the_rest() {
+        let mut settings = TrainingSettings::default();
+        assert_eq!(live_tone(&settings).1, 0.7);
+        settings.band.master_volume = 0.5;
+        assert_eq!(live_tone(&settings).1, 0.35);
+        settings.band.volume_min = 0.1;
+        assert_eq!(live_tone(&settings).1, SIDETONE_FLOOR * 0.5);
     }
 
     #[test]

@@ -46,6 +46,10 @@ use crate::timing::{
 /// limiter takes the band's crests on top of it for some 6% of the time. A
 /// steady tone still stands well clear of hiss spread over two kilohertz,
 /// and going louder would only bend more of it.
+///
+/// All of that is the band as it is calibrated, before the volume. At full
+/// volume ([`crate::band::FULL_VOLUME_GAIN`]) your message is lifted with
+/// the callers, and from about −9 dB up it reaches the limiter's knee.
 pub const MONITOR_LEVEL: f64 = 0.5;
 
 /// Who sends a segment of a turn.

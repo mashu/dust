@@ -7,9 +7,10 @@
 //! band, the AGC hearing the two together and riding both, bands handing
 //! over to each other, and, without full break-in, its output muted while
 //! you send. Your own message in a contest joins after all of it, as a
-//! rig's sidetone does. The output stage — the paddle's sidetone, and the
-//! limiter on the lot — is added by the stream, which runs it even when the
-//! UI holds the mixer for a moment.
+//! rig's sidetone does, and the volume sets how loud the lot is played. The
+//! output stage — the paddle's sidetone, and the limiter on everything — is
+//! added by the stream, which runs it even when the UI holds the mixer for a
+//! moment.
 
 mod band;
 mod send;
@@ -53,6 +54,12 @@ pub struct Mixer {
     /// break-in, moving between the two a straight line at a time, over
     /// [`GATE_RAMP_SEC`], so it never clicks.
     gate: f64,
+    /// What everything it plays is multiplied by, the volume, and what it
+    /// was last asked to be: moving between the two at the gate's pace, a
+    /// whole unit of gain over [`GATE_RAMP_SEC`], so a slider moved under a
+    /// tone never clicks.
+    volume: f64,
+    volume_asked: f64,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -86,6 +93,8 @@ impl Mixer {
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
             latency: 0,
             gate: 1.0,
+            volume: 1.0,
+            volume_asked: 1.0,
         }
     }
 
@@ -97,6 +106,12 @@ impl Mixer {
     /// callback found the speaker behind it.
     pub fn latency_sec(&self) -> f64 {
         self.latency as f64 / f64::from(self.sample_rate)
+    }
+
+    /// Play everything at `gain` from here on: the volume, as the output
+    /// stage's gain ([`cw_core::TrainingSettings::output_gain`]).
+    pub fn set_volume(&mut self, gain: f64) {
+        self.volume_asked = if gain.is_finite() { gain.max(0.0) } else { 1.0 };
     }
 
     /// Put a new band in, or take the band away. The one going out is not
@@ -167,6 +182,7 @@ impl Mixer {
     pub fn clear(&mut self, sample_rate: u32, swept: &mut Swept) {
         self.sample_rate = sample_rate.max(1);
         self.gate = 1.0;
+        self.volume = self.volume_asked;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
         swept.sends.append(&mut self.retiring);
@@ -236,7 +252,8 @@ impl Mixer {
             // is never muted.
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
-            *slot += ((background + heard) * self.gate + send.dry) as f32;
+            self.volume += (self.volume_asked - self.volume).clamp(-gate_step, gate_step);
+            *slot += (((background + heard) * self.gate + send.dry) * self.volume) as f32;
         }
         for send in self.send.iter().chain(&self.retiring) {
             send.settle(latency);
@@ -272,9 +289,9 @@ impl Output {
         }
     }
 
-    /// One callback's worth of mono frames: the mixer, the paddle's
-    /// sidetone, and the limiter over the lot, `latency` frames ahead of the
-    /// speaker.
+    /// One callback's worth of mono frames: the mixer, at its volume, the
+    /// paddle's sidetone, set at the level it is heard at, and the limiter
+    /// over the lot, `latency` frames ahead of the speaker.
     ///
     /// Never waits. A callback that finds the UI holding the mixer — it only
     /// ever does to swap a band or a send in — goes without the mixer for

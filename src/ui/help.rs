@@ -433,10 +433,12 @@ pub fn speed_settings() -> Element {
 pub fn tone() -> Element {
     rsx! {
         dl { class: "help-terms",
+            dt { "Volume" }
+            dd { "How loud Dust plays everything: the band, the stations, your sending and the paddle's sidetone. 100% is as loud as it plays without distorting; your device's volume does the rest." }
             dt { "Side tone" }
             dd { "The pitch you hear the Morse at. A range picks a fresh pitch for each group, as different stations sound." }
-            dt { "Volume" }
-            dd { "How loud it plays; a range varies it from group to group." }
+            dt { "Station strength" }
+            dd { "How strong the station you copy comes in, against the band's noise and static: lower is harder to copy, not quieter overall. A range varies it from group to group." }
             dt { "Your sending" }
             dd { "In a contest, how loud you hear your own messages." }
             dt { "Full break-in (QSK)" }

@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::sync::atomic::AtomicUsize;
 
 use super::*;
-use cw_core::band::{BandMixer, FilterDesign, Qsb};
+use cw_core::band::{BandMixer, FilterDesign, Qsb, SOFT_LIMIT_KNEE};
 use cw_core::{
     CALLSIGN_TIER_MAX, FILTER_WIDTH_MIN, MONITOR_LEVEL, PlannedTransmission, STATIONS_MAX, Segment,
     Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, Turn, VOLUME_MAX, VOLUME_MIN,
@@ -95,6 +95,59 @@ fn a_new_band_comes_in_without_a_hole_in_the_hiss() {
     assert!(
         levels.iter().all(|level| level.abs() < 1.0),
         "the hiss through a rebuild, in dB against before it: {levels:.2?}"
+    );
+}
+
+/// The volume sets the level of everything the receiver plays, the band
+/// and the Morse over it alike, and gets there in a straight line at the
+/// gate's pace rather than in a step: a slider moved under a tone never
+/// clicks.
+#[test]
+fn the_volume_moves_all_the_receiver_plays_without_a_step() {
+    let settings = hiss();
+    let play = |volume: f64| {
+        let mut mixer = Mixer::new(SR);
+        let mut swept = Swept::new();
+        mixer.set_band(Some(band(&settings, 9)), &mut swept);
+        mixer.start(send(&settings, "TEST"), &mut swept);
+        mixer.set_volume(volume);
+        render(&mut mixer, SR as usize)
+    };
+    let (plain, lifted) = (play(1.0), play(4.0));
+    assert!(loudest(&plain) > 0.1, "the Morse was heard");
+    let step = 1.0 / (GATE_RAMP_SEC * f64::from(SR));
+    for (i, (a, b)) in plain.iter().zip(&lifted).enumerate() {
+        let gain = (1.0 + step * (i + 1) as f64).min(4.0);
+        let off = (f64::from(*b) - gain * f64::from(*a)).abs();
+        assert!(off < 1e-5, "{off} off at {i}");
+    }
+}
+
+/// Full volume is full: the strongest station on the default band, as the
+/// AGC rides it, peaks about where the limiter starts to bend, rather than
+/// some 15 dB under full scale, where the band is calibrated.
+#[test]
+fn at_full_volume_the_strongest_station_reaches_the_limiters_knee() {
+    let mut settings = hiss();
+    settings.band.link_volume = true;
+    settings.band.volume_min = VOLUME_MAX;
+    assert_eq!(settings.master_volume(), 1.0, "full out of the box");
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.set_band(Some(band(&settings, 9)), &mut swept);
+    mixer.set_volume(settings.output_gain());
+    render(&mut mixer, SR as usize);
+    mixer.start(send(&settings, "TEST TEST TEST"), &mut swept);
+    let mut heard: Vec<f32> = render(&mut mixer, SR as usize * 3)
+        .iter()
+        .map(|s| s.abs())
+        .collect();
+    heard.sort_by(f32::total_cmp);
+    let loudest = f64::from(heard[heard.len() - 1]);
+    let crest = f64::from(heard[heard.len() * 999 / 1000]);
+    assert!(
+        loudest > 0.8 * SOFT_LIMIT_KNEE && crest < SOFT_LIMIT_KNEE,
+        "loudest {loudest:.3}, 99.9% under {crest:.3}"
     );
 }
 

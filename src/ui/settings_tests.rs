@@ -1158,22 +1158,24 @@ fn your_sending_is_on_the_tone_card_in_contest_mode() {
             "{}",
             ui.html()
         );
-        // Apart from the volume, and level with an average caller where it
-        // starts, as cw-core keeps that.
+        // Apart from the station strength, and level with an average caller
+        // where it starts, as cw-core keeps that.
         assert!(ui.has(
-            "Your own messages in a run, apart from the volume above: 0 dB is the loudest, −9 dB about level with an average caller, and Off silent"
+            "Your own messages in a run, apart from the station strength above: 0 dB is the loudest, −9 dB about level with an average caller, and Off silent"
         ));
-        // It sits on Tone and volume, after the volume.
+        // It sits on Tone and volume, after the station strength.
         let html = ui.html();
         let card = html
             .find(">Tone &amp; volume<")
             .or_else(|| html.find(">Tone &#38; volume<"))
             .expect("the card");
-        let volume = html.find(r#"id="link-volume""#).expect("the volume");
+        let strength = html
+            .find(r#"id="link-station-strength""#)
+            .expect("the station strength");
         let sending = html
             .find(r#"id="slider-your-sending""#)
             .expect("your sending");
-        assert!(card < volume && volume < sending);
+        assert!(card < strength && strength < sending);
 
         ui.click("less-slider-your-sending");
         assert_eq!(ui.stored_settings().await.contest.my_sending_db, -12);
@@ -1195,6 +1197,63 @@ fn your_sending_is_on_the_tone_card_in_contest_mode() {
         );
         ui.click("reset-tone-volume");
         assert_eq!(ui.stored_settings().await.contest.my_sending_db, -9);
+    });
+}
+
+/// Volume is the first thing on the Tone and volume card, in every mode:
+/// at 100% until you set it, down in steps of 5% to 5%, stored, and put
+/// back by the card's reset. The range under it is the station's strength,
+/// in percent, and says it is not how loud anything plays.
+#[test]
+fn the_volume_heads_the_tone_card_and_the_range_is_station_strength() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(ui.has(r#"<span class="slider-value">100%</span>"#));
+        assert!(ui.input_tag("more-slider-volume").contains("disabled"));
+        let html = ui.html();
+        let volume = html.find(r#"id="slider-volume""#).expect("the volume");
+        let tone = html.find(r#"id="link-side-tone""#).expect("the side tone");
+        let strength = html
+            .find(r#"id="link-station-strength""#)
+            .expect("the station strength");
+        assert!(volume < tone && tone < strength);
+        assert!(ui.has("noise, not how loud it plays. A range draws a fresh strength per group."));
+        assert!(
+            !ui.has(r#"<span class="field-label">Volume</span>"#),
+            "no range is called volume"
+        );
+
+        ui.click("less-slider-volume");
+        assert_eq!(ui.stored_settings().await.band.master_volume, 0.95);
+        assert!(ui.has(r#"<span class="slider-value">95%</span>"#));
+        ui.type_into("slider-volume", "0.05");
+        assert_eq!(ui.stored_settings().await.band.master_volume, 0.05);
+        assert!(ui.has(r#"<span class="slider-value">5%</span>"#));
+        assert!(ui.input_tag("less-slider-volume").contains("disabled"));
+        ui.click("reset-tone-volume");
+        assert_eq!(ui.stored_settings().await.band.master_volume, 1.0);
+        assert!(ui.has(r#"<span class="slider-value">100%</span>"#));
+    });
+}
+
+/// The station strength is shown and typed as a percentage of the
+/// strongest, and stored as the share it always was.
+#[test]
+fn the_station_strength_is_typed_in_percent() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.band.link_volume = false;
+        settings.band.volume_min = 0.7;
+        settings.band.volume_max = 1.0;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(ui.has("70–100 %"), "{}", ui.html());
+        ui.type_into("from-station-strength", "40");
+        ui.commit("from-station-strength", "40");
+        ui.advance(50).await;
+        assert_eq!(ui.stored_settings().await.band.volume_min, 0.4);
+        assert!(ui.has("40–100 %"));
     });
 }
 
