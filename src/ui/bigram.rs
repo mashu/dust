@@ -9,6 +9,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::elsewhere::{PAIR_CARD, use_click_elsewhere};
+use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
 
 /// A pair as the character before and the one after it.
@@ -182,6 +183,7 @@ pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
                 icon: IconName::Target,
                 title: "Hardest pairs",
                 note: "Where it is the pair that trips you, not the letter",
+                help: help::hardest_pairs(),
             }
             if heat.hardest.is_empty() {
                 p { class: "muted", style: "margin: 0;",
@@ -263,6 +265,7 @@ pub fn BigramCard(heat: BigramHeatmap) -> Element {
                 icon: IconName::Chart,
                 title: "Bigram error rate",
                 note: "How often a character goes wrong after each other one",
+                help: help::bigram(),
                 div { class: "segmented",
                     Seg {
                         label: "Taught order",

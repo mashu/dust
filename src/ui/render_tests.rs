@@ -2605,6 +2605,22 @@ mod interactions {
         );
     }
 
+    /// What comes up next says, under its ?, what its colours mean against
+    /// the threshold the settings set: 10% wrong, from 90% to level up.
+    #[test]
+    fn what_comes_up_next_explains_its_colours() {
+        let mut ui = Ui::new(SamplingHarness, ());
+        assert!(!ui.has("help-note"), "out of the way until asked for");
+        ui.click("help-what-comes-up-next");
+        assert!(ui.has("class=\"help-note\""));
+        assert!(ui.has(">Under your 10%<"), "{}", ui.html());
+        assert!(ui.has("a session levels up at 90% right (Settings → Auto level)"));
+        assert!(
+            ui.input_tag("help-what-comes-up-next")
+                .contains("aria-expanded=true")
+        );
+    }
+
     /// Choosing another set never hides the span and speed of the ones
     /// practised before: with Callsigns chosen, which has none, the cards show
     /// the sets that have, one at a time.
@@ -3082,8 +3098,17 @@ mod interactions {
             assert!(!ui.has(gone), "{gone} should no longer be on the card");
         }
 
-        ui.open_disclosures();
-        assert!(ui.has("QSB slowly fades"), "the help should have opened");
+        assert!(!ui.has("Slow swells and dips of the signal."));
+        ui.click("help-band-conditions");
+        assert!(
+            ui.has("Slow swells and dips of the signal."),
+            "the help should have opened"
+        );
+        ui.click("help-band-conditions");
+        assert!(
+            !ui.has("Slow swells and dips of the signal."),
+            "and closes again"
+        );
 
         // The filter shape is a real choice, and it shows which one is in:
         // the peaked one out of the box.

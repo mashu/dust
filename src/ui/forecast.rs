@@ -15,6 +15,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::ui::help;
 use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds};
 use crate::ui::widgets::{CardHead, IconName, control_id};
 
@@ -164,6 +165,7 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]
                 icon: IconName::Signal,
                 title: "Group length",
                 note: "How often you copy a group that long without a mistake, and its chance of coming up next",
+                help: help::group_length(aim),
             }
             div { class: "err-summary",
                 {summary_row(format!("Your aim · {} whole", pct(aim)), reach)}
@@ -263,6 +265,7 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> El
                 icon: IconName::Gauge,
                 title: "Speed",
                 note: "How much you copy right at each speed, in WPM, and its chance of coming up next",
+                help: help::speed(aim),
             }
             div { class: "err-summary",
                 if let Some(reach) = reach {

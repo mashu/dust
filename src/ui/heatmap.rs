@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 
 use crate::ui::elsewhere::{DAY_CARD, use_click_elsewhere};
 use crate::ui::format::{counted, long_date, month_name};
+use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id, html_bool};
 
 #[component]
@@ -85,6 +86,7 @@ pub fn ActivityHeatmap(sessions: Vec<SessionResult>, today: String) -> Element {
                 icon: IconName::Timer,
                 title: "Practice calendar",
                 note: "One square per day",
+                help: help::calendar(),
                 div { class: "segmented",
                     Seg {
                         label: "Volume".to_string(),

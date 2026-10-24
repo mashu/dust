@@ -14,6 +14,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::format::counted;
+use crate::ui::help;
 use crate::ui::settings_charset::mode_label;
 use crate::ui::stats::shown_mode;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
@@ -136,7 +137,7 @@ pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -
     let Some((mode, curve)) = shown else {
         return rsx! {
             div { class: "card",
-                CardHead { icon: IconName::Timer, title: "Endurance" }
+                CardHead { icon: IconName::Timer, title: "Endurance", help: help::endurance() }
                 p { class: "muted", style: "margin: 0;",
                     "How long you can keep copying at your best. After {ENDURANCE_MIN_SESSIONS} sessions of {2 * GROUPS_A_STRETCH} groups or more, or contest runs of {2 * MINUTES_A_STRETCH} minutes or more, this shows whether your accuracy holds up as a session goes on, or where it starts to slip."
                 }
@@ -157,6 +158,7 @@ pub fn EnduranceCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -
             CardHead {
                 icon: IconName::Timer,
                 title: "Endurance",
+                help: help::endurance(),
                 note: format!(
                     "Accuracy as a session goes on · {} · last {}",
                     mode_label(mode),

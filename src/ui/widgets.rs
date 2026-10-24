@@ -426,26 +426,50 @@ pub fn ProgressHeader(
 }
 
 /// The head every card wears: an icon, a title, a note under it, and the
-/// card's own tools to the right.
+/// card's own tools to the right. A card with `help` has a ? beside its
+/// title that opens it under the head: what the card's terms, colours and
+/// options mean, out of the way until asked for.
 #[component]
 pub fn CardHead(
     icon: IconName,
     #[props(into)] title: String,
     #[props(into)] note: Option<String>,
+    #[props(default)] help: Option<Element>,
     #[props(default)] children: Element,
 ) -> Element {
+    let mut open = use_signal(|| false);
+    let id = control_id("help", &title);
     rsx! {
         div { class: "card-head",
             div { class: "card-head-main",
                 span { class: "card-icon", Icon { name: icon } }
                 div {
-                    h3 { class: "card-title", "{title}" }
+                    div { class: "card-title-row",
+                        h3 { class: "card-title", "{title}" }
+                        if help.is_some() {
+                            button {
+                                id,
+                                class: if open() { "icon-btn help-btn on" } else { "icon-btn help-btn" },
+                                r#type: "button",
+                                title: if open() { "Hide the help" } else { "What does this mean?" },
+                                aria_label: if open() { "Hide the help" } else { "What does this mean?" },
+                                aria_expanded: open(),
+                                onclick: move |_| open.toggle(),
+                                Icon { name: if open() { IconName::X } else { IconName::Help } }
+                            }
+                        }
+                    }
                     if let Some(note) = note {
                         p { class: "card-note", "{note}" }
                     }
                 }
             }
             div { class: "card-tools", {children} }
+        }
+        if open() {
+            if let Some(help) = help {
+                div { class: "help-note", role: "note", {help} }
+            }
         }
     }
 }

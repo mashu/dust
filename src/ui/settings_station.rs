@@ -13,6 +13,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, NumberField, SectionReset, control_id};
 
 /// What the callsign, name, state, zone and power fields are called, and so
@@ -806,7 +807,11 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
         .and(s.missing.clone());
     rsx! {
         div { class: "card stack-sm",
-            CardHead { icon: IconName::Flag, title: "Your station", note,
+            CardHead {
+                icon: IconName::Flag,
+                title: "Your station",
+                note,
+                help: help::station(),
                 SectionReset {
                     label: "your station",
                     on_reset: move |()| {

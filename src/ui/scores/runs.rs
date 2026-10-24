@@ -12,6 +12,7 @@ use dioxus::prelude::*;
 
 use crate::state::SessionPick;
 use crate::ui::format::{counted, day_and_clock, minutes_seconds};
+use crate::ui::help;
 use crate::ui::stats_detail::{ASSISTED, HISTORY_PAGE, log_parts};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 
@@ -49,7 +50,7 @@ pub(super) fn RunsCard(
     );
     rsx! {
         div { class: "card stack-sm runs-card",
-            CardHead { icon: IconName::Flag, title: "Runs", note }
+            CardHead { icon: IconName::Flag, title: "Runs", note, help: help::runs() }
             p { class: "muted runs-key",
                 if kind.scored() {
                     "Verified is the contest score of what was logged clean, raw of everything logged. The best verified run of each length is marked; an assisted run, with Show copy on, never is."

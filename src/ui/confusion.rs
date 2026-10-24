@@ -6,6 +6,7 @@
 use cw_core::{ConfusionEntry, morse_for};
 use dioxus::prelude::*;
 
+use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName};
 
 /// The fewest confusions drawn in full, even when each happened once.
@@ -86,6 +87,7 @@ pub fn confusions_card(rows: &[ConfusionEntry]) -> Element {
                 icon: IconName::Shuffle,
                 title: "Common confusions",
                 note: "What each character was taken for, its Morse against yours",
+                help: help::confusions(),
             }
             if rows.is_empty() {
                 p { class: "muted", style: "margin: 0;", "No substitution errors yet." }

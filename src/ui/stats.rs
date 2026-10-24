@@ -10,6 +10,7 @@ use crate::ui::backup::Backups;
 use crate::ui::chart::{CHART_H, marks, path, polyline, series, trend_chart};
 use crate::ui::endurance::EnduranceCard;
 use crate::ui::format::counted;
+use crate::ui::help;
 use crate::ui::letters::LettersTab;
 use crate::ui::scores::ScoresTab;
 use crate::ui::settings::aim_label;
@@ -136,6 +137,8 @@ fn TrendCard(
     /// What the estimate stands for, said before its scale.
     #[props(into)]
     meaning: String,
+    /// What its ? opens.
+    help: Element,
     /// The aim, while the feature is steering by it.
     steering: Option<&'static str>,
     /// What the chip says while it is not.
@@ -165,6 +168,7 @@ fn TrendCard(
                 icon,
                 title,
                 note: format!("{:.decimals$} ± {:.decimals$} {unit} · {trend}", last.mean, last.sd),
+                help,
             }
             if modes.len() > 1 {
                 div { class: "mode-pills",
@@ -265,6 +269,7 @@ fn SpanCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element
             decimals: 1,
             colour: "var(--info)",
             meaning: "Copied whole about half the time",
+            help: help::copy_span(),
             steering: (now && adapts_group_size(&settings)).then(|| aim_label(settings.curriculum.aim)),
             off: if now { "Adaptive length off" } else { NOT_NOW },
             modes,
@@ -309,6 +314,7 @@ fn CopySpeedCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> El
             decimals: 0,
             colour: "var(--good)",
             meaning: format!("{:.0}% of characters right", aim.chars_right() * 100.0),
+            help: help::copy_speed(aim.chars_right()),
             steering: (now && adapts_speed(&settings)).then(|| aim_label(aim)),
             off,
             modes,
@@ -412,6 +418,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                             icon: IconName::Chart,
                             title: "Accuracy over time",
                             note: format!("{} · latest {}%", counted(sessions.len(), "session"), latest.round()),
+                            help: help::accuracy_over_time(threshold / 100.0),
                         }
                         svg {
                             class: "sparkline",

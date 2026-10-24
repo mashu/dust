@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use super::{rating_said, what_it_was};
 use crate::ui::chart::path;
 use crate::ui::format::{clock, counted, ordinal, short_date};
+use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName};
 
 const TIMELINE_W: f64 = 420.0;
@@ -123,6 +124,7 @@ pub(super) fn ScoreTimeline(
             CardHead {
                 icon: IconName::Chart,
                 title,
+                help: help::timeline(ranking),
                 note: format!(
                     "{} · the record set {}",
                     counted(total, noun),

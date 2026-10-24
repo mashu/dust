@@ -1255,3 +1255,48 @@ fn your_call_in_tu_is_on_the_contest_card_in_a_pile_up() {
         );
     });
 }
+
+/// Every card on the settings screen has a ? that opens what its options
+/// do, out of the way until asked for: in group training, and in Contest
+/// mode with the station's card.
+#[test]
+fn every_settings_card_says_what_its_options_do() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        for (card, says) in [
+            ("experience", "A starting point for where you are"),
+            (
+                "character-set",
+                "unlocked one at a time in the order chosen",
+            ),
+            ("session-shape", "How many groups one session sends"),
+            ("speed", "Farnsworth: the characters stay fast"),
+            ("tone-volume", "The pitch you hear the Morse at"),
+            ("keying-envelope", "How each dit and dah starts and stops"),
+            (
+                "auto-level",
+                "How many good sessions it takes to unlock a new character",
+            ),
+            (
+                "character-sampling",
+                "How much more often the characters you miss are sent",
+            ),
+            ("band-conditions", "Slow swells and dips of the signal."),
+        ] {
+            let help = format!("help-{card}");
+            assert!(!ui.has(says), "{card} keeps its help closed");
+            ui.click(&help);
+            assert!(ui.has(says), "{card} opens its help: {}", ui.html());
+            ui.click(&help);
+            assert!(!ui.has(says), "{card} closes it again");
+        }
+
+        let mut contest = test_settings();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        let (mut ui, _recorder) = Ui::app_with_settings(contest);
+        ui.click("nav-settings");
+        ui.click("help-your-station");
+        assert!(ui.has("What you send in a run: your call"));
+    });
+}
