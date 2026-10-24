@@ -3099,6 +3099,11 @@ mod interactions {
         assert!(ui.shows("fixed-stations-calling"), "{}", ui.html());
         assert!(ui.has("class=\"slider-value\">S/N 40 dB<"), "{}", ui.html());
         assert!(ui.has("300 Hz — widened to 353 Hz to pass your pitch range"));
+        // The 6 dB is where the width is read, not a loss, and the label
+        // does not make it look like one.
+        assert!(ui.has(r#"<span class="slider-name">Filter width</span>"#));
+        assert!(!ui.has("-6 dB") && !ui.has("−6 dB"));
+        assert!(ui.has("Its width is read between the points 6 dB down"));
         for (button, reading) in [
             ("more-slider-noise-level", 39),
             ("more-slider-noise-level", 38),

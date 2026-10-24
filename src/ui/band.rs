@@ -216,7 +216,7 @@ pub fn BandConditionsCard(
             }
             div { class: "field-grid",
                 SliderField {
-                    label: "Filter width (-6 dB)".to_string(),
+                    label: "Filter width".to_string(),
                     id: "slider-filter-width".to_string(),
                     value_label: format!("{:.0} Hz", b.filter_width_hz),
                     value: b.filter_width_hz,
@@ -244,7 +244,7 @@ pub fn BandConditionsCard(
                 }
             }
             p { class: "muted", style: "margin: 0;",
-                "Everything you hear comes through this. Narrow it and less noise gets in and the filter rings longer, but a station off your pitch fades with it. Sharp: a modern DSP filter, flat with steep sides. Soft: rounded like an older crystal filter. Peaked: Sharp plus the rig's audio peak filter — a resonance at your pitch; stations off your pitch come out a few dB weaker."
+                "Everything you hear comes through this. Its width is read between the points 6 dB down, as a rig quotes a CW filter, and it costs a station on your pitch nothing: narrow it and less noise gets in, so the S/N of the band noise rises, while that station stays as strong. It rings longer, and a station off your pitch fades with it. Sharp: a modern DSP filter, flat with steep sides. Soft: rounded like an older crystal filter. Peaked: Sharp plus the rig's audio peak filter — a resonance at your pitch; stations off your pitch come out a few dB weaker."
             }
             SettingsRange {
                 settings,
