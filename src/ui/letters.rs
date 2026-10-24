@@ -16,6 +16,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::bigram::id_part;
+use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, control_id};
 
 /// The share of the belief the likely range holds.
@@ -65,8 +66,9 @@ fn trend(letter: &CharacterDiagnostic) -> Trend {
     }
 }
 
-fn seconds(ms: f64) -> String {
-    format!("{:.1} s", ms / 1000.0)
+/// A time to answer, in milliseconds to the nearest ten: "650 ms".
+fn millis(ms: f64) -> String {
+    format!("{:.0} ms", (ms / 10.0).round() * 10.0)
 }
 
 /// The start of the line under a row's bar: where it stands, how often it
@@ -111,7 +113,7 @@ fn letter_label(letter: &CharacterDiagnostic) -> String {
     if letter.avg_ms > 0.0 {
         text.push_str(&format!(
             ", answered in {}{}",
-            seconds(letter.avg_ms),
+            millis(letter.avg_ms),
             if letter.is_slow { ", slow" } else { "" }
         ));
     }
@@ -167,7 +169,7 @@ fn row_view(letter: &CharacterDiagnostic) -> Element {
                 if letter.avg_ms > 0.0 {
                     " · "
                     span { class: if letter.is_slow { "acc-time slow" } else { "acc-time" },
-                        "{seconds(letter.avg_ms)} to answer"
+                        "{millis(letter.avg_ms)} to answer"
                     }
                 }
             }
@@ -208,6 +210,7 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
                 icon: IconName::Letters,
                 title: "Letter accuracy",
                 note: "How often you copy each character right, which way it is going, and how fast you answer",
+                help: help::letters(),
             }
             div { class: "err-summary",
                 for (status , label) in groups {
@@ -282,7 +285,7 @@ mod tests {
         assert_eq!(p.status, MasteryStatus::FewTries);
         assert_eq!(
             letter_label(&p),
-            "P: 50% right of 2, likely 20% to 80%, few tries, answered in 0.7 s"
+            "P: 50% right of 2, likely 20% to 80%, few tries, answered in 650 ms"
         );
         assert_eq!(letter_note(&p), "Few tries · 2 tries · likely 20–80%");
         p = letter(1, 1);
@@ -296,7 +299,7 @@ mod tests {
         p.earlier_pct = Some(80.0);
         p.is_slow = true;
         assert!(
-            letter_label(&p).ends_with("mastered, up 15 points lately, answered in 0.7 s, slow"),
+            letter_label(&p).ends_with("mastered, up 15 points lately, answered in 650 ms, slow"),
             "{}",
             letter_label(&p)
         );

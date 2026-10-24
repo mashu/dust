@@ -598,7 +598,7 @@ fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
     run(|| async {
         let (ui, _recorder) = on_words();
         assert!(
-            ui.has("Starter words, sent whole · 43 words"),
+            ui.has("Starter words, sent whole · 81 words"),
             "{}",
             ui.html()
         );
@@ -606,7 +606,7 @@ fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
         // How many words there are to draw from is said; the list itself is
         // folded away, and no character is shown on its own: a word is sent
         // whole.
-        assert!(ui.has("43 words to draw from"), "{}", ui.html());
+        assert!(ui.has("81 words to draw from"), "{}", ui.html());
         assert!(!ui.has(">QTH<"), "the list starts folded");
         assert!(!ui.has("ch sent-row"), "single characters in Words mode");
         assert_eq!(value_of(&ui, "field-word-list"), "");
@@ -687,7 +687,7 @@ fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
         // Emptying the box goes back to the starter words.
         ui.commit("field-word-list", "  \n");
         assert_eq!(word_report(&ui), "Back to the starter words.");
-        assert!(ui.has("Starter words, sent whole · 43 words"));
+        assert!(ui.has("Starter words, sent whole · 81 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
     });
 }
@@ -1253,5 +1253,50 @@ fn your_call_in_tu_is_on_the_contest_card_in_a_pile_up() {
             ui.stored_settings().await.contest.contest_tu_call,
             cw_core::TuCall::Third
         );
+    });
+}
+
+/// Every card on the settings screen has an ⓘ that opens what its options
+/// do, out of the way until asked for: in group training, and in Contest
+/// mode with the station's card.
+#[test]
+fn every_settings_card_says_what_its_options_do() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        for (card, says) in [
+            ("experience", "A starting point for where you are"),
+            (
+                "character-set",
+                "unlocked one at a time in the order chosen",
+            ),
+            ("session-shape", "How many groups one session sends"),
+            ("speed", "Farnsworth: the characters stay fast"),
+            ("tone-volume", "The pitch you hear the Morse at"),
+            ("keying-envelope", "How each dit and dah starts and stops"),
+            (
+                "auto-level",
+                "How many good sessions it takes to unlock a new character",
+            ),
+            (
+                "character-sampling",
+                "How much more often the characters you miss are sent",
+            ),
+            ("band-conditions", "Slow swells and dips of the signal."),
+        ] {
+            let help = format!("help-{card}");
+            assert!(!ui.has(says), "{card} keeps its help closed");
+            ui.click(&help);
+            assert!(ui.has(says), "{card} opens its help: {}", ui.html());
+            ui.click(&help);
+            assert!(!ui.has(says), "{card} closes it again");
+        }
+
+        let mut contest = test_settings();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        let (mut ui, _recorder) = Ui::app_with_settings(contest);
+        ui.click("nav-settings");
+        ui.click("help-your-station");
+        assert!(ui.has("What you send in a run: your call"));
     });
 }

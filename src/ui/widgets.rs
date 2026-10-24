@@ -147,12 +147,15 @@ pub enum IconName {
     Upload,
     Download,
     Medal,
+    /// What a card's terms mean: the ⓘ of its help. The ? is the guided
+    /// setup's.
+    Info,
 }
 
 impl IconName {
     /// Every icon, for the test that draws them all.
     #[cfg(test)]
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::Signal,
         Self::Chart,
         Self::Sliders,
@@ -184,10 +187,11 @@ impl IconName {
         Self::Upload,
         Self::Download,
         Self::Medal,
+        Self::Info,
     ];
 
     /// The strokes, on a 24×24 grid.
-    fn paths(self) -> &'static [&'static str] {
+    pub(crate) fn paths(self) -> &'static [&'static str] {
         match self {
             Self::Signal => &["M2 12h3l2.5-7 3.5 14 3-10 2 3h6"],
             Self::Chart => &["M4 20V11", "M10 20V4", "M16 20v-6", "M2 20h20"],
@@ -284,6 +288,11 @@ impl IconName {
                 "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
                 "M9.4 9.4a2.7 2.7 0 015.2 1c0 1.8-2.6 2.2-2.6 3.8",
                 "M12 17.3h.01",
+            ],
+            Self::Info => &[
+                "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+                "M12 11v5.5",
+                "M12 7.6h.01",
             ],
         }
     }
@@ -426,26 +435,50 @@ pub fn ProgressHeader(
 }
 
 /// The head every card wears: an icon, a title, a note under it, and the
-/// card's own tools to the right.
+/// card's own tools to the right. A card with `help` has an ⓘ beside its
+/// title that opens it under the head (the ? is the guided setup's): what the card's terms, colours and
+/// options mean, out of the way until asked for.
 #[component]
 pub fn CardHead(
     icon: IconName,
     #[props(into)] title: String,
     #[props(into)] note: Option<String>,
+    #[props(default)] help: Option<Element>,
     #[props(default)] children: Element,
 ) -> Element {
+    let mut open = use_signal(|| false);
+    let id = control_id("help", &title);
     rsx! {
         div { class: "card-head",
             div { class: "card-head-main",
                 span { class: "card-icon", Icon { name: icon } }
                 div {
-                    h3 { class: "card-title", "{title}" }
+                    div { class: "card-title-row",
+                        h3 { class: "card-title", "{title}" }
+                        if help.is_some() {
+                            button {
+                                id,
+                                class: if open() { "icon-btn help-btn on" } else { "icon-btn help-btn" },
+                                r#type: "button",
+                                title: if open() { "Hide the help" } else { "What does this mean?" },
+                                aria_label: if open() { "Hide the help" } else { "What does this mean?" },
+                                aria_expanded: open(),
+                                onclick: move |_| open.toggle(),
+                                Icon { name: if open() { IconName::X } else { IconName::Info } }
+                            }
+                        }
+                    }
                     if let Some(note) = note {
                         p { class: "card-note", "{note}" }
                     }
                 }
             }
             div { class: "card-tools", {children} }
+        }
+        if open() {
+            if let Some(help) = help {
+                div { class: "help-note", role: "note", {help} }
+            }
         }
     }
 }

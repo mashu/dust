@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 
 use super::{Medal, mode_label, rating_label, run_rule, speed};
 use crate::ui::format::day_and_clock;
+use crate::ui::help;
 use crate::ui::stats_detail::ASSISTED;
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id};
 
@@ -117,6 +118,7 @@ pub(super) fn BoardList(
             CardHead {
                 icon: IconName::Medal,
                 title: if ranking == Ranking::PerGroup { "Best sessions" } else { "Best runs" },
+                help: help::board(ranking),
                 note,
             }
             if runs_among_others {

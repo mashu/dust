@@ -305,8 +305,10 @@ pub struct SpeedForecast {
     /// The chance the next group is sent nearer this speed than any other
     /// in the forecast.
     pub drawn: f64,
-    /// The share of characters copied right at this speed.
+    /// The share of characters copied right at this speed, and how far the
+    /// posterior spreads it.
     pub right: f64,
+    pub right_sd: f64,
 }
 
 /// What the history and this session say about your copy speed.
@@ -443,10 +445,10 @@ impl SpeedBelief {
     }
 
     /// The share of characters copied right at `wpm`, over everything the
-    /// posterior allows.
-    pub fn right_at(&self, wpm: f64) -> f64 {
+    /// posterior allows, and how far it spreads it.
+    pub fn right_at(&self, wpm: f64) -> Estimate {
         let ln_speed = wpm.max(1.0).ln();
-        self.belief.estimate(|cell| p_right(ln_speed, cell)).mean
+        self.belief.estimate(|cell| p_right(ln_speed, cell))
     }
 
     /// How the next group's speed spreads over `speeds`, as [`Self::draw_speed`]
@@ -1039,8 +1041,8 @@ mod tests {
             .map(|(index, _)| speeds[index]);
         assert_eq!(busiest, Some(20.0), "{forecast:?}");
         // Faster is copied less well.
-        assert!(belief.right_at(15.0) > belief.right_at(25.0));
-        assert!(belief.right_at(25.0) > belief.right_at(40.0));
+        assert!(belief.right_at(15.0).mean > belief.right_at(25.0).mean);
+        assert!(belief.right_at(25.0).mean > belief.right_at(40.0).mean);
         // One speed is the only one drawn.
         assert_eq!(belief.drawn_near(&[20.0], 20.0, 20.0, 0.94), [1.0]);
         assert!(belief.drawn_near(&[], 10.0, 50.0, 0.94).is_empty());

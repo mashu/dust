@@ -107,11 +107,12 @@ pub use settings::{
 pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};
 pub use stats::{
-    AccuracyPoint, BigramCell, BigramHeatmap, CONTEST_TIMES_NOTE, CharTally, CharacterDiagnostic,
-    ConfusionEntry, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_MIN_TRIES, HARD_PAIR_RATIO, HardPair,
-    MASTERED_MIN_ACCURACY, MasteryStatus, MistakeStats, RECENT_TRIES, SamplingRow,
-    SessionHistoryRow, accuracy_chart, character_diagnostics, group_length_forecast, mistake_stats,
-    practised_modes, sampling_rows, session_history, span_history, speed_forecast, speed_history,
+    AccuracyPoint, BUILDING_MIN_ACCURACY, BigramCell, BigramHeatmap, CONTEST_TIMES_NOTE, CharTally,
+    CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_MIN_TRIES,
+    HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MasteryStatus,
+    MistakeStats, RECENT_TRIES, SLOW_AVG_MS, SamplingRow, SessionHistoryRow, accuracy_chart,
+    character_diagnostics, group_length_forecast, mistake_stats, practised_modes, sampling_rows,
+    session_history, span_history, speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

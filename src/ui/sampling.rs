@@ -16,6 +16,7 @@ use cw_core::{CharSetMode, SamplingRow, SessionResult, TrainingSettings, samplin
 use dioxus::prelude::*;
 
 use crate::ui::bigram::id_part;
+use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 
 /// The share of the belief the likely range holds.
@@ -262,6 +263,7 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
                 icon: IconName::Sparkle,
                 title: "What comes up next",
                 note: "How often you get each character wrong, and its chance of {next}",
+                help: help::next_up(threshold),
                 div { class: "segmented",
                     for (each , label , id) in [
                         (Order::MostWork, "Most work", "seg-sample-work"),

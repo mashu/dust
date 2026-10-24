@@ -8,9 +8,9 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::format::counted;
+use crate::ui::help;
 use crate::ui::widgets::{
-    CardHead, DISCLOSURE, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch,
-    control_id,
+    CardHead, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch, control_id,
 };
 
 /// The filter shapes, in the order the control offers them.
@@ -115,7 +115,6 @@ pub fn BandConditionsCard(
     let view = use_memo(move || Band::of(&settings.read()));
     let view = view.read();
     let b = &view.band;
-    let mut show_help = use_signal(|| false);
     // As heard through the filter you have set, so narrowing it visibly buys
     // signal-to-noise — which is the whole reason to reach for it.
     let noise_reading = if b.noise_enabled && b.noise_level > 0.0 {
@@ -185,6 +184,7 @@ pub fn BandConditionsCard(
                 } else {
                     "Stations, fading, static, noise and the receiver that hears them"
                 },
+                help: help::band(),
                 if previewing {
                     button {
                         id: control_id("btn", "band stop"),
@@ -208,26 +208,10 @@ pub fn BandConditionsCard(
                         settings.write().reset_section(SettingsSection::BandConditions);
                     },
                 }
-                button {
-                    id: control_id(DISCLOSURE, "band help"),
-                    class: if show_help() { "icon-btn open" } else { "icon-btn" },
-                    title: "What is this?",
-                    aria_label: "What is this?",
-                    onclick: move |_| show_help.set(!show_help()),
-                    Icon { name: if show_help() { IconName::X } else { IconName::Target } }
-                }
             }
             if previewing {
                 p { class: "muted", style: "margin: 0;",
                     "Looping “CQ” with the current mix. Move a slider and you hear it immediately."
-                }
-            }
-            if show_help() {
-                div { class: "tips",
-                    span { class: "tips-mark", "QRx" }
-                    p { class: "muted", style: "margin: 0;",
-                        "Everything you hear passes through one CW filter, the way it does in a real receiver: the band noise is a steady hiss pitched at the filter, and static and every dit ring in it for a moment. QSB slowly fades the signal. QRN is lightning: the crackle of distant storms and the crash of a near one, with the receiver's AGC ducking the band behind it. Turn the noise up and the band reaches the signal."
-                    }
                 }
             }
             div { class: "field-grid",

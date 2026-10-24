@@ -12,6 +12,7 @@ use crate::ui::band::habits_label;
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
+use crate::ui::help;
 use crate::ui::home::range_label;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id,
@@ -342,7 +343,11 @@ pub fn CharsetCard(
     let has_unlock_order = matches!(c.mode, CharSetMode::Koch | CharSetMode::Mixed);
     rsx! {
         div { class: "card stack-sm",
-            CardHead { icon: IconName::Letters, title: "Character set", note: c.note(),
+            CardHead {
+                icon: IconName::Letters,
+                title: "Character set",
+                note: c.note(),
+                help: help::character_set(),
                 SectionReset {
                     label: "character set",
                     on_reset: move |()| {

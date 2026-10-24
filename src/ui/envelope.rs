@@ -7,6 +7,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::ui::help;
 use crate::ui::widgets::{
     CardHead, Icon, IconName, SectionReset, SliderField, control_id, pretty_number,
 };
@@ -124,6 +125,7 @@ pub fn EnvelopeCard(
             CardHead {
                 icon: IconName::Envelope,
                 title: "Keying envelope",
+                help: help::envelope(),
                 note: format!("A dit and a dah at {} WPM · dit {dot_ms} ms", shape.wpm as u32),
                 SectionReset {
                     label: "keying envelope",

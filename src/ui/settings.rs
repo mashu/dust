@@ -18,6 +18,7 @@ use dioxus::prelude::*;
 use crate::playback::Dialogue;
 use crate::ui::band::BandConditionsCard;
 use crate::ui::envelope::EnvelopeCard;
+use crate::ui::help;
 use crate::ui::home::range_label;
 use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
@@ -62,8 +63,8 @@ fn keyer_description(mode: KeyerMode) -> &'static str {
     }
 }
 
-/// A settings card's head: its icon, title and note, and the button that
-/// puts the section back to its defaults.
+/// A settings card's head: its icon, title and note, the button that puts
+/// the section back to its defaults, and its ⓘ with what the options do.
 #[component]
 fn SectionHead(
     icon: IconName,
@@ -71,9 +72,10 @@ fn SectionHead(
     note: &'static str,
     settings: Signal<TrainingSettings>,
     section: SettingsSection,
+    help: Element,
 ) -> Element {
     rsx! {
-        CardHead { icon, title, note,
+        CardHead { icon, title, note, help,
             SectionReset {
                 label: title.to_lowercase(),
                 on_reset: move |()| settings.write().reset_section(section),
@@ -170,7 +172,11 @@ fn ExperienceCard(settings: Signal<TrainingSettings>) -> Element {
     };
     rsx! {
         div { class: "card experience",
-            CardHead { icon: IconName::Sparkle, title: "Experience", note,
+            CardHead {
+                icon: IconName::Sparkle,
+                title: "Experience",
+                note,
+                help: help::experience(),
                 ExperiencePicker {
                     on,
                     on_pick: move |experience: Experience| experience.apply(&mut settings.write()),
@@ -320,6 +326,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                 note: "How much gets sent in one run",
                 settings,
                 section: SettingsSection::SessionShape,
+                help: help::session_shape(),
             }
             div { class: "field-grid",
                 if s.contest {
@@ -544,6 +551,7 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 note,
                 settings,
                 section: SettingsSection::Speed,
+                help: help::speed_settings(),
             }
             SettingsRange {
                 settings,
@@ -769,6 +777,7 @@ fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
                 note: "Side tone pitch and sending level",
                 settings,
                 section: SettingsSection::ToneAndVolume,
+                help: help::tone(),
             }
             SettingsRange {
                 settings,
@@ -812,6 +821,7 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
                 note: "Move the level from session accuracy",
                 settings,
                 section: SettingsSection::AutoLevel,
+                help: help::auto_level(),
             }
             Switch {
                 title: "Adjust the level for me",
@@ -862,6 +872,7 @@ fn SamplingCard(settings: Signal<TrainingSettings>) -> Element {
                 note: "Which characters come round more often",
                 settings,
                 section: SettingsSection::CharacterSampling,
+                help: help::sampling(),
             }
             div { class: "field-grid",
                 NumberField {

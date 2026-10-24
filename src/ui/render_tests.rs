@@ -2282,25 +2282,22 @@ mod interactions {
     fn the_sampling_speed_card_says_how_callers_are_drawn() {
         let mut adapting = contest_stats(CharSetMode::Contest, true, false);
         adapting.click("seg-sampling");
-        assert!(adapting.has("Speed, WPM"));
+        assert!(adapting.has(">Speed<"));
         // The runs were copied clean at 26 WPM, past the 18 to 25 set.
         assert!(adapting.has(
-            "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen&#39;s − and + move only your own speed. Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster."
+            "The chances are for the first callers of your next run. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen&#39;s − and + move only your own speed. Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster."
         ), "{}", adapting.html());
         let mut one = contest_stats(CharSetMode::Contest, true, true);
         one.click("seg-sampling");
-        assert!(one.has(&format!(
-            "{CALLERS_AT_ONE} Right is the share of characters you copy at that speed."
-        )));
+        assert!(one.has(CALLERS_AT_ONE));
         let mut even = contest_stats(CharSetMode::Contest, false, false);
         even.click("seg-sampling");
-        assert!(even.has(&format!(
-            "{CALLERS_EVEN} Right is the share of characters you copy at that speed."
-        )));
+        assert!(even.has(CALLERS_EVEN));
         // At 18 to 25 WPM, a seventh of the range is nearest each whole
         // speed between, and half that at either end.
-        assert_eq!(even.html().matches(">14%<").count(), 6, "{}", even.html());
-        assert_ne!(adapting.html().matches(">14%<").count(), 6);
+        let seventh = " 14% chance of the first callers<";
+        assert_eq!(even.html().matches(seventh).count(), 6, "{}", even.html());
+        assert_ne!(adapting.html().matches(seventh).count(), 6);
     }
 
     /// On a board of every mode, a run is flagged with its contest and
@@ -2393,13 +2390,19 @@ mod interactions {
         // The default range is 2 to 3 characters: half each.
         let html = ui.html();
         let card = &html[html.find("Group length").expect("the card")..];
-        let card = &card[..card.find("Speed, WPM").unwrap_or(card.len())];
-        assert_eq!(card.matches(">50%<").count(), 2, "{card}");
+        let card = &card[..card.find(">Speed<").unwrap_or(card.len())];
+        assert_eq!(card.matches(" 50% chance next<").count(), 2, "{card}");
+        // Each length is a bar of how often it is copied whole, against
+        // the aim, Balanced's 70%; the summary says how far it reaches.
+        assert!(card.contains("class=\"bar-mark\" style=\"left: 70.0%;\""));
+        assert!(card.contains(">Your aim · 70% whole<"), "{card}");
+        assert!(card.contains(">Across your range<"));
+        assert!(ui.shows("next-length-2") && ui.shows("next-length-3"));
 
         let mut ui = stats(true, CharSetMode::Mixed);
         ui.click("seg-sampling");
-        assert!(ui.has("Chance of each length in the next group"));
-        assert!(ui.has("whole "));
+        assert!(ui.has("Adaptive group size leans each group&#39;s length towards where you copy 70% of groups whole."), "{}", ui.html());
+        assert!(ui.has("% whole · "));
 
         let mut ui = stats(true, CharSetMode::Callsign);
         ui.click("seg-sampling");
@@ -2412,10 +2415,14 @@ mod interactions {
     fn the_sampling_tab_shows_each_speed() {
         let mut ui = stats(false, CharSetMode::Mixed);
         ui.click("seg-sampling");
-        assert!(ui.has("Speed, WPM"));
+        assert!(ui.has(">Speed<"));
         assert!(ui.has("Adaptive speed is off, so each group"));
-        // The default speeds are 18 to 25 WPM: a row for each.
-        assert_eq!(ui.html().matches(">right ").count(), 8);
+        // The default speeds are 15 to 30 WPM: a row every two, a bar of
+        // the characters copied right at it against Balanced's 94%.
+        assert_eq!(ui.html().matches("% right · ").count(), 8);
+        assert!(ui.shows("next-speed-16") && ui.shows("next-speed-30"));
+        assert!(ui.has("class=\"bar-mark\" style=\"left: 94.0%;\""));
+        assert!(ui.has(">Your aim · 94% right<"));
 
         let mut ui = Ui::new(
             SpeedStatsHarness,
@@ -2424,13 +2431,13 @@ mod interactions {
             },
         );
         ui.click("seg-sampling");
-        assert!(ui.has("Chance of each speed in the next group"));
+        assert!(ui.has("Adaptive speed leans each group&#39;s speed towards where you copy 94% of characters right."), "{}", ui.html());
         assert!(!ui.has("Farnsworth"), "tied spacing needs no word on it");
 
         // Callsigns have no length to choose, but they still have a speed.
         let mut ui = stats(true, CharSetMode::Callsign);
         ui.click("seg-sampling");
-        assert!(ui.has("Speed, WPM"));
+        assert!(ui.has(">Speed<"));
     }
 
     /// Mixed history from `history`, and a Koch session that missed Q, seen
@@ -2596,6 +2603,40 @@ mod interactions {
             first_row(&ui),
             format!("sample-{}", likeliest.to_ascii_lowercase())
         );
+    }
+
+    /// What comes up next says, under its ⓘ, what its colours mean against
+    /// the threshold the settings set: 10% wrong, from 90% to level up.
+    #[test]
+    fn what_comes_up_next_explains_its_colours() {
+        let mut ui = Ui::new(SamplingHarness, ());
+        assert!(!ui.has("help-note"), "out of the way until asked for");
+        ui.click("help-what-comes-up-next");
+        assert!(ui.has("class=\"help-note\""));
+        assert!(ui.has(">Under your 10%<"), "{}", ui.html());
+        assert!(ui.has("a session levels up at 90% right (Settings → Auto level)"));
+        assert!(
+            ui.input_tag("help-what-comes-up-next")
+                .contains("aria-expanded=true")
+        );
+    }
+
+    /// A card's help wears the ⓘ, and the ? is the guided setup's alone:
+    /// the two never look alike.
+    #[test]
+    fn help_and_the_guided_setup_wear_icons_of_their_own() {
+        use crate::ui::widgets::IconName;
+        let info = IconName::Info.paths();
+        let question = IconName::Help.paths();
+        assert_ne!(info, question);
+        let ui = Ui::new(SamplingHarness, ());
+        let html = ui.html();
+        let at = html
+            .find("id=\"help-what-comes-up-next\"")
+            .expect("the chip");
+        let chip = &html[at..at + html[at..].find("</button>").expect("its end")];
+        assert!(chip.contains(info[1]), "{chip}");
+        assert!(!chip.contains(question[1]), "{chip}");
     }
 
     /// Choosing another set never hides the span and speed of the ones
@@ -3075,8 +3116,17 @@ mod interactions {
             assert!(!ui.has(gone), "{gone} should no longer be on the card");
         }
 
-        ui.open_disclosures();
-        assert!(ui.has("QSB slowly fades"), "the help should have opened");
+        assert!(!ui.has("Slow swells and dips of the signal."));
+        ui.click("help-band-conditions");
+        assert!(
+            ui.has("Slow swells and dips of the signal."),
+            "the help should have opened"
+        );
+        ui.click("help-band-conditions");
+        assert!(
+            !ui.has("Slow swells and dips of the signal."),
+            "and closes again"
+        );
 
         // The filter shape is a real choice, and it shows which one is in:
         // the peaked one out of the box.
