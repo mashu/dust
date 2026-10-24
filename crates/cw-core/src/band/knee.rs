@@ -3,7 +3,7 @@
 use std::sync::OnceLock;
 
 use super::agc::AGC_TRIGGER;
-use super::calibration::{REFERENCE_NOISE_LEVEL, noise_level, qrn_level};
+use super::calibration::{NOISE_LEVEL_PER_DB, noise_level, qrn_level};
 use super::filter::{FilterDesign, ReceiverFilter, reference_width_hz};
 use super::memo::{Exact, LastAnswer};
 use super::source::BandSource;
@@ -22,13 +22,15 @@ pub const FLOOR_MEASURE_RATE: u32 = 16_000;
 /// `None` with the AGC switched off.
 ///
 /// `AGC_TRIGGER` times the band's own floor (`band_standing_level`), and
-/// never below that of the reference floor heard through the reference
-/// filter (`reference_width_hz`). Above that it follows the floor, the way
-/// an operator backs the RF gain off on a noisy band or a wide filter, so the
-/// hiss on its own never pumps the gain. Below it, it stays put, as a real
-/// receiver's AGC threshold does: closing the filter or finding a quiet band
-/// takes noise away from under the knee, and leaves the station you are
-/// copying exactly as loud as it was.
+/// never below that of the quietest floor the noise control sets, heard
+/// through the reference filter (`reference_width_hz`): just over the hiss,
+/// so everything you can copy stands over it and the AGC evens it all out.
+/// Above that it follows the floor, the way an operator backs the RF gain
+/// off on a noisy band or a wide filter, so the hiss on its own never pumps
+/// the gain. Below it, it stays put, as a real receiver's AGC threshold
+/// does: closing the filter or switching the noise off takes noise away
+/// from under the knee, and leaves the station you are copying as loud as
+/// it was.
 ///
 /// Remembered, because measuring it is three seconds of band: the floor
 /// depends only on the noise, the static and the receiver, so moving the
@@ -42,7 +44,7 @@ pub fn agc_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
     static LAST: LastAnswer<KneeAsk, f64> = LastAnswer::new();
     Some(LAST.get_or(KneeAsk::of(band, receiver), || {
         let floor =
-            band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(reference_floor_level());
+            band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(quietest_floor_level());
         AGC_TRIGGER * floor
     }))
 }
@@ -141,18 +143,18 @@ pub fn band_standing_level(sample_rate: u32, band: &BandSettings, receiver: &Fil
     levels.get(levels.len() / 2).copied().unwrap_or(0.0)
 }
 
-/// [`band_standing_level`] of the reference floor alone
-/// ([`REFERENCE_NOISE_LEVEL`]), through the reference filter: a sharp one
-/// 500 Hz wide at 3 dB, on a 500 Hz note whatever the default pitch. Measured
-/// once.
-pub fn reference_floor_level() -> f64 {
+/// [`band_standing_level`] of the quietest floor the noise control sets
+/// ([`NOISE_LEVEL_PER_DB`], a station 39 dB over it) alone, through the
+/// reference filter: a sharp one 500 Hz wide at 3 dB, on a 500 Hz note
+/// whatever the default pitch. Measured once.
+pub fn quietest_floor_level() -> f64 {
     static LEVEL: OnceLock<f64> = OnceLock::new();
     *LEVEL.get_or_init(|| {
         let mut settings = TrainingSettings::default();
         settings.band.side_tone_min = 500.0;
         settings.band.side_tone_max = 500.0;
         settings.band.noise_enabled = true;
-        settings.band.noise_level = REFERENCE_NOISE_LEVEL;
+        settings.band.noise_level = NOISE_LEVEL_PER_DB;
         settings.band.qrn_enabled = false;
         settings.band.stations_min = STATIONS_MIN;
         settings.band.stations_max = STATIONS_MIN;

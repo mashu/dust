@@ -7,7 +7,8 @@
 //! band, the AGC hearing the two together and riding both, bands handing
 //! over to each other, and, without full break-in, its output muted while
 //! you send. The RF gain turns down all the receiver hears before its AGC
-//! does. Your own message in a contest joins after all of it, as a rig's
+//! does, and the AGC hears it all [`AGC_LOOKAHEAD_SEC`] before it is
+//! played. Your own message in a contest joins after all of it, as a rig's
 //! sidetone does, at the volume, and the receiver's AF gain sets how loud
 //! the rest is played. The
 //! output stage — the paddle's sidetone, and the limiter on everything — is
@@ -23,14 +24,16 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 
-use cw_core::band::soft_limit;
+#[cfg(doc)]
+use cw_core::band::AGC_LOOKAHEAD_SEC;
+use cw_core::band::{agc_lookahead_samples, soft_limit};
 
 use crate::audio::shape::{GATE_RAMP_SEC, Gains};
 
 pub use band::BandVoice;
 pub use meter::Meter;
 use meter::Metering;
-pub use send::SendVoice;
+pub use send::{SendSample, SendVoice};
 pub use sidetone::{Sidetone, SidetoneControl};
 
 /// How many bands may be fading out at once. One band hands over to the next
@@ -41,6 +44,10 @@ const FADING_BANDS: usize = 8;
 /// How many replaced sends may be riding out their release at once. A
 /// release is a few milliseconds; sends are seconds apart.
 const RETIRING_SENDS: usize = 4;
+
+/// The highest rate a stream is ever opened at, which the room for the
+/// look-ahead is made for once.
+const HIGHEST_RATE: u32 = 384_000;
 
 /// The band and the Morse, mixed. The UI hands it bands and sends under its
 /// lock; the audio callback plays it out.
@@ -67,6 +74,13 @@ pub struct Mixer {
     gains_asked: Gains,
     /// What the receiver did, a frame at a time, for the level scope.
     metering: Metering,
+    /// What the sends played, waiting out the receiver's look-ahead: its AGC
+    /// hears every sample as it comes, and everything is played that much
+    /// later at the gain it has by then, as the band is. Room for the
+    /// highest rate, made once, of which the rate in use takes `late_len`.
+    late: Vec<SendSample>,
+    late_len: usize,
+    late_at: usize,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -103,6 +117,9 @@ impl Mixer {
             gate: 1.0,
             gains: Gains::UNITY,
             gains_asked: Gains::UNITY,
+            late: vec![SendSample::default(); agc_lookahead_samples(HIGHEST_RATE)],
+            late_len: agc_lookahead_samples(sample_rate.min(HIGHEST_RATE)),
+            late_at: 0,
         }
     }
 
@@ -115,10 +132,10 @@ impl Mixer {
         self.metering.meter()
     }
 
-    /// How long after it starts a send is heard, in seconds, as the last
-    /// callback found the speaker behind it.
+    /// How long after it starts a send is heard, in seconds: the receiver's
+    /// look-ahead, and how far behind the last callback found the speaker.
     pub fn latency_sec(&self) -> f64 {
-        self.latency as f64 / f64::from(self.sample_rate)
+        (self.latency + self.late_len) as f64 / f64::from(self.sample_rate)
     }
 
     /// Play at `gains` from here on.
@@ -201,6 +218,9 @@ impl Mixer {
         self.gate = 1.0;
         self.gains = self.gains_asked;
         self.metering.restart(self.sample_rate);
+        self.late_len = agc_lookahead_samples(self.sample_rate.min(HIGHEST_RATE));
+        self.late.fill(SendSample::default());
+        self.late_at = 0;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
         swept.sends.append(&mut self.retiring);
@@ -246,10 +266,14 @@ impl Mixer {
             now.received += (asked.received - now.received).clamp(-gate_step, gate_step);
             now.monitored += (asked.monitored - now.monitored).clamp(-gate_step, gate_step);
             let now = *now;
-            let mut send = self.send.as_mut().map(SendVoice::next).unwrap_or_default();
+            let mut coming = self.send.as_mut().map(SendVoice::next).unwrap_or_default();
             for old in &mut self.retiring {
-                send += old.next();
+                coming += old.next();
             }
+            // The AGC hears the send as it comes; it, your message and the
+            // mute are played the look-ahead late, with the band.
+            let send = std::mem::replace(&mut self.late[self.late_at], coming);
+            self.late_at = (self.late_at + 1) % self.late_len;
             let mut background = 0.0;
             // The gain the send rides: the band's, or, with none on, the
             // last one's as it goes, easing back to nothing at all to duck
@@ -257,15 +281,15 @@ impl Mixer {
             let mut gain = None;
             // What reached the AGC, for the meter: the send alone, through
             // the RF gain, with no band to meet it.
-            let mut input = send.heard * now.rf;
+            let mut input = coming.heard * now.rf;
             if let Some(band) = self.band.as_mut() {
-                let played = band.next(send.heard, now.rf);
+                let played = band.next(coming.heard, now.rf);
                 background += played.band;
                 gain = Some(played.gain);
                 input = played.input;
             }
             for band in self.fading.iter_mut().rev() {
-                let played = band.next(send.heard, now.rf);
+                let played = band.next(coming.heard, now.rf);
                 background += played.band;
                 gain.get_or_insert(1.0 + (played.gain - 1.0) * played.weight);
             }
@@ -286,8 +310,10 @@ impl Mixer {
             *slot += played as f32;
             self.metering.add(input, gain.unwrap_or(1.0), played);
         }
+        // A send is heard the look-ahead after it was played, as well as the
+        // speaker's own latency.
         for send in self.send.iter().chain(&self.retiring) {
-            send.settle(latency);
+            send.settle(latency + self.late_len);
         }
     }
 }

@@ -7,9 +7,9 @@ use std::rc::Rc;
 
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, Sampler, Sender,
-    SplitMix64, TrainingSettings, Transmission, compute_after_group_gap_ms,
-    compute_group_gap_for_wpm, generate_callsign, generate_training_group, hear_qsos, plan_turn,
-    resolve_station,
+    SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX, VOLUME_MIN,
+    compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    generate_training_group, hear_qsos, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -86,6 +86,11 @@ pub struct DialogueLine {
 /// What the band preview calls, and the pause between calls.
 const BAND_PREVIEW_CALL: &str = "CQ";
 const BAND_PREVIEW_GAP_MS: u32 = 280;
+
+/// The strengths the band preview calls at, in turn: loud, medium and weak,
+/// the full strength and a station 10 and 20 dB down, so the AGC can be
+/// heard evening them out and its threshold heard deciding which it does.
+pub const BAND_PREVIEW_STRENGTHS: [f64; 3] = [VOLUME_MAX, 0.3, VOLUME_MIN];
 
 /// What the app is playing when no session is running.
 ///
@@ -463,8 +468,9 @@ async fn play_sample(
         .map(|_| ())
 }
 
-/// Call `text` over and over, `gap_ms` apart, under the settings as they are
-/// at each call. Ends only when the lease does, or the audio fails.
+/// Call `text` over and over, `gap_ms` apart, loud, medium and weak in turn
+/// ([`BAND_PREVIEW_STRENGTHS`]), under the settings as they are at each
+/// call. Ends only when the lease does, or the audio fails.
 async fn loop_band_preview(
     lease: Lease,
     settings: Signal<TrainingSettings>,
@@ -472,12 +478,20 @@ async fn loop_band_preview(
     gap_ms: u32,
 ) -> Result<(), AudioError> {
     // One station, kept, so moving a band slider changes the band and not
-    // the signal you are judging it against. Whoever calls across it is drawn
-    // afresh each time, from the settings as they are now, so the pile-up is
-    // heard here just as a session would send it.
-    let (voice, mut rng) = new_station(&settings.peek().clone().clamp());
+    // the signal you are judging it against: the same pitch and speed every
+    // time, only its strength stepping round. Whoever calls across it is
+    // drawn afresh each time, from the settings as they are now, so the
+    // pile-up is heard here just as a session would send it.
+    let (station, mut rng) = new_station(&settings.peek().clone().clamp());
+    let mut turn = 0;
     loop {
+        let strength = BAND_PREVIEW_STRENGTHS[turn % BAND_PREVIEW_STRENGTHS.len()];
+        turn += 1;
         let settings_now = settings.peek().clone().clamp();
+        let voice = StationVoice {
+            volume: strength,
+            ..station
+        };
         // A CQ is answered by callsigns.
         let call = Transmission::calling(&settings_now, text, voice, &mut rng, |rng| {
             generate_callsign(CALLSIGN_TIER_MAX, rng)
@@ -823,8 +837,17 @@ mod tests {
                     .flat_map(|t| t.others.iter())
                     .all(|other| other.text != "CQ" && !other.text.is_empty())
             );
-            // The same station calls every time: only the pile-up is new.
-            assert!(sent.windows(2).all(|w| w[0].voice == w[1].voice));
+            // The same station calls every time, loud, medium and weak in
+            // turn: only its strength and the pile-up are new.
+            let same = |a: &StationVoice, b: &StationVoice| {
+                StationVoice {
+                    volume: b.volume,
+                    ..*a
+                } == *b
+            };
+            assert!(sent.windows(2).all(|w| same(&w[0].voice, &w[1].voice)));
+            let strengths: Vec<f64> = sent.iter().map(|t| t.voice.volume).collect();
+            assert_eq!(strengths[..3], BAND_PREVIEW_STRENGTHS);
         });
     }
 

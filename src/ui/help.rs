@@ -515,11 +515,13 @@ pub fn band() -> Element {
             dt { "RF gain" }
             dd { "Turns down everything reaching the receiver, ahead of the AGC: the noise, the static and every station alike. With the AGC on, the strong stations it was riding stay nearly as loud while the noise and the weak ones drop; with it off, the whole band gets quieter. The volume does not make it up, as on a rig." }
             dt { "AGC" }
-            dd { "The receiver rides its gain: the band ducks under a strong station and behind a crash." }
+            dd { "The receiver rides its gain, as a rig's AGC does: every station over the threshold comes out within a few dB of the others, a weak one nearly as loud as a strong one, and the hiss ducks under a strong station and comes back between overs. Off, every station keeps its own level." }
+            dt { "AGC decay" }
+            dd { "How fast the gain comes back once a signal has gone. Fast is back by the next word; Slow holds through an over and comes back over a second or so, so a weak station straight after a strong one starts quiet." }
             dt { "AGC threshold" }
-            dd { "How strong a signal has to be before the AGC acts. Lowest starts it just above the band's hiss; raised, it acts only on stronger signals, or on none. The volume follows, so it changes how hard the AGC works, not how loud the band is." }
+            dd { "How strong a signal has to be before the AGC acts. Lowest starts it just above the quietest hiss, so every station you can copy is evened out; raised, it acts only on stronger ones, and the weaker keep their own level. The volume follows, so the strongest station stays as loud." }
             dt { "Live preview" }
-            dd { "Loops a CQ through the band as it is set, so you hear each change at once." }
+            dd { "Loops a CQ through the band as it is set, loud, medium and weak in turn, so you hear each change and what the AGC does with each of them." }
         }
     }
 }

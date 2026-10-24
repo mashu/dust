@@ -92,7 +92,7 @@ pub use session::{
 };
 pub use settings::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AGC_THRESHOLD_MAX_DB,
-    AGC_THRESHOLD_MIN_DB, Aim, AutoLevelSettings, BandSettings, CONTEST_MINUTES_MAX,
+    AGC_THRESHOLD_MIN_DB, AgcDecay, Aim, AutoLevelSettings, BandSettings, CONTEST_MINUTES_MAX,
     COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ContestPreset, ContestSettings,
     CurriculumSettings, DEFAULT_FILTER_WIDTH_HZ, ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX,
     EXTRA_WORD_SPACE_MIN, Experience, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, FilterShape,

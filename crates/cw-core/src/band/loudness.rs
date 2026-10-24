@@ -5,20 +5,20 @@
 //! Worked out by listening rather than from a formula, because what sets it
 //! is the receiver's own behaviour at the edges: the filter overshoots every
 //! keying edge, by more the sharper the filter and the harder the edge, and
-//! the AGC meets the first element of every over wide open and lets its first
-//! few milliseconds through before it catches up. So the strongest station
-//! there can be is sent through the same filter and the same AGC the players
-//! run, and its loudest sample, with the crests of the band's hiss on top of
-//! it, is what full volume is sized by.
+//! the AGC rides it all down by however far it stands over the knee. So the
+//! strongest station there can be is sent through the same filter and the
+//! same AGC the players run, look-ahead and all, and its loudest sample,
+//! with the crests of the band's hiss on top of it, is what full volume is
+//! sized by.
 
-use super::agc::Agc;
+use super::agc::{Agc, agc_lookahead_samples};
 use super::calibration::{REFERENCE_BANDWIDTH_HZ, noise_floor_rms, noise_level};
 use super::filter::{FilterDesign, ReceiverFilter};
 use super::knee::receiver_knee;
 use super::memo::{Exact, LastAnswer};
 use super::output::SOFT_LIMIT_KNEE;
 use crate::settings::{
-    STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, WPM_MAX, WPM_MIN,
+    AgcDecay, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, WPM_MAX, WPM_MIN,
 };
 use crate::timing::{StationVoice, ToneEvent, plan_morse_playback_for};
 
@@ -52,11 +52,12 @@ const CLEAN_MARGIN: f64 = 0.97;
 /// limiter's knee is soft enough that nothing of them is heard.
 const HISS_CREST: f64 = 3.5;
 
-/// The most full volume lifts the receiver by. Never reached by any real
-/// receiver, which delivers a station at full strength well above a tenth
-/// of the knee; here so a receiver that somehow delivered nothing could not
-/// ask for an endless gain.
-const FULL_VOLUME_GAIN_MAX: f64 = 10.0;
+/// The most full volume lifts the receiver by: forty decibels, the most the
+/// AGC ever takes off. Never reached by any real receiver, whose AGC holds a
+/// station at full strength a few decibels over a knee no lower than the
+/// quietest hiss's; here so a receiver that somehow delivered nothing could
+/// not ask for an endless gain.
+const FULL_VOLUME_GAIN_MAX: f64 = 100.0;
 
 /// What the loudest station is remembered by: everything the receiver and
 /// the keying are made of, and nothing else. Not the RF gain: the station
@@ -65,6 +66,7 @@ const FULL_VOLUME_GAIN_MAX: f64 = 10.0;
 struct LoudestAsk {
     receiver: FilterDesign,
     knee: Option<Exact>,
+    decay: AgcDecay,
     noise: Exact,
     low_hz: Exact,
     high_hz: Exact,
@@ -92,6 +94,7 @@ impl LoudestAsk {
         };
         Self {
             knee: knee.map(Exact),
+            decay: settings.band.agc_decay,
             noise: Exact(noise_level(&settings.band)),
             receiver,
             low_hz: Exact(*range.start()),
@@ -153,11 +156,10 @@ fn listen(ask: &LoudestAsk, settings: &TrainingSettings) -> f64 {
     settings.band.envelope_smoothing = ask.smoothing.0;
     let (low, high) = (ask.low_hz.0, ask.high_hz.0);
     // The hiss as heard through this receiver: white at the antenna, so the
-    // filter lets in its noise bandwidth's worth of it. Left unducked, as it
-    // is between overs.
+    // filter lets in its noise bandwidth's worth of it.
     let hiss = noise_floor_rms(ask.noise.0)
         * (ask.receiver.noise_bandwidth_hz() / REFERENCE_BANDWIDTH_HZ).sqrt();
-    let station = LISTEN_AT
+    LISTEN_AT
         .iter()
         .map(|share| {
             let voice = StationVoice {
@@ -169,25 +171,34 @@ fn listen(ask: &LoudestAsk, settings: &TrainingSettings) -> f64 {
                 dash_ratio: 3.0,
             };
             let plan = plan_morse_playback_for(LISTEN_TEXT, &settings, &voice);
-            loudest_through(&plan.events, &ask.receiver, ask.knee.map(|knee| knee.0))
+            let agc = match ask.knee {
+                Some(knee) => Agc::new(LISTEN_RATE, knee.0, ask.decay),
+                None => Agc::off(LISTEN_RATE),
+            };
+            loudest_through(&plan.events, &ask.receiver, agc, HISS_CREST * hiss)
         })
-        .fold(0.0, f64::max);
-    station + HISS_CREST * hiss
+        .fold(0.0, f64::max)
 }
 
-/// The loudest sample of `tones` through `receiver` and an AGC with its
-/// knee at `knee`, the send riding at the AGC's gain as the native mixer
-/// plays it.
-fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, knee: Option<f64>) -> f64 {
+/// The loudest sample of `tones` through `receiver` and `agc`, played the
+/// look-ahead late at the gain the AGC rides at, as the native mixer plays
+/// the send, with the crests of the hiss, `crest` high, on top of it: at the
+/// same gain, as the band rides with the station, and at full between
+/// elements, where it is let back up.
+fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, crest: f64) -> f64 {
     let sr = f64::from(LISTEN_RATE);
     let mut filter = ReceiverFilter::new(LISTEN_RATE, receiver);
-    let mut agc = knee.map_or_else(Agc::off, |knee| Agc::new(LISTEN_RATE, knee));
+    let lookahead = agc_lookahead_samples(LISTEN_RATE);
+    let mut waiting = vec![0.0; lookahead];
+    let mut next = 0;
     let mut loudest = 0.0f64;
     let mut at = 0usize;
     let mut listen = |sample: f64| {
         let heard = filter.process(sample);
         let gain = agc.next_gain(heard);
-        loudest = loudest.max((heard * gain).abs());
+        let due = std::mem::replace(&mut waiting[next], heard);
+        next = (next + 1) % waiting.len();
+        loudest = loudest.max((due.abs() + crest) * gain);
     };
     let end = (LISTEN_SEC * sr) as usize;
     for tone in tones {
@@ -207,8 +218,9 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, knee: Option<f6
         }
         at = start + len;
     }
-    // The filter rings on after the last element.
-    for _ in 0..(0.05 * sr) as usize {
+    // The filter rings on after the last element, and the look-ahead holds
+    // the last of it back.
+    for _ in 0..(0.05 * sr) as usize + lookahead {
         listen(0.0);
     }
     loudest

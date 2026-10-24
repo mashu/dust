@@ -20,7 +20,7 @@ mod stream;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::band::{BandKey, Qsb};
+use cw_core::band::{BandKey, Qsb, SOFT_LIMIT_HEADROOM};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 use gloo_timers::callback::Timeout;
 use wasm_bindgen::JsCast;
@@ -396,7 +396,11 @@ impl MorseBackend for MorsePlayer {
     /// The analysers hold the latest stretch of samples, not a queue of
     /// frames: as many frames as the context's clock has moved since the
     /// last look are cut from the end of what they hold, the AGC's gain
-    /// read once for all of them.
+    /// read once for all of them. What is played is read on its way into
+    /// the limiter, where everything is [`SOFT_LIMIT_HEADROOM`] times
+    /// quieter than it is played, and put back up by as much: read as it
+    /// stood, the scope had the browser twelve decibels under the limiter
+    /// that it was not.
     fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
         let now = self.ctx.current_time();
         let Some(last) = self.metered_at.replace(now) else {
@@ -422,7 +426,7 @@ impl MorseBackend for MorsePlayer {
             into.push(MeterFrame {
                 input: peak(&self.meter_input[span.clone()]),
                 gain,
-                output: peak(&self.meter_output[span]),
+                output: peak(&self.meter_output[span]) * SOFT_LIMIT_HEADROOM as f32,
             });
         }
     }

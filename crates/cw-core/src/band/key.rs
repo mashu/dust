@@ -9,7 +9,7 @@
 
 use super::calibration::{noise_level, qrn_level};
 use super::memo::Exact;
-use crate::settings::{BandSettings, FilterShape, STATIONS_MIN};
+use crate::settings::{AgcDecay, BandSettings, FilterShape, STATIONS_MIN};
 
 /// Everything the band is built from. Two settings with the same key sound
 /// the same, so a player rebuilds its band only when this changes.
@@ -31,8 +31,10 @@ pub struct BandKey {
     qrn: Exact,
     stations_max: u32,
     agc_enabled: bool,
-    /// The AGC's threshold, which moves its knee; nothing with the AGC off.
+    /// The AGC's threshold, which moves its knee, and its decay; nothing
+    /// with the AGC off.
     agc_threshold_db: Option<Exact>,
+    agc_decay: Option<AgcDecay>,
 }
 
 impl BandKey {
@@ -48,6 +50,7 @@ impl BandKey {
             stations_max: band.stations_max,
             agc_enabled: band.agc_enabled,
             agc_threshold_db: band.agc_enabled.then_some(Exact(band.agc_threshold_db)),
+            agc_decay: band.agc_enabled.then_some(band.agc_decay),
         }
     }
 }
@@ -87,6 +90,7 @@ mod tests {
             },
             |s| s.band.agc_enabled = false,
             |s| s.band.agc_threshold_db = 10.0,
+            |s| s.band.agc_decay = AgcDecay::Slow,
             |s| s.band.filter_width_hz = 250.0,
             |s| s.band.filter_shape = FilterShape::Soft,
         ];

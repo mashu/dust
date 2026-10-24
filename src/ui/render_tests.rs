@@ -3138,7 +3138,16 @@ mod interactions {
         );
         ui.click("more-slider-agc-threshold");
         assert!(ui.has(r#"<span class="slider-value">+1 dB</span>"#));
+
+        // The AGC's decay is Fast until you pick Slow, and is there only
+        // while the AGC is on.
+        assert!(ui.has(r#"<span class="field-label">AGC decay</span>"#));
+        assert!(ui.input_tag("seg-agc-fast").contains("seg active"));
+        ui.click("seg-agc-slow");
+        assert!(ui.input_tag("seg-agc-slow").contains("seg active"));
+        assert!(!ui.input_tag("seg-agc-fast").contains("active"));
         ui.commit("switch-agc", "false");
+        assert!(!ui.has("AGC decay"));
         assert!(
             ui.input_tag("more-slider-agc-threshold")
                 .contains("disabled")

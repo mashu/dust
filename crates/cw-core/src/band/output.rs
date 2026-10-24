@@ -26,7 +26,9 @@ pub fn soft_limit(x: f64) -> f64 {
 
 /// How far past full scale [`soft_limit_curve`] reaches before it simply holds
 /// at its last value. Far beyond anything the band and the Morse add up to.
-const SOFT_LIMIT_HEADROOM: f64 = 4.0;
+/// Everything on its way into the browser's limiter is this many times
+/// quieter than it is played ([`limiter_feed`]).
+pub const SOFT_LIMIT_HEADROOM: f64 = 4.0;
 
 /// `soft_limit` as a lookup table, for a Web Audio `WaveShaperNode`.
 ///

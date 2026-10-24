@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use cw_core::band::{FilterDesign, SOFT_LIMIT_KNEE, agc_knee, threshold_raise};
+use cw_core::band::{AGC_MAX_DUCK_DB, FilterDesign, SOFT_LIMIT_KNEE, agc_knee, threshold_raise};
 use cw_core::{BandSettings, TrainingSettings};
 use dioxus::prelude::*;
 
@@ -25,13 +25,14 @@ const READ_OVER: usize = (0.5 / METER_FRAME_SEC) as usize;
 const POLL_MS: u32 = 50;
 
 /// The levels the scope spans, in decibels over the AGC's threshold: the
-/// strongest station stands about ten over its lowest, and the default
-/// band's hiss well under the bottom.
-const TOP_DB: f64 = 18.0;
-const BOTTOM_DB: f64 = -36.0;
+/// strongest station stands about 28 over its lowest and the quietest hiss
+/// about 7 under it, and with the threshold raised all the way the hiss is
+/// still on it, 37 under. A decibel to a unit of the pane's height.
+const TOP_DB: f64 = 30.0;
+const BOTTOM_DB: f64 = -42.0;
 
 /// The most the AGC ever takes off, which its lane spans.
-const AGC_LANE_DB: f64 = 12.0;
+const AGC_LANE_DB: f64 = AGC_MAX_DUCK_DB;
 
 /// The scope's drawing, in its own units: the level pane, a gap, and the
 /// AGC's lane under it.
@@ -198,7 +199,7 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
                 polygon { class: "scope-agc", points: "{agc}" }
             }
             p { class: "muted scope-legend",
-                "The band at the AGC over the last three seconds; dashed, where the AGC starts; underneath, how much it takes off, up to 12 dB."
+                "The band at the AGC over the last three seconds; dashed, where the AGC starts; underneath, how much it takes off, up to 40 dB."
             }
             p { id: "scope-reading", class: "muted scope-reading", "{says}" }
         }
