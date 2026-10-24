@@ -8,9 +8,11 @@
 //! the top of where the accuracy likely is. The line under it says the
 //! rest, how fast it is recognised among it, in the colour of its band:
 //! green fast, yellow ICR, orange slow, red too slow, as Settings →
-//! Recognition sets them. A summary above names the weak, the building and
-//! the ones with too few tries to tell, and those recognised at once (ICR);
-//! a character tried once is no longer called weak.
+//! Recognition sets them; one never timed shows its groups' answer time
+//! instead, shared out over their characters. A summary above names the
+//! weak, the building and the ones with too few tries to tell, and those
+//! recognised at once (ICR); a character tried once is no longer called
+//! weak.
 
 use cw_core::{
     AutoLevelSettings, CONTEST_TIMES_NOTE, CharSetMode, CharacterDiagnostic, MASTERED_MIN_ACCURACY,
@@ -104,13 +106,28 @@ fn band_class(band: RecognitionBand) -> &'static str {
     }
 }
 
-/// A band in a sentence.
-fn band_word(band: RecognitionBand) -> &'static str {
-    match band {
-        RecognitionBand::Fast => "fast, ICR",
-        RecognitionBand::Instant => "ICR",
-        RecognitionBand::Slow => "slow",
-        RecognitionBand::TooSlow => "too slow",
+/// Whether `letter`, its time in `band`, counts as recognised at once:
+/// fast enough, and copied right often enough to be building or mastered.
+/// A weak one's time is that of the tries it got right, which says little
+/// of the ones it missed.
+fn instant(letter: &CharacterDiagnostic, band: RecognitionBand) -> bool {
+    band.icr()
+        && matches!(
+            letter.status,
+            MasteryStatus::Mastered | MasteryStatus::Building
+        )
+}
+
+/// A band in a sentence, for `letter`.
+fn band_word(letter: &CharacterDiagnostic, band: RecognitionBand) -> String {
+    match (band, instant(letter, band)) {
+        (RecognitionBand::Fast, true) => "fast, ICR".to_string(),
+        (RecognitionBand::Instant, true) => "ICR".to_string(),
+        (RecognitionBand::Fast | RecognitionBand::Instant, false) => {
+            format!("but not ICR while {}", status_word(letter.status))
+        }
+        (RecognitionBand::Slow, _) => "slow".to_string(),
+        (RecognitionBand::TooSlow, _) => "too slow".to_string(),
     }
 }
 
@@ -135,8 +152,8 @@ fn letter_note(letter: &CharacterDiagnostic) -> String {
     )
 }
 
-/// What a screen reader hears for a row.
-fn letter_label(letter: &CharacterDiagnostic, bands: &AutoLevelSettings) -> String {
+/// What a screen reader hears for a row; `timing` as for [`row_view`].
+fn letter_label(letter: &CharacterDiagnostic, bands: &AutoLevelSettings, timing: bool) -> String {
     let (low, high) = letter.accuracy_interval(LIKELY);
     let mut text = format!(
         "{}: {:.0}% right of {}, likely {:.0}% to {:.0}%, {}",
@@ -157,13 +174,23 @@ fn letter_label(letter: &CharacterDiagnostic, bands: &AutoLevelSettings) -> Stri
         Recognition::Banded(ms, band) => text.push_str(&format!(
             ", recognised in {}, {}",
             millis(ms),
-            band_word(band)
+            band_word(letter, band)
         )),
         Recognition::Provisional(ms, tries) => text.push_str(&format!(
             ", recognised in about {} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed",
             millis(ms)
         )),
-        Recognition::Untimed => text.push_str(", not timed yet"),
+        Recognition::Untimed => {
+            if timing {
+                text.push_str(", not timed yet");
+            }
+            if let Some(ms) = letter.answer_ms {
+                text.push_str(&format!(
+                    ", its groups answered in about {} a character",
+                    millis(ms)
+                ));
+            }
+        }
     }
     text
 }
@@ -174,7 +201,8 @@ fn along(share: f64) -> f64 {
 }
 
 /// One character's row; `timing` is whether any character has been timed,
-/// so that one never timed says so.
+/// so that one never timed says so. One never timed shows its groups'
+/// answer time, muted: all there is of its speed, and no recognition time.
 fn row_view(letter: &CharacterDiagnostic, bands: &AutoLevelSettings, timing: bool) -> Element {
     let (low, high) = letter.accuracy_interval(LIKELY);
     let (low, high) = (along(low), along(high));
@@ -183,7 +211,7 @@ fn row_view(letter: &CharacterDiagnostic, bands: &AutoLevelSettings, timing: boo
             id: control_id("letter", &id_part(letter.letter)),
             class: "letter-row stat-row {status_class(letter.status)}",
             role: "listitem",
-            aria_label: "{letter_label(letter, bands)}",
+            aria_label: "{letter_label(letter, bands, timing)}",
             span { class: "letter-key group-text", "{letter.letter}" }
             div { class: "bar-track marked",
                 span {
@@ -220,7 +248,7 @@ fn row_view(letter: &CharacterDiagnostic, bands: &AutoLevelSettings, timing: boo
                     Recognition::Banded(ms, band) => rsx! {
                         " · "
                         b { class: "rec-chip {band_class(band)}",
-                            if band.icr() {
+                            if instant(letter, band) {
                                 "ICR {millis(ms)}"
                             } else {
                                 "{millis(ms)}"
@@ -228,8 +256,14 @@ fn row_view(letter: &CharacterDiagnostic, bands: &AutoLevelSettings, timing: boo
                         }
                     },
                     Recognition::Provisional(ms, tries) => rsx! { " · about {millis(ms)} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed" },
-                    Recognition::Untimed if timing => rsx! { " · not timed yet" },
-                    Recognition::Untimed => rsx! {},
+                    Recognition::Untimed => rsx! {
+                        if timing {
+                            " · not timed yet"
+                        }
+                        if let Some(ms) = letter.answer_ms {
+                            span { class: "muted", " · groups answered in about {millis(ms)} a character" }
+                        }
+                    },
                 }
             }
         }
@@ -266,10 +300,11 @@ pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
     let line = MASTERED_MIN_ACCURACY * 100.0;
     // Recognised at once, of those timed enough to say, each with its band;
     // and whether any is timed enough, or at all.
-    let instant: Vec<(char, RecognitionBand)> = letters
+    let at_once: Vec<(char, RecognitionBand)> = letters
         .iter()
-        .filter_map(|letter| Some((letter.letter, letter.recognition_band(bands)?)))
-        .filter(|(_, band)| band.icr())
+        .filter_map(|letter| Some((letter, letter.recognition_band(bands)?)))
+        .filter(|(letter, band)| instant(letter, *band))
+        .map(|(letter, band)| (letter.letter, band))
         .collect();
     let timed = letters
         .iter()
@@ -306,9 +341,9 @@ pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
                 }
                 if timed {
                     div { class: "err-sum-row",
-                        span { class: "err-sum-label solid", "Instant (ICR) · {instant.len()}" }
+                        span { class: "err-sum-label solid", "Instant (ICR) · {at_once.len()}" }
                         span { class: "err-chips",
-                            for (character , band) in instant.iter() {
+                            for (character , band) in at_once.iter() {
                                 span { class: "err-chip {band_class(*band)} group-text", "{character}" }
                             }
                         }
@@ -317,7 +352,7 @@ pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
             }
             if !timing {
                 p { class: "muted", style: "margin: 0; font-size: 0.85rem;",
-                    "How fast you recognise each character is timed as you type along: with Lock typing while sending off (Settings → Session shape), or with groups of one character. Type each one as soon as you hear it."
+                    "How fast you recognise each character is timed as you type along: with Lock typing while sending off (Settings → Session shape), or with groups of one character. Type each one as soon as you hear it. Until then, each row shows how long its groups took to answer, shared out over their characters."
                 }
             }
             div { class: "err-legend", aria_hidden: "true",
@@ -331,7 +366,7 @@ pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
             if timing {
                 div { class: "err-legend", aria_hidden: "true",
                     span { "Recognised in" }
-                    span { i { class: "err-swatch rec-fast" } "under {bands.recognition_fast_ms} ms" }
+                    span { i { class: "err-swatch rec-fast" } "ICR, under {bands.recognition_fast_ms} ms" }
                     span { i { class: "err-swatch rec-icr" } "ICR, under {bands.recognition_icr_ms}" }
                     span { i { class: "err-swatch rec-slow" } "under {bands.recognition_slow_ms}" }
                     span { i { class: "err-swatch rec-too-slow" } "{bands.recognition_slow_ms} and over" }
@@ -371,13 +406,14 @@ mod tests {
             earlier_pct: None,
             recognition_ms: None,
             recognition_tries: 0,
+            answer_ms: None,
         }
     }
 
     #[test]
     fn a_row_reads_out_what_it_shows() {
         let bands = AutoLevelSettings::default();
-        let label = |p: &CharacterDiagnostic| letter_label(p, &bands);
+        let label = |p: &CharacterDiagnostic| letter_label(p, &bands, true);
         let mut p = letter(1, 2);
         assert_eq!(p.status, MasteryStatus::FewTries);
         assert_eq!(
@@ -428,6 +464,35 @@ mod tests {
             assert_eq!(recognition(&p, &bands), Recognition::Banded(ms, band));
             assert!(label(&p).ends_with(said), "{}", label(&p));
         }
+        // A weak one's time is of the tries it got right: fast, but not
+        // called ICR until it is copied right more often.
+        let mut weak = letter(10, 30);
+        weak.recognition_tries = 12;
+        weak.recognition_ms = Some(321.0);
+        assert_eq!(weak.status, MasteryStatus::Weak);
+        assert!(!instant(&weak, RecognitionBand::Fast));
+        assert!(
+            label(&weak).ends_with(", recognised in 320 ms, but not ICR while weak"),
+            "{}",
+            label(&weak)
+        );
+        // Never timed: its groups' answer time stands in, and it is said to
+        // be not timed yet only once another one is.
+        let mut untimed = letter(27, 30);
+        untimed.answer_ms = Some(912.0);
+        assert!(
+            letter_label(&untimed, &bands, false)
+                .ends_with(", mastered, its groups answered in about 910 ms a character"),
+            "{}",
+            letter_label(&untimed, &bands, false)
+        );
+        assert!(
+            letter_label(&untimed, &bands, true).ends_with(
+                ", mastered, not timed yet, its groups answered in about 910 ms a character"
+            ),
+            "{}",
+            letter_label(&untimed, &bands, true)
+        );
     }
 
     /// A trend needs five points to be one; less is steady, and without

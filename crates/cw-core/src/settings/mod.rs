@@ -1439,14 +1439,6 @@ mod tests {
         }
     }
 
-    /// The reset buttons have to cover everything between them, or one card
-    /// keeps a setting nobody can put back.
-    ///
-    /// Rather than restate the field lists here — which would only be the same
-    /// mistake written twice — this walks a fully-changed settings object
-    /// through every section's reset and checks what is left. Anything still
-    /// altered is a preference no card owns. Add a field, forget to place it,
-    /// and this names it.
     /// An edge of the recognition bands moves the others only to keep them
     /// in order, and stays in bounds; a save holding them out of order is
     /// put in order.
@@ -1500,6 +1492,14 @@ mod tests {
         assert_eq!(old.auto_level.recognition_icr_ms, 600);
     }
 
+    /// The reset buttons have to cover everything between them, or one card
+    /// keeps a setting nobody can put back.
+    ///
+    /// Rather than restate the field lists here — which would only be the same
+    /// mistake written twice — this walks a fully-changed settings object
+    /// through every section's reset and checks what is left. Anything still
+    /// altered is a preference no card owns. Add a field, forget to place it,
+    /// and this names it.
     #[test]
     fn every_setting_belongs_to_exactly_one_section() {
         // Progress, not preference: where you have got to, and what the

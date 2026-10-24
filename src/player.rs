@@ -60,9 +60,11 @@ pub struct Sent {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
-    /// When each character of a group's send reached the ear, finished:
-    /// from when the send started, its lead and output latency, and where
-    /// the character ends in it. Empty but for a group's send.
+    /// When each character of the send reached the ear, finished: from when
+    /// the send was started, its lead and output latency, and where the
+    /// character ends in it. Empty for a send planned whole, a contest's
+    /// turn, and where the device's delay cannot be told
+    /// ([`crate::audio::start_send`]).
     pub heard_at: Vec<MonoMs>,
 }
 
@@ -443,8 +445,12 @@ impl Ticket<'_> {
         self.check()?;
         // In a statement of its own: the player is borrowed only while the
         // send starts, never while `on_start` runs.
+        // Read before the send is scheduled: the player reckons its lead
+        // from its own clock as it schedules, and the moment after would
+        // put every character's end that much early.
+        let started = MonoMs(mono_ms());
         let wait = player.start(begin)?;
-        let heard_from = MonoMs(mono_ms()).plus_sec(wait.heard_after_sec);
+        let heard_from = started.plus_sec(wait.heard_after_sec);
         on_start(wait.heard_after_sec);
         let sent = Sent {
             duration_sec: wait.duration_sec,

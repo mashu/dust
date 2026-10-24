@@ -14,6 +14,11 @@ use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};
 
 pub const AUTO_CONFIRM_DELAY_MS: u32 = 300;
 
+/// How long after the player said a send's sound would end it may be seen
+/// to end and its characters still be timed from what the player said:
+/// the wait's own tail and poll, and room besides. Later, it started late.
+const LATE_SEND_MS: u64 = 150;
+
 /// One step of the count down before the first group.
 pub const COUNTDOWN_STEP_MS: u32 = 1_000;
 
@@ -345,9 +350,17 @@ impl<S: GroupSource> SessionMachine<S> {
             .session
             .group_start(index)
             .map_or(now, |start| start.plus(self.group_elapsed_ms));
-        // The last send's, which is the one answered.
+        let end = now.max(earliest);
+        // The last send's, which is the one answered — unless the send was
+        // seen to end well after the player said its sound would: it started
+        // late, a suspended audio clock or a stall, and every time in it
+        // would be that much slower than it was.
+        let late = heard_at
+            .last()
+            .is_some_and(|last| end > last.plus(LATE_SEND_MS));
+        let heard_at = if late { Vec::new() } else { heard_at };
         self.session
-            .end_playback(index, now.max(earliest), char_wpm, effective_wpm, heard_at);
+            .end_playback(index, end, char_wpm, effective_wpm, heard_at);
         self.set_phase(SessionPhase::AwaitingAnswer { index });
         let timeout_ms = (self.session.settings().playback.group_timeout * 1000.0).round() as u32;
         if timeout_ms == 0 {
@@ -1218,5 +1231,36 @@ mod tests {
         let _ = m.apply(SessionEvent::Confirm, MonoMs(4_000));
         let result = m.session().result(5_000, "2026-09-01".into());
         assert_eq!(result.group_timings[0].time_to_complete_ms, 2_000.0);
+    }
+
+    /// "KM" typed along, its characters said to reach the ear at 600 and
+    /// 1000, its send seen to end at `ended_at`: the recognition times.
+    fn timed_along(ended_at: u64) -> Vec<Option<u32>> {
+        let mut m = start_with(settings(1, false, 10.0), script(&["KM"], 1));
+        let _ = m.apply(
+            SessionEvent::PlaybackEnded {
+                index: 0,
+                duration_sec: 0.5,
+                char_wpm: 20.0,
+                effective_wpm: 20.0,
+                heard_at: vec![MonoMs(600), MonoMs(1_000)],
+            },
+            MonoMs(ended_at),
+        );
+        m.note_keys(0, &[MonoMs(800), MonoMs(1_150)]);
+        let _ = m.apply(typed(0, "KM"), MonoMs(ended_at + 100));
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(ended_at + 200));
+        let result = m.session().result(ended_at + 300, "2026-09-01".into());
+        result.group_timings[0].recognition_ms.clone()
+    }
+
+    /// A send seen to end well after its sound was said to started late, a
+    /// suspended audio clock or a stall: its times would all be off, so
+    /// none is kept. Seen to end about when it was said to, they are.
+    #[test]
+    fn a_send_that_started_late_is_not_timed() {
+        assert_eq!(timed_along(1_000), [Some(200), Some(150)]);
+        assert_eq!(timed_along(1_150), [Some(200), Some(150)]);
+        assert_eq!(timed_along(1_151), Vec::<Option<u32>>::new());
     }
 }

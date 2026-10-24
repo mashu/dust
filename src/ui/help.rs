@@ -92,17 +92,17 @@ pub fn letters(bands: &AutoLevelSettings) -> Element {
             }
             dt { "Recognised in" }
             dd {
-                "How soon you type a character after its sound reaches you: the median of its latest timed tries. A try is timed when you type it right while keeping up, the one before it already typed when it ended, in a group sent once; a gap past {RECOGNITION_MAX_MS} ms is a pause, not timed. Type each character the moment you hear it: waiting for the group to end counts as time."
+                "How soon you type a character after its sound reaches you: the median of its latest timed tries. A try is timed when you type it right on the keyboard while keeping up, the one before it already typed when it ended, in a group sent once; a group of more than one character only when you start typing before it ends. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Type each character the moment you hear it."
             }
             dt { "The bands" }
             dd {
-                "Green under {fast} ms, fast; yellow under {icr} ms, instant character recognition (ICR): you know it as a sound rather than working it out; orange under {slow} ms; red from {slow} ms. Set them under Settings → Recognition."
+                "Green under {fast} ms, fast; yellow under {icr} ms, instant character recognition (ICR): you know it as a sound rather than working it out; orange under {slow} ms; red from {slow} ms. Green and yellow count as ICR once a character is building or mastered: a weak one's time is only that of the tries it got right. Set them under Settings → Recognition."
             }
             dt { "About, so far" }
             dd { "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band." }
             dt { "Not timed yet" }
             dd {
-                "With Lock typing while sending on, only groups of one character can be timed: turn it off (Settings → Session shape) to type along. Contest runs are not timed."
+                "With Lock typing while sending on, only groups of one character can be timed: turn it off (Settings → Session shape) to type along. Keys from paddles and contest runs are not timed. Until a character is timed, its row shows how long its groups took to answer, shared out over their characters: it cannot say which one held you up."
             }
         }
     }

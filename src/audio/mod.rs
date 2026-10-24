@@ -97,8 +97,14 @@ pub fn start_send(
 ) -> Result<PlaybackWait, String> {
     let plan = plan_transmission(transmission, settings);
     let mut wait = start_planned(player, &plan, transmission, settings, None)?;
-    // Off the plan played, so they are where its sound is.
-    wait.char_ends_sec = plan.wanted.char_ends(&transmission.text);
+    // Off the plan played, so they are where its sound is — where the
+    // player can tell when that sound reaches the ear. Android's output
+    // reports a delay off a clock of its own, which puts every end up to
+    // half a second out: a recognition time there would be wrong with
+    // confidence, so none is taken.
+    if cfg!(not(target_os = "android")) {
+        wait.char_ends_sec = plan.wanted.char_ends(&transmission.text);
+    }
     Ok(wait)
 }
 

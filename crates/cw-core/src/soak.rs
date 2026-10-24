@@ -19,11 +19,12 @@ use crate::{
     Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CallerHabits, CharSamplingState,
     CharSetMode, ContestEffect, ContestEvent, ContestKind, ContestMachine, ContestPhase, CopyTally,
     FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Fields, MonoMs, OpKey, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError, Rng, RowStatus,
-    RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso, Sender, SessionId, SessionPhase,
-    SessionResult, SplitMix64, TrainingSettings, Transmission, WPM_MIN, align_group,
-    compute_char_pool, contest_score, evaluate_auto_level, generate_training_group, parse_exchange,
-    plan_morse_playback_for, plan_transmission, plan_turn, read_number, resolve_station,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PauseWhy, QsoError,
+    RECOGNITION_MAX_MS, Rng, RowStatus, RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso,
+    Sender, SessionId, SessionPhase, SessionResult, SplitMix64, TrainingSettings, Transmission,
+    WPM_MIN, align_group, compute_char_pool, contest_score, evaluate_auto_level,
+    generate_training_group, parse_exchange, plan_morse_playback_for, plan_transmission, plan_turn,
+    read_number, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -305,9 +306,17 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
     }
 }
 
+/// Moments about `now`, as many as a send or a box might hold, in order or
+/// not: when a send's characters reached the ear, or when keys went in.
+fn random_moments(rng: &mut SplitMix64, now: u64) -> Vec<MonoMs> {
+    (0..rng.usize_in(0, 14))
+        .map(|_| MonoMs((now + rng.usize_in(0, 6_000) as u64).saturating_sub(3_000)))
+        .collect()
+}
+
 /// One of everything the runtime can send, including events for the wrong
 /// group and timers that are already stale.
-fn random_event(rng: &mut SplitMix64, groups: usize, timers: &[u64]) -> SessionEvent {
+fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -> SessionEvent {
     let index = rng.usize_in(0, groups.saturating_sub(1).max(1));
     // Whatever a keyboard or a paste can produce, not just tidy call signs.
     const KEYS: [char; 12] = [
@@ -322,7 +331,7 @@ fn random_event(rng: &mut SplitMix64, groups: usize, timers: &[u64]) -> SessionE
             duration_sec: rng.pick_in_range(0.0, 5.0),
             char_wpm: rng.pick_in_range(1.0, 60.0),
             effective_wpm: rng.pick_in_range(1.0, 60.0),
-            heard_at: Vec::new(),
+            heard_at: random_moments(rng, now),
         },
         1 => SessionEvent::PlaybackStopped { index },
         2 => SessionEvent::Input { index, text },
@@ -399,7 +408,11 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
             // arrives late — a send that was in flight, a timer, a keystroke —
             // must be dropped, not turned into more work.
             let was_terminal = machine.is_terminal();
-            let event = random_event(&mut rng, groups, &timers);
+            // Keys as the box saw them, for any group, as the runtime notes
+            // them before each event.
+            let typing = rng.usize_in(0, groups);
+            machine.note_keys(typing, &random_moments(&mut rng, now));
+            let event = random_event(&mut rng, now, groups, &timers);
             effects = machine.apply(event.clone(), MonoMs(now));
             if was_terminal {
                 assert!(
@@ -462,6 +475,24 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 .all(|t| t.time_to_complete_ms >= MIN_RESPONSE_MS_PER_CHAR),
             "seed {seed}: an answer quicker than anyone types"
         );
+        // A recognition time is one a character of the group's, within the
+        // cap, and a run of them never ends untimed.
+        for (group, timing) in result.groups.iter().zip(&result.group_timings) {
+            let times = &timing.recognition_ms;
+            assert!(
+                times.len() <= group.sent.chars().count(),
+                "seed {seed}: more times than characters: {times:?} for {:?}",
+                group.sent
+            );
+            assert!(
+                times
+                    .iter()
+                    .flatten()
+                    .all(|&ms| u64::from(ms) <= RECOGNITION_MAX_MS),
+                "seed {seed}: {times:?} past the cap"
+            );
+            assert!(times.last() != Some(&None), "seed {seed}: {times:?}");
+        }
     }
 }
 

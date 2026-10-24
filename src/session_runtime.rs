@@ -145,6 +145,12 @@ impl AnswerOutbox {
         outbox.waiting = Some((index, text));
     }
 
+    /// A paddle keyed a letter into group `index`'s box: its keys are not
+    /// timed ([`KeyTimes::paddled`]).
+    pub fn paddled(mut self, index: usize) {
+        self.0.write().keys.paddled(index);
+    }
+
     /// When each character typed into the box went in, and the group it is.
     fn keys(self) -> (usize, Vec<MonoMs>) {
         let outbox = self.0.peek();
@@ -711,8 +717,12 @@ mod tests {
                 .copied()
                 .flatten()
                 .expect("timed");
+            // Keyed 300 ms after the box was seen open, which is up to a
+            // poll of the send's wait, and one of this harness's, after the
+            // sound ended.
+            let seen_late = 2 * crate::time::POLL_MS;
             assert!(
-                (300..=300 + crate::time::POLL_MS).contains(&took),
+                (300..=300 + seen_late).contains(&took),
                 "{took} ms for {sent}"
             );
         });

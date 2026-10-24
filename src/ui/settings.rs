@@ -135,8 +135,10 @@ pub fn SettingsView(
             }
             if !contest {
                 AutoLevelSettingsCard { settings }
-                RecognitionCard { settings }
             }
+            // The bands colour Letter accuracy, which keeps the group
+            // trainer's times whatever mode is on.
+            RecognitionCard { settings }
             SamplingCard { settings }
             BandConditionsCard {
                 settings,

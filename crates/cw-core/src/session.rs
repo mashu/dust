@@ -26,8 +26,8 @@ use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
 /// types one.
 pub const MIN_RESPONSE_MS_PER_CHAR: f64 = 100.0;
 
-/// The longest a character can take, from sounding to being typed, and the
-/// gap still be recognition rather than a pause.
+/// The longest a recognition time says: a character typed later than this
+/// after it sounded is timed as this, as slow as the bands go.
 pub const RECOGNITION_MAX_MS: u64 = 3_000;
 
 /// How far behind a character may be, with the one before it typed, and you
@@ -216,17 +216,24 @@ impl Group {
         }
     }
 
-    /// For each character sent, how long after it finished sounding it was
+    /// For each character sent, how long after it reached the ear it was
     /// typed, in milliseconds: how fast it was recognised. Only where that
-    /// is what the gap says — the character typed right, in its place, and
-    /// you keeping up, with the one before it typed (or the box open, for
-    /// the first) by the time this one ended, so the gap is not you
-    /// catching up on a backlog; and only in a group sent once, every
-    /// character's end known, as a group heard twice is no measure of
-    /// hearing it. A key before the character reached the ear is a guess,
-    /// or the device's delay misjudged, and a gap of more than
-    /// [`RECOGNITION_MAX_MS`] a pause: neither is recognition. Empty where
-    /// none of it can be said.
+    /// is what the gap says:
+    /// - in a group sent once, every character's end known: a group heard
+    ///   twice is no measure of hearing it;
+    /// - typed along: a group of more than one character only if its first
+    ///   key came before its last character had ended. A group copied
+    ///   whole by ear and typed after — and every one with the box shut
+    ///   while it was sent — says how fast you recall, not recognise;
+    /// - the character typed right, in its place, no sooner than it reached
+    ///   the ear (sooner is a guess, or the device's delay misjudged), and
+    ///   the one before it typed by the time this one ended (or the box
+    ///   open, for the first), so the gap is not a backlog caught up on.
+    ///
+    /// A gap past [`RECOGNITION_MAX_MS`] counts as that, as slow as a time
+    /// says, rather than going untimed and leaving the slowest tries out.
+    /// Untimed characters at the end are left off; empty where none is
+    /// timed.
     fn recognition(&self, locked: bool) -> Vec<Option<u32>> {
         let sent: Vec<char> = self.sent.chars().map(|c| c.to_ascii_uppercase()).collect();
         let (Some(end), true, true) = (
@@ -236,9 +243,17 @@ impl Group {
         ) else {
             return Vec::new();
         };
+        let (Some(first_key), Some(last_heard)) = (self.keyed_at.first(), self.heard_at.last())
+        else {
+            return Vec::new();
+        };
+        let along = !locked && *first_key <= last_heard.plus(KEEPING_UP_SLACK_MS);
+        if sent.len() > 1 && !along {
+            return Vec::new();
+        }
         let typed: Vec<char> = self.input.chars().collect();
         let open = if locked { end } else { self.start_at };
-        let measured: Vec<Option<u32>> = sent
+        let mut measured: Vec<Option<u32>> = sent
             .iter()
             .enumerate()
             .map(|(at, ch)| {
@@ -248,19 +263,16 @@ impl Group {
                     0 => open,
                     _ => *self.keyed_at.get(at - 1)?,
                 };
-                let took = key.since(heard);
                 (typed.get(at) == Some(ch)
                     && key >= heard
-                    && ready <= heard.plus(KEEPING_UP_SLACK_MS)
-                    && took <= RECOGNITION_MAX_MS)
-                    .then_some(took as u32)
+                    && ready <= heard.plus(KEEPING_UP_SLACK_MS))
+                .then(|| key.since(heard).min(RECOGNITION_MAX_MS) as u32)
             })
             .collect();
-        if measured.iter().all(Option::is_none) {
-            Vec::new()
-        } else {
-            measured
+        while measured.last() == Some(&None) {
+            measured.pop();
         }
+        measured
     }
 }
 
@@ -494,7 +506,8 @@ impl GroupSession {
     }
 
     /// When each character typed into `index` went in, as the box saw the
-    /// keys; for the current group, until it is answered.
+    /// keys; for the current group, until it is answered. Keys past the
+    /// group's length are no character of it, and kept nowhere.
     pub(crate) fn note_keys(&mut self, index: usize, keyed_at: &[MonoMs]) {
         if index != self.current_group {
             return;
@@ -502,7 +515,11 @@ impl GroupSession {
         if let Some(group) = self.groups.get_mut(index)
             && !group.confirmed()
         {
-            group.keyed_at = keyed_at.to_vec();
+            let length = group.sent.chars().count();
+            let kept = &keyed_at[..keyed_at.len().min(length)];
+            if group.keyed_at != kept {
+                group.keyed_at = kept.to_vec();
+            }
         }
     }
 
@@ -648,6 +665,10 @@ pub struct KeyTimes {
     index: usize,
     typed: Vec<char>,
     at: Vec<MonoMs>,
+    /// A paddle keyed a letter into the group: it goes in only once its
+    /// letter space has run out, its sending and the wait in its moment,
+    /// so the group says nothing of recognising it.
+    paddled: bool,
 }
 
 impl KeyTimes {
@@ -675,9 +696,23 @@ impl KeyTimes {
         self.typed = chars;
     }
 
-    /// The group the moments are of, and the moments.
+    /// A paddle keyed a letter into group `index`'s box: the group's keys
+    /// are not timed.
+    pub fn paddled(&mut self, index: usize) {
+        if index != self.index {
+            *self = Self {
+                index,
+                ..Self::default()
+            };
+        }
+        self.paddled = true;
+    }
+
+    /// The group the moments are of, and the moments: none for a group a
+    /// paddle keyed into.
     pub fn of(&self) -> (usize, &[MonoMs]) {
-        (self.index, &self.at)
+        let at: &[MonoMs] = if self.paddled { &[] } else { &self.at };
+        (self.index, at)
     }
 }
 
@@ -1173,17 +1208,47 @@ mod tests {
             recognised(&[('K', 1_550), ('X', 1_900), ('R', 2_250)], false),
             [Some(250), None, Some(250)]
         );
-        // Waiting for the group to end before typing: K's wait counts, as
-        // recognising at once is typing at once; M and R came on its heels
-        // from memory, and say nothing of hearing them.
+        // Waiting for the group to end before typing: copied whole by ear
+        // and typed from memory, which says how fast you recall, not
+        // recognise. None of it is timed.
         assert_eq!(
             recognised(&[('K', 2_400), ('M', 2_550), ('R', 2_700)], false),
-            [Some(1_100), None, None]
+            Vec::<Option<u32>>::new()
         );
-        // A gap past three seconds is a pause.
+        // Typed along if the first key is in by the last character's end,
+        // and a moment's slack: K is timed, M and R come from memory.
+        assert_eq!(
+            recognised(&[('K', 2_100), ('M', 2_150), ('R', 2_200)], false),
+            [Some(800)]
+        );
+        assert_eq!(
+            recognised(&[('K', 2_101), ('M', 2_150), ('R', 2_200)], false),
+            Vec::<Option<u32>>::new()
+        );
+        // A gap past three seconds counts as three seconds, as slow as a
+        // time says, rather than leaving the slowest tries out.
+        assert_eq!(
+            recognised(&[('K', 1_550), ('M', 1_900), ('R', 5_000)], false),
+            [Some(250), Some(200), Some(3_000)]
+        );
         assert_eq!(
             recognised(&[('K', 1_550), ('M', 1_900), ('R', 5_100)], false),
-            [Some(250), Some(200), None]
+            [Some(250), Some(200), Some(3_000)]
+        );
+        // The last one typed wrong: nothing untimed is kept at the end.
+        assert_eq!(
+            recognised(&[('K', 1_550), ('M', 1_900), ('X', 2_250)], false),
+            [Some(250), Some(200)]
+        );
+        // M's key in by R's end and slack, at 2100, keeps R timed; a moment
+        // later, R's gap is M's backlog.
+        assert_eq!(
+            recognised(&[('K', 1_550), ('M', 2_100), ('R', 2_250)], false),
+            [Some(250), Some(400), Some(250)]
+        );
+        assert_eq!(
+            recognised(&[('K', 1_550), ('M', 2_101), ('R', 2_250)], false),
+            [Some(250), Some(401)]
         );
         // M keyed before it reached the ear: a guess, not recognition.
         assert_eq!(
@@ -1193,12 +1258,38 @@ mod tests {
     }
 
     /// With the box shut while the group was sent, only a character that
-    /// ends the group can be typed as soon as it is heard.
+    /// ends the group can be typed as soon as it is heard: a group of one.
     #[test]
     fn a_shut_box_times_only_what_could_be_typed_at_once() {
         assert_eq!(
             recognised(&[('K', 2_300), ('M', 2_450), ('R', 2_600)], true),
             Vec::<Option<u32>>::new()
+        );
+        let mut settings = TrainingSettings::default();
+        settings.playback.lock_input_during_group_playback = true;
+        let mut session = GroupSession::new(SessionId::new(1), 1, settings);
+        session.set_group(0, "K".into(), 1);
+        session.begin_group(0, MonoMs(1_000));
+        session.end_playback(0, MonoMs(1_300), 20.0, 20.0, vec![MonoMs(1_300)]);
+        session.set_input(0, "K");
+        session.note_keys(0, &[MonoMs(1_620)]);
+        session.confirm(0, MonoMs(2_000));
+        assert_eq!(
+            result(&session).group_timings[0].recognition_ms,
+            [Some(320)]
+        );
+    }
+
+    /// Keys past a group's length are no character of it, and kept
+    /// nowhere.
+    #[test]
+    fn keys_past_the_group_are_not_kept() {
+        let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        session.set_group(0, "KM".into(), 1);
+        session.note_keys(0, &[MonoMs(100), MonoMs(200), MonoMs(300)]);
+        assert_eq!(
+            session.group(0).map(|g| g.keyed_at.clone()),
+            Some(vec![MonoMs(100), MonoMs(200)])
         );
     }
 
@@ -1232,6 +1323,16 @@ mod tests {
         assert_eq!(keys.of().1, [MonoMs(100), MonoMs(500), MonoMs(500)]);
         keys.typed(1, "T", MonoMs(600));
         assert_eq!(keys.of(), (1, &[MonoMs(600)][..]));
+        // A paddle's letter goes in once its letter space has run out: the
+        // group says nothing of recognising, until the next one.
+        keys.paddled(1);
+        keys.typed(1, "TE", MonoMs(700));
+        assert_eq!(keys.of(), (1, &[][..]));
+        keys.typed(2, "K", MonoMs(800));
+        assert_eq!(keys.of(), (2, &[MonoMs(800)][..]));
+        keys.paddled(3);
+        keys.typed(3, "M", MonoMs(900));
+        assert_eq!(keys.of(), (3, &[][..]));
     }
 
     /// Typing is kept the way a group is written: no spaces, upper case, and

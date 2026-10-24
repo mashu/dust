@@ -173,6 +173,14 @@ impl AnswerDraft {
         });
     }
 
+    /// A paddle keyed `letter` into the box for `idx`: as the keypad does,
+    /// and the group's keys go untimed, a keyed letter going in only once
+    /// its letter space has run out.
+    fn push_keyed(self, idx: usize, letter: char, sent: &str) {
+        self.outbox.paddled(idx);
+        self.push(idx, letter, sent);
+    }
+
     /// The keypad or a paddle keyed `letter` into the box for `idx`. The page
     /// has not seen it, so the box is drawn again to show it.
     fn push(self, idx: usize, letter: char, sent: &str) {
@@ -621,7 +629,7 @@ pub fn TrainingView(
     {
         let sent_now = sent_now.clone();
         keys.use_answer_box(can_paddle, move |letter: char| {
-            draft.push(current, letter, &sent_now);
+            draft.push_keyed(current, letter, &sent_now);
         });
     }
     // A letter keyed in full is in the answer when it closes, even with its
