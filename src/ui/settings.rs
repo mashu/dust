@@ -64,7 +64,7 @@ fn keyer_description(mode: KeyerMode) -> &'static str {
 }
 
 /// A settings card's head: its icon, title and note, the button that puts
-/// the section back to its defaults, and its ? with what the options do.
+/// the section back to its defaults, and its ⓘ with what the options do.
 #[component]
 fn SectionHead(
     icon: IconName,

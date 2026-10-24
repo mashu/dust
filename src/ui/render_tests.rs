@@ -2605,7 +2605,7 @@ mod interactions {
         );
     }
 
-    /// What comes up next says, under its ?, what its colours mean against
+    /// What comes up next says, under its ⓘ, what its colours mean against
     /// the threshold the settings set: 10% wrong, from 90% to level up.
     #[test]
     fn what_comes_up_next_explains_its_colours() {
@@ -2619,6 +2619,24 @@ mod interactions {
             ui.input_tag("help-what-comes-up-next")
                 .contains("aria-expanded=true")
         );
+    }
+
+    /// A card's help wears the ⓘ, and the ? is the guided setup's alone:
+    /// the two never look alike.
+    #[test]
+    fn help_and_the_guided_setup_wear_icons_of_their_own() {
+        use crate::ui::widgets::IconName;
+        let info = IconName::Info.paths();
+        let question = IconName::Help.paths();
+        assert_ne!(info, question);
+        let ui = Ui::new(SamplingHarness, ());
+        let html = ui.html();
+        let at = html
+            .find("id=\"help-what-comes-up-next\"")
+            .expect("the chip");
+        let chip = &html[at..at + html[at..].find("</button>").expect("its end")];
+        assert!(chip.contains(info[1]), "{chip}");
+        assert!(!chip.contains(question[1]), "{chip}");
     }
 
     /// Choosing another set never hides the span and speed of the ones

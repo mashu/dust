@@ -137,7 +137,7 @@ fn TrendCard(
     /// What the estimate stands for, said before its scale.
     #[props(into)]
     meaning: String,
-    /// What its ? opens.
+    /// What its ⓘ opens.
     help: Element,
     /// The aim, while the feature is steering by it.
     steering: Option<&'static str>,

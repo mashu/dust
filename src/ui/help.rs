@@ -1,4 +1,4 @@
-//! What each card's ? opens: what its terms, colours and options mean, a
+//! What each card's ⓘ opens: what its terms, colours and options mean, a
 //! line each. Kept apart from the cards, so a card's code is what it draws
 //! and its help reads as one text.
 

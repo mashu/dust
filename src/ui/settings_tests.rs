@@ -1256,7 +1256,7 @@ fn your_call_in_tu_is_on_the_contest_card_in_a_pile_up() {
     });
 }
 
-/// Every card on the settings screen has a ? that opens what its options
+/// Every card on the settings screen has an ⓘ that opens what its options
 /// do, out of the way until asked for: in group training, and in Contest
 /// mode with the station's card.
 #[test]

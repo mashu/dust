@@ -567,8 +567,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   letter-spacing: 0.06em;
 }
 .card-tools { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-/* A card's help: a ? beside its title, and what it opens under the head —
-   what the card's terms, colours and options mean, a line each. */
+/* A card's help: an ⓘ beside its title, and what it opens under the head —
+   what the card's terms, colours and options mean, a line each. The ? in
+   the header is the guided setup's, and only that. */
 .card-title-row { display: flex; align-items: center; gap: 0.45rem; }
 .help-btn { flex: none; width: 1.6rem; height: 1.6rem; border-radius: 50%; box-shadow: none; }
 .help-btn .icon { width: 0.85rem; height: 0.85rem; }

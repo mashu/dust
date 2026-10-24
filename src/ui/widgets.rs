@@ -147,12 +147,15 @@ pub enum IconName {
     Upload,
     Download,
     Medal,
+    /// What a card's terms mean: the ⓘ of its help. The ? is the guided
+    /// setup's.
+    Info,
 }
 
 impl IconName {
     /// Every icon, for the test that draws them all.
     #[cfg(test)]
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::Signal,
         Self::Chart,
         Self::Sliders,
@@ -184,10 +187,11 @@ impl IconName {
         Self::Upload,
         Self::Download,
         Self::Medal,
+        Self::Info,
     ];
 
     /// The strokes, on a 24×24 grid.
-    fn paths(self) -> &'static [&'static str] {
+    pub(crate) fn paths(self) -> &'static [&'static str] {
         match self {
             Self::Signal => &["M2 12h3l2.5-7 3.5 14 3-10 2 3h6"],
             Self::Chart => &["M4 20V11", "M10 20V4", "M16 20v-6", "M2 20h20"],
@@ -284,6 +288,11 @@ impl IconName {
                 "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
                 "M9.4 9.4a2.7 2.7 0 015.2 1c0 1.8-2.6 2.2-2.6 3.8",
                 "M12 17.3h.01",
+            ],
+            Self::Info => &[
+                "M21 12a9 9 0 11-18 0 9 9 0 0118 0z",
+                "M12 11v5.5",
+                "M12 7.6h.01",
             ],
         }
     }
@@ -426,8 +435,8 @@ pub fn ProgressHeader(
 }
 
 /// The head every card wears: an icon, a title, a note under it, and the
-/// card's own tools to the right. A card with `help` has a ? beside its
-/// title that opens it under the head: what the card's terms, colours and
+/// card's own tools to the right. A card with `help` has an ⓘ beside its
+/// title that opens it under the head (the ? is the guided setup's): what the card's terms, colours and
 /// options mean, out of the way until asked for.
 #[component]
 pub fn CardHead(
@@ -455,7 +464,7 @@ pub fn CardHead(
                                 aria_label: if open() { "Hide the help" } else { "What does this mean?" },
                                 aria_expanded: open(),
                                 onclick: move |_| open.toggle(),
-                                Icon { name: if open() { IconName::X } else { IconName::Help } }
+                                Icon { name: if open() { IconName::X } else { IconName::Info } }
                             }
                         }
                     }
