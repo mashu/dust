@@ -493,7 +493,7 @@ pub fn recognition() -> Element {
             dt { "Slow under" }
             dd { "Orange: slower than ICR, under this. Red from it on." }
             dt { "Bluetooth" }
-            dd { "Times are taken from when the sound reaches you, as far as the device reports its delay: a Bluetooth headset that does not adds its own." }
+            dd { "Times run from when the sound reaches you, as far as the device reports its delay; a Bluetooth headset that does not report it adds its own to every time." }
         }
     }
 }
