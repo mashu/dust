@@ -1,13 +1,16 @@
 //! The "What comes up next" card: how often you get each character wrong,
-//! with how sure the trainer is of it, against your level-up threshold, and
-//! each one's chance of coming up next.
+//! against your level-up threshold, and each one's chance of coming up
+//! next.
 //!
-//! The trainer does not hold one error rate for a character but a belief:
-//! a spread of rates, narrow for a character heard hundreds of times and
-//! wide for one just unlocked. Each row draws that spread as a band, inked
-//! where the rate is likely and fading where it is not, with a dot at the
-//! best guess. A summary above names the characters to work on and the
-//! ones it is still finding out about.
+//! A row is a bar, drawn as the speed and length bars below it are: as long
+//! as the best guess at how often you get the character wrong, in the
+//! colour of where it stands, with a notch at your threshold. The trainer
+//! does not hold one rate for a character but a belief, narrow for one
+//! heard hundreds of times and wide for one just unlocked: a paler stretch
+//! past the bar runs to the top of where the rate likely is, and the line
+//! under it says the range. A summary above names the characters to work
+//! on, the ones it is still finding out about, and the ones not heard yet,
+//! which have no row: there is nothing yet to draw of them.
 
 use cw_core::{CharSetMode, SamplingRow, SessionResult, TrainingSettings, sampling_rows};
 use dioxus::prelude::*;
@@ -21,12 +24,6 @@ const LIKELY: f64 = 0.8;
 const UNSURE_WIDTH: f64 = 0.2;
 /// Less evidence than this, and a character has not been heard.
 const NEW_BELOW: f64 = 0.5;
-/// Steps the belief is read in, and stops the band is drawn with.
-const GRID: usize = 600;
-const STOPS: usize = 40;
-/// The density the band is at its darkest from: a belief this sure or surer
-/// is full ink, a flat one, never heard, a faint wash.
-const FULL_INK: f64 = 8.0;
 
 /// Where a character stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,7 +60,7 @@ impl Standing {
     }
 }
 
-/// The right end of the scale: 60% wrong, past which everything is bad
+/// The right end of the bars: 60% wrong, past which everything is bad
 /// enough, unless your threshold sits near it.
 fn scale_top(threshold: f64) -> f64 {
     if threshold > 0.45 { 1.0 } else { 0.6 }
@@ -79,11 +76,9 @@ struct Line {
     standing: Standing,
     /// Its chance of coming up next; none when the set does not draw it.
     chance: Option<f64>,
-    /// The band: where along the scale, in percent, and how dark.
-    band: Vec<(f64, f64)>,
 }
 
-fn line(row: &SamplingRow, threshold: f64, top: f64) -> Line {
+fn line(row: &SamplingRow, threshold: f64) -> Line {
     let likely = row.error_interval(LIKELY);
     let standing = if row.evidence() < NEW_BELOW {
         Standing::New
@@ -94,22 +89,12 @@ fn line(row: &SamplingRow, threshold: f64, top: f64) -> Line {
     } else {
         Standing::Solid
     };
-    let density = row.error_density(GRID);
-    let band = (0..STOPS)
-        .map(|stop| {
-            let along = stop as f64 / (STOPS - 1) as f64;
-            let at = ((along * top * GRID as f64) as usize).min(GRID - 1);
-            let ink = (density[at] / FULL_INK).min(1.0);
-            (along * 100.0, 0.06 + 0.64 * ink)
-        })
-        .collect();
     Line {
         character: row.character,
         guess: row.p_error,
         likely,
         standing,
         chance: row.drawn_now.then_some(row.sampling_prob),
-        band,
     }
 }
 
@@ -121,6 +106,21 @@ fn percent(share: f64) -> String {
         "<1%".to_string()
     } else {
         format!("{pct:.0}%")
+    }
+}
+
+/// The line under a row's bar: where its rate likely is, and its chance of
+/// coming up next.
+fn line_note(line: &Line) -> String {
+    let (low, high) = line.likely;
+    let likely = format!(
+        "likely {:.0}–{:.0}% wrong",
+        low * 100.0,
+        (high * 100.0).max(1.0)
+    );
+    match line.chance {
+        Some(chance) => format!("{likely} · {} chance next", percent(chance)),
+        None => format!("{likely} · not drawn now"),
     }
 }
 
@@ -146,14 +146,14 @@ fn line_label(line: &Line) -> String {
     }
 }
 
-/// Where along the scale, in percent.
+/// Where along the bar, in percent.
 fn along(rate: f64, top: f64) -> f64 {
     (rate / top * 100.0).clamp(0.0, 100.0)
 }
 
-fn row_view(line: &Line, top: f64, threshold: f64, max_chance: f64) -> Element {
+fn row_view(line: &Line, top: f64, threshold: f64) -> Element {
     let class = format!(
-        "err-row {}{}",
+        "letter-row stat-row {}{}",
         line.standing.class(),
         if line.chance.is_none() {
             " not-drawn"
@@ -161,66 +161,30 @@ fn row_view(line: &Line, top: f64, threshold: f64, max_chance: f64) -> Element {
             ""
         }
     );
-    let gradient = format!("err-{}", u32::from(line.character));
-    let chance_width = match line.chance {
-        Some(chance) if max_chance > 0.0 => (chance / max_chance * 100.0).clamp(0.0, 100.0),
-        _ => 0.0,
-    };
+    let (low, high) = (along(line.likely.0, top), along(line.likely.1, top));
     rsx! {
         div {
             id: control_id("sample", &id_part(line.character)),
             class,
             role: "listitem",
             aria_label: "{line_label(line)}",
-            span { class: "letter-key err-key group-text", "{line.character}" }
-            div {
-                class: "err-plot",
-                style: "--thr: {along(threshold, top):.1}%;",
-                svg {
-                    class: "err-band",
-                    view_box: "0 0 100 10",
-                    preserve_aspect_ratio: "none",
-                    defs {
-                        linearGradient { id: "{gradient}", x1: "0", x2: "1",
-                            for (offset, ink) in line.band.iter() {
-                                stop {
-                                    offset: "{offset:.1}%",
-                                    style: "stop-color: var(--tone); stop-opacity: {ink:.3};",
-                                }
-                            }
-                        }
-                    }
-                    rect {
-                        class: "err-track",
-                        x: "0",
-                        y: "2",
-                        width: "100",
-                        height: "6",
-                        rx: "1.2",
-                        ry: "3",
-                    }
-                    rect {
-                        x: "0",
-                        y: "2",
-                        width: "100",
-                        height: "6",
-                        rx: "1.2",
-                        ry: "3",
-                        fill: "url(#{gradient})",
-                    }
+            span { class: "letter-key group-text", "{line.character}" }
+            div { class: "bar-track marked",
+                span {
+                    class: "stat-range",
+                    style: "left: {low:.1}%; width: {high - low:.1}%;",
                 }
-                span { class: "err-dot", style: "left: {along(line.guess, top):.1}%;" }
-            }
-            span { class: "err-chance",
-                if let Some(chance) = line.chance {
-                    span { class: "err-cbar",
-                        span { style: "width: {chance_width:.1}%;" }
-                    }
-                    "{percent(chance)}"
-                } else {
-                    "—"
+                span {
+                    class: "bar-fill stat-fill",
+                    style: "width: {along(line.guess, top):.1}%;",
+                }
+                span {
+                    class: "bar-mark",
+                    style: "left: {along(threshold, top):.1}%;",
                 }
             }
+            span { class: "mono muted stat-value", "{percent(line.guess)}" }
+            span { class: "tiny", "{line_note(line)}" }
         }
     }
 }
@@ -271,13 +235,9 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
     let threshold = (1.0 - settings.auto_level.auto_adjust_threshold / 100.0).clamp(0.0, 1.0);
     let top = scale_top(threshold);
     let rows = sampling_rows(&settings, &sessions);
-    let max_chance = rows
-        .iter()
-        .map(|row| row.sampling_prob)
-        .fold(0.0_f64, f64::max);
     let (mut drawn, mut others): (Vec<Line>, Vec<Line>) = rows
         .iter()
-        .map(|row| line(row, threshold, top))
+        .map(|row| line(row, threshold))
         .partition(|line| line.chance.is_some());
     // A character never heard has no row: there is nothing yet to draw of
     // it. The summary names the ones the set draws.
@@ -295,7 +255,6 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
     } else {
         "coming up in the next group"
     };
-    let ticks: Vec<f64> = (0..=6).map(|tick| f64::from(tick) * top / 6.0).collect();
     let limit = percent(threshold);
     rsx! {
         div { class: "card stack-sm",
@@ -361,31 +320,13 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
                     span { i { class: "err-swatch solid" } "under your {limit}" }
                     span { i { class: "err-swatch to-work-on" } "over it" }
                     span { i { class: "err-swatch finding-out" } "still finding out" }
-                    span { i { class: "err-swatch band" } "where it likely is" }
+                    span { i { class: "err-swatch range" } "where it likely is" }
+                    span { i { class: "err-swatch mark" } "your {limit}" }
                 }
             }
-            div { class: "err-rows", role: "list",
+            div { class: "stat-rows", role: "list",
                 for line in drawn.iter() {
-                    {row_view(line, top, threshold, max_chance)}
-                }
-            }
-            if !drawn.is_empty() {
-                div { class: "err-axis", aria_hidden: "true",
-                    span {}
-                    span {
-                        class: "err-ticks",
-                        style: "--thr: {along(threshold, top):.1}%;",
-                        for tick in ticks.iter() {
-                            span { style: "left: {along(*tick, top):.1}%;",
-                                if *tick >= top && top < 1.0 {
-                                    "{percent(*tick)}+"
-                                } else {
-                                    "{percent(*tick)}"
-                                }
-                            }
-                        }
-                    }
-                    span { class: "err-next", "next" }
+                    {row_view(line, top, threshold)}
                 }
             }
             if !others.is_empty() {
@@ -393,9 +334,9 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
                 p { class: "muted", style: "margin: 0;",
                     "Practised before, and not drawn now. What you learned of them is kept, and counts again when they come back."
                 }
-                div { class: "err-rows", role: "list",
+                div { class: "stat-rows", role: "list",
                     for line in others.iter() {
-                        {row_view(line, top, threshold, max_chance)}
+                        {row_view(line, top, threshold)}
                     }
                 }
             }
@@ -425,40 +366,26 @@ mod tests {
     /// it is solid under your threshold and to work on over it.
     #[test]
     fn each_character_stands_where_its_belief_puts_it() {
-        let standing = |row: SamplingRow| line(&row, 0.1, 0.6).standing;
+        let standing = |row: SamplingRow| line(&row, 0.1).standing;
         assert_eq!(standing(row(0.0, 0.0, true)), Standing::New);
         assert_eq!(standing(row(4.0, 2.0, true)), Standing::FindingOut);
         assert_eq!(standing(row(190.0, 5.0, true)), Standing::Solid);
         assert_eq!(standing(row(160.0, 40.0, true)), Standing::ToWorkOn);
     }
 
-    /// The band is dark where the rate is likely and faint elsewhere; a
-    /// flat belief is a faint wash all the way.
+    /// The line under the bar says the range its paler stretch runs over,
+    /// and the chance next, or that the set does not draw it.
     #[test]
-    fn the_band_is_inked_where_the_rate_is_likely() {
-        let known = line(&row(190.0, 10.0, true), 0.1, 0.6);
-        let darkest = known
-            .band
-            .iter()
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .expect("stops");
-        // The darkest stop is near 5% wrong, a twelfth of the way along.
-        assert!((darkest.0 - 100.0 / 12.0).abs() < 4.0, "{darkest:?}");
-        assert!((darkest.1 - 0.70).abs() < 1e-9);
-        assert!(known.band.last().expect("stops").1 < 0.07);
-        let flat = line(&row(0.0, 0.0, true), 0.1, 0.6);
-        assert!(flat.band.iter().all(|(_, ink)| (ink - 0.14).abs() < 1e-9));
-        assert_eq!(known.band.len(), STOPS);
-    }
-
-    #[test]
-    fn a_row_reads_out_what_it_shows() {
-        let known = line(&row(190.0, 10.0, true), 0.1, 0.6);
+    fn a_row_says_what_it_shows() {
+        let known = line(&row(190.0, 10.0, true), 0.1);
         assert_eq!(
             line_label(&known),
             "K: wrong about 5%, likely 4% to 8%, 3% chance next"
         );
-        let new = line(&row(0.0, 0.0, false), 0.1, 0.6);
+        assert_eq!(line_note(&known), "likely 4–8% wrong · 3% chance next");
+        let away = line(&row(190.0, 10.0, false), 0.1);
+        assert_eq!(line_note(&away), "likely 4–8% wrong · not drawn now");
+        let new = line(&row(0.0, 0.0, false), 0.1);
         assert_eq!(line_label(&new), "K: not heard yet, not drawn now");
         assert_eq!(percent(0.004), "<1%");
         assert_eq!(percent(0.0), "0%");
@@ -478,7 +405,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(character, row)| {
-            let mut line = line(&row, 0.1, 0.6);
+            let mut line = line(&row, 0.1);
             line.character = character;
             line
         })
@@ -495,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn the_scale_runs_to_sixty_percent_unless_the_threshold_is_near_it() {
+    fn the_bars_run_to_sixty_percent_unless_the_threshold_is_near_it() {
         assert_eq!(scale_top(0.1), 0.6);
         assert_eq!(scale_top(0.5), 1.0);
         assert_eq!(along(0.3, 0.6), 50.0);

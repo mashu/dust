@@ -19,6 +19,13 @@
 //! greyed, with no place, and it sets no record and moves no form. Every
 //! run of a contest, whole or not, is on its Runs card ([`contest_runs`]).
 //!
+//! A contest's own board ranks by the contest's own measure ([`Ranking`]):
+//! the verified score, of what was logged clean, among runs set to the
+//! same length, as a longer run scores more for the same copy; or the QSOs
+//! logged clean an hour, fair between runs of any length, and the only
+//! measure of a contest with no score. Points a group rank the boards that
+//! mix runs with sessions of groups.
+//!
 //! There is one player, so a place on the board is a session's, not a
 //! person's. It is read off the stored history, so a deleted session leaves
 //! the board with it. Two equal scores are placed in the order they were set:
@@ -46,8 +53,9 @@ pub struct BoardEntry {
     pub place: usize,
     /// Where the session sits in the history it was read from.
     pub index: usize,
-    /// What it earned a group: what it is ranked by.
-    pub per_group: f64,
+    /// What it is ranked by ([`Ranking`]): what it earned a group, or a
+    /// run's verified score or clean QSOs an hour.
+    pub rating: f64,
     /// What it earned in all.
     pub score: f64,
     pub timestamp: u64,
@@ -59,8 +67,11 @@ pub struct BoardEntry {
     pub mode: CharSetMode,
     /// The contest a run was of, when this build knows it.
     pub contest: Option<ContestKind>,
-    /// The QSOs a run logged, where its log reads.
+    /// The QSOs a run logged, and those logged clean, where its log reads.
     pub qsos: Option<usize>,
+    pub clean: Option<usize>,
+    /// The length a run was set to, in seconds, where its log reads.
+    pub limit_s: Option<u32>,
 }
 
 /// What a session earned a group, if it can go on the board: a score that
@@ -104,6 +115,62 @@ fn a_whole_run(session: &SessionResult, assisted: bool) -> bool {
     })
 }
 
+/// What a board ranks the sessions it holds by.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ranking {
+    /// What a session earned a group: the one measure every mode shares.
+    #[default]
+    PerGroup,
+    /// A run's verified contest score, among the runs set to this length,
+    /// in seconds: a longer run scores more for the same copy.
+    Verified(u32),
+    /// The QSOs a run logged clean, an hour of the run: fair between runs
+    /// of any length.
+    CleanRate,
+}
+
+impl Ranking {
+    /// What `session` is ranked by on its own board: a run by its
+    /// contest's score among runs of its length, or by its clean rate in a
+    /// contest without a score; any other session by what it earned a
+    /// group.
+    pub fn of(session: &SessionResult) -> Self {
+        let scored = session.contest_kind().is_some_and(ContestKind::scored);
+        match session.contest_run() {
+            Some(run) if scored => Self::Verified(run.limit_s),
+            Some(_) => Self::CleanRate,
+            None => Self::PerGroup,
+        }
+    }
+}
+
+/// What `session` is ranked by under `ranking`, if it goes on a board that
+/// ranks so: it has to go on the board at all ([`per_group`]), with Show
+/// copy as `assisted` says; and under a contest's own ranking be a run,
+/// with a score, of the length ranked.
+fn rated(session: &SessionResult, ranking: Ranking, assisted: bool) -> Option<f64> {
+    let per_group = earned(session, assisted)?;
+    let run = || session.contest_run();
+    match ranking {
+        Ranking::PerGroup => Some(per_group),
+        Ranking::Verified(limit_s) => {
+            let run = run().filter(|run| run.limit_s == limit_s)?;
+            Some(f64::from(run.score(&session.groups)?.verified.score))
+        }
+        Ranking::CleanRate => {
+            let run = run()?;
+            let clean = run.clean_qsos(&session.groups)?;
+            Some(clean as f64 * 3_600_000.0 / run.run_ms.max(1) as f64)
+        }
+    }
+}
+
+/// What `session` is ranked by under `ranking`, if it is placed on a board
+/// that ranks so.
+pub fn rating(session: &SessionResult, ranking: Ranking) -> Option<f64> {
+    rated(session, ranking, false)
+}
+
 /// Which sessions a board ranks against each other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BoardOf {
@@ -136,20 +203,26 @@ impl BoardOf {
     }
 }
 
-/// The sessions `of` holds that go on the board, each with where it sits in
-/// the history and what it earned a group.
-fn qualifying(sessions: &[SessionResult], of: BoardOf) -> Vec<(usize, &SessionResult, f64)> {
+/// The sessions `of` holds that go on a board ranked by `ranking`, each
+/// with where it sits in the history and what it is ranked by.
+fn qualifying(
+    sessions: &[SessionResult],
+    of: BoardOf,
+    ranking: Ranking,
+) -> Vec<(usize, &SessionResult, f64)> {
     sessions
         .iter()
         .enumerate()
         .filter(|(_, session)| of.holds(session))
-        .filter_map(|(index, session)| per_group(session).map(|rating| (index, session, rating)))
+        .filter_map(|(index, session)| {
+            rated(session, ranking, false).map(|rating| (index, session, rating))
+        })
         .collect()
 }
 
-/// Every session `of` holds on the board, best first.
-pub fn score_board(sessions: &[SessionResult], of: BoardOf) -> Vec<BoardEntry> {
-    let mut ranked = qualifying(sessions, of);
+/// Every session `of` holds on the board, best by `ranking` first.
+pub fn score_board(sessions: &[SessionResult], of: BoardOf, ranking: Ranking) -> Vec<BoardEntry> {
+    let mut ranked = qualifying(sessions, of, ranking);
     ranked.sort_by(|(a_index, a, a_rating), (b_index, b, b_rating)| {
         b_rating
             .total_cmp(a_rating)
@@ -163,12 +236,13 @@ pub fn score_board(sessions: &[SessionResult], of: BoardOf) -> Vec<BoardEntry> {
         .collect()
 }
 
-/// Session `index`, `session`, on the board at `place`, earning `per_group`.
-fn entry(place: usize, index: usize, session: &SessionResult, per_group: f64) -> BoardEntry {
+/// Session `index`, `session`, on the board at `place`, ranked by `rating`.
+fn entry(place: usize, index: usize, session: &SessionResult, rating: f64) -> BoardEntry {
+    let run = session.contest_run();
     BoardEntry {
         place,
         index,
-        per_group,
+        rating,
         score: session.score,
         timestamp: session.timestamp,
         date: session.date.clone(),
@@ -178,22 +252,24 @@ fn entry(place: usize, index: usize, session: &SessionResult, per_group: f64) ->
         groups: session.groups.len(),
         mode: session.char_set_mode,
         contest: session.contest_kind(),
-        qsos: session
-            .contest_run()
+        qsos: run
+            .as_ref()
             .map(|run| run.qsos.iter().filter(|qso| qso.k.is_empty()).count()),
+        clean: run.as_ref().and_then(|run| run.clean_qsos(&session.groups)),
+        limit_s: run.as_ref().map(|run| run.limit_s),
     }
 }
 
 /// The whole runs `of` holds that had Show copy on, newest first: the board
 /// lists them greyed, each with place 0, as they are never placed, and
 /// they set no record and move no form.
-pub fn assisted_runs(sessions: &[SessionResult], of: BoardOf) -> Vec<BoardEntry> {
+pub fn assisted_runs(sessions: &[SessionResult], of: BoardOf, ranking: Ranking) -> Vec<BoardEntry> {
     let mut assisted: Vec<BoardEntry> = sessions
         .iter()
         .enumerate()
         .filter(|(_, session)| of.holds(session))
         .filter_map(|(index, session)| {
-            earned(session, true).map(|rating| entry(0, index, session, rating))
+            rated(session, ranking, true).map(|rating| entry(0, index, session, rating))
         })
         .collect();
     assisted.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then(b.index.cmp(&a.index)));
@@ -202,13 +278,13 @@ pub fn assisted_runs(sessions: &[SessionResult], of: BoardOf) -> Vec<BoardEntry>
 
 /// Where the session finished at `timestamp` stands among the sessions of
 /// its own mode on the board, and a contest run among runs of its own
-/// contest: its place, and how many there are. Nothing for a session that
-/// is not on it.
+/// contest, as its own board ranks it ([`Ranking::of`]): its place, and
+/// how many there are. Nothing for a session that is not on it.
 pub fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize, usize)> {
     let session = sessions
         .iter()
         .find(|session| session.timestamp == timestamp)?;
-    let board = score_board(sessions, BoardOf::of(session));
+    let board = score_board(sessions, BoardOf::of(session), Ranking::of(session));
     let place = board
         .iter()
         .position(|entry| entry.timestamp == timestamp)?;
@@ -216,15 +292,14 @@ pub fn board_place(sessions: &[SessionResult], timestamp: u64) -> Option<(usize,
 }
 
 /// The modes the board offers a pill for, in the order the trainer offers
-/// them: those it has sessions of, and Contest once the history holds a
-/// run, placed or not, as every run is on the Runs card under that pill
-/// ([`run_kinds`]).
+/// them: those it has sessions of, and Contest always, as the pill that
+/// opens the contests' own boards says how a run gets on them before there
+/// is one, and lists every run on its Runs card ([`run_kinds`]).
 pub fn board_modes(sessions: &[SessionResult]) -> Vec<CharSetMode> {
-    let runs = !run_kinds(sessions).is_empty();
     CharSetMode::ALL
         .into_iter()
         .filter(|mode| {
-            (*mode == CharSetMode::Contest && runs)
+            *mode == CharSetMode::Contest
                 || sessions
                     .iter()
                     .any(|session| session.char_set_mode == *mode && per_group(session).is_some())
@@ -324,6 +399,32 @@ pub fn contest_runs(sessions: &[SessionResult], kind: ContestKind) -> Vec<RunEnt
     runs
 }
 
+/// The lengths the runs of `kind` on its board were set to, in seconds,
+/// shortest first, assisted runs among them: under its verified score, the
+/// board ranks the runs of one length against each other.
+pub fn run_lengths(sessions: &[SessionResult], kind: ContestKind) -> Vec<u32> {
+    let mut lengths: Vec<u32> = sessions
+        .iter()
+        .filter(|session| session.contest_kind() == Some(kind))
+        .filter(|session| earned(session, false).or(earned(session, true)).is_some())
+        .filter_map(|session| session.contest_run().map(|run| run.limit_s))
+        .collect();
+    lengths.sort_unstable();
+    lengths.dedup();
+    lengths
+}
+
+/// The length the latest run of `kind` on its board was set to, in
+/// seconds: the one its verified score is shown for first.
+pub fn latest_run_length(sessions: &[SessionResult], kind: ContestKind) -> Option<u32> {
+    sessions
+        .iter()
+        .filter(|session| session.contest_kind() == Some(kind))
+        .filter(|session| earned(session, false).or(earned(session, true)).is_some())
+        .max_by_key(|session| session.timestamp)
+        .and_then(|session| session.contest_run().map(|run| run.limit_s))
+}
+
 /// The contests the board has runs of, in the order the card lists them.
 pub fn board_kinds(sessions: &[SessionResult]) -> Vec<ContestKind> {
     ContestKind::ALL
@@ -353,9 +454,9 @@ fn median(values: &[f64]) -> Option<f64> {
 pub struct TimelinePoint {
     pub index: usize,
     pub timestamp: u64,
-    /// What it earned a group.
-    pub per_group: f64,
-    /// The best a group up to and including this session.
+    /// What it is ranked by ([`Ranking`]).
+    pub rating: f64,
+    /// The best rating up to and including this session.
     pub record: f64,
     /// Whether this session set that record: beat every session before it.
     pub set_record: bool,
@@ -364,10 +465,14 @@ pub struct TimelinePoint {
     pub form: f64,
 }
 
-/// Every session `of` holds on the board, oldest first, with the record and
-/// the form as they stood after each.
-pub fn score_timeline(sessions: &[SessionResult], of: BoardOf) -> Vec<TimelinePoint> {
-    let mut sorted = qualifying(sessions, of);
+/// Every session `of` holds on the board ranked by `ranking`, oldest
+/// first, with the record and the form as they stood after each.
+pub fn score_timeline(
+    sessions: &[SessionResult],
+    of: BoardOf,
+    ranking: Ranking,
+) -> Vec<TimelinePoint> {
+    let mut sorted = qualifying(sessions, of, ranking);
     sorted.sort_by(|(a_index, a, _), (b_index, b, _)| {
         a.timestamp.cmp(&b.timestamp).then(a_index.cmp(b_index))
     });
@@ -383,7 +488,7 @@ pub fn score_timeline(sessions: &[SessionResult], of: BoardOf) -> Vec<TimelinePo
             TimelinePoint {
                 index: *index,
                 timestamp: session.timestamp,
-                per_group: *rating,
+                rating: *rating,
                 record,
                 set_record,
                 form: median(recent).unwrap_or(*rating),
@@ -420,8 +525,8 @@ mod tests {
     #[test]
     fn the_best_a_group_comes_first() {
         let sessions = [koch(1, 30.0), koch(2, 90.0), koch(3, 50.0)];
-        let board = score_board(&sessions, BoardOf::All);
-        let ratings: Vec<f64> = board.iter().map(|entry| entry.per_group).collect();
+        let board = score_board(&sessions, BoardOf::All, Ranking::PerGroup);
+        let ratings: Vec<f64> = board.iter().map(|entry| entry.rating).collect();
         assert_eq!(ratings, [90.0, 50.0, 30.0]);
         let places: Vec<usize> = board.iter().map(|entry| entry.place).collect();
         assert_eq!(places, [1, 2, 3]);
@@ -434,9 +539,9 @@ mod tests {
     fn a_longer_session_is_not_a_better_one() {
         let long = session(1, 50.0 * 60.0, 60, CharSetMode::Koch);
         let short = session(2, 70.0 * 12.0, 12, CharSetMode::Koch);
-        let board = score_board(&[long, short], BoardOf::All);
+        let board = score_board(&[long, short], BoardOf::All, Ranking::PerGroup);
         assert_eq!(board[0].timestamp, 2);
-        assert_eq!(board[0].per_group, 70.0);
+        assert_eq!(board[0].rating, 70.0);
     }
 
     /// Too few groups say too little: a lucky handful is not a place.
@@ -446,7 +551,7 @@ mod tests {
         let just = session(2, 100.0, BOARD_MIN_GROUPS, CharSetMode::Koch);
         assert_eq!(per_group(&short), None);
         assert_eq!(per_group(&just), Some(10.0));
-        let board = score_board(&[short, just], BoardOf::All);
+        let board = score_board(&[short, just], BoardOf::All, Ranking::PerGroup);
         assert_eq!(board.len(), 1);
         assert_eq!(board[0].timestamp, 2);
     }
@@ -455,7 +560,7 @@ mod tests {
     #[test]
     fn an_equal_score_ranks_below_the_one_set_first() {
         let sessions = [koch(20, 50.0), koch(10, 50.0)];
-        let board = score_board(&sessions, BoardOf::All);
+        let board = score_board(&sessions, BoardOf::All, Ranking::PerGroup);
         assert_eq!(board[0].timestamp, 10);
         assert_eq!(board[1].timestamp, 20);
     }
@@ -490,7 +595,11 @@ mod tests {
         };
         assert_eq!(per_group(&stripped), None, "its log dropped");
         let sessions = [short, whole.clone(), busted, stripped];
-        let board = score_board(&sessions, BoardOf::Mode(CharSetMode::Contest));
+        let board = score_board(
+            &sessions,
+            BoardOf::Mode(CharSetMode::Contest),
+            Ranking::PerGroup,
+        );
         assert_eq!(board.len(), 1);
         assert_eq!(board_place(&sessions, 2), Some((1, 1)));
         // A better run of another contest, as its mark says, is not above
@@ -503,7 +612,12 @@ mod tests {
         };
         let sessions = [sessions[1].clone(), other];
         assert_eq!(
-            score_board(&sessions, BoardOf::Mode(CharSetMode::Contest)).len(),
+            score_board(
+                &sessions,
+                BoardOf::Mode(CharSetMode::Contest),
+                Ranking::PerGroup
+            )
+            .len(),
             2
         );
         assert_eq!(board_place(&sessions, 2), Some((1, 1)));
@@ -514,12 +628,20 @@ mod tests {
             board_kinds(&sessions),
             [ContestKind::Wpx, ContestKind::SimpleQso]
         );
-        let wpx = score_board(&sessions, BoardOf::Contest(ContestKind::Wpx));
+        let wpx = score_board(
+            &sessions,
+            BoardOf::Contest(ContestKind::Wpx),
+            Ranking::PerGroup,
+        );
         assert_eq!(
             wpx.iter().map(|entry| entry.timestamp).collect::<Vec<_>>(),
             [2]
         );
-        let timeline = score_timeline(&sessions, BoardOf::Contest(ContestKind::SimpleQso));
+        let timeline = score_timeline(
+            &sessions,
+            BoardOf::Contest(ContestKind::SimpleQso),
+            Ranking::PerGroup,
+        );
         assert_eq!(timeline.len(), 1);
         assert_eq!(
             BoardOf::of(&sessions[0]),
@@ -542,10 +664,10 @@ mod tests {
             koch(4, -5.0),
             koch(5, 40.0),
         ];
-        let board = score_board(&sessions, BoardOf::All);
+        let board = score_board(&sessions, BoardOf::All, Ranking::PerGroup);
         assert_eq!(board.len(), 1);
         assert_eq!(board[0].timestamp, 5);
-        assert!(score_board(&[], BoardOf::All).is_empty());
+        assert!(score_board(&[], BoardOf::All, Ranking::PerGroup).is_empty());
     }
 
     #[test]
@@ -556,16 +678,28 @@ mod tests {
             koch(3, 50.0),
             session(4, 900.0, 3, CharSetMode::Words),
         ];
-        let calls = score_board(&sessions, BoardOf::Mode(CharSetMode::Callsign));
+        let calls = score_board(
+            &sessions,
+            BoardOf::Mode(CharSetMode::Callsign),
+            Ranking::PerGroup,
+        );
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].place, 1);
-        let koch_board = score_board(&sessions, BoardOf::Mode(CharSetMode::Koch));
+        let koch_board = score_board(
+            &sessions,
+            BoardOf::Mode(CharSetMode::Koch),
+            Ranking::PerGroup,
+        );
         assert_eq!(koch_board.len(), 2);
-        assert_eq!(koch_board[0].per_group, 50.0);
+        assert_eq!(koch_board[0].rating, 50.0);
         assert_eq!(
             board_modes(&sessions),
-            [CharSetMode::Koch, CharSetMode::Callsign],
-            "words have only a session too short"
+            [
+                CharSetMode::Koch,
+                CharSetMode::Callsign,
+                CharSetMode::Contest
+            ],
+            "words have only a session too short; Contest is always offered"
         );
     }
 
@@ -595,7 +729,7 @@ mod tests {
             koch(20, 20.0),
             koch(40, 90.0),
         ];
-        let timeline = score_timeline(&sessions, BoardOf::All);
+        let timeline = score_timeline(&sessions, BoardOf::All, Ranking::PerGroup);
         let at: Vec<u64> = timeline.iter().map(|point| point.timestamp).collect();
         assert_eq!(at, [10, 20, 30, 40]);
         let records: Vec<f64> = timeline.iter().map(|point| point.record).collect();
@@ -603,7 +737,11 @@ mod tests {
         let set: Vec<bool> = timeline.iter().map(|point| point.set_record).collect();
         assert_eq!(set, [true, false, true, true]);
         // Equalling the record does not set it.
-        let tie = score_timeline(&[koch(1, 30.0), koch(2, 30.0)], BoardOf::All);
+        let tie = score_timeline(
+            &[koch(1, 30.0), koch(2, 30.0)],
+            BoardOf::All,
+            Ranking::PerGroup,
+        );
         assert!(!tie[1].set_record);
     }
 
@@ -613,15 +751,19 @@ mod tests {
     fn the_form_is_the_median_of_the_latest_sessions() {
         let mut sessions: Vec<SessionResult> = (0..9).map(|n| koch(n, 60.0)).collect();
         sessions.push(koch(9, 5.0));
-        let timeline = score_timeline(&sessions, BoardOf::All);
+        let timeline = score_timeline(&sessions, BoardOf::All, Ranking::PerGroup);
         assert_eq!(timeline.last().map(|point| point.form), Some(60.0));
         // Two sessions: the mean of the two.
-        let pair = score_timeline(&[koch(1, 40.0), koch(2, 60.0)], BoardOf::All);
+        let pair = score_timeline(
+            &[koch(1, 40.0), koch(2, 60.0)],
+            BoardOf::All,
+            Ranking::PerGroup,
+        );
         assert_eq!(pair[1].form, 50.0);
         // Only the last ten count.
         let mut long: Vec<SessionResult> = (0..10).map(|n| koch(n, 10.0)).collect();
         long.extend((10..20).map(|n| koch(n, 70.0)));
-        let timeline = score_timeline(&long, BoardOf::All);
+        let timeline = score_timeline(&long, BoardOf::All, Ranking::PerGroup);
         assert_eq!(timeline.last().map(|point| point.form), Some(70.0));
         assert_eq!(timeline[0].form, 10.0);
     }
@@ -700,7 +842,11 @@ mod tests {
         let (copied, guessed) = (worked(false, 1), worked(true, 2));
         assert!(per_group(&guessed).is_some(), "a whole run, one QSO clean");
         assert!(guessed.accuracy < copied.accuracy);
-        let board = score_board(&[copied, guessed], BoardOf::Mode(CharSetMode::Contest));
+        let board = score_board(
+            &[copied, guessed],
+            BoardOf::Mode(CharSetMode::Contest),
+            Ranking::PerGroup,
+        );
         assert_eq!(board[0].timestamp, 1);
     }
 
@@ -727,10 +873,14 @@ mod tests {
         assert!(per_group(&finished).is_some() && per_group(&walked).is_some());
         assert_eq!(finished.accuracy, 1.0);
         assert!(walked.accuracy < finished.accuracy);
-        let board = score_board(&[finished, walked], BoardOf::Mode(CharSetMode::Contest));
+        let board = score_board(
+            &[finished, walked],
+            BoardOf::Mode(CharSetMode::Contest),
+            Ranking::PerGroup,
+        );
         let ranked: Vec<(u64, f64)> = board
             .iter()
-            .map(|entry| (entry.timestamp, entry.per_group))
+            .map(|entry| (entry.timestamp, entry.rating))
             .collect();
         assert_eq!(
             board[0].timestamp, 1,
@@ -758,6 +908,66 @@ mod tests {
         runtime.machine.result(timestamp, "2026-10-20".into())
     }
 
+    /// A contest's own board ranks its runs by the contest's own measure:
+    /// the verified score among runs set to the same length, or the QSOs
+    /// logged clean an hour, whatever the length. A run's place is said as
+    /// its contest ranks it first: by its score, among runs of its length.
+    #[test]
+    fn a_contest_board_ranks_by_the_contests_own_measure() {
+        use crate::contest::bot::script::Habit;
+        let fast = worked_run(3, 5, Habit::Perfect, false, 1);
+        let slow = worked_run(3, 5, Habit::HumanPaced, false, 2);
+        let long = worked_run(3, 10, Habit::HumanPaced, false, 3);
+        let sessions = [fast.clone(), slow.clone(), long];
+        let wpx = BoardOf::Contest(ContestKind::Wpx);
+        assert_eq!(run_lengths(&sessions, ContestKind::Wpx), [300, 600]);
+        assert_eq!(latest_run_length(&sessions, ContestKind::Wpx), Some(600));
+        assert!(run_lengths(&sessions, ContestKind::Sprint).is_empty());
+        let verified = |session: &SessionResult| {
+            let run = session.contest_run().expect("a log");
+            f64::from(run.score(&session.groups).expect("a score").verified.score)
+        };
+        assert!(verified(&fast) > verified(&slow), "more QSOs, more score");
+        let five = score_board(&sessions, wpx, Ranking::Verified(300));
+        assert_eq!(
+            five.iter()
+                .map(|entry| (entry.timestamp, entry.rating))
+                .collect::<Vec<_>>(),
+            [(1, verified(&fast)), (2, verified(&slow))]
+        );
+        assert_eq!(five[0].limit_s, Some(300));
+        assert!(five[0].clean.is_some_and(|clean| clean > 0));
+        let ten = score_board(&sessions, wpx, Ranking::Verified(600));
+        assert_eq!(ten.len(), 1);
+        assert_eq!(ten[0].timestamp, 3);
+        // Clean QSOs an hour put every length on one board.
+        let rate = score_board(&sessions, wpx, Ranking::CleanRate);
+        assert_eq!(rate.len(), 3);
+        assert_eq!(rate[0].timestamp, 1);
+        let clean = fast
+            .contest_run()
+            .and_then(|run| run.clean_qsos(&fast.groups));
+        let hours = fast.contest_run().expect("a log").run_ms as f64 / 3_600_000.0;
+        assert!((rate[0].rating - clean.expect("clean QSOs") as f64 / hours).abs() < 1e-9);
+        assert_eq!(
+            score_timeline(&sessions, wpx, Ranking::Verified(300)).len(),
+            2
+        );
+        // Placed as its own contest ranks it.
+        assert_eq!(Ranking::of(&fast), Ranking::Verified(300));
+        assert_eq!(board_place(&sessions, 2), Some((2, 2)));
+        assert_eq!(board_place(&sessions, 3), Some((1, 1)));
+        let unscored = SessionResult {
+            alphabet_fingerprint: "contest:simpleQso".into(),
+            ..fast
+        };
+        assert_eq!(Ranking::of(&unscored), Ranking::CleanRate);
+        assert_eq!(Ranking::of(&koch(9, 50.0)), Ranking::PerGroup);
+        // Points a group are no contest's measure: a run of groups is
+        // never on a board ranked by one.
+        assert!(score_board(&[koch(9, 50.0)], BoardOf::All, Ranking::CleanRate).is_empty());
+    }
+
     /// A whole run with Show copy on is assisted: never placed, however it
     /// scores, but listed greyed apart from the places on every board that
     /// holds it, and out of the record and the form.
@@ -776,27 +986,48 @@ mod tests {
             BoardOf::Mode(CharSetMode::Contest),
             BoardOf::Contest(ContestKind::Wpx),
         ] {
-            let placed: Vec<u64> = score_board(&sessions, of)
+            let placed: Vec<u64> = score_board(&sessions, of, Ranking::PerGroup)
                 .iter()
                 .map(|entry| entry.timestamp)
                 .collect();
             assert_eq!(placed, [1], "{of:?}");
-            let listed: Vec<(u64, usize)> = assisted_runs(&sessions, of)
+            let listed: Vec<(u64, usize)> = assisted_runs(&sessions, of, Ranking::PerGroup)
                 .iter()
                 .map(|entry| (entry.timestamp, entry.place))
                 .collect();
             assert_eq!(listed, [(2, 0)], "{of:?}");
-            let timeline = score_timeline(&sessions, of);
+            let timeline = score_timeline(&sessions, of, Ranking::PerGroup);
             assert_eq!(timeline.len(), 1, "no record, no form: {of:?}");
         }
         assert_eq!(board_place(&sessions, 2), None);
         assert_eq!(board_kinds(&sessions), [ContestKind::Wpx]);
-        assert!(assisted_runs(&sessions, BoardOf::Mode(CharSetMode::Koch)).is_empty());
-        assert!(assisted_runs(&sessions, BoardOf::Contest(ContestKind::Sprint)).is_empty());
+        assert!(
+            assisted_runs(
+                &sessions,
+                BoardOf::Mode(CharSetMode::Koch),
+                Ranking::PerGroup
+            )
+            .is_empty()
+        );
+        assert!(
+            assisted_runs(
+                &sessions,
+                BoardOf::Contest(ContestKind::Sprint),
+                Ranking::PerGroup
+            )
+            .is_empty()
+        );
         // A run too short for the board is no assisted run on it either,
         // but the Contest pill shows for it, with its Runs card.
         let short = worked_run(3, 2, Habit::Perfect, true, 3);
-        assert!(assisted_runs(std::slice::from_ref(&short), BoardOf::All).is_empty());
+        assert!(
+            assisted_runs(
+                std::slice::from_ref(&short),
+                BoardOf::All,
+                Ranking::PerGroup
+            )
+            .is_empty()
+        );
         assert!(board_kinds(std::slice::from_ref(&short)).is_empty());
         assert_eq!(run_kinds(std::slice::from_ref(&short)), [ContestKind::Wpx]);
         assert_eq!(

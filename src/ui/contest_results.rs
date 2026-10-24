@@ -12,7 +12,7 @@
 //! never say Points.
 
 use cw_core::{
-    ContestKind, ContestRules, ContestScore, Field, QsoCheck, QsoError, RunErrors, RunQso,
+    ContestKind, ContestRules, ContestScore, Field, QsoCheck, QsoError, Ranking, RunErrors, RunQso,
     RunSummary, SessionResult, board_place,
 };
 use dioxus::prelude::*;
@@ -21,6 +21,7 @@ use crate::state::SessionPick;
 use crate::ui::contest::LogRowView;
 use crate::ui::format::{counted, counted_in_words, minutes_seconds, short_date};
 use crate::ui::results::{PlaceBanner, place_line};
+use crate::ui::scores::{rating_label, rating_unit};
 use crate::ui::widgets::{CardHead, Icon, IconName, ScoreRing, control_id};
 
 /// What the results of a run with Show copy on say of it.
@@ -45,6 +46,7 @@ pub fn ContestResults(
     back_to: &'static str,
 ) -> Element {
     let kind = result.contest_kind().map_or("Contest", ContestKind::label);
+    let ranking = Ranking::of(&result);
     // A contest without a score is told by its pace and its copy.
     let scored = result.contest_kind().is_none_or(ContestKind::scored);
     let rules = result.contest_kind().map(ContestKind::rules);
@@ -119,9 +121,16 @@ pub fn ContestResults(
                     }
                 }
             }
-            if let (Some((place, of)), Some(per_group)) = (place, cw_core::per_group(&result)) {
+            if let (Some((place, of)), Some(rating)) = (place, cw_core::rating(&result, ranking)) {
                 {
-                    let (text, medal) = place_line(place, of, kind, "run", per_group);
+                    // Placed as its contest ranks it: by its verified score
+                    // among runs of its length, or its clean rate.
+                    let of_length = match ranking {
+                        Ranking::Verified(length) => format!(" of {}", counted(length / 60, "minute")),
+                        _ => String::new(),
+                    };
+                    let said = format!("{} {}", rating_label(ranking, rating), rating_unit(ranking));
+                    let (text, medal) = place_line(place, of, kind, "run", &of_length, &said);
                     rsx! {
                         PlaceBanner { text, place, medal }
                     }

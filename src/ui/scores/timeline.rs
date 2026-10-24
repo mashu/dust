@@ -1,7 +1,7 @@
-use cw_core::{BoardEntry, FORM_SESSIONS, TimelinePoint};
+use cw_core::{BoardEntry, FORM_SESSIONS, Ranking, TimelinePoint};
 use dioxus::prelude::*;
 
-use super::per_group_label;
+use super::{rating_said, what_it_was};
 use crate::ui::chart::path;
 use crate::ui::format::{clock, counted, ordinal, short_date};
 use crate::ui::widgets::{CardHead, IconName};
@@ -11,12 +11,9 @@ const TIMELINE_H: f64 = 120.0;
 /// Room at the chart's edges, so the outermost dots are not cut in half.
 const TIMELINE_PAD: f64 = 8.0;
 
-/// The best a group on the timeline: the top of its scale.
+/// The best rating on the timeline: the top of its scale.
 fn timeline_top(points: &[TimelinePoint]) -> f64 {
-    points
-        .iter()
-        .map(|point| point.per_group)
-        .fold(0.0, f64::max)
+    points.iter().map(|point| point.rating).fold(0.0, f64::max)
 }
 
 /// How high `value` sits on a scale whose top is `top`.
@@ -29,7 +26,7 @@ fn timeline_y(value: f64, top: f64) -> f64 {
 }
 
 /// Where each session sits on the timeline: across by when it was set, up
-/// by what it earned a group, against the best.
+/// by what it is ranked by, against the best.
 fn timeline_xy(points: &[TimelinePoint]) -> Vec<(f64, f64)> {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
         return Vec::new();
@@ -45,7 +42,7 @@ fn timeline_xy(points: &[TimelinePoint]) -> Vec<(f64, f64)> {
             } else {
                 TIMELINE_W / 2.0
             };
-            (x, timeline_y(point.per_group, top))
+            (x, timeline_y(point.rating, top))
         })
         .collect()
 }
@@ -88,8 +85,8 @@ fn record_path(points: &[TimelinePoint], xy: &[(f64, f64)]) -> String {
     path(corners)
 }
 
-/// What a group earned over time: a dot a session, larger where it set the
-/// record, the record as it stood and the form through them, with the
+/// What the board ranks by over time: a dot a session, larger where it set
+/// the record, the record as it stood and the form through them, with the
 /// session in `focus` marked and said in full beneath.
 #[component]
 pub(super) fn ScoreTimeline(
@@ -104,6 +101,8 @@ pub(super) fn ScoreTimeline(
     /// The dates of the first session and the last, under either end.
     first_date: String,
     last_date: String,
+    /// What the board ranks by.
+    ranking: Ranking,
 ) -> Element {
     let xy = timeline_xy(&timeline);
     let record = record_path(&timeline, &xy);
@@ -114,14 +113,19 @@ pub(super) fn ScoreTimeline(
         .find(|(point, _)| point.timestamp == focus)
         .map(|(_, at)| *at);
     let records = timeline.iter().filter(|point| point.set_record).count();
+    let (title, noun) = match ranking {
+        Ranking::PerGroup => ("Points a group over time", "session"),
+        Ranking::Verified(_) => ("Verified score over time", "run"),
+        Ranking::CleanRate => ("Clean QSOs an hour over time", "run"),
+    };
     rsx! {
         div { class: "card chart-card",
             CardHead {
                 icon: IconName::Chart,
-                title: "Points a group over time",
+                title,
                 note: format!(
                     "{} · the record set {}",
-                    counted(total, "session"),
+                    counted(total, noun),
                     if records == 1 { "once".to_string() } else { format!("{records} times") }
                 ),
             }
@@ -158,7 +162,7 @@ pub(super) fn ScoreTimeline(
             if let Some(entry) = focused.as_ref() {
                 p { class: "timeline-focus",
                     span { class: "timeline-focus-place", "{ordinal(entry.place)}" }
-                    " · {per_group_label(entry.per_group)} a group · {entry.score.round()} points over {entry.groups} groups · {short_date(&entry.date)}"
+                    " · {rating_said(ranking, entry.rating)} · {what_it_was(entry)} · {short_date(&entry.date)}"
                     if let Some(time) = clock(entry.timestamp) {
                         " {time}"
                     }
@@ -188,7 +192,7 @@ mod tests {
         TimelinePoint {
             index: 0,
             timestamp,
-            per_group,
+            rating: per_group,
             record,
             set_record,
             form: per_group,

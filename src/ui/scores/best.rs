@@ -1,7 +1,7 @@
-use cw_core::BoardEntry;
+use cw_core::{BoardEntry, Ranking};
 use dioxus::prelude::*;
 
-use super::{Medal, mode_label, per_group_label, speed};
+use super::{Medal, mode_label, rating_label, rating_unit, speed, what_it_was};
 use crate::ui::format::{ago, clock, long_date};
 
 /// When a session was set, in full: "Friday 16 October 2026 at 14:32".
@@ -12,9 +12,9 @@ fn when_set(entry: &BoardEntry) -> String {
     }
 }
 
-/// The personal best, with its gold: what it earned a group and in all,
-/// when it was set, and how it was sent. Beside it, the form: the median a
-/// group over the last sessions.
+/// The personal best, with its gold: what it is ranked by, what it was,
+/// when it was set, and how it was sent. Beside it, the form: the median
+/// rating over the last sessions.
 #[component]
 pub(super) fn BestCard(
     best: BoardEntry,
@@ -26,6 +26,8 @@ pub(super) fn BestCard(
     today: String,
     /// The board is of every mode, so the best says which it was.
     show_mode: bool,
+    /// What the board ranks by.
+    ranking: Ranking,
 ) -> Element {
     let set_ago = ago(&best.date, &today);
     rsx! {
@@ -34,12 +36,10 @@ pub(super) fn BestCard(
             div { class: "best-copy",
                 div { class: "tiny", "Personal best" }
                 div { class: "best-score",
-                    "{per_group_label(best.per_group)}"
-                    span { class: "best-unit", " points a group" }
+                    "{rating_label(ranking, best.rating)}"
+                    span { class: "best-unit", " {rating_unit(ranking)}" }
                 }
-                p { class: "best-when",
-                    "{best.score.round()} points over {best.groups} groups"
-                }
+                p { class: "best-when", "{what_it_was(&best)}" }
                 p { class: "best-when",
                     "{when_set(&best)}"
                     if let Some(set_ago) = set_ago {
@@ -59,7 +59,7 @@ pub(super) fn BestCard(
             if let Some(form) = form {
                 div { class: "best-form",
                     div { class: "tiny", "Form" }
-                    div { class: "best-form-value", "{per_group_label(form)}" }
+                    div { class: "best-form-value", "{rating_label(ranking, form)}" }
                     div { class: "best-form-note",
                         if form_over == 1 {
                             "your one session"

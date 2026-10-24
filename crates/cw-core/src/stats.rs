@@ -74,12 +74,6 @@ pub struct CharacterDiagnostic {
 }
 
 impl CharacterDiagnostic {
-    /// The belief in how often it is copied right ([`rate_density`]).
-    pub fn accuracy_density(&self, steps: usize) -> Vec<f64> {
-        let wrong = self.total.saturating_sub(self.correct);
-        rate_density(f64::from(self.correct) + 1.0, f64::from(wrong) + 1.0, steps)
-    }
-
     /// The range its accuracy is likely in ([`rate_interval`]).
     pub fn accuracy_interval(&self, mass: f64) -> (f64, f64) {
         let wrong = self.total.saturating_sub(self.correct);
@@ -199,15 +193,8 @@ impl SamplingRow {
         (self.alpha + self.beta - CHAR_SAMPLING_PRIOR_ALPHA - CHAR_SAMPLING_PRIOR_BETA).max(0.0)
     }
 
-    /// The belief in the character's error rate as a density: a Beta of
-    /// what was missed against what was copied ([`rate_density`]). A
-    /// character never heard reads one everywhere; a well known one peaks
-    /// high and narrow.
-    pub fn error_density(&self, steps: usize) -> Vec<f64> {
-        rate_density(self.beta, self.alpha, steps)
-    }
-
-    /// The range the error rate is likely in ([`rate_interval`]).
+    /// The range the error rate is likely in: of a Beta of what was missed
+    /// against what was copied ([`rate_interval`]).
     pub fn error_interval(&self, mass: f64) -> (f64, f64) {
         rate_interval(self.beta, self.alpha, mass)
     }
@@ -1142,7 +1129,7 @@ mod tests {
         };
         assert_eq!(row.evidence(), 0.0);
         // Never heard: even everywhere, its likely range most of the way.
-        let flat = row.error_density(100);
+        let flat = rate_density(row.beta, row.alpha, 100);
         assert!(flat.iter().all(|d| (d - 1.0).abs() < 1e-9));
         let (low, high) = row.error_interval(0.8);
         assert!((low - 0.1).abs() < 0.002 && (high - 0.9).abs() < 0.002);
@@ -1165,7 +1152,7 @@ mod tests {
             is_letter: true,
             drawn_now: true,
         };
-        let density = row.error_density(1_000);
+        let density = rate_density(row.beta, row.alpha, 1_000);
         let area = density.iter().sum::<f64>() / 1_000.0;
         assert!((area - 1.0).abs() < 1e-9);
         let peak = density
@@ -1211,8 +1198,6 @@ mod tests {
         // The likely range takes in what was measured.
         let (low, high) = now.accuracy_interval(0.8);
         assert!(low < now.accuracy_pct / 100.0 && now.accuracy_pct / 100.0 < high);
-        let density = now.accuracy_density(100);
-        assert!((density.iter().sum::<f64>() / 100.0 - 1.0).abs() < 1e-9);
     }
 
     #[test]

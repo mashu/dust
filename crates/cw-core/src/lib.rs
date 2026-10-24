@@ -43,9 +43,9 @@ pub use auto_level::{
 };
 pub use belief::{Estimate, EstimatePoint};
 pub use board::{
-    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, RunEntry, TimelinePoint,
-    assisted_runs, board_kinds, board_modes, board_place, contest_runs, per_group, run_kinds,
-    score_board, score_timeline,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, FORM_SESSIONS, Ranking, RunEntry,
+    TimelinePoint, assisted_runs, board_kinds, board_modes, board_place, contest_runs,
+    latest_run_length, per_group, rating, run_kinds, run_lengths, score_board, score_timeline,
 };
 pub use callsign::{
     CALLSIGN_TIER_MAX, CallSpec, CallsignParts, Countries, GeneratedCall, call_fault,

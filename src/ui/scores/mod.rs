@@ -5,10 +5,11 @@
 //! no name, no callsign. The board is read off the stored history, so a
 //! deleted session leaves it.
 //!
-//! The tab holds what its cards share — the mode shown and the session
-//! marked — and each card draws its own part: `best` the personal best,
-//! `timeline` the score over time, `board` the rows, and under the Contest
-//! pill `runs` every run of the contest chosen.
+//! The tab holds what its cards share — the mode shown, the session marked,
+//! and under the Contest pill the contest and what its board ranks by — and
+//! each card draws its own part: `best` the personal best, `timeline` the
+//! score over time, `board` the rows, and under the Contest pill `runs`
+//! every run of the contest chosen.
 
 mod best;
 mod board;
@@ -20,8 +21,8 @@ mod timeline;
 
 use cw_core::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BoardEntry, BoardOf, CharSetMode, ContestKind,
-    FORM_SESSIONS, SessionResult, TimelinePoint, assisted_runs, board_kinds, board_modes,
-    run_kinds, score_board, score_timeline,
+    FORM_SESSIONS, Ranking, SessionResult, TimelinePoint, assisted_runs, board_kinds, board_modes,
+    latest_run_length, run_kinds, run_lengths, score_board, score_timeline,
 };
 use dioxus::prelude::*;
 
@@ -52,6 +53,47 @@ pub fn per_group_label(per_group: f64) -> String {
     format!("{per_group:.1}")
 }
 
+/// What a board ranks by, as the board shows it: "72.4" points a group, a
+/// verified score of "1312", "86" clean QSOs an hour.
+pub fn rating_label(ranking: Ranking, rating: f64) -> String {
+    match ranking {
+        Ranking::PerGroup => per_group_label(rating),
+        Ranking::Verified(_) | Ranking::CleanRate => format!("{rating:.0}"),
+    }
+}
+
+/// What follows a rating's figure: "points a group".
+pub fn rating_unit(ranking: Ranking) -> &'static str {
+    match ranking {
+        Ranking::PerGroup => "points a group",
+        Ranking::Verified(_) => "verified points",
+        Ranking::CleanRate => "clean QSOs an hour",
+    }
+}
+
+/// A rating said in a line: "72.4 a group", "1312 verified points".
+fn rating_said(ranking: Ranking, rating: f64) -> String {
+    match ranking {
+        Ranking::PerGroup => format!("{} a group", per_group_label(rating)),
+        _ => format!("{} {}", rating_label(ranking, rating), rating_unit(ranking)),
+    }
+}
+
+/// What a row of the board was, in figures: "500 points over 20 groups", or
+/// for a run whose log reads, "42 of 45 QSOs clean · 10-minute run".
+fn what_it_was(entry: &BoardEntry) -> String {
+    match (entry.clean, entry.qsos, entry.limit_s) {
+        (Some(clean), Some(qsos), Some(limit_s)) => {
+            format!("{clean} of {qsos} QSOs clean · {}-minute run", limit_s / 60)
+        }
+        _ => format!(
+            "{} points over {} groups",
+            entry.score.round(),
+            entry.groups
+        ),
+    }
+}
+
 /// The speed a session was sent at: "25 WPM", or "25/15 WPM" under
 /// Farnsworth.
 fn speed(entry: &BoardEntry) -> String {
@@ -71,22 +113,70 @@ fn run_rule() -> String {
     )
 }
 
+/// What a contest's board ranks by: the ranking chosen, where this contest
+/// has it; else its verified score among runs of the length of its latest
+/// run, or its clean QSOs an hour where it has no score.
+fn contest_ranking(
+    sessions: &[SessionResult],
+    kind: ContestKind,
+    chosen: Option<Ranking>,
+) -> Ranking {
+    match chosen {
+        Some(Ranking::CleanRate) => Ranking::CleanRate,
+        Some(Ranking::Verified(length))
+            if kind.scored() && run_lengths(sessions, kind).contains(&length) =>
+        {
+            Ranking::Verified(length)
+        }
+        _ => match latest_run_length(sessions, kind) {
+            Some(length) if kind.scored() => Ranking::Verified(length),
+            _ => Ranking::CleanRate,
+        },
+    }
+}
+
+/// What a contest's board can rank by, as its pills offer it: its verified
+/// score at each length its runs were set to, and its clean QSOs an hour.
+/// A contest without a score has the one, and no pills.
+fn contest_rankings(sessions: &[SessionResult], kind: ContestKind) -> Vec<(Ranking, String)> {
+    if !kind.scored() {
+        return Vec::new();
+    }
+    let lengths = run_lengths(sessions, kind);
+    let several = lengths.len() > 1;
+    lengths
+        .into_iter()
+        .map(|length| {
+            let label = if several {
+                format!("Score · {} min", length / 60)
+            } else {
+                "Verified score".to_string()
+            };
+            (Ranking::Verified(length), label)
+        })
+        .chain([(Ranking::CleanRate, "Clean QSOs an hour".to_string())])
+        .collect()
+}
+
 /// Every session of `mode`, best first, with the personal best, the score
 /// over time and the board itself. Pointing at a row (or tapping it) marks
 /// on the timeline when it was set. Contest runs are ranked within their
-/// contest, chosen by a chip of its own under the Contest pill, which also
-/// lists every run of it on its Runs card, placed or not; a row there opens
-/// the run's results in the tab's place, as History opens them.
+/// contest, chosen by a chip of its own under the Contest pill, by the
+/// contest's own measure: the verified score among runs of one length, or
+/// the QSOs logged clean an hour. The Runs card there lists every run of
+/// it, placed or not; a row there opens the run's results in the tab's
+/// place, as History opens them.
 #[component]
 pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     let mode = use_signal(|| None::<CharSetMode>);
     let kind = use_signal(|| None::<ContestKind>);
+    let rank = use_signal(|| None::<Ranking>);
     let hovered = use_signal(|| None::<u64>);
     let pinned = use_signal(|| None::<u64>);
     // The run whose results are open, from the Runs card.
     let mut opened = use_opened_run();
-    // The Contest pill shows once the history holds a run, placed or not,
-    // and a chip for each contest it holds runs of: the Runs card is there.
+    // The Contest pill is always there; a chip for each contest the
+    // history holds runs of, placed or not: the Runs card is there.
     let kinds = run_kinds(&sessions);
     let modes = board_modes(&sessions);
     // A mode whose sessions have all been deleted shows every mode again,
@@ -102,19 +192,36 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
         (Some(CharSetMode::Contest), Some(contest)) => BoardOf::Contest(contest),
         (Some(mode), _) => BoardOf::Mode(mode),
     };
+    let (ranking, rankings) = match of {
+        BoardOf::Contest(kind) => (
+            contest_ranking(&sessions, kind, rank()),
+            contest_rankings(&sessions, kind),
+        ),
+        _ => (Ranking::PerGroup, Vec::new()),
+    };
     if let Some(results) = opened_results(&sessions, opened, "Scores") {
         return results;
     }
-    let board = score_board(&sessions, of);
-    let assisted = assisted_runs(&sessions, of);
-    let timeline = score_timeline(&sessions, of);
+    let board = score_board(&sessions, of, ranking);
+    let assisted = assisted_runs(&sessions, of, ranking);
+    let timeline = score_timeline(&sessions, of, ranking);
     let today = crate::time::local_date_string();
     let runs_of = match of {
         BoardOf::Contest(kind) => Some(kind),
         _ => None,
     };
     let pills = rsx! {
-        BoardPills { modes, kinds, current, of, mode, kind }
+        BoardPills {
+            modes,
+            kinds,
+            current,
+            of,
+            mode,
+            kind,
+            rankings,
+            ranking,
+            rank,
+        }
     };
 
     let Some(best) = board.first().cloned() else {
@@ -127,7 +234,15 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                     p { class: "muted", style: "margin: 0;", "{body}" }
                 }
                 if !assisted.is_empty() {
-                    BoardList { board: Vec::new(), assisted, focus: 0, hovered, pinned, show_mode: current.is_none() }
+                    BoardList {
+                        board: Vec::new(),
+                        assisted,
+                        focus: 0,
+                        hovered,
+                        pinned,
+                        show_mode: current.is_none(),
+                        ranking,
+                    }
                 }
                 if let Some(kind) = runs_of {
                     RunsCard { sessions: sessions.clone(), kind, on_open: move |pick| opened.set(Some(pick)) }
@@ -153,9 +268,32 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     rsx! {
         div { class: "stack",
             {pills}
-            BestCard { best, form, form_over, today, show_mode }
-            ScoreTimeline { timeline, focus, focused, total, first_date, last_date }
-            BoardList { board, assisted, focus, hovered, pinned, show_mode }
+            BestCard {
+                best,
+                form,
+                form_over,
+                today,
+                show_mode,
+                ranking,
+            }
+            ScoreTimeline {
+                timeline,
+                focus,
+                focused,
+                total,
+                first_date,
+                last_date,
+                ranking,
+            }
+            BoardList {
+                board,
+                assisted,
+                focus,
+                hovered,
+                pinned,
+                show_mode,
+                ranking,
+            }
             if let Some(kind) = runs_of {
                 RunsCard { sessions: sessions.clone(), kind, on_open: move |pick| opened.set(Some(pick)) }
             }
@@ -163,9 +301,9 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
     }
 }
 
-/// The mode pills, when there is more than one mode to choose, or a
-/// contest run whose Runs card the Contest pill opens; and under the
-/// Contest pill, a chip for each contest the history holds runs of.
+/// The mode pills, when there is more than one mode to choose; under the
+/// Contest pill, a chip for each contest the history holds runs of; and
+/// under a contest with a score, what its board ranks by.
 #[component]
 fn BoardPills(
     modes: Vec<CharSetMode>,
@@ -174,8 +312,13 @@ fn BoardPills(
     of: BoardOf,
     mode: Signal<Option<CharSetMode>>,
     kind: Signal<Option<ContestKind>>,
+    /// What the contest shown can rank by, each with its label.
+    rankings: Vec<(Ranking, String)>,
+    /// What it ranks by now.
+    ranking: Ranking,
+    rank: Signal<Option<Ranking>>,
 ) -> Element {
-    let (mut mode, mut kind) = (mode, kind);
+    let (mut mode, mut kind, mut rank) = (mode, kind, rank);
     rsx! {
         if modes.len() > 1 || !kinds.is_empty() {
             div { class: "mode-pills",
@@ -202,14 +345,28 @@ fn BoardPills(
                     }
                 }
             }
+            if rankings.len() > 1 {
+                div { class: "mode-pills kind-pills rank-pills",
+                    span { class: "rank-label", "Ranked by" }
+                    for (each , label) in rankings.iter().cloned() {
+                        Seg {
+                            label: label.clone(),
+                            id: control_id("rank", &label),
+                            pill: true,
+                            active: ranking == each,
+                            onclick: move |_| rank.set(Some(each)),
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 /// What a board with nothing placed on it says, `of` the sessions it
-/// holds: none scored yet; runs, which go on by their own rule; or sessions
-/// too short. A board that lists `assisted` runs says why they are not
-/// placed.
+/// holds: no contest run yet, under the Contest pill; none scored yet;
+/// runs, which go on by their own rule; or sessions too short. A board
+/// that lists `assisted` runs says why they are not placed.
 fn empty_board(sessions: &[SessionResult], of: BoardOf, assisted: bool) -> (&'static str, String) {
     let scored: Vec<&SessionResult> = sessions
         .iter()
@@ -221,7 +378,19 @@ fn empty_board(sessions: &[SessionResult], of: BoardOf, assisted: bool) -> (&'st
     let runs_only = scored
         .iter()
         .all(|session| session.char_set_mode == CharSetMode::Contest);
+    // A contest's own board ranks by the contest's measure; a board that
+    // mixes runs with sessions, by what each earns a group.
+    let ranked = match of {
+        BoardOf::Contest(_) => {
+            "ranked by verified contest score among runs of the same length, or by QSOs logged clean an hour"
+        }
+        _ => "ranked by what they earn a group",
+    };
     match (scored.is_empty(), runs_only, assisted) {
+        (true, _, _) if of == BoardOf::Mode(CharSetMode::Contest) => (
+            "No contest runs yet",
+            "Choose Contest under Settings → Character set and work a run. Every run that works a station is kept: here each contest gets a board of its own, ranked by its verified score among runs of the same length, or by QSOs logged clean an hour.".to_string(),
+        ),
         (true, _, _) => (
             "No scores yet",
             format!(
@@ -231,14 +400,14 @@ fn empty_board(sessions: &[SessionResult], of: BoardOf, assisted: bool) -> (&'st
         (false, true, true) => (
             "No placed run yet",
             format!(
-                "Runs with Show copy on are assisted: listed below, never placed. The board takes {}, ranked by what they earn a group.",
+                "Runs with Show copy on are assisted: listed below, never placed. The board takes {}, {ranked}.",
                 run_rule()
             ),
         ),
         (false, true, false) => (
             "No run long enough yet",
             format!(
-                "The board takes {}, ranked by what they earn a group. Set Minutes per run to {} or more under Settings → Session shape.",
+                "The board takes {}, {ranked}. Set Minutes per run to {} or more under Settings → Session shape.",
                 run_rule(),
                 BOARD_RUN_MIN_S / 60
             ),
@@ -271,12 +440,11 @@ mod tests {
         assert_eq!(mode_label(CharSetMode::Contest), "Contest");
     }
 
-    #[test]
-    fn a_farnsworth_speed_says_both() {
-        let mut entry = BoardEntry {
+    fn entry() -> BoardEntry {
+        BoardEntry {
             place: 1,
             index: 0,
-            per_group: 25.0,
+            rating: 25.0,
             score: 500.0,
             timestamp: 0,
             date: "2026-10-16".to_string(),
@@ -287,10 +455,38 @@ mod tests {
             mode: CharSetMode::Callsign,
             contest: None,
             qsos: None,
-        };
+            clean: None,
+            limit_s: None,
+        }
+    }
+
+    #[test]
+    fn a_farnsworth_speed_says_both() {
+        let mut entry = entry();
         assert_eq!(speed(&entry), "25 WPM");
         entry.effective_wpm = 15.0;
         assert_eq!(speed(&entry), "25/15 WPM");
         assert_eq!(per_group_label(72.44), "72.4");
+    }
+
+    /// Each ranking is said in its own unit; a run is told by its QSOs,
+    /// any other session by its points and groups.
+    #[test]
+    fn a_rating_is_said_in_its_own_unit() {
+        assert_eq!(rating_said(Ranking::PerGroup, 72.44), "72.4 a group");
+        assert_eq!(
+            rating_said(Ranking::Verified(600), 1312.4),
+            "1312 verified points"
+        );
+        assert_eq!(
+            rating_said(Ranking::CleanRate, 86.6),
+            "87 clean QSOs an hour"
+        );
+        let mut run = entry();
+        assert_eq!(what_it_was(&run), "500 points over 20 groups");
+        run.qsos = Some(45);
+        run.clean = Some(42);
+        run.limit_s = Some(600);
+        assert_eq!(what_it_was(&run), "42 of 45 QSOs clean · 10-minute run");
     }
 }
