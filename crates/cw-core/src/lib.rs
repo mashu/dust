@@ -87,8 +87,8 @@ pub use sampling::{
 };
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
-    Answered, ChosenSpeed, Group, GroupResult, GroupSession, KeyTimes, MonoMs, SessionId,
-    SessionPhase, SessionResult, SessionTiming, SessionView, answer_length_matches,
+    Answered, ChosenSpeed, Group, GroupResult, GroupSession, KeyTimes, MonoMs, RECOGNITION_MAX_MS,
+    SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, answer_length_matches,
 };
 pub use settings::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, Aim, AutoLevelSettings,
@@ -99,20 +99,21 @@ pub use settings::{
     GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC, LevelAxis, MY_CALL_MAX, MY_NAME_MAX, MY_POWER_MAX,
     MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_ZONE_MAX, MixedAutoLevelAxis, NUM_GROUPS_MAX,
     NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN,
-    PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RangeValues,
-    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
-    STEEPNESS_MIN_MS, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
-    class_reading, power_reading, section_code, state_code,
+    PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RECOGNITION_BAND_MAX_MS,
+    RECOGNITION_BAND_MIN_MS, RangeSetting, RangeValues, RecognitionEdge, SIDE_TONE_MAX_HZ,
+    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
+    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, class_reading,
+    power_reading, section_code, state_code,
 };
 pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};
 pub use stats::{
     AccuracyPoint, BUILDING_MIN_ACCURACY, BigramCell, BigramHeatmap, CONTEST_TIMES_NOTE, CharTally,
     CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_MIN_TRIES,
-    HARD_PAIR_RATIO, HardPair, ICR_MS, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MasteryStatus,
-    MistakeStats, RECENT_TRIES, RECOGNITION_MIN_TRIES, SamplingRow, SessionHistoryRow,
-    accuracy_chart, character_diagnostics, group_length_forecast, mistake_stats, practised_modes,
-    sampling_rows, session_history, span_history, speed_forecast, speed_history,
+    HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MasteryStatus,
+    MistakeStats, RECENT_TRIES, RECOGNITION_MIN_TRIES, RecognitionBand, SamplingRow,
+    SessionHistoryRow, accuracy_chart, character_diagnostics, group_length_forecast, mistake_stats,
+    practised_modes, sampling_rows, session_history, span_history, speed_forecast, speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

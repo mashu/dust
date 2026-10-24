@@ -14,7 +14,7 @@ use crate::sampling::{
     generate_contest_call, generate_word_group, group_size_bounds, normalize_weights,
 };
 use crate::session::SessionResult;
-use crate::settings::{CharSetMode, TrainingSettings};
+use crate::settings::{AutoLevelSettings, CharSetMode, TrainingSettings};
 use crate::span::{LengthForecast, SpanBelief};
 use crate::speed::{SpeedBelief, SpeedForecast, SpeedPath, forecast_speeds, station_shares};
 
@@ -55,10 +55,40 @@ pub enum MasteryStatus {
 pub const RECENT_TRIES: u32 = 20;
 /// The fewest tries before them for there to be an earlier to compare with.
 const EARLIER_MIN_TRIES: u32 = 10;
-/// Instant character recognition: a character typed this soon after it
-/// finished sounding, in milliseconds, at the median of its latest timed
-/// tries, is recognised at once rather than worked out.
-pub const ICR_MS: f64 = 500.0;
+/// How fast a character is recognised, by the bands its settings set
+/// ([`crate::AutoLevelSettings`]'s recognition edges): from fast, through
+/// instant character recognition (ICR) and slow, to too slow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecognitionBand {
+    /// Under the first edge.
+    Fast,
+    /// Under the second: recognised at once rather than worked out.
+    Instant,
+    /// Under the third.
+    Slow,
+    /// From the third on.
+    TooSlow,
+}
+
+impl RecognitionBand {
+    /// The band `ms` falls in, under `settings`.
+    pub fn of(ms: f64, settings: &AutoLevelSettings) -> Self {
+        if ms < f64::from(settings.recognition_fast_ms) {
+            Self::Fast
+        } else if ms < f64::from(settings.recognition_icr_ms) {
+            Self::Instant
+        } else if ms < f64::from(settings.recognition_slow_ms) {
+            Self::Slow
+        } else {
+            Self::TooSlow
+        }
+    }
+
+    /// Instant character recognition, or faster.
+    pub fn icr(self) -> bool {
+        matches!(self, Self::Fast | Self::Instant)
+    }
+}
 /// The fewest timed tries of a character for its recognition time to be
 /// said: fewer, and one slow key moves the median too far.
 pub const RECOGNITION_MIN_TRIES: u32 = 8;
@@ -79,8 +109,9 @@ pub struct CharacterDiagnostic {
     pub recent_pct: Option<f64>,
     pub earlier_pct: Option<f64>,
     /// How soon you type it after it finishes sounding, in milliseconds:
-    /// the median of its latest timed tries, once there are
-    /// [`RECOGNITION_MIN_TRIES`] of them. See [`crate::SessionTiming`]'s
+    /// the median of its latest timed tries, once any is; said for sure
+    /// once there are [`RECOGNITION_MIN_TRIES`] of them
+    /// ([`Self::recognition_band`]). See [`crate::SessionTiming`]'s
     /// recognition times for which tries are timed.
     pub recognition_ms: Option<f64>,
     /// How many tries of it have been timed.
@@ -88,9 +119,13 @@ pub struct CharacterDiagnostic {
 }
 
 impl CharacterDiagnostic {
-    /// Recognised at once: its recognition time is [`ICR_MS`] or less.
-    pub fn instant(&self) -> bool {
-        self.recognition_ms.is_some_and(|ms| ms <= ICR_MS)
+    /// The band its recognition time falls in under `settings`, once
+    /// enough tries are timed for it to be said: fewer, and one slow key
+    /// moves the median too far.
+    pub fn recognition_band(&self, settings: &AutoLevelSettings) -> Option<RecognitionBand> {
+        self.recognition_ms
+            .filter(|_| self.recognition_tries >= RECOGNITION_MIN_TRIES)
+            .map(|ms| RecognitionBand::of(ms, settings))
     }
 }
 
@@ -323,11 +358,39 @@ pub fn accuracy_chart(sessions: &[SessionResult]) -> Vec<AccuracyPoint> {
         .collect()
 }
 
+/// Each character's timed tries in `sessions`: how many there are, and the
+/// latest [`RECOGNITION_RECENT`] of them, in milliseconds. Read newest
+/// session first, so a long history stops being kept once a character has
+/// as many as it needs. A contest's times run from a station's send to an
+/// edit, waiting and typing included: not answers after a send (§10 of the
+/// design).
+fn recognition_times(sessions: &[SessionResult]) -> BTreeMap<char, (u32, Vec<f64>)> {
+    let mut newest_first: Vec<&SessionResult> = sessions
+        .iter()
+        .filter(|session| session.char_set_mode != CharSetMode::Contest)
+        .collect();
+    // Stable: a session's own groups keep their order.
+    newest_first.sort_by_key(|session| std::cmp::Reverse(session.timestamp));
+    let mut times: BTreeMap<char, (u32, Vec<f64>)> = BTreeMap::new();
+    for session in newest_first {
+        for (group, timing) in session.groups.iter().zip(&session.group_timings) {
+            let sent = group.sent.to_ascii_uppercase();
+            for (ch, took) in sent.chars().zip(&timing.recognition_ms) {
+                if let Some(took) = took {
+                    let (tries, latest) = times.entry(ch).or_default();
+                    *tries += 1;
+                    if latest.len() < RECOGNITION_RECENT {
+                        latest.push(f64::from(*took));
+                    }
+                }
+            }
+        }
+    }
+    times
+}
+
 pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnostic> {
     let mut totals: BTreeMap<char, (u32, u32)> = BTreeMap::new();
-    // Each character's timed tries, with when their session was, for its
-    // recognition time.
-    let mut recognised: BTreeMap<char, Vec<(u64, u32)>> = BTreeMap::new();
     // Each character's tallies by session, newest first, for its trend.
     let mut by_session: BTreeMap<char, Vec<(u64, u32, u32)>> = BTreeMap::new();
     for session in sessions {
@@ -341,23 +404,8 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
                 stats.total,
             ));
         }
-        // A contest's times run from a station's send to an edit, waiting
-        // and typing included: not answers after a send (§10 of the design).
-        if session.char_set_mode == CharSetMode::Contest {
-            continue;
-        }
-        for (group, timing) in session.groups.iter().zip(session.group_timings.iter()) {
-            let sent = group.sent.to_ascii_uppercase();
-            for (ch, took) in sent.chars().zip(&timing.recognition_ms) {
-                if let Some(took) = took {
-                    recognised
-                        .entry(ch)
-                        .or_default()
-                        .push((session.timestamp, *took));
-                }
-            }
-        }
     }
+    let mut recognised = recognition_times(sessions);
     let mut out: Vec<CharacterDiagnostic> = totals
         .into_iter()
         .map(|(letter, (correct, total))| {
@@ -368,18 +416,8 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
             };
             let status = classify_mastery(accuracy01, total);
             let (recent_pct, earlier_pct) = trend(by_session.remove(&letter).unwrap_or_default());
-            let mut timed = recognised.remove(&letter).unwrap_or_default();
-            let recognition_tries = timed.len() as u32;
-            // The latest first; a stable sort keeps a session's own order.
-            timed.sort_by_key(|(timestamp, _)| std::cmp::Reverse(*timestamp));
-            let latest: Vec<f64> = timed
-                .iter()
-                .take(RECOGNITION_RECENT)
-                .map(|(_, took)| f64::from(*took))
-                .collect();
-            let recognition_ms = (recognition_tries >= RECOGNITION_MIN_TRIES)
-                .then(|| crate::board::median(&latest))
-                .flatten();
+            let (recognition_tries, latest) = recognised.remove(&letter).unwrap_or_default();
+            let recognition_ms = crate::board::median(&latest);
             CharacterDiagnostic {
                 letter,
                 accuracy_pct: accuracy01 * 100.0,
@@ -1011,8 +1049,13 @@ mod tests {
         };
         let early = k(std::slice::from_ref(&few));
         assert_eq!(early.recognition_tries, 7);
-        assert_eq!(early.recognition_ms, None, "seven is too few to say");
-        assert!(!early.instant());
+        assert_eq!(early.recognition_ms, Some(300.0), "the median so far");
+        let bands = AutoLevelSettings::default();
+        assert_eq!(
+            early.recognition_band(&bands),
+            None,
+            "seven is too few to say for sure"
+        );
         let slow = timed(
             "2026-09-02",
             2,
@@ -1022,7 +1065,32 @@ mod tests {
         assert_eq!(both.recognition_tries, 11);
         // 300 seven times and 700, 800, 900, 1000: the middle is 300.
         assert_eq!(both.recognition_ms, Some(300.0));
-        assert!(both.instant());
+        assert_eq!(
+            both.recognition_band(&bands),
+            Some(RecognitionBand::Fast),
+            "under 400 ms"
+        );
+        // The bands' edges: 400, 600, 800.
+        let band = |ms| RecognitionBand::of(ms, &bands);
+        assert_eq!(
+            [
+                band(399.0),
+                band(400.0),
+                band(599.0),
+                band(600.0),
+                band(799.0),
+                band(800.0)
+            ],
+            [
+                RecognitionBand::Fast,
+                RecognitionBand::Instant,
+                RecognitionBand::Instant,
+                RecognitionBand::Slow,
+                RecognitionBand::Slow,
+                RecognitionBand::TooSlow,
+            ]
+        );
+        assert!(band(500.0).icr() && band(100.0).icr() && !band(700.0).icr());
         // M was never timed.
         let m = character_diagnostics(&[few])
             .into_iter()

@@ -15,7 +15,7 @@ use cw_core::{
     AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate,
     KeyTimes, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine,
     SessionResult, SplitMix64, Transmission, complete_session, generate_training_group,
-    plan_morse_playback_for, resolve_station,
+    resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -436,10 +436,6 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     else {
         return;
     };
-    // Where each character finishes in the send, as the player plans it:
-    // what recognition is timed from.
-    let char_ends_sec = plan_morse_playback_for(&transmission.text, &settings, &transmission.voice)
-        .char_ends(&transmission.text);
     let lease = lease.clone();
     spawn_forever(async move {
         let event = match lease.send(&transmission, &settings).await {
@@ -448,7 +444,7 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
                 duration_sec: sent.duration_sec,
                 char_wpm: sent.char_wpm,
                 effective_wpm: sent.effective_wpm,
-                char_ends_sec,
+                heard_at: sent.heard_at,
             },
             Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
             Err(failure) => {
@@ -1592,7 +1588,7 @@ mod tests {
                         duration_sec: 1.0,
                         char_wpm: 20.0,
                         effective_wpm: 20.0,
-                        char_ends_sec: Vec::new(),
+                        heard_at: Vec::new(),
                     },
                 )
             });

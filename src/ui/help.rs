@@ -3,9 +3,10 @@
 //! and its help reads as one text.
 
 use cw_core::{
-    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
-    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, ICR_MS, MASTERED_MIN_ACCURACY,
-    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RECENT_TRIES, RECOGNITION_MIN_TRIES, Ranking,
+    AutoLevelSettings, BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS,
+    ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES,
+    MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RECENT_TRIES,
+    RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, Ranking,
 };
 use dioxus::prelude::*;
 
@@ -62,7 +63,13 @@ pub fn next_up(limit: f64) -> Element {
 }
 
 /// Letter accuracy: where each character stands, its trend and its time.
-pub fn letters() -> Element {
+/// Letter accuracy, its recognition times in the bands `bands` set.
+pub fn letters(bands: &AutoLevelSettings) -> Element {
+    let (fast, icr, slow) = (
+        bands.recognition_fast_ms,
+        bands.recognition_icr_ms,
+        bands.recognition_slow_ms,
+    );
     let mastered = pct(MASTERED_MIN_ACCURACY);
     let building = pct(BUILDING_MIN_ACCURACY);
     rsx! {
@@ -85,15 +92,17 @@ pub fn letters() -> Element {
             }
             dt { "Recognised in" }
             dd {
-                "How soon you type a character after it finishes sounding: the median of its latest timed tries, once it has {RECOGNITION_MIN_TRIES}. A try is timed when you type it right while keeping up, the one before it already typed when it ended, in a group sent once. Type each character the moment you hear it: waiting for the group to end counts as time."
+                "How soon you type a character after its sound reaches you: the median of its latest timed tries. A try is timed when you type it right while keeping up, the one before it already typed when it ended, in a group sent once; a gap past {RECOGNITION_MAX_MS} ms is a pause, not timed. Type each character the moment you hear it: waiting for the group to end counts as time."
             }
-            dt { "ICR" }
+            dt { "The bands" }
             dd {
-                "Instant character recognition: recognised in {ICR_MS:.0} ms or less, so you know it as a sound rather than working it out."
+                "Green under {fast} ms, fast; yellow under {icr} ms, instant character recognition (ICR): you know it as a sound rather than working it out; orange under {slow} ms; red from {slow} ms. Set them under Settings → Recognition."
             }
-            dt { "Timing" }
+            dt { "About, so far" }
+            dd { "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band." }
+            dt { "Not timed yet" }
             dd {
-                "With Lock typing while sending on, only groups of one character can be timed: turn it off (Settings → Session shape) to type along."
+                "With Lock typing while sending on, only groups of one character can be timed: turn it off (Settings → Session shape) to type along. Contest runs are not timed."
             }
         }
     }
@@ -466,6 +475,25 @@ pub fn envelope() -> Element {
             dd { "The shape of that ramp: harder edges snap, smoother ones are gentler on the ear." }
             dt { "Dit · Dah · CQ" }
             dd { "Hear the envelope as it is now." }
+        }
+    }
+}
+
+/// Recognition: the bands of Letter accuracy's recognition times.
+pub fn recognition() -> Element {
+    rsx! {
+        p {
+            "How fast counts as what on Letter accuracy, where each character's recognition time is the median gap between its sound reaching you and your key."
+        }
+        dl { class: "help-terms",
+            dt { "Fast under" }
+            dd { "Green: quicker than this." }
+            dt { "ICR under" }
+            dd { "Yellow: instant character recognition, the sound known at once rather than worked out." }
+            dt { "Slow under" }
+            dd { "Orange: slower than ICR, under this. Red from it on." }
+            dt { "Bluetooth" }
+            dd { "Times are taken from when the sound reaches you, as far as the device reports its delay: a Bluetooth headset that does not adds its own." }
         }
     }
 }

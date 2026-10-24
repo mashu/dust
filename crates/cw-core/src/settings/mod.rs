@@ -57,6 +57,12 @@ pub const ADJUST_THRESHOLD_MAX_PCT: f64 = 100.0;
 pub const ERROR_WEIGHT_MAX: f64 = 10.0;
 pub const COVERAGE_STRENGTH_MAX: f64 = 8.0;
 
+/// The bounds of a recognition band's edge, in milliseconds: from as fast
+/// as a key follows a sound to the longest gap still timed
+/// ([`crate::session::RECOGNITION_MAX_MS`]).
+pub const RECOGNITION_BAND_MIN_MS: u32 = 100;
+pub const RECOGNITION_BAND_MAX_MS: u32 = 3_000;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MixedAutoLevelAxis {
@@ -496,6 +502,49 @@ pub struct AutoLevelSettings {
     pub error_weight_strength: f64,
     pub char_sampling_coverage_strength: f64,
     pub char_sampling_thompson: bool,
+    /// The edges of the recognition bands, in milliseconds from a character
+    /// sounding to its key: under the first is fast, under the second
+    /// instant character recognition (ICR), under the third slow, and from
+    /// the third on too slow. Ascending.
+    pub recognition_fast_ms: u32,
+    pub recognition_icr_ms: u32,
+    pub recognition_slow_ms: u32,
+}
+
+/// One edge of the recognition bands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecognitionEdge {
+    /// Under it is fast.
+    Fast,
+    /// Under it is instant character recognition (ICR).
+    Icr,
+    /// Under it is slow; from it on, too slow.
+    Slow,
+}
+
+impl AutoLevelSettings {
+    /// Set one edge of the recognition bands to `ms`, kept in bounds,
+    /// moving the others only as far as it takes to keep them in order.
+    pub fn set_recognition_edge(&mut self, edge: RecognitionEdge, ms: u32) {
+        let ms = ms.clamp(RECOGNITION_BAND_MIN_MS, RECOGNITION_BAND_MAX_MS);
+        match edge {
+            RecognitionEdge::Fast => {
+                self.recognition_fast_ms = ms;
+                self.recognition_icr_ms = self.recognition_icr_ms.max(ms);
+                self.recognition_slow_ms = self.recognition_slow_ms.max(ms);
+            }
+            RecognitionEdge::Icr => {
+                self.recognition_icr_ms = ms;
+                self.recognition_fast_ms = self.recognition_fast_ms.min(ms);
+                self.recognition_slow_ms = self.recognition_slow_ms.max(ms);
+            }
+            RecognitionEdge::Slow => {
+                self.recognition_slow_ms = ms;
+                self.recognition_icr_ms = self.recognition_icr_ms.min(ms);
+                self.recognition_fast_ms = self.recognition_fast_ms.min(ms);
+            }
+        }
+    }
 }
 
 impl Default for AutoLevelSettings {
@@ -509,6 +558,9 @@ impl Default for AutoLevelSettings {
             error_weight_strength: 3.0,
             char_sampling_coverage_strength: 1.0,
             char_sampling_thompson: false,
+            recognition_fast_ms: 400,
+            recognition_icr_ms: 600,
+            recognition_slow_ms: 800,
         }
     }
 }
@@ -547,6 +599,9 @@ pub enum SettingsSection {
     AutoLevel,
     /// How the next group is drawn from the characters you know.
     CharacterSampling,
+    /// Where recognising a character counts as fast, instant (ICR), slow
+    /// and too slow.
+    Recognition,
     /// Your callsign, and the exchange you send in a contest.
     Station,
 }
@@ -554,7 +609,7 @@ pub enum SettingsSection {
 impl SettingsSection {
     /// Every section, for the tests that sweep them.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::SessionShape,
         Self::Speed,
         Self::KeyingEnvelope,
@@ -563,6 +618,7 @@ impl SettingsSection {
         Self::BandConditions,
         Self::AutoLevel,
         Self::CharacterSampling,
+        Self::Recognition,
         Self::Station,
     ];
 }
@@ -1391,6 +1447,59 @@ mod tests {
     /// through every section's reset and checks what is left. Anything still
     /// altered is a preference no card owns. Add a field, forget to place it,
     /// and this names it.
+    /// An edge of the recognition bands moves the others only to keep them
+    /// in order, and stays in bounds; a save holding them out of order is
+    /// put in order.
+    #[test]
+    fn the_recognition_bands_stay_in_order() {
+        let mut a = AutoLevelSettings::default();
+        assert_eq!(
+            (
+                a.recognition_fast_ms,
+                a.recognition_icr_ms,
+                a.recognition_slow_ms
+            ),
+            (400, 600, 800)
+        );
+        a.set_recognition_edge(RecognitionEdge::Fast, 700);
+        assert_eq!(
+            (
+                a.recognition_fast_ms,
+                a.recognition_icr_ms,
+                a.recognition_slow_ms
+            ),
+            (700, 700, 800)
+        );
+        a.set_recognition_edge(RecognitionEdge::Slow, 300);
+        assert_eq!(
+            (
+                a.recognition_fast_ms,
+                a.recognition_icr_ms,
+                a.recognition_slow_ms
+            ),
+            (300, 300, 300)
+        );
+        a.set_recognition_edge(RecognitionEdge::Icr, 9_999);
+        assert_eq!(a.recognition_icr_ms, RECOGNITION_BAND_MAX_MS);
+        assert_eq!(a.recognition_slow_ms, RECOGNITION_BAND_MAX_MS);
+        let mut s = TrainingSettings::default();
+        s.auto_level.recognition_fast_ms = 900;
+        s.auto_level.recognition_icr_ms = 500;
+        s.auto_level.recognition_slow_ms = 10;
+        let s = s.clamp();
+        assert_eq!(
+            (
+                s.auto_level.recognition_fast_ms,
+                s.auto_level.recognition_icr_ms,
+                s.auto_level.recognition_slow_ms
+            ),
+            (900, 900, 900)
+        );
+        // An older save, with no bands, loads them as they ship.
+        let old: TrainingSettings = serde_json::from_str("{}").expect("an empty save");
+        assert_eq!(old.auto_level.recognition_icr_ms, 600);
+    }
+
     #[test]
     fn every_setting_belongs_to_exactly_one_section() {
         // Progress, not preference: where you have got to, and what the
@@ -1534,6 +1643,9 @@ mod tests {
         s.auto_level.error_weight_strength = 0.9;
         s.auto_level.char_sampling_coverage_strength = 0.9;
         s.auto_level.char_sampling_thompson = false;
+        s.auto_level.recognition_fast_ms = 300;
+        s.auto_level.recognition_icr_ms = 500;
+        s.auto_level.recognition_slow_ms = 1_000;
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_habits = crate::contest::CallerHabits::Real;

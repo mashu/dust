@@ -113,7 +113,7 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
                 duration_sec: 0.5,
                 char_wpm: 40.0,
                 effective_wpm: 40.0,
-                char_ends_sec: Vec::new(),
+                heard_at: Vec::new(),
             },
             now,
         );

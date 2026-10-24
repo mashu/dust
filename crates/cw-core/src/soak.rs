@@ -322,7 +322,7 @@ fn random_event(rng: &mut SplitMix64, groups: usize, timers: &[u64]) -> SessionE
             duration_sec: rng.pick_in_range(0.0, 5.0),
             char_wpm: rng.pick_in_range(1.0, 60.0),
             effective_wpm: rng.pick_in_range(1.0, 60.0),
-            char_ends_sec: Vec::new(),
+            heard_at: Vec::new(),
         },
         1 => SessionEvent::PlaybackStopped { index },
         2 => SessionEvent::Input { index, text },

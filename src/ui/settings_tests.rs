@@ -1282,6 +1282,7 @@ fn every_settings_card_says_what_its_options_do() {
                 "character-sampling",
                 "How much more often the characters you miss are sent",
             ),
+            ("recognition", "How fast counts as what on Letter accuracy"),
             ("band-conditions", "Slow swells and dips of the signal."),
         ] {
             let help = format!("help-{card}");

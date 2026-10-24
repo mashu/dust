@@ -223,8 +223,10 @@ impl Group {
     /// the first) by the time this one ended, so the gap is not you
     /// catching up on a backlog; and only in a group sent once, every
     /// character's end known, as a group heard twice is no measure of
-    /// hearing it. A gap of more than [`RECOGNITION_MAX_MS`] is a pause, not
-    /// recognition. Empty where none of it can be said.
+    /// hearing it. A key before the character reached the ear is a guess,
+    /// or the device's delay misjudged, and a gap of more than
+    /// [`RECOGNITION_MAX_MS`] a pause: neither is recognition. Empty where
+    /// none of it can be said.
     fn recognition(&self, locked: bool) -> Vec<Option<u32>> {
         let sent: Vec<char> = self.sent.chars().map(|c| c.to_ascii_uppercase()).collect();
         let (Some(end), true, true) = (
@@ -248,6 +250,7 @@ impl Group {
                 };
                 let took = key.since(heard);
                 (typed.get(at) == Some(ch)
+                    && key >= heard
                     && ready <= heard.plus(KEEPING_UP_SLACK_MS)
                     && took <= RECOGNITION_MAX_MS)
                     .then_some(took as u32)
@@ -1181,6 +1184,11 @@ mod tests {
         assert_eq!(
             recognised(&[('K', 1_550), ('M', 1_900), ('R', 5_100)], false),
             [Some(250), Some(200), None]
+        );
+        // M keyed before it reached the ear: a guess, not recognition.
+        assert_eq!(
+            recognised(&[('K', 1_550), ('M', 1_650), ('R', 2_250)], false),
+            [Some(250), None, Some(250)]
         );
     }
 

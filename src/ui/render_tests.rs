@@ -2500,7 +2500,7 @@ mod interactions {
         })
         .collect();
         rsx! {
-            crate::ui::letters::LettersTab { sessions }
+            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions }
         }
     }
 
@@ -2530,6 +2530,48 @@ mod interactions {
         // The weakest first: K, building, before M, too few tries to tell.
         let html = ui.html();
         assert!(html.find("id=\"letter-k\"") < html.find("id=\"letter-m\""));
+    }
+
+    /// K timed eight times at 320 ms, M at 520, R at 700 and S at 900, U
+    /// three times, and E never: a band each, a provisional time, and none.
+    #[component]
+    fn TimedLettersHarness() -> Element {
+        let mut session = stored_session("2026-09-01", &[("KMRSUE", "KMRSUE"); 8]);
+        for (n, timing) in session.group_timings.iter_mut().enumerate() {
+            let u = (n < 3).then_some(410);
+            timing.recognition_ms = vec![Some(320), Some(520), Some(700), Some(900), u, None];
+        }
+        rsx! {
+            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions: vec![session] }
+        }
+    }
+
+    /// Each character's recognition time is in the colour of its band, the
+    /// ICR ones named in the summary; one timed too few times says so, and
+    /// one never timed says that.
+    #[test]
+    fn recognition_times_are_shown_in_their_bands() {
+        let ui = Ui::new(TimedLettersHarness, ());
+        let line = |id: &str| {
+            let html = ui.html();
+            let at = html.find(&format!("id=\"{id}\"")).expect("the row");
+            let row = &html[at..];
+            row[..row.find("</div><div").unwrap_or(row.len())].to_string()
+        };
+        assert!(
+            line("letter-k").contains(r#"class="rec-chip rec-fast">ICR 320 ms<"#),
+            "{}",
+            line("letter-k")
+        );
+        assert!(line("letter-m").contains(r#"class="rec-chip rec-icr">ICR 520 ms<"#));
+        assert!(line("letter-r").contains(r#"class="rec-chip rec-slow">700 ms<"#));
+        assert!(line("letter-s").contains(r#"class="rec-chip rec-too-slow">900 ms<"#));
+        assert!(line("letter-u").contains("about 410 ms so far, 3 of 8 tries timed"));
+        assert!(line("letter-e").contains("not timed yet"));
+        assert!(ui.has(">Instant (ICR) · 2<"), "{}", ui.html());
+        assert!(ui.has(r#"class="err-chip rec-fast group-text">K<"#));
+        assert!(ui.has(r#"class="err-chip rec-icr group-text">M<"#));
+        assert!(ui.has("ICR, under 600"));
     }
 
     /// Koch at level 3, K and M heard, M often missed.

@@ -5,9 +5,9 @@ use super::{
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
     LETTER_LEVEL_CEILING, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN,
     NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
-    PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
-    STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX,
-    VOLUME_MIN, WPM_MAX, WPM_MIN,
+    PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RECOGNITION_BAND_MAX_MS,
+    RECOGNITION_BAND_MIN_MS, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN,
+    STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 use crate::callsign::{CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN};
 use crate::level::LEVEL_MIN;
@@ -112,6 +112,12 @@ impl TrainingSettings {
         a.char_sampling_coverage_strength = a
             .char_sampling_coverage_strength
             .clamp(0.0, COVERAGE_STRENGTH_MAX);
+        // The recognition bands in bounds, and in order: an edge never below
+        // the one before it.
+        let band = |ms: u32| ms.clamp(RECOGNITION_BAND_MIN_MS, RECOGNITION_BAND_MAX_MS);
+        a.recognition_fast_ms = band(a.recognition_fast_ms);
+        a.recognition_icr_ms = band(a.recognition_icr_ms).max(a.recognition_fast_ms);
+        a.recognition_slow_ms = band(a.recognition_slow_ms).max(a.recognition_icr_ms);
 
         // The contest, its run style, its callers' habits and how often
         // your TU signs need nothing: each can hold only what it names, and

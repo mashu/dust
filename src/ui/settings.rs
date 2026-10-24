@@ -9,7 +9,8 @@ use cw_core::{
     CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ContestSettings,
     ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC,
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    KeyerMode, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting,
+    KeyerMode, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, NUM_GROUPS_MAX, NUM_GROUPS_MIN,
+    RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RangeSetting, RecognitionEdge,
     SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX,
     VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section,
 };
@@ -134,6 +135,7 @@ pub fn SettingsView(
             }
             if !contest {
                 AutoLevelSettingsCard { settings }
+                RecognitionCard { settings }
             }
             SamplingCard { settings }
             BandConditionsCard {
@@ -855,6 +857,76 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
                     step: 1.0,
                     onchange: move |v| settings.write().auto_level.auto_adjust_below_threshold_count = v as u32,
                 }
+            }
+        }
+    }
+}
+
+/// Where recognising a character counts as fast, instant (ICR), slow and
+/// too slow, on Letter accuracy: three edges, each kept in order with the
+/// others as it moves.
+#[component]
+fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
+    let auto = use_auto_level(settings);
+    let a = auto.read();
+    let (fast, icr, slow) = (
+        a.recognition_fast_ms,
+        a.recognition_icr_ms,
+        a.recognition_slow_ms,
+    );
+    let edge = move |which: RecognitionEdge| {
+        move |ms: f64| {
+            settings
+                .write()
+                .auto_level
+                .set_recognition_edge(which, ms.round() as u32);
+        }
+    };
+    let (low, high) = (
+        f64::from(RECOGNITION_BAND_MIN_MS),
+        f64::from(RECOGNITION_BAND_MAX_MS),
+    );
+    rsx! {
+        div { class: "card stack-sm",
+            SectionHead {
+                icon: IconName::Timer,
+                title: "Recognition",
+                note: "How fast counts as ICR on Letter accuracy",
+                settings,
+                section: SettingsSection::Recognition,
+                help: help::recognition(),
+            }
+            div { class: "field-grid",
+                NumberField {
+                    label: "Fast under",
+                    value: f64::from(fast),
+                    min: low,
+                    max: high,
+                    step: 50.0,
+                    unit: "ms",
+                    onchange: edge(RecognitionEdge::Fast),
+                }
+                NumberField {
+                    label: "ICR under",
+                    value: f64::from(icr),
+                    min: low,
+                    max: high,
+                    step: 50.0,
+                    unit: "ms",
+                    onchange: edge(RecognitionEdge::Icr),
+                }
+                NumberField {
+                    label: "Slow under",
+                    value: f64::from(slow),
+                    min: low,
+                    max: high,
+                    step: 50.0,
+                    unit: "ms",
+                    onchange: edge(RecognitionEdge::Slow),
+                }
+            }
+            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                "Green under {fast} ms, yellow (ICR) under {icr} ms, orange under {slow} ms, red from {slow} ms: the time from a character's sound reaching you to your key."
             }
         }
     }

@@ -198,6 +198,9 @@ pub struct PlaybackWait {
     /// How long after it was started the send reaches the ear
     /// ([`PlaybackSignal::heard_after_sec`]).
     pub heard_after_sec: f64,
+    /// Where each character of a group's send finishes, in seconds from its
+    /// start, as its plan has it: empty but for a group's send.
+    pub char_ends_sec: Vec<f64>,
     signal: Rc<dyn PlaybackSignal>,
 }
 
@@ -210,6 +213,7 @@ impl PlaybackWait {
             char_wpm: plan.resolved_char_wpm,
             effective_wpm: plan.resolved_effective_wpm,
             heard_after_sec: signal.heard_after_sec(),
+            char_ends_sec: Vec::new(),
             signal,
         }
     }

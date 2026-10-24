@@ -16,7 +16,7 @@ use std::rc::Rc;
 use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 
 use crate::audio::{MorseBackend, PlaybackOutcome, PlaybackWait};
-use crate::time::{POLL_MS, sleep_ms};
+use crate::time::{POLL_MS, mono_ms, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
 /// without a sound card.
@@ -55,11 +55,15 @@ impl fmt::Display for AudioError {
 }
 
 /// A send that played to its end: how long it was, and the speeds it went at.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Sent {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
+    /// When each character of a group's send reached the ear, finished:
+    /// from when the send started, its lead and output latency, and where
+    /// the character ends in it. Empty but for a group's send.
+    pub heard_at: Vec<MonoMs>,
 }
 
 /// The one audio player the app has. Cheap to clone; every clone is the same
@@ -440,11 +444,17 @@ impl Ticket<'_> {
         // In a statement of its own: the player is borrowed only while the
         // send starts, never while `on_start` runs.
         let wait = player.start(begin)?;
+        let heard_from = MonoMs(mono_ms()).plus_sec(wait.heard_after_sec);
         on_start(wait.heard_after_sec);
         let sent = Sent {
             duration_sec: wait.duration_sec,
             char_wpm: wait.char_wpm,
             effective_wpm: wait.effective_wpm,
+            heard_at: wait
+                .char_ends_sec
+                .iter()
+                .map(|end| heard_from.plus_sec(*end))
+                .collect(),
         };
         match wait.wait().await {
             PlaybackOutcome::Completed => self.check().map(|()| sent),

@@ -96,7 +96,10 @@ pub fn start_send(
     settings: &TrainingSettings,
 ) -> Result<PlaybackWait, String> {
     let plan = plan_transmission(transmission, settings);
-    start_planned(player, &plan, transmission, settings, None)
+    let mut wait = start_planned(player, &plan, transmission, settings, None)?;
+    // Off the plan played, so they are where its sound is.
+    wait.char_ends_sec = plan.wanted.char_ends(&transmission.text);
+    Ok(wait)
 }
 
 /// Send a send planned already on `player`, and hand back something to wait

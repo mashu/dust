@@ -359,7 +359,7 @@ pub fn StatsView(
                     OverviewTab { settings, sessions }
                 },
                 StatsTab::Scores => rsx! { ScoresTab { sessions } },
-                StatsTab::Letters => rsx! { LettersTab { sessions } },
+                StatsTab::Letters => rsx! { LettersTab { settings, sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
                 StatsTab::History => rsx! { HistoryTab { sessions, on_delete, backups } },
