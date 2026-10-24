@@ -2193,6 +2193,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .err-sum-label.finding-out { color: var(--ink-soft); }
 .err-sum-label.solid { color: var(--good); }
 .err-sum-label.building { color: var(--warn); }
+.err-sum-text { font-size: 0.9rem; color: var(--ink); }
 .err-chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
 .err-chip { display: grid; place-items: center; min-width: 1.4rem; height: 1.4rem; padding: 0 0.3rem; border-radius: 6px; font-size: 0.8rem; font-weight: 700; }
 .err-chip.to-work-on { background: var(--copper-soft); color: var(--copper-deep); }

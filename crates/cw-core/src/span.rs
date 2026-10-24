@@ -87,8 +87,10 @@ pub struct LengthForecast {
     pub length: usize,
     /// The chance this is the next group's length.
     pub drawn: f64,
-    /// The chance a group this long is copied whole.
+    /// The chance a group this long is copied whole, and how far the
+    /// posterior spreads it.
     pub whole: f64,
+    pub whole_sd: f64,
 }
 
 /// What the history and this session say about your copy span.
@@ -237,8 +239,11 @@ impl SpanBelief {
                 length,
                 drawn: if target.is_some() { 0.0 } else { even },
                 whole: 0.0,
+                whole_sd: 0.0,
             })
             .collect();
+        // The second moment of each chance whole, for its spread.
+        let mut squares = vec![0.0; rows.len()];
         for (cell, p) in self.belief.posterior().into_iter().enumerate() {
             if p < 1e-12 {
                 continue;
@@ -249,9 +254,14 @@ impl SpanBelief {
                     row.drawn += p * weight;
                 }
             }
-            for row in &mut rows {
-                row.whole += p * p_whole(row.length as f64, span_of(cell), spread_of(cell));
+            for (row, square) in rows.iter_mut().zip(&mut squares) {
+                let whole = p_whole(row.length as f64, span_of(cell), spread_of(cell));
+                row.whole += p * whole;
+                *square += p * whole * whole;
             }
+        }
+        for (row, square) in rows.iter_mut().zip(squares) {
+            row.whole_sd = (square - row.whole * row.whole).max(0.0).sqrt();
         }
         rows
     }

@@ -1,9 +1,8 @@
 use std::collections::BTreeSet;
 
 use cw_core::{
-    CharSetMode, ContestKind, SessionHistoryRow, SessionResult, SpeedForecast, SpeedPath,
-    StoredLog, TrainingSettings, adapts_speed, group_length_forecast, mistake_stats,
-    session_history, speed_forecast,
+    ContestKind, SessionHistoryRow, SessionResult, StoredLog, TrainingSettings, mistake_stats,
+    session_history,
 };
 use dioxus::prelude::*;
 
@@ -13,10 +12,10 @@ use crate::ui::backup::{BackupCard, Backups};
 use crate::ui::bigram::{BigramCard, hardest_pairs_card};
 use crate::ui::confusion::confusions_card;
 use crate::ui::contest_results::{opened_results, use_opened_run};
+use crate::ui::forecast::{group_length_card, speed_card};
 use crate::ui::format::counted;
 use crate::ui::sampling::NextUpCard;
 use crate::ui::settings_charset::mode_label;
-use crate::ui::stats::{YOUR_SPEED_KEYS, contest_speeds};
 use crate::ui::widgets::{CardHead, Icon, IconName, control_id, html_bool};
 
 #[component]
@@ -43,125 +42,6 @@ pub fn SamplingTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> 
             {speed_card(&settings, &sessions)}
         }
     }
-}
-
-/// The group lengths the next session can send: how likely each is, and how
-/// often a group that long is copied whole. Nothing for callsigns, which are
-/// as long as they are. A plain function, like the character card.
-fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
-    let rows = group_length_forecast(settings, sessions);
-    if rows.is_empty() {
-        return rsx! {};
-    }
-    let max_drawn = rows
-        .iter()
-        .map(|row| row.drawn)
-        .fold(0.0_f64, f64::max)
-        .max(0.0001);
-    let curriculum = &settings.curriculum;
-    let note = if !curriculum.adaptive_group_size {
-        "Adaptive group size is off, so every length is as likely as the next. Whole is how often you copy a group that long without a mistake."
-    } else if rows.len() == 1 {
-        "The group size is fixed, so there is no length to choose. Whole is how often you copy a group that long without a mistake."
-    } else {
-        "Chance of each length in the next group, and how often you copy a group that long without a mistake."
-    };
-    rsx! {
-        div { class: "card stack",
-            div { class: "tiny", "Group length" }
-            p { class: "muted", "{note}" }
-            for row in rows.iter() {
-                {
-                    let width = (row.drawn / max_drawn * 100.0).clamp(4.0, 100.0);
-                    rsx! {
-                        div { class: "letter-row",
-                            span { class: "letter-key mono", "{row.length}" }
-                            div { class: "bar-track",
-                                span { class: "bar-fill sample", style: "width: {width}%;" }
-                            }
-                            span { class: "mono muted", "{(row.drawn * 100.0).round()}%" }
-                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "whole {(row.whole * 100.0).round()}%" }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// The speeds the next session can send at: how likely the next group is to
-/// be sent at about each, and the share of characters copied right at it. A
-/// plain function, like the length card.
-fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> Element {
-    let rows = speed_forecast(settings, sessions);
-    if rows.is_empty() {
-        return rsx! {};
-    }
-    let max_drawn = rows
-        .iter()
-        .map(|row| row.drawn)
-        .fold(0.0_f64, f64::max)
-        .max(0.0001);
-    let playback = &settings.playback;
-    let contest = settings.curriculum.char_set_mode == CharSetMode::Contest;
-    let mut note = if contest && adapts_speed(settings) {
-        adapting_callers_note(&rows)
-    } else if contest {
-        format!(
-            "{} Right is the share of characters you copy at that speed.",
-            contest_speeds(settings)
-        )
-    } else if !playback.adaptive_speed {
-        "Adaptive speed is off, so each group's speed is drawn evenly from your range. Right is the share of characters you copy at that speed.".to_string()
-    } else if !SpeedPath::of(settings).has_room() {
-        "One speed is set, so there is no speed to choose. Right is the share of characters you copy at it.".to_string()
-    } else {
-        "Chance of each speed in the next group, and the share of characters you copy right at it."
-            .to_string()
-    };
-    if !playback.link_char_to_effective {
-        note.push_str(
-            " With Farnsworth spacing, a speed counts the spacing too, as the score does.",
-        );
-    }
-    rsx! {
-        div { class: "card stack",
-            div { class: "tiny", "Speed, WPM" }
-            p { class: "muted", "{note}" }
-            for row in rows.iter() {
-                {
-                    let width = (row.drawn / max_drawn * 100.0).clamp(4.0, 100.0);
-                    rsx! {
-                        div { class: "letter-row",
-                            span { class: "letter-key mono", "{row.wpm:.0}" }
-                            div { class: "bar-track",
-                                span { class: "bar-fill sample", style: "width: {width}%;" }
-                            }
-                            span { class: "mono muted", "{(row.drawn * 100.0).round()}%" }
-                            span { class: "tiny", style: "text-transform: none; letter-spacing: 0;", "right {(row.right * 100.0).round()}%" }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// What the speed card says of a contest's callers while their speed
-/// adapts: its chances are the first callers' of the next run, which the
-/// run moves on from, and when most of them sit at an end of the range, the
-/// copy speed is past it.
-fn adapting_callers_note(rows: &[SpeedForecast]) -> String {
-    let mut note = format!(
-        "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. {YOUR_SPEED_KEYS}"
-    );
-    let most = |row: Option<&SpeedForecast>| row.is_some_and(|row| row.drawn > 0.5);
-    if most(rows.last()) {
-        note.push_str(" Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster.");
-    } else if most(rows.first()) {
-        note.push_str(" Your copy speed is below this range, so most come at its bottom: a wider range on the Speed card lets them go slower.");
-    }
-    note
 }
 
 /// How many sessions the history lists before it offers more, as the Runs

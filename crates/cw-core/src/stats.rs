@@ -754,10 +754,14 @@ pub fn speed_forecast(
     speeds
         .into_iter()
         .zip(drawn)
-        .map(|(wpm, drawn)| SpeedForecast {
-            wpm,
-            drawn,
-            right: belief.right_at(wpm),
+        .map(|(wpm, drawn)| {
+            let right = belief.right_at(wpm);
+            SpeedForecast {
+                wpm,
+                drawn,
+                right: right.mean,
+                right_sd: right.sd,
+            }
         })
         .collect()
 }
