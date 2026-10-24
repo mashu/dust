@@ -12,9 +12,10 @@
 //! whichever is live.
 
 use cw_core::{
-    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate, MonoMs,
-    Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult, SplitMix64,
-    Transmission, complete_session, generate_training_group, resolve_station,
+    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate,
+    KeyTimes, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine,
+    SessionResult, SplitMix64, Transmission, complete_session, generate_training_group,
+    plan_morse_playback_for, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -116,6 +117,10 @@ pub struct AnswerOutbox(CopyValue<Outbox>);
 struct Outbox {
     /// Typed into the box for this group, and not handed over yet.
     waiting: Option<(usize, String)>,
+    /// When each character typed into the box went in, key by key: the
+    /// session hears the text only once typing pauses, and recognition is
+    /// timed to the keys.
+    keys: KeyTimes,
     entry: Option<Entry>,
 }
 
@@ -135,7 +140,16 @@ impl AnswerOutbox {
 
     /// Group `index`'s box now holds `text`, not handed over yet.
     pub fn hold(mut self, index: usize, text: String) {
-        self.0.write().waiting = Some((index, text));
+        let mut outbox = self.0.write();
+        outbox.keys.typed(index, &text, MonoMs(mono_ms()));
+        outbox.waiting = Some((index, text));
+    }
+
+    /// When each character typed into the box went in, and the group it is.
+    fn keys(self) -> (usize, Vec<MonoMs>) {
+        let outbox = self.0.peek();
+        let (index, at) = outbox.keys.of();
+        (index, at.to_vec())
     }
 
     /// Whatever is waiting, now handed over.
@@ -185,7 +199,9 @@ impl AnswerOutbox {
 
     /// A new session: nothing typed for the last one carries over.
     fn clear(mut self) {
-        self.0.write().waiting = None;
+        let mut outbox = self.0.write();
+        outbox.waiting = None;
+        outbox.keys = KeyTimes::default();
     }
 }
 
@@ -359,6 +375,10 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
             return;
         };
         let now = MonoMs(mono_ms());
+        // When each key went in, for the group being typed into, before the
+        // typing itself: recognition is timed to the keys.
+        let (typing, keyed_at) = ctx.answer.keys();
+        live.machine.note_keys(typing, &keyed_at);
         // Typing still waiting out the box's pause came before this event,
         // so the machine hears it first.
         let mut effects = ctx.answer.take().map_or_else(Vec::new, |(index, text)| {
@@ -416,6 +436,10 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     else {
         return;
     };
+    // Where each character finishes in the send, as the player plans it:
+    // what recognition is timed from.
+    let char_ends_sec = plan_morse_playback_for(&transmission.text, &settings, &transmission.voice)
+        .char_ends(&transmission.text);
     let lease = lease.clone();
     spawn_forever(async move {
         let event = match lease.send(&transmission, &settings).await {
@@ -424,6 +448,7 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
                 duration_sec: sent.duration_sec,
                 char_wpm: sent.char_wpm,
                 effective_wpm: sent.effective_wpm,
+                char_ends_sec,
             },
             Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
             Err(failure) => {
@@ -663,6 +688,37 @@ mod tests {
             h.send(SessionEvent::Confirm);
             let confirmed = h.ctx.runtime.peek().as_ref().map(|s| s.view().confirmed);
             assert_eq!(confirmed, Some(vec![true, false]));
+        });
+    }
+
+    /// A character typed as soon as it is heard is timed from where it
+    /// finished sounding, as the audio plan has it, to its key in the box:
+    /// one-character groups, which a box shut while sending can time.
+    #[test]
+    fn a_key_is_timed_from_the_end_of_its_character() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.min_group_size = 1;
+            settings.curriculum.max_group_size = 1;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            h.advance(300).await;
+            let sent = h.sent(0);
+            h.ctx.answer.hold(0, sent.clone());
+            h.send(SessionEvent::Confirm);
+            let session = h.ctx.runtime.peek().clone().expect("the session");
+            let timing = &session.result(0, "2026-10-24".into()).group_timings[0];
+            let took = timing
+                .recognition_ms
+                .first()
+                .copied()
+                .flatten()
+                .expect("timed");
+            assert!(
+                (300..=300 + crate::time::POLL_MS).contains(&took),
+                "{took} ms for {sent}"
+            );
         });
     }
 
@@ -1536,6 +1592,7 @@ mod tests {
                         duration_sec: 1.0,
                         char_wpm: 20.0,
                         effective_wpm: 20.0,
+                        char_ends_sec: Vec::new(),
                     },
                 )
             });

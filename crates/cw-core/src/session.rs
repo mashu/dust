@@ -26,6 +26,14 @@ use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
 /// types one.
 pub const MIN_RESPONSE_MS_PER_CHAR: f64 = 100.0;
 
+/// The longest a character can take, from sounding to being typed, and the
+/// gap still be recognition rather than a pause.
+pub const RECOGNITION_MAX_MS: u64 = 3_000;
+
+/// How far behind a character may be, with the one before it typed, and you
+/// still be keeping up when it ends.
+const KEEPING_UP_SLACK_MS: u64 = 100;
+
 /// The longest an answer is kept, against the group it answers: twice its
 /// length, or this many characters for a short one. Room for every honest
 /// mistake, and none for a paste of a novel to be stored, scored and aligned
@@ -131,6 +139,12 @@ pub struct Group {
     answer_at: Option<MonoMs>,
     /// The character and effective speed it was sent at, once measured.
     played_wpm: Option<(f64, f64)>,
+    /// When each character of its last send finished sounding; empty when
+    /// the runtime did not say.
+    heard_at: Vec<MonoMs>,
+    /// When each character of the answer went in, as the box saw the keys:
+    /// the moment it first held that character in that place.
+    keyed_at: Vec<MonoMs>,
     /// The character and effective speed the source chose for it, when it
     /// chooses one: adaptive speed does.
     planned_wpm: Option<(f64, f64)>,
@@ -150,6 +164,8 @@ impl Group {
             end_at: None,
             answer_at: None,
             played_wpm: None,
+            heard_at: Vec::new(),
+            keyed_at: Vec::new(),
             planned_wpm: None,
             repeats: 1,
             plays_done: 0,
@@ -179,8 +195,10 @@ impl Group {
     }
 
     /// How long the answer took, from the end of the send — never quicker
-    /// than a person types.
-    fn timing(&self) -> SessionTiming {
+    /// than a person types — and how soon each character was typed once it
+    /// had sounded, where that says how fast it was recognised. `locked` is
+    /// whether the box stayed shut while the group was sent.
+    fn timing(&self, locked: bool) -> SessionTiming {
         let chars = self.sent.chars().count().max(1) as f64;
         let measured = match (self.end_at, self.answer_at) {
             (Some(end), Some(answer)) => answer.since(end) as f64,
@@ -194,6 +212,51 @@ impl Group {
             // A group answered before its last send was heard was heard
             // fewer times than planned, and is scored for what it was.
             sends: self.plays_done.clamp(1, self.repeats.max(1)),
+            recognition_ms: self.recognition(locked),
+        }
+    }
+
+    /// For each character sent, how long after it finished sounding it was
+    /// typed, in milliseconds: how fast it was recognised. Only where that
+    /// is what the gap says — the character typed right, in its place, and
+    /// you keeping up, with the one before it typed (or the box open, for
+    /// the first) by the time this one ended, so the gap is not you
+    /// catching up on a backlog; and only in a group sent once, every
+    /// character's end known, as a group heard twice is no measure of
+    /// hearing it. A gap of more than [`RECOGNITION_MAX_MS`] is a pause, not
+    /// recognition. Empty where none of it can be said.
+    fn recognition(&self, locked: bool) -> Vec<Option<u32>> {
+        let sent: Vec<char> = self.sent.chars().map(|c| c.to_ascii_uppercase()).collect();
+        let (Some(end), true, true) = (
+            self.end_at,
+            self.repeats <= 1,
+            self.heard_at.len() == sent.len(),
+        ) else {
+            return Vec::new();
+        };
+        let typed: Vec<char> = self.input.chars().collect();
+        let open = if locked { end } else { self.start_at };
+        let measured: Vec<Option<u32>> = sent
+            .iter()
+            .enumerate()
+            .map(|(at, ch)| {
+                let key = *self.keyed_at.get(at)?;
+                let heard = self.heard_at[at];
+                let ready = match at {
+                    0 => open,
+                    _ => *self.keyed_at.get(at - 1)?,
+                };
+                let took = key.since(heard);
+                (typed.get(at) == Some(ch)
+                    && ready <= heard.plus(KEEPING_UP_SLACK_MS)
+                    && took <= RECOGNITION_MAX_MS)
+                    .then_some(took as u32)
+            })
+            .collect();
+        if measured.iter().all(Option::is_none) {
+            Vec::new()
+        } else {
+            measured
         }
     }
 }
@@ -409,17 +472,34 @@ impl GroupSession {
         }
     }
 
+    /// The last send of `index` ended at `now`, at these speeds, each of its
+    /// characters having finished sounding at `heard_at`.
     pub(crate) fn end_playback(
         &mut self,
         index: usize,
         now: MonoMs,
         char_wpm: f64,
         effective_wpm: f64,
+        heard_at: Vec<MonoMs>,
     ) {
         if let Some(group) = self.groups.get_mut(index) {
             group.end_at = Some(now);
             group.played_wpm =
                 (char_wpm > 0.0 && effective_wpm > 0.0).then_some((char_wpm, effective_wpm));
+            group.heard_at = heard_at;
+        }
+    }
+
+    /// When each character typed into `index` went in, as the box saw the
+    /// keys; for the current group, until it is answered.
+    pub(crate) fn note_keys(&mut self, index: usize, keyed_at: &[MonoMs]) {
+        if index != self.current_group {
+            return;
+        }
+        if let Some(group) = self.groups.get_mut(index)
+            && !group.confirmed()
+        {
+            group.keyed_at = keyed_at.to_vec();
         }
     }
 
@@ -481,7 +561,8 @@ impl GroupSession {
         }
         let accuracy = tally.accuracy();
         let sent: Vec<&str> = scored.iter().map(|g| g.sent.as_str()).collect();
-        let timings: Vec<SessionTiming> = scored.iter().map(|g| g.timing()).collect();
+        let locked = self.settings.playback.lock_input_during_group_playback;
+        let timings: Vec<SessionTiming> = scored.iter().map(|g| g.timing(locked)).collect();
         let per_char: Vec<f64> = scored
             .iter()
             .zip(&timings)
@@ -554,6 +635,49 @@ fn recorded_mode(mode: CharSetMode) -> CharSetMode {
     }
 }
 
+/// When each character of a group's answer went in, kept as it is typed:
+/// a character still where it was keeps its moment, and from the first
+/// that is not, each takes the moment it went in. Characters are counted as
+/// an answer keeps them, upper case and whitespace left out, so the moments
+/// line up with the answer the session holds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KeyTimes {
+    index: usize,
+    typed: Vec<char>,
+    at: Vec<MonoMs>,
+}
+
+impl KeyTimes {
+    /// Group `index`'s box now holds `text`, as of `now`.
+    pub fn typed(&mut self, index: usize, text: &str, now: MonoMs) {
+        let chars: Vec<char> = text
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        if index != self.index {
+            *self = Self {
+                index,
+                ..Self::default()
+            };
+        }
+        let kept = self
+            .typed
+            .iter()
+            .zip(&chars)
+            .take_while(|(was, is)| was == is)
+            .count();
+        self.at.truncate(kept);
+        self.at.resize(chars.len(), now);
+        self.typed = chars;
+    }
+
+    /// The group the moments are of, and the moments.
+    pub fn of(&self) -> (usize, &[MonoMs]) {
+        (self.index, &self.at)
+    }
+}
+
 /// An answer as it is kept: upper case, with no whitespace — a group never
 /// has any, so a stray space is neither an error nor a reason the length
 /// does not match — and no longer than [`LONGEST_ANSWER`] allows.
@@ -598,6 +722,12 @@ pub struct SessionTiming {
     /// sent each group once.
     #[serde(default = "one_send")]
     pub sends: u32,
+    /// For each character sent, how long after it finished sounding it was
+    /// typed, in milliseconds, where that says how fast it was recognised
+    /// (see [`Group`]'s recognition). Empty for older saves, and where none
+    /// of it could be said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recognition_ms: Vec<Option<u32>>,
 }
 
 fn one_send() -> u32 {
@@ -801,7 +931,7 @@ mod tests {
             session.set_group(index, (*sent).into(), 1);
             session.begin_group(index, now);
             now = now.plus(500);
-            session.end_playback(index, now, 18.0, 18.0);
+            session.end_playback(index, now, 18.0, 18.0, Vec::new());
             session.set_input(index, typed);
             now = now.plus(*ms);
             session.confirm(index, now);
@@ -879,7 +1009,7 @@ mod tests {
                 session.note_play_finished(index);
             }
             now = now.plus(2_000);
-            session.end_playback(index, now, wpm, wpm);
+            session.end_playback(index, now, wpm, wpm, Vec::new());
             session.set_input(index, typed);
             now = now.plus(600);
             session.confirm(index, now);
@@ -981,7 +1111,7 @@ mod tests {
         let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         session.set_group(0, "KMURE".into(), 1);
         session.begin_group(0, MonoMs(1_000));
-        session.end_playback(0, MonoMs(2_000), 20.0, 18.0);
+        session.end_playback(0, MonoMs(2_000), 20.0, 18.0, Vec::new());
         session.mark_answer_complete(0, true, MonoMs(3_000));
         session.mark_answer_complete(0, true, MonoMs(3_500));
         session.confirm(0, MonoMs(4_000));
@@ -993,13 +1123,107 @@ mod tests {
         // A stamp withdrawn by a backspace is gone; the confirm is the answer.
         let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         session.set_group(0, "KMURE".into(), 1);
-        session.end_playback(0, MonoMs(2_000), 20.0, 18.0);
+        session.end_playback(0, MonoMs(2_000), 20.0, 18.0, Vec::new());
         session.mark_answer_complete(0, true, MonoMs(2_500));
         session.mark_answer_complete(0, false, MonoMs(2_600));
         session.confirm(0, MonoMs(4_000));
         let timing = &result(&session).group_timings[0];
         assert_eq!(timing.time_to_complete_ms, 2_000.0);
         assert_eq!(timing.char_wpm, Some(20.0));
+    }
+
+    /// Group "KMR", heard from 1000 ms, its characters ending at 1300,
+    /// 1700 and 2000, typed as `keys` say, with the box shut while it was
+    /// sent if `locked`.
+    fn recognised(keys: &[(char, u64)], locked: bool) -> Vec<Option<u32>> {
+        let mut settings = TrainingSettings::default();
+        settings.playback.lock_input_during_group_playback = locked;
+        let mut session = GroupSession::new(SessionId::new(1), 1, settings);
+        session.set_group(0, "KMR".into(), 1);
+        session.begin_group(0, MonoMs(1_000));
+        let heard = vec![MonoMs(1_300), MonoMs(1_700), MonoMs(2_000)];
+        session.end_playback(0, MonoMs(2_000), 20.0, 20.0, heard);
+        let typed: String = keys.iter().map(|(ch, _)| ch).collect();
+        let at: Vec<MonoMs> = keys.iter().map(|(_, at)| MonoMs(*at)).collect();
+        session.set_input(0, &typed);
+        session.note_keys(0, &at);
+        session.confirm(0, MonoMs(3_000));
+        result(&session).group_timings[0].recognition_ms.clone()
+    }
+
+    /// Each character is timed from when it finished sounding to its key,
+    /// typed along as it was sent.
+    #[test]
+    fn typed_along_each_character_is_timed_from_its_end() {
+        assert_eq!(
+            recognised(&[('K', 1_550), ('M', 1_900), ('R', 2_250)], false),
+            [Some(250), Some(200), Some(250)]
+        );
+    }
+
+    /// A character typed wrong is not timed, nor one typed while you were
+    /// still catching up: its gap is the backlog, not hearing it.
+    #[test]
+    fn only_a_character_typed_right_while_keeping_up_is_timed() {
+        // M typed wrong: X. R's key came after M's, which was in by R's end.
+        assert_eq!(
+            recognised(&[('K', 1_550), ('X', 1_900), ('R', 2_250)], false),
+            [Some(250), None, Some(250)]
+        );
+        // Waiting for the group to end before typing: K's wait counts, as
+        // recognising at once is typing at once; M and R came on its heels
+        // from memory, and say nothing of hearing them.
+        assert_eq!(
+            recognised(&[('K', 2_400), ('M', 2_550), ('R', 2_700)], false),
+            [Some(1_100), None, None]
+        );
+        // A gap past three seconds is a pause.
+        assert_eq!(
+            recognised(&[('K', 1_550), ('M', 1_900), ('R', 5_100)], false),
+            [Some(250), Some(200), None]
+        );
+    }
+
+    /// With the box shut while the group was sent, only a character that
+    /// ends the group can be typed as soon as it is heard.
+    #[test]
+    fn a_shut_box_times_only_what_could_be_typed_at_once() {
+        assert_eq!(
+            recognised(&[('K', 2_300), ('M', 2_450), ('R', 2_600)], true),
+            Vec::<Option<u32>>::new()
+        );
+    }
+
+    /// A group sent twice was heard before it was typed: no measure of
+    /// hearing it.
+    #[test]
+    fn a_group_sent_twice_is_not_timed() {
+        let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        session.set_group(0, "K".into(), 2);
+        session.begin_group(0, MonoMs(1_000));
+        session.end_playback(0, MonoMs(2_000), 20.0, 20.0, vec![MonoMs(2_000)]);
+        session.set_input(0, "K");
+        session.note_keys(0, &[MonoMs(2_200)]);
+        session.confirm(0, MonoMs(3_000));
+        assert!(result(&session).group_timings[0].recognition_ms.is_empty());
+    }
+
+    /// The box's keys: a character still where it was keeps its moment, a
+    /// changed or new one takes the moment it went in, whitespace left out
+    /// and case as an answer keeps it; a new group starts afresh.
+    #[test]
+    fn each_key_keeps_the_moment_it_went_in() {
+        let mut keys = KeyTimes::default();
+        keys.typed(0, "k", MonoMs(100));
+        keys.typed(0, "k m", MonoMs(200));
+        assert_eq!(keys.of(), (0, &[MonoMs(100), MonoMs(200)][..]));
+        keys.typed(0, "KX", MonoMs(300));
+        assert_eq!(keys.of().1, [MonoMs(100), MonoMs(300)]);
+        keys.typed(0, "K", MonoMs(400));
+        keys.typed(0, "KMR", MonoMs(500));
+        assert_eq!(keys.of().1, [MonoMs(100), MonoMs(500), MonoMs(500)]);
+        keys.typed(1, "T", MonoMs(600));
+        assert_eq!(keys.of(), (1, &[MonoMs(600)][..]));
     }
 
     /// Typing is kept the way a group is written: no spaces, upper case, and
@@ -1110,7 +1334,7 @@ mod tests {
         settings.playback.effective_wpm_min = 18.0;
         let mut session = GroupSession::new(SessionId::new(1), 1, settings.clone());
         session.set_group(0, "KM".into(), 1);
-        session.end_playback(0, MonoMs(500), 25.0, 12.0);
+        session.end_playback(0, MonoMs(500), 25.0, 12.0, Vec::new());
         session.confirm(0, MonoMs(1_000));
         let played = result(&session);
         assert!((played.char_wpm - 25.0).abs() < 1e-9);
@@ -1249,6 +1473,7 @@ mod tests {
             char_wpm: Some(26.0),
             effective_wpm: Some(26.0),
             sends: 1,
+            recognition_ms: Vec::new(),
         };
         SessionResult {
             groups: vec![

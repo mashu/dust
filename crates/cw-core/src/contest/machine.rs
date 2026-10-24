@@ -4231,6 +4231,7 @@ fn group(
             char_wpm: Some(tenth(voice.char_wpm)),
             effective_wpm: Some(tenth(voice.effective_wpm)),
             sends,
+            recognition_ms: Vec::new(),
         },
     )
 }

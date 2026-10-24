@@ -4,8 +4,8 @@
 
 use cw_core::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
-    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, MASTERED_MIN_ACCURACY,
-    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RECENT_TRIES, Ranking, SLOW_AVG_MS,
+    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, ICR_MS, MASTERED_MIN_ACCURACY,
+    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RECENT_TRIES, RECOGNITION_MIN_TRIES, Ranking,
 };
 use dioxus::prelude::*;
 
@@ -83,9 +83,17 @@ pub fn letters() -> Element {
             dd {
                 "Your last {RECENT_TRIES} tries of it against the ones before, in points: up in green, down in copper, shown from 5 points either way."
             }
-            dt { "ms to answer" }
+            dt { "Recognised in" }
             dd {
-                "How long you took to answer, a character: each group's time from the end of its send to your answer, shared evenly over its characters, so it cannot tell which character of a group held you up. Copper from {SLOW_AVG_MS:.0} ms on a character you copy well."
+                "How soon you type a character after it finishes sounding: the median of its latest timed tries, once it has {RECOGNITION_MIN_TRIES}. A try is timed when you type it right while keeping up, the one before it already typed when it ended, in a group sent once. Type each character the moment you hear it: waiting for the group to end counts as time."
+            }
+            dt { "ICR" }
+            dd {
+                "Instant character recognition: recognised in {ICR_MS:.0} ms or less, so you know it as a sound rather than working it out."
+            }
+            dt { "Timing" }
+            dd {
+                "With Lock typing while sending on, only groups of one character can be timed: turn it off (Settings → Session shape) to type along."
             }
         }
     }

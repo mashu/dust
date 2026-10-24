@@ -2250,7 +2250,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .acc-trend { font-weight: 700; }
 .acc-trend.up { color: var(--good); }
 .acc-trend.down { color: var(--copper-deep); }
-.acc-time.slow { color: var(--copper-deep); font-weight: 700; }
+/* ICR: a character recognised at once, its mark and its chip. */
+.acc-icr { padding: 0 0.3rem; border-radius: 5px; background: var(--good-soft); color: var(--good); font-weight: 800; letter-spacing: 0.04em; }
+.err-chip.icr { background: var(--good-soft); color: var(--good); }
 /* Common confusions and hardest pairs: the characters as tiles, the one
    taken for or the one after in copper, each in small Morse with the
    elements that differ picked out, and a bar of how often, of every one

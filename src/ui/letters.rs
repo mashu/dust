@@ -1,17 +1,18 @@
 //! The Letter accuracy card: how often you copy each character right, how
-//! sure that figure is, which way it is going, and how fast you answer it,
-//! the ones that need the most work first.
+//! sure that figure is, which way it is going, and how fast you recognise
+//! it, the ones that need the most work first.
 //!
 //! A row is a bar, drawn as "What comes up next" draws its own: as long as
 //! the share copied right, in the colour of where the character stands,
 //! with a notch at the Mastered line and a paler stretch past the bar to
 //! the top of where the accuracy likely is. The line under it says the
 //! rest. A summary above names the weak, the building and the ones with
-//! too few tries to tell; a character tried once is no longer called weak.
+//! too few tries to tell, and those recognised at once (ICR); a character
+//! tried once is no longer called weak.
 
 use cw_core::{
-    CONTEST_TIMES_NOTE, CharSetMode, CharacterDiagnostic, MASTERED_MIN_ACCURACY, MasteryStatus,
-    SessionResult, character_diagnostics,
+    CONTEST_TIMES_NOTE, CharSetMode, CharacterDiagnostic, ICR_MS, MASTERED_MIN_ACCURACY,
+    MasteryStatus, RECOGNITION_MIN_TRIES, SessionResult, character_diagnostics,
 };
 use dioxus::prelude::*;
 
@@ -66,9 +67,31 @@ fn trend(letter: &CharacterDiagnostic) -> Trend {
     }
 }
 
-/// A time to answer, in milliseconds to the nearest ten: "650 ms".
+/// A recognition time, in milliseconds to the nearest ten: "320 ms".
 fn millis(ms: f64) -> String {
     format!("{:.0} ms", (ms / 10.0).round() * 10.0)
+}
+
+/// How fast a character is recognised, as far as it has been timed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Recognition {
+    /// At [`ICR_MS`] or under: instant character recognition.
+    Instant(f64),
+    /// Timed, and slower than that.
+    Timed(f64),
+    /// Timed this many times, too few to say.
+    Timing(u32),
+    /// Never timed.
+    Untimed,
+}
+
+fn recognition(letter: &CharacterDiagnostic) -> Recognition {
+    match (letter.recognition_ms, letter.recognition_tries) {
+        (Some(ms), _) if letter.instant() => Recognition::Instant(ms),
+        (Some(ms), _) => Recognition::Timed(ms),
+        (None, 0) => Recognition::Untimed,
+        (None, tries) => Recognition::Timing(tries),
+    }
 }
 
 /// The start of the line under a row's bar: where it stands, how often it
@@ -110,12 +133,15 @@ fn letter_label(letter: &CharacterDiagnostic) -> String {
         Trend::Steady => text.push_str(", steady lately"),
         Trend::Unknown => {}
     }
-    if letter.avg_ms > 0.0 {
-        text.push_str(&format!(
-            ", answered in {}{}",
-            millis(letter.avg_ms),
-            if letter.is_slow { ", slow" } else { "" }
-        ));
+    match recognition(letter) {
+        Recognition::Instant(ms) => {
+            text.push_str(&format!(", recognised in {}, instant", millis(ms)))
+        }
+        Recognition::Timed(ms) => text.push_str(&format!(", recognised in {}", millis(ms))),
+        Recognition::Timing(tries) => {
+            text.push_str(&format!(", timed {tries} of {RECOGNITION_MIN_TRIES} tries"))
+        }
+        Recognition::Untimed => {}
     }
     text
 }
@@ -166,11 +192,15 @@ fn row_view(letter: &CharacterDiagnostic) -> Element {
                     Trend::Steady => rsx! { " · steady lately" },
                     Trend::Unknown => rsx! {},
                 }
-                if letter.avg_ms > 0.0 {
-                    " · "
-                    span { class: if letter.is_slow { "acc-time slow" } else { "acc-time" },
-                        "{millis(letter.avg_ms)} to answer"
-                    }
+                match recognition(letter) {
+                    Recognition::Instant(ms) => rsx! {
+                        " · "
+                        b { class: "acc-icr", "ICR" }
+                        " {millis(ms)}"
+                    },
+                    Recognition::Timed(ms) => rsx! { " · recognised in {millis(ms)}" },
+                    Recognition::Timing(tries) => rsx! { " · timing, {tries} of {RECOGNITION_MIN_TRIES} tries" },
+                    Recognition::Untimed => rsx! {},
                 }
             }
         }
@@ -204,12 +234,20 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
     ];
     let mastered = with_status(&letters, MasteryStatus::Mastered).len();
     let line = MASTERED_MIN_ACCURACY * 100.0;
+    // Recognised at once, of those timed; and whether any is timed at all.
+    let instant: Vec<char> = letters
+        .iter()
+        .filter(|letter| letter.instant())
+        .map(|letter| letter.letter)
+        .collect();
+    let timed = letters.iter().any(|letter| letter.recognition_ms.is_some());
+    let timing = letters.iter().any(|letter| letter.recognition_tries > 0);
     rsx! {
         div { class: "card stack-sm",
             CardHead {
                 icon: IconName::Letters,
                 title: "Letter accuracy",
-                note: "How often you copy each character right, which way it is going, and how fast you answer",
+                note: "How often you copy each character right, which way it is going, and how fast you recognise it",
                 help: help::letters(),
             }
             div { class: "err-summary",
@@ -233,6 +271,21 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
                 div { class: "err-sum-row",
                     span { class: "err-sum-label solid", "Mastered · {mastered}" }
                 }
+                if timed {
+                    div { class: "err-sum-row",
+                        span { class: "err-sum-label solid", "Instant (ICR) · {instant.len()}" }
+                        span { class: "err-chips",
+                            for character in instant.iter() {
+                                span { class: "err-chip icr group-text", "{character}" }
+                            }
+                        }
+                    }
+                }
+            }
+            if !timing {
+                p { class: "muted", style: "margin: 0; font-size: 0.85rem;",
+                    "How fast you recognise each character is timed as you type along: with Lock typing while sending off (Settings → Session shape), or with groups of one character. Type each one as soon as you hear it."
+                }
             }
             div { class: "err-legend", aria_hidden: "true",
                 span { i { class: "err-swatch solid" } "mastered" }
@@ -241,6 +294,10 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
                 span { i { class: "err-swatch finding-out" } "few tries" }
                 span { i { class: "err-swatch range" } "where it likely is" }
                 span { i { class: "err-swatch mark" } "mastered from {line:.0}%" }
+                span {
+                    b { class: "acc-icr", "ICR" }
+                    " typed within {ICR_MS:.0} ms of sounding"
+                }
             }
             if contest {
                 p { class: "muted", style: "margin: 0;", "{CONTEST_TIMES_NOTE}" }
@@ -263,7 +320,6 @@ mod tests {
         CharacterDiagnostic {
             letter: 'P',
             accuracy_pct: accuracy * 100.0,
-            avg_ms: 650.0,
             total,
             correct,
             status: if total < 5 {
@@ -273,9 +329,10 @@ mod tests {
             } else {
                 MasteryStatus::Weak
             },
-            is_slow: false,
             recent_pct: None,
             earlier_pct: None,
+            recognition_ms: None,
+            recognition_tries: 0,
         }
     }
 
@@ -285,7 +342,7 @@ mod tests {
         assert_eq!(p.status, MasteryStatus::FewTries);
         assert_eq!(
             letter_label(&p),
-            "P: 50% right of 2, likely 20% to 80%, few tries, answered in 650 ms"
+            "P: 50% right of 2, likely 20% to 80%, few tries"
         );
         assert_eq!(letter_note(&p), "Few tries · 2 tries · likely 20–80%");
         p = letter(1, 1);
@@ -297,13 +354,20 @@ mod tests {
         p = letter(27, 30);
         p.recent_pct = Some(95.0);
         p.earlier_pct = Some(80.0);
-        p.is_slow = true;
+        p.recognition_tries = 3;
         assert!(
-            letter_label(&p).ends_with("mastered, up 15 points lately, answered in 650 ms, slow"),
+            letter_label(&p).ends_with("mastered, up 15 points lately, timed 3 of 8 tries"),
             "{}",
             letter_label(&p)
         );
         assert!(letter_note(&p).starts_with("Mastered · 30 tries · likely "));
+        p.recognition_tries = 12;
+        p.recognition_ms = Some(321.0);
+        assert_eq!(recognition(&p), Recognition::Instant(321.0));
+        assert!(letter_label(&p).ends_with(", recognised in 320 ms, instant"));
+        p.recognition_ms = Some(640.0);
+        assert_eq!(recognition(&p), Recognition::Timed(640.0));
+        assert!(letter_label(&p).ends_with(", recognised in 640 ms"));
     }
 
     /// A trend needs five points to be one; less is steady, and without

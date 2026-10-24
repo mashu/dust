@@ -40,6 +40,23 @@ pub struct PlaybackPlan {
     pub resolved_effective_wpm: f64,
 }
 
+impl PlaybackPlan {
+    /// Where each character of `text` that sounds finishes, in seconds from
+    /// the start of the send: the end of its last element, as this plan,
+    /// made from `text`, sends it.
+    pub fn char_ends(&self, text: &str) -> Vec<f64> {
+        let mut tones = self.events.iter();
+        text.chars()
+            .filter(|c| *c != ' ')
+            .filter_map(|c| {
+                let elements = morse_for(c.to_ascii_uppercase())?.chars().count();
+                let last = tones.by_ref().take(elements).last()?;
+                Some(last.start_sec + last.duration_sec)
+            })
+            .collect()
+    }
+}
+
 /// The wanted send and whatever is on top of it, as scheduled sound.
 #[derive(Clone, Debug)]
 pub struct PlannedTransmission {
@@ -297,6 +314,22 @@ mod tests {
         s.band.side_tone_min = 600.0;
         s.band.side_tone_max = 600.0;
         s
+    }
+
+    /// Each character ends with its last element: at 20 WPM a dit is 60 ms,
+    /// K (dah dit dah) ends 420 ms in, and the send ends with M's last dah,
+    /// where the plan's duration does.
+    #[test]
+    fn each_character_ends_with_its_last_element() {
+        let settings = fixed_speed(20.0);
+        let plan = planned("KM", &settings, &mut Fixed(0.5));
+        let ends = plan.char_ends("KM");
+        assert_eq!(ends.len(), 2);
+        let tones: Vec<&ToneEvent> = plan.events.iter().collect();
+        assert!((ends[0] - (tones[2].start_sec + tones[2].duration_sec)).abs() < 1e-9);
+        assert!((ends[1] - plan.duration_sec).abs() < 1e-9, "{ends:?}");
+        assert!(ends[0] < ends[1]);
+        assert!(plan.char_ends("").is_empty());
     }
 
     fn fist(variation: f64) -> TrainingSettings {

@@ -769,6 +769,7 @@ mod tests {
                 duration_sec: 0.5,
                 char_wpm: 20.0,
                 effective_wpm: 20.0,
+                char_ends_sec: Vec::new(),
             };
             let _ = machine.apply(ended, now);
             let text = answer.to_string();

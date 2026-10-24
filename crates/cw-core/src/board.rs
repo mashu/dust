@@ -438,7 +438,7 @@ pub fn board_kinds(sessions: &[SessionResult]) -> Vec<ContestKind> {
 }
 
 /// The middle of `values`, or the mean of the two middle ones.
-fn median(values: &[f64]) -> Option<f64> {
+pub(crate) fn median(values: &[f64]) -> Option<f64> {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let mid = sorted.len() / 2;

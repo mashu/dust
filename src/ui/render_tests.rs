@@ -175,6 +175,7 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
             char_wpm: Some(20.0),
             effective_wpm: None,
             sends: 1,
+            recognition_ms: Vec::new(),
         }],
         accuracy,
         avg_response_ms: 450.0,

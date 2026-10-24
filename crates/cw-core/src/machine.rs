@@ -39,6 +39,10 @@ pub enum SessionEvent {
         duration_sec: f64,
         char_wpm: f64,
         effective_wpm: f64,
+        /// Where each character of the group finished sounding in this
+        /// send, in seconds from its start ([`crate::PlaybackPlan::char_ends`]);
+        /// empty when the runtime does not say.
+        char_ends_sec: Vec<f64>,
     },
     /// The send stopped before it finished — cancelled from outside, or the
     /// audio failed. Either way the session ends with what it has scored.
@@ -165,6 +169,12 @@ impl<S: GroupSource> SessionMachine<S> {
         (machine, effects)
     }
 
+    /// When each character typed into group `index` went in, as the answer
+    /// box saw the keys: what recognition is timed to.
+    pub fn note_keys(&mut self, index: usize, keyed_at: &[MonoMs]) {
+        self.session.note_keys(index, keyed_at);
+    }
+
     pub fn session(&self) -> &GroupSession {
         &self.session
     }
@@ -262,7 +272,13 @@ impl<S: GroupSource> SessionMachine<S> {
                 duration_sec,
                 char_wpm,
                 effective_wpm,
-            } => self.playback_ended(index, now, duration_sec, char_wpm, effective_wpm),
+                char_ends_sec,
+            } => self.playback_ended(
+                index,
+                now,
+                (duration_sec, char_wpm, effective_wpm),
+                &char_ends_sec,
+            ),
             SessionEvent::Input { index, text } => self.input(index, &text, now),
             SessionEvent::Confirm => self.confirm_current(now),
             SessionEvent::TimerFired { id } => self.timer_fired(id, now),
@@ -292,13 +308,14 @@ impl<S: GroupSource> SessionMachine<S> {
         }
     }
 
+    /// Send `index` ended at `now`, having lasted `duration_sec` at these
+    /// speeds, each character finishing `char_ends_sec` into it.
     fn playback_ended(
         &mut self,
         index: usize,
         now: MonoMs,
-        duration_sec: f64,
-        char_wpm: f64,
-        effective_wpm: f64,
+        (duration_sec, char_wpm, effective_wpm): (f64, f64, f64),
+        char_ends_sec: &[f64],
     ) -> Vec<SessionEffect> {
         if self.playing_index() != Some(index) {
             return Vec::new();
@@ -327,8 +344,16 @@ impl<S: GroupSource> SessionMachine<S> {
             .session
             .group_start(index)
             .map_or(now, |start| start.plus(self.group_elapsed_ms));
+        let end = now.max(earliest);
+        // When each character finished sounding, counted back from the end
+        // of the send that was heard last.
+        let start = MonoMs(end.0.saturating_sub(played_ms));
+        let heard_at = char_ends_sec
+            .iter()
+            .map(|sec| start.plus_sec(*sec))
+            .collect();
         self.session
-            .end_playback(index, now.max(earliest), char_wpm, effective_wpm);
+            .end_playback(index, end, char_wpm, effective_wpm, heard_at);
         self.set_phase(SessionPhase::AwaitingAnswer { index });
         let timeout_ms = (self.session.settings().playback.group_timeout * 1000.0).round() as u32;
         if timeout_ms == 0 {
@@ -579,6 +604,7 @@ mod tests {
             duration_sec: 0.5,
             char_wpm: 20.0,
             effective_wpm: 18.0,
+            char_ends_sec: Vec::new(),
         }
     }
 
@@ -1162,6 +1188,7 @@ mod tests {
                 duration_sec: 0.0,
                 char_wpm: 0.0,
                 effective_wpm: 0.0,
+                char_ends_sec: Vec::new(),
             },
             MonoMs(10),
         );
@@ -1189,6 +1216,7 @@ mod tests {
                 duration_sec: 2.0,
                 char_wpm: 20.0,
                 effective_wpm: 20.0,
+                char_ends_sec: Vec::new(),
             },
             MonoMs(500),
         );

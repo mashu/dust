@@ -113,6 +113,7 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
                 duration_sec: 0.5,
                 char_wpm: 40.0,
                 effective_wpm: 40.0,
+                char_ends_sec: Vec::new(),
             },
             now,
         );
@@ -230,6 +231,7 @@ fn stored_contest_run(
                 char_wpm: Some(26.0),
                 effective_wpm: Some(26.0),
                 sends: 1,
+                recognition_ms: Vec::new(),
             })
             .collect(),
         groups,

@@ -1030,6 +1030,7 @@ mod tests {
             char_wpm: Some(24.0),
             effective_wpm: Some(22.0),
             sends,
+            recognition_ms: Vec::new(),
         };
         let groups = vec![
             (group("K5XYZ", "K5XYZ"), timing(1)),
@@ -1095,6 +1096,7 @@ mod tests {
             char_wpm: Some(wpm),
             effective_wpm: Some(wpm),
             sends,
+            recognition_ms: Vec::new(),
         };
         // Its sends count only the repeats charged to the copy: the record
         // holds those you asked for.
@@ -1176,6 +1178,7 @@ mod tests {
             char_wpm: Some(24.0),
             effective_wpm: Some(24.0),
             sends: 1,
+            recognition_ms: Vec::new(),
         };
         let groups = ["K5XYZ", "214", "DL2XYZ", "TT7", "W1AW"]
             .map(|sent| (group(sent, sent), timing.clone()))
@@ -1241,6 +1244,7 @@ mod tests {
             char_wpm: Some(24.0),
             effective_wpm: Some(24.0),
             sends: 1,
+            recognition_ms: Vec::new(),
         };
         let groups = ["K5XYZ", "214", "DL2XYZ", "TT7", "W1AW"]
             .map(|sent| (group(sent, sent), timing.clone()))
