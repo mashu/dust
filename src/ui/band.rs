@@ -1,4 +1,4 @@
-use cw_core::band::{FilterDesign, heard_snr_db};
+use cw_core::band::{FilterDesign, NOISE_LEVEL_PER_DB, heard_snr_db};
 use cw_core::{
     BandSettings, CallerHabits, CharSetMode, ContestRules, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN,
     Field, FilterShape, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
@@ -374,7 +374,7 @@ pub fn BandConditionsCard(
                 value: b.noise_level,
                 min: 0.0,
                 max: 1.0,
-                step: 0.05,
+                step: NOISE_LEVEL_PER_DB,
                 disabled: !b.noise_enabled,
                 onchange: move |v| settings.write().band.noise_level = v,
             }

@@ -3092,12 +3092,24 @@ mod interactions {
 
     /// Out of the box the band is one station, fixed, under a subtle hiss,
     /// and the 300 Hz filter is built wider to pass the 300-600 Hz pitches.
+    /// The noise moves a decibel of signal-to-noise a step, either way.
     #[test]
     fn the_band_card_out_of_the_box() {
-        let ui = Ui::new(DefaultBandHarness, ());
+        let mut ui = Ui::new(DefaultBandHarness, ());
         assert!(ui.shows("fixed-stations-calling"), "{}", ui.html());
-        assert!(ui.has("class=\"slider-value\">S/N 41 dB<"), "{}", ui.html());
+        assert!(ui.has("class=\"slider-value\">S/N 40 dB<"), "{}", ui.html());
         assert!(ui.has("300 Hz — widened to 353 Hz to pass your pitch range"));
+        for (button, reading) in [
+            ("more-slider-noise-level", 39),
+            ("more-slider-noise-level", 38),
+            ("less-slider-noise-level", 39),
+            ("less-slider-noise-level", 40),
+            ("less-slider-noise-level", 41),
+        ] {
+            ui.click(button);
+            let says = format!("class=\"slider-value\">S/N {reading} dB<");
+            assert!(ui.has(&says), "{button}: {}", ui.html());
+        }
     }
 
     #[test]

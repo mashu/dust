@@ -55,7 +55,7 @@ mod source;
 pub use agc::{
     AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, CompressorSetting, agc_compressor,
 };
-pub use calibration::heard_snr_db;
+pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
 pub(crate) use filter::mirror_hz;
 pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,

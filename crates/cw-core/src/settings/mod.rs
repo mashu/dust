@@ -429,11 +429,13 @@ pub struct BandSettings {
     /// switch the receiver background, and before that `qrm`.
     #[serde(alias = "receiverEnabled", alias = "qrmEnabled")]
     pub noise_enabled: bool,
-    /// How loud the noise floor is. Deliberately not read from the old
-    /// receiver-background level: that drove a different sound entirely, and
-    /// its value says nothing about how much hiss someone wants. Out of the
-    /// box it is a subtle hiss, about 40 dB under the station through the
-    /// default receiver.
+    /// How loud the noise floor is, held to whole decibels of
+    /// signal-to-noise ([`crate::band::NOISE_LEVEL_PER_DB`]). Deliberately
+    /// not read from the old receiver-background level: that drove a
+    /// different sound entirely, and its value says nothing about how much
+    /// hiss someone wants. Out of the box it is a subtle hiss, four decibels
+    /// in from the quiet end, which the default receiver hears about 40 dB
+    /// under the station.
     pub noise_level: f64,
     /// The receiver's automatic gain control. Off is a receiver run on its
     /// RF gain, the way contesters often do.
@@ -486,7 +488,7 @@ impl Default for BandSettings {
             qrn_enabled: true,
             qrn_level: 0.25,
             noise_enabled: true,
-            noise_level: 0.1,
+            noise_level: 4.0 * crate::band::NOISE_LEVEL_PER_DB,
             agc_enabled: true,
             filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
             filter_shape: FilterShape::default(),
