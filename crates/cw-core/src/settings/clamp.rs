@@ -6,8 +6,8 @@ use super::{
     LETTER_LEVEL_CEILING, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, MY_SENDING_MAX_DB,
     MY_SENDING_OFF_DB, MY_WPM_MAX, MY_WPM_MIN, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB,
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
-    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
-    STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN,
+    STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 use crate::callsign::{CALLSIGN_TIER_MAX, CALLSIGN_TIER_MIN};
 use crate::level::LEVEL_MIN;
@@ -100,6 +100,7 @@ impl TrainingSettings {
         b.qsb_rate_hz = b.qsb_rate_hz.clamp(QSB_RATE_MIN_HZ, QSB_RATE_MAX_HZ);
         b.qrn_level = b.qrn_level.clamp(0.0, 1.0);
         b.noise_level = crate::band::whole_db_noise_level(b.noise_level.clamp(0.0, 1.0));
+        b.rf_gain_db = b.rf_gain_db.clamp(RF_GAIN_MIN_DB, RF_GAIN_MAX_DB);
 
         let a = &mut self.auto_level;
         a.auto_adjust_threshold = a
@@ -176,6 +177,7 @@ impl TrainingSettings {
         fix(&mut b.filter_width_hz, db.filter_width_hz);
         fix(&mut b.pileup_spread_hz, db.pileup_spread_hz);
         fix(&mut b.pileup_level_db, db.pileup_level_db);
+        fix(&mut b.rf_gain_db, db.rf_gain_db);
         let (a, da) = (&mut self.auto_level, &d.auto_level);
         fix(&mut a.auto_adjust_threshold, da.auto_adjust_threshold);
         fix(&mut a.error_weight_strength, da.error_weight_strength);

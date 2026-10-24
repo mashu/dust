@@ -61,7 +61,7 @@ pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
 };
 pub use key::BandKey;
-pub use knee::agc_knee;
+pub use knee::{agc_knee, receiver_knee, rf_gain};
 pub use noise::AudioFloor;
 pub use output::{
     FULL_VOLUME_GAIN, LimiterFeed, SOFT_LIMIT_KNEE, limiter_feed, soft_limit, soft_limit_curve,
@@ -108,7 +108,7 @@ impl BandMixer {
         Self {
             source: BandSource::new(sample_rate, band, &receiver, seed),
             receiver: ReceiverFilter::new(sample_rate, &receiver),
-            agc: match agc_knee(band, &receiver) {
+            agc: match receiver_knee(band, &receiver) {
                 Some(knee) => Agc::new(sample_rate, knee),
                 None => Agc::off(),
             },

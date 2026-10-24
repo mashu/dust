@@ -7,7 +7,7 @@
 use cw_core::TrainingSettings;
 use cw_core::band::{
     AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, FilterDesign, agc_compressor,
-    agc_knee, limiter_feed, soft_limit_curve,
+    limiter_feed, receiver_knee, soft_limit_curve,
 };
 use web_sys::{AudioContext, AudioParam, DynamicsCompressorNode, GainNode};
 
@@ -167,7 +167,7 @@ impl Chain {
 
     /// Set the compressor to the native AGC's law for this band.
     ///
-    /// The same knee the native receiver uses ([`agc_knee`]: set from the
+    /// The same knee the native receiver uses ([`receiver_knee`]: set from the
     /// band's own floor, measured at a low rate because this runs on the main
     /// thread every time a band setting moves), the same two-to-one slope
     /// above it, attack and release to match. A compressor has no hang, so
@@ -183,7 +183,7 @@ impl Chain {
     /// the audio-stage floor, which has not ([`limiter_feed`]).
     pub fn tune_agc(&self, ctx: &AudioContext, settings: &TrainingSettings) {
         let knee = if settings.band.has_background() {
-            agc_knee(&settings.band, &FilterDesign::from_settings(settings))
+            receiver_knee(&settings.band, &FilterDesign::from_settings(settings))
         } else {
             None
         };

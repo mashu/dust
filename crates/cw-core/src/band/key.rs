@@ -31,6 +31,8 @@ pub struct BandKey {
     qrn: Exact,
     stations_max: u32,
     agc_enabled: bool,
+    /// The RF gain, which moves the AGC's knee; nothing with the AGC off.
+    rf_gain_db: Option<Exact>,
 }
 
 impl BandKey {
@@ -45,6 +47,7 @@ impl BandKey {
             qrn: Exact(qrn_level(band)),
             stations_max: band.stations_max,
             agc_enabled: band.agc_enabled,
+            rf_gain_db: band.agc_enabled.then_some(Exact(band.rf_gain_db)),
         }
     }
 }
@@ -82,6 +85,7 @@ mod tests {
                 s.band.volume_min = 0.3;
             },
             |s| s.band.agc_enabled = false,
+            |s| s.band.rf_gain_db = -10.0,
             |s| s.band.filter_width_hz = 250.0,
             |s| s.band.filter_shape = FilterShape::Soft,
         ];

@@ -514,6 +514,8 @@ pub fn band() -> Element {
             dd { "Lightning: the crackle of distant storms and the crash of a near one." }
             dt { "AGC" }
             dd { "The receiver rides its gain: the band ducks under a strong station and behind a crash." }
+            dt { "RF gain" }
+            dd { "How strong a signal has to be before the AGC acts. Full starts it just above the band's hiss; backed off, it acts only on stronger signals, or on none. The volume follows, so it changes how hard the AGC works, not how loud the band is." }
             dt { "Live preview" }
             dd { "Loops a CQ through the band as it is set, so you hear each change at once." }
         }

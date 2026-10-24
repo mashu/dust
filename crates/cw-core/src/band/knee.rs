@@ -7,7 +7,9 @@ use super::calibration::{REFERENCE_NOISE_LEVEL, noise_level, qrn_level};
 use super::filter::{FilterDesign, ReceiverFilter, reference_width_hz};
 use super::memo::{Exact, LastAnswer};
 use super::source::BandSource;
-use crate::settings::{BandSettings, FilterShape, STATIONS_MIN, TrainingSettings};
+use crate::settings::{
+    BandSettings, FilterShape, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, STATIONS_MIN, TrainingSettings,
+};
 
 /// The rate the floor is measured at for the AGC's knee. Both backends use
 /// it, so both arrive at the same knee to the bit; it is low because the
@@ -42,6 +44,29 @@ pub fn agc_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
             band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(reference_floor_level());
         AGC_TRIGGER * floor
     }))
+}
+
+/// Where the receiver's AGC starts to turn the gain down for these band
+/// settings, heard through `receiver`, at the RF gain they set: the band's
+/// own knee ([`agc_knee`]), raised by however far the RF gain is backed off.
+/// Turning the RF gain down lowers everything reaching the AGC alike, which
+/// to the AGC is its threshold rising by as much; the volume after it makes
+/// up the rest. `None` with the AGC switched off.
+///
+/// What both players set their AGC by.
+pub fn receiver_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
+    agc_knee(band, receiver).map(|knee| knee / rf_gain(band))
+}
+
+/// The RF gain as a gain: one at full, and less as it is backed off, inside
+/// its range whatever is set.
+pub fn rf_gain(band: &BandSettings) -> f64 {
+    let db = if band.rf_gain_db.is_finite() {
+        band.rf_gain_db.clamp(RF_GAIN_MIN_DB, RF_GAIN_MAX_DB)
+    } else {
+        RF_GAIN_MAX_DB
+    };
+    10f64.powf(db / 20.0)
 }
 
 /// What the knee is measured from, and so what it is remembered by: the
@@ -143,6 +168,33 @@ mod tests {
     use crate::settings::{FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ};
 
     const SR: u32 = 48_000;
+
+    /// Backing the RF gain off raises the knee the players set their AGC by
+    /// as far as it backs off, from the band's own knee at full; with the
+    /// AGC off there is none, and a gain no setting allows reads as full.
+    #[test]
+    fn the_rf_gain_raises_the_knee_as_far_as_it_backs_off() {
+        let mut settings = TrainingSettings::default();
+        let receiver = FilterDesign::from_settings(&settings);
+        let full = agc_knee(&settings.band, &receiver).expect("the AGC is on");
+        assert_eq!(receiver_knee(&settings.band, &receiver), Some(full));
+        settings.band.rf_gain_db = -10.0;
+        let backed_off = receiver_knee(&settings.band, &receiver).expect("still on");
+        assert!((20.0 * (backed_off / full).log10() - 10.0).abs() < 1e-9);
+        for wild in [f64::NAN, 40.0] {
+            settings.band.rf_gain_db = wild;
+            assert_eq!(
+                receiver_knee(&settings.band, &receiver),
+                Some(full),
+                "{wild}"
+            );
+        }
+        settings.band.rf_gain_db = -90.0;
+        let floor = receiver_knee(&settings.band, &receiver).expect("still on");
+        assert!((20.0 * (floor / full).log10() + RF_GAIN_MIN_DB).abs() < 1e-9);
+        settings.band.agc_enabled = false;
+        assert_eq!(receiver_knee(&settings.band, &receiver), None);
+    }
 
     /// The band preview measures the knee ahead of building the band, for
     /// the settings as the app holds them — clamped once — and the band then

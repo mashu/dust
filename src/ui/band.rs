@@ -2,8 +2,9 @@ use cw_core::band::{FilterDesign, NOISE_LEVEL_PER_DB, heard_snr_db};
 use cw_core::{
     BandSettings, CallerHabits, CharSetMode, ContestRules, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN,
     Field, FilterShape, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
-    PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RunStyle, STATIONS_MAX,
-    STATIONS_MIN, SettingsSection, Side, TrainingSettings, filter_capacity,
+    PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB,
+    RangeSetting, RunStyle, STATIONS_MAX, STATIONS_MIN, SettingsSection, Side, TrainingSettings,
+    filter_capacity,
 };
 use dioxus::prelude::*;
 
@@ -384,6 +385,32 @@ pub fn BandConditionsCard(
                 checked: b.agc_enabled,
                 onchange: move |on| settings.write().band.agc_enabled = on,
             }
+            SliderField {
+                label: "RF gain".to_string(),
+                value_label: rf_gain_label(b.rf_gain_db),
+                value: b.rf_gain_db,
+                min: RF_GAIN_MIN_DB,
+                max: RF_GAIN_MAX_DB,
+                step: 1.0,
+                disabled: !b.agc_enabled,
+                onchange: move |v: f64| settings.write().band.rf_gain_db = v.round(),
+            }
+            p { id: "rf-gain-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                if b.agc_enabled {
+                    "How strong a signal has to be before the AGC turns it down. Back it off and the AGC works less: strong stations are squeezed less and the band breathes less between overs. The volume follows, so the strongest station stays as loud."
+                } else {
+                    "With the AGC off, nothing rides the gain, and the volume is all the level there is."
+                }
+            }
         }
+    }
+}
+
+/// What the RF gain reads as: "Full" at the top, "−12 dB" backed off.
+fn rf_gain_label(db: f64) -> String {
+    if db >= RF_GAIN_MAX_DB {
+        "Full".to_string()
+    } else {
+        format!("\u{2212}{:.0} dB", -db)
     }
 }
