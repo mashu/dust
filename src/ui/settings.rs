@@ -928,7 +928,7 @@ fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
             p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                "Green under {fast} ms, yellow (ICR) under {icr} ms, orange under {slow} ms, red from {slow} ms: the time from a character's sound reaching you to your key."
+                "Green under {fast} ms, yellow (ICR) under {icr} ms, orange under {slow} ms, red from {slow} ms: the time from a character's sound going out to your speaker or headphones to your key."
             }
         }
     }

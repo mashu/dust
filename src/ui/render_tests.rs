@@ -176,6 +176,7 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
             effective_wpm: None,
             sends: 1,
             recognition_ms: Vec::new(),
+            typed_along: false,
         }],
         accuracy,
         avg_response_ms: 450.0,
@@ -2534,15 +2535,21 @@ mod interactions {
 
     /// K timed eight times at 320 ms, M at 520, R at 700 and S at 900, U
     /// three times, and E never: a band each, a provisional time, and none.
-    #[component]
-    fn TimedLettersHarness() -> Element {
+    /// E is also sent alone, answered half a second after each send, so it
+    /// has an answer time.
+    fn timed_history() -> Vec<SessionResult> {
         let mut session = stored_session("2026-09-01", &[("KMRSUE", "KMRSUE"); 8]);
         for (n, timing) in session.group_timings.iter_mut().enumerate() {
             let u = (n < 3).then_some(410);
             timing.recognition_ms = vec![Some(320), Some(520), Some(700), Some(900), u, None];
         }
+        vec![session, stored_session("2026-09-02", &[("E", "E"); 8])]
+    }
+
+    #[component]
+    fn TimedLettersHarness() -> Element {
         rsx! {
-            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions: vec![session] }
+            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions: timed_history() }
         }
     }
 
@@ -2570,7 +2577,13 @@ mod interactions {
         // visible text, where the label has ", ".
         assert!(line("letter-u").contains(" · about 410 ms so far, 3 of 8 tries timed"));
         assert!(line("letter-e").contains(" · not timed yet"));
-        // With others timed, a group's answer time is not set beside them.
+        // With others timed, a group's answer time is not set beside them,
+        // though E has one.
+        let e = cw_core::character_diagnostics(&timed_history())
+            .into_iter()
+            .find(|letter| letter.letter == 'E')
+            .expect("E");
+        assert_eq!((e.recognition_tries, e.answer_ms), (0, Some(500.0)));
         assert!(!line("letter-e").contains("groups answered"));
         assert!(ui.has(">Instant (ICR) · 2<"), "{}", ui.html());
         assert!(ui.has(r#"class="err-chip rec-fast group-text">K<"#));

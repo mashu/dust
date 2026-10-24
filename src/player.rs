@@ -16,7 +16,7 @@ use std::rc::Rc;
 use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 
 use crate::audio::{MorseBackend, PlaybackOutcome, PlaybackWait};
-use crate::time::{POLL_MS, sleep_ms};
+use crate::time::{POLL_MS, mono_ms, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
 /// without a sound card.
@@ -30,6 +30,11 @@ const SEND_ATTEMPTS: u32 = 3;
 /// The quietest the live sidetone is played, whatever the band's volume
 /// floor: a paddle you cannot hear is no use.
 const SIDETONE_FLOOR: f64 = 0.15;
+
+/// How long after it was due a send may be over and its characters still be
+/// timed: the wait's own tail and poll, and room besides. Later, it started
+/// late.
+const LATE_SEND_MS: u64 = 150;
 
 /// Why audio did not happen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,11 +65,12 @@ pub struct Sent {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
-    /// When each character of the send reached the ear, finished: from when
-    /// the send was started, its lead and output latency, and where the
-    /// character ends in it. Empty for a send planned whole, a contest's
-    /// turn, and where the device's delay cannot be told
-    /// ([`crate::audio::start_send`]).
+    /// When each character of the send was heard, finished, taken as when
+    /// its last sample went to the audio output: from when the send was
+    /// started, how far ahead it was scheduled, and where the character ends
+    /// in it. The delay on to the ear, a speaker's or a headset's, cannot be
+    /// known and is not guessed at. Empty for a send planned whole, a
+    /// contest's turn, and one that played late.
     pub heard_at: Vec<MonoMs>,
 }
 
@@ -446,20 +452,32 @@ impl Ticket<'_> {
         // In a statement of its own: the player is borrowed only while the
         // send starts, never while `on_start` runs.
         let wait = player.start(begin)?;
-        let heard_from = wait.started.plus_sec(wait.heard_after_sec);
+        let output_from = wait.started.plus_sec(wait.sent_after_sec);
+        // When the player said the send would be over, heard to its end.
+        let due = wait
+            .started
+            .plus_sec(wait.heard_after_sec + wait.duration_sec);
         on_start(wait.heard_after_sec);
-        let sent = Sent {
+        let mut sent = Sent {
             duration_sec: wait.duration_sec,
             char_wpm: wait.char_wpm,
             effective_wpm: wait.effective_wpm,
             heard_at: wait
                 .char_ends_sec
                 .iter()
-                .map(|end| heard_from.plus_sec(*end))
+                .map(|end| output_from.plus_sec(*end))
                 .collect(),
         };
         match wait.wait().await {
-            PlaybackOutcome::Completed => self.check().map(|()| sent),
+            PlaybackOutcome::Completed => {
+                // Over well after it was due, it started late, a parked
+                // audio clock or a stall: every character's moment would be
+                // that much early, so none is kept.
+                if MonoMs(mono_ms()) > due.plus(LATE_SEND_MS) {
+                    sent.heard_at.clear();
+                }
+                self.check().map(|()| sent)
+            }
             PlaybackOutcome::Cancelled => Err(AudioError::Cancelled),
             // The send never reached its end: rebuilding the player on the
             // next attempt is what recovers it.
@@ -709,6 +727,38 @@ mod tests {
             assert!(sent.is_ok());
             assert_eq!(starts, [0.0], "at once");
             assert_eq!(recorder.starts()[1].heard_in, Some(-0.2));
+        });
+    }
+
+    /// Each character is timed from when it goes to the output, whatever
+    /// delay the device says follows; a send held up on its way, its clock
+    /// parked, is over late, and none of it is timed.
+    #[test]
+    fn a_send_is_timed_from_its_output_unless_it_played_late() {
+        run(|| async {
+            let (player, recorder) = player();
+            let settings = test_settings();
+            let lease = player.claim(&settings).expect("a player");
+            recorder.latency_sec.set(0.25);
+            let began = MonoMs(crate::time::mono_ms());
+            let sent = lease.send(&cq(), &settings).await.expect("sent");
+            assert_eq!(sent.heard_at.len(), 2, "{sent:?}");
+            // The last character ends the send, a quarter second before the
+            // device says it is heard.
+            assert_eq!(
+                sent.heard_at.last(),
+                Some(&began.plus_sec(sent.duration_sec))
+            );
+
+            let parked = async {
+                sleep_ms(100).await;
+                recorder.set_page_hidden(true);
+                sleep_ms(500).await;
+                recorder.set_page_hidden(false);
+            };
+            let cq = cq();
+            let (sent, ()) = tokio::join!(lease.send(&cq, &settings), parked);
+            assert_eq!(sent.map(|sent| sent.heard_at), Ok(Vec::new()));
         });
     }
 

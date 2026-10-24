@@ -399,7 +399,8 @@ fn recognition_times(sessions: &[SessionResult]) -> BTreeMap<char, (u32, Vec<f64
 /// end of its send to its answer shared evenly over its characters: their
 /// sum, and how many. A contest's are left out, as its recognition times
 /// are; so is a group typed along, timed or done by its send's end: its
-/// time is only the last key's lag, held at the floor, and no answer time.
+/// time is only the last key's lag, or held at the floor, and no answer
+/// time.
 fn answer_times(sessions: &[SessionResult]) -> BTreeMap<char, (f64, u32)> {
     let mut times: BTreeMap<char, (f64, u32)> = BTreeMap::new();
     let groups = sessions
@@ -410,7 +411,11 @@ fn answer_times(sessions: &[SessionResult]) -> BTreeMap<char, (f64, u32)> {
         let sent = group.sent.to_ascii_uppercase();
         let length = sent.chars().count();
         let floor = crate::session::MIN_RESPONSE_MS_PER_CHAR * length as f64;
-        if length == 0 || !timing.recognition_ms.is_empty() || timing.time_to_complete_ms <= floor {
+        if length == 0
+            || timing.typed_along
+            || !timing.recognition_ms.is_empty()
+            || timing.time_to_complete_ms <= floor
+        {
             continue;
         }
         let each = timing.time_to_complete_ms / length as f64;
@@ -891,6 +896,7 @@ mod tests {
                 effective_wpm: None,
                 sends: 1,
                 recognition_ms: Vec::new(),
+                typed_along: false,
             }],
             accuracy: 0.5,
             tally: CopyTally::of("KM", "K?"),
@@ -921,6 +927,7 @@ mod tests {
                 effective_wpm: Some(25.0),
                 sends: 1,
                 recognition_ms: Vec::new(),
+                typed_along: false,
             });
             calls.tally.add("K5XYZ", "K5XYZ");
         }
@@ -1026,6 +1033,7 @@ mod tests {
                 effective_wpm: None,
                 sends: 1,
                 recognition_ms: Vec::new(),
+                typed_along: false,
             })
             .collect();
         out
@@ -1154,11 +1162,19 @@ mod tests {
         session.group_timings[1].recognition_ms = vec![Some(250), Some(240)];
         // Done by the send's end: held at the floor, 100 ms a character.
         session.group_timings[2].time_to_complete_ms = 200.0;
-        let k = character_diagnostics(&[session])
-            .into_iter()
-            .find(|d| d.letter == 'K')
-            .expect("K");
-        assert_eq!(k.answer_ms, Some(450.0));
+        let k = |sessions: &[SessionResult]| {
+            character_diagnostics(sessions)
+                .into_iter()
+                .find(|d| d.letter == 'K')
+                .expect("K")
+        };
+        assert_eq!(k(std::slice::from_ref(&session)).answer_ms, Some(450.0));
+        // Typed along with nothing timed, a group sent twice: its last key
+        // 700 ms after the send, above the floor, but still no answer time.
+        let mut along = plain("2026-09-02", 2, &[("KM", "KM")]);
+        along.group_timings[0].time_to_complete_ms = 700.0;
+        along.group_timings[0].typed_along = true;
+        assert_eq!(k(&[session, along]).answer_ms, Some(450.0));
     }
 
     /// The latest tries are the latest groups of the latest session: a

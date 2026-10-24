@@ -910,6 +910,7 @@ mod tests {
                     effective_wpm: Some(wpm),
                     sends: 1 + u32::from(assisted),
                     recognition_ms: Vec::new(),
+                    typed_along: false,
                 })
                 .collect(),
             groups,

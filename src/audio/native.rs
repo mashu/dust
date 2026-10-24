@@ -227,6 +227,9 @@ impl MorseBackend for MorsePlayer {
         settings: &TrainingSettings,
         heard_in: Option<f64>,
     ) -> Result<Rc<dyn PlaybackSignal>, String> {
+        // What the send says of when it is heard is from here, where it was
+        // asked for: a device opened below is time it waits like any other.
+        let entered = Instant::now();
         if let Err(err) = self.ensure_output() {
             self.state.retire();
             return Err(format!("Audio mixer failed to open: {err}"));
@@ -245,13 +248,16 @@ impl MorseBackend for MorsePlayer {
             (mixer.sample_rate(), mixer.latency_sec())
         };
         let now = Instant::now();
+        let opening_sec = now.saturating_duration_since(entered).as_secs_f64();
         let sr = f64::from(rate);
         // A send asked to start at a given time takes over from the one
         // playing where that one is then, on the mixer's own clock, sample
         // for sample; with nothing playing, it waits out the time from now.
-        let wait_sec = heard_in.map_or(0.0, |heard_in| (heard_in - latency_sec).max(0.0));
+        let wait_sec = heard_in.map_or(0.0, |heard_in| {
+            (heard_in - opening_sec - latency_sec).max(0.0)
+        });
         let into = heard_in.zip(self.heard_at).map(|(heard_in, playing)| {
-            let asked = now + Duration::from_secs_f64(heard_in.max(0.0));
+            let asked = entered + Duration::from_secs_f64(heard_in.max(0.0));
             (asked.saturating_duration_since(playing).as_secs_f64() * sr).round() as usize
         });
         let voice = SendVoice::new(
@@ -267,13 +273,14 @@ impl MorseBackend for MorsePlayer {
         self.with_mixer(|mixer, swept| {
             waits = mixer.start_at(voice, into, (wait_sec * sr).round() as usize, swept);
         });
-        let heard_after_sec = latency_sec + waits as f64 / sr;
-        self.heard_at = Some(now + Duration::from_secs_f64(heard_after_sec));
+        let rendered_in = waits as f64 / sr;
+        self.heard_at = Some(now + Duration::from_secs_f64(latency_sec + rendered_in));
         Ok(Rc::new(ToneSignal::new(
             armed,
             finished,
             failed,
-            heard_after_sec,
+            opening_sec + latency_sec + rendered_in,
+            opening_sec + rendered_in,
         )))
     }
 
@@ -299,7 +306,16 @@ impl MorseBackend for MorsePlayer {
 
 /// How far behind the callback the speaker is, in frames: how long the
 /// buffer being filled waits before it is heard.
+///
+/// None on Android: cpal's oboe host stamps the callback with the time since
+/// its stream was made and the playback with the system's monotonic clock,
+/// so the gap between them is the phone's uptime, not a delay — half a
+/// second, at the cap, after every send. There a send is over, and its
+/// characters timed, as it goes to the output.
 fn latency_frames(info: &cpal::OutputCallbackInfo, sample_rate: u32) -> usize {
+    if cfg!(target_os = "android") {
+        return 0;
+    }
     let stamp = info.timestamp();
     stamp
         .playback

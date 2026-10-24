@@ -188,6 +188,15 @@ pub trait PlaybackSignal {
     fn heard_after_sec(&self) -> f64 {
         0.0
     }
+
+    /// How long after it was started the send's first sample goes to the
+    /// player's output, in seconds: how far ahead it was scheduled, without
+    /// the delay from there to the ear. A character is timed from here; the
+    /// delay after, a speaker's or a headset's, is the same for every
+    /// character and cannot be known.
+    fn sent_after_sec(&self) -> f64 {
+        self.heard_after_sec()
+    }
 }
 
 /// Morse already scheduled; wait without holding the player borrow.
@@ -196,14 +205,17 @@ pub struct PlaybackWait {
     pub char_wpm: f64,
     pub effective_wpm: f64,
     /// When the send was started, on the app's clock: the moment
-    /// `heard_after_sec` is reckoned from.
+    /// `heard_after_sec` and `sent_after_sec` are reckoned from.
     pub started: MonoMs,
     /// How long after it was started the send reaches the ear
     /// ([`PlaybackSignal::heard_after_sec`]).
     pub heard_after_sec: f64,
+    /// How long after it was started the send goes to the output
+    /// ([`PlaybackSignal::sent_after_sec`]).
+    pub sent_after_sec: f64,
     /// Where each character of the send finishes, in seconds from its start,
-    /// as its plan has it: empty for a send planned whole, and where the
-    /// device's delay cannot be told ([`super::start_send`]).
+    /// as its plan has it: empty for a send planned whole
+    /// ([`super::start_send`]).
     pub char_ends_sec: Vec<f64>,
     signal: Rc<dyn PlaybackSignal>,
 }
@@ -219,6 +231,7 @@ impl PlaybackWait {
             effective_wpm: plan.resolved_effective_wpm,
             started,
             heard_after_sec: signal.heard_after_sec(),
+            sent_after_sec: signal.sent_after_sec(),
             char_ends_sec: Vec::new(),
             signal,
         }

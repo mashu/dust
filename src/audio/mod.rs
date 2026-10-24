@@ -82,12 +82,6 @@ pub trait MorseBackend {
     }
 }
 
-/// Whether this build times how fast each character is recognised. Android's
-/// output reports its delay off a clock of its own, which puts every
-/// character's end up to half a second out: a time there would be wrong
-/// with confidence, so none is taken, and the Letters card says so.
-pub const TIMES_RECOGNITION: bool = cfg!(not(target_os = "android"));
-
 /// Send `transmission` on `player`, and hand back something to wait on. The
 /// caller owns the stations, so every repeat of a group arrives from the same
 /// operators.
@@ -103,11 +97,8 @@ pub fn start_send(
 ) -> Result<PlaybackWait, String> {
     let plan = plan_transmission(transmission, settings);
     let mut wait = start_planned(player, &plan, transmission, settings, None)?;
-    // Off the plan played, so they are where its sound is — where the
-    // player can tell when that sound reaches the ear.
-    if TIMES_RECOGNITION {
-        wait.char_ends_sec = plan.wanted.char_ends(&transmission.text);
-    }
+    // Off the plan played, so they are where its sound is.
+    wait.char_ends_sec = plan.wanted.char_ends(&transmission.text);
     Ok(wait)
 }
 
@@ -328,6 +319,10 @@ pub mod fake {
     impl PlaybackSignal for FakeSignal {
         fn heard_after_sec(&self) -> f64 {
             self.latency_sec + f64::from(self.wait_ms) / 1_000.0
+        }
+
+        fn sent_after_sec(&self) -> f64 {
+            f64::from(self.wait_ms) / 1_000.0
         }
 
         fn poll(&self) -> WaitFlags {

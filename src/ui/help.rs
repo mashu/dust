@@ -10,8 +10,6 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::audio::TIMES_RECOGNITION;
-
 fn pct(share: f64) -> String {
     format!("{:.0}%", share * 100.0)
 }
@@ -94,7 +92,7 @@ pub fn letters(bands: &AutoLevelSettings) -> Element {
             }
             dt { "Recognised in" }
             dd {
-                "How soon you type a character after its sound reaches you: the median of its latest timed tries. A try is timed when you type it right on the keyboard while keeping up, the one before it already typed when it ended, in a group sent once; a group of more than one character only when you start typing before it ends. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Type each character the moment you hear it."
+                "How soon you type a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest timed tries. A try is timed when you type it right on the keyboard while keeping up, the one before it already typed when it ended, in a group sent once; a group of more than one character only when you start typing before it ends. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Type each character the moment you hear it."
             }
             dt { "The bands" }
             dd {
@@ -104,10 +102,7 @@ pub fn letters(bands: &AutoLevelSettings) -> Element {
             dd { "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band." }
             dt { "Not timed yet" }
             dd {
-                if !TIMES_RECOGNITION {
-                    "Nothing is timed on Android: its sound output cannot say closely enough when a character reaches you. "
-                }
-                "With Lock typing while sending on, only groups of one character can be timed: turn it off (group training, Settings → Session shape) to type along. Keys from paddles and contest runs are not timed. Until any character is timed, each row shows how long its groups took to answer after their send, shared out over their characters: it cannot say which one held you up."
+                "Only groups sent once are timed (Sends per group 1×), and with Lock typing while sending on, only groups of one character: turn it off (group training, Settings → Session shape) to type along. Keys from paddles and contest runs are not timed. Until any character is timed, each row shows how long its groups took to answer after their send, shared out over their characters: it cannot say which one held you up."
             }
         }
     }
@@ -488,7 +483,7 @@ pub fn envelope() -> Element {
 pub fn recognition() -> Element {
     rsx! {
         p {
-            "How fast counts as what on Letter accuracy, where each character's recognition time is the median gap between its sound reaching you and your key."
+            "How fast counts as what on Letter accuracy, where each character's recognition time is the median gap between its sound going out to your speaker or headphones and your key."
         }
         dl { class: "help-terms",
             dt { "Fast under" }
@@ -497,13 +492,6 @@ pub fn recognition() -> Element {
             dd { "Yellow: instant character recognition, the sound known at once rather than worked out." }
             dt { "Slow under" }
             dd { "Orange: slower than ICR, under this. Red from it on." }
-            if TIMES_RECOGNITION {
-                dt { "Bluetooth" }
-                dd { "Times run from when the sound reaches you, as far as the device reports its delay; a Bluetooth headset that does not report it adds its own to every time." }
-            } else {
-                dt { "Android" }
-                dd { "Nothing is timed here: Android's sound output cannot say closely enough when a character reaches you. The bands colour times from a backup of another device." }
-            }
         }
     }
 }

@@ -139,8 +139,9 @@ pub struct Group {
     answer_at: Option<MonoMs>,
     /// The character and effective speed it was sent at, once measured.
     played_wpm: Option<(f64, f64)>,
-    /// When each character of its last send finished sounding; empty when
-    /// the runtime did not say.
+    /// When each character of its last send finished sounding, taken as
+    /// when it went to the audio output; empty when the runtime did not
+    /// say.
     heard_at: Vec<MonoMs>,
     /// When each character of the answer went in, as the box saw the keys:
     /// the moment it first held that character in that place.
@@ -213,11 +214,19 @@ impl Group {
             // fewer times than planned, and is scored for what it was.
             sends: self.plays_done.clamp(1, self.repeats.max(1)),
             recognition_ms: self.recognition(locked),
+            typed_along: !locked
+                && self
+                    .keyed_at
+                    .first()
+                    .zip(self.end_at)
+                    .is_some_and(|(key, end)| *key < end),
         }
     }
 
-    /// For each character sent, how long after it reached the ear it was
-    /// typed, in milliseconds: how fast it was recognised. Only where that
+    /// For each character sent, how long after it was heard it was typed,
+    /// in milliseconds: how fast it was recognised. Heard is when its last
+    /// sample went to the audio output: the delay on to the ear, a
+    /// speaker's or a headset's, is in every time alike. Only where that
     /// is what the gap says:
     /// - in a group sent once, every character's end known: a group heard
     ///   twice is no measure of hearing it;
@@ -225,8 +234,8 @@ impl Group {
     ///   key came before its last character had ended. A group copied
     ///   whole by ear and typed after — and every one with the box shut
     ///   while it was sent — says how fast you recall, not recognise;
-    /// - the character typed right, in its place, no sooner than it reached
-    ///   the ear (sooner is a guess, or the device's delay misjudged), and
+    /// - the character typed right, in its place, no sooner than it was
+    ///   heard (sooner is a guess), and
     ///   the one before it typed by the time this one ended (or the box
     ///   open, for the first), so the gap is not a backlog caught up on.
     ///
@@ -766,6 +775,12 @@ pub struct SessionTiming {
     /// of it could be said.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recognition_ms: Vec<Option<u32>>,
+    /// Typed along: the box open while the group was sent, and its first
+    /// key in before the send was over. Its time to complete is then only
+    /// the last key's lag, no answer time, whatever its recognition says.
+    /// Older saves: not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub typed_along: bool,
 }
 
 fn one_send() -> u32 {
@@ -1199,6 +1214,30 @@ mod tests {
         );
     }
 
+    /// Typed along is the box open and the first key in before the send
+    /// was over, timed or not, as a group sent twice never is; with the box
+    /// shut, or the first key after, it is not.
+    #[test]
+    fn a_group_is_typed_along_when_its_first_key_beats_the_send() {
+        let along = |first: u64, locked: bool| {
+            let mut settings = TrainingSettings::default();
+            settings.playback.lock_input_during_group_playback = locked;
+            let mut session = GroupSession::new(SessionId::new(1), 1, settings);
+            session.set_group(0, "KM".into(), 2);
+            session.begin_group(0, MonoMs(1_000));
+            session.end_playback(0, MonoMs(2_000), 20.0, 20.0, Vec::new());
+            session.set_input(0, "KM");
+            session.note_keys(0, &[MonoMs(first), MonoMs(2_300)]);
+            session.confirm(0, MonoMs(2_700));
+            let timing = result(&session).group_timings[0].clone();
+            assert!(timing.recognition_ms.is_empty());
+            timing.typed_along
+        };
+        assert!(along(1_900, false));
+        assert!(!along(2_000, false));
+        assert!(!along(1_900, true));
+    }
+
     /// A character typed wrong is not timed, nor one typed while you were
     /// still catching up: its gap is the backlog, not hearing it.
     #[test]
@@ -1250,7 +1289,7 @@ mod tests {
             recognised(&[('K', 1_550), ('M', 2_101), ('R', 2_250)], false),
             [Some(250), Some(401)]
         );
-        // M keyed before it reached the ear: a guess, not recognition.
+        // M keyed before it was heard: a guess, not recognition.
         assert_eq!(
             recognised(&[('K', 1_550), ('M', 1_650), ('R', 2_250)], false),
             [Some(250), None, Some(250)]
@@ -1589,6 +1628,7 @@ mod tests {
             effective_wpm: Some(26.0),
             sends: 1,
             recognition_ms: Vec::new(),
+            typed_along: false,
         };
         SessionResult {
             groups: vec![

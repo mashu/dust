@@ -93,11 +93,18 @@ struct WebSignal {
     /// How long after it was started the send reaches the ear: its lead on
     /// the clock, and the latency the browser reports, read as it started.
     heard_after_sec: f64,
+    /// How long after it was started the send goes to the output: its lead
+    /// on the clock alone.
+    sent_after_sec: f64,
 }
 
 impl PlaybackSignal for WebSignal {
     fn heard_after_sec(&self) -> f64 {
         self.heard_after_sec
+    }
+
+    fn sent_after_sec(&self) -> f64 {
+        self.sent_after_sec
     }
 
     fn poll(&self) -> WaitFlags {
@@ -329,6 +336,8 @@ impl MorseBackend for MorsePlayer {
                 start + plan.wanted.duration_sec,
             ));
         }
+        // Its lead alone is when it goes to the output.
+        let sent_after_sec = heard_after_sec(start - now, 0.0);
         let heard_after_sec = heard_after_sec(start - now, latency);
         self.heard = Some((now_heard + heard_after_sec, start));
         Ok(Rc::new(WebSignal {
@@ -336,6 +345,7 @@ impl MorseBackend for MorsePlayer {
             ticket,
             started_at: start,
             heard_after_sec,
+            sent_after_sec,
         }))
     }
 

@@ -323,6 +323,7 @@ mod tests {
             effective_wpm: None,
             sends: 1,
             recognition_ms: Vec::new(),
+            typed_along: false,
         }];
         stored.char_wpm = 35.0;
         stored.effective_wpm = 35.0;

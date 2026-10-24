@@ -232,6 +232,7 @@ fn stored_contest_run(
                 effective_wpm: Some(26.0),
                 sends: 1,
                 recognition_ms: Vec::new(),
+                typed_along: false,
             })
             .collect(),
         groups,

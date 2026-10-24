@@ -242,6 +242,7 @@ mod tests {
                 effective_wpm: None,
                 sends: 1,
                 recognition_ms: Vec::new(),
+                typed_along: false,
             })
             .collect();
         out

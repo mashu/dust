@@ -14,11 +14,6 @@ use crate::timing::{compute_after_group_gap_ms, compute_group_gap_for_wpm};
 
 pub const AUTO_CONFIRM_DELAY_MS: u32 = 300;
 
-/// How long after the player said a send's sound would end it may be seen
-/// to end and its characters still be timed from what the player said:
-/// the wait's own tail and poll, and room besides. Later, it started late.
-const LATE_SEND_MS: u64 = 150;
-
 /// One step of the count down before the first group.
 pub const COUNTDOWN_STEP_MS: u32 = 1_000;
 
@@ -44,10 +39,11 @@ pub enum SessionEvent {
         duration_sec: f64,
         char_wpm: f64,
         effective_wpm: f64,
-        /// When each character of the group reached the ear, finished, in
-        /// this send: the player's own reckoning, its output latency
-        /// included ([`crate::PlaybackPlan::char_ends`]). Empty when the
-        /// runtime does not say.
+        /// When each character of the group was heard, finished, in this
+        /// send: taken as when its last sample went to the audio output, by
+        /// the player's own reckoning ([`crate::PlaybackPlan::char_ends`]).
+        /// The delay on to the ear cannot be known and is not guessed at.
+        /// Empty when the runtime does not say, or the send played late.
         heard_at: Vec<MonoMs>,
     },
     /// The send stopped before it finished — cancelled from outside, or the
@@ -350,17 +346,9 @@ impl<S: GroupSource> SessionMachine<S> {
             .session
             .group_start(index)
             .map_or(now, |start| start.plus(self.group_elapsed_ms));
-        let end = now.max(earliest);
-        // The last send's, which is the one answered — unless the send was
-        // seen to end well after the player said its sound would: it started
-        // late, a suspended audio clock or a stall, and every time in it
-        // would be that much slower than it was.
-        let late = heard_at
-            .last()
-            .is_some_and(|last| end > last.plus(LATE_SEND_MS));
-        let heard_at = if late { Vec::new() } else { heard_at };
+        // The last send's, which is the one answered.
         self.session
-            .end_playback(index, end, char_wpm, effective_wpm, heard_at);
+            .end_playback(index, now.max(earliest), char_wpm, effective_wpm, heard_at);
         self.set_phase(SessionPhase::AwaitingAnswer { index });
         let timeout_ms = (self.session.settings().playback.group_timeout * 1000.0).round() as u32;
         if timeout_ms == 0 {
@@ -1233,7 +1221,7 @@ mod tests {
         assert_eq!(result.group_timings[0].time_to_complete_ms, 2_000.0);
     }
 
-    /// "KM" typed along, its characters said to reach the ear at 600 and
+    /// "KM" typed along, its characters said to be heard at 600 and
     /// 1000, its send seen to end at `ended_at`: the recognition times.
     fn timed_along(ended_at: u64) -> Vec<Option<u32>> {
         let mut m = start_with(settings(1, false, 10.0), script(&["KM"], 1));
@@ -1254,13 +1242,12 @@ mod tests {
         result.group_timings[0].recognition_ms.clone()
     }
 
-    /// A send seen to end well after its sound was said to started late, a
-    /// suspended audio clock or a stall: its times would all be off, so
-    /// none is kept. Seen to end about when it was said to, they are.
+    /// Each character is timed from when the send says it was heard,
+    /// however late the end is seen: whether the send played late is the
+    /// player's to say, against its own audio.
     #[test]
-    fn a_send_that_started_late_is_not_timed() {
+    fn a_send_is_timed_from_what_it_says_of_its_characters() {
         assert_eq!(timed_along(1_000), [Some(200), Some(150)]);
-        assert_eq!(timed_along(1_150), [Some(200), Some(150)]);
-        assert_eq!(timed_along(1_151), Vec::<Option<u32>>::new());
+        assert_eq!(timed_along(1_400), [Some(200), Some(150)]);
     }
 }

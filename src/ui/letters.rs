@@ -22,7 +22,6 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
-use crate::audio::TIMES_RECOGNITION;
 use crate::ui::bigram::id_part;
 use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, control_id};
@@ -354,15 +353,9 @@ pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
             }
             if !timing {
                 p { class: "muted", style: "margin: 0; font-size: 0.85rem;",
-                    if TIMES_RECOGNITION {
-                        "In group training, how fast you recognise each character is timed as you type along: with Lock typing while sending off (Settings → Session shape), or with groups of one character. Type each one as soon as you hear it."
-                    } else {
-                        "How fast you recognise each character is not timed on Android: its sound output cannot say closely enough when each character reaches you."
-                    }
-                    if answered && TIMES_RECOGNITION {
+                    "In group training, how fast you recognise each character is timed as you type along, in groups sent once (Sends per group 1×): with Lock typing while sending off (Settings → Session shape), or with groups of one character. Type each one as soon as you hear it."
+                    if answered {
                         " Until then, each row shows how long its groups took to answer, shared out over their characters."
-                    } else if answered {
-                        " Each row shows how long its groups took to answer instead, shared out over their characters."
                     }
                 }
             }
