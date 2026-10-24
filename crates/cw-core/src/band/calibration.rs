@@ -6,7 +6,7 @@
 //! quoted. The static and the other stations are set against the reference
 //! floor in that filter: absolute, like the station you are copying, so that
 //! turning the hiss down does not take the storm or the band's traffic down
-//! with it. The AGC's knee holds at what the reference floor peaks at.
+//! with it. The AGC's knee holds at what the quietest floor peaks at.
 
 use std::f64::consts::SQRT_2;
 
@@ -24,8 +24,7 @@ pub const REFERENCE_BANDWIDTH_HZ: f64 = 500.0;
 /// The setting of the noise control the band is calibrated against: the
 /// middle of it, where the floor is a station 21 dB down in the reference
 /// bandwidth. The static and the stations are set against this floor whether
-/// or not the floor itself is switched on, and the AGC's knee never sits
-/// lower than this floor puts it.
+/// or not the floor itself is switched on.
 pub const REFERENCE_NOISE_LEVEL: f64 = 0.5;
 
 /// Signal-to-noise in the reference bandwidth at each end of the noise

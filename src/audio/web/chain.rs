@@ -4,9 +4,10 @@
 //! with the audio-stage floor's way around the RF gain and the compressor
 //! and the paddle's sidetone's around the volume.
 
+use cw_core::AgcDecay;
 use cw_core::TrainingSettings;
 use cw_core::band::{
-    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_RELEASE_SEC, FilterDesign, agc_compressor,
+    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, FilterDesign, agc_compressor, agc_decay_sec,
     limiter_feed, receiver_knee, soft_limit_curve,
 };
 use web_sys::{AnalyserNode, AudioContext, AudioParam, DynamicsCompressorNode, GainNode};
@@ -62,7 +63,8 @@ pub struct Chain {
     /// The band's floor goes in here, through the gate's second half.
     pub band_floor: GainNode,
     /// The level scope's taps: what reaches the AGC, after the RF gain, and
-    /// what comes out of both volumes on the way to the limiter.
+    /// what comes out of both volumes on the way to the limiter, which is
+    /// [`cw_core::band::SOFT_LIMIT_HEADROOM`] times quieter than it is played.
     pub meter_input: AnalyserNode,
     pub meter_output: AnalyserNode,
 }
@@ -102,7 +104,11 @@ impl Chain {
             (agc.threshold(), 0.0, "agc threshold"),
             (agc.ratio(), 1.0, "agc ratio"),
             (agc.attack(), AGC_ATTACK_SEC, "agc attack"),
-            (agc.release(), AGC_RELEASE_SEC, "agc release"),
+            (
+                agc.release(),
+                agc_decay_sec(AgcDecay::Fast).1,
+                "agc release",
+            ),
         ] {
             param
                 .set_value_at_time(value as f32, now)
@@ -233,10 +239,12 @@ impl Chain {
     ///
     /// The same knee the native receiver uses ([`receiver_knee`]: set from the
     /// band's own floor, measured at a low rate because this runs on the main
-    /// thread every time a band setting moves), the same two-to-one slope
-    /// above it, attack and release to match. A compressor has no hang, so
-    /// between elements it lets go a little where the native AGC holds — a
-    /// decibel or two of ripple — but its static curve is the native one.
+    /// thread every time a band setting moves), the same ten-to-one slope
+    /// above it, attack to match and the release of the decay asked for. A
+    /// compressor has no hang, so between elements it lets go a little where
+    /// the native AGC holds — a decibel or two of ripple — but its static
+    /// curve is the native one. Its own look-ahead, six milliseconds in every
+    /// browser, catches the first element of an over as the native one does.
     /// With the AGC off, or nothing on the band for it to ride, it is parked
     /// where it is transparent, as the native player is with no band running.
     ///
@@ -261,6 +269,8 @@ impl Chain {
             .agc
             .ratio()
             .set_value_at_time(setting.ratio.clamp(1.0, 20.0) as f32, now);
+        let (_, release) = agc_decay_sec(settings.band.agc_decay);
+        let _ = self.agc.release().set_value_at_time(release as f32, now);
         let feed = limiter_feed(&setting);
         let _ = self
             .limiter_in

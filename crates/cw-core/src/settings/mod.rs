@@ -104,6 +104,33 @@ pub enum FilterShape {
     Peaked,
 }
 
+/// How fast the receiver's AGC lets the gain back up once a signal has
+/// gone, as a rig's AGC switch offers it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgcDecay {
+    /// Holds across the gaps inside a word and lets the band back in a word
+    /// gap: what most CW operators run.
+    #[default]
+    Fast,
+    /// Holds across word gaps too and comes back over a second or so: the
+    /// band stays steady under a station, and a weak one right after a strong
+    /// one comes up slowly.
+    Slow,
+}
+
+impl<'de> Deserialize<'de> for AgcDecay {
+    /// By name, anything this version does not know coming back as Fast,
+    /// rather than costing the rest of the save.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(match name.as_str() {
+            "slow" => Self::Slow,
+            _ => Self::Fast,
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for FilterShape {
     /// By name. Anything this version does not know — a shape a later version
     /// added, or a save edited by hand — comes back as Sharp, the plain IF
@@ -459,6 +486,9 @@ pub struct BandSettings {
     /// The receiver's automatic gain control. Off is a receiver run on its
     /// RF gain, the way contesters often do.
     pub agc_enabled: bool,
+    /// How fast the AGC lets the gain back up once a signal has gone. Older
+    /// saves have no field and load at Fast, which is how the AGC ran.
+    pub agc_decay: AgcDecay,
     /// Where the AGC starts to turn signals down, in decibels over the lowest
     /// it goes: how much stronger a signal has to be before the AGC acts
     /// ([`crate::band::receiver_knee`]). The lowest, out of the box, starts
@@ -517,6 +547,7 @@ impl Default for BandSettings {
             noise_level: crate::band::NOISE_LEVEL_PER_DB,
             rf_gain_db: RF_GAIN_MAX_DB,
             agc_enabled: true,
+            agc_decay: AgcDecay::Fast,
             agc_threshold_db: AGC_THRESHOLD_MIN_DB,
             filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
             filter_shape: FilterShape::default(),
@@ -1437,6 +1468,28 @@ mod tests {
         }
     }
 
+    /// The AGC's decay is saved by name, loads at Fast from a save from
+    /// before it, and a name this build does not know comes back as Fast
+    /// rather than costing the save.
+    #[test]
+    fn the_agc_decay_is_saved_by_name() {
+        let mut slow = TrainingSettings::default();
+        assert_eq!(slow.band.agc_decay, AgcDecay::Fast);
+        slow.band.agc_decay = AgcDecay::Slow;
+        let json = serde_json::to_value(&slow).expect("settings serialize");
+        assert_eq!(json["agcDecay"], "slow");
+        let back: TrainingSettings = serde_json::from_value(json).expect("and load back");
+        assert_eq!(back.band.agc_decay, AgcDecay::Slow);
+        for save in [
+            serde_json::json!({ "stationsMax": 3 }),
+            serde_json::json!({ "agcDecay": "medium", "stationsMax": 3 }),
+        ] {
+            let settings: TrainingSettings = serde_json::from_value(save).expect("loads");
+            assert_eq!(settings.band.agc_decay, AgcDecay::Fast);
+            assert_eq!(settings.band.stations_max, 3);
+        }
+    }
+
     /// Dragging either end past the other takes the other with it, so the
     /// range can never be stored back to front.
     #[test]
@@ -1626,6 +1679,7 @@ mod tests {
         s.band.noise_level = 0.9;
         s.band.agc_enabled = false;
         s.band.agc_threshold_db = 12.0;
+        s.band.agc_decay = AgcDecay::Slow;
         s.band.rf_gain_db = -12.0;
         s.band.filter_width_hz = 250.0;
         s.band.filter_shape = FilterShape::Soft;
@@ -1765,7 +1819,7 @@ mod tests {
                 "{section:?}"
             );
             assert_eq!(
-                s.contest.my_sending_db == -6,
+                s.contest.my_sending_db == -3,
                 section == SettingsSection::ToneAndVolume,
                 "{section:?}"
             );
@@ -1852,7 +1906,7 @@ mod tests {
         assert_eq!(json["contestTuCall"], "third");
         assert_eq!(json["contestAdaptSpeed"], true);
         assert_eq!(json["myWpm"], 0);
-        assert_eq!(json["mySendingDb"], -6);
+        assert_eq!(json["mySendingDb"], -3);
         assert_eq!(json["contestQsk"], false);
         assert_eq!(json["myCall"], "");
         assert_eq!(json["myName"], "");

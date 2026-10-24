@@ -1,6 +1,6 @@
 use cw_core::band::{FilterDesign, NOISE_LEVEL_PER_DB, heard_snr_db};
 use cw_core::{
-    AGC_THRESHOLD_MAX_DB, AGC_THRESHOLD_MIN_DB, BandSettings, CallerHabits, CharSetMode,
+    AGC_THRESHOLD_MAX_DB, AGC_THRESHOLD_MIN_DB, AgcDecay, BandSettings, CallerHabits, CharSetMode,
     ContestRules, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Field, FilterShape, PILEUP_LEVEL_MAX_DB,
     PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
     RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RunStyle, STATIONS_MAX, STATIONS_MIN,
@@ -14,6 +14,9 @@ use crate::ui::scope::LevelScope;
 use crate::ui::widgets::{
     CardHead, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch, control_id,
 };
+
+/// The AGC's decays, in the order the control offers them.
+const AGC_DECAYS: [(AgcDecay, &str); 2] = [(AgcDecay::Fast, "Fast"), (AgcDecay::Slow, "Slow")];
 
 /// The filter shapes, in the order the control offers them.
 const FILTER_SHAPES: [(FilterShape, &str); 3] = [
@@ -213,7 +216,7 @@ pub fn BandConditionsCard(
             }
             if previewing {
                 p { class: "muted", style: "margin: 0;",
-                    "Looping “CQ” with the current mix. Move a slider and you hear it immediately."
+                    "Looping “CQ” loud, medium and weak in turn (100%, 30% and 10% strength) through the current mix. Move a slider and you hear the change."
                 }
             }
             div { class: "field-grid",
@@ -395,9 +398,27 @@ pub fn BandConditionsCard(
             }
             Switch {
                 title: "AGC".to_string(),
-                description: "The receiver rides its gain: the band ducks under a strong station and behind a crash.".to_string(),
+                description: "The receiver rides its gain: stations over its threshold come out nearly as loud as each other, and the hiss ducks under them and comes back between overs.".to_string(),
                 checked: b.agc_enabled,
                 onchange: move |on| settings.write().band.agc_enabled = on,
+            }
+            if b.agc_enabled {
+                div { class: "field",
+                    span { class: "field-label", "AGC decay" }
+                    div { class: "segmented",
+                        for (decay, label) in AGC_DECAYS {
+                            Seg {
+                                label,
+                                id: control_id("seg", &format!("agc {label}")),
+                                active: b.agc_decay == decay,
+                                onclick: move |_| settings.write().band.agc_decay = decay,
+                            }
+                        }
+                    }
+                }
+                p { id: "agc-decay-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "How fast the gain comes back once a signal has gone: Fast by the next word, Slow over a second or so, holding the band steady through an over."
+                }
             }
             SliderField {
                 label: "AGC threshold".to_string(),
@@ -411,7 +432,7 @@ pub fn BandConditionsCard(
             }
             p { id: "agc-threshold-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
                 if b.agc_enabled {
-                    "How strong a signal has to be before the AGC turns it down; at its lowest, just over the band's hiss. Raise it and the AGC works less: strong stations are squeezed less and the band breathes less between overs. The volume follows, so the strongest station stays as loud."
+                    "How strong a signal has to be before the AGC turns it down; at its lowest, just over the quietest hiss, so every station you can copy is evened out. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss ducks less. The volume follows, so the strongest station stays as loud."
                 } else {
                     "With the AGC off there is no threshold to set."
                 }
@@ -420,7 +441,7 @@ pub fn BandConditionsCard(
                 LevelScope { settings }
             } else {
                 p { id: "scope-hint", class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                    "Play the live preview to watch the band reach the AGC, and set the RF gain and the threshold by it: the station's peaks over the dashed line are ridden by the AGC, under it they come through as they are."
+                    "Play the live preview to hear and watch it: CQ comes loud, medium and weak in turn. Peaks over the dashed line are evened out by the AGC; under it they keep their own level."
                 }
             }
         }

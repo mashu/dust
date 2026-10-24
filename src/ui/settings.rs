@@ -720,7 +720,7 @@ fn MasterVolume(settings: Signal<TrainingSettings>) -> Element {
     }
 }
 
-/// What your sending reads as: "−6 dB", or "Off" at the bottom.
+/// What your sending reads as: "−3 dB", or "Off" at the bottom.
 fn sending_label(db: i32) -> String {
     if db <= MY_SENDING_OFF_DB {
         "Off".to_string()
