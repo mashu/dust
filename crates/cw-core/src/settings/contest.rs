@@ -31,13 +31,15 @@ pub const MY_SENDING_MAX_DB: i32 = 0;
 pub const MY_SENDING_OFF_DB: i32 = -60;
 
 /// Your sending until you set it: level with an average caller as you hear
-/// it. The loudest stands about 6 dB over an average caller before the
-/// receiver's AGC, which ducks that caller some 4 dB more, so a caller is
-/// heard about 7 dB under it (§5.3 of the design); 9 dB down, your message
-/// sits a couple of decibels under the caller, about level, as a rig's
-/// sidetone set to the receiver's audio is, and still stands well clear of
-/// the default band's noise.
-const MY_SENDING_DEFAULT_DB: i32 = -9;
+/// it. Its loudest, 0 dB, is the limiter's knee, where the strongest station
+/// a receiver plays at full volume crests as an over starts; an average
+/// caller, drawn under the strongest and ridden by the AGC once it is
+/// sending, holds about 5 dB under that (§5.3 of the design). Six down, your
+/// message sits a decibel under the caller, about level, as a rig's sidetone
+/// set to the receiver's audio is, and still stands well clear of the
+/// default band's noise. Measured through the default receiver at full
+/// volume: the caller at 0.39 of full scale, your message at 0.35.
+const MY_SENDING_DEFAULT_DB: i32 = -6;
 
 /// The longest callsign kept: room for a host and a marker around a call,
 /// `VP2E/DL1ABC/P` aside.
@@ -1065,7 +1067,7 @@ mod tests {
     #[test]
     fn your_sending_turns_the_monitor_down() {
         let mut settings = ContestSettings::default();
-        assert_eq!(settings.my_sending_db, -9);
+        assert_eq!(settings.my_sending_db, -6);
         let level = |db: i32| {
             ContestSettings {
                 my_sending_db: db,
@@ -1087,7 +1089,7 @@ mod tests {
         assert_eq!(settings.sending_level(), 0.0);
         // At full volume the top is where the limiter starts to bend, and
         // no further.
-        let heard = level(MY_SENDING_MAX_DB) * crate::band::FULL_VOLUME_GAIN;
+        let heard = level(MY_SENDING_MAX_DB);
         assert!(
             (heard - crate::band::SOFT_LIMIT_KNEE).abs() < 1e-12,
             "{heard}"
@@ -1133,7 +1135,7 @@ mod tests {
                 missing.my_sending_db,
                 missing.contest_tu_call
             ),
-            (0, -9, TuCall::Third)
+            (0, -6, TuCall::Third)
         );
         assert_eq!(missing.my_call, "DL1ABC");
         let set = read(serde_json::json!({
@@ -1153,7 +1155,7 @@ mod tests {
         }));
         assert_eq!(
             (odd.my_wpm, odd.my_sending_db, odd.contest_tu_call),
-            (0, -9, TuCall::Third)
+            (0, -6, TuCall::Third)
         );
         assert_eq!(odd.my_call, "K1ABC", "the rest of the save is kept");
         let wild = read(serde_json::json!({ "myWpm": -4.6, "mySendingDb": 1e12 }));
@@ -1163,7 +1165,7 @@ mod tests {
         let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
         assert_eq!(json["contestTuCall"], "third");
         assert_eq!(json["myWpm"], 0);
-        assert_eq!(json["mySendingDb"], -9);
+        assert_eq!(json["mySendingDb"], -6);
     }
 
     #[test]

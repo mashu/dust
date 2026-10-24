@@ -25,7 +25,9 @@
 //!    quite silent outside the passband — as no real receiver is.
 //! 5. A soft limiter ([`soft_limit`]) catches whatever is still too loud,
 //!    once, on everything the player is about to play, after the volume
-//!    ([`crate::TrainingSettings::output_gain`]) has set how loud it is.
+//!    ([`crate::TrainingSettings::af_gain`]) has set how loud it is: as loud
+//!    as the strongest station comes out of this receiver clean
+//!    ([`full_volume_gain`]), at full.
 //!
 //! QSB is applied to the Morse alone ([`Qsb`]): fading is a property of the
 //! path a station arrives on, not of the noise around it.
@@ -43,6 +45,7 @@ mod dsp;
 mod filter;
 mod key;
 mod knee;
+mod loudness;
 mod memo;
 mod noise;
 mod output;
@@ -62,10 +65,9 @@ pub use filter::{
 };
 pub use key::BandKey;
 pub use knee::{agc_knee, receiver_knee, rf_gain};
+pub use loudness::{full_volume_gain, loudest_station};
 pub use noise::AudioFloor;
-pub use output::{
-    FULL_VOLUME_GAIN, LimiterFeed, SOFT_LIMIT_KNEE, limiter_feed, soft_limit, soft_limit_curve,
-};
+pub use output::{LimiterFeed, SOFT_LIMIT_KNEE, limiter_feed, soft_limit, soft_limit_curve};
 pub use qsb::Qsb;
 pub use source::BandSource;
 

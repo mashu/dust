@@ -29,7 +29,7 @@ use web_sys::{AudioContext, AudioContextState, GainNode};
 
 use super::band_queue::Reservation;
 use super::epoch::{Epoch, Ticket};
-use super::shape::{GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest};
+use super::shape::{GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest, Volume};
 use super::wait::{heard_after_sec, heard_ms, schedule_lead_sec};
 use super::{MorseBackend, PlaybackSignal, WaitFlags};
 use crate::time::mono_ms;
@@ -169,7 +169,7 @@ impl MorsePlayer {
     }
 
     fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.chain.set_volume(&self.ctx, settings.output_gain());
+        self.chain.set_volume(&self.ctx, Volume::of(settings));
         self.receiver.tune(&self.ctx, &self.chain, settings)?;
         let key = BandKey::of(&settings.band);
         if self.band_key == Some(key) {
@@ -309,13 +309,13 @@ impl MorseBackend for MorsePlayer {
         // together.
         self.release_send(takes_over.then_some(start - SEND_RELEASE_SEC));
         // Your own message in a contest goes around the receiver, whose
-        // filter and AGC are for what you copy, as the paddle's sidetone
-        // does; but through the volume, as the native mixer plays it, and
-        // the limiter.
+        // filter, AGC and AF gain are for what you copy, as the paddle's
+        // sidetone does; at the volume alone, as the native mixer monitors
+        // it, and through the limiter.
         let send = ScheduledSend::schedule(
             &self.ctx,
             &self.chain.mix,
-            &self.chain.floor_in,
+            &self.chain.monitor_in,
             plan,
             Qsb::of(&settings.band),
             start,

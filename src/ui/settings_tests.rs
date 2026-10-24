@@ -1141,7 +1141,7 @@ fn the_callers_adaptive_speed_is_on_the_speed_card_in_contest_mode() {
 }
 
 /// Your sending is on the Tone and volume card in Contest mode only, in
-/// decibels from the loudest down to off, at -9 dB until you set it; it
+/// decibels from the loudest down to off, at -6 dB until you set it; it
 /// is stored, a preset leaves it alone, and the card's reset puts it back.
 #[test]
 fn your_sending_is_on_the_tone_card_in_contest_mode() {
@@ -1154,14 +1154,14 @@ fn your_sending_is_on_the_tone_card_in_contest_mode() {
         ui.click("nav-settings");
         assert!(ui.shows("slider-your-sending"));
         assert!(
-            ui.has(r#"<span class="slider-value">−9 dB</span>"#),
+            ui.has(r#"<span class="slider-value">−6 dB</span>"#),
             "{}",
             ui.html()
         );
         // Apart from the station strength, and level with an average caller
         // where it starts, as cw-core keeps that.
         assert!(ui.has(
-            "Your own messages in a run, apart from the station strength above: 0 dB is the loudest, −9 dB about level with an average caller, and Off silent"
+            "Your own messages in a run, apart from the station strength above: 0 dB is the loudest, −6 dB about level with an average caller, and Off silent"
         ));
         // It sits on Tone and volume, after the station strength.
         let html = ui.html();
@@ -1178,8 +1178,8 @@ fn your_sending_is_on_the_tone_card_in_contest_mode() {
         assert!(card < strength && strength < sending);
 
         ui.click("less-slider-your-sending");
-        assert_eq!(ui.stored_settings().await.contest.my_sending_db, -12);
-        assert!(ui.has(r#"<span class="slider-value">−12 dB</span>"#));
+        assert_eq!(ui.stored_settings().await.contest.my_sending_db, -9);
+        assert!(ui.has(r#"<span class="slider-value">−9 dB</span>"#));
         ui.type_into("slider-your-sending", "-60");
         assert_eq!(ui.stored_settings().await.contest.my_sending_db, -60);
         assert!(ui.has(r#"<span class="slider-value">Off</span>"#));
@@ -1196,7 +1196,7 @@ fn your_sending_is_on_the_tone_card_in_contest_mode() {
             "a preset leaves it alone"
         );
         ui.click("reset-tone-volume");
-        assert_eq!(ui.stored_settings().await.contest.my_sending_db, -9);
+        assert_eq!(ui.stored_settings().await.contest.my_sending_db, -6);
     });
 }
 

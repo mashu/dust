@@ -7,7 +7,8 @@
 //! band, the AGC hearing the two together and riding both, bands handing
 //! over to each other, and, without full break-in, its output muted while
 //! you send. Your own message in a contest joins after all of it, as a
-//! rig's sidetone does, and the volume sets how loud the lot is played. The
+//! rig's sidetone does, at the volume, and the receiver's AF gain sets how
+//! loud the rest is played. The
 //! output stage — the paddle's sidetone, and the limiter on everything — is
 //! added by the stream, which runs it even when the UI holds the mixer for a
 //! moment.
@@ -22,7 +23,7 @@ use std::sync::{Arc, Mutex, TryLockError};
 
 use cw_core::band::soft_limit;
 
-use crate::audio::shape::GATE_RAMP_SEC;
+use crate::audio::shape::{GATE_RAMP_SEC, Volume};
 
 pub use band::BandVoice;
 pub use send::SendVoice;
@@ -54,12 +55,12 @@ pub struct Mixer {
     /// break-in, moving between the two a straight line at a time, over
     /// [`GATE_RAMP_SEC`], so it never clicks.
     gate: f64,
-    /// What everything it plays is multiplied by, the volume, and what it
-    /// was last asked to be: moving between the two at the gate's pace, a
-    /// whole unit of gain over [`GATE_RAMP_SEC`], so a slider moved under a
-    /// tone never clicks.
-    volume: f64,
-    volume_asked: f64,
+    /// What it plays what it receives and what it monitors at, and what it
+    /// was last asked to: moving between the two at the gate's pace, a whole
+    /// unit of gain over [`GATE_RAMP_SEC`], so a slider moved under a tone
+    /// never clicks.
+    volume: Volume,
+    volume_asked: Volume,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -93,8 +94,8 @@ impl Mixer {
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
             latency: 0,
             gate: 1.0,
-            volume: 1.0,
-            volume_asked: 1.0,
+            volume: Volume::UNITY,
+            volume_asked: Volume::UNITY,
         }
     }
 
@@ -108,10 +109,13 @@ impl Mixer {
         self.latency as f64 / f64::from(self.sample_rate)
     }
 
-    /// Play everything at `gain` from here on: the volume, as the output
-    /// stage's gain ([`cw_core::TrainingSettings::output_gain`]).
-    pub fn set_volume(&mut self, gain: f64) {
-        self.volume_asked = if gain.is_finite() { gain.max(0.0) } else { 1.0 };
+    /// Play what it receives and what it monitors at `volume` from here on.
+    pub fn set_volume(&mut self, volume: Volume) {
+        let held = |gain: f64| if gain.is_finite() { gain.max(0.0) } else { 1.0 };
+        self.volume_asked = Volume {
+            received: held(volume.received),
+            monitored: held(volume.monitored),
+        };
     }
 
     /// Put a new band in, or take the band away. The one going out is not
@@ -244,7 +248,8 @@ impl Mixer {
             }
             // Your own message comes in after the AGC: the receiver never
             // hears it, so it neither ducks the reply that follows nor is
-            // shaped by the filter, and only the limiter is past it.
+            // shaped by the filter, and it is monitored at the volume alone,
+            // set at the level it is heard at, not at the AF gain.
             let heard = send.heard * gain.unwrap_or(1.0);
             // Without full break-in the receiver's output, the band and the
             // stations alike, goes quiet while you send, as a rig that is
@@ -252,8 +257,11 @@ impl Mixer {
             // is never muted.
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
-            self.volume += (self.volume_asked - self.volume).clamp(-gate_step, gate_step);
-            *slot += (((background + heard) * self.gate + send.dry) * self.volume) as f32;
+            let (asked, now) = (self.volume_asked, &mut self.volume);
+            now.received += (asked.received - now.received).clamp(-gate_step, gate_step);
+            now.monitored += (asked.monitored - now.monitored).clamp(-gate_step, gate_step);
+            *slot +=
+                ((background + heard) * self.gate * now.received + send.dry * now.monitored) as f32;
         }
         for send in self.send.iter().chain(&self.retiring) {
             send.settle(latency);

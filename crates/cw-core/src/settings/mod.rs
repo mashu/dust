@@ -42,7 +42,7 @@ pub const SIDE_TONE_MAX_HZ: f64 = 1_200.0;
 pub const VOLUME_MIN: f64 = 0.1;
 pub const VOLUME_MAX: f64 = 1.0;
 /// How loud everything is played, as a share of full volume: the loudest
-/// the output stage plays clean ([`crate::band::FULL_VOLUME_GAIN`]).
+/// the receiver plays a station clean ([`crate::band::full_volume_gain`]).
 pub const MASTER_VOLUME_MIN: f64 = 0.05;
 pub const MASTER_VOLUME_MAX: f64 = 1.0;
 /// The keying envelope's rise and fall, in milliseconds.
@@ -415,11 +415,12 @@ pub struct BandSettings {
     pub volume_min: f64,
     pub volume_max: f64,
     pub link_volume: bool,
-    /// How loud everything is played, as a share of full volume: the band,
-    /// the Morse and your own messages, lifted together after the AGC and
-    /// before the limiter ([`TrainingSettings::output_gain`]), and the
-    /// paddle's sidetone with them. Full, out of the box, is as loud as the
-    /// output stage plays clean; older saves have no field and load at it.
+    /// How loud everything is played, as a share of full volume: the band and
+    /// the stations, after the AGC and before the limiter
+    /// ([`TrainingSettings::af_gain`]), and your own messages and the
+    /// paddle's sidetone with them. Full, out of the box, is as loud as this
+    /// receiver plays the strongest station clean; older saves have no field
+    /// and load at it.
     pub master_volume: f64,
     /// The keying envelope's rise and fall, in milliseconds. A rig keys in
     /// four to eight; ten sounded soft.
@@ -788,13 +789,13 @@ mod tests {
     /// nothing set takes it past full or under its floor.
     #[test]
     fn the_volume_is_a_share_of_full_volume() {
-        let full = crate::band::FULL_VOLUME_GAIN;
         let mut s = TrainingSettings::default();
+        let full = crate::band::full_volume_gain(&s);
         assert_eq!(s.band.master_volume, 1.0);
-        assert_eq!(s.output_gain(), full);
+        assert_eq!(s.af_gain(), full);
         assert!(full > 1.0, "full is louder than the band as calibrated");
         s.band.master_volume = 0.5;
-        assert_eq!((s.master_volume(), s.output_gain()), (0.5, 0.5 * full));
+        assert_eq!((s.master_volume(), s.af_gain()), (0.5, 0.5 * full));
         for wild in [90.0, -9.0, 0.0, f64::NAN, f64::INFINITY] {
             s.band.master_volume = wild;
             let share = s.master_volume();
@@ -1722,7 +1723,7 @@ mod tests {
                 "{section:?}"
             );
             assert_eq!(
-                s.contest.my_sending_db == -9,
+                s.contest.my_sending_db == -6,
                 section == SettingsSection::ToneAndVolume,
                 "{section:?}"
             );
@@ -1809,7 +1810,7 @@ mod tests {
         assert_eq!(json["contestTuCall"], "third");
         assert_eq!(json["contestAdaptSpeed"], true);
         assert_eq!(json["myWpm"], 0);
-        assert_eq!(json["mySendingDb"], -9);
+        assert_eq!(json["mySendingDb"], -6);
         assert_eq!(json["contestQsk"], false);
         assert_eq!(json["myCall"], "");
         assert_eq!(json["myName"], "");

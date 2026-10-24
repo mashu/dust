@@ -4,7 +4,7 @@
 //! and the browser cannot drift apart — values that had to match used to be
 //! copied by hand.
 
-use cw_core::{SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ};
+use cw_core::{SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, TrainingSettings};
 
 /// How long a stopped send takes to reach silence: kept with the plans, as
 /// a contest's machine splices a continuation onto a send no sooner than
@@ -21,6 +21,32 @@ pub const BAND_FADE_SEC: f64 = 0.02;
 /// and a straight line long enough that neither the hiss nor a caller's
 /// tone it catches clicks.
 pub const GATE_RAMP_SEC: f64 = 0.005;
+
+/// How loud a player plays the two things it plays: what it receives, the
+/// band and the stations, at the receiver's AF gain, which full volume sizes
+/// to the receiver; and what it monitors, your own messages, at the volume
+/// alone, as they are set at the level they are heard at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Volume {
+    pub received: f64,
+    pub monitored: f64,
+}
+
+impl Volume {
+    /// Both at one: the band as it is calibrated, and your messages at their
+    /// level.
+    pub const UNITY: Self = Self {
+        received: 1.0,
+        monitored: 1.0,
+    };
+
+    pub fn of(settings: &TrainingSettings) -> Self {
+        Self {
+            received: settings.af_gain(),
+            monitored: settings.master_volume(),
+        }
+    }
+}
 
 /// One step of the receiver's gate as the browser plays it: held at a
 /// level from a moment, or moved there in a straight line ending then,

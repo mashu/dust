@@ -110,7 +110,10 @@ fn the_volume_moves_all_the_receiver_plays_without_a_step() {
         let mut swept = Swept::new();
         mixer.set_band(Some(band(&settings, 9)), &mut swept);
         mixer.start(send(&settings, "TEST"), &mut swept);
-        mixer.set_volume(volume);
+        mixer.set_volume(Volume {
+            received: volume,
+            monitored: 1.0,
+        });
         render(&mut mixer, SR as usize)
     };
     let (plain, lifted) = (play(1.0), play(4.0));
@@ -123,21 +126,21 @@ fn the_volume_moves_all_the_receiver_plays_without_a_step() {
     }
 }
 
-/// Full volume is as loud as the Morse plays clean, through any receiver:
-/// a station at full strength, on its own, never reaches where the limiter
-/// starts to bend, whatever the AGC, the filter's shape and width, the
-/// keying's edges or the pitch, and through the receiver it peaks highest
-/// in, it comes close.
+/// Full volume is as loud as the Morse plays clean, through whatever
+/// receiver is set: a station at full strength, on its own, never reaches
+/// where the limiter starts to bend, whatever the AGC, the RF gain, the
+/// filter's shape and width, the keying's edges or the pitch, and through
+/// every one of them it comes close, full volume sized to that receiver.
 #[test]
-fn at_full_volume_no_station_reaches_the_limiter() {
+fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
     use cw_core::FilterShape;
-    let mut loudest_of_all = 0.0f64;
-    for agc in [true, false] {
+    for (agc, rf_gain_db) in [(true, 0.0), (true, -6.0), (false, 0.0)] {
         for shape in [FilterShape::Peaked, FilterShape::Sharp, FilterShape::Soft] {
             for width in [FILTER_WIDTH_MIN, 2_000.0] {
                 for (low, high) in [(300.0, 600.0), (200.0, 200.0), (1_200.0, 1_200.0)] {
                     let mut settings = hiss();
                     settings.band.agc_enabled = agc;
+                    settings.band.rf_gain_db = rf_gain_db;
                     settings.band.filter_shape = shape;
                     settings.band.filter_width_hz = width;
                     settings.band.steepness = cw_core::STEEPNESS_MIN_MS;
@@ -148,11 +151,12 @@ fn at_full_volume_no_station_reaches_the_limiter() {
                     let settings = settings.clamp();
                     assert_eq!(settings.master_volume(), 1.0, "full out of the box");
                     let receiver = FilterDesign::from_settings(&settings);
+                    let mut loudest_here = 0.0f64;
                     for seed in 0..5 {
                         let mut mixer = Mixer::new(SR);
                         let mut swept = Swept::new();
                         mixer.set_band(Some(band(&settings, seed)), &mut swept);
-                        mixer.set_volume(settings.output_gain());
+                        mixer.set_volume(Volume::of(&settings));
                         render(&mut mixer, SR as usize / 2);
                         let voice = resolve_station(&settings, &mut SplitMix64::new(seed));
                         let plan =
@@ -160,20 +164,20 @@ fn at_full_volume_no_station_reaches_the_limiter() {
                         mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
                         let frames = ((plan.wanted.duration_sec + 0.2) * f64::from(SR)) as usize;
                         let peak = f64::from(loudest(&render(&mut mixer, frames)));
-                        assert!(
-                            peak < SOFT_LIMIT_KNEE,
-                            "{peak:.3} with the AGC {agc}, {shape:?} {width} Hz, {low}-{high} Hz, seed {seed}"
+                        let at = format!(
+                            "the AGC {agc} at {rf_gain_db} dB, {shape:?} {width} Hz, {low}-{high} Hz"
                         );
-                        loudest_of_all = loudest_of_all.max(peak);
+                        assert!(peak < SOFT_LIMIT_KNEE, "{peak:.3} with {at}, seed {seed}");
+                        loudest_here = loudest_here.max(peak);
                     }
+                    assert!(
+                        loudest_here > 0.8 * SOFT_LIMIT_KNEE,
+                        "only {loudest_here:.3} with the AGC {agc} at {rf_gain_db} dB, {shape:?} {width} Hz, {low}-{high} Hz"
+                    );
                 }
             }
         }
     }
-    assert!(
-        loudest_of_all > 0.9 * SOFT_LIMIT_KNEE,
-        "{loudest_of_all:.3}"
-    );
 }
 
 /// Bands rebuilt faster than one can fade out each fade out in full: none is

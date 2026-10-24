@@ -4,7 +4,7 @@ use super::{
     MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
     SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, TrainingSettings, VOLUME_MAX, VOLUME_MIN,
 };
-use crate::band::FULL_VOLUME_GAIN;
+use crate::band::full_volume_gain;
 
 /// How far apart the side tone bounds are pushed when a fixed pitch is opened
 /// back up into a range.
@@ -182,10 +182,13 @@ impl TrainingSettings {
         )
     }
 
-    /// What the output stage multiplies the band, the Morse and your own
-    /// messages by before the limiter: that share of full volume's gain.
-    pub fn output_gain(&self) -> f64 {
-        self.master_volume() * FULL_VOLUME_GAIN
+    /// The receiver's AF gain: what the output stage multiplies the band and
+    /// the stations by before the limiter, that share of the gain full
+    /// volume is for this receiver ([`full_volume_gain`]). Your own messages
+    /// and the paddle's sidetone are monitored, not received, and are set at
+    /// the level they are heard at, turned down by the volume alone.
+    pub fn af_gain(&self) -> f64 {
+        self.master_volume() * full_volume_gain(self)
     }
 
     /// The middle of the side-tone range: where the receiver is tuned.

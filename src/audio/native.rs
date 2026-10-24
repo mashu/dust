@@ -16,7 +16,7 @@ use cw_core::band::{BandMixer, FilterDesign, Qsb};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::mixer::{BandVoice, Mixer, Output, SendVoice, SidetoneControl, Swept};
-use super::shape::ToneRequest;
+use super::shape::{ToneRequest, Volume};
 use super::{MorseBackend, PlaybackSignal};
 use state::{PlayerState, ToneSignal};
 
@@ -55,10 +55,10 @@ pub struct MorsePlayer {
     /// be: what a send asked to start at a given time takes over from it
     /// against.
     heard_at: Option<Instant>,
-    /// The volume the mixer was last asked to play at, as its gain, so it
-    /// is locked for it only when that moves: a callback that finds it held
-    /// plays a buffer without it.
-    volume: f64,
+    /// The volume the mixer was last asked to play at, so it is locked for
+    /// it only when that moves: a callback that finds it held plays a buffer
+    /// without it.
+    volume: Volume,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -115,7 +115,7 @@ impl MorsePlayer {
             opened_at: Instant::now(),
             refused_at: None,
             heard_at: None,
-            volume: 1.0,
+            volume: Volume::UNITY,
         };
         if let Err(err) = player.open(&device, &supported) {
             eprintln!("audio output: {err}");
@@ -208,7 +208,7 @@ impl MorseBackend for MorsePlayer {
     fn apply_band(&mut self, settings: &TrainingSettings) {
         // A stream that will not open is reported by the next send.
         self.ensure_output_unless_refused();
-        let volume = settings.output_gain();
+        let volume = Volume::of(settings);
         if volume != self.volume {
             self.mixer().set_volume(volume);
             self.volume = volume;

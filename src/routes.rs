@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cw_core::band::{FilterDesign, agc_knee};
+use cw_core::band::{FilterDesign, agc_knee, loudest_station};
 use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
@@ -234,6 +234,10 @@ fn use_band_follow(ctx: AppCtx) {
 /// the two keep forgetting each other's. Should the settings move after the
 /// follow's last measurement, the band measures its own knee, as it always
 /// did.
+///
+/// And with it how loud the strongest station comes out of that receiver
+/// ([`loudest_station`]), which full volume is sized by: a few milliseconds
+/// more, and asked of the knee just measured.
 async fn warm_agc_knee(settings: &TrainingSettings) {
     if !settings.band.has_background() {
         return;
@@ -243,8 +247,12 @@ async fn warm_agc_knee(settings: &TrainingSettings) {
     // that panicked has measured nothing, which leaves it to the band.
     #[cfg(all(not(target_arch = "wasm32"), not(test)))]
     {
-        let band = settings.band.clone();
-        let _ = tokio::task::spawn_blocking(move || agc_knee(&band, &receiver)).await;
+        let settings = settings.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            agc_knee(&settings.band, &receiver);
+            loudest_station(&settings);
+        })
+        .await;
     }
     // The browser has the one thread. It measures here, then lets the page
     // draw and take input before the band is built: two short tasks rather
@@ -254,6 +262,7 @@ async fn warm_agc_knee(settings: &TrainingSettings) {
     #[cfg(any(target_arch = "wasm32", test))]
     {
         agc_knee(&settings.band, &receiver);
+        loudest_station(settings);
         sleep_ms(1).await;
     }
 }
