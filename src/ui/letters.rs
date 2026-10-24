@@ -146,7 +146,7 @@ fn row_view(letter: &CharacterDiagnostic, bottom: f64) -> Element {
             aria_label: "{letter_label(letter)}",
             span { class: "letter-key err-key group-text", "{letter.letter}" }
             div {
-                class: "err-plot below",
+                class: "err-plot",
                 style: "--thr: {along(MASTERED_MIN_ACCURACY, bottom):.1}%;",
                 svg {
                     class: "err-band",
@@ -161,6 +161,15 @@ fn row_view(letter: &CharacterDiagnostic, bottom: f64) -> Element {
                                 }
                             }
                         }
+                    }
+                    rect {
+                        class: "err-track",
+                        x: "0",
+                        y: "2",
+                        width: "100",
+                        height: "6",
+                        rx: "1.2",
+                        ry: "3",
                     }
                     rect {
                         x: "0",
@@ -257,7 +266,7 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
                 span { i { class: "err-swatch solid" } "mastered, {MASTERED_MIN_ACCURACY * 100.0:.0}% or more" }
                 span { i { class: "err-swatch building" } "building" }
                 span { i { class: "err-swatch to-work-on" } "weak" }
-                span { i { class: "err-swatch new" } "few tries" }
+                span { i { class: "err-swatch finding-out" } "few tries" }
                 span { i { class: "err-swatch band" } "where it likely is" }
                 span {
                     b { class: "acc-trend up", "↑ 8 " }
@@ -274,7 +283,9 @@ pub fn LettersTab(sessions: Vec<SessionResult>) -> Element {
             }
             div { class: "err-axis letters", aria_hidden: "true",
                 span {}
-                span { class: "err-ticks",
+                span {
+                    class: "err-ticks",
+                    style: "--thr: {along(MASTERED_MIN_ACCURACY, bottom):.1}%;",
                     for tick in ticks.iter() {
                         span { style: "left: {along(*tick, bottom):.1}%;", "{tick * 100.0:.0}%" }
                     }

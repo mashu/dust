@@ -2534,10 +2534,15 @@ mod interactions {
         assert!(m.contains("err-row finding-out"), "{m}");
         assert!(m.contains("aria-label=\"M: wrong about"), "{m}");
         // U, the third Koch character, was never heard.
-        let u = ui.input_tag("sample-u");
-        assert!(u.contains("err-row new"), "{u}");
-        assert!(u.contains("aria-label=\"U: not heard yet,"), "{u}");
+        // and has no row: the summary names it, with the rest the set draws
+        // and nothing has been heard of.
+        assert!(!ui.shows("sample-u"));
+        assert!(ui.has(">Not heard yet · "), "{}", ui.html());
+        assert!(ui.has("class=\"err-chip finding-out group-text\">U<"));
         assert!(ui.has("Still finding out · "));
+        // Each row sits on a track of its own.
+        assert!(ui.input_tag("sample-m").contains("err-row"));
+        assert!(ui.has("class=\"err-track\""));
         assert!(ui.input_tag("seg-sample-work").contains("active"));
         assert_eq!(first_row(&ui), "sample-m", "the most work first");
         // The dot sits on the best guess, and the dashed threshold at 10%

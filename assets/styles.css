@@ -2194,9 +2194,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .err-swatch.solid { background: var(--good); }
 .err-swatch.to-work-on { background: var(--copper); }
 .err-swatch.building { background: var(--warn); }
-.err-swatch.new { border: 1.5px solid var(--ink-dim); }
+.err-swatch.finding-out { background: var(--ink-dim); }
 .err-swatch.band { width: 26px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, transparent, var(--ink-dim), transparent); }
-.err-rows { display: grid; }
+.err-rows { display: grid; gap: 4px; }
 .err-row, .err-axis { display: grid; grid-template-columns: 1.55rem 1fr 4.2rem; align-items: center; gap: 0.6rem; }
 .err-row { height: 24px; --tone: var(--ink-dim); }
 .err-row.solid { --tone: var(--good); }
@@ -2207,14 +2207,8 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .err-row.solid .err-key { background: var(--good-soft); color: var(--good); }
 .err-row.to-work-on .err-key { background: var(--copper-soft); color: var(--copper-deep); }
 .err-row.building .err-key { background: var(--warn-soft); color: var(--warn); }
-.err-row.finding-out .err-key, .err-row.new .err-key { background: none; border: 1px dashed var(--line-strong); color: var(--ink-soft); }
-.err-plot {
-  position: relative;
-  height: 100%;
-  background: linear-gradient(90deg, transparent var(--thr), var(--copper-soft));
-}
-/* For accuracy the side to stay out of is the left, under the line. */
-.err-plot.below { background: linear-gradient(90deg, var(--copper-soft), transparent var(--thr)); }
+.err-row.finding-out .err-key { background: none; border: 1px dashed var(--line-strong); color: var(--ink-soft); }
+.err-plot { position: relative; height: 100%; }
 .err-plot::before {
   content: "";
   position: absolute;
@@ -2225,6 +2219,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   opacity: 0.75;
 }
 .err-band { position: absolute; inset: 7px 0; width: 100%; height: 10px; }
+.err-track { fill: var(--line); fill-opacity: 0.75; }
 .err-dot {
   position: absolute;
   top: 50%;
@@ -2235,13 +2230,27 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   background: var(--tone);
   transform: translate(-50%, -50%);
 }
-.err-row.new .err-dot { border-color: var(--ink-dim); background: var(--surface); }
 .err-chance { display: flex; align-items: center; justify-content: flex-end; gap: 0.35rem; font-size: 0.75rem; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
 .err-cbar { width: 1.8rem; height: 4px; border-radius: 2px; background: var(--surface-sunken); overflow: hidden; }
 .err-cbar span { display: block; height: 100%; background: linear-gradient(90deg, var(--info), var(--purple-700)); }
 .err-axis { margin-top: 0.2rem; font-size: 0.7rem; color: var(--ink-dim); }
-.err-ticks { position: relative; height: 1rem; }
-.err-ticks span { position: absolute; transform: translate(-50%, 0); white-space: nowrap; }
+/* Along the top of the scale, a strip that is green on the side of your
+   threshold to be on and copper on the side to stay out of: over it for
+   error, under it for accuracy. */
+.err-ticks { position: relative; height: 1.4rem; }
+.err-ticks::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--good) var(--thr), var(--copper) var(--thr));
+  opacity: 0.55;
+}
+.err-axis.letters .err-ticks::before { background: linear-gradient(90deg, var(--copper) var(--thr), var(--good) var(--thr)); }
+.err-ticks span { position: absolute; top: 0.4rem; transform: translate(-50%, 0); white-space: nowrap; }
 .err-ticks span:first-child { transform: none; }
 .err-ticks span:last-child { transform: translate(-100%, 0); }
 .err-next { text-align: right; }

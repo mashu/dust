@@ -191,6 +191,15 @@ fn row_view(line: &Line, top: f64, threshold: f64, max_chance: f64) -> Element {
                         }
                     }
                     rect {
+                        class: "err-track",
+                        x: "0",
+                        y: "2",
+                        width: "100",
+                        height: "6",
+                        rx: "1.2",
+                        ry: "3",
+                    }
+                    rect {
                         x: "0",
                         y: "2",
                         width: "100",
@@ -270,11 +279,13 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
         .iter()
         .map(|row| line(row, threshold, top))
         .partition(|line| line.chance.is_some());
+    // A character never heard has no row: there is nothing yet to draw of
+    // it. The summary names the ones the set draws.
+    let unheard = chips(&drawn, Standing::New);
+    drawn.retain(|line| line.standing != Standing::New);
+    others.retain(|line| line.standing != Standing::New);
     let to_work_on = chips(&drawn, Standing::ToWorkOn);
-    let finding_out: Vec<char> = chips(&drawn, Standing::FindingOut)
-        .into_iter()
-        .chain(chips(&drawn, Standing::New))
-        .collect();
+    let finding_out = chips(&drawn, Standing::FindingOut);
     let solid = chips(&drawn, Standing::Solid).len();
     sort(&mut drawn, order());
     sort(&mut others, order());
@@ -308,7 +319,7 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
                     }
                 }
             }
-            if drawn.is_empty() {
+            if drawn.is_empty() && unheard.is_empty() {
                 p { class: "muted", style: "margin: 0;", "Pool is empty." }
             } else {
                 div { class: "err-summary",
@@ -335,11 +346,21 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
                     div { class: "err-sum-row",
                         span { class: "err-sum-label solid", "Solid · {solid}" }
                     }
+                    if !unheard.is_empty() {
+                        div { class: "err-sum-row",
+                            span { class: "err-sum-label finding-out", "Not heard yet · {unheard.len()}" }
+                            span { class: "err-chips",
+                                for character in unheard.iter() {
+                                    span { class: "err-chip finding-out group-text", "{character}" }
+                                }
+                            }
+                        }
+                    }
                 }
                 div { class: "err-legend", aria_hidden: "true",
                     span { i { class: "err-swatch solid" } "under your {limit}" }
                     span { i { class: "err-swatch to-work-on" } "over it" }
-                    span { i { class: "err-swatch new" } "not heard" }
+                    span { i { class: "err-swatch finding-out" } "still finding out" }
                     span { i { class: "err-swatch band" } "where it likely is" }
                 }
             }
@@ -351,7 +372,9 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
             if !drawn.is_empty() {
                 div { class: "err-axis", aria_hidden: "true",
                     span {}
-                    span { class: "err-ticks",
+                    span {
+                        class: "err-ticks",
+                        style: "--thr: {along(threshold, top):.1}%;",
                         for tick in ticks.iter() {
                             span { style: "left: {along(*tick, top):.1}%;",
                                 if *tick >= top && top < 1.0 {
