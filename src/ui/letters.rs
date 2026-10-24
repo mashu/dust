@@ -8,8 +8,9 @@
 //! the top of where the accuracy likely is. The line under it says the
 //! rest, how fast it is recognised among it, in the colour of its band:
 //! green fast, yellow ICR, orange slow, red too slow, as Settings →
-//! Recognition sets them; one never timed shows its groups' answer time
-//! instead, shared out over their characters. A summary above names the
+//! Recognition sets them; until any is timed, each shows its groups'
+//! answer time instead, shared out over their characters. A summary above
+//! names the
 //! weak, the building and the ones with too few tries to tell, and those
 //! recognised at once (ICR); a character tried once is no longer called
 //! weak.
@@ -21,6 +22,7 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::audio::TIMES_RECOGNITION;
 use crate::ui::bigram::id_part;
 use crate::ui::help;
 use crate::ui::widgets::{CardHead, IconName, control_id};
@@ -180,10 +182,8 @@ fn letter_label(letter: &CharacterDiagnostic, bands: &AutoLevelSettings, timing:
             ", recognised in about {} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed",
             millis(ms)
         )),
+        Recognition::Untimed if timing => text.push_str(", not timed yet"),
         Recognition::Untimed => {
-            if timing {
-                text.push_str(", not timed yet");
-            }
             if let Some(ms) = letter.answer_ms {
                 text.push_str(&format!(
                     ", its groups answered in about {} a character",
@@ -201,8 +201,11 @@ fn along(share: f64) -> f64 {
 }
 
 /// One character's row; `timing` is whether any character has been timed,
-/// so that one never timed says so. One never timed shows its groups'
-/// answer time, muted: all there is of its speed, and no recognition time.
+/// so that one never timed says so. Until any is, a row shows its groups'
+/// answer time, lighter: all there is of its speed, and no recognition
+/// time.
+/// Once some are, the others' answer times would sit beside them as if
+/// they were the same measure, and are left off.
 fn row_view(letter: &CharacterDiagnostic, bands: &AutoLevelSettings, timing: bool) -> Element {
     let (low, high) = letter.accuracy_interval(LIKELY);
     let (low, high) = (along(low), along(high));
@@ -256,12 +259,10 @@ fn row_view(letter: &CharacterDiagnostic, bands: &AutoLevelSettings, timing: boo
                         }
                     },
                     Recognition::Provisional(ms, tries) => rsx! { " · about {millis(ms)} so far, {tries} of {RECOGNITION_MIN_TRIES} tries timed" },
+                    Recognition::Untimed if timing => rsx! { " · not timed yet" },
                     Recognition::Untimed => rsx! {
-                        if timing {
-                            " · not timed yet"
-                        }
                         if let Some(ms) = letter.answer_ms {
-                            span { class: "muted", " · groups answered in about {millis(ms)} a character" }
+                            span { class: "rec-answer", " · groups answered in about {millis(ms)} a character" }
                         }
                     },
                 }
@@ -310,6 +311,7 @@ pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
         .iter()
         .any(|letter| letter.recognition_band(bands).is_some());
     let timing = letters.iter().any(|letter| letter.recognition_tries > 0);
+    let answered = letters.iter().any(|letter| letter.answer_ms.is_some());
     rsx! {
         div { class: "card stack-sm",
             CardHead {
@@ -352,7 +354,16 @@ pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
             }
             if !timing {
                 p { class: "muted", style: "margin: 0; font-size: 0.85rem;",
-                    "How fast you recognise each character is timed as you type along: with Lock typing while sending off (Settings → Session shape), or with groups of one character. Type each one as soon as you hear it. Until then, each row shows how long its groups took to answer, shared out over their characters."
+                    if TIMES_RECOGNITION {
+                        "In group training, how fast you recognise each character is timed as you type along: with Lock typing while sending off (Settings → Session shape), or with groups of one character. Type each one as soon as you hear it."
+                    } else {
+                        "How fast you recognise each character is not timed on Android: its sound output cannot say closely enough when each character reaches you."
+                    }
+                    if answered && TIMES_RECOGNITION {
+                        " Until then, each row shows how long its groups took to answer, shared out over their characters."
+                    } else if answered {
+                        " Each row shows how long its groups took to answer instead, shared out over their characters."
+                    }
                 }
             }
             div { class: "err-legend", aria_hidden: "true",
@@ -476,8 +487,9 @@ mod tests {
             "{}",
             label(&weak)
         );
-        // Never timed: its groups' answer time stands in, and it is said to
-        // be not timed yet only once another one is.
+        // Never timed: until another one is, its groups' answer time stands
+        // in; once one is, it is said to be not timed yet, and the answer
+        // time, another measure, is left off.
         let mut untimed = letter(27, 30);
         untimed.answer_ms = Some(912.0);
         assert!(
@@ -487,9 +499,7 @@ mod tests {
             letter_label(&untimed, &bands, false)
         );
         assert!(
-            letter_label(&untimed, &bands, true).ends_with(
-                ", mastered, not timed yet, its groups answered in about 910 ms a character"
-            ),
+            letter_label(&untimed, &bands, true).ends_with(", mastered, not timed yet"),
             "{}",
             letter_label(&untimed, &bands, true)
         );

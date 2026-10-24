@@ -16,7 +16,7 @@ use std::rc::Rc;
 use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
 
 use crate::audio::{MorseBackend, PlaybackOutcome, PlaybackWait};
-use crate::time::{POLL_MS, mono_ms, sleep_ms};
+use crate::time::{POLL_MS, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
 /// without a sound card.
@@ -445,12 +445,8 @@ impl Ticket<'_> {
         self.check()?;
         // In a statement of its own: the player is borrowed only while the
         // send starts, never while `on_start` runs.
-        // Read before the send is scheduled: the player reckons its lead
-        // from its own clock as it schedules, and the moment after would
-        // put every character's end that much early.
-        let started = MonoMs(mono_ms());
         let wait = player.start(begin)?;
-        let heard_from = started.plus_sec(wait.heard_after_sec);
+        let heard_from = wait.started.plus_sec(wait.heard_after_sec);
         on_start(wait.heard_after_sec);
         let sent = Sent {
             duration_sec: wait.duration_sec,

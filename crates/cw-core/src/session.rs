@@ -1265,6 +1265,12 @@ mod tests {
             recognised(&[('K', 2_300), ('M', 2_450), ('R', 2_600)], true),
             Vec::<Option<u32>>::new()
         );
+        // Keyed as soon as a typed-along group's could be, but the box was
+        // shut while it was sent: copied whole, recall, and not timed.
+        assert_eq!(
+            recognised(&[('K', 2_050), ('M', 2_080), ('R', 2_090)], true),
+            Vec::<Option<u32>>::new()
+        );
         let mut settings = TrainingSettings::default();
         settings.playback.lock_input_during_group_playback = true;
         let mut session = GroupSession::new(SessionId::new(1), 1, settings);

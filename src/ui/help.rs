@@ -10,6 +10,8 @@ use cw_core::{
 };
 use dioxus::prelude::*;
 
+use crate::audio::TIMES_RECOGNITION;
+
 fn pct(share: f64) -> String {
     format!("{:.0}%", share * 100.0)
 }
@@ -102,7 +104,10 @@ pub fn letters(bands: &AutoLevelSettings) -> Element {
             dd { "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band." }
             dt { "Not timed yet" }
             dd {
-                "With Lock typing while sending on, only groups of one character can be timed: turn it off (Settings → Session shape) to type along. Keys from paddles and contest runs are not timed. Until a character is timed, its row shows how long its groups took to answer, shared out over their characters: it cannot say which one held you up."
+                if !TIMES_RECOGNITION {
+                    "Nothing is timed on Android: its sound output cannot say closely enough when a character reaches you. "
+                }
+                "With Lock typing while sending on, only groups of one character can be timed: turn it off (group training, Settings → Session shape) to type along. Keys from paddles and contest runs are not timed. Until any character is timed, each row shows how long its groups took to answer after their send, shared out over their characters: it cannot say which one held you up."
             }
         }
     }
@@ -492,8 +497,13 @@ pub fn recognition() -> Element {
             dd { "Yellow: instant character recognition, the sound known at once rather than worked out." }
             dt { "Slow under" }
             dd { "Orange: slower than ICR, under this. Red from it on." }
-            dt { "Bluetooth" }
-            dd { "Times run from when the sound reaches you, as far as the device reports its delay; a Bluetooth headset that does not report it adds its own to every time." }
+            if TIMES_RECOGNITION {
+                dt { "Bluetooth" }
+                dd { "Times run from when the sound reaches you, as far as the device reports its delay; a Bluetooth headset that does not report it adds its own to every time." }
+            } else {
+                dt { "Android" }
+                dd { "Nothing is timed here: Android's sound output cannot say closely enough when a character reaches you. The bands colour times from a backup of another device." }
+            }
         }
     }
 }

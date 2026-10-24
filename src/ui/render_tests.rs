@@ -2566,12 +2566,49 @@ mod interactions {
         assert!(line("letter-m").contains(r#"class="rec-chip rec-icr">ICR 520 ms<"#));
         assert!(line("letter-r").contains(r#"class="rec-chip rec-slow">700 ms<"#));
         assert!(line("letter-s").contains(r#"class="rec-chip rec-too-slow">900 ms<"#));
-        assert!(line("letter-u").contains("about 410 ms so far, 3 of 8 tries timed"));
-        assert!(line("letter-e").contains("not timed yet"));
+        // What the row shows, not its label: " · " starts only the
+        // visible text, where the label has ", ".
+        assert!(line("letter-u").contains(" · about 410 ms so far, 3 of 8 tries timed"));
+        assert!(line("letter-e").contains(" · not timed yet"));
+        // With others timed, a group's answer time is not set beside them.
+        assert!(!line("letter-e").contains("groups answered"));
         assert!(ui.has(">Instant (ICR) · 2<"), "{}", ui.html());
         assert!(ui.has(r#"class="err-chip rec-fast group-text">K<"#));
         assert!(ui.has(r#"class="err-chip rec-icr group-text">M<"#));
         assert!(ui.has("ICR, under 600"));
+        assert!(!ui.has("Until then"));
+    }
+
+    /// KM answered half a second after each send, the box shut while it
+    /// was sent, as it ships.
+    #[component]
+    fn UntimedLettersHarness() -> Element {
+        let session = stored_session("2026-09-01", &[("KM", "KM"); 8]);
+        rsx! {
+            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions: vec![session] }
+        }
+    }
+
+    /// Nothing timed yet: the card says how to be, and each row shows its
+    /// groups' answer time, shared out over their characters, lighter.
+    #[test]
+    fn untimed_letters_show_their_groups_answer_time() {
+        let ui = Ui::new(UntimedLettersHarness, ());
+        assert!(ui.has("timed as you type along"), "{}", ui.html());
+        assert!(ui.has(" Until then, each row shows how long its groups took to answer"));
+        assert!(ui.has(
+            r#"<span class="rec-answer"> · groups answered in about 250 ms a character</span>"#
+        ));
+        assert!(!ui.has("not timed yet"));
+        assert!(
+            !ui.has("Recognised in"),
+            "no bands' legend with nothing in them"
+        );
+        let k = ui.input_tag("letter-k");
+        assert!(
+            k.contains(", its groups answered in about 250 ms a character\""),
+            "{k}"
+        );
     }
 
     /// Koch at level 3, K and M heard, M often missed.

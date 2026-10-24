@@ -82,6 +82,12 @@ pub trait MorseBackend {
     }
 }
 
+/// Whether this build times how fast each character is recognised. Android's
+/// output reports its delay off a clock of its own, which puts every
+/// character's end up to half a second out: a time there would be wrong
+/// with confidence, so none is taken, and the Letters card says so.
+pub const TIMES_RECOGNITION: bool = cfg!(not(target_os = "android"));
+
 /// Send `transmission` on `player`, and hand back something to wait on. The
 /// caller owns the stations, so every repeat of a group arrives from the same
 /// operators.
@@ -98,11 +104,8 @@ pub fn start_send(
     let plan = plan_transmission(transmission, settings);
     let mut wait = start_planned(player, &plan, transmission, settings, None)?;
     // Off the plan played, so they are where its sound is — where the
-    // player can tell when that sound reaches the ear. Android's output
-    // reports a delay off a clock of its own, which puts every end up to
-    // half a second out: a recognition time there would be wrong with
-    // confidence, so none is taken.
-    if cfg!(not(target_os = "android")) {
+    // player can tell when that sound reaches the ear.
+    if TIMES_RECOGNITION {
         wait.char_ends_sec = plan.wanted.char_ends(&transmission.text);
     }
     Ok(wait)
@@ -125,9 +128,14 @@ pub fn start_planned(
     starts_at: Option<MonoMs>,
 ) -> Result<PlaybackWait, String> {
     player.apply_band(settings);
-    let heard_in = starts_at.map(|at| (at.0 as f64 - mono_ms() as f64) / 1_000.0);
+    // Read once the band is in line, a device reopened or a band rebuilt,
+    // and before the player schedules: the moment it reckons its lead from.
+    // Earlier, and that work would be counted as the sound's delay; later,
+    // and the scheduling would be taken off it.
+    let started = MonoMs(mono_ms());
+    let heard_in = starts_at.map(|at| (at.0 as f64 - started.0 as f64) / 1_000.0);
     let signal = player.start(transcript, plan, settings, heard_in)?;
-    Ok(PlaybackWait::new(&plan.wanted, signal))
+    Ok(PlaybackWait::new(&plan.wanted, signal, started))
 }
 
 /// The player this build ships with.

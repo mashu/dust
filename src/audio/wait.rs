@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use cw_core::PlaybackPlan;
+use cw_core::{MonoMs, PlaybackPlan};
 
 use crate::time::{POLL_MS, mono_ms, sleep_ms};
 
@@ -195,6 +195,9 @@ pub struct PlaybackWait {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
+    /// When the send was started, on the app's clock: the moment
+    /// `heard_after_sec` is reckoned from.
+    pub started: MonoMs,
     /// How long after it was started the send reaches the ear
     /// ([`PlaybackSignal::heard_after_sec`]).
     pub heard_after_sec: f64,
@@ -206,13 +209,15 @@ pub struct PlaybackWait {
 }
 
 impl PlaybackWait {
-    /// Wait on `signal` for a send that plays as `plan` says: its length,
-    /// and the speeds it resolved to, are the plan's, whoever plays it.
-    pub fn new(plan: &PlaybackPlan, signal: Rc<dyn PlaybackSignal>) -> Self {
+    /// Wait on `signal` for a send that plays as `plan` says, started at
+    /// `started`: its length, and the speeds it resolved to, are the plan's,
+    /// whoever plays it.
+    pub fn new(plan: &PlaybackPlan, signal: Rc<dyn PlaybackSignal>, started: MonoMs) -> Self {
         Self {
             duration_sec: plan.duration_sec,
             char_wpm: plan.resolved_char_wpm,
             effective_wpm: plan.resolved_effective_wpm,
+            started,
             heard_after_sec: signal.heard_after_sec(),
             char_ends_sec: Vec::new(),
             signal,
@@ -405,6 +410,7 @@ mod tests {
             Rc::new(Scripted {
                 steps: RefCell::new(steps),
             }),
+            MonoMs(mono_ms()),
         )
     }
 

@@ -119,8 +119,8 @@ pub struct CharacterDiagnostic {
     /// character, in milliseconds, averaged: each group's time shared out
     /// evenly over its characters, so it cannot tell which one held you
     /// up. What there is of its speed where it has no recognition time —
-    /// with the box shut while sending, the usual way. None before a group
-    /// with it is timed.
+    /// with the box shut while sending, the usual way. Only groups answered
+    /// after their send count ([`answer_times`]); None before one with it.
     pub answer_ms: Option<f64>,
 }
 
@@ -398,7 +398,8 @@ fn recognition_times(sessions: &[SessionResult]) -> BTreeMap<char, (u32, Vec<f64
 /// Each character's answer times in `sessions`, each group's time from the
 /// end of its send to its answer shared evenly over its characters: their
 /// sum, and how many. A contest's are left out, as its recognition times
-/// are.
+/// are; so is a group typed along, timed or done by its send's end: its
+/// time is only the last key's lag, held at the floor, and no answer time.
 fn answer_times(sessions: &[SessionResult]) -> BTreeMap<char, (f64, u32)> {
     let mut times: BTreeMap<char, (f64, u32)> = BTreeMap::new();
     let groups = sessions
@@ -408,7 +409,8 @@ fn answer_times(sessions: &[SessionResult]) -> BTreeMap<char, (f64, u32)> {
     for (group, timing) in groups {
         let sent = group.sent.to_ascii_uppercase();
         let length = sent.chars().count();
-        if length == 0 || timing.time_to_complete_ms <= 0.0 {
+        let floor = crate::session::MIN_RESPONSE_MS_PER_CHAR * length as f64;
+        if length == 0 || !timing.recognition_ms.is_empty() || timing.time_to_complete_ms <= floor {
             continue;
         }
         let each = timing.time_to_complete_ms / length as f64;
@@ -1138,6 +1140,25 @@ mod tests {
             .find(|d| d.letter == 'M')
             .expect("M");
         assert_eq!((m.recognition_tries, m.recognition_ms), (0, None));
+    }
+
+    /// A group's answer time is shared out over its characters, but only
+    /// for a group answered after its send: one typed along, timed or done
+    /// by the send's end, holds only the last key's lag, at the floor.
+    #[test]
+    fn answer_times_are_of_groups_answered_after_their_send() {
+        let mut session = plain("2026-09-01", 1, &[("KM", "KM"); 3]);
+        session.group_timings[0].time_to_complete_ms = 900.0;
+        // Typed along and timed.
+        session.group_timings[1].time_to_complete_ms = 700.0;
+        session.group_timings[1].recognition_ms = vec![Some(250), Some(240)];
+        // Done by the send's end: held at the floor, 100 ms a character.
+        session.group_timings[2].time_to_complete_ms = 200.0;
+        let k = character_diagnostics(&[session])
+            .into_iter()
+            .find(|d| d.letter == 'K')
+            .expect("K");
+        assert_eq!(k.answer_ms, Some(450.0));
     }
 
     /// The latest tries are the latest groups of the latest session: a
