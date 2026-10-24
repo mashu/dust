@@ -1,8 +1,8 @@
 //! Words of the learner's own, each sent whole as a group: a list pasted in,
 //! or loaded from a text file with a word to a line.
 //!
-//! Until there is a list, Words sends a starter one: the abbreviations and
-//! Q-codes a CW contact is made of. A list is read the same way however it
+//! Until there is a list, Words sends a starter one: the Q-codes,
+//! abbreviations, prosigns and reports a CW contact is made of. A list is read the same way however it
 //! arrives, and what could not be kept is counted, so the screen can say so.
 
 use crate::morse::morse_for;
@@ -13,11 +13,16 @@ use crate::settings::{GROUP_SIZE_MAX, TrainingSettings};
 /// kilobytes.
 pub const WORD_LIST_MAX: usize = 2_000;
 
-/// What Words sends until a list of the learner's own replaces it.
+/// What Words sends until a list of the learner's own replaces it: the
+/// Q-codes, abbreviations, prosigns, numbers and reports a CW contact is
+/// made of, the Q-codes first.
 pub const STARTER_WORDS: &[&str] = &[
-    "CQ", "DE", "K", "KN", "BK", "SK", "AR", "TU", "TNX", "73", "88", "UR", "RST", "599", "5NN",
-    "NAME", "QTH", "OP", "RIG", "ANT", "WX", "PSE", "AGN", "FB", "ES", "HR", "HW", "CPY", "GM",
-    "GA", "GE", "GN", "OM", "YL", "QSL", "QRZ", "QRL", "QRM", "QRN", "QSB", "QSY", "QRP", "QRO",
+    "QRL", "QRM", "QRN", "QRO", "QRP", "QRS", "QRT", "QRZ", "QSB", "QSL", "QSO", "QSY", "QTH",
+    "AGN", "ANT", "CFM", "CPI", "CPY", "CQ", "CS", "CU", "CUAGN", "CUL", "DE", "DX", "ES", "FB",
+    "FER", "FREQ", "GA", "GD", "GE", "GL", "GM", "GN", "GUD", "HR", "HW?", "IS", "K", "MY", "NAME",
+    "NR", "OK", "OM", "OP", "POTA", "PSE", "PWR", "REF", "RIG", "RST", "SIG", "SKED", "SN", "SOTA",
+    "SRI", "TEMP", "TEST", "TNX", "TU", "UR", "VY", "WX", "YL", "AR", "BK", "KN", "SK", "44", "72",
+    "73", "88", "539", "559", "579", "599", "53N", "55N", "57N", "5NN",
 ];
 
 /// A list as it was read, and what was left out of it.
