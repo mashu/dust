@@ -149,13 +149,12 @@ pub fn SettingsView(
     }
 }
 
-/// What a preset sets, in a line: "20 groups of 2–3 · 15–25 WPM".
+/// What a preset sets, in a line: "Groups of 2–3 · 15–25 WPM".
 fn experience_summary(experience: Experience) -> String {
     let (fewest, most) = experience.group_size();
     let (slowest, fastest) = experience.char_wpm();
     format!(
-        "{} groups of {} · {} WPM",
-        experience.groups(),
+        "Groups of {} · {} WPM",
         range_label(f64::from(fewest), f64::from(most)),
         range_label(slowest, fastest),
     )
@@ -169,7 +168,7 @@ fn ExperienceCard(settings: Signal<TrainingSettings>) -> Element {
     let on = use_memo(move || Experience::of(&settings.read()))();
     let note = match on {
         Some(experience) => experience_summary(experience),
-        None => "Sets session length, group size and speed to start from.".to_string(),
+        None => "Sets group size and speed to start from.".to_string(),
     };
     rsx! {
         div { class: "card experience",
