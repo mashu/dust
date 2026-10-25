@@ -33,14 +33,6 @@ const CALLER_HABITS: [(CallerHabits, &str); 3] = [
     (CallerHabits::Rough, "Rough"),
 ];
 
-/// The word the Band card calls `habits` by.
-pub(crate) fn habits_label(habits: CallerHabits) -> &'static str {
-    CALLER_HABITS
-        .iter()
-        .find(|(each, _)| *each == habits)
-        .map_or("Easy", |(_, label)| label)
-}
-
 /// What the habits line says in a contest of `rules`, from `side`: each
 /// habit in a sentence, the numbers cut as that contest's callers cut
 /// them, and a fumbled serial only where they send one.

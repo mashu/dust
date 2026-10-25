@@ -1631,8 +1631,9 @@ mod tests {
     }
 
     /// Settings with every stored preference moved off its default, so a reset
-    /// has something to undo whichever section it is asked about.
-    fn wildly_different() -> TrainingSettings {
+    /// has something to undo whichever section it is asked about, and a
+    /// preset something to leave alone.
+    pub(super) fn wildly_different() -> TrainingSettings {
         let mut s = TrainingSettings::default();
         s.curriculum.num_groups = 7;
         s.curriculum.min_group_size = 2;

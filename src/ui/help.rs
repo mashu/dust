@@ -341,7 +341,7 @@ pub fn runs() -> Element {
 pub fn experience() -> Element {
     rsx! {
         p {
-            "A starting point for where you are: Novice, Intermediate, Advanced or Expert sets the session length, the group size and the speed range. Change any of them and it reads Custom; pick a preset to go back to it. Your level and history are never touched."
+            "A starting point for where you are: Novice, Intermediate, Advanced or Expert sets the group size and the speed range, and nothing else. Change either of them and it reads Custom; pick a preset to go back to it. Your level, your session length, your history and every other setting are never touched."
         }
     }
 }

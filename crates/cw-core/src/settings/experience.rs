@@ -1,10 +1,11 @@
-//! Starting points for four kinds of learner: how long a session is, how
-//! long its groups are, and how fast they come.
+//! Starting points for four kinds of learner: how long the groups are, and
+//! how fast they come. Those two and nothing more.
 //!
 //! A preset is applied once, through the same calls the settings screen
-//! makes, and leaves everything else as it was — the level among them, which
-//! is the learner's own. The settings are on a preset for exactly as long as
-//! everything it set is still what it set.
+//! makes, and leaves everything else as it was: the level, which is the
+//! learner's own, and how long a session is, which is theirs to choose too.
+//! The settings are on a preset for exactly as long as everything it set is
+//! still what it set.
 
 use super::{RangeSetting, RangeValues, TrainingSettings};
 
@@ -16,9 +17,6 @@ pub enum Experience {
     Advanced,
     Expert,
 }
-
-/// Groups in a session, whichever preset.
-const GROUPS: u32 = 20;
 
 impl Experience {
     pub const ALL: [Self; 4] = [
@@ -53,11 +51,6 @@ impl Experience {
             .find(|experience| experience.key() == key)
     }
 
-    /// Groups in a session.
-    pub fn groups(self) -> u32 {
-        GROUPS
-    }
-
     /// Characters in a group: the fewest and the most. One number is a fixed
     /// size.
     pub fn group_size(self) -> (u32, u32) {
@@ -78,10 +71,9 @@ impl Experience {
         }
     }
 
-    /// Put the settings on this preset: the session, the group size and the
-    /// speed, the way the settings screen sets each.
+    /// Put the settings on this preset: the group size and the speed, the
+    /// way the settings screen sets each.
     pub fn apply(self, settings: &mut TrainingSettings) {
-        settings.curriculum.num_groups = GROUPS;
         let (fewest, most) = self.group_size();
         put(
             settings,
@@ -99,13 +91,11 @@ impl Experience {
         Self::ALL.into_iter().find(|experience| {
             let (fewest, most) = experience.group_size();
             let (slowest, fastest) = experience.char_wpm();
-            settings.curriculum.num_groups == GROUPS
-                && holds(
-                    settings.range(RangeSetting::GroupSize),
-                    f64::from(fewest),
-                    f64::from(most),
-                )
-                && holds(settings.range(RangeSetting::CharWpm), slowest, fastest)
+            holds(
+                settings.range(RangeSetting::GroupSize),
+                f64::from(fewest),
+                f64::from(most),
+            ) && holds(settings.range(RangeSetting::CharWpm), slowest, fastest)
         })
     }
 }
@@ -168,8 +158,12 @@ mod tests {
         ];
         for (experience, size, speed) in cases {
             let mut settings = TrainingSettings::default();
+            settings.curriculum.num_groups = 33;
             experience.apply(&mut settings);
-            assert_eq!(settings.curriculum.num_groups, 20, "{experience:?}");
+            assert_eq!(
+                settings.curriculum.num_groups, 33,
+                "{experience:?}: the session is the learner's"
+            );
             assert_eq!(
                 settings.range(RangeSetting::GroupSize),
                 size,
@@ -234,24 +228,41 @@ mod tests {
         assert_eq!(applied.playback.keyer_wpm, settings.playback.keyer_wpm);
     }
 
+    /// The group size and the character speed are all a preset sets: with
+    /// every setting moved off its default, each preset leaves every other
+    /// one where it was, the session's length and the spacing among them.
+    #[test]
+    fn a_preset_sets_the_group_size_and_speed_and_nothing_more() {
+        let moved = crate::settings::tests::wildly_different();
+        for experience in Experience::ALL {
+            let mut applied = moved.clone();
+            experience.apply(&mut applied);
+            let (c, p) = (&mut applied.curriculum, &mut applied.playback);
+            c.min_group_size = moved.curriculum.min_group_size;
+            c.max_group_size = moved.curriculum.max_group_size;
+            c.link_group_size = moved.curriculum.link_group_size;
+            p.char_wpm_min = moved.playback.char_wpm_min;
+            p.char_wpm_max = moved.playback.char_wpm_max;
+            p.link_char_wpm = moved.playback.link_char_wpm;
+            assert_eq!(applied, moved, "{experience:?} set more than it says");
+        }
+    }
+
     /// A change to anything a preset set takes the settings off it, however
-    /// small; a change to what it leaves alone, the level among them, does
-    /// not.
+    /// small; a change to what it leaves alone, the level and the session's
+    /// length among them, does not.
     #[test]
     fn a_change_to_what_a_preset_set_drops_it() {
         let mut settings = TrainingSettings::default();
         Experience::Novice.apply(&mut settings);
         settings.set_active_level(5);
         settings.band.side_tone_max = 900.0;
+        settings.curriculum.num_groups = 30;
         assert_eq!(Experience::of(&settings), Some(Experience::Novice));
 
         let mut fixed_larger = settings.clone();
         fixed_larger.set_range_min(RangeSetting::GroupSize, 3.0);
         assert_eq!(Experience::of(&fixed_larger), None);
-
-        let mut longer = settings.clone();
-        longer.curriculum.num_groups = 30;
-        assert_eq!(Experience::of(&longer), None);
 
         let mut faster = settings.clone();
         faster.set_range_min(RangeSetting::CharWpm, 18.0);

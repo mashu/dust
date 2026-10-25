@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::{BackupSaving, HistorySaved, Store, load_settings_from, newest, parse_sessions};
+use super::{BackupSaving, HistorySaved, Store, newest, parse_sessions, read_settings_from};
 
 const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
@@ -180,8 +180,8 @@ impl Store for DesktopStore {
         let _ = self.write(TUTORIAL, b"done");
     }
 
-    fn load_settings(&self) -> TrainingSettings {
-        load_settings_from(&fs::read_to_string(self.root.join(SETTINGS)).unwrap_or_default())
+    fn read_settings(&self) -> Option<TrainingSettings> {
+        read_settings_from(&fs::read_to_string(self.root.join(SETTINGS)).ok()?)
     }
 
     fn save_settings(&self, settings: &TrainingSettings) {
@@ -339,7 +339,7 @@ fn data_dir_from(overridden: Option<std::ffi::OsString>) -> PathBuf {
 mod tests {
     use super::*;
     use crate::persist::MAX_SESSIONS;
-    use crate::persist::tests::session;
+    use crate::persist::tests::{every_setting_moved, session};
 
     /// A scratch directory that cleans up after itself.
     struct TempDir(PathBuf);
@@ -446,6 +446,16 @@ mod tests {
                 "tutorial_done.txt"
             ]
         );
+    }
+
+    /// Every setting written to the file comes back from it, by a store
+    /// opened afresh on the same folder, as the next launch opens it.
+    #[test]
+    fn every_setting_comes_back_on_the_next_launch() {
+        let (dir, store) = store("every-setting");
+        let moved = every_setting_moved();
+        store.save_settings(&moved);
+        assert_eq!(DesktopStore::at(dir.0.clone()).load_settings(), moved);
     }
 
     /// The history is the file that grows: written compact, it is about half

@@ -459,18 +459,20 @@ fn chosen_experience(ui: &Ui) -> String {
         .to_string()
 }
 
-/// Choosing an experience sets the trainer up for it, through the same
-/// controls the rest of the page shows: their values follow at once. The
-/// level is the learner's own, and stays where it was.
+/// Choosing an experience sets the group size and the speed, through the
+/// same controls the rest of the page shows: their values follow at once.
+/// The level and the session's length are the learner's own, and stay
+/// where they were.
 #[test]
 fn choosing_an_experience_sets_the_trainer_up_for_it() {
     run(|| async {
         let mut settings = test_settings();
         settings.curriculum.level = 6;
+        settings.curriculum.num_groups = 33;
         let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
         assert_eq!(chosen_experience(&ui), "Custom");
-        assert!(ui.has("Sets session length, group size and speed to start from."));
+        assert!(ui.has("Sets group size and speed to start from."));
 
         ui.commit("select-experience", "intermediate");
         assert_eq!(chosen_experience(&ui), "Intermediate");
@@ -478,12 +480,16 @@ fn choosing_an_experience_sets_the_trainer_up_for_it() {
             !experience_picker(&ui).contains(">Custom<"),
             "Custom is offered over a preset"
         );
-        assert!(ui.has("20 groups of 2–3 · 15–25 WPM"), "{}", ui.html());
+        assert!(ui.has("Groups of 2–3 · 15–25 WPM"), "{}", ui.html());
         assert_eq!(value_of(&ui, "from-group-size"), "2");
         assert_eq!(value_of(&ui, "to-group-size"), "3");
         assert_eq!(value_of(&ui, "from-character-speed"), "15");
         assert_eq!(value_of(&ui, "to-character-speed"), "25");
-        assert_eq!(value_of(&ui, "number-groups-per-session"), "20");
+        assert_eq!(
+            value_of(&ui, "number-groups-per-session"),
+            "33",
+            "a preset moved the session's length"
+        );
         assert_eq!(
             value_of(&ui, "field-level"),
             "6",
@@ -491,10 +497,11 @@ fn choosing_an_experience_sets_the_trainer_up_for_it() {
         );
         let stored = ui.stored_settings().await;
         assert_eq!(Experience::of(&stored), Some(Experience::Intermediate));
+        assert_eq!(stored.curriculum.num_groups, 33);
 
         // A fixed size and speed show as one value each.
         ui.commit("select-experience", "novice");
-        assert!(ui.has("20 groups of 2 · 15 WPM"), "{}", ui.html());
+        assert!(ui.has("Groups of 2 · 15 WPM"), "{}", ui.html());
         assert_eq!(value_of(&ui, "fixed-group-size"), "2");
         assert_eq!(value_of(&ui, "fixed-character-speed"), "15");
         assert_eq!(
@@ -516,13 +523,12 @@ fn choosing_an_experience_sets_the_trainer_up_for_it() {
 
 /// Every way of changing what a preset set makes the settings your own:
 /// typing, stepping, fixing or opening a range, putting a card back to its
-/// defaults. Changing what it leaves alone, the level among them, does not.
+/// defaults. Changing what it leaves alone, the level and the session's
+/// length among them, does not.
 #[test]
 fn any_change_to_what_a_preset_set_shows_the_settings_as_your_own() {
     run(|| async {
-        let edits: [(&str, &str, Option<&str>); 11] = [
-            ("intermediate", "number-groups-per-session", Some("21")),
-            ("intermediate", "more-number-groups-per-session", None),
+        let edits: [(&str, &str, Option<&str>); 9] = [
             ("intermediate", "from-group-size", Some("1")),
             ("intermediate", "to-group-size", Some("4")),
             ("intermediate", "link-group-size", None),
@@ -548,7 +554,7 @@ fn any_change_to_what_a_preset_set_shows_the_settings_as_your_own() {
                 "{control} on {preset} left the preset chosen"
             );
             assert!(
-                ui.has("Sets session length, group size and speed to start from."),
+                ui.has("Sets group size and speed to start from."),
                 "{control} on {preset}"
             );
         }
@@ -558,17 +564,21 @@ fn any_change_to_what_a_preset_set_shows_the_settings_as_your_own() {
         ui.commit("select-experience", "expert");
         ui.commit("field-level", "20");
         ui.commit("number-pause-after-each-group", "2");
+        ui.commit("number-groups-per-session", "30");
+        ui.click("more-number-groups-per-session");
         assert_eq!(
             chosen_experience(&ui),
             "Expert",
             "a setting it left alone took it off"
         );
-        // Picked again, it puts back what was changed.
-        ui.commit("number-groups-per-session", "30");
+        // Picked again, it puts back what was changed, and only that.
+        ui.commit("to-character-speed", "30");
         assert_eq!(chosen_experience(&ui), "Custom");
         ui.commit("select-experience", "expert");
         assert_eq!(chosen_experience(&ui), "Expert");
-        assert_eq!(value_of(&ui, "number-groups-per-session"), "20");
+        assert_eq!(value_of(&ui, "to-character-speed"), "35");
+        assert_eq!(value_of(&ui, "number-groups-per-session"), "31");
+        assert_eq!(value_of(&ui, "number-pause-after-each-group"), "2");
     });
 }
 
@@ -770,67 +780,54 @@ fn a_session_on_words_sends_the_words_of_the_list() {
     });
 }
 
-/// The contest card's presets each put the settings where they say, as
-/// the card and the cards below it show them, and the card reads Custom
-/// once anything a preset set is changed, wherever it is changed.
+/// The contest card's presets each set how fast the callers come, as the
+/// card and the Speed card show it, and nothing else: the tier, the run
+/// style, the callers' habits, the band and your own speed stay as they
+/// were. The card reads Custom once the callers' speed is changed, and a
+/// change to anything else leaves the preset chosen.
 #[test]
-fn a_contest_preset_sets_its_fields_and_reads_custom_once_one_changes() {
+fn a_contest_preset_sets_the_callers_speed_and_nothing_else() {
     run(|| async {
+        let custom = "Custom · a preset sets how fast the callers come, and nothing else";
         let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        let before = ui.store.load_settings();
         ui.click("nav-settings");
-        assert!(ui.has("Custom · a preset sets the callers"));
+        assert!(ui.has(custom));
         ui.click("preset-first-qso");
         assert!(ui.input_tag("preset-first-qso").contains("active"));
         assert!(
-            ui.has("15–18\u{a0}WPM\u{a0}· tier\u{a0}1\u{a0}calls\u{a0}· one\u{a0}caller\u{a0}at\u{a0}a\u{a0}time\u{a0}· easy\u{a0}habits\u{a0}· no\u{a0}fading\u{a0}or\u{a0}static"),
+            ui.has("Callers\u{a0}at\u{a0}15–18\u{a0}WPM"),
             "{}",
             ui.html()
         );
-        assert_eq!(value_of(&ui, "field-level"), "1");
-        assert!(ui.has("One station calls at a time"));
-        let settings = ui.with_app(|ctx| {
-            use dioxus::prelude::ReadableExt;
-            ctx.settings.peek().clone()
-        });
+        assert_eq!(value_of(&ui, "from-character-speed"), "15");
+        assert_eq!(value_of(&ui, "to-character-speed"), "18");
+        let stored = ui.stored_settings().await;
         assert_eq!(
-            cw_core::ContestPreset::of(&settings),
+            cw_core::ContestPreset::of(&stored),
             Some(cw_core::ContestPreset::FirstQso)
         );
-        assert!(!settings.band.qsb_enabled && !settings.band.qrn_enabled);
+        assert_eq!(stored.curriculum, before.curriculum, "the tier");
+        assert_eq!(stored.contest, before.contest, "the contest's own");
+        assert_eq!(stored.band, before.band, "the band");
 
         ui.click("preset-contester");
-        assert!(ui.has("28–36\u{a0}WPM\u{a0}· tier\u{a0}6\u{a0}calls\u{a0}· 2–5\u{a0}callers\u{a0}· rough\u{a0}habits\u{a0}· deep\u{a0}fading\u{a0}and\u{a0}flutter,\u{a0}strong\u{a0}static"));
-        // The Band card shows the habits it set.
-        assert!(ui.input_tag("habits-rough").contains("active"));
-        assert_eq!(value_of(&ui, "field-level"), "6");
-        assert!(
-            ui.has("2–5 callers · set on the Band card"),
-            "{}",
-            ui.html()
-        );
-        assert_eq!(
-            ui.stored_settings().await.band.stations_max,
-            5,
-            "stored as any edit is"
-        );
-
-        // The tier moved by hand: the settings are your own.
-        ui.commit("field-level", "5");
+        assert!(ui.has("Callers\u{a0}at\u{a0}28–36\u{a0}WPM"));
+        // The callers' speed moved by hand: the settings are your own.
+        ui.commit("from-character-speed", "30");
         ui.advance(50).await;
-        assert!(ui.has("Custom · a preset sets the callers"));
+        assert!(ui.has(custom));
         assert!(!ui.input_tag("preset-contester").contains("active"));
-        // Back on Club, then a single caller picked: your own again.
+        // Back on Club, then the tier, the run style and the habits picked
+        // by hand: Club still, as a preset sets none of them.
         ui.click("preset-club");
-        assert!(ui.has("20–26\u{a0}WPM\u{a0}· tier\u{a0}3\u{a0}calls\u{a0}· 1–3\u{a0}callers\u{a0}· real\u{a0}habits\u{a0}· QSB\u{a0}fading\u{a0}and\u{a0}QRN\u{a0}static"));
-        ui.click("style-single-caller");
-        assert!(ui.has("Custom · a preset sets the callers"));
-        // Back on Club, then easier habits picked on the Band card: your
-        // own again.
-        ui.click("preset-club");
+        assert!(ui.has("Callers\u{a0}at\u{a0}20–26\u{a0}WPM"));
+        ui.commit("field-level", "5");
+        ui.click("style-pile-up");
+        ui.click("habits-rough");
+        ui.advance(50).await;
         assert!(ui.input_tag("preset-club").contains("active"));
-        ui.click("habits-easy");
-        assert!(ui.has("Custom · a preset sets the callers"));
-        assert!(!ui.input_tag("preset-club").contains("active"));
+        assert!(!ui.has(custom));
     });
 }
 
@@ -895,9 +892,8 @@ fn the_band_card_sets_the_callers_habits_in_a_contest() {
 }
 
 /// Flutter is on the Band card in Contest mode only, after the fading,
-/// off until it is turned on, says what it does, is stored, is turned on by
-/// the Contester preset and off by the others, and goes back off with its
-/// card's reset.
+/// off until it is turned on, says what it does, is stored, no preset
+/// touches it, and it goes back off with its card's reset.
 #[test]
 fn flutter_is_a_band_switch_in_contest_mode() {
     run(|| async {
@@ -923,10 +919,11 @@ fn flutter_is_a_band_switch_in_contest_mode() {
         ui.commit("switch-flutter", "true");
         assert!(ui.stored_settings().await.contest.contest_flutter);
         ui.click("preset-club");
-        assert!(!ui.stored_settings().await.contest.contest_flutter);
-        ui.click("preset-contester");
-        assert!(ui.stored_settings().await.contest.contest_flutter);
-        assert!(ui.has("deep\u{a0}fading\u{a0}and\u{a0}flutter"));
+        ui.click("preset-first-qso");
+        assert!(
+            ui.stored_settings().await.contest.contest_flutter,
+            "a preset leaves it alone"
+        );
         ui.click("reset-band-conditions");
         assert!(!ui.stored_settings().await.contest.contest_flutter);
     });
@@ -1008,8 +1005,8 @@ fn show_copy_is_a_session_shape_switch_in_contest_mode() {
 
 /// Your speed is on the Speed card in Contest mode only: until you set
 /// one, the middle of the callers' range, which it says; set, it is yours,
-/// stored, with a press back to the middle; a preset and the card's reset
-/// put it back to the middle too.
+/// stored, with a press back to the middle; the card's reset puts it back
+/// to the middle too, and a preset leaves it alone.
 #[test]
 fn your_speed_is_on_the_speed_card_in_contest_mode() {
     run(|| async {
@@ -1045,16 +1042,24 @@ fn your_speed_is_on_the_speed_card_in_contest_mode() {
         ui.click("more-number-your-speed");
         assert_eq!(ui.stored_settings().await.contest.my_wpm, 31);
         ui.click("preset-club");
-        assert_eq!(ui.stored_settings().await.contest.my_wpm, 0, "a preset");
+        assert_eq!(
+            ui.stored_settings().await.contest.my_wpm,
+            31,
+            "a preset leaves it alone"
+        );
+        assert!(ui.input_tag("preset-club").contains("active"));
+        // Back to the middle, it follows the callers' range a preset sets.
+        ui.click("btn-callers-middle");
         assert_eq!(value_of(&ui, "number-your-speed"), "23");
         // A middle on a half reads as the run bar reads it: 16.5 as 17.
         ui.click("preset-first-qso");
         assert_eq!(value_of(&ui, "number-your-speed"), "17");
-        ui.click("preset-club");
-        assert!(ui.input_tag("preset-club").contains("active"));
         ui.commit("number-your-speed", "40");
         ui.advance(50).await;
-        assert!(!ui.input_tag("preset-club").contains("active"), "your own");
+        assert!(
+            ui.input_tag("preset-first-qso").contains("active"),
+            "your speed is not the preset's"
+        );
         ui.click("reset-speed");
         assert_eq!(ui.stored_settings().await.contest.my_wpm, 0, "the reset");
     });

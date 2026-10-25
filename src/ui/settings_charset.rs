@@ -8,7 +8,6 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::playback::Dialogue;
-use crate::ui::band::habits_label;
 use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
@@ -291,38 +290,11 @@ impl Charset {
     }
 }
 
-/// What a preset sets, in a line: "15–18 WPM · tier 1 calls · one caller
-/// at a time · easy habits · no fading or static", the callers' habits and
-/// the band in the Band card's own words.
+/// What a preset sets, in a line: "Callers at 15–18 WPM", kept in one
+/// piece where a narrow line breaks.
 fn preset_summary(preset: ContestPreset) -> String {
     let (slowest, fastest) = preset.char_wpm();
-    let (fewest, most) = preset.stations();
-    let callers = match preset.style() {
-        RunStyle::Single => "one caller at a time".to_string(),
-        RunStyle::Pileup => format!(
-            "{} callers",
-            range_label(f64::from(fewest), f64::from(most))
-        ),
-    };
-    let band = match preset {
-        ContestPreset::FirstQso => "no fading or static",
-        ContestPreset::Club => "QSB fading and QRN static",
-        ContestPreset::Contester => "deep fading and flutter, strong static",
-    };
-    let parts = [
-        format!("{} WPM", range_label(slowest, fastest)),
-        format!("tier {} calls", preset.tier()),
-        callers,
-        format!("{} habits", habits_label(preset.habits()).to_lowercase()),
-        band.to_string(),
-    ];
-    // One piece each, and the dot at the end of a line, not the start of
-    // the next, where a narrow line breaks.
-    let parts: Vec<String> = parts
-        .iter()
-        .map(|part| part.replace(' ', "\u{a0}"))
-        .collect();
-    parts.join("\u{a0}· ")
+    format!("Callers at {} WPM", range_label(slowest, fastest)).replace(' ', "\u{a0}")
 }
 
 /// The character set card. In Contest mode it also plays Hear a QSO:
@@ -566,15 +538,13 @@ fn ContestBody(
 }
 
 /// Where a run starts from: a preset for a first QSO, a club operator or a
-/// contester, each setting the callers' speed, calls and habits, the run
-/// style and how many call, and the band. The settings read Custom once
-/// any of that is changed, as the Experience presets do.
+/// contester, each setting how fast the callers come and nothing else. The
+/// settings read Custom once that is changed, as the Experience presets do.
 #[component]
 fn PresetPicker(settings: Signal<TrainingSettings>, preset: Option<ContestPreset>) -> Element {
     let line = match preset {
         Some(preset) => preset_summary(preset),
-        None => "Custom · a preset sets the callers' speed, calls and habits, how many call, and the band"
-            .to_string(),
+        None => "Custom · a preset sets how fast the callers come, and nothing else".to_string(),
     };
     rsx! {
         div { class: "eyebrow", "Preset" }

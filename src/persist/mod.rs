@@ -36,8 +36,13 @@ pub trait Store {
     /// itself on a first launch only.
     fn tutorial_done(&self) -> bool;
     fn mark_tutorial_done(&self);
+    /// The stored settings, clamped; `None` when nothing stored reads as
+    /// settings at all: a first launch, or a store that cannot be read.
+    fn read_settings(&self) -> Option<TrainingSettings>;
     /// The stored settings, clamped; defaults for whatever could not be read.
-    fn load_settings(&self) -> TrainingSettings;
+    fn load_settings(&self) -> TrainingSettings {
+        self.read_settings().unwrap_or_default()
+    }
     fn save_settings(&self, settings: &TrainingSettings);
     /// Every stored session that can still be read, oldest first.
     fn load_sessions(&self) -> Vec<SessionResult>;
@@ -231,6 +236,52 @@ fn load_settings_from(raw: &str) -> TrainingSettings {
     recover_settings(raw).clamp()
 }
 
+/// Stored settings, as the app may use them, when what is stored is
+/// settings at all: a JSON object, however much of it still reads.
+#[cfg(any(feature = "web", feature = "native-runtime"))]
+fn read_settings_from(raw: &str) -> Option<TrainingSettings> {
+    matches!(
+        serde_json::from_str::<serde_json::Value>(raw),
+        Ok(serde_json::Value::Object(_))
+    )
+    .then(|| load_settings_from(raw))
+}
+
+/// `theirs`, the settings stored now, with every setting `ours` changed
+/// from `base` laid over it.
+///
+/// `base` is the settings as this copy of the app last read or wrote them.
+/// Another tab, window or copy of the app may have stored changes of its
+/// own since, and a copy that wrote all of its settings back would put each
+/// of those back as it was: only what changed here is written, setting by
+/// setting, as a save names them.
+pub fn merge_settings(
+    base: &TrainingSettings,
+    ours: &TrainingSettings,
+    theirs: &TrainingSettings,
+) -> TrainingSettings {
+    let keys = |settings: &TrainingSettings| match serde_json::to_value(settings) {
+        Ok(serde_json::Value::Object(keys)) => keys,
+        _ => serde_json::Map::new(),
+    };
+    let (base, mine, mut merged) = (keys(base), keys(ours), keys(theirs));
+    // Every key either side has: one only some settings write, as Contest
+    // writes `contestActive`, goes when this copy left it behind.
+    let changed: Vec<&String> = base
+        .keys()
+        .chain(mine.keys())
+        .filter(|key| base.get(*key) != mine.get(*key))
+        .collect();
+    for key in changed {
+        match mine.get(key) {
+            Some(value) => merged.insert(key.clone(), value.clone()),
+            None => merged.remove(key),
+        };
+    }
+    serde_json::from_value::<TrainingSettings>(serde_json::Value::Object(merged))
+        .map_or_else(|_| ours.clone(), TrainingSettings::clamp)
+}
+
 /// The newest of `sessions` whose JSON fits in `budget` bytes, as one JSON
 /// list, and how many it holds.
 ///
@@ -257,9 +308,214 @@ fn newest_that_fit(sessions: &[SessionResult], budget: usize) -> (String, usize)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use cw_core::CharSetMode;
+
+    /// Settings with every one of them moved off its default, and every
+    /// value in bounds, so a save and a load have nothing to put back: what
+    /// is read is what was written, setting by setting.
+    pub(crate) fn every_setting_moved() -> TrainingSettings {
+        let mut s = TrainingSettings::default();
+        let c = &mut s.curriculum;
+        c.level = 9;
+        // Contest is written as Callsigns with `contestActive` beside it, so
+        // this writes that key too.
+        c.char_set_mode = CharSetMode::Contest;
+        c.digits_level = 4;
+        c.mixed_letters_percent = 33;
+        c.custom_sequence = vec!['Z', 'Q', 'X'];
+        c.sequence_is_custom = true;
+        c.practice_window = cw_core::PracticeWindow::Last3;
+        c.callsign_level = 5;
+        c.word_list = vec!["CQ".into(), "TEST".into()];
+        c.num_groups = 7;
+        c.min_group_size = 4;
+        c.max_group_size = 4;
+        c.link_group_size = true;
+        c.adaptive_group_size = true;
+        c.aim = cw_core::Aim::Stretch;
+        let p = &mut s.playback;
+        p.char_wpm_min = 31.0;
+        p.char_wpm_max = 31.0;
+        p.link_char_wpm = true;
+        p.effective_wpm_min = 11.0;
+        p.effective_wpm_max = 11.0;
+        p.link_effective_wpm = true;
+        p.link_char_to_effective = false;
+        p.adaptive_speed = true;
+        p.extra_word_space_multiplier = 2.5;
+        p.group_timeout = 30.0;
+        p.group_pause_sec = 6.0;
+        p.countdown_sec = 7;
+        p.lock_input_during_group_playback = false;
+        p.paddle_swap = true;
+        p.keyer_mode = cw_core::KeyerMode::Ultimatic;
+        p.keyer_wpm = 32.0;
+        p.fist_variation = 0.6;
+        p.group_repeat_min = 2;
+        p.group_repeat_max = 4;
+        p.link_group_repeat = false;
+        let b = &mut s.band;
+        b.side_tone_min = 700.0;
+        b.side_tone_max = 900.0;
+        b.volume_min = 0.4;
+        b.volume_max = 0.4;
+        b.link_volume = true;
+        b.master_volume = 0.5;
+        b.steepness = 7.0;
+        b.envelope_smoothing = 0.5;
+        b.qsb_enabled = false;
+        b.qsb_depth = 0.9;
+        b.qsb_rate_hz = 0.9;
+        b.qrn_enabled = false;
+        b.qrn_level = 0.9;
+        b.noise_enabled = false;
+        b.noise_level = 1.0;
+        b.rf_gain_db = -12.0;
+        b.agc_enabled = false;
+        b.agc_decay = cw_core::AgcDecay::Slow;
+        b.agc_threshold_db = 12.0;
+        b.filter_width_hz = 250.0;
+        b.filter_shape = cw_core::FilterShape::Soft;
+        b.stations_min = 2;
+        b.stations_max = 4;
+        b.pileup_spread_hz = 400.0;
+        b.pileup_level_db = 9.0;
+        let a = &mut s.auto_level;
+        a.mixed_auto_level_next_axis = cw_core::MixedAutoLevelAxis::Digits;
+        a.auto_adjust_level = false;
+        a.auto_adjust_threshold = 77.0;
+        a.auto_adjust_below_threshold_count = 4;
+        a.auto_adjust_above_threshold_count = 9;
+        a.error_weight_strength = 0.9;
+        a.char_sampling_coverage_strength = 0.9;
+        a.char_sampling_thompson = true;
+        let k = &mut s.contest;
+        k.contest_kind = cw_core::ContestKind::Sprint;
+        k.contest_style = cw_core::RunStyle::Pileup;
+        k.contest_habits = cw_core::CallerHabits::Rough;
+        k.contest_flutter = true;
+        k.contest_minutes = 25;
+        k.contest_show_copy = true;
+        k.contest_tu_call = cw_core::TuCall::Every;
+        k.contest_adapt_speed = false;
+        k.my_wpm = 34;
+        k.my_sending_db = -21;
+        k.contest_qsk = true;
+        k.my_call = "DL1ABC".into();
+        k.my_name = "MAT".into();
+        k.my_state = "MA".into();
+        k.my_zone = 15;
+        k.my_power = "500".into();
+        k.my_class = "3A".into();
+        k.my_section = "EMA".into();
+        s
+    }
+
+    /// Every key a save holds is read back, each on its own: one moved in
+    /// an otherwise fresh save comes back moved. A key a section did not
+    /// read, or one another section took first, would come back as its
+    /// default. A setting added and left out of [`every_setting_moved`] is
+    /// named here too.
+    #[test]
+    fn every_setting_is_read_back_on_its_own() {
+        let moved = serde_json::to_value(every_setting_moved()).expect("serialize");
+        let fresh = serde_json::to_value(TrainingSettings::default()).expect("serialize");
+        let (moved, fresh) = (
+            moved.as_object().expect("an object"),
+            fresh.as_object().expect("an object"),
+        );
+        let unmoved: Vec<&String> = fresh
+            .iter()
+            .filter(|(key, value)| moved.get(*key) == Some(*value))
+            .map(|(key, _)| key)
+            .collect();
+        assert!(
+            unmoved.is_empty(),
+            "every_setting_moved leaves these as they ship: {unmoved:?}"
+        );
+        for key in fresh.keys() {
+            let mut save = fresh.clone();
+            save.insert(key.clone(), moved[key].clone());
+            let read: TrainingSettings =
+                serde_json::from_value(serde_json::Value::Object(save)).expect("a save loads");
+            let written = serde_json::to_value(&read).expect("serialize");
+            assert_eq!(
+                written.get(key),
+                Some(&moved[key]),
+                "{key} was not read back"
+            );
+        }
+    }
+
+    /// And all of them together come back from a save exactly as they were
+    /// written, through the same reading the stores and backups use.
+    #[test]
+    fn every_setting_comes_back_from_a_save() {
+        let moved = every_setting_moved();
+        assert_eq!(
+            moved.clone().clamp(),
+            moved,
+            "the moved settings are in bounds"
+        );
+        let compact = serde_json::to_string(&moved).expect("serialize");
+        assert_eq!(load_settings_from(&compact), moved);
+        // Pretty, as the desktop writes them.
+        let pretty = serde_json::to_string_pretty(&moved).expect("serialize");
+        assert_eq!(load_settings_from(&pretty), moved);
+        let backup = backup::read_backup(&backup::write_backup(&moved, &[], 1)).expect("a backup");
+        assert_eq!(backup.settings, moved);
+    }
+
+    /// A merge keeps what is stored, and lays over it only what this copy
+    /// changed: each setting from whichever side moved it.
+    #[test]
+    fn a_merge_keeps_what_another_copy_stored() {
+        let base = TrainingSettings::default();
+        let mut ours = base.clone();
+        ours.band.steepness = 12.0;
+        let mut theirs = base.clone();
+        theirs.curriculum.num_groups = 9;
+        theirs.playback.char_wpm_min = 20.0;
+        // Clamped, as a store reads them.
+        let theirs = theirs.clamp();
+        let merged = merge_settings(&base, &ours, &theirs);
+        assert_eq!(merged.band.steepness, 12.0);
+        assert_eq!(merged.curriculum.num_groups, 9);
+        assert_eq!(merged.playback.char_wpm_min, 20.0);
+        // Nothing changed here: what is stored, as it is.
+        assert_eq!(merge_settings(&base, &base, &theirs), theirs);
+        // Both changed one: this copy's change is the newer.
+        ours.curriculum.num_groups = 4;
+        assert_eq!(
+            merge_settings(&base, &ours, &theirs).curriculum.num_groups,
+            4
+        );
+    }
+
+    /// Contest writes a key no other character set does. Into Contest here
+    /// writes it; out of it here takes it away, whatever is stored.
+    #[test]
+    fn a_merge_carries_the_character_set_whole() {
+        let on = |mode| {
+            let mut settings = TrainingSettings::default();
+            settings.curriculum.char_set_mode = mode;
+            settings
+        };
+        let (contest, mixed) = (on(CharSetMode::Contest), on(CharSetMode::Mixed));
+        let mut theirs = mixed.clone();
+        theirs.curriculum.num_groups = 9;
+        let into = merge_settings(&mixed, &contest, &theirs);
+        assert_eq!(into.curriculum.char_set_mode, CharSetMode::Contest);
+        assert_eq!(into.curriculum.num_groups, 9);
+
+        let mut theirs = contest.clone();
+        theirs.curriculum.num_groups = 9;
+        let out = merge_settings(&contest, &on(CharSetMode::Koch), &theirs);
+        assert_eq!(out.curriculum.char_set_mode, CharSetMode::Koch);
+        assert_eq!(out.curriculum.num_groups, 9);
+    }
 
     pub(super) fn session(date: &str) -> SessionResult {
         SessionResult {
