@@ -14,7 +14,7 @@
 use cw_core::{
     AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate, MonoMs,
     Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult, SplitMix64,
-    Transmission, complete_session, generate_training_group, resolve_station,
+    Transmission, apply_auto_level, complete_session, generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -223,14 +223,15 @@ pub fn start_session(ctx: AppCtx) {
         mut preview,
         ..
     } = ctx;
-    let fitted = settings.peek().clone().clamp();
-    if *settings.peek() != fitted {
-        settings.set(fitted.clone());
+    let clamped = settings.peek().clone().clamp();
+    if *settings.peek() != clamped {
+        settings.set(clamped);
     }
     // Stored now, with whatever the press that starts it kept, a call typed
     // into Home's hero among it: nothing is stored while the session runs,
-    // so a reload mid-run would lose them otherwise.
-    ctx.store_settings();
+    // so a reload mid-run would lose them otherwise. What another window
+    // stored meanwhile comes in with them, and the session runs on that.
+    let fitted = ctx.store_settings();
     // A contest is a run, with a machine of its own.
     if fitted.curriculum.char_set_mode == CharSetMode::Contest {
         start_run(ctx, fitted);
@@ -487,9 +488,11 @@ fn finish_session(ctx: AppCtx) {
         .change
         .as_ref()
         .map(crate::ui::auto_level::change_message);
-    if done.change.is_some() {
-        // Stored by the app's settings effect, once the results are up.
-        settings.set(done.settings);
+    if let Some(change) = &done.change {
+        // Onto the settings as they are now, not as the session started
+        // with them, so the level is all it moves. Stored by the app's
+        // settings effect, once the results are up.
+        apply_auto_level(&mut settings.write(), change);
     }
     if let Some(message) = &message {
         toasts.show(message.clone());
@@ -1741,6 +1744,28 @@ mod tests {
                     .load_auto_counters(&CountersKey::of(&h.ctx.settings.peek())),
                 AutoLevelCounters::default()
             );
+        });
+    }
+
+    /// The level is all a session that earns one moves: a setting changed
+    /// while it ran is kept, where the level used to come back on the
+    /// settings the session started with, and take the change away.
+    #[test]
+    fn a_level_earned_moves_the_level_and_nothing_else() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.auto_level.auto_adjust_level = true;
+            settings.auto_level.auto_adjust_above_threshold_count = 1;
+            settings.auto_level.auto_adjust_threshold = 50.0;
+            settings.curriculum.level = 1;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            h.ctx.settings.write().band.master_volume = 0.5;
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let after = h.ctx.settings.peek().clone();
+            assert_eq!(after.curriculum.level, 2);
+            assert_eq!(after.band.master_volume, 0.5, "the change was taken away");
         });
     }
 

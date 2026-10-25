@@ -48,8 +48,8 @@ impl Store for MemoryStore {
         self.tutorial_done.set(true);
     }
 
-    fn load_settings(&self) -> TrainingSettings {
-        self.settings.borrow().clone().unwrap_or_default().clamp()
+    fn read_settings(&self) -> Option<TrainingSettings> {
+        self.settings.borrow().clone().map(TrainingSettings::clamp)
     }
 
     fn save_settings(&self, settings: &TrainingSettings) {
