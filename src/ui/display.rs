@@ -16,8 +16,16 @@ use crate::ui::widgets::{CardHead, IconName, control_id, html_bool};
 /// What draws the page.
 #[derive(Clone, Debug, PartialEq)]
 enum Drawn {
-    /// The graphics card, by name.
+    /// The graphics card, by name, handing each frame to the window.
     Card(String),
+    /// The graphics card, by name, each of its frames copied to the window
+    /// by the processor, for the reason given. Only WebKitGTK's own page
+    /// says so.
+    #[cfg_attr(
+        not(any(test, all(feature = "desktop", target_os = "linux"))),
+        allow(dead_code)
+    )]
+    CardCopied { name: String, why: String },
     /// The processor, by the name of the software that does it.
     Processor(String),
     /// The webview gives no word on it.
@@ -61,6 +69,9 @@ fn software(name: &str) -> bool {
 fn drawn_text(looked: &Looked) -> String {
     let mut text = match &looked.drawn {
         Drawn::Card(name) => format!("Drawn on the graphics card: {name}."),
+        Drawn::CardCopied { name, why } => format!(
+            "Drawn on the graphics card ({name}), but each frame is copied to the window by the processor, which costs it a little on every scroll: {why}."
+        ),
         Drawn::Processor(name) => format!(
             "Drawn by the processor ({name}), with no graphics card: scrolling and animation cost the processor, and can lag. The webview falls back to this when it cannot use the graphics driver."
         ),
@@ -72,6 +83,112 @@ fn drawn_text(looked: &Looked) -> String {
         ));
     }
     text
+}
+
+/// WebKitGTK's own word on how it draws, from its `webkit://gpu` page.
+#[cfg(any(test, all(feature = "desktop", target_os = "linux")))]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuPage {
+    /// Its hardware acceleration: "always", or "never".
+    policy: Option<String>,
+    /// The GL renderer it composites with.
+    gl_renderer: Option<String>,
+    /// How its frames reach the window: "DMABuf (Supported buffers:
+    /// Hardware, Shared Memory)", say.
+    renderer: Option<String>,
+    /// What the window takes them through: none under X11.
+    native_interface: Option<String>,
+    /// What paints the page's tiles: "GPU (2 threads)", or "CPU".
+    threaded: Option<String>,
+}
+
+/// Whether an environment variable WebKitGTK reads is on: set, and not to
+/// "0", as WebKitGTK takes it.
+#[cfg(any(test, all(feature = "desktop", target_os = "linux")))]
+fn on(env: &impl Fn(&str) -> Option<String>, name: &str) -> bool {
+    env(name).is_some_and(|value| value != "0")
+}
+
+/// What WebKitGTK's page says, read with the environment `env` it runs in,
+/// and what turned its DMA-BUF renderer off, if anything did.
+#[cfg(any(test, all(feature = "desktop", target_os = "linux")))]
+fn classify(
+    page: &GpuPage,
+    env: impl Fn(&str) -> Option<String>,
+    dmabuf_off: Option<&str>,
+) -> Looked {
+    let never = page
+        .policy
+        .as_deref()
+        .is_some_and(|policy| policy.eq_ignore_ascii_case("never"));
+    let compositing_off = if on(&env, "WEBKIT_DISABLE_COMPOSITING_MODE") {
+        Some("WEBKIT_DISABLE_COMPOSITING_MODE is set".to_string())
+    } else if never {
+        // What WebKitGTK falls back to never under, or failing that, its
+        // own finding: no graphics driver it can use.
+        Some(
+            dmabuf_off
+                .unwrap_or("WebKitGTK's hardware acceleration is set to never, as it is when it finds no graphics driver it can use")
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let painted_by_processor = page
+        .threaded
+        .as_deref()
+        .is_some_and(|threads| threads.to_ascii_uppercase().starts_with("CPU"));
+    let drawn = match drawn_by(page.gl_renderer.clone()) {
+        Drawn::Card(name) if painted_by_processor => {
+            let set = if on(&env, "WEBKIT_SKIA_ENABLE_CPU_RENDERING") {
+                ", as WEBKIT_SKIA_ENABLE_CPU_RENDERING asks"
+            } else {
+                ""
+            };
+            Drawn::Processor(format!(
+                "its painter, Skia, on the processor{set}; {name} only composites"
+            ))
+        }
+        Drawn::Card(name)
+            if page
+                .renderer
+                .as_deref()
+                .is_some_and(|renderer| !renderer.contains("Hardware")) =>
+        {
+            let why = if on(&env, "WEBKIT_DMABUF_RENDERER_FORCE_SHM") {
+                "WEBKIT_DMABUF_RENDERER_FORCE_SHM is set"
+            } else {
+                "the graphics driver shares no buffer with the window"
+            };
+            Drawn::CardCopied {
+                name,
+                why: why.to_string(),
+            }
+        }
+        Drawn::Card(name)
+            if page
+                .native_interface
+                .as_deref()
+                .is_some_and(|interface| interface.eq_ignore_ascii_case("none")) =>
+        {
+            let wayland = env("XDG_SESSION_TYPE").is_some_and(|kind| kind == "wayland");
+            let why = if wayland {
+                "the window runs under X11 (XWayland), which takes no buffer from the card; start Dust with GDK_BACKEND=wayland to hand them over"
+            } else {
+                "the window, under X11, takes no buffer from the card"
+            };
+            Drawn::CardCopied {
+                name,
+                why: why.to_string(),
+            }
+        }
+        drawn => drawn,
+    };
+    Looked {
+        drawn,
+        compositing_off,
+    }
 }
 
 /// Ask the webview.
@@ -98,11 +215,13 @@ mod webkitgtk {
 
     use webkit2gtk::{LoadEvent, WebViewExt};
 
-    use super::{Looked, drawn_by};
+    use super::{GpuPage, Looked, classify};
 
     /// Its rows of interest as JSON, written into the page's title once the
     /// page has filled them in: the title is the one thing of a page a view
-    /// hands back without a JavaScript engine of the app's own.
+    /// hands back without a JavaScript engine of the app's own. The page
+    /// fills its rows in a moment after it loads; with its acceleration
+    /// never it has no GL rows to wait for.
     const READ_ROWS: &str = r#"(() => {
     const started = Date.now();
     const read = () => {
@@ -111,8 +230,15 @@ mod webkitgtk {
             const cells = [...tr.children].map((cell) => cell.innerText.trim());
             if (cells.length >= 2) rows[cells[0]] = cells[1];
         }
-        if (rows.GL_RENDERER || Date.now() - started > 3000) {
-            document.title = JSON.stringify({ policy: rows.Policy ?? null, renderer: rows.GL_RENDERER ?? null });
+        const never = (rows.Policy ?? "").toLowerCase() === "never";
+        if (rows.GL_RENDERER || (rows.Policy && never) || Date.now() - started > 3000) {
+            document.title = JSON.stringify({
+                policy: rows.Policy ?? null,
+                glRenderer: rows.GL_RENDERER ?? null,
+                renderer: rows.Renderer ?? null,
+                nativeInterface: rows["Native interface"] ?? null,
+                threaded: rows["Threaded rendering"] ?? null,
+            });
         } else {
             setTimeout(read, 100);
         }
@@ -144,36 +270,19 @@ mod webkitgtk {
             }
         });
         view.load_uri("webkit://gpu");
-        let rows = tokio::time::timeout(Duration::from_secs(6), said).await;
+        let said = tokio::time::timeout(Duration::from_secs(6), said).await;
         // The view, and its page, go once they have said.
         drop(view);
-        let rows: serde_json::Value = rows
+        let page: GpuPage = said
             .ok()
             .and_then(Result::ok)
             .and_then(|title| serde_json::from_str(&title).ok())
             .unwrap_or_default();
-        let field = |name: &str| {
-            rows.get(name)
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        };
-        let never = field("policy").is_some_and(|policy| policy.eq_ignore_ascii_case("never"));
-        let compositing_off = if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some() {
-            Some("WEBKIT_DISABLE_COMPOSITING_MODE is set")
-        } else if never {
-            // What WebKitGTK falls back to never under, or failing that,
-            // its own finding: no graphics driver it can use.
-            Some(crate::linux_webview::dmabuf_off().unwrap_or(
-                "WebKitGTK's hardware acceleration is set to never, as it is when it finds no graphics driver it can use",
-            ))
-        } else {
-            None
-        }
-        .map(str::to_string);
-        Looked {
-            drawn: drawn_by(field("renderer")),
-            compositing_off,
-        }
+        classify(
+            &page,
+            |name| std::env::var(name).ok(),
+            crate::linux_webview::dmabuf_off(),
+        )
     }
 }
 
@@ -316,6 +425,110 @@ mod tests {
             off.ends_with("painted by the processor: WEBKIT_DISABLE_COMPOSITING_MODE is set."),
             "{off}"
         );
+    }
+
+    /// The environment `set` gives, and nothing else.
+    fn env(set: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let set: Vec<(String, String)> = set
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+        move |name| {
+            set.iter()
+                .find(|(set, _)| set == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    const INTEL: &str = "Mesa Intel(R) UHD Graphics 620 (KBL GT2)";
+
+    fn page(gl: &str) -> GpuPage {
+        GpuPage {
+            policy: Some("always".into()),
+            gl_renderer: Some(gl.into()),
+            renderer: Some("DMABuf (Supported buffers: Hardware, Shared Memory)".into()),
+            native_interface: Some("Wayland".into()),
+            threaded: Some("GPU (2 threads)".into()),
+        }
+    }
+
+    /// WebKitGTK's page read row by row: the card handing its frames over,
+    /// the card with its frames copied by the processor, the processor
+    /// painting, and compositing off, each said with what is to blame.
+    #[test]
+    fn webkitgtk_s_page_says_what_draws_and_what_copies() {
+        let clean = classify(&page(INTEL), env(&[]), None);
+        assert_eq!(clean.drawn, Drawn::Card(INTEL.into()));
+        assert_eq!(clean.compositing_off, None);
+
+        let shm = GpuPage {
+            renderer: Some("DMABuf (Supported buffers: Shared Memory)".into()),
+            ..page(INTEL)
+        };
+        let copied = classify(
+            &shm,
+            env(&[("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1")]),
+            None,
+        );
+        assert!(
+            matches!(&copied.drawn, Drawn::CardCopied { why, .. } if why.contains("FORCE_SHM")),
+            "{copied:?}"
+        );
+
+        let x11 = GpuPage {
+            native_interface: Some("None".into()),
+            ..page(INTEL)
+        };
+        let xwayland = classify(&x11, env(&[("XDG_SESSION_TYPE", "wayland")]), None);
+        assert!(
+            matches!(&xwayland.drawn, Drawn::CardCopied { why, .. } if why.contains("GDK_BACKEND=wayland")),
+            "{xwayland:?}"
+        );
+
+        let cpu = GpuPage {
+            threaded: Some("CPU (4 threads)".into()),
+            ..page(INTEL)
+        };
+        let skia = classify(
+            &cpu,
+            env(&[("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1")]),
+            None,
+        );
+        assert!(
+            matches!(&skia.drawn, Drawn::Processor(name) if name.contains("WEBKIT_SKIA_ENABLE_CPU_RENDERING")),
+            "{skia:?}"
+        );
+
+        let soft = classify(&page("llvmpipe (LLVM 20.1.2, 256 bits)"), env(&[]), None);
+        assert!(matches!(soft.drawn, Drawn::Processor(_)), "{soft:?}");
+
+        // Compositing off: by the environment, by the renderer turned off,
+        // or by WebKitGTK finding no driver; and a variable set to "0" is off.
+        let never = GpuPage {
+            policy: Some("never".into()),
+            ..GpuPage::default()
+        };
+        let named = classify(
+            &never,
+            env(&[]),
+            Some("WEBKIT_DISABLE_DMABUF_RENDERER is set"),
+        );
+        assert_eq!(named.drawn, Drawn::Unknown);
+        assert_eq!(
+            named.compositing_off.as_deref(),
+            Some("WEBKIT_DISABLE_DMABUF_RENDERER is set")
+        );
+        assert!(
+            classify(&never, env(&[]), None)
+                .compositing_off
+                .is_some_and(|why| why.contains("no graphics driver"))
+        );
+        let zero = classify(
+            &page(INTEL),
+            env(&[("WEBKIT_DISABLE_COMPOSITING_MODE", "0")]),
+            None,
+        );
+        assert_eq!(zero.compositing_off, None, "set to 0 is not set");
     }
 
     /// Nothing is asked of the webview until Check is pressed.

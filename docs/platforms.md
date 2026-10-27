@@ -198,6 +198,10 @@ Settings → Display → Check says what draws the page: the graphics card by
 name, or the processor ("llvmpipe" and the like), and why compositing is off
 if it is. On Linux that comes from WebKitGTK's own `webkit://gpu` page, which
 GNOME Web shows as well. A page's WebGL is only told a made-up name there.
+That page also says when the card draws but the processor copies each frame
+to the window (under X11 or XWayland, or with
+`WEBKIT_DMABUF_RENDERER_FORCE_SHM`), and when Skia paints on the processor
+(`WEBKIT_SKIA_ENABLE_CPU_RENDERING`). The check says both, with the cause.
 
 To try the graphics card under NVIDIA, start Dust with
 `WEBKIT_DISABLE_DMABUF_RENDERER=0`. Set to `1`, it paints by the processor
