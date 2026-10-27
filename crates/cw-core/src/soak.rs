@@ -460,11 +460,36 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                     event = coherent(&mut rng, &machine, &mut ends, event, now);
                 }
             }
+            let answered = machine.session().any_confirmed();
             effects = machine.apply(event.clone(), MonoMs(now));
             if was_terminal {
                 assert!(
                     effects.is_empty(),
                     "seed {seed} step {step}: {event:?} restarted a finished session: {effects:?}"
+                );
+            }
+            // Typing, and what a send says of itself as it goes, reach the
+            // session from inside the box and the send: they may start a
+            // timer, never stop the sound or end the session under them.
+            if matches!(
+                event,
+                SessionEvent::Input { .. }
+                    | SessionEvent::PlaybackStarted { .. }
+                    | SessionEvent::PlaybackHeldUp { .. }
+            ) {
+                assert!(
+                    effects
+                        .iter()
+                        .all(|effect| matches!(effect, SessionEffect::StartTimer { .. })),
+                    "seed {seed} step {step}: {event:?} did {effects:?}"
+                );
+            }
+            // Once a group is answered, only Discard leaves without keeping
+            // the session: a send stopped or failed, or End session, keeps it.
+            if answered && event != SessionEvent::Abort {
+                assert!(
+                    !effects.contains(&SessionEffect::AbortToHome),
+                    "seed {seed} step {step}: {event:?} threw away answered groups"
                 );
             }
 
