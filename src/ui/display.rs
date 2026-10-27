@@ -159,10 +159,17 @@ mod webkitgtk {
         };
         let never = field("policy").is_some_and(|policy| policy.eq_ignore_ascii_case("never"));
         let compositing_off = if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_some() {
-            Some("WEBKIT_DISABLE_COMPOSITING_MODE is set".to_string())
+            Some("WEBKIT_DISABLE_COMPOSITING_MODE is set")
+        } else if never {
+            // What WebKitGTK falls back to never under, or failing that,
+            // its own finding: no graphics driver it can use.
+            Some(crate::linux_webview::dmabuf_off().unwrap_or(
+                "WebKitGTK's hardware acceleration is set to never, as it is when it finds no graphics driver it can use",
+            ))
         } else {
-            never.then(|| "WebKitGTK's hardware acceleration is set to never".to_string())
-        };
+            None
+        }
+        .map(str::to_string);
         Looked {
             drawn: drawn_by(field("renderer")),
             compositing_off,

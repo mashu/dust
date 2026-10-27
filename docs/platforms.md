@@ -182,6 +182,29 @@ into those sizes under [`assets/linux/`](../assets/linux) by
 to `dust.desktop`. Regenerate them after changing the master. The same master
 is the window icon.
 
+### Drawn on the graphics card
+
+On Linux, WebKitGTK draws the page with the graphics card through its DMA-BUF
+renderer. Left to itself, Dioxus turns that renderer off on every Wayland
+session with a GPU (`WEBKIT_DISABLE_DMABUF_RENDERER`), a workaround for
+NVIDIA's driver. A recent WebKitGTK (2.52 among them) then sets its hardware
+acceleration to never and paints every page by the processor, so scrolling
+lags. Dust keeps it on ([`src/linux_webview.rs`](../src/linux_webview.rs)).
+The one exception is NVIDIA's own driver on a Wayland session, whose windows
+can come up blank with it on. The app still runs under XWayland, as Dioxus
+has it, for the window manager's title bar.
+
+Settings → Display → Check says what draws the page: the graphics card by
+name, or the processor ("llvmpipe" and the like), and why compositing is off
+if it is. On Linux that comes from WebKitGTK's own `webkit://gpu` page, which
+GNOME Web shows as well. A page's WebGL is only told a made-up name there.
+
+To try the graphics card under NVIDIA, start Dust with
+`WEBKIT_DISABLE_DMABUF_RENDERER=0`. Set to `1`, it paints by the processor
+anywhere, should the graphics driver misbehave. `GDK_BACKEND=wayland` runs
+it as a native Wayland window. Any of these set before Dust starts is left
+as it is.
+
 ### Copying while you work in other programs
 
 Listen → **Stream groups** keeps sending groups with the window minimised or
