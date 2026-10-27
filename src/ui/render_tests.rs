@@ -80,6 +80,11 @@ fn Keyed(
             onkeydown: move |e| keys.keydown(e),
             onkeyup: move |e| keys.keyup(e),
             {children}
+            // What the window losing the focus, or the page going, does.
+            button {
+                id: crate::ui::widgets::control_id("btn", "lose focus"),
+                onclick: move |_| keys.release_all(),
+            }
         }
     }
 }
@@ -3535,6 +3540,42 @@ mod interactions {
             ui.release_key(on, Key::Character("[".into()), Code::BracketLeft);
             ui.advance(250).await;
         }
+    }
+
+    /// A paddle let go with Ctrl, Alt or Meta down still opens: the release
+    /// is the paddle's, though the press would have been a shortcut. The
+    /// dah stops, and the pad hears a T rather than dahs on and on.
+    #[test]
+    fn a_paddle_let_go_with_a_modifier_down_still_opens() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let key = Key::Character("]".into());
+            ui.press_key("keyed-root", key.clone(), Code::BracketRight);
+            ui.advance(100).await;
+            ui.release_key_held(
+                "keyed-root",
+                key,
+                Code::BracketRight,
+                dioxus::prelude::Modifiers::CONTROL,
+            );
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    /// The window losing the focus, or the page going, takes the key
+    /// releases with it: the paddles open, the element sounding finishes,
+    /// and the letter it ends is heard.
+    #[test]
+    fn losing_the_focus_opens_the_paddles() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            ui.press_key("keyed-root", Key::Character("]".into()), Code::BracketRight);
+            ui.advance(100).await;
+            ui.click("btn-lose-focus");
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
     }
 
     #[test]

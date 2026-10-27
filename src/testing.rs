@@ -1166,6 +1166,17 @@ impl Ui {
     }
 
     pub fn release_key(&mut self, id: &str, key: Key, code: dioxus::prelude::Code) {
+        self.release_key_held(id, key, code, dioxus::prelude::Modifiers::empty());
+    }
+
+    /// Release `key` with `held` down.
+    pub fn release_key_held(
+        &mut self,
+        id: &str,
+        key: Key,
+        code: dioxus::prelude::Code,
+        held: dioxus::prelude::Modifiers,
+    ) {
         self.fire(
             "keyup",
             id,
@@ -1174,7 +1185,7 @@ impl Ui {
                 code,
                 dioxus::prelude::Location::Standard,
                 false,
-                dioxus::prelude::Modifiers::empty(),
+                held,
                 false,
             )),
         );

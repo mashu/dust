@@ -10,9 +10,11 @@
 use dioxus::prelude::*;
 
 /// Where the run screen, and the Settings and Listen screens, which play
-/// Hear a QSO, keep their listeners on the page; and the app itself, which
-/// stores the settings.
+/// Hear a QSO, keep their listeners on the page; the app itself, which
+/// stores the settings; and the paddles, which open when the page goes, as
+/// their key releases go with it.
 pub const RUN_HIDDEN: &str = "__dustRunHidden";
+pub const PADDLES_HIDDEN: &str = "__dustPaddlesHidden";
 pub const SETTINGS_HIDDEN: &str = "__dustSettingsHidden";
 pub const LISTEN_HIDDEN: &str = "__dustListenHidden";
 pub const APP_HIDDEN: &str = "__dustAppHidden";
