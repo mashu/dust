@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 
 use crate::session_runtime::{AnswerOutbox, TypedAnswer};
 use crate::time::{mono_ms, sleep_ms};
+use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
     CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool,
@@ -238,6 +239,19 @@ impl AnswerDraft {
 /// types into the box: `none` asks only that no keyboard be drawn on screen.
 pub(crate) const ANSWER_INPUT_MODE: &str = "none";
 
+/// Put the cursor in group `idx`'s box, so a keyboard types straight into
+/// it.
+fn focus_box(idx: usize) {
+    // Tests have no page to run it on.
+    #[cfg(not(test))]
+    spawn(async move {
+        let script = crate::ui::widgets::focus_script(&format!("group-input-{idx}"));
+        let _ = document::eval(&script).await;
+    });
+    #[cfg(test)]
+    let _ = idx;
+}
+
 /// The open group: its number, how many times it has been sent, and the box
 /// it is answered in.
 ///
@@ -258,16 +272,9 @@ fn OpenCard(
     // A box that opens takes the focus, so a keyboard types straight into
     // it. One that has it already keeps it, and nothing moves.
     use_effect(use_reactive!(|idx, live| {
-        // Tests have no page to run it on.
-        #[cfg(not(test))]
         if live {
-            spawn(async move {
-                let script = crate::ui::widgets::focus_script(&format!("group-input-{idx}"));
-                let _ = document::eval(&script).await;
-            });
+            focus_box(idx);
         }
-        #[cfg(test)]
-        let _ = (idx, live);
     }));
     rsx! {
         div { id: "group-card-{idx}", class: "group focused",
@@ -610,6 +617,7 @@ pub fn TrainingView(
     on_stop: EventHandler<()>,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
+    let mut asking = use_discard_ask(Discarded::Session);
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     // The open box is never drawn from the session, so a view drawn afresh
     // on a session under way — after a hot reload, say — starts its draft
@@ -748,20 +756,30 @@ pub fn TrainingView(
                 }
             }
             Keypad { open: live, rows: group_rows(), on_key }
-            div { class: "train-actions",
-                button {
-                    id: control_id("btn", "end session"),
-                    class: "btn btn-primary",
-                    onclick: move |_| on_submit.call(()),
-                    Icon { name: IconName::Flag }
-                    "End session"
-                }
-                button {
-                    id: control_id("btn", "discard"),
-                    class: "btn btn-danger",
-                    onclick: move |_| on_stop.call(()),
-                    Icon { name: IconName::X }
-                    "Discard"
+            // End session, and Discard, which asks once more first
+            // ([`crate::ui::discard`]). Keep it puts the cursor back in the
+            // open box.
+            div { class: if asking() { "train-actions asking" } else { "train-actions" },
+                if asking() {
+                    DiscardAsk {
+                        what: Discarded::Session,
+                        on_discard: move |()| on_stop.call(()),
+                        on_keep: move |()| {
+                            asking.set(false);
+                            if live {
+                                focus_box(open);
+                            }
+                        },
+                    }
+                } else {
+                    button {
+                        id: control_id("btn", "end session"),
+                        class: "btn btn-primary",
+                        onclick: move |_| on_submit.call(()),
+                        Icon { name: IconName::Flag }
+                        "End session"
+                    }
+                    DiscardButton { asking }
                 }
             }
         }

@@ -1,6 +1,6 @@
 //! Files under one directory: the desktop and mobile store.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::{BackupSaving, HistorySaved, Store, newest, parse_sessions, read_settings_from};
+use super::{
+    BackupSaving, HistorySaved, OpenSession, Store, newest, parse_sessions, read_settings_from,
+};
 
 const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
@@ -16,6 +18,12 @@ const SETTINGS: &str = "settings.json";
 const SESSIONS: &str = "sessions.json";
 const COUNTERS: &str = "auto_adjust.json";
 const LAST_BACKUP: &str = "last_backup.txt";
+/// The session or run marked open ([`Store::mark_open`]).
+const OPEN: &str = "open_session.json";
+/// Locked by the copy of the app whose session is marked open, for as long
+/// as it runs: a copy that stops, however it stops, lets go of it, so the
+/// next can tell a session cut off from one another window is running.
+const OPEN_LOCK: &str = "open_session.lock";
 
 /// Files under one directory. The directory is a field rather than a global
 /// so a test can point one at a scratch folder.
@@ -26,6 +34,8 @@ pub struct DesktopStore {
     /// The stored history could not be read, nor moved out of the way, so it
     /// is not to be written over.
     history_held: Cell<bool>,
+    /// [`OPEN_LOCK`], held while this copy's session is marked open.
+    open_held: RefCell<Option<fs::File>>,
 }
 
 impl DesktopStore {
@@ -42,6 +52,7 @@ impl DesktopStore {
             root: root.into(),
             backup_folder: None,
             history_held: Cell::new(false),
+            open_held: RefCell::new(None),
         }
     }
 
@@ -268,6 +279,61 @@ impl Store for DesktopStore {
         #[cfg(not(all(target_os = "android", not(test))))]
         super::saved_now(self.save_in_folder(name, contents))
     }
+
+    /// The marker is written and taken away only under the lock, and read
+    /// only under it, so a copy starting up never takes a session another
+    /// is running for one cut off. Written unsynced: it is only a marker,
+    /// and the first group waits on nothing.
+    fn mark_open(&self, open: Option<OpenSession>) {
+        let path = self.root.join(OPEN);
+        let mut held = self.open_held.borrow_mut();
+        match open {
+            Some(open) => {
+                // Without the lock nothing is marked: better a session cut
+                // off unsaid than one running told of as lost.
+                let Some(lock) = held.take().or_else(|| self.lock_open()) else {
+                    return;
+                };
+                if let Ok(raw) = serde_json::to_vec(&open)
+                    && fs::write(&path, raw).is_ok()
+                {
+                    *held = Some(lock);
+                }
+            }
+            None => {
+                let _ = fs::remove_file(&path);
+                // Let go once the marker is gone.
+                held.take();
+            }
+        }
+    }
+
+    fn take_cut_off(&self) -> Option<OpenSession> {
+        let path = self.root.join(OPEN);
+        if !path.exists() {
+            return None;
+        }
+        // Held: another copy of the app is running it.
+        let _lock = self.lock_open()?;
+        let raw = fs::read(&path).ok()?;
+        let _ = fs::remove_file(&path);
+        serde_json::from_slice(&raw).ok()
+    }
+}
+
+impl DesktopStore {
+    /// [`OPEN_LOCK`], locked for this copy, unless another holds it.
+    fn lock_open(&self) -> Option<fs::File> {
+        fs::create_dir_all(&self.root).ok()?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.root.join(OPEN_LOCK))
+            .ok()?;
+        file.try_lock().ok()?;
+        Some(file)
+    }
 }
 
 impl DesktopStore {
@@ -376,6 +442,32 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// A session marked open by a copy of the app that stopped under it is
+    /// told of once; one a copy still running holds is left alone; one that
+    /// ended is never told of.
+    #[test]
+    fn a_session_left_open_is_told_of_once_and_only_when_cut_off() {
+        let (dir, running) = store("open");
+        let open = OpenSession {
+            started_at: 1_790_000_000_000,
+            run: false,
+        };
+        running.mark_open(Some(open));
+        // Another copy, started while it runs, leaves it to the one running.
+        let other = DesktopStore::at(dir.0.clone());
+        assert_eq!(other.take_cut_off(), None, "still running elsewhere");
+        // Ended: nothing to tell of.
+        running.mark_open(None);
+        assert_eq!(other.take_cut_off(), None);
+
+        // The app stops under it: the next copy is told, once.
+        running.mark_open(Some(open));
+        drop(running);
+        let next = DesktopStore::at(dir.0.clone());
+        assert_eq!(next.take_cut_off(), Some(open));
+        assert_eq!(next.take_cut_off(), None, "told of once");
     }
 
     #[test]

@@ -34,6 +34,7 @@ use crate::contest_runtime::refocus_run;
 use crate::session_runtime::{abort_run, start_session};
 use crate::state::{AppCtx, Screen, Tour};
 use crate::time::{POLL_MS, sleep_ms};
+use crate::ui::discard::Discarded;
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::training::TOUCH_BUILD;
 use crate::ui::widgets::{Icon, IconName, control_id, html_bool, keep_focus, pretty_number};
@@ -254,11 +255,12 @@ impl Move {
                 .map(|index| format!("group-input-{index}"))
                 .into_iter()
                 .collect(),
-            // A run's Discard asks once more, and the Discard that confirms
-            // it stands in its row.
+            // Discard asks once more, and the Discard that confirms it
+            // stands in its row.
             Self::Discard => vec![
                 control_id("btn", "discard"),
-                control_id("btn", "discard run"),
+                Discarded::Session.confirm_id(),
+                Discarded::Run.confirm_id(),
             ],
             Self::OpenSettings => vec![control_id("nav", "settings")],
             Self::Random(range) => vec![control_id("link", range.label)],
@@ -428,7 +430,7 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "Discard the session",
-        text: "That is the whole drill: hear a group, type it. Press Discard to leave without keeping this session.",
+        text: "That is the whole drill: hear a group, type it. Press Discard, then Discard again, to leave without keeping this session.",
         moves: &[Move::Discard],
         shows: None,
         screen: Some(Screen::Training),
@@ -1322,8 +1324,14 @@ mod tests {
             "{}",
             ui.html()
         );
-        assert!(ui.has("#btn-discard, #btn-discard-run {"), "{}", ui.html());
+        assert!(
+            ui.has("#btn-discard, #btn-discard-session, #btn-discard-run {"),
+            "{}",
+            ui.html()
+        );
         ui.click("btn-discard");
+        assert_eq!(ui.screen(), "training", "Discard asks once more");
+        ui.click("btn-discard-session");
         assert_eq!(ui.screen(), "home");
         assert!(on_step(ui, 3), "{}", ui.html());
         assert!(!ui.has("tour-dock top"));
@@ -1794,7 +1802,11 @@ mod tests {
             }
             let discard = CONTEST_STEPS.len() - 2;
             assert!(on_contest_step(&ui, discard), "{}", ui.html());
-            assert!(ui.has("#btn-discard, #btn-discard-run {"), "{}", ui.html());
+            assert!(
+                ui.has("#btn-discard, #btn-discard-session, #btn-discard-run {"),
+                "{}",
+                ui.html()
+            );
             ui.click("btn-discard");
             assert_eq!(ui.screen(), "training", "Discard asks once more");
             assert!(ui.shows("btn-discard-run"));

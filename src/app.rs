@@ -15,6 +15,7 @@ use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::contest::RunAnnouncer;
+use crate::ui::notice::NoticeBanner;
 use crate::ui::paddle::use_paddle_keys;
 use crate::ui::tour::{TourButton, TourDock};
 use crate::ui::widgets::{Icon, IconName, control_id, keep_focus};
@@ -210,6 +211,11 @@ pub fn App() -> Element {
                     }
                 }
                 div { class: "screen", id: "screen-{screen_key}",
+                    // Off the training screen: whatever the session or run
+                    // before ended with, other than by your hand.
+                    if show_nav {
+                        NoticeBanner {}
+                    }
                     Route { screen: screen_now }
                 }
             }
@@ -385,7 +391,8 @@ mod tests {
 
 #[cfg(test)]
 mod ui_tests {
-    use crate::persist::Store;
+    use crate::persist::memory::MemoryStore;
+    use crate::persist::{OpenSession, Store};
     use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
     use dioxus::prelude::{Code, Key, ReadableExt, WritableExt};
@@ -704,16 +711,108 @@ mod ui_tests {
     #[test]
     fn every_way_out_of_a_session_is_honoured() {
         run(|| async {
-            for button in ["btn-exit", "btn-end-session", "btn-discard"] {
+            for presses in [
+                &["btn-exit"][..],
+                &["btn-end-session"],
+                &["btn-discard", "btn-discard-session"],
+            ] {
+                let button = presses.join(" then ");
                 let (mut ui, _recorder) = Ui::app_with_settings(short_session());
                 ui.click("btn-start-training");
-                ui.click(button);
+                for press in presses {
+                    ui.click(press);
+                }
                 assert!(
                     ui.run_until(2_000, |ui| ui.screen() == "home").await,
                     "{button} should have left the session"
                 );
                 assert!(ui.store.load_sessions().is_empty());
             }
+        });
+    }
+
+    /// Discard asks once more: what it throws away is kept nowhere. Keep it
+    /// carries the session on as it was; only the second Discard leaves it,
+    /// answered groups and all.
+    #[test]
+    fn discarding_a_session_asks_once_more() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+
+            ui.click("btn-discard");
+            assert_eq!(ui.screen(), "training", "the first press only asks");
+            assert!(ui.has("Discard this session? Its answers are not kept"));
+            assert!(!ui.shows("btn-end-session"), "the question takes the row");
+            ui.click("btn-keep-session");
+            assert!(ui.shows("btn-end-session") && ui.shows("btn-discard"));
+            assert!(!ui.shows("btn-discard-session"));
+            assert_eq!(ui.screen(), "training");
+
+            ui.click("btn-discard");
+            ui.click("btn-discard-session");
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.store.load_sessions().is_empty());
+        });
+    }
+
+    /// A session or run the last copy of the app stopped under is told of
+    /// as the app opens, once, until it is put away; one another copy is
+    /// still running is left to it.
+    #[test]
+    fn a_session_the_app_stopped_under_is_told_of_at_launch() {
+        run(|| async {
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.mark_tutorial_done();
+            let started_at = crate::time::now_ms();
+            store.mark_open(Some(OpenSession {
+                started_at,
+                run: false,
+            }));
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            assert_eq!(ui.screen(), "home");
+            assert!(
+                ui.has("was cut off: Dust closed while it ran"),
+                "{}",
+                ui.html()
+            );
+            assert_eq!(store.open.get(), None, "told of once");
+            ui.click("btn-dismiss-notice");
+            assert!(!ui.has("was cut off"));
+
+            store.mark_open(Some(OpenSession {
+                started_at,
+                run: true,
+            }));
+            store.open_elsewhere.set(true);
+            let (ui, _recorder) = Ui::launch(store.clone());
+            assert!(!ui.has("was cut off"), "another copy is running it");
+            assert!(store.open.get().is_some(), "left to the copy running it");
+        });
+    }
+
+    /// Starting the next session puts away what the last one left to say.
+    #[test]
+    fn starting_a_session_puts_the_notice_away() {
+        run(|| async {
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.mark_tutorial_done();
+            store.save_settings(&short_session());
+            store.mark_open(Some(OpenSession {
+                started_at: crate::time::now_ms(),
+                run: false,
+            }));
+            let (mut ui, _recorder) = Ui::launch(store);
+            assert!(ui.has("was cut off"));
+            ui.click("btn-start-training");
+            ui.click("btn-discard");
+            ui.click("btn-discard-session");
+            assert_eq!(ui.screen(), "home");
+            assert!(!ui.has("was cut off"), "{}", ui.html());
         });
     }
 

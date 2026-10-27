@@ -1785,7 +1785,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 @media (any-pointer: coarse) {
   .run:not(.paused) .run-actions { order: 0; }
 }
-.run-ask { flex-basis: 100%; margin: 0; font-weight: 600; }
+.discard-ask { flex-basis: 100%; margin: 0; font-weight: 600; }
 
 .run-paused-line { display: flex; align-items: center; gap: 0.45rem; margin: 0; font-weight: 700; }
 .run-paused-why { margin: 0.3rem 0 0; }
@@ -1887,6 +1887,22 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 600;
   font-size: 0.92rem;
 }
+/* What the session or run before ended with, other than by your hand. */
+.notice-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+  border-radius: var(--r-md);
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--ink);
+  padding: 0.75rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+.notice-text { flex: 1; }
+.notice-close { width: 1.9rem; height: 1.9rem; flex: none; box-shadow: none; }
 /* Score board. A medal is gold, silver or bronze by its class, with the
    place on it; its ribbon is the same for all three. */
 .medal { display: block; flex: none; width: 1.55rem; height: 1.95rem; overflow: visible; }
@@ -2816,7 +2832,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .run-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .run-actions.asking { grid-template-columns: 1fr 1fr; }
   .run-actions .btn { padding-left: 0.5rem; padding-right: 0.5rem; }
-  .run-ask { grid-column: 1 / -1; }
+  .discard-ask { grid-column: 1 / -1; }
   .grid-4 { grid-template-columns: 1fr 1fr; gap: 0.5rem; }
   /* A log row takes two lines: who and what, then speed and how it checked. */
   .run-log { --log-row: 2.9rem; }

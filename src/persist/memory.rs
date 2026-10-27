@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::{BackupSaving, HistorySaved, Store, newest, saved_now};
+use super::{BackupSaving, HistorySaved, OpenSession, Store, newest, saved_now};
 
 #[derive(Default)]
 pub struct MemoryStore {
@@ -29,6 +29,11 @@ pub struct MemoryStore {
     pub no_backups: Cell<bool>,
     /// How many times the store was asked to keep its data.
     pub keep_asks: Cell<u32>,
+    /// The session or run marked open, as a copy of the app that stopped
+    /// leaves it for the next.
+    pub open: Cell<Option<OpenSession>>,
+    /// Another copy of the app is running the session marked open.
+    pub open_elsewhere: Cell<bool>,
 }
 
 impl Store for MemoryStore {
@@ -118,5 +123,16 @@ impl Store for MemoryStore {
 
     fn ask_to_keep(&self) {
         self.keep_asks.set(self.keep_asks.get() + 1);
+    }
+
+    fn mark_open(&self, open: Option<OpenSession>) {
+        self.open.set(open);
+    }
+
+    fn take_cut_off(&self) -> Option<OpenSession> {
+        if self.open_elsewhere.get() {
+            return None;
+        }
+        self.open.take()
     }
 }

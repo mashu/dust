@@ -312,6 +312,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
         last_tick: None,
         unsaid: Vec::new(),
     })));
+    ctx.mark_running(true);
     run_effects(ctx, &lease, effects);
 }
 
@@ -639,8 +640,9 @@ pub fn refocus_run(ctx: AppCtx) {
     }
 }
 
-/// The run, taken out of the app, with the audio given back. Its sound has
-/// stopped, so what it held for a screen reader is said now.
+/// The run, taken out of the app, with the audio given back, and marked as
+/// over. Its sound has stopped, so what it held for a screen reader is said
+/// now.
 fn end_run(ctx: AppCtx) -> Option<LiveContest> {
     let taken = ctx
         .app()
@@ -651,6 +653,7 @@ fn end_run(ctx: AppCtx) -> Option<LiveContest> {
         return None;
     };
     live.lease.release();
+    ctx.mark_ended();
     say(ctx, std::mem::take(&mut live.unsaid));
     Some(*live)
 }
@@ -682,7 +685,9 @@ fn keep_nothing(ctx: AppCtx) {
         mut auto_message,
         ..
     } = ctx;
-    end_run(ctx);
+    if end_run(ctx).is_none() {
+        return;
+    }
     view.set(None);
     result.set(Some(Finished::NothingKept));
     auto_message.set(None);
@@ -696,7 +701,9 @@ fn abandon_run(ctx: AppCtx) {
         contest: mut view,
         ..
     } = ctx;
-    end_run(ctx);
+    if end_run(ctx).is_none() {
+        return;
+    }
     view.set(None);
     screen.set(Screen::Home);
 }
@@ -994,6 +1001,30 @@ mod tests {
                 matches!(&row.status, cw_core::RowStatus::Checked(check) if check.is_clean())
             };
             assert!(h.run_until(15_000, clean).await, "logged and checked clean");
+        });
+    }
+
+    /// A run is marked open from its start until it ends, kept or not: one
+    /// the app stops under is told of when it next opens.
+    #[test]
+    fn a_run_is_marked_open_while_it_runs() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let open = h.store.open.get().expect("marked open");
+            assert!(open.run);
+            let ctx = h.ctx;
+            h.in_app(|| crate::session_runtime::abort_run(ctx));
+            h.pump();
+            assert_eq!(h.screen(), Screen::Home);
+            assert_eq!(h.store.open.get(), None, "discarded");
+
+            h.start_training();
+            assert!(h.store.open.get().is_some());
+            h.in_app(|| crate::session_runtime::finish_run(ctx));
+            h.pump();
+            assert_ne!(h.screen(), Screen::Training);
+            assert_eq!(h.store.open.get(), None, "ended");
         });
     }
 

@@ -217,6 +217,18 @@ gives it:
 `DUST_DATA_DIR` overrides the directory on every desktop and mobile build,
 which is what a portable install uses.
 
+A session or contest run is marked open while it runs, and the mark goes
+when it ends, kept or discarded. One still marked when the app next opens
+was cut off: the app closed, crashed, was killed, or was rebuilt under
+`dx serve`. The app then says so, once, on the practice screen, so a session
+is never lost without a word. On desktop and mobile the mark is
+`open_session.json`, written only while `open_session.lock` is held. A copy
+of the app that stops, however it stops, lets go of the lock, so a second
+window opened meanwhile never takes a session the first is still running for
+one cut off. In a browser the mark is in the tab's own `sessionStorage`
+(`dust_open_session`): it outlives a reload of that tab, and no other tab
+reads it.
+
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
 `dust_last_backup`) and

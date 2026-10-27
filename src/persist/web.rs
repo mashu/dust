@@ -7,8 +7,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    BackupSaving, HistorySaved, Store, newest, newest_that_fit, parse_sessions, read_settings_from,
-    saved_now,
+    BackupSaving, HistorySaved, OpenSession, Store, newest, newest_that_fit, parse_sessions,
+    read_settings_from, saved_now,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -18,6 +18,9 @@ const SESSIONS_KEY: &str = "dust_sessions";
 const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
 const LAST_BACKUP_KEY: &str = "dust_last_backup";
+/// The session or run marked open ([`Store::mark_open`]), in the tab's own
+/// store.
+const OPEN_KEY: &str = "dust_open_session";
 
 /// How much of the site's storage the history may take, in characters.
 /// Browsers give a site about five million; the rest is left for the
@@ -35,6 +38,12 @@ pub struct WebStore {
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// The tab's own store: what is marked there is the tab's, outlives a
+/// reload of it, and no other tab reads it.
+fn tab_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.session_storage().ok().flatten()
 }
 
 fn counters_key(key: &CountersKey) -> String {
@@ -232,5 +241,31 @@ impl Store for WebStore {
         if !self.asked_to_keep.replace(true) {
             wasm_bindgen_futures::spawn_local(ask_for_persistence());
         }
+    }
+
+    /// In the tab's own store: a session another tab is running is never
+    /// taken for one cut off, and one a reload cut off is the reloaded
+    /// tab's to tell of.
+    fn mark_open(&self, open: Option<OpenSession>) {
+        let Some(store) = tab_storage() else {
+            return;
+        };
+        match open {
+            Some(open) => {
+                if let Ok(raw) = serde_json::to_string(&open) {
+                    let _ = store.set_item(OPEN_KEY, &raw);
+                }
+            }
+            None => {
+                let _ = store.remove_item(OPEN_KEY);
+            }
+        }
+    }
+
+    fn take_cut_off(&self) -> Option<OpenSession> {
+        let store = tab_storage()?;
+        let raw = store.get_item(OPEN_KEY).ok().flatten()?;
+        let _ = store.remove_item(OPEN_KEY);
+        serde_json::from_str(&raw).ok()
     }
 }

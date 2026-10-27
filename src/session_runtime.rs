@@ -23,7 +23,7 @@ use dioxus::prelude::*;
 use crate::contest_runtime::{LiveContest, send_run_event, start_run};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
-use crate::state::{AppCtx, Finished, Screen};
+use crate::state::{AppCtx, Finished, Notice, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
 /// What has the training screen: a session of groups, or a contest run.
@@ -305,6 +305,7 @@ pub fn start_session(ctx: AppCtx) {
         stations: SplitMix64::new(seed_rng()),
         lease: lease.clone(),
     })));
+    ctx.mark_running(false);
     run_effects(ctx, &lease, effects);
 }
 
@@ -348,12 +349,20 @@ pub fn abort_run(ctx: AppCtx) {
     }
 }
 
-/// Let the machine decide what `event` means, then do what it says.
+/// How a session ended: kept and shown, or let go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+    Kept,
+    LetGo,
+}
+
+/// Let the machine decide what `event` means, then do what it says, and say
+/// whether that ended the session.
 ///
 /// `lease` is the session the event belongs to: an event from a session
 /// that has ended, or from one before the session now running, is dropped
 /// rather than handed to a machine it means nothing to.
-fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
+fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) -> Option<Ended> {
     let mut runtime = ctx.runtime;
     let app = ctx.app();
     let closes = app
@@ -384,7 +393,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
                     dispatch(ctx, &lease, event);
                 }
             });
-            return;
+            return None;
         }
         // A letter keyed in full and not in the box yet begins the answer
         // too, once it is in.
@@ -393,13 +402,10 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
     }
     let effects = {
         let mut slot = app.session.borrow_mut();
-        let Some(live) = slot
+        let live = slot
             .as_mut()
             .and_then(Live::groups_mut)
-            .filter(|live| live.lease.is(lease) && lease.is_current())
-        else {
-            return;
-        };
+            .filter(|live| live.lease.is(lease) && lease.is_current())?;
         let now = MonoMs(mono_ms());
         // Typing still waiting out the box's pause came before this event,
         // so the machine hears it first.
@@ -417,10 +423,12 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         }
         effects
     };
-    run_effects(ctx, lease, effects);
+    run_effects(ctx, lease, effects)
 }
 
-fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
+/// Do what the machine said, and say whether it ended the session.
+fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) -> Option<Ended> {
+    let mut ended = None;
     for effect in effects {
         match effect {
             SessionEffect::StopAudio => lease.stop_sending(),
@@ -435,10 +443,19 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
                     }
                 });
             }
-            SessionEffect::PersistAndShowResults => finish_session(ctx),
-            SessionEffect::AbortToHome => abandon_session(ctx),
+            SessionEffect::PersistAndShowResults => {
+                if finish_session(ctx) {
+                    ended = Some(Ended::Kept);
+                }
+            }
+            SessionEffect::AbortToHome => {
+                if abandon_session(ctx) {
+                    ended = Some(Ended::LetGo);
+                }
+            }
         }
     }
+    ended
 }
 
 /// Send group `index`, and tell the machine how it went.
@@ -475,22 +492,37 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
             };
             dispatch(ctx, &lease, event);
         };
-        let event = match lease.send(&transmission, &settings, news).await {
-            Ok(sent) => SessionEvent::PlaybackEnded {
-                index,
-                duration_sec: sent.duration_sec,
-            },
-            Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
-            Err(failure) => {
-                ctx.toasts.show(failure.to_string());
-                SessionEvent::PlaybackStopped { index }
-            }
+        let (event, stopped) = match lease.send(&transmission, &settings, news).await {
+            Ok(sent) => (
+                SessionEvent::PlaybackEnded {
+                    index,
+                    duration_sec: sent.duration_sec,
+                },
+                None,
+            ),
+            Err(stopped) => (SessionEvent::PlaybackStopped { index }, Some(stopped)),
         };
-        dispatch(ctx, &lease, event);
+        match (stopped, dispatch(ctx, &lease, event)) {
+            // The sound ended the session: why stays up on the screen it
+            // left, until it is read.
+            (Some(why), Some(ended)) => {
+                let mut notice = ctx.notice;
+                notice.set(Some(Notice::SoundStopped {
+                    why: why.to_string(),
+                    kept: ended == Ended::Kept,
+                }));
+            }
+            // The session had moved on from it.
+            (Some(failure), None) if failure != AudioError::Cancelled => {
+                ctx.toasts.show(failure.to_string());
+            }
+            _ => {}
+        }
     });
 }
 
-/// The session, taken out of the app, with the audio given back.
+/// The session, taken out of the app, with the audio given back, and
+/// marked as over.
 fn end_session(ctx: AppCtx) -> Option<LiveSession> {
     let taken = ctx
         .app()
@@ -501,24 +533,28 @@ fn end_session(ctx: AppCtx) -> Option<LiveSession> {
         return None;
     };
     live.lease.release();
+    ctx.mark_ended();
     Some(*live)
 }
 
-/// End the session without keeping it.
-fn abandon_session(ctx: AppCtx) {
+/// End the session without keeping it. Whether there was one.
+fn abandon_session(ctx: AppCtx) -> bool {
     let AppCtx {
         mut screen,
         mut runtime,
         ..
     } = ctx;
-    end_session(ctx);
+    if end_session(ctx).is_none() {
+        return false;
+    }
     runtime.set(None);
     screen.set(Screen::Home);
+    true
 }
 
 /// Score the session, move the level if it earned it, store it, and show
-/// the results.
-fn finish_session(ctx: AppCtx) {
+/// the results. Whether there was one.
+fn finish_session(ctx: AppCtx) -> bool {
     let AppCtx {
         mut runtime,
         mut auto_message,
@@ -527,7 +563,7 @@ fn finish_session(ctx: AppCtx) {
         ..
     } = ctx;
     let Some(live) = end_session(ctx) else {
-        return;
+        return false;
     };
     let store = ctx.app().store;
     let session = live.machine.session();
@@ -554,6 +590,7 @@ fn finish_session(ctx: AppCtx) {
     auto_message.set(message);
     runtime.set(None);
     keep_and_show(ctx, done.result);
+    true
 }
 
 /// Add `finished` to the history, store it, and show it on the results
@@ -1206,8 +1243,75 @@ mod tests {
                 "a stalled player should end the session, not hang"
             );
             assert!(h.recorder.players_built.get() > 1, "the player is rebuilt");
-            assert_eq!(h.toast().as_deref(), Some("Audio playback stalled."));
+            assert_eq!(h.notice(), Some(stopped("Audio playback stalled.", false)));
             assert!(h.ctx.sessions.peek().is_empty());
+        });
+    }
+
+    /// The sound ended the session, `kept` or not, for `why`.
+    fn stopped(why: &str, kept: bool) -> Notice {
+        Notice::SoundStopped {
+            why: why.to_string(),
+            kept,
+        }
+    }
+
+    /// A session its sound ends after a group was answered is kept, and the
+    /// results say why it ended early for as long as it takes to read them:
+    /// no toast that is gone in a moment.
+    #[test]
+    fn a_session_its_sound_ends_keeps_what_was_answered_and_says_why() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            h.set_behaviour(Behaviour::Stall);
+            assert!(h.run_until(60_000, |h| h.screen() == Screen::Results).await);
+            assert_eq!(h.ctx.sessions.peek().len(), 1, "the answer was kept");
+            assert_eq!(h.notice(), Some(stopped("Audio playback stalled.", true)));
+            h.advance(u64::from(crate::state::ACTION_TOAST_MS) * 2)
+                .await;
+            assert_eq!(h.notice(), Some(stopped("Audio playback stalled.", true)));
+        });
+    }
+
+    /// A session is marked open from its start until it ends, however it
+    /// ends: one the app stops under is told of when it next opens.
+    #[test]
+    fn a_session_is_marked_open_while_it_runs() {
+        run(|| async {
+            let mut h = Harness::new();
+            assert_eq!(h.store.open.get(), None);
+            h.start_training();
+            let open = h.store.open.get().expect("marked open");
+            assert!(!open.run);
+            h.send(SessionEvent::Abort);
+            assert_eq!(h.store.open.get(), None, "discarded");
+
+            h.start_training();
+            assert!(h.store.open.get().is_some());
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.store.open.get(), None, "kept");
+        });
+    }
+
+    /// Leaving a session that has already gone leaves the screen as it is.
+    #[test]
+    fn leaving_a_session_that_has_gone_changes_nothing() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let ctx = h.ctx;
+            assert!(!h.in_app(|| abandon_session(ctx)));
+            assert!(!h.in_app(|| finish_session(ctx)));
+            assert_eq!(h.screen(), Screen::Results);
         });
     }
 
@@ -1531,7 +1635,10 @@ mod tests {
             // Three attempts, each on a freshly built player.
             assert_eq!(h.texts().len(), 3);
             assert!(h.recorder.players_built.get() >= 3);
-            assert!(h.toast().is_some());
+            assert!(matches!(
+                h.notice(),
+                Some(Notice::SoundStopped { kept: false, .. })
+            ));
         });
     }
 
@@ -1542,7 +1649,10 @@ mod tests {
             h.set_behaviour(Behaviour::RefuseToStart);
             h.start_training();
             assert!(h.run_until(30_000, |h| h.screen() == Screen::Home).await);
-            assert_eq!(h.toast().as_deref(), Some("Audio stream: device is gone"));
+            assert_eq!(
+                h.notice(),
+                Some(stopped("Audio stream: device is gone", false))
+            );
         });
     }
 

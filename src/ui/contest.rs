@@ -20,9 +20,9 @@ use crate::session_runtime::{abort_run, finish_run};
 use crate::state::AppCtx;
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
+use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::tour::bring_into_sight;
 use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow, TOUCH_BUILD};
 use crate::ui::widgets::{
     Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool, keep_focus,
@@ -870,10 +870,9 @@ fn paused_why(why: PauseWhy) -> Option<&'static str> {
     }
 }
 
-/// Pause, End run and Discard, which asks once more first: the QSOs it
-/// throws away are not kept anywhere. Asking, Keep it stands where Discard
-/// stood, so the second tap of a double tap keeps the run. Discard and Keep
-/// it leave the cursor in the field, so the run goes on as it was.
+/// Pause, End run and Discard, which asks once more first
+/// ([`crate::ui::discard`]). Discard and Keep it leave the cursor in the
+/// field, so the run goes on as it was.
 ///
 /// Paused, Pause keeps its place, inert, and says so: the paused page is
 /// shorter, so the row may come to rest under the finger that paused, and
@@ -882,34 +881,16 @@ fn paused_why(why: PauseWhy) -> Option<&'static str> {
 #[component]
 fn RunActions(paused: bool) -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut asking = use_signal(|| false);
-    // The question takes more room than the row it replaces, and its Discard
-    // can land below the window, or under the guide: it is brought into
-    // sight once the page has it.
-    use_effect(move || {
-        if asking() {
-            bring_into_sight(&[control_id("btn", "discard run")]);
-        }
-    });
+    let mut asking = use_discard_ask(Discarded::Run);
     if asking() {
         return rsx! {
             div {
                 id: control_id("run", "actions"),
                 class: "train-actions run-actions asking",
-                p { class: "run-ask", role: "alert", "Discard this run? Its QSOs are not kept" }
-                button {
-                    id: control_id("btn", "discard run"),
-                    class: "btn btn-danger",
-                    onclick: move |_| abort_run(ctx),
-                    Icon { name: IconName::X }
-                    "Discard"
-                }
-                button {
-                    id: control_id("btn", "keep run"),
-                    class: "btn btn-secondary",
-                    onmousedown: keep_focus,
-                    onclick: move |_| from_button(ctx, || asking.set(false)),
-                    "Keep it"
+                DiscardAsk {
+                    what: Discarded::Run,
+                    on_discard: move |()| abort_run(ctx),
+                    on_keep: move |()| from_button(ctx, || asking.set(false)),
                 }
             }
         };
@@ -932,14 +913,7 @@ fn RunActions(paused: bool) -> Element {
                 Icon { name: IconName::Flag }
                 "End run"
             }
-            button {
-                id: control_id("btn", "discard"),
-                class: "btn btn-danger",
-                onmousedown: keep_focus,
-                onclick: move |_| asking.set(true),
-                Icon { name: IconName::X }
-                "Discard"
-            }
+            DiscardButton { asking }
         }
     }
 }

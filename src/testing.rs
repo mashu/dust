@@ -25,7 +25,7 @@ use crate::persist::Store;
 use crate::persist::memory::MemoryStore;
 use crate::player::Lease;
 use crate::session_runtime::{send_event, start_session};
-use crate::state::{AppCtx, AppState, Screen};
+use crate::state::{AppCtx, AppState, Notice, Screen};
 use crate::time::POLL_MS;
 use crate::ui::widgets::DISCLOSURE;
 
@@ -429,6 +429,11 @@ impl Harness {
 
     pub fn toast(&self) -> Option<String> {
         self.ctx.toasts.current().map(|toast| toast.text)
+    }
+
+    /// What the session or run before ended with, other than by your hand.
+    pub fn notice(&self) -> Option<Notice> {
+        self.ctx.notice.peek().clone()
     }
 
     pub fn calls(&self) -> Vec<Call> {

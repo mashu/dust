@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
 use crate::persist::backup::{Backup, backup_name, merge_sessions, write_backup};
-use crate::persist::{HistorySaved, Store, merge_settings};
+use crate::persist::{HistorySaved, OpenSession, Store, merge_settings};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live};
@@ -142,6 +142,10 @@ pub struct AppCtx {
     pub tour: Signal<Option<Tour>>,
     /// When the last backup was saved, if ever.
     pub last_backup: Signal<Option<u64>>,
+    /// Why the session or run before was lost, or ended before it was done,
+    /// when it was not by your hand: up until it is put away, or the next
+    /// one starts.
+    pub notice: Signal<Option<Notice>>,
     /// The sessions deleted last, each with where it sat, for Undo to put
     /// back.
     trash: Signal<Vec<(usize, SessionResult)>>,
@@ -159,6 +163,9 @@ impl AppCtx {
     /// scope that owns the app, as everything in it lives as long as that.
     pub fn new(app: AppState, settings: TrainingSettings, sessions: Vec<SessionResult>) -> Self {
         let last_backup = app.store.last_backup();
+        // A session or run the last copy of the app stopped under is told
+        // of as this one opens.
+        let notice = app.store.take_cut_off().map(Notice::CutOff);
         let stored_settings = CopyValue::new(settings.clone().clamp());
         Self {
             screen: Signal::new(Screen::Home),
@@ -177,6 +184,7 @@ impl AppCtx {
             entry: ContestEntry::new(),
             tour: Signal::new(None),
             last_backup: Signal::new(last_backup),
+            notice: Signal::new(notice),
             trash: Signal::new(Vec::new()),
             before_restore: Signal::new(None),
             stored_settings,
@@ -186,6 +194,22 @@ impl AppCtx {
 
     pub fn app(self) -> AppState {
         self.app.cloned()
+    }
+
+    /// A session (`run` false) or a contest run now has the app: marked open
+    /// until it ends, so that one the app stops under is told of when it
+    /// next opens. Whatever the last one left to say is put away.
+    pub fn mark_running(mut self, run: bool) {
+        self.notice.set(None);
+        self.app().store.mark_open(Some(OpenSession {
+            started_at: crate::time::now_ms(),
+            run,
+        }));
+    }
+
+    /// The session or run that had the app has ended, kept or let go.
+    pub fn mark_ended(self) {
+        self.app().store.mark_open(None);
     }
 
     /// Whether a session or a run has the app: on its screen, or about to
@@ -454,6 +478,18 @@ fn why_not_stored(saved: &HistorySaved) -> Option<String> {
         }
         HistorySaved::Failed(reason) => Some(reason.clone()),
     }
+}
+
+/// A session or run lost, or ended before it was done, other than by your
+/// hand ([`AppCtx::notice`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Notice {
+    /// The app stopped with it running: closed, crashed, killed or rebuilt.
+    /// It was not kept.
+    CutOff(OpenSession),
+    /// Its sound stopped and could not be brought back, for the reason
+    /// given. What was answered by then is `kept`.
+    SoundStopped { why: String, kept: bool },
 }
 
 /// How the session just finished ended, as its results screen shows it.

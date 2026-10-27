@@ -66,6 +66,27 @@ pub trait Store {
     /// needs room. Only a browser clears a store on its own, and it may ask
     /// the user first.
     fn ask_to_keep(&self) {}
+    /// Mark a session or run open in this copy of the app while it runs
+    /// (`Some`), or over (`None`): it ended, kept or let go. One still marked
+    /// when the app stops was cut off ([`Store::take_cut_off`]).
+    fn mark_open(&self, open: Option<OpenSession>);
+    /// The session or run a copy of the app left marked open, and no copy is
+    /// running any longer: the app closed, crashed or was stopped under it.
+    /// Taken, so it is told of once; one another copy is still running is
+    /// left alone.
+    fn take_cut_off(&self) -> Option<OpenSession>;
+}
+
+/// A session of groups or a contest run, as it is marked open while it runs
+/// ([`Store::mark_open`]): so that one the app stops under is never lost
+/// without a word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSession {
+    /// When it started, in milliseconds since the epoch.
+    pub started_at: u64,
+    /// A contest run, rather than a session of groups.
+    pub run: bool,
 }
 
 /// A backup file on its way: saved already, or still being saved where only
