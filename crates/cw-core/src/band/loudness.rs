@@ -78,12 +78,9 @@ struct LoudestAsk {
 impl LoudestAsk {
     fn of(settings: &TrainingSettings) -> Self {
         let receiver = FilterDesign::from_settings(settings);
-        // The AGC the players run: none when there is no band to run it on.
-        let knee = if settings.band.has_background() {
-            receiver_knee(&settings.band, &receiver)
-        } else {
-            None
-        };
+        // The AGC the players run, whatever is on the band: none only with
+        // it switched off.
+        let knee = receiver_knee(&settings.band, &receiver);
         let range = settings.side_tone_range();
         let held = |value: f64, low: f64, high: f64, fallback: f64| {
             if value.is_finite() {

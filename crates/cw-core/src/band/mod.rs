@@ -61,7 +61,7 @@ mod source;
 // is the band's own business.
 pub use agc::{
     AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_LOOKAHEAD_SEC, AGC_MAX_DUCK_DB, CompressorSetting,
-    agc_compressor, agc_decay_sec, agc_lookahead_samples,
+    agc_compressor, agc_compressor_release_sec, agc_decay_sec, agc_lookahead_samples,
 };
 pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
 pub(crate) use filter::mirror_hz;
@@ -182,9 +182,21 @@ impl BandMixer {
     }
 
     /// Take the receiver's gain over from the band this one replaces, so a
-    /// station being copied across the change is not ducked afresh.
-    pub fn carry_gain_from(&mut self, previous: &BandMixer) {
-        self.agc.carry_on_from(&previous.agc);
+    /// station being copied across the change is not ducked afresh. Whether
+    /// there was a gain to take: an AGC switched off has none.
+    pub fn carry_gain_from(&mut self, previous: &BandMixer) -> bool {
+        self.agc.carry_on_from(&previous.agc)
+    }
+
+    /// Let the AGC hear `send`, a sample of the send still waiting out the
+    /// look-ahead, through the RF gain already, without the band moving on:
+    /// a band put in under a station its AGC never heard, the AGC switched
+    /// on or the receiver new, has the station's gain by the time the send
+    /// it never heard is played at it.
+    pub fn hear_ahead(&mut self, send: f64) {
+        if send.is_finite() {
+            let _ = self.agc.next_gain(send);
+        }
     }
 
     /// The band alone, as the player would play it with nothing sent over
@@ -202,6 +214,14 @@ impl BandSettings {
     /// not, there is no background stream to run.
     pub fn has_background(&self) -> bool {
         qrn_level(self) > 0.0 || noise_level(self) > 0.0 || self.stations_max > STATIONS_MIN
+    }
+
+    /// Whether the receiver has anything to do but filter the station: a
+    /// band to play, or an AGC to ride the station with. A rig's AGC rides
+    /// whatever reaches it, on a dead band as much as a busy one, and on a
+    /// quiet one is where its evening out is plainest to hear.
+    pub fn runs_receiver(&self) -> bool {
+        self.has_background() || self.agc_enabled
     }
 }
 

@@ -22,15 +22,15 @@ pub const BAND_FADE_SEC: f64 = 0.02;
 pub const GATE_RAMP_SEC: f64 = 0.005;
 
 /// The gains a player plays at: the receiver's RF gain, on everything
-/// reaching its AGC; what it receives, the band and the stations, at the
-/// receiver's AF gain after the AGC, which full volume sizes to the
-/// receiver; and what it monitors, your own messages, at the volume alone,
-/// as they are set at the level they are heard at.
+/// reaching its AGC; the AF gain full volume lifts what the receiver plays
+/// by after its AGC, sized to that receiver; and the volume, which turns
+/// that down, and your own messages and the paddle's sidetone with it, as
+/// they are set at the level they are heard at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gains {
     pub rf: f64,
-    pub received: f64,
-    pub monitored: f64,
+    pub af: f64,
+    pub volume: f64,
 }
 
 impl Gains {
@@ -38,16 +38,28 @@ impl Gains {
     /// level.
     pub const UNITY: Self = Self {
         rf: 1.0,
-        received: 1.0,
-        monitored: 1.0,
+        af: 1.0,
+        volume: 1.0,
     };
 
     pub fn of(settings: &TrainingSettings) -> Self {
         Self {
             rf: settings.rf_gain(),
-            received: settings.af_gain(),
-            monitored: settings.master_volume(),
+            af: cw_core::band::full_volume_gain(settings),
+            volume: settings.master_volume(),
         }
+    }
+
+    /// What the receiver's output plays at: its AF gain at the volume.
+    #[cfg(feature = "web")]
+    pub fn received(&self) -> f64 {
+        self.af * self.volume
+    }
+
+    /// What your own messages play at, past the receiver: the volume alone.
+    #[cfg(feature = "web")]
+    pub fn monitored(&self) -> f64 {
+        self.volume
     }
 }
 

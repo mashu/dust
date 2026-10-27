@@ -7,8 +7,8 @@
 use cw_core::AgcDecay;
 use cw_core::TrainingSettings;
 use cw_core::band::{
-    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, FilterDesign, agc_compressor, agc_decay_sec,
-    limiter_feed, receiver_knee, soft_limit_curve,
+    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, FilterDesign, agc_compressor,
+    agc_compressor_release_sec, limiter_feed, receiver_knee, soft_limit_curve,
 };
 use web_sys::{AnalyserNode, AudioContext, AudioParam, DynamicsCompressorNode, GainNode};
 
@@ -106,7 +106,7 @@ impl Chain {
             (agc.attack(), AGC_ATTACK_SEC, "agc attack"),
             (
                 agc.release(),
-                agc_decay_sec(AgcDecay::Fast).1,
+                agc_compressor_release_sec(AgcDecay::Fast),
                 "agc release",
             ),
         ] {
@@ -215,8 +215,8 @@ impl Chain {
         let now = ctx.current_time();
         for (node, to, from) in [
             (&self.rf, gains.rf, self.gains.rf),
-            (&self.received, gains.received, self.gains.received),
-            (&self.monitored, gains.monitored, self.gains.monitored),
+            (&self.received, gains.received(), self.gains.received()),
+            (&self.monitored, gains.monitored(), self.gains.monitored()),
         ] {
             if to != from && to.is_finite() {
                 ramp_to(
@@ -245,8 +245,9 @@ impl Chain {
     /// the native AGC holds — a decibel or two of ripple — but its static
     /// curve is the native one. Its own look-ahead, six milliseconds in every
     /// browser, catches the first element of an over as the native one does.
-    /// With the AGC off, or nothing on the band for it to ride, it is parked
-    /// where it is transparent, as the native player is with no band running.
+    /// With the AGC off it is parked where it is transparent, as the native
+    /// player runs none; on, it rides the station on a band with nothing
+    /// else on it as on any other.
     ///
     /// Every browser adds make-up gain after a compressor, scaled by how hard
     /// it compresses at full scale. A receiver's AGC only ever turns things
@@ -254,11 +255,7 @@ impl Chain {
     /// receiver's output, which has been through the compressor, and not for
     /// the audio-stage floor, which has not ([`limiter_feed`]).
     pub fn tune_agc(&self, ctx: &AudioContext, settings: &TrainingSettings) {
-        let knee = if settings.band.has_background() {
-            receiver_knee(&settings.band, &FilterDesign::from_settings(settings))
-        } else {
-            None
-        };
+        let knee = receiver_knee(&settings.band, &FilterDesign::from_settings(settings));
         let setting = agc_compressor(knee);
         let now = ctx.current_time();
         let _ = self
@@ -269,7 +266,7 @@ impl Chain {
             .agc
             .ratio()
             .set_value_at_time(setting.ratio.clamp(1.0, 20.0) as f32, now);
-        let (_, release) = agc_decay_sec(settings.band.agc_decay);
+        let release = agc_compressor_release_sec(settings.band.agc_decay);
         let _ = self.agc.release().set_value_at_time(release as f32, now);
         let feed = limiter_feed(&setting);
         let _ = self

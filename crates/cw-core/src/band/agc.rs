@@ -62,20 +62,35 @@ pub const AGC_ATTACK_SEC: f64 = 0.002;
 /// pumping AGC is the one everyone dislikes.
 pub const AGC_HANG_SEC: f64 = 0.22;
 /// Once the hang has run out, the time constant the gain recovers with at
-/// Fast decay: between the FAST and MID settings of a typical transceiver
-/// (0.1 and 0.5 s), so a pause of a second has the band fully back.
-pub const AGC_RELEASE_SEC: f64 = 0.3;
+/// Fast decay, in decibels: the way down left shrinks by e every this long,
+/// as an analogue AGC's capacitor discharges into a gain control that works
+/// in decibels. The bulk of a 25 dB duck is back a tenth of a second after
+/// the hang and the last decibel by 0.7 s, so a pause of a second has the
+/// band fully back; between the FAST and MID settings of a typical
+/// transceiver (0.1 and 0.5 s).
+pub const AGC_RELEASE_SEC: f64 = 0.15;
 /// The hang at Slow decay: across a word gap at 15 WPM (0.56 s), so the band
 /// stays down from one word of an over to the next.
 pub const AGC_SLOW_HANG_SEC: f64 = 0.6;
-/// The release at Slow decay: a typical transceiver's SLOW.
-pub const AGC_SLOW_RELEASE_SEC: f64 = 1.2;
+/// The release at Slow decay, in decibels as at Fast: the band back over a
+/// second or so after the hang, as a typical transceiver's SLOW.
+pub const AGC_SLOW_RELEASE_SEC: f64 = 0.5;
 
 /// The hang and the release `decay` runs the AGC with, in seconds.
 pub fn agc_decay_sec(decay: AgcDecay) -> (f64, f64) {
     match decay {
         AgcDecay::Fast => (AGC_HANG_SEC, AGC_RELEASE_SEC),
         AgcDecay::Slow => (AGC_SLOW_HANG_SEC, AGC_SLOW_RELEASE_SEC),
+    }
+}
+
+/// The release a browser's compressor runs at for `decay`, in its own terms:
+/// the time it takes to bring the gain back up ten decibels. It has no hang,
+/// so it lets go slower than the native AGC recovers once its hang is over.
+pub fn agc_compressor_release_sec(decay: AgcDecay) -> f64 {
+    match decay {
+        AgcDecay::Fast => 0.3,
+        AgcDecay::Slow => 1.2,
     }
 }
 /// The detector's smoothing: a one-pole average of power with this time
@@ -464,15 +479,18 @@ impl Agc {
         };
         if self.above >= self.qualify {
             self.hang_left = self.hang;
-            self.held = if wanted < self.held {
-                closer_in_db(self.held, wanted, self.attack)
+            // Both ways in decibels: down at the attack, and up, to a weaker
+            // signal still standing over the knee, at the release.
+            let rate = if wanted < self.held {
+                self.attack
             } else {
-                wanted + (self.held - wanted) * self.release
+                self.release
             };
+            self.held = closer_in_db(self.held, wanted, rate);
         } else if self.hang_left > 0 {
             self.hang_left -= 1;
         } else {
-            self.held = 1.0 + (self.held - 1.0) * self.release;
+            self.held = closer_in_db(self.held, 1.0, self.release);
         }
 
         // The ceiling, on the crests still waiting to be played, at the gain
@@ -508,10 +526,11 @@ impl Agc {
     /// same hang, the same gain. A band rebuilt under a station would
     /// otherwise open its gain wide and duck the station afresh — a swell on
     /// every rebuild, and a flutter while a slider moves. From here it rides
-    /// to its own knee at its own attack and release.
-    pub fn carry_on_from(&mut self, previous: &Agc) {
+    /// to its own knee at its own attack and release. Whether it could: one
+    /// switched off, on either side, has nothing to carry.
+    pub fn carry_on_from(&mut self, previous: &Agc) -> bool {
         if self.is_off() || previous.is_off() {
-            return;
+            return false;
         }
         self.power = previous.power;
         self.peak = previous.peak;
@@ -524,6 +543,7 @@ impl Agc {
         self.limited = previous.limited;
         self.ceiling = previous.ceiling;
         self.gain = previous.gain;
+        true
     }
 
     /// The static law as a gain, for a detector reading of `level`: nothing
@@ -812,6 +832,42 @@ mod tests {
 
     /// (7): sending groups with pauses between them, every group is ducked
     /// the same from its first letter to its last.
+    /// After the hang the gain comes back in decibels, as a rig's does: the
+    /// last of a deep duck no slower, against the first, than a curve
+    /// exponential in decibels takes it, where one stepped in amplitude
+    /// snapped the first fifteen decibels back and crept over the rest; and
+    /// the band is back within a decibel a second after the station at Fast,
+    /// within two at Slow two seconds after.
+    #[test]
+    fn the_gain_comes_back_in_decibels() {
+        for (decay, back_by, within_db) in [(AgcDecay::Fast, 1.0, 1.0), (AgcDecay::Slow, 2.0, 2.0)]
+        {
+            let knee = 0.01;
+            let mut agc = Agc::new(SR, knee, decay);
+            let level = knee * db_to_gain(28.0);
+            let tone = seconds(0.5);
+            for i in 0..tone {
+                let _ = agc.next_gain(level * (TAU * 600.0 * i as f64 / f64::from(SR)).sin());
+            }
+            let gains: Vec<f64> = (0..seconds(2.5)).map(|_| db(agc.next_gain(0.0))).collect();
+            let when = |down: f64| {
+                gains.iter().position(|g| *g >= down).expect("it came back") as f64 / f64::from(SR)
+            };
+            assert!(gains[0] < -24.0, "{decay:?}: ducked {:.1} dB", gains[0]);
+            let first = when(-15.0) - when(-20.0);
+            let last = when(-5.0) - when(-10.0);
+            assert!(
+                first / last >= 0.35,
+                "{decay:?}: 5 dB in {first:.3} s near the bottom, {last:.3} s near the top"
+            );
+            let after = gains[seconds(back_by)];
+            assert!(
+                after > -within_db,
+                "{decay:?}: {after:.2} dB {back_by} s on"
+            );
+        }
+    }
+
     #[test]
     fn every_group_is_ducked_the_same_from_start_to_finish() {
         let settings = floor_only();

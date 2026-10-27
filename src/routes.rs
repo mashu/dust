@@ -291,18 +291,16 @@ fn use_band_follow(ctx: AppCtx) {
 /// the one the level scope draws its line by, AGC on or off ([`BandKnee`]),
 /// so that the scope never measures it on the thread that draws.
 ///
-/// And with it, for a band with a background, how loud the strongest
-/// station comes out of that receiver ([`loudest_station`]), which full
-/// volume is sized by: a few milliseconds more, and asked of the knee just
-/// measured. The knee, unless the worker measuring it failed.
+/// And with it how loud the strongest station comes out of that receiver
+/// ([`loudest_station`]), which full volume is sized by whatever is on the
+/// band: a few milliseconds more, and asked of the knee just measured. The
+/// knee, unless the worker measuring it failed.
 async fn warm_agc_knee(settings: &TrainingSettings) -> Option<f64> {
     let (on, receiver) = knee_asked(settings);
-    let band = settings.band.has_background().then(|| settings.clone());
+    let settings = settings.clone();
     let measure = move || {
         let knee = agc_knee(&on, &receiver);
-        if let Some(settings) = band {
-            loudest_station(&settings);
-        }
+        loudest_station(&settings);
         knee
     };
     // A worker measures it, and the slider is not held up at all. A worker

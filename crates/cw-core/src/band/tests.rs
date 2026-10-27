@@ -666,7 +666,7 @@ fn a_rebuilt_band_carries_the_gain_on() {
         "the send should have ducked the band: {gain:.2}"
     );
     let mut new = BandMixer::new(SR, &settings, 8);
-    new.carry_gain_from(&old);
+    assert!(new.carry_gain_from(&old), "an AGC on both sides to carry");
     let next = new.next(tone(1.0, SR as usize / 2)).gain;
     assert!(
         (20.0 * (next / gain).log10()).abs() < 0.1,

@@ -104,35 +104,47 @@ fn a_new_band_comes_in_without_a_hole_in_the_hiss() {
     );
 }
 
-/// The volume sets the level of everything the receiver plays, the band
-/// and the Morse over it alike, and gets there in a straight line at the
-/// gate's pace rather than in a step: a slider moved under a tone never
+/// The volume and the AF gain set the level of everything the receiver
+/// plays, the band and the Morse over it alike, and neither steps: the
+/// volume moves in a straight line at the gate's pace, and the AF gain,
+/// which can move tens of decibels as the receiver changes, glides there a
+/// decibel at a time over a band's fade. A slider moved under a tone never
 /// clicks.
 #[test]
-fn the_volume_moves_all_the_receiver_plays_without_a_step() {
+fn the_volume_and_the_af_gain_move_all_the_receiver_plays_without_a_step() {
     // The AGC off, so the Morse plays at its own level rather than held
     // down to the knee's at a volume of one.
     let mut settings = hiss();
     settings.band.agc_enabled = false;
-    let play = |volume: f64| {
+    // Moved once the band is in and the send has begun.
+    let play = |af: f64, volume: f64| {
         let mut mixer = Mixer::new(SR);
         let mut swept = Swept::new();
-        mixer.set_band(Some(band(&settings, 9)), &mut swept);
+        mixer.set_band_at(Some(band(&settings, 9)), Gains::UNITY, &mut swept);
         mixer.start(send(&settings, "TEST"), &mut swept);
+        render(&mut mixer, SR as usize / 10);
         mixer.set_gains(Gains {
             rf: 1.0,
-            received: volume,
-            monitored: 1.0,
+            af,
+            volume,
         });
         render(&mut mixer, SR as usize)
     };
-    let (plain, lifted) = (play(1.0), play(4.0));
+    let plain = play(1.0, 1.0);
     assert!(loudest(&plain) > 0.1, "the Morse was heard");
-    let step = 1.0 / (GATE_RAMP_SEC * f64::from(SR));
+    let fade = (BAND_FADE_SEC * f64::from(SR)).round();
+    let lifted = play(4.0, 1.0);
     for (i, (a, b)) in plain.iter().zip(&lifted).enumerate() {
-        let gain = (1.0 + step * (i + 1) as f64).min(4.0);
+        let gain = 4f64.powf(((i + 1) as f64 / fade).min(1.0));
         let off = (f64::from(*b) - gain * f64::from(*a)).abs();
-        assert!(off < 1e-5, "{off} off at {i}");
+        assert!(off < 1e-5, "{off} off at {i}, the AF gain lifted");
+    }
+    let step = 1.0 / (GATE_RAMP_SEC * f64::from(SR));
+    let quieter = play(1.0, 0.25);
+    for (i, (a, b)) in plain.iter().zip(&quieter).enumerate() {
+        let gain = (1.0 - step * (i + 1) as f64).max(0.25);
+        let off = (f64::from(*b) - gain * f64::from(*a)).abs();
+        assert!(off < 1e-5, "{off} off at {i}, the volume turned down");
     }
 }
 
@@ -247,6 +259,151 @@ fn the_agc_evens_out_the_previews_three_strengths() {
         raised[1] > -4.0 && raised[2] < -10.0,
         "threshold +20 dB: {raised:.2?} dB"
     );
+}
+
+/// A band with nothing on it but the station still has its receiver's AGC:
+/// noise and static off, the preview's loud and weak CQs come out within a
+/// few decibels of each other with it on, as a rig's AGC rides whatever
+/// reaches it, and as far apart as they were sent with it off.
+#[test]
+fn the_agc_rides_a_station_on_a_quiet_band() {
+    let quiet = |agc: bool| {
+        let mut settings = hiss();
+        settings.band.noise_enabled = false;
+        settings.band.agc_enabled = agc;
+        settings
+    };
+    let played = |settings: &TrainingSettings, strength: f64| -> f64 {
+        let mut mixer = Mixer::new(SR);
+        let mut swept = Swept::new();
+        mixer.set_gains(Gains::of(settings));
+        mixer.set_band(BandVoice::for_settings(settings, SR, 3), &mut swept);
+        render(&mut mixer, SR as usize / 4);
+        let voice = keyer(settings.side_tone_center(), strength);
+        let plan = plan_transmission(&Transmission::alone("CQ CQ", voice), settings);
+        let receiver = FilterDesign::from_settings(settings);
+        mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
+        let frames = late() + (plan.wanted.duration_sec * f64::from(SR)) as usize;
+        let mut peaks: Vec<f32> = render(&mut mixer, frames)
+            .chunks(SR as usize / 100)
+            .map(loudest)
+            .collect();
+        peaks.sort_by(f32::total_cmp);
+        f64::from(peaks[peaks.len() * 9 / 10])
+    };
+    let on = quiet(true);
+    assert!(!on.band.has_background() && on.band.runs_receiver());
+    let apart =
+        |settings: &TrainingSettings| db((played(settings, 0.1) / played(settings, 1.0)).powi(2));
+    let even = apart(&on);
+    assert!(even > -3.0, "AGC on: the weak one {even:.2} dB");
+    let off = quiet(false);
+    assert!(
+        BandVoice::for_settings(&off, SR, 3).is_none(),
+        "nothing to run"
+    );
+    let raw = apart(&off);
+    assert!(
+        (raw + 20.0).abs() < 1.0,
+        "AGC off: the weak one {raw:.2} dB"
+    );
+}
+
+/// Switching the AGC off under a station, as the band preview invites,
+/// plays it no louder than full volume plays any station clean: the AF
+/// gain full volume sized for the receiver with the AGC on goes out with
+/// that band, and the station eases from the one to the other over the
+/// change, where it once rode the new band's open gain at the old AF gain,
+/// twenty-odd decibels into the limiter for a sixth of a second.
+#[test]
+fn switching_the_agc_off_under_a_station_never_drives_it_into_the_limiter() {
+    let on = hiss();
+    let mut off = on.clone();
+    off.band.agc_enabled = false;
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.set_gains(Gains::of(&on));
+    mixer.set_band(BandVoice::for_settings(&on, SR, 3), &mut swept);
+    render(&mut mixer, SR as usize / 2);
+    let voice = keyer(on.side_tone_center(), VOLUME_MAX);
+    let plan = plan_transmission(&Transmission::alone("TTTTTTTTTT", voice), &on);
+    let receiver = FilterDesign::from_settings(&on);
+    mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
+    let before = render(&mut mixer, SR as usize * 6 / 10);
+    assert!(loudest(&before) > 0.6, "the station played full");
+    // Both ways, the AGC on again as well.
+    for (switch, to) in [(&off, "off"), (&on, "on")] {
+        let band = BandVoice::for_settings(switch, SR, 3);
+        mixer.set_band_at(band, Gains::of(switch), &mut swept);
+        let after = render(&mut mixer, SR as usize * 3 / 10);
+        let peak = f64::from(loudest(&after));
+        assert!(
+            peak < SOFT_LIMIT_KNEE * 1.05,
+            "the AGC switched {to}: {peak:.3} into the limiter"
+        );
+    }
+}
+
+/// The RF gain turned up under a strong station, as a tap at the end of its
+/// slider does, plays the station no louder than the AGC holds it: the send
+/// waits out the look-ahead through the RF gain the AGC heard it at, as
+/// the band does, rather than at the one it is played at, which the AGC
+/// never heard and let through ten to twenty-five decibels over.
+#[test]
+fn turning_the_rf_gain_up_under_a_station_never_overshoots() {
+    let settings = hiss();
+    let voice = keyer(settings.side_tone_center(), VOLUME_MAX);
+    let plan = plan_transmission(&Transmission::alone("TTTTTTTTTT", voice), &settings);
+    let receiver = FilterDesign::from_settings(&settings);
+    let mut backed = settings.clone();
+    backed.band.rf_gain_db = -30.0;
+    // A fresh receiver for every moment the RF gain comes up, through a
+    // dah and the space after it.
+    let play = |step_at: Option<usize>| {
+        let mut mixer = Mixer::new(SR);
+        let mut swept = Swept::new();
+        let first = if step_at.is_some() {
+            &backed
+        } else {
+            &settings
+        };
+        mixer.set_gains(Gains::of(first));
+        mixer.set_band(BandVoice::for_settings(first, SR, 3), &mut swept);
+        render(&mut mixer, SR as usize / 2);
+        mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
+        let settle = SR as usize / 2 + step_at.unwrap_or(0);
+        render(&mut mixer, settle);
+        mixer.set_gains(Gains::of(&settings));
+        render(&mut mixer, SR as usize / 10)
+    };
+    let held = f64::from(loudest(&play(None)));
+    for k in 0..12 {
+        let step_at = k * SR as usize / 100;
+        let peak = f64::from(loudest(&play(Some(step_at))));
+        assert!(
+            peak < held * 1.41,
+            "{:.1} dB over the station held, the RF gain up {} ms on",
+            db((peak / held).powi(2)),
+            step_at * 1_000 / SR as usize
+        );
+    }
+}
+
+/// However high the rate a stream opens at, the send waits out as long a
+/// look-ahead as the AGC listens ahead, so the AGC has heard every element
+/// of it coming.
+#[test]
+fn the_look_ahead_is_the_agcs_at_any_rate() {
+    for rate in [8_000, 48_000, 384_000, 705_600, 768_000] {
+        let mut mixer = Mixer::new(rate);
+        let expected = agc_lookahead_samples(rate) as f64 / f64::from(rate);
+        assert_eq!(mixer.lookahead_sec(), expected, "made at {rate} Hz");
+        let mut swept = Swept::new();
+        mixer.clear(rate, &mut swept);
+        assert_eq!(mixer.lookahead_sec(), expected, "reopened at {rate} Hz");
+        let mut out = vec![0.0f32; 4_096];
+        mixer.render(&mut out, 0);
+    }
 }
 
 /// Full volume is as loud as the Morse plays clean, through whatever

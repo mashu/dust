@@ -9,8 +9,8 @@
 //! you send. The RF gain turns down all the receiver hears before its AGC
 //! does, and the AGC hears it all [`AGC_LOOKAHEAD_SEC`] before it is
 //! played. Your own message in a contest joins after all of it, as a rig's
-//! sidetone does, at the volume, and the receiver's AF gain sets how loud
-//! the rest is played. The
+//! sidetone does, at the volume, and the receiver's AF gain, each band's
+//! its own, sets how loud the rest is played. The
 //! output stage — the paddle's sidetone, and the limiter on everything — is
 //! added by the stream, which runs it even when the UI holds the mixer for a
 //! moment.
@@ -28,9 +28,10 @@ use std::sync::{Arc, Mutex, TryLockError};
 use cw_core::band::AGC_LOOKAHEAD_SEC;
 use cw_core::band::{agc_lookahead_samples, soft_limit};
 
-use crate::audio::shape::{GATE_RAMP_SEC, Gains};
+use crate::audio::shape::{BAND_FADE_SEC, GATE_RAMP_SEC, Gains};
 
 pub use band::BandVoice;
+use band::Glide;
 pub use meter::Meter;
 use meter::Metering;
 pub use send::{SendSample, SendVoice};
@@ -47,8 +48,8 @@ const FADING_BANDS: usize = 8;
 /// release is a few milliseconds; sends are seconds apart.
 const RETIRING_SENDS: usize = 4;
 
-/// The highest rate a stream is ever opened at, which the room for the
-/// look-ahead is made for once.
+/// The highest rate the room for the look-ahead is made for up front. A
+/// stream opened higher has it grown before it starts.
 const HIGHEST_RATE: u32 = 384_000;
 
 /// The band and the Morse, mixed. The UI hands it bands and sends under its
@@ -68,18 +69,22 @@ pub struct Mixer {
     /// break-in, moving between the two a straight line at a time, over
     /// [`GATE_RAMP_SEC`], so it never clicks.
     gate: f64,
-    /// The gains it plays at, the RF gain ahead of the AGC and the two after
-    /// it, and what it was last asked to: each moving between the two at the
-    /// gate's pace, a whole unit of gain over [`GATE_RAMP_SEC`], so a slider
-    /// moved under a tone never clicks.
+    /// The gains it plays at, the RF gain ahead of the AGC and the volume
+    /// after it, and what it was last asked to: each moving between the two
+    /// at the gate's pace, a whole unit of gain over [`GATE_RAMP_SEC`], so a
+    /// slider moved under a tone never clicks. The AF gain is each band's
+    /// own; this one is the receiver's with no band, which the send rides
+    /// alone.
     gains: Gains,
     gains_asked: Gains,
+    af: Glide,
     /// What the receiver did, a frame at a time, for the level scope.
     metering: Metering,
     /// What the sends played, waiting out the receiver's look-ahead: its AGC
-    /// hears every sample as it comes, and everything is played that much
-    /// later at the gain it has by then, as the band is. Room for the
-    /// highest rate, made once, of which the rate in use takes `late_len`.
+    /// hears every sample as it comes, through the RF gain as it stands
+    /// then, and everything is played that much later at the gain it has by
+    /// then, as the band is. Room for the highest rate, made once, of which
+    /// the rate in use takes `late_len`.
     late: Vec<SendSample>,
     late_len: usize,
     late_at: usize,
@@ -119,8 +124,9 @@ impl Mixer {
             gate: 1.0,
             gains: Gains::UNITY,
             gains_asked: Gains::UNITY,
-            late: vec![SendSample::default(); agc_lookahead_samples(HIGHEST_RATE)],
-            late_len: agc_lookahead_samples(sample_rate.min(HIGHEST_RATE)),
+            af: Glide::at(1.0),
+            late: vec![SendSample::default(); late_room(sample_rate)],
+            late_len: agc_lookahead_samples(sample_rate),
             late_at: 0,
         }
     }
@@ -146,14 +152,43 @@ impl Mixer {
         self.latency as f64 / f64::from(self.sample_rate)
     }
 
-    /// Play at `gains` from here on.
+    /// Play at `gains` from here on, the band as it is: the AF gain it is
+    /// played at glides there over a band's fade, a decibel at a time, or,
+    /// with none, the receiver's own.
     pub fn set_gains(&mut self, gains: Gains) {
+        self.ask(gains);
+        let (af, samples) = (self.gains_asked.af, self.fade_len());
+        match self.band.as_mut() {
+            Some(band) => band.glide_to(af),
+            None => self.af.to(af, samples),
+        }
+    }
+
+    /// Put a new band in, or take the band away, and play at `gains` from
+    /// here on: the band going out keeps the AF gain its receiver was played
+    /// at, and the one coming in, or the receiver with none, has the new one
+    /// from the start. The send eases from the one to the other with the
+    /// fade, so a change of receiver plays neither band at the other's.
+    pub fn set_band_at(&mut self, band: Option<BandVoice>, gains: Gains, swept: &mut Swept) {
+        self.ask(gains);
+        if band.is_none() {
+            self.af = Glide::at(self.gains_asked.af);
+        }
+        self.set_band(band, swept);
+    }
+
+    fn ask(&mut self, gains: Gains) {
         let held = |gain: f64| if gain.is_finite() { gain.max(0.0) } else { 1.0 };
         self.gains_asked = Gains {
             rf: held(gains.rf),
-            received: held(gains.received),
-            monitored: held(gains.monitored),
+            af: held(gains.af),
+            volume: held(gains.volume),
         };
+    }
+
+    /// How long a band's fade is, in samples.
+    fn fade_len(&self) -> usize {
+        ((BAND_FADE_SEC * f64::from(self.sample_rate)).round() as usize).max(1)
     }
 
     /// Put a new band in, or take the band away. The one going out is not
@@ -161,8 +196,20 @@ impl Mixer {
     /// gain carries across, so a station being copied rides straight on.
     pub fn set_band(&mut self, band: Option<BandVoice>, swept: &mut Swept) {
         let mut band = band;
-        if let (Some(new), Some(old)) = (band.as_mut(), self.band.as_ref()) {
-            new.take_over_from(old);
+        if let Some(new) = band.as_mut() {
+            new.start_at(self.gains_asked.af);
+            let carried = self
+                .band
+                .as_ref()
+                .is_some_and(|old| new.take_over_from(old));
+            if !carried {
+                // Nothing to carry over: the AGC hears what is still to be
+                // played, oldest first, so the send waiting out the
+                // look-ahead is played at the gain it has for it.
+                for k in 0..self.late_len {
+                    new.hear_ahead(self.late[(self.late_at + k) % self.late_len].heard);
+                }
+            }
         }
         if let Some(mut old) = std::mem::replace(&mut self.band, band) {
             old.fade_out();
@@ -225,8 +272,12 @@ impl Mixer {
         self.sample_rate = sample_rate.max(1);
         self.gate = 1.0;
         self.gains = self.gains_asked;
+        self.af = Glide::at(self.gains_asked.af);
         self.metering.restart(self.sample_rate);
-        self.late_len = agc_lookahead_samples(self.sample_rate.min(HIGHEST_RATE));
+        self.late_len = agc_lookahead_samples(self.sample_rate);
+        // On the UI thread, before the stream at the new rate starts.
+        self.late
+            .resize(late_room(self.sample_rate), SendSample::default());
         self.late.fill(SendSample::default());
         self.late_at = 0;
         swept.bands.append(&mut self.fading);
@@ -271,52 +322,73 @@ impl Mixer {
         for slot in out.iter_mut() {
             let (asked, now) = (self.gains_asked, &mut self.gains);
             now.rf += (asked.rf - now.rf).clamp(-gate_step, gate_step);
-            now.received += (asked.received - now.received).clamp(-gate_step, gate_step);
-            now.monitored += (asked.monitored - now.monitored).clamp(-gate_step, gate_step);
+            now.volume += (asked.volume - now.volume).clamp(-gate_step, gate_step);
             let now = *now;
+            // The receiver's AF gain with no band on, which the send rides
+            // alone.
+            let alone = self.af.next();
             let mut coming = self.send.as_mut().map(SendVoice::next).unwrap_or_default();
             for old in &mut self.retiring {
                 coming += old.next();
             }
-            // The AGC hears the send as it comes; it, your message and the
-            // mute are played the look-ahead late, with the band.
-            let send = std::mem::replace(&mut self.late[self.late_at], coming);
+            // The AGC hears the send as it comes, through the RF gain as it
+            // stands now, as it hears the band; the send, your message and
+            // the mute are played the look-ahead late, with the band, at the
+            // gain the AGC has by then for what it heard.
+            let heard_now = SendSample {
+                heard: coming.heard * now.rf,
+                ..coming
+            };
+            let send = std::mem::replace(&mut self.late[self.late_at], heard_now);
             self.late_at = (self.late_at + 1) % self.late_len;
             let mut background = 0.0;
-            // The gain the send rides: the band's, or, with none on, the
-            // last one's as it goes, easing back to nothing at all to duck
-            // behind.
-            let mut gain = None;
             // What reached the AGC, for the meter: the send alone, through
             // the RF gain, with no band to meet it.
             let mut input = coming.heard * now.rf;
+            // The AGC's gain, for the meter, and what the send rides: that
+            // gain at the AF gain of the band riding it. While one band
+            // hands over to the next, or to none, the send eases from the
+            // one to the other with the fade, the two sized alike for the
+            // strongest station, so it never steps.
+            let mut current = None;
             if let Some(band) = self.band.as_mut() {
                 let played = band.next(coming.heard, now.rf);
                 background += played.band;
-                gain = Some(played.gain);
-                input = played.input;
+                current = Some(played);
+                input = current.as_ref().map_or(input, |played| played.input);
             }
+            let mut outgoing = None;
             for band in self.fading.iter_mut().rev() {
                 let played = band.next(coming.heard, now.rf);
                 background += played.band;
-                gain.get_or_insert(1.0 + (played.gain - 1.0) * played.weight);
+                outgoing.get_or_insert(played);
             }
-            // The send the receiver hears comes through its RF gain, as the
-            // band did, and rides the AGC's gain with it. Your own message
-            // comes in after the AGC: the receiver never hears it, so it
-            // neither ducks the reply that follows nor is shaped by the
-            // filter, and it is monitored at the volume alone, set at the
-            // level it is heard at, not at the RF or the AF gain.
-            let heard = send.heard * now.rf * gain.unwrap_or(1.0);
+            let (gain, riding) = match (current, outgoing) {
+                (Some(new), old) => {
+                    let from = old.map_or(alone, |old| old.gain * old.af);
+                    let to = new.gain * new.af;
+                    (new.gain, from + (to - from) * new.weight)
+                }
+                (None, Some(old)) => (
+                    1.0 + (old.gain - 1.0) * old.weight,
+                    alone + (old.gain * old.af - alone) * old.weight,
+                ),
+                (None, None) => (1.0, alone),
+            };
+            // Your own message comes in after the AGC: the receiver never
+            // hears it, so it neither ducks the reply that follows nor is
+            // shaped by the filter, and it is monitored at the volume alone,
+            // set at the level it is heard at, not at the RF or the AF gain.
+            let heard = send.heard * riding;
             // Without full break-in the receiver's output, the band and the
             // stations alike, goes quiet while you send, as a rig that is
             // not QSK mutes it; the AGC runs on under it, and your message
             // is never muted.
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
-            let played = (background + heard) * self.gate * now.received + send.dry * now.monitored;
+            let played = ((background + heard) * self.gate + send.dry) * now.volume;
             *slot += played as f32;
-            self.metering.add(input, gain.unwrap_or(1.0), played);
+            self.metering.add(input, gain, played);
         }
         // A send is heard the look-ahead after it was played, as well as the
         // speaker's own latency.
@@ -324,6 +396,13 @@ impl Mixer {
             send.settle(latency + self.late_len);
         }
     }
+}
+
+/// How much room the send's look-ahead is given at `sample_rate`: enough
+/// for the highest rate up front, so a stream reopened at another needs
+/// none made, and more for a higher one.
+fn late_room(sample_rate: u32) -> usize {
+    agc_lookahead_samples(sample_rate.max(HIGHEST_RATE))
 }
 
 /// The stream's side of the mixer: what each callback plays.

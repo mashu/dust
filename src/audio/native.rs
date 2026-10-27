@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample};
-use cw_core::band::{BandMixer, FilterDesign, Qsb};
+use cw_core::band::{FilterDesign, Qsb};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::ToneRequest;
@@ -257,24 +257,20 @@ impl MorseBackend for MorsePlayer {
         // A stream that will not open is reported by the next send.
         self.ensure_output_unless_refused();
         let gains = Gains::of(settings);
-        if gains != self.gains {
-            self.mixer().set_gains(gains);
-            self.gains = gains;
-        }
         if !self.state.band_needs_rebuild(settings) {
+            if gains != self.gains {
+                self.mixer().set_gains(gains);
+                self.gains = gains;
+            }
             return;
         }
         let rate = self.mixer().sample_rate();
-        let band = settings.band.has_background().then(|| {
-            // A fresh band every time, as the browser's is: with stations
-            // on it, a fixed seed would replay the same callsigns at the
-            // same moments in every session.
-            BandVoice::new(
-                BandMixer::new(rate, settings, crate::time::seed_rng()),
-                rate,
-            )
-        });
-        self.with_mixer(|mixer, swept| mixer.set_band(band, swept));
+        // A fresh band every time, as the browser's is: with stations on it,
+        // a fixed seed would replay the same callsigns at the same moments
+        // in every session.
+        let band = BandVoice::for_settings(settings, rate, crate::time::seed_rng());
+        self.with_mixer(|mixer, swept| mixer.set_band_at(band, gains, swept));
+        self.gains = gains;
         self.state.note_band(settings);
     }
 
