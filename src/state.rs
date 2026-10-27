@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
 use crate::persist::backup::{Backup, backup_name, merge_sessions, write_backup};
-use crate::persist::{HistorySaved, OpenSession, Store, merge_settings};
+use crate::persist::{CutOff, HistorySaved, OpenSession, Store, merge_settings};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live};
@@ -142,10 +142,9 @@ pub struct AppCtx {
     pub tour: Signal<Option<Tour>>,
     /// When the last backup was saved, if ever.
     pub last_backup: Signal<Option<u64>>,
-    /// Why the session or run before was lost, or ended before it was done,
-    /// when it was not by your hand: up until it is put away, or the next
-    /// one starts.
-    pub notice: Signal<Option<Notice>>,
+    /// What became of the sessions and runs before, where it was not by
+    /// your hand: up until it is put away, or the next one starts.
+    pub notices: Signal<Vec<Notice>>,
     /// The sessions deleted last, each with where it sat, for Undo to put
     /// back.
     trash: Signal<Vec<(usize, SessionResult)>>,
@@ -163,9 +162,6 @@ impl AppCtx {
     /// scope that owns the app, as everything in it lives as long as that.
     pub fn new(app: AppState, settings: TrainingSettings, sessions: Vec<SessionResult>) -> Self {
         let last_backup = app.store.last_backup();
-        // A session or run the last copy of the app stopped under is told
-        // of as this one opens.
-        let notice = app.store.take_cut_off().map(Notice::CutOff);
         let stored_settings = CopyValue::new(settings.clone().clamp());
         Self {
             screen: Signal::new(Screen::Home),
@@ -184,7 +180,7 @@ impl AppCtx {
             entry: ContestEntry::new(),
             tour: Signal::new(None),
             last_backup: Signal::new(last_backup),
-            notice: Signal::new(notice),
+            notices: Signal::new(Vec::new()),
             trash: Signal::new(Vec::new()),
             before_restore: Signal::new(None),
             stored_settings,
@@ -200,16 +196,35 @@ impl AppCtx {
     /// until it ends, so that one the app stops under is told of when it
     /// next opens. Whatever the last one left to say is put away.
     pub fn mark_running(mut self, run: bool) {
-        self.notice.set(None);
+        self.notices.set(Vec::new());
+        // Another window's session may have been cut off since this one
+        // opened, while it was still running: told of once this one is over.
+        self.tell_of_cut_off();
         self.app().store.mark_open(Some(OpenSession {
             started_at: crate::time::now_ms(),
             run,
         }));
     }
 
-    /// The session or run that had the app has ended, kept or let go.
+    /// The session or run that had the app is over, kept and stored, or let
+    /// go.
     pub fn mark_ended(self) {
         self.app().store.mark_open(None);
+    }
+
+    /// Tell of any session or run a copy of the app stopped under, once the
+    /// store has looked: at once on a computer or a phone, a moment later
+    /// in a browser.
+    pub fn tell_of_cut_off(self) {
+        let looking = self.app().store.take_cut_off();
+        let mut notices = self.notices;
+        // In the root scope: the press that starts a session leaves the
+        // screen it was made on.
+        dioxus::core::spawn_forever(async move {
+            if let Some(cut) = looking.await {
+                notices.write().push(Notice::CutOff(cut));
+            }
+        });
     }
 
     /// Whether a session or a run has the app: on its screen, or about to
@@ -480,16 +495,19 @@ fn why_not_stored(saved: &HistorySaved) -> Option<String> {
     }
 }
 
-/// A session or run lost, or ended before it was done, other than by your
-/// hand ([`AppCtx::notice`]).
+/// What became of a session or run, where it was not by your hand
+/// ([`AppCtx::notices`]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
     /// The app stopped with it running: closed, crashed, killed or rebuilt.
     /// It was not kept.
-    CutOff(OpenSession),
+    CutOff(CutOff),
     /// Its sound stopped and could not be brought back, for the reason
-    /// given. What was answered by then is `kept`.
-    SoundStopped { why: String, kept: bool },
+    /// given, with groups `answered` by then or none.
+    SoundStopped { why: String, answered: bool },
+    /// The history could not take it, or let older sessions go to make
+    /// room: the store's own words.
+    History(String),
 }
 
 /// How the session just finished ended, as its results screen shows it.

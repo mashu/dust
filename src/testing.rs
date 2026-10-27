@@ -431,9 +431,9 @@ impl Harness {
         self.ctx.toasts.current().map(|toast| toast.text)
     }
 
-    /// What the session or run before ended with, other than by your hand.
-    pub fn notice(&self) -> Option<Notice> {
-        self.ctx.notice.peek().clone()
+    /// What became of the sessions before, where it was not by your hand.
+    pub fn notices(&self) -> Vec<Notice> {
+        self.ctx.notices.peek().clone()
     }
 
     pub fn calls(&self) -> Vec<Call> {

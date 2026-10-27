@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::{BackupSaving, HistorySaved, OpenSession, Store, newest, saved_now};
+use super::{
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, saved_now,
+};
 
 #[derive(Default)]
 pub struct MemoryStore {
@@ -129,10 +131,12 @@ impl Store for MemoryStore {
         self.open.set(open);
     }
 
-    fn take_cut_off(&self) -> Option<OpenSession> {
-        if self.open_elsewhere.get() {
-            return None;
-        }
-        self.open.take()
+    fn take_cut_off(&self) -> CutOffTaking {
+        let cut = if self.open_elsewhere.get() {
+            None
+        } else {
+            self.open.take().map(CutOff::Marked)
+        };
+        Box::pin(std::future::ready(cut))
     }
 }

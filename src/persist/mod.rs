@@ -66,15 +66,15 @@ pub trait Store {
     /// needs room. Only a browser clears a store on its own, and it may ask
     /// the user first.
     fn ask_to_keep(&self) {}
-    /// Mark a session or run open in this copy of the app while it runs
-    /// (`Some`), or over (`None`): it ended, kept or let go. One still marked
-    /// when the app stops was cut off ([`Store::take_cut_off`]).
+    /// Mark this copy of the app's session or run open while it runs
+    /// (`Some`), or over (`None`): it ended, kept or let go. Each copy marks
+    /// its own and holds it, a tab or a window of its own; one whose copy
+    /// stopped while it was marked was cut off ([`Store::take_cut_off`]).
     fn mark_open(&self, open: Option<OpenSession>);
-    /// The session or run a copy of the app left marked open, and no copy is
-    /// running any longer: the app closed, crashed or was stopped under it.
-    /// Taken, so it is told of once; one another copy is still running is
-    /// left alone.
-    fn take_cut_off(&self) -> Option<OpenSession>;
+    /// The sessions or runs copies of the app left marked open, and stopped
+    /// under: closed, crashed, killed, reloaded. Taken, so each is told of
+    /// once; one a copy is still running is left to it.
+    fn take_cut_off(&self) -> CutOffTaking;
 }
 
 /// A session of groups or a contest run, as it is marked open while it runs
@@ -88,6 +88,35 @@ pub struct OpenSession {
     /// A contest run, rather than a session of groups.
     pub run: bool,
 }
+
+/// A session or run the app stopped under, as its mark tells of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CutOff {
+    Marked(OpenSession),
+    /// The mark is there and cannot be read: cut short itself, by a power
+    /// cut, say. A session was running all the same.
+    Unread,
+}
+
+impl CutOff {
+    /// The one to tell of, of all those cut off: the newest that can be
+    /// read, or failing that, one that cannot.
+    fn newest(cut: impl IntoIterator<Item = Self>) -> Option<Self> {
+        cut.into_iter().max_by_key(|cut| match cut {
+            Self::Marked(open) => Some(open.started_at),
+            Self::Unread => None,
+        })
+    }
+
+    /// A mark as it was read.
+    fn read(raw: &[u8]) -> Self {
+        serde_json::from_slice(raw).map_or(Self::Unread, Self::Marked)
+    }
+}
+
+/// The sessions cut off, being looked for: already, or still, where only the
+/// platform can tell which copies are running, as in a browser.
+pub type CutOffTaking = Pin<Box<dyn Future<Output = Option<CutOff>>>>;
 
 /// A backup file on its way: saved already, or still being saved where only
 /// the platform's own thread can save it, as on Android.

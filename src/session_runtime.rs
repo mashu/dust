@@ -506,11 +506,11 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
             // The sound ended the session: why stays up on the screen it
             // left, until it is read.
             (Some(why), Some(ended)) => {
-                let mut notice = ctx.notice;
-                notice.set(Some(Notice::SoundStopped {
+                let mut notices = ctx.notices;
+                notices.write().push(Notice::SoundStopped {
                     why: why.to_string(),
-                    kept: ended == Ended::Kept,
-                }));
+                    answered: ended == Ended::Kept,
+                });
             }
             // The session had moved on from it.
             (Some(failure), None) if failure != AudioError::Cancelled => {
@@ -521,8 +521,8 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     });
 }
 
-/// The session, taken out of the app, with the audio given back, and
-/// marked as over.
+/// The session, taken out of the app, with the audio given back. It is
+/// marked over once it is stored or let go.
 fn end_session(ctx: AppCtx) -> Option<LiveSession> {
     let taken = ctx
         .app()
@@ -533,7 +533,6 @@ fn end_session(ctx: AppCtx) -> Option<LiveSession> {
         return None;
     };
     live.lease.release();
-    ctx.mark_ended();
     Some(*live)
 }
 
@@ -547,6 +546,7 @@ fn abandon_session(ctx: AppCtx) -> bool {
     if end_session(ctx).is_none() {
         return false;
     }
+    ctx.mark_ended();
     runtime.set(None);
     screen.set(Screen::Home);
     true
@@ -594,23 +594,26 @@ fn finish_session(ctx: AppCtx) -> bool {
 }
 
 /// Add `finished` to the history, store it, and show it on the results
-/// screen: a session of groups and a contest run alike.
+/// screen: a session of groups and a contest run alike. It is marked over
+/// once it is stored, so the app stopping before then still tells of it.
 pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     let AppCtx {
         mut screen,
         mut result,
         mut sessions,
-        toasts,
+        mut notices,
         ..
     } = ctx;
     // The history grows by one where it is, and is stored from there.
     sessions.write().push(finished.clone());
     let saved = ctx.store_history();
+    ctx.mark_ended();
     // A browser may clear its store to make room; there is now something in
     // it worth asking it to keep.
     ctx.app().store.ask_to_keep();
+    // Up until it is read: a session not stored is a session lost.
     if let Some(problem) = saved.problem() {
-        toasts.show(problem);
+        notices.write().push(Notice::History(problem));
     }
     result.set(Some(Finished::Kept(Box::new(finished))));
     screen.set(Screen::Results);
@@ -1243,16 +1246,17 @@ mod tests {
                 "a stalled player should end the session, not hang"
             );
             assert!(h.recorder.players_built.get() > 1, "the player is rebuilt");
-            assert_eq!(h.notice(), Some(stopped("Audio playback stalled.", false)));
+            assert_eq!(h.notices(), [stopped("Audio playback stalled.", false)]);
             assert!(h.ctx.sessions.peek().is_empty());
         });
     }
 
-    /// The sound ended the session, `kept` or not, for `why`.
-    fn stopped(why: &str, kept: bool) -> Notice {
+    /// The sound ended the session, for `why`, with groups `answered` or
+    /// none.
+    fn stopped(why: &str, answered: bool) -> Notice {
         Notice::SoundStopped {
             why: why.to_string(),
-            kept,
+            answered,
         }
     }
 
@@ -1272,10 +1276,10 @@ mod tests {
             h.set_behaviour(Behaviour::Stall);
             assert!(h.run_until(60_000, |h| h.screen() == Screen::Results).await);
             assert_eq!(h.ctx.sessions.peek().len(), 1, "the answer was kept");
-            assert_eq!(h.notice(), Some(stopped("Audio playback stalled.", true)));
+            assert_eq!(h.notices(), [stopped("Audio playback stalled.", true)]);
             h.advance(u64::from(crate::state::ACTION_TOAST_MS) * 2)
                 .await;
-            assert_eq!(h.notice(), Some(stopped("Audio playback stalled.", true)));
+            assert_eq!(h.notices(), [stopped("Audio playback stalled.", true)]);
         });
     }
 
@@ -1636,8 +1640,11 @@ mod tests {
             assert_eq!(h.texts().len(), 3);
             assert!(h.recorder.players_built.get() >= 3);
             assert!(matches!(
-                h.notice(),
-                Some(Notice::SoundStopped { kept: false, .. })
+                h.notices().as_slice(),
+                [Notice::SoundStopped {
+                    answered: false,
+                    ..
+                }]
             ));
         });
     }
@@ -1650,8 +1657,8 @@ mod tests {
             h.start_training();
             assert!(h.run_until(30_000, |h| h.screen() == Screen::Home).await);
             assert_eq!(
-                h.notice(),
-                Some(stopped("Audio stream: device is gone", false))
+                h.notices(),
+                [stopped("Audio stream: device is gone", false)]
             );
         });
     }
@@ -2078,12 +2085,20 @@ mod tests {
             assert_eq!(shown[0], "2026-09-02", "the oldest is the one let go");
             assert_eq!(h.store.load_sessions().len(), 2);
             assert!(
-                h.toast()
+                history_said(&h)
                     .is_some_and(|text| text.contains("newest 2") && !text.contains("contest")),
                 "{:?}",
-                h.toast()
+                h.notices()
             );
         });
+    }
+
+    /// What the history said of the session just kept, up until it is read.
+    fn history_said(h: &Harness) -> Option<String> {
+        h.notices().into_iter().find_map(|notice| match notice {
+            Notice::History(said) => Some(said),
+            _ => None,
+        })
     }
 
     /// A history that held a contest run says why it ran short of room: a
@@ -2102,16 +2117,17 @@ mod tests {
             h.play_through(60_000).await;
             assert_eq!(h.store.load_sessions().len(), 2);
             assert!(
-                h.toast().is_some_and(|text| text.contains("newest 2")
+                history_said(&h).is_some_and(|text| text.contains("newest 2")
                     && text.ends_with("Long contest runs take more room.")),
                 "{:?}",
-                h.toast()
+                h.notices()
             );
         });
     }
 
     /// A history the store could not read is not written over, and the user
-    /// is told the session was not kept.
+    /// is told the session was not kept, until they have read it: a session
+    /// not stored is a session lost.
     #[test]
     fn a_session_is_not_stored_over_a_history_that_could_not_be_read() {
         run(|| async {
@@ -2121,12 +2137,14 @@ mod tests {
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results, "the results are still shown");
             assert!(h.store.load_sessions().is_empty());
+            h.advance(u64::from(crate::state::ACTION_TOAST_MS) * 2)
+                .await;
             assert!(
-                h.toast()
-                    .is_some_and(|text| text.contains("could not be read")),
+                history_said(&h).is_some_and(|text| text.contains("could not be read")),
                 "{:?}",
-                h.toast()
+                h.notices()
             );
+            assert_eq!(h.store.open.get(), None, "told of, so no longer open");
         });
     }
 }

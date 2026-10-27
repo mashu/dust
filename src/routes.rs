@@ -405,6 +405,7 @@ fn ResultsRoute() -> Element {
             result,
             place,
             auto_message: ctx.auto_message.read().clone(),
+            typing_locked: ctx.settings.read().playback.lock_input_during_group_playback,
             on_again,
             on_home,
         }

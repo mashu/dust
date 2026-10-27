@@ -640,9 +640,9 @@ pub fn refocus_run(ctx: AppCtx) {
     }
 }
 
-/// The run, taken out of the app, with the audio given back, and marked as
-/// over. Its sound has stopped, so what it held for a screen reader is said
-/// now.
+/// The run, taken out of the app, with the audio given back: marked over
+/// once it is stored or let go. Its sound has stopped, so what it held for a
+/// screen reader is said now.
 fn end_run(ctx: AppCtx) -> Option<LiveContest> {
     let taken = ctx
         .app()
@@ -653,7 +653,6 @@ fn end_run(ctx: AppCtx) -> Option<LiveContest> {
         return None;
     };
     live.lease.release();
-    ctx.mark_ended();
     say(ctx, std::mem::take(&mut live.unsaid));
     Some(*live)
 }
@@ -688,6 +687,7 @@ fn keep_nothing(ctx: AppCtx) {
     if end_run(ctx).is_none() {
         return;
     }
+    ctx.mark_ended();
     view.set(None);
     result.set(Some(Finished::NothingKept));
     auto_message.set(None);
@@ -704,6 +704,7 @@ fn abandon_run(ctx: AppCtx) {
     if end_run(ctx).is_none() {
         return;
     }
+    ctx.mark_ended();
     view.set(None);
     screen.set(Screen::Home);
 }

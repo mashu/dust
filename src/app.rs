@@ -113,6 +113,9 @@ pub fn App() -> Element {
         toasts,
         ..
     } = ctx;
+    // A session or run the last copy of the app stopped under is told of
+    // as this one opens.
+    use_hook(move || ctx.tell_of_cut_off());
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
@@ -761,19 +764,22 @@ mod ui_tests {
     }
 
     /// A session or run the last copy of the app stopped under is told of
-    /// as the app opens, once, until it is put away; one another copy is
-    /// still running is left to it.
+    /// as the app opens, once, until it is put away. One another copy is
+    /// still running is left to it, and told of if that copy stops under it
+    /// before this one starts a session of its own.
     #[test]
-    fn a_session_the_app_stopped_under_is_told_of_at_launch() {
+    fn a_session_the_app_stopped_under_is_told_of() {
         run(|| async {
             let store = std::rc::Rc::new(MemoryStore::default());
             store.mark_tutorial_done();
+            store.save_settings(&short_session());
             let started_at = crate::time::now_ms();
             store.mark_open(Some(OpenSession {
                 started_at,
                 run: false,
             }));
             let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
             assert_eq!(ui.screen(), "home");
             assert!(
                 ui.has("was cut off: Dust closed while it ran"),
@@ -784,14 +790,52 @@ mod ui_tests {
             ui.click("btn-dismiss-notice");
             assert!(!ui.has("was cut off"));
 
+            // Another window is running one as this copy opens.
             store.mark_open(Some(OpenSession {
                 started_at,
                 run: true,
             }));
             store.open_elsewhere.set(true);
-            let (ui, _recorder) = Ui::launch(store.clone());
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
             assert!(!ui.has("was cut off"), "another copy is running it");
-            assert!(store.open.get().is_some(), "left to the copy running it");
+            // It stops under that run; this copy starts a session.
+            store.open_elsewhere.set(false);
+            ui.click("btn-start-training");
+            ui.click("btn-discard");
+            ui.click("btn-discard-session");
+            ui.advance(20).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(
+                ui.has("Your contest run started at"),
+                "the other window's run, once this session is over: {}",
+                ui.html()
+            );
+        });
+    }
+
+    /// Pressed from the keyboard, Discard hands the cursor to Keep it, so a
+    /// second Enter keeps the session; pressed with the mouse, the cursor
+    /// stays where it was.
+    #[test]
+    fn discard_pressed_from_the_keyboard_leaves_the_cursor_on_keep_it() {
+        run(|| async {
+            let (mut ui, _recorder) = awaiting_answer(short_session()).await;
+            ui.take_focused();
+            ui.press_enter("btn-discard");
+            ui.click("btn-discard");
+            assert_eq!(ui.take_focused(), ["btn-keep-session"]);
+            ui.click("btn-keep-session");
+            assert_eq!(ui.screen(), "training");
+
+            ui.take_focused();
+            assert!(!ui.mouse_down("btn-discard"), "the cursor stays put");
+            ui.click("btn-discard");
+            assert!(ui.shows("btn-keep-session"));
+            assert!(
+                !ui.take_focused().iter().any(|id| id == "btn-keep-session"),
+                "a click leaves the cursor in the box"
+            );
         });
     }
 
@@ -807,6 +851,7 @@ mod ui_tests {
                 run: false,
             }));
             let (mut ui, _recorder) = Ui::launch(store);
+            ui.advance(20).await;
             assert!(ui.has("was cut off"));
             ui.click("btn-start-training");
             ui.click("btn-discard");

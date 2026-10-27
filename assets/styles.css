@@ -1887,22 +1887,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 600;
   font-size: 0.92rem;
 }
-/* What the session or run before ended with, other than by your hand. */
-.notice-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-  margin-bottom: 1rem;
-  border-radius: var(--r-md);
-  border: 1px solid var(--warn);
-  background: var(--warn-soft);
-  color: var(--ink);
-  padding: 0.75rem 0.9rem;
-  font-weight: 600;
-  font-size: 0.92rem;
-}
-.notice-text { flex: 1; }
-.notice-close { width: 1.9rem; height: 1.9rem; flex: none; box-shadow: none; }
 /* Score board. A medal is gold, silver or bronze by its class, with the
    place on it; its ribbon is the same for all three. */
 .medal { display: block; flex: none; width: 1.55rem; height: 1.95rem; overflow: visible; }
@@ -2662,6 +2646,12 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   padding: 0.8rem 0.95rem;
 }
 .notice .icon { color: var(--warn); width: 1.15rem; height: 1.15rem; margin-top: 0.1rem; }
+/* What became of the sessions before, over the screen they left you on. */
+.notice-up { margin-bottom: 1rem; font-weight: 600; font-size: 0.92rem; }
+.notice-lines { flex: 1; }
+.notice-lines p { margin: 0; }
+.notice-lines p + p { margin-top: 0.4rem; }
+.notice-close { width: 1.9rem; height: 1.9rem; flex: none; box-shadow: none; }
 
 /* Tips */
 .tips {

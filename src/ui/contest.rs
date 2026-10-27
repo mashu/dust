@@ -881,8 +881,8 @@ fn paused_why(why: PauseWhy) -> Option<&'static str> {
 #[component]
 fn RunActions(paused: bool) -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut asking = use_discard_ask(Discarded::Run);
-    if asking() {
+    let asking = use_discard_ask(Discarded::Run);
+    if asking.is_open() {
         return rsx! {
             div {
                 id: control_id("run", "actions"),
@@ -890,7 +890,7 @@ fn RunActions(paused: bool) -> Element {
                 DiscardAsk {
                     what: Discarded::Run,
                     on_discard: move |()| abort_run(ctx),
-                    on_keep: move |()| from_button(ctx, || asking.set(false)),
+                    on_keep: move |()| from_button(ctx, || asking.close()),
                 }
             }
         };

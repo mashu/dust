@@ -617,7 +617,7 @@ pub fn TrainingView(
     on_stop: EventHandler<()>,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
-    let mut asking = use_discard_ask(Discarded::Session);
+    let asking = use_discard_ask(Discarded::Session);
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     // The open box is never drawn from the session, so a view drawn afresh
     // on a session under way — after a hot reload, say — starts its draft
@@ -759,13 +759,13 @@ pub fn TrainingView(
             // End session, and Discard, which asks once more first
             // ([`crate::ui::discard`]). Keep it puts the cursor back in the
             // open box.
-            div { class: if asking() { "train-actions asking" } else { "train-actions" },
-                if asking() {
+            div { class: if asking.is_open() { "train-actions asking" } else { "train-actions" },
+                if asking.is_open() {
                     DiscardAsk {
                         what: Discarded::Session,
                         on_discard: move |()| on_stop.call(()),
                         on_keep: move |()| {
-                            asking.set(false);
+                            asking.close();
                             if live {
                                 focus_box(open);
                             }

@@ -1212,6 +1212,43 @@ fn home_asks_for_your_section_before_field_day() {
     }
 }
 
+/// A session with nothing timed says why, and what would have it timed:
+/// the lock, when it was on and the groups were longer than a character.
+#[test]
+fn results_with_nothing_timed_say_why() {
+    let locked = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_session("2026-10-22", &[("KM", "KM"), ("RS", "RS")]),
+                auto_message: None,
+                typing_locked: true,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(locked.contains("none timed"), "{locked}");
+    assert!(
+        locked.contains("Lock typing while sending is on"),
+        "{locked}"
+    );
+    let unlocked = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_session("2026-10-22", &[("KM", "KM")]),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(
+        unlocked.contains("key each character as you hear it"),
+        "{unlocked}"
+    );
+    assert!(!unlocked.contains("Lock typing"), "{unlocked}");
+}
+
 /// A Field Day run's results: two points a QSO and nothing to multiply
 /// them, so the multipliers read a dash and the score is the points; raw
 /// as logged, verified as sent, with what the checks found.

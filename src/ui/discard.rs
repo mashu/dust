@@ -8,7 +8,7 @@
 use dioxus::prelude::*;
 
 use crate::ui::tour::bring_into_sight;
-use crate::ui::widgets::{Icon, IconName, control_id, keep_focus};
+use crate::ui::widgets::{Icon, IconName, control_id, focus_script, keep_focus};
 
 /// What a Discard throws away, as its buttons and its question name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,29 +44,80 @@ impl Discarded {
     }
 }
 
-/// Whether the row's Discard is asking. The question takes more room than
-/// the row it replaces, and its Discard can land below the window, or under
-/// the guide: it is brought into sight once the page has it.
-pub fn use_discard_ask(what: Discarded) -> Signal<bool> {
-    let asking = use_signal(|| false);
+/// Whether a row's Discard is asking, and whether it was asked from the
+/// keyboard.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Asking {
+    open: Signal<bool>,
+    by_key: Signal<bool>,
+}
+
+impl Asking {
+    pub fn is_open(self) -> bool {
+        (self.open)()
+    }
+
+    /// Ask no more: kept.
+    pub fn close(mut self) {
+        self.open.set(false);
+    }
+}
+
+/// The row's asking. The question takes more room than the row it replaces,
+/// and its Discard can land below the window, or under the guide: it is
+/// brought into sight once the page has it. Asked from the keyboard, Keep it
+/// takes the cursor, which the question took Discard from under: Enter again
+/// keeps what Discard would have thrown away.
+pub fn use_discard_ask(what: Discarded) -> Asking {
+    let asking = Asking {
+        open: use_signal(|| false),
+        by_key: use_signal(|| false),
+    };
     use_effect(move || {
-        if asking() {
+        if (asking.open)() {
             bring_into_sight(&[what.confirm_id()]);
+            if *asking.by_key.peek() {
+                focus(what.keep_id());
+            }
         }
     });
     asking
 }
 
-/// Discard as it first stands: it only asks, and leaves the cursor where
-/// it was.
+/// Give the button `id` the cursor.
+fn focus(id: String) {
+    let script = focus_script(&id);
+    // Tests have no page to run it on: the harness looks for the button.
+    #[cfg(test)]
+    crate::testing::ask_focus(&id, &script);
+    #[cfg(not(test))]
+    spawn(async move {
+        let _ = document::eval(&script).await;
+    });
+}
+
+/// Discard as it first stands: it only asks. Pressed, it leaves the cursor
+/// where it was.
 #[component]
-pub fn DiscardButton(asking: Signal<bool>) -> Element {
+pub fn DiscardButton(asking: Asking) -> Element {
+    let Asking {
+        mut open,
+        mut by_key,
+    } = asking;
     rsx! {
         button {
             id: control_id("btn", "discard"),
             class: "btn btn-danger",
-            onmousedown: keep_focus,
-            onclick: move |_| asking.set(true),
+            onmousedown: move |e| {
+                keep_focus(e);
+                by_key.set(false);
+            },
+            onkeydown: move |e| {
+                if e.key() == Key::Enter || e.key() == Key::Character(" ".into()) {
+                    by_key.set(true);
+                }
+            },
+            onclick: move |_| open.set(true),
             Icon { name: IconName::X }
             "Discard"
         }

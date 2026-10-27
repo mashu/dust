@@ -218,20 +218,22 @@ gives it:
 which is what a portable install uses.
 
 A session or contest run is marked open while it runs, and the mark goes
-when it ends, kept or discarded. One still marked when the app next opens
-was cut off: the app closed, crashed, was killed, or was rebuilt under
-`dx serve`. The app then says so, once, on the practice screen, so a session
-is never lost without a word. On desktop and mobile the mark is
-`open_session.json`, written only while `open_session.lock` is held. A copy
-of the app that stops, however it stops, lets go of the lock, so a second
-window opened meanwhile never takes a session the first is still running for
-one cut off. In a browser the mark is in the tab's own `sessionStorage`
-(`dust_open_session`): it outlives a reload of that tab, and no other tab
-reads it.
+once it ends, stored or discarded. Each copy of the app marks its own, a
+window or a tab of its own, and holds a lock on it for as long as it runs. A
+copy that stops lets go of its lock, however it stops: closed, crashed,
+killed, reloaded, or rebuilt under `dx serve`. So a mark nobody holds was cut
+off, and the app says so, once, on the screen it opens on, or once the
+session it starts next is over, if the window that was running it stopped
+meanwhile. A mark another window still holds is left to it. On desktop and
+mobile the marks are `open/<id>.json`, each beside the `open/<id>.lock` its
+copy holds; one a power cut left empty still says a session was cut off. In
+a browser they are `dust_open_session_<id>` in `localStorage`, each held by
+a Web Lock of the same name. A browser without Web Locks marks nothing,
+rather than take a tab still running for one cut off.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
-`dust_last_backup`) and
+`dust_last_backup`, `dust_open_session_*`) and
 file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
 that field. A history that
