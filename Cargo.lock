@@ -1644,6 +1644,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "webkit2gtk",
 ]
 
 [[package]]

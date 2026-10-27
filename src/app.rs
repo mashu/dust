@@ -839,6 +839,58 @@ mod ui_tests {
         });
     }
 
+    /// A screen at rest changes nothing on the page, so the webview has
+    /// nothing to lay out or paint again: none on Settings or Stats, and on
+    /// Home only the tip, every few seconds. On the desktop every change
+    /// crosses to the webview, on the thread it scrolls on.
+    #[test]
+    fn screens_at_rest_change_nothing() {
+        run(|| async {
+            let history: Vec<_> = (1..=28)
+                .map(|day| {
+                    stored_session(
+                        &format!("2026-09-{day:02}"),
+                        &[("KMRS", "KMRS"), ("UAPT", "UAPX")],
+                    )
+                })
+                .collect();
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &history);
+            for (nav, most) in [("nav-settings", 0), ("nav-stats", 0), ("nav-practice", 6)] {
+                ui.click(nav);
+                ui.advance(1_000).await;
+                ui.take_work();
+                ui.advance(20_000).await;
+                let work = ui.take_work();
+                assert!(work <= most, "{nav}: {work} changes in 20 s at rest");
+            }
+        });
+    }
+
+    /// Left alone, a session sending its groups, and a run with its clock
+    /// running, change the page little: what moves on, and the clock.
+    #[test]
+    fn a_session_and_a_run_left_alone_change_the_page_little() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 20;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.advance(200).await;
+            ui.take_work();
+            ui.advance(5_000).await;
+            let work = ui.take_work();
+            assert!(work <= 150, "a session: {work} changes in 5 s");
+
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("btn-start-training");
+            ui.advance(6_000).await;
+            ui.take_work();
+            ui.advance(10_000).await;
+            let work = ui.take_work();
+            assert!(work <= 100, "a run: {work} changes in 10 s");
+        });
+    }
+
     /// Starting the next session puts away what the last one left to say.
     #[test]
     fn starting_a_session_puts_the_notice_away() {

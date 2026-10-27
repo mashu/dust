@@ -147,6 +147,7 @@ pub fn SettingsView(
                 on_preview: on_preview_band,
                 on_stop: on_stop_band,
             }
+            crate::ui::display::DisplayCard {}
             crate::ui::privacy::PrivacyCard {}
             crate::ui::credits::CreditsCard {}
         }
