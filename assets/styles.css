@@ -2484,8 +2484,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .bigram-grid { display: grid; gap: 2px; min-width: min-content; }
 .bigram-head { font-size: 0.65rem; text-align: center; color: var(--ink-dim); font-weight: 700; border-radius: 4px; }
 .bigram-head.row-head { position: sticky; left: 0; z-index: 2; background: var(--surface); }
-.bigram-head.in-line { color: var(--ink); background: var(--info-soft); }
-.bigram-head.row-head.in-line { background: linear-gradient(var(--info-soft), var(--info-soft)), var(--surface); }
 .bigram-cell {
   display: block;
   width: 100%;
@@ -2496,9 +2494,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   background-color: var(--surface-sunken);
 }
 .bigram-cell.empty { background: none; box-shadow: inset 0 0 0 1px var(--line); cursor: default; }
-.bigram-cell.in-line { box-shadow: inset 0 0 0 1.5px var(--info); }
-.bigram-cell.shown { position: relative; z-index: 1; outline: 2px solid var(--info); outline-offset: 1px; }
-.bigram-cell.selected { position: relative; z-index: 1; outline: 2px solid var(--ink); outline-offset: 1px; }
+/* The pair shown, its row and column, and the pair pinned are lit by a rule
+   the grid writes for them (line_css in src/ui/bigram.rs), so that pointing
+   at a pair draws none of the squares again. */
 .pair-dock {
   position: fixed;
   left: 0;

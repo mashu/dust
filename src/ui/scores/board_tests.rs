@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::testing::{Ui, assisted, stored_run, stored_session};
+use crate::ui::format::ordinal;
 
 /// A session of ten groups on the `day`th of October 2026, that earned
 /// `per_group` each.
@@ -75,6 +76,51 @@ fn a_row_marks_its_session_on_the_timeline() {
     // A finger does not point.
     ui.point_at("board-4", "touch", (0.0, 0.0), (0.0, 0.0));
     assert!(ui.has("1st</span> · 90.0 a group"));
+}
+
+/// Pointing at a row redraws the rows it moves between, the mark and what
+/// is said of it, and nothing else: the tab reads every stored run's log to
+/// build the board, and the timeline draws a dot a session, so neither is
+/// drawn again for a mouse crossing the board. Under All modes as under a
+/// contest's own board.
+#[test]
+fn pointing_at_a_row_redraws_only_what_marks_it() {
+    let mut sessions: Vec<SessionResult> = (1..=8)
+        .map(|day| koch(day, f64::from(day) * 10.0))
+        .collect();
+    sessions.extend((9..=14).map(|day| wpx_run(day, 6 + day as usize)));
+    let mut ui = board(sessions);
+    for pill in [None, Some("pill-contest")] {
+        if let Some(pill) = pill {
+            ui.click(pill);
+        }
+        ui.take_work();
+        for name in ["ScoresTab", "ScoreTimeline", "BoardRow"] {
+            ui.take_renders(name);
+        }
+        for place in 3..=5 {
+            let row = format!("board-{place}");
+            ui.point_at(&row, "mouse", (0.0, 0.0), (0.0, 0.0));
+            assert!(ui.input_tag(&row).contains("focused"), "{pill:?} {row}");
+            assert!(
+                ui.has(&format!("{}</span> · ", ordinal(place))),
+                "{pill:?} {row}"
+            );
+            ui.point_away(&row);
+        }
+        assert!(
+            ui.input_tag("board-1").contains("focused"),
+            "back to the best"
+        );
+        assert_eq!(ui.take_renders("ScoresTab"), 0, "{pill:?}");
+        assert_eq!(ui.take_renders("ScoreTimeline"), 0, "{pill:?}");
+        // Six moves, each between the best's row and another.
+        assert_eq!(ui.take_renders("BoardRow"), 12, "{pill:?}");
+        // The rows' classes, the guide's and the ring's places, the line
+        // said of the session.
+        let work = ui.take_work();
+        assert!(work <= 6 * 10, "{pill:?}: {work} mutations");
+    }
 }
 
 #[test]

@@ -2912,7 +2912,12 @@ mod interactions {
         ui.click("seg-taught-order");
         assert!(ui.input_tag("seg-taught-order").contains("active"));
         assert_eq!(first_square(&ui), "pair-start-k");
-        assert!(ui.input_tag("pair-k-m").contains("selected"));
+        assert!(
+            line_rule(&ui).contains(
+                "#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--ink)"
+            ),
+            "still pinned"
+        );
         ui.click("seg-most-errors");
         assert_eq!(first_square(&ui), "pair-k-m");
     }
@@ -2992,11 +2997,13 @@ mod interactions {
             assert!(ui.has(text), "no {text} on the card: {}", ui.html());
         }
         assert!(ui.has("class=\"pair-dock\""));
-        let square = ui.input_tag("pair-k-m");
-        assert!(
-            square.contains("selected") && square.contains("shown"),
-            "{square}"
-        );
+        // Shown, ringed in ink for being pinned.
+        let css = line_rule(&ui);
+        let ring =
+            css.find("#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--info)");
+        let ink =
+            css.find("#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--ink)");
+        assert!(ring < ink && ring.is_some(), "{css}");
         // Its row, K before, and its column, M after, light up; nothing else.
         for (id, lit) in [
             ("pair-k-k", true),
@@ -3006,20 +3013,15 @@ mod interactions {
             ("pair-u-k", false),
             ("pair-start-u", false),
         ] {
-            assert_eq!(ui.input_tag(id).contains("in-line"), lit, "{id}");
+            assert_eq!(lights(&ui, id), lit, "{id}");
         }
-        assert!(ui.has("class=\"bigram-head row-head group-text in-line\">K<"));
-        assert!(ui.has("class=\"bigram-head group-text in-line\">M<"));
-        assert_eq!(
-            ui.html().matches("in-line\">").count(),
-            2,
-            "one row, one column"
-        );
+        assert!(css.contains(r#".bigram-head[data-r="K"], .bigram-head[data-c="M"]"#));
+        assert!(ui.has(r#"class="bigram-head row-head group-text" data-r="K">K<"#));
+        assert!(ui.has(r#"class="bigram-head group-text" data-c="M">M<"#));
 
         ui.click("pair-k-m");
         assert!(!ui.has("pair-card"));
-        assert!(!ui.input_tag("pair-k-m").contains("selected"));
-        assert!(!ui.input_tag("pair-k-k").contains("in-line"));
+        assert!(line_rule(&ui).is_empty(), "nothing lit");
 
         ui.click("pair-k-m");
         ui.click("pair-u-m");
@@ -3029,7 +3031,33 @@ mod interactions {
         assert!(!ui.has(">Taken for<"), "nothing was taken for anything");
         ui.click_elsewhere();
         assert!(!ui.has("pair-card"));
-        assert!(!ui.input_tag("pair-u-m").contains("selected"));
+        assert!(line_rule(&ui).is_empty(), "nothing lit");
+    }
+
+    /// The rule that lights the bigram grid's pair, as drawn: nothing when
+    /// no pair is shown.
+    fn line_rule(ui: &Ui) -> String {
+        let html = ui.html();
+        html.split("<style>")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("</style>"))
+            .map(|(css, _)| css)
+            .find(|css| css.contains("bigram"))
+            .unwrap_or_default()
+            .replace("&quot;", "\"")
+    }
+
+    /// Whether the square with this id is lit as in the line of the pair
+    /// shown: by its row or by its column.
+    fn lights(ui: &Ui, id: &str) -> bool {
+        let tag = ui.input_tag(id);
+        let data = |name: &str| {
+            let at = tag.find(&format!("{name}=\"")).expect("tagged") + name.len() + 2;
+            tag[at..].split('"').next().unwrap_or_default().to_string()
+        };
+        let css = line_rule(ui);
+        css.contains(&format!(".bigram-cell[data-r=\"{}\"]", data("data-r")))
+            || css.contains(&format!(".bigram-cell[data-c=\"{}\"]", data("data-c")))
     }
 
     /// A mouse shows a pair's card for as long as it points at the square,
@@ -3040,18 +3068,24 @@ mod interactions {
         let mut ui = Ui::new(MistakesHarness, ());
         ui.point_at("pair-start-k", "mouse", (40.0, 300.0), (5.0, 5.0));
         assert!(ui.has("class=\"tip-date\">K at the start of a group<"));
-        assert!(ui.input_tag("pair-start-u").contains("in-line"));
+        assert!(lights(&ui, "pair-start-u"));
+        // Leaving the square for the next keeps the card up; leaving the
+        // grid takes it down.
         ui.point_away("pair-start-k");
+        assert!(ui.has("class=\"tip-date\">K at the start of a group<"));
+        ui.point_away("bigram-grid");
         assert!(!ui.has("pair-card"));
 
         ui.click("pair-k-m");
         ui.point_at("pair-u-m", "mouse", (40.0, 300.0), (5.0, 5.0));
         assert!(ui.has("class=\"tip-date\">M after U<"));
         assert!(
-            ui.input_tag("pair-k-m").contains("selected"),
+            line_rule(&ui).contains(
+                "#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--ink)"
+            ),
             "still pinned"
         );
-        ui.point_away("pair-u-m");
+        ui.point_away("bigram-grid");
         assert!(ui.has("class=\"tip-date\">M after K<"));
         ui.click("pair-k-m");
 
@@ -3059,6 +3093,35 @@ mod interactions {
         assert!(!ui.has("pair-card"));
         ui.point_at("pair-k-k", "mouse", (40.0, 300.0), (5.0, 5.0));
         assert!(!ui.has("pair-card"));
+    }
+
+    /// Pointing from pair to pair draws no square again, and keeps the card
+    /// up between them: what changes is the rule that lights the pair, and
+    /// what its card says. A grid of forty characters holds 1,640 squares.
+    #[test]
+    fn pointing_from_pair_to_pair_draws_no_square_again() {
+        let mut ui = Ui::new(MistakesHarness, ());
+        ui.take_renders("PairGrid");
+        ui.take_renders("BigramCard");
+        ui.take_work();
+        for (id, title) in [
+            ("pair-k-m", "M after K"),
+            ("pair-u-m", "M after U"),
+            ("pair-start-k", "K at the start of a group"),
+            ("pair-start-u", "U at the start of a group"),
+        ] {
+            ui.point_at(id, "mouse", (40.0, 300.0), (5.0, 5.0));
+            assert!(ui.has(&format!("class=\"tip-date\">{title}<")), "{id}");
+            ui.point_away(id);
+        }
+        ui.point_away("bigram-grid");
+        assert!(!ui.has("pair-card"));
+        assert_eq!(ui.take_renders("PairGrid"), 0, "no square drawn again");
+        assert_eq!(ui.take_renders("BigramCard"), 0);
+        // The card put up and taken down once, and each pair's rule and
+        // words in between.
+        let work = ui.take_work();
+        assert!(work <= 60, "{work} mutations for four pairs");
     }
 
     /// A mouse opens a day's card by pointing at the square and closes it by

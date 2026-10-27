@@ -863,6 +863,25 @@ mod ui_tests {
                 let work = ui.take_work();
                 assert!(work <= most, "{nav}: {work} changes in 20 s at rest");
             }
+            // The Scores tab reads every stored run's log to draw: at rest
+            // it is not drawn again, even with nothing changing on the page.
+            let mut history: Vec<_> = (1..=6)
+                .map(|day| stored_session(&format!("2026-09-{day:02}"), &[("KM", "KM"); 10]))
+                .collect();
+            history.extend((7..=9).map(|day| {
+                crate::testing::stored_run(
+                    &format!("2026-09-{day:02}"),
+                    &[("K5XYZ", "214", "K5XYZ", "214"); 6],
+                )
+            }));
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &history);
+            ui.click("nav-stats");
+            ui.click("seg-scores");
+            ui.advance(1_000).await;
+            assert!(ui.has("Best sessions"), "{}", ui.html());
+            ui.take_renders("ScoresTab");
+            ui.advance(20_000).await;
+            assert_eq!(ui.take_renders("ScoresTab"), 0, "Scores redrawn at rest");
         });
     }
 

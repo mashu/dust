@@ -50,6 +50,9 @@ thread_local! {
     static SCROLLS_ASKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// What listens for a click anywhere off a widget's own squares.
     static ELSEWHERE: std::cell::RefCell<Vec<Callback<()>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// How many times each component that tells of it has rendered since a
+    /// test last looked, by name.
+    static RENDERS: std::cell::RefCell<Vec<(&'static str, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The page asks for the field with this id to have the cursor, by
@@ -72,6 +75,18 @@ pub fn ask_scroll_to_top() {
 /// `on_elsewhere` when a test clicks elsewhere ([`Ui::click_elsewhere`]).
 pub fn listen_elsewhere(on_elsewhere: Callback<()>) {
     ELSEWHERE.with_borrow_mut(|heard| heard.push(on_elsewhere));
+}
+
+/// A component costly to draw has rendered: a test can count how often
+/// ([`Ui::take_renders`]), and so tell a hover that redraws a mark from one
+/// that redraws a whole tab.
+pub fn rendered(component: &'static str) {
+    RENDERS.with_borrow_mut(|renders| {
+        match renders.iter_mut().find(|(name, _)| *name == component) {
+            Some((_, count)) => *count += 1,
+            None => renders.push((component, 1)),
+        }
+    });
 }
 
 pub struct Harness {
@@ -727,6 +742,17 @@ impl Ui {
         SCROLLS_ASKED.take()
     }
 
+    /// How many times `component` rendered since this was last called for
+    /// it ([`rendered`]).
+    pub fn take_renders(&mut self, component: &str) -> usize {
+        RENDERS.with_borrow_mut(|renders| {
+            renders
+                .iter_mut()
+                .find(|(name, _)| *name == component)
+                .map_or(0, |(_, count)| std::mem::take(count))
+        })
+    }
+
     /// Whether anything is ready to run: a task woken, an effect queued, a
     /// component marked for redrawing. Runs the tasks and effects it finds,
     /// as the renderer would before drawing.
@@ -908,7 +934,10 @@ impl Ui {
         let element = self.element(id);
         let payload: std::rc::Rc<dyn std::any::Any> =
             std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
-        let delivered = dioxus::core::Event::new(payload, true);
+        // As a browser has it: entering, leaving and focus are told to the
+        // element alone, not to those around it.
+        let bubbles = !matches!(event, "pointerenter" | "pointerleave" | "focus");
+        let delivered = dioxus::core::Event::new(payload, bubbles);
         self.dom
             .runtime()
             .handle_event(event, delivered.clone(), element);

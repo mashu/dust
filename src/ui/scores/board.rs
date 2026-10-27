@@ -1,7 +1,7 @@
 use cw_core::{BOARD_MIN_GROUPS, BoardEntry, CharSetMode, Ranking};
 use dioxus::prelude::*;
 
-use super::{Medal, mode_label, rating_label, run_rule, speed};
+use super::{Medal, focus, mode_label, rating_label, run_rule, speed};
 use crate::ui::format::day_and_clock;
 use crate::ui::help;
 use crate::ui::stats_detail::ASSISTED;
@@ -58,18 +58,40 @@ fn ranked_by(ranking: Ranking, runs_only: bool) -> String {
     }
 }
 
+/// What a row says under its score: a run counts its QSOs and says its
+/// length, where its log reads; a session counts its groups.
+fn detail(entry: &BoardEntry) -> String {
+    let count = match (entry.qsos, entry.limit_s) {
+        (Some(qsos), Some(limit_s)) => format!(
+            "{qsos} QSO{} · {} min",
+            if qsos == 1 { "" } else { "s" },
+            limit_s / 60
+        ),
+        (Some(qsos), None) => format!("{qsos} QSO{}", if qsos == 1 { "" } else { "s" }),
+        (None, _) => format!("{} groups", entry.groups),
+    };
+    format!(
+        "{count} · {} · {}%",
+        speed(entry),
+        (entry.accuracy * 100.0).round()
+    )
+}
+
 /// The board itself, best first: the top ten until asked for every row,
 /// then the assisted runs, greyed and with no place. Pointing at a row with
 /// a mouse marks it on the timeline for as long as it stays; a tap keeps it
 /// marked until the same row is tapped again. An assisted run is on no
-/// timeline, so its row marks nothing.
+/// timeline, so its row marks nothing. A row is drawn again only when it
+/// is marked or let go.
 #[component]
 pub(super) fn BoardList(
     board: Vec<BoardEntry>,
     /// The whole runs it holds that had Show copy on, newest first.
     assisted: Vec<BoardEntry>,
-    /// When the session marked on the timeline was set.
-    focus: u64,
+    /// When the best was set, marked while no row is.
+    best_at: u64,
+    /// The row pointed at, else the row tapped.
+    marked: Memo<Option<u64>>,
     /// The row a mouse is pointing at.
     hovered: Signal<Option<u64>>,
     /// The row tapped to keep marked.
@@ -79,7 +101,6 @@ pub(super) fn BoardList(
     /// What it ranks by.
     ranking: Ranking,
 ) -> Element {
-    let (mut hovered, mut pinned) = (hovered, pinned);
     let mut show_all = use_signal(|| false);
     let total = board.len() + assisted.len();
     // The rule the card names is the one its rows went on by: a board of
@@ -94,25 +115,7 @@ pub(super) fn BoardList(
         rows.truncate(BOARD_TOP);
         greyed.truncate(BOARD_TOP - rows.len());
     }
-    // A run counts its QSOs and says its length, where its log reads; a
-    // session counts its groups.
-    let detail = |entry: &BoardEntry| {
-        let count = match (entry.qsos, entry.limit_s) {
-            (Some(qsos), Some(limit_s)) => format!(
-                "{qsos} QSO{} · {} min",
-                if qsos == 1 { "" } else { "s" },
-                limit_s / 60
-            ),
-            (Some(qsos), None) => format!("{qsos} QSO{}", if qsos == 1 { "" } else { "s" }),
-            (None, _) => format!("{} groups", entry.groups),
-        };
-        format!(
-            "{count} · {} · {}%",
-            speed(entry),
-            (entry.accuracy * 100.0).round()
-        )
-    };
-    let when = |entry: &BoardEntry| day_and_clock(&entry.date, entry.timestamp);
+    let (focus, tapped) = (focus(marked, best_at), pinned());
     rsx! {
         div { class: "card stack-sm",
             CardHead {
@@ -129,54 +132,15 @@ pub(super) fn BoardList(
             }
             div { class: "board-list",
                 for entry in rows {
-                    {
-                        let at = entry.timestamp;
-                        let is_focus = at == focus;
-                        let is_pinned = pinned() == Some(at);
-                        let class = match (is_focus, is_pinned) {
-                            (_, true) => "board-row focused pinned",
-                            (true, false) => "board-row focused",
-                            (false, false) => "board-row",
-                        };
-                        let (detail, when) = (detail(&entry), when(&entry));
-                        rsx! {
-                            button {
-                                id: control_id("board", &entry.place.to_string()),
-                                class: class,
-                                aria_pressed: if is_pinned { "true" } else { "false" },
-                                onpointerenter: move |evt: PointerEvent| {
-                                    if evt.pointer_type() == "mouse" {
-                                        hovered.set(Some(at));
-                                    }
-                                },
-                                onpointerleave: move |evt: PointerEvent| {
-                                    if evt.pointer_type() == "mouse" && *hovered.peek() == Some(at) {
-                                        hovered.set(None);
-                                    }
-                                },
-                                onclick: move |_| {
-                                    let again = *pinned.peek() == Some(at);
-                                    pinned.set(if again { None } else { Some(at) });
-                                },
-                                span { class: "board-place",
-                                    if entry.place <= 3 {
-                                        Medal { place: entry.place }
-                                    } else {
-                                        span { class: "board-number", "{entry.place}" }
-                                    }
-                                }
-                                span { class: "board-main",
-                                    span { class: "board-score", "{rating_label(ranking, entry.rating)}" }
-                                    span { class: "board-when", "{when}" }
-                                }
-                                span { class: "board-detail",
-                                    if show_mode {
-                                        {badge(&entry)}
-                                    }
-                                    "{detail}"
-                                }
-                            }
-                        }
+                    BoardRow {
+                        key: "{entry.timestamp}",
+                        focused: entry.timestamp == focus,
+                        pinned: tapped == Some(entry.timestamp),
+                        entry,
+                        hovered,
+                        tapped: pinned,
+                        show_mode,
+                        ranking,
                     }
                 }
                 for entry in greyed {
@@ -188,7 +152,7 @@ pub(super) fn BoardList(
                         }
                         span { class: "board-main",
                             span { class: "board-score", "{rating_label(ranking, entry.rating)}" }
-                            span { class: "board-when", "{when(&entry)}" }
+                            span { class: "board-when", "{day_and_clock(&entry.date, entry.timestamp)}" }
                         }
                         span { class: "board-detail",
                             if show_mode {
@@ -210,6 +174,73 @@ pub(super) fn BoardList(
                         "Show all {total}"
                     }
                 }
+            }
+        }
+    }
+}
+
+/// A placed row: its place, its rating, when it was set and how it went,
+/// marked when the timeline marks it, and pressed while tapped.
+#[component]
+fn BoardRow(
+    entry: BoardEntry,
+    /// The timeline marks it.
+    focused: bool,
+    /// It was tapped to stay marked.
+    pinned: bool,
+    /// The row a mouse is pointing at.
+    hovered: Signal<Option<u64>>,
+    /// The row tapped to keep marked.
+    tapped: Signal<Option<u64>>,
+    /// The board is of every mode, so the row says which it was.
+    show_mode: bool,
+    /// What the board ranks by.
+    ranking: Ranking,
+) -> Element {
+    #[cfg(test)]
+    crate::testing::rendered("BoardRow");
+    let (mut hovered, mut tapped) = (hovered, tapped);
+    let at = entry.timestamp;
+    let class = match (focused, pinned) {
+        (_, true) => "board-row focused pinned",
+        (true, false) => "board-row focused",
+        (false, false) => "board-row",
+    };
+    rsx! {
+        button {
+            id: control_id("board", &entry.place.to_string()),
+            class,
+            aria_pressed: if pinned { "true" } else { "false" },
+            onpointerenter: move |evt: PointerEvent| {
+                if evt.pointer_type() == "mouse" {
+                    hovered.set(Some(at));
+                }
+            },
+            onpointerleave: move |evt: PointerEvent| {
+                if evt.pointer_type() == "mouse" && *hovered.peek() == Some(at) {
+                    hovered.set(None);
+                }
+            },
+            onclick: move |_| {
+                let again = *tapped.peek() == Some(at);
+                tapped.set(if again { None } else { Some(at) });
+            },
+            span { class: "board-place",
+                if entry.place <= 3 {
+                    Medal { place: entry.place }
+                } else {
+                    span { class: "board-number", "{entry.place}" }
+                }
+            }
+            span { class: "board-main",
+                span { class: "board-score", "{rating_label(ranking, entry.rating)}" }
+                span { class: "board-when", "{day_and_clock(&entry.date, entry.timestamp)}" }
+            }
+            span { class: "board-detail",
+                if show_mode {
+                    {badge(&entry)}
+                }
+                "{detail(&entry)}"
             }
         }
     }

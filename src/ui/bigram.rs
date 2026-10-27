@@ -224,18 +224,50 @@ pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
     }
 }
 
+/// What lights up the pair `shown`: its row and column, its headings and
+/// its square, and the square `pinned`, ringed in ink, which wins where the
+/// two are one. A rule of its own, so that pointing at a pair draws no
+/// square again (the squares and headings carry their row and column).
+fn line_css(shown: Option<Pair>, pinned: Option<Pair>) -> String {
+    let mut css = String::new();
+    if let Some((row, col)) = shown {
+        let (r, c) = (id_part(row), id_part(col));
+        css.push_str(&format!(
+            ".bigram-cell[data-r=\"{r}\"], .bigram-cell[data-c=\"{c}\"] {{ box-shadow: inset 0 0 0 1.5px var(--info); }}\n\
+             .bigram-head[data-r=\"{r}\"], .bigram-head[data-c=\"{c}\"] {{ color: var(--ink); background: var(--info-soft); }}\n\
+             .bigram-head.row-head[data-r=\"{r}\"] {{ background: linear-gradient(var(--info-soft), var(--info-soft)), var(--surface); }}\n\
+             #{} {{ position: relative; z-index: 1; outline: 2px solid var(--info); outline-offset: 1px; }}\n",
+            pair_id(row, col)
+        ));
+    }
+    if let Some((row, col)) = pinned {
+        css.push_str(&format!(
+            "#{} {{ position: relative; z-index: 1; outline: 2px solid var(--ink); outline-offset: 1px; }}\n",
+            pair_id(row, col)
+        ));
+    }
+    css
+}
+
 /// Every pair as a square, darker the more often its second character went
-/// wrong there. A mouse pointing at a square shows its card for as long as
-/// it stays; a tap pins it until the same square is tapped again, anywhere
-/// else is, or Escape is pressed. Touch has no pointing, so only a mouse's
-/// counts. The pair shown lights up its row and column.
+/// wrong there. A mouse pointing at a square shows its card until it points
+/// at another or leaves the grid; a tap pins it until the same square is
+/// tapped again, anywhere else is, or Escape is pressed. Touch has no
+/// pointing, so only a mouse's counts. The pair shown lights up its row and
+/// column.
 ///
 /// The grid scrolls sideways, which would cut off a card hung on its square,
 /// so the card docks above the nav instead, where it stays in sight however
 /// far down a tall grid the square is.
+///
+/// Forty characters make 1,640 squares, so the card is drawn apart from
+/// them: pointing at a pair draws its card and the rule that lights it up
+/// ([`line_css`]), and no square again.
 #[component]
-pub fn BigramCard(heat: BigramHeatmap) -> Element {
-    let mut hovered = use_signal(|| None::<Pair>);
+pub fn BigramCard(heat: ReadSignal<BigramHeatmap>) -> Element {
+    #[cfg(test)]
+    crate::testing::rendered("BigramCard");
+    let hovered = use_signal(|| None::<Pair>);
     let mut pinned = use_signal(|| None::<Pair>);
     // The most errors first, as every list of characters on Stats starts
     // with the ones that need the most work.
@@ -245,20 +277,6 @@ pub fn BigramCard(heat: BigramHeatmap) -> Element {
             pinned.set(None);
         }
     });
-    let cols = heat.cols.len();
-    let pinned_now = pinned();
-    // A pair no longer in the grid, after a history was cut, shows nothing.
-    let shown = hovered()
-        .or(pinned_now)
-        .and_then(|(row, col)| {
-            heat.cells
-                .iter()
-                .find(|cell| (cell.row, cell.col) == (row, col))
-        })
-        .filter(|cell| cell.total > 0);
-    let line = shown.map(|cell| (cell.row, cell.col));
-    let card = shown.map(|cell| pair_card(cell, heat.overall_of(cell.col)));
-    let (row_order, col_order) = order(&heat, most_errors());
     rsx! {
         div { class: "card stack",
             CardHead {
@@ -282,102 +300,149 @@ pub fn BigramCard(heat: BigramHeatmap) -> Element {
             p { class: "muted", style: "margin: 0;",
                 "Rows are the character before ({GROUP_START_BIGRAM_TOKEN} = start of group), columns the one after. Darker means more errors; an empty square is a pair not heard yet."
             }
-            div { class: "bigram-scroll",
-                div {
-                    class: "bigram-grid",
-                    style: "grid-template-columns: repeat({cols + 1}, minmax(1.35rem, 1fr));",
-                    div { class: "bigram-head row-head" }
-                    for col in col_order.iter().map(|c| heat.cols[*c]) {
-                        div {
-                            class: if line.is_some_and(|(_, c)| c == col) { "bigram-head group-text in-line" } else { "bigram-head group-text" },
-                            "{col}"
-                        }
+            PairGrid {
+                heat,
+                most_errors: most_errors(),
+                hovered,
+                pinned,
+            }
+            p { class: "muted", "Tap a pair for details." }
+            PairShown { heat, hovered, pinned }
+        }
+    }
+}
+
+/// The squares, a pair each, under the characters heading their rows and
+/// columns, each tagged with its row and column for [`line_css`]. What is
+/// pointed at or pinned is set here, and never read to draw.
+#[component]
+fn PairGrid(
+    heat: ReadSignal<BigramHeatmap>,
+    most_errors: bool,
+    hovered: Signal<Option<Pair>>,
+    pinned: Signal<Option<Pair>>,
+) -> Element {
+    #[cfg(test)]
+    crate::testing::rendered("PairGrid");
+    let (mut hovered, mut pinned) = (hovered, pinned);
+    let heat = heat.read();
+    let cols = heat.cols.len();
+    let (row_order, col_order) = order(&heat, most_errors);
+    rsx! {
+        div { class: "bigram-scroll",
+            div {
+                id: control_id("bigram", "grid"),
+                class: "bigram-grid",
+                style: "grid-template-columns: repeat({cols + 1}, minmax(1.35rem, 1fr));",
+                // The pair pointed at goes when the mouse leaves the grid,
+                // not the square: its card stays up across the gaps between.
+                onpointerleave: move |evt: PointerEvent| {
+                    if evt.pointer_type() == "mouse" && hovered.peek().is_some() {
+                        hovered.set(None);
                     }
-                    for r in row_order.iter().copied() {
-                        div {
-                            class: if line.is_some_and(|(at, _)| at == heat.rows[r]) { "bigram-head row-head group-text in-line" } else { "bigram-head row-head group-text" },
-                            "{heat.rows[r]}"
-                        }
-                        for cell in col_order.iter().map(|c| &heat.cells[r * cols + c]) {
-                            {
-                                let pair = (cell.row, cell.col);
-                                let heard = cell.total > 0;
-                                let mut class = vec!["bigram-cell"];
-                                if !heard {
-                                    class.push("empty");
-                                }
-                                if line.is_some_and(|(r, c)| r == cell.row || c == cell.col) {
-                                    class.push("in-line");
-                                }
-                                if line == Some(pair) {
-                                    class.push("shown");
-                                }
-                                if pinned_now == Some(pair) {
-                                    class.push("selected");
-                                }
-                                let class = class.join(" ");
-                                let alpha = if heat.max_rate <= 0.0 { 0.0 } else { cell.rate / heat.max_rate } * 0.85;
-                                let style = heard.then(|| {
-                                    format!("background-image: linear-gradient(rgba(180, 83, 9, {alpha:.3}), rgba(180, 83, 9, {alpha:.3}));")
-                                });
-                                rsx! {
-                                    button {
-                                        id: pair_id(cell.row, cell.col),
-                                        class: class,
-                                        style: style,
-                                        aria_label: "{pair_label(cell)}",
-                                        disabled: html_bool(!heard),
-                                        onpointerenter: move |evt: PointerEvent| {
-                                            if heard && evt.pointer_type() == "mouse" {
-                                                hovered.set(Some(pair));
-                                            }
-                                        },
-                                        onpointerleave: move |evt: PointerEvent| {
-                                            if evt.pointer_type() == "mouse" && *hovered.peek() == Some(pair) {
-                                                hovered.set(None);
-                                            }
-                                        },
-                                        onclick: move |_| {
-                                            if heard {
-                                                let again = *pinned.peek() == Some(pair);
-                                                pinned.set((!again).then_some(pair));
-                                            }
-                                        },
-                                    }
+                },
+                div { class: "bigram-head row-head" }
+                for col in col_order.iter().map(|c| heat.cols[*c]) {
+                    div { class: "bigram-head group-text", "data-c": id_part(col), "{col}" }
+                }
+                for r in row_order.iter().copied() {
+                    div {
+                        class: "bigram-head row-head group-text",
+                        "data-r": id_part(heat.rows[r]),
+                        "{heat.rows[r]}"
+                    }
+                    for cell in col_order.iter().map(|c| &heat.cells[r * cols + c]) {
+                        {
+                            let pair = (cell.row, cell.col);
+                            let heard = cell.total > 0;
+                            let alpha = if heat.max_rate <= 0.0 { 0.0 } else { cell.rate / heat.max_rate } * 0.85;
+                            let style = heard.then(|| {
+                                format!("background-image: linear-gradient(rgba(180, 83, 9, {alpha:.3}), rgba(180, 83, 9, {alpha:.3}));")
+                            });
+                            rsx! {
+                                button {
+                                    id: pair_id(cell.row, cell.col),
+                                    class: if heard { "bigram-cell" } else { "bigram-cell empty" },
+                                    "data-r": id_part(cell.row),
+                                    "data-c": id_part(cell.col),
+                                    style,
+                                    aria_label: "{pair_label(cell)}",
+                                    disabled: html_bool(!heard),
+                                    // A pair not heard yet has no card, and
+                                    // pointing at it takes down the one up.
+                                    onpointerenter: move |evt: PointerEvent| {
+                                        let next = heard.then_some(pair);
+                                        if evt.pointer_type() == "mouse" && *hovered.peek() != next {
+                                            hovered.set(next);
+                                        }
+                                    },
+                                    onclick: move |_| {
+                                        if heard {
+                                            let again = *pinned.peek() == Some(pair);
+                                            pinned.set((!again).then_some(pair));
+                                        }
+                                    },
                                 }
                             }
                         }
                     }
                 }
             }
-            p { class: "muted", "Tap a pair for details." }
-            if let Some(card) = card {
-                div { class: "pair-dock",
-                    div { class: "pair-card",
-                        span { class: "tip-date", "{card.title}" }
-                        for row in card.rows {
-                            span { class: "tip-row",
-                                span { class: "tip-line",
-                                    span { class: "tip-label", "{row.label}" }
-                                    span { class: "tip-value", "{row.value}" }
-                                }
-                                if let Some(share) = row.share {
-                                    span { class: "tip-bar",
-                                        if share > 0.0 {
-                                            span {
-                                                class: "tip-fill {row.tone}",
-                                                style: "width: {share * 100.0:.1}%;",
-                                            }
+        }
+    }
+}
+
+/// The pair pointed at, else the one pinned: its row and column lit, and its
+/// card. A pair no longer in the grid, after a history was cut, shows
+/// nothing.
+#[component]
+fn PairShown(
+    heat: ReadSignal<BigramHeatmap>,
+    hovered: Signal<Option<Pair>>,
+    pinned: Signal<Option<Pair>>,
+) -> Element {
+    let heat = heat.read();
+    let pinned = pinned();
+    let shown = hovered()
+        .or(pinned)
+        .and_then(|(row, col)| {
+            heat.cells
+                .iter()
+                .find(|cell| (cell.row, cell.col) == (row, col))
+        })
+        .filter(|cell| cell.total > 0);
+    let css = line_css(shown.map(|cell| (cell.row, cell.col)), pinned);
+    let card = shown.map(|cell| pair_card(cell, heat.overall_of(cell.col)));
+    rsx! {
+        if !css.is_empty() {
+            style { "{css}" }
+        }
+        if let Some(card) = card {
+            div { class: "pair-dock",
+                div { class: "pair-card",
+                    span { class: "tip-date", "{card.title}" }
+                    for row in card.rows {
+                        span { class: "tip-row",
+                            span { class: "tip-line",
+                                span { class: "tip-label", "{row.label}" }
+                                span { class: "tip-value", "{row.value}" }
+                            }
+                            if let Some(share) = row.share {
+                                span { class: "tip-bar",
+                                    if share > 0.0 {
+                                        span {
+                                            class: "tip-fill {row.tone}",
+                                            style: "width: {share * 100.0:.1}%;",
                                         }
                                     }
                                 }
-                                if let Some(note) = row.note {
-                                    span { class: "tip-note", "{note}" }
-                                }
+                            }
+                            if let Some(note) = row.note {
+                                span { class: "tip-note", "{note}" }
                             }
                         }
-                        span { class: "pair-verdict", "{card.verdict}" }
                     }
+                    span { class: "pair-verdict", "{card.verdict}" }
                 }
             }
         }
@@ -467,6 +532,36 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), all);
+    }
+
+    /// The rule lights the pair's row and column by the tags its squares
+    /// and headings carry, rings its square, and rings the pinned one in
+    /// ink after it, so that ink wins where the two are one; a character
+    /// that is not a letter is tagged, and named, by its code point.
+    #[test]
+    fn the_line_rule_lights_a_row_a_column_and_two_squares() {
+        assert!(line_css(None, None).is_empty());
+        let css = line_css(Some(('K', 'M')), Some(('/', 'M')));
+        for rule in [
+            r#".bigram-cell[data-r="K"], .bigram-cell[data-c="M"] {"#,
+            r#".bigram-head[data-r="K"], .bigram-head[data-c="M"] {"#,
+            r#".bigram-head.row-head[data-r="K"] {"#,
+            "#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--info);",
+            "#pair-u002f-m { position: relative; z-index: 1; outline: 2px solid var(--ink);",
+        ] {
+            assert!(css.contains(rule), "{rule} in {css}");
+        }
+        assert_eq!(css.matches('{').count(), css.matches('}').count());
+        let pinned = line_css(None, Some(('K', 'M')));
+        assert!(
+            !pinned.contains("data-r"),
+            "a pair pinned, none shown: {pinned}"
+        );
+        let both = line_css(Some(('K', 'M')), Some(('K', 'M')));
+        assert!(
+            both.find("var(--info)") < both.rfind("var(--ink)"),
+            "{both}"
+        );
     }
 
     #[test]
