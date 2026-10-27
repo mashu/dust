@@ -306,7 +306,7 @@ pub fn LettersTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
             }
             if !timing {
                 p { class: "muted", style: "margin: 0; font-size: 0.85rem;",
-                    "How fast you recognise each character is timed from its sound to your key, as you key along: with Lock typing while sending off (Settings → Session shape), or in groups of one character. Key each one as soon as you hear it."
+                    "How fast you recognise each character is timed from its sound to your key, as you key along: with Lock typing while sending off (Settings → Session shape), or in groups of one character sent once (Sends per group 1×). Key each one as soon as you hear it."
                 }
             }
             div { class: "err-legend", aria_hidden: "true",

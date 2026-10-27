@@ -114,11 +114,15 @@ impl PlaybackSignal for WebSignal {
             // fault. The tones stay scheduled at their own context times, so
             // coming back resumes the group where it stopped.
             suspended: page_is_hidden(),
+            // Against the latency read as it started, as its timing is:
+            // the browser refining it as the send plays is no hold-up.
             played_ms: Some(heard_ms(
                 self.ctx.current_time(),
                 self.started_at,
-                heard_latency(&self.ctx),
+                self.timing.latency_sec,
             )),
+            // Its clock says that, against the app's.
+            late: false,
         }
     }
 }

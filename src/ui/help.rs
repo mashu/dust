@@ -4,7 +4,7 @@
 
 use cw_core::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
-    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, MASTERED_MIN_ACCURACY,
+    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS, MASTERED_MIN_ACCURACY,
     MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS,
     RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
 };
@@ -92,7 +92,7 @@ pub fn letters(bands: RecognitionBands) -> Element {
             }
             dt { "Recognised in" }
             dd {
-                "How soon you key a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest {RECOGNITION_WINDOW} timed tries. The key is the keyboard's or the keypad's, or for the paddles the first contact of the letter. A try is timed when you key it right, in its place, at least {REACTION_MIN_MS} ms after it sounded, while keeping up: the one before it already keyed when it reached you. A group of more than one character is timed only when you key along, starting before it ends; keys after a group is sent again are not. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Key each character the moment you hear it."
+                "How soon you key a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest {RECOGNITION_WINDOW} timed tries. The key is the keyboard's or the keypad's, or for the paddles the first contact of the letter. A try is timed when you key it right, in its place, at least {REACTION_MIN_MS} ms after it sounded, while keeping up: the one before it keyed by {KEEPING_UP_MS} ms after this one reached you. A character put right after a slip is not timed, but costs the ones around it nothing. A group of more than one character is timed only when you key along, starting before it ends; keys after a group is sent again are not. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Key each character the moment you hear it."
             }
             dt { "The bands" }
             dd {
@@ -102,7 +102,7 @@ pub fn letters(bands: RecognitionBands) -> Element {
             dd { "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band." }
             dt { "Not timed yet" }
             dd {
-                "With Lock typing while sending on, only groups of one character are timed: turn it off (group training, Settings → Session shape) to key along. In a contest run, a call or an exchange is timed when it was heard once and alone, with Show copy off. A send the audio held up is not timed, nor is what the guided setup types for you. Nothing stands in for a time: a character never timed says so."
+                "With Lock typing while sending on, only groups of one character sent once (Sends per group 1×) are timed: turn it off (group training, Settings → Session shape) to key along, on the keyboard, the keypad or the paddles. In a contest run, a call or an exchange is timed when it was heard once and alone, with Show copy off. A send the audio held up is not timed, nor is what the guided setup types for you. Nothing stands in for a time: a character never timed says so."
             }
         }
     }

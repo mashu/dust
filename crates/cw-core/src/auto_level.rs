@@ -775,11 +775,10 @@ mod tests {
             let ended = SessionEvent::PlaybackEnded {
                 index,
                 duration_sec: 0.5,
-                on_time: true,
             };
             let _ = machine.apply(ended, now);
             let text = answer.to_string();
-            let keys = Vec::new();
+            let keys = crate::recognition::Keys::default();
             let _ = machine.apply(SessionEvent::Input { index, text, keys }, now);
             for effect in machine.apply(SessionEvent::Confirm, now) {
                 if let SessionEffect::StartTimer { id, .. } = effect {

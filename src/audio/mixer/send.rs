@@ -4,11 +4,13 @@
 use std::ops::AddAssign;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use cw_core::band::{FilterDesign, Qsb, ReceiverFilter};
 use cw_core::{PlannedTransmission, PlaybackPlan, ToneEvent};
 
 use crate::audio::shape::{SEND_RELEASE_SEC, release_gain};
+use crate::audio::wait::LATE_MS;
 
 /// How long a send runs on after its last element ends: the receiver's
 /// filter rings, and the ringing is part of the sound.
@@ -182,6 +184,13 @@ pub struct SendVoice {
     /// The most other stations calling across this send at once.
     callers: usize,
     finished: Arc<AtomicBool>,
+    /// When its first sample was played, on the wall clock.
+    first_played: Option<Instant>,
+    /// Set once what it has played falls behind the wall clock since its
+    /// first sample by more than [`LATE_MS`]: the stream was held up while
+    /// it played, so it went out later than planned. The stream has no
+    /// audio clock to report, so the send watches for itself.
+    late: Arc<AtomicBool>,
 }
 
 impl SendVoice {
@@ -225,6 +234,8 @@ impl SendVoice {
             release_len: samples(SEND_RELEASE_SEC),
             callers: plan.others_at_once(),
             finished: Arc::new(AtomicBool::new(false)),
+            first_played: None,
+            late: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -232,6 +243,11 @@ impl SendVoice {
     /// the waiter watches.
     pub fn finished_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.finished)
+    }
+
+    /// Set once it is found to have played late ([`Self::settle`]).
+    pub fn late_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.late)
     }
 
     /// Start only after `samples` of silence: a send that starts at a given
@@ -323,6 +339,9 @@ impl SendVoice {
             return SendSample::default();
         }
         let pos = self.pos;
+        if pos == 0 {
+            self.first_played = Some(Instant::now());
+        }
         self.pos += 1;
         if pos >= self.sound_ends_at() {
             return SendSample::default();
@@ -380,7 +399,22 @@ impl SendVoice {
     /// Say the send is over once its last sample has been heard: `latency`
     /// samples after it was played, which is how far behind the callback the
     /// speaker is. Called once per callback, after the buffer.
+    ///
+    /// Until then it also says whether it is playing late: what it has
+    /// played behind the wall clock since its first sample, as a stream held
+    /// up between callbacks leaves it. A buffer renders ahead of the wall
+    /// clock, never behind it, while the stream keeps up.
     pub fn settle(&self, latency: usize) {
+        if self.is_finished() {
+            return;
+        }
+        if let Some(first) = self.first_played {
+            let played_ms = self.pos as f64 * 1_000.0 / self.sample_rate;
+            let behind_ms = first.elapsed().as_secs_f64() * 1_000.0 - played_ms;
+            if behind_ms > LATE_MS as f64 {
+                self.late.store(true, Ordering::Release);
+            }
+        }
         if self.wait == 0 && self.pos >= self.sound_ends_at().saturating_add(latency) {
             self.finished.store(true, Ordering::Release);
         }
@@ -656,6 +690,31 @@ mod tests {
         voice.settle(latency);
         assert!(finished.load(Ordering::Acquire));
         assert!(voice.is_finished());
+    }
+
+    /// A send whose stream keeps up plays ahead of the wall clock, a buffer
+    /// at a time; one held up between callbacks falls behind it, and is
+    /// found late.
+    #[test]
+    fn a_send_held_up_between_callbacks_is_found_late() {
+        let plan = planned("TTT", &[]);
+        let mut steady = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
+        let late = steady.late_flag();
+        play(&mut steady, SR as usize / 10);
+        steady.settle(0);
+        assert!(!late.load(Ordering::Acquire), "rendered ahead");
+
+        let mut held = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
+        let late = held.late_flag();
+        play(&mut held, 64);
+        held.settle(0);
+        std::thread::sleep(std::time::Duration::from_millis(LATE_MS + 50));
+        play(&mut held, 64);
+        held.settle(0);
+        assert!(
+            late.load(Ordering::Acquire),
+            "held up for longer than a send may be"
+        );
     }
 
     /// A send with nothing in it is still a send: it has its tail, and ends.

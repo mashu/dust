@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::alignment::{CopyTally, LetterAccuracy};
 use crate::contest::{CONTEST_MARK, ContestLog};
 use crate::level::LEVEL_MIN;
-use crate::recognition::{CharTimes, answer_chars, lenient_char_times};
+use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
 use crate::score::{
     GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
     compute_average_response_ms, copy_speed, session_points,
@@ -161,9 +161,9 @@ pub struct Group {
     played_wpm: Option<(f64, f64)>,
     /// How its first send went to the output, once it starts.
     sounding: Option<Sounding>,
-    /// When each position of the answer first held its character, as the
-    /// box keyed it; none where it cannot be timed. As long as the answer.
-    keys: Vec<Option<MonoMs>>,
+    /// When each position of the answer was first keyed, as the box keyed
+    /// it, and which hold a correction. As long as the answer.
+    keys: Keys<MonoMs>,
     /// The character and effective speed the source chose for it, when it
     /// chooses one: adaptive speed does.
     planned_wpm: Option<(f64, f64)>,
@@ -184,7 +184,7 @@ impl Group {
             answer_at: None,
             played_wpm: None,
             sounding: None,
-            keys: Vec::new(),
+            keys: Keys::default(),
             planned_wpm: None,
             repeats: 1,
             plays_done: 0,
@@ -239,12 +239,13 @@ impl Group {
                     CharTimes::of(
                         sounding.origin.0,
                         &sounding.char_ends_ms,
-                        self.keys.iter().map(|key| key.map(|key| key.0)),
+                        &self.keys.map(|key| key.0),
                         sounding.resent.map(|resent| resent.0),
                         sounding.latency_ms,
                         box_open,
                     )
-                }),
+                })
+                .filter(CharTimes::can_be_timed),
         }
     }
 }
@@ -409,8 +410,23 @@ impl GroupSession {
         self.groups.get(index).map_or(1, |g| g.repeats.max(1))
     }
 
-    pub(crate) fn played_wpm(&self, index: usize) -> Option<(f64, f64)> {
-        self.groups.get(index)?.played_wpm
+    /// The character and effective speeds `index` was sent at, as its
+    /// sends said; before any did, the settings' slowest.
+    pub(crate) fn sent_wpm(&self, index: usize) -> (f64, f64) {
+        self.groups
+            .get(index)
+            .and_then(|group| group.played_wpm)
+            .unwrap_or_else(|| self.slowest_wpm())
+    }
+
+    /// The slowest the settings send at, the spacing no faster than the
+    /// characters.
+    fn slowest_wpm(&self) -> (f64, f64) {
+        let playback = &self.settings.playback;
+        (
+            playback.char_wpm_min,
+            playback.effective_wpm_min.min(playback.char_wpm_min),
+        )
     }
 
     pub(crate) fn group_start(&self, index: usize) -> Option<MonoMs> {
@@ -482,17 +498,23 @@ impl GroupSession {
         }
     }
 
-    /// Count one finished send of `index`, and whether it played on time:
-    /// a first send held up on its way cannot be timed.
-    pub(crate) fn note_play_finished(&mut self, index: usize, on_time: bool) {
+    /// Count one finished send of `index`.
+    pub(crate) fn note_play_finished(&mut self, index: usize) {
         if let Some(group) = self.groups.get_mut(index) {
-            if !on_time
-                && group.plays_done == 0
-                && let Some(sounding) = &mut group.sounding
-            {
-                sounding.trusted = false;
-            }
             group.plays_done = group.plays_done.saturating_add(1);
+        }
+    }
+
+    /// A send of `index` was held up on its way, as it ended or was
+    /// stopped: the first, which is said before it is counted finished,
+    /// cannot be timed from. A later one marks nothing its keys are not
+    /// already cut at.
+    pub(crate) fn note_held_up(&mut self, index: usize) {
+        if let Some(group) = self.groups.get_mut(index)
+            && group.plays_done == 0
+            && let Some(sounding) = &mut group.sounding
+        {
+            sounding.trusted = false;
         }
     }
 
@@ -505,7 +527,7 @@ impl GroupSession {
 
     /// Take what is typed into the current group, tidied ([`normalize_answer`]),
     /// with when each of its characters went in.
-    pub(crate) fn set_input(&mut self, index: usize, typed: &str, keys: &[Option<MonoMs>]) {
+    pub(crate) fn set_input(&mut self, index: usize, typed: &str, keys: &Keys<MonoMs>) {
         if index != self.current_group {
             return;
         }
@@ -514,9 +536,7 @@ impl GroupSession {
         {
             group.input = normalize_answer(&group.sent, typed);
             let length = group.input.chars().count();
-            group.keys.clear();
-            group.keys.extend(keys.iter().take(length));
-            group.keys.resize(length, None);
+            group.keys = keys.fitted(length);
         }
     }
 
@@ -567,20 +587,19 @@ impl GroupSession {
         let sent: Vec<&str> = scored.iter().map(|g| g.sent.as_str()).collect();
         let box_open = !self.settings.playback.lock_input_during_group_playback;
         let timings: Vec<SessionTiming> = scored.iter().map(|g| g.timing(box_open)).collect();
-        let avg_response_ms = compute_average_response_ms(
-            scored
-                .iter()
-                .zip(&timings)
-                .map(|(group, timing)| timing.ms_per_char(&group.sent)),
-        );
+        let groups: Vec<GroupResult> = scored
+            .iter()
+            .map(|group| GroupResult {
+                sent: group.sent.clone(),
+                received: group.input.clone(),
+                correct: group.sent == group.input,
+            })
+            .collect();
+        let avg_response_ms = compute_average_response_ms(&groups, &timings);
         let total_chars = calculate_total_chars(&sent);
         let played: Vec<(f64, f64)> = scored.iter().filter_map(|g| g.played_wpm).collect();
-        let playback = &self.settings.playback;
         let (char_wpm, effective_wpm) = if played.is_empty() {
-            (
-                playback.char_wpm_min,
-                playback.effective_wpm_min.min(playback.char_wpm_min),
-            )
+            self.slowest_wpm()
         } else {
             let n = played.len() as f64;
             (
@@ -600,14 +619,7 @@ impl GroupSession {
         let mut result = SessionResult {
             date,
             timestamp: finished_at,
-            groups: scored
-                .iter()
-                .map(|group| GroupResult {
-                    sent: group.sent.clone(),
-                    received: group.input.clone(),
-                    correct: group.sent == group.input,
-                })
-                .collect(),
+            groups,
             group_timings: timings,
             accuracy,
             tally,
@@ -912,7 +924,7 @@ mod tests {
             now = now.plus(500);
             session.start_playback(index, &speeds(18.0, 18.0));
             session.end_playback(index, now);
-            session.set_input(index, typed, &[]);
+            session.set_input(index, typed, &Keys::default());
             now = now.plus(*ms);
             session.confirm(index, now);
         }
@@ -987,11 +999,11 @@ mod tests {
             session.begin_group(index, now);
             session.start_playback(index, &speeds(wpm, wpm));
             for _ in 0..sends {
-                session.note_play_finished(index, true);
+                session.note_play_finished(index);
             }
             now = now.plus(2_000);
             session.end_playback(index, now);
-            session.set_input(index, typed, &[]);
+            session.set_input(index, typed, &Keys::default());
             now = now.plus(600);
             session.confirm(index, now);
         }
@@ -1066,7 +1078,7 @@ mod tests {
         let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         session.set_group(0, "KMURE".into(), 1);
         session.begin_group(0, MonoMs(1_000));
-        session.set_input(0, "KMURE", &[]);
+        session.set_input(0, "KMURE", &Keys::default());
         session.confirm(0, MonoMs(1_400));
         let early = result(&session);
         assert_eq!(
@@ -1138,6 +1150,14 @@ mod tests {
         }
     }
 
+    /// Keys at `at`, in milliseconds, nothing corrected.
+    fn keyed(at: &[Option<u64>]) -> Keys<MonoMs> {
+        Keys {
+            at: at.iter().map(|at| at.map(MonoMs)).collect(),
+            corrected: Vec::new(),
+        }
+    }
+
     /// "KMR" sent once from 1000 ms, its characters ending 300, 700 and 1000
     /// ms into it, typed at `keys` with the box `open` or not: what its
     /// timing keeps.
@@ -1148,9 +1168,8 @@ mod tests {
         session.set_group(0, "KMR".into(), 1);
         session.begin_group(0, MonoMs(980));
         session.start_playback(0, &send_start(1_000, 20.0, &[300, 700, 1_000]));
-        let keys: Vec<Option<MonoMs>> = keys.iter().map(|at| at.map(MonoMs)).collect();
-        session.set_input(0, "KMR", &keys);
-        session.note_play_finished(0, true);
+        session.set_input(0, "KMR", &keyed(keys));
+        session.note_play_finished(0);
         session.end_playback(0, MonoMs(2_050));
         session.confirm(0, MonoMs(3_000));
         result(&session).group_timings[0].char_times.clone()
@@ -1166,14 +1185,15 @@ mod tests {
             Some(CharTimes {
                 ends: vec![300, 700, 1_000],
                 keys: vec![Some(550), Some(900), None],
+                corrected: Vec::new(),
                 latency_ms: 40,
                 box_open: true,
             })
         );
-        assert_eq!(
-            kept(&[Some(2_300)], false).map(|times| times.box_open),
-            Some(false)
-        );
+        // With the box shut, a group of more than one character keeps
+        // nothing: the rule could time none of it. Nor does one with no key.
+        assert_eq!(kept(&[Some(2_300)], false), None);
+        assert_eq!(kept(&[None, None, None], true), None);
         // Keys for more than was typed are no character of it.
         assert_eq!(
             kept(&[Some(1_550), Some(1_900), Some(2_250), Some(2_400)], true)
@@ -1195,9 +1215,12 @@ mod tests {
             if retried {
                 session.start_playback(0, &send_start(1_500, 20.0, &[300]));
             }
-            session.note_play_finished(0, on_time);
+            if !on_time {
+                session.note_held_up(0);
+            }
+            session.note_play_finished(0);
             session.end_playback(0, MonoMs(1_350));
-            session.set_input(0, "K", &[Some(MonoMs(1_700))]);
+            session.set_input(0, "K", &keyed(&[Some(1_700)]));
             session.confirm(0, MonoMs(2_000));
             result(&session).group_timings[0].char_times.is_some()
         };
@@ -1205,14 +1228,16 @@ mod tests {
         assert!(!session(true, true));
         assert!(!session(false, false));
 
-        let mut twice = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        let mut open = TrainingSettings::default();
+        open.playback.lock_input_during_group_playback = false;
+        let mut twice = GroupSession::new(SessionId::new(1), 1, open);
         twice.set_group(0, "KM".into(), 2);
         twice.begin_group(0, MonoMs(980));
         twice.start_playback(0, &send_start(1_000, 20.0, &[300, 700]));
-        twice.note_play_finished(0, true);
+        twice.note_play_finished(0);
         twice.start_playback(0, &send_start(2_500, 20.0, &[300, 700]));
-        twice.set_input(0, "KM", &[Some(MonoMs(1_500)), Some(MonoMs(2_600))]);
-        twice.note_play_finished(0, true);
+        twice.set_input(0, "KM", &keyed(&[Some(1_500), Some(2_600)]));
+        twice.note_play_finished(0);
         twice.end_playback(0, MonoMs(3_200));
         twice.confirm(0, MonoMs(3_500));
         let timing = &result(&twice).group_timings[0];
@@ -1231,7 +1256,7 @@ mod tests {
         session.set_group(0, "KM".into(), 1);
         session.begin_group(0, MonoMs(1_000));
         session.start_playback(0, &send_start(1_020, 27.0, &[200, 500]));
-        session.set_input(0, "KM", &[]);
+        session.set_input(0, "KM", &Keys::default());
         session.confirm(0, MonoMs(1_600));
         let timing = &result(&session).group_timings[0];
         assert_eq!(
@@ -1246,16 +1271,16 @@ mod tests {
     fn an_answer_is_tidied_and_capped_on_the_way_in() {
         let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         session.set_group(0, "KM".into(), 1);
-        session.set_input(0, " k m\t", &[]);
+        session.set_input(0, " k m\t", &Keys::default());
         assert_eq!(session.group(0).map(Group::input), Some("KM"));
-        session.set_input(0, &"E".repeat(100_000), &[]);
+        session.set_input(0, &"E".repeat(100_000), &Keys::default());
         assert_eq!(
             session.group(0).map(|g| g.input().len()),
             Some(LONGEST_ANSWER)
         );
         let mut long = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         long.set_group(0, "KMUREKMUREKMUREKMURE".into(), 1);
-        long.set_input(0, &"E".repeat(100), &[]);
+        long.set_input(0, &"E".repeat(100), &Keys::default());
         assert_eq!(long.group(0).map(|g| g.input().len()), Some(40));
     }
 
@@ -1264,13 +1289,13 @@ mod tests {
         let mut session = GroupSession::new(SessionId::new(1), 2, TrainingSettings::default());
         session.set_group(0, "KM".into(), 1);
         session.set_group(1, "UR".into(), 1);
-        session.set_input(1, "nope", &[]);
+        session.set_input(1, "nope", &Keys::default());
         assert_eq!(session.group(1).map(Group::input), Some(""));
-        session.set_input(0, "km", &[]);
+        session.set_input(0, "km", &Keys::default());
         assert_eq!(session.group(0).map(Group::input), Some("KM"));
         assert!(session.confirm(0, MonoMs(1_200)).is_some());
         assert!(session.confirm(0, MonoMs(1_300)).is_none(), "only once");
-        session.set_input(0, "later", &[]);
+        session.set_input(0, "later", &Keys::default());
         assert_eq!(session.group(0).map(Group::input), Some("KM"));
         // A confirmed group keeps its text too.
         session.set_group(0, "XX".into(), 1);
@@ -1301,7 +1326,7 @@ mod tests {
         session.set_group(0, "KM".into(), 3);
         session.set_group(1, "UR".into(), 0);
         session.begin_group(0, MonoMs(1_000));
-        session.note_play_finished(0, true);
+        session.note_play_finished(0);
         let view = session.view();
         assert!(view.playing && view.locked);
         assert_eq!(

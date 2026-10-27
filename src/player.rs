@@ -55,15 +55,24 @@ impl fmt::Display for AudioError {
     }
 }
 
-/// A send that played to its end: how long it was, the speeds it went at,
-/// and whether it played on time, its audio not held up on its way
-/// ([`PlaybackOutcome::Completed`]).
+/// A send that played to its end: how long it was, and the speeds it went
+/// at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sent {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
-    pub on_time: bool,
+}
+
+/// What a send says of itself as it goes, to whoever sent it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SendNews<'a> {
+    /// An attempt at it started ([`SendStart`]): each attempt says so.
+    Started(&'a SendStart),
+    /// Its audio was held up on its way, parked or its clock fallen behind:
+    /// it went out later than planned, and none of it can be timed. Said
+    /// once known, as it ends or is stopped.
+    HeldUp,
 }
 
 /// The one audio player the app has. Cheap to clone; every clone is the same
@@ -340,13 +349,13 @@ impl Lease {
     /// [`SEND_ATTEMPTS`] in all, and the last failure is the one reported.
     /// A send that is stopped — the lease ending, or [`Lease::stop_sending`]
     /// — comes back [`AudioError::Cancelled`] from wherever it had got to,
-    /// a retry included. Each attempt, once started, is told to `on_start`,
-    /// as for [`Lease::send_planned`].
+    /// a retry included. What it says of itself as it goes is told to
+    /// `on_news`, as for [`Lease::send_planned`].
     pub async fn send(
         &self,
         transmission: &Transmission,
         settings: &TrainingSettings,
-        mut on_start: impl FnMut(&SendStart),
+        mut on_news: impl FnMut(SendNews<'_>),
     ) -> Result<Sent, AudioError> {
         let begin = |backend: &mut dyn MorseBackend| {
             crate::audio::start_send(backend, transmission, settings)
@@ -354,7 +363,7 @@ impl Lease {
         // A session sends a group only once the one before is over or
         // stopped, so this is the send from when it starts.
         let asked = Asked(self.player.0.sends.get());
-        self.send_with(asked, &begin, settings, &mut on_start).await
+        self.send_with(asked, &begin, settings, &mut on_news).await
     }
 
     /// Send a contest's turn, planned already, and wait for it to be heard:
@@ -364,10 +373,11 @@ impl Lease {
     /// sound is to reach the ear: each attempt asks the player for it, and
     /// one after it has passed, a retry, starts as soon as it can.
     ///
-    /// Each attempt, once started, calls `on_start` with the send as it
+    /// Each attempt, once started, tells `on_news` so, with the send as it
     /// starts ([`SendStart`]): when it goes to the output and reaches the
-    /// ear, and where its characters end. No borrow of the player is held
-    /// then, so `on_start` may use it.
+    /// ear, and where its characters end; and a send held up on its way
+    /// says that too ([`SendNews`]). No borrow of the player is held then,
+    /// so `on_news` may use it.
     pub async fn send_planned(
         &self,
         asked: Asked,
@@ -375,12 +385,12 @@ impl Lease {
         transcript: &Transmission,
         settings: &TrainingSettings,
         starts_at: Option<MonoMs>,
-        mut on_start: impl FnMut(&SendStart),
+        mut on_news: impl FnMut(SendNews<'_>),
     ) -> Result<Sent, AudioError> {
         let begin = |backend: &mut dyn MorseBackend| {
             crate::audio::start_planned(backend, plan, transcript, settings, starts_at)
         };
-        self.send_with(asked, &begin, settings, &mut on_start).await
+        self.send_with(asked, &begin, settings, &mut on_news).await
     }
 
     /// A send, each attempt started by `begin`: tried again on a freshly
@@ -393,13 +403,13 @@ impl Lease {
         asked: Asked,
         begin: &Begin<'_>,
         settings: &TrainingSettings,
-        on_start: &mut dyn FnMut(&SendStart),
+        on_news: &mut dyn FnMut(SendNews<'_>),
     ) -> Result<Sent, AudioError> {
         let ticket = Ticket {
             lease: self,
             sends: asked.0,
         };
-        let mut outcome = ticket.attempt(begin, on_start).await;
+        let mut outcome = ticket.attempt(begin, on_news).await;
         for _ in 1..SEND_ATTEMPTS {
             if matches!(outcome, Ok(_) | Err(AudioError::Cancelled)) {
                 break;
@@ -411,7 +421,7 @@ impl Lease {
             sleep_ms(POLL_MS).await;
             ticket.check()?;
             outcome = match rebuilt {
-                Ok(()) => ticket.attempt(begin, on_start).await,
+                Ok(()) => ticket.attempt(begin, on_news).await,
                 // There is no player to send through, and the reason it could
                 // not be opened is the one worth showing.
                 Err(err) => Err(err),
@@ -453,22 +463,27 @@ impl Ticket<'_> {
     async fn attempt(
         &self,
         begin: &Begin<'_>,
-        on_start: &mut dyn FnMut(&SendStart),
+        on_news: &mut dyn FnMut(SendNews<'_>),
     ) -> Result<Sent, AudioError> {
         let player = &self.lease.player;
         self.check()?;
         // In a statement of its own: the player is borrowed only while the
-        // send starts, never while `on_start` runs.
+        // send starts, never while `on_news` runs.
         let wait = player.start(begin)?;
         let start = wait.start();
-        on_start(&start);
+        on_news(SendNews::Started(&start));
         let duration_sec = wait.duration_sec;
-        match wait.wait().await {
-            PlaybackOutcome::Completed { on_time } => self.check().map(|()| Sent {
+        let waited = wait.wait().await;
+        // Heard out or stopped, a send held up on its way says so: what of
+        // it was heard went out late. One that failed is sent again.
+        if waited.held_up && waited.outcome != PlaybackOutcome::Failed {
+            on_news(SendNews::HeldUp);
+        }
+        match waited.outcome {
+            PlaybackOutcome::Completed => self.check().map(|()| Sent {
                 duration_sec,
                 char_wpm: start.char_wpm,
                 effective_wpm: start.effective_wpm,
-                on_time,
             }),
             PlaybackOutcome::Cancelled => Err(AudioError::Cancelled),
             // The send never reached its end: rebuilding the player on the
@@ -668,7 +683,11 @@ mod tests {
                     &transmission,
                     &settings,
                     None,
-                    |start: &SendStart| starts.push(start.latency_ms),
+                    |news: SendNews<'_>| {
+                        if let SendNews::Started(start) = news {
+                            starts.push(start.latency_ms);
+                        }
+                    },
                 )
                 .await;
             assert_eq!(
@@ -706,7 +725,11 @@ mod tests {
                     &transmission,
                     &settings,
                     Some(at),
-                    |start: &SendStart| starts.push(start.heard_at()),
+                    |news: SendNews<'_>| {
+                        if let SendNews::Started(start) = news {
+                            starts.push(start.heard_at());
+                        }
+                    },
                 )
                 .await;
             assert!(sent.is_ok());
@@ -727,7 +750,11 @@ mod tests {
                     &transmission,
                     &settings,
                     Some(past),
-                    |start: &SendStart| starts.push(start.heard_at()),
+                    |news: SendNews<'_>| {
+                        if let SendNews::Started(start) = news {
+                            starts.push(start.heard_at());
+                        }
+                    },
                 )
                 .await;
             assert!(sent.is_ok());
@@ -738,10 +765,10 @@ mod tests {
 
     /// A send says as it starts when it goes to the output and where its
     /// characters end after that, the delay the device says follows apart;
-    /// and once over, whether it played on time: one held up on its way, its
-    /// clock parked, did not.
+    /// and, heard out or stopped, whether it was held up on its way, its
+    /// clock parked.
     #[test]
-    fn a_send_says_its_timeline_as_it_starts_and_whether_it_played_on_time() {
+    fn a_send_says_its_timeline_as_it_starts_and_whether_it_was_held_up() {
         run(|| async {
             let (player, recorder) = player();
             let settings = test_settings();
@@ -749,8 +776,12 @@ mod tests {
             recorder.latency_sec.set(0.25);
             let began = MonoMs(crate::time::mono_ms());
             let mut starts = Vec::new();
+            let mut held_up = false;
             let sent = lease
-                .send(&cq(), &settings, |start| starts.push(start.clone()))
+                .send(&cq(), &settings, |news| match news {
+                    SendNews::Started(start) => starts.push(start.clone()),
+                    SendNews::HeldUp => held_up = true,
+                })
                 .await
                 .expect("sent");
             let [start] = starts.as_slice() else {
@@ -765,8 +796,9 @@ mod tests {
                 start.char_ends_ms.last().copied(),
                 Some((sent.duration_sec * 1_000.0).round() as u32)
             );
-            assert!(sent.on_time);
+            assert!(!held_up);
 
+            // Parked on its way, heard out: held up.
             let parked = async {
                 sleep_ms(100).await;
                 recorder.set_page_hidden(true);
@@ -774,12 +806,33 @@ mod tests {
                 recorder.set_page_hidden(false);
             };
             let cq = cq();
-            let (sent, ()) = tokio::join!(lease.send(&cq, &settings, |_| {}), parked);
-            assert_eq!(sent.map(|sent| sent.on_time), Ok(false));
+            let mut news = Vec::new();
+            let send = lease.send(&cq, &settings, |said| {
+                news.push(matches!(said, SendNews::HeldUp));
+            });
+            let (sent, ()) = tokio::join!(send, parked);
+            assert!(sent.is_ok());
+            assert_eq!(news, [false, true], "started, then held up");
+
+            // Parked on its way, and stopped there: held up all the same.
+            let parked_then_stopped = async {
+                sleep_ms(100).await;
+                recorder.set_page_hidden(true);
+                sleep_ms(300).await;
+                lease.stop_sending();
+            };
+            let mut news = Vec::new();
+            let send = lease.send(&cq, &settings, |said| {
+                news.push(matches!(said, SendNews::HeldUp));
+            });
+            let (sent, ()) = tokio::join!(send, parked_then_stopped);
+            recorder.set_page_hidden(false);
+            assert_eq!(sent, Err(AudioError::Cancelled));
+            assert_eq!(news, [false, true]);
         });
     }
 
-    /// `on_start` may stop the send it is told about: nothing of the player
+    /// `on_news` may stop the send it is told about: nothing of the player
     /// is borrowed while it runs, and the send comes back cancelled.
     #[test]
     fn a_planned_send_can_be_stopped_as_it_starts() {

@@ -453,11 +453,12 @@ fn a_send_finishes_when_it_has_been_heard() {
         played >= unheard + latency && played <= unheard + latency + 64,
         "finished after {played} frames, {unheard} with no latency"
     );
-    // And the next send is reckoned heard as far behind as the speaker was,
-    // and the look-ahead.
+    // And the next send goes to the output after the look-ahead, and is
+    // reckoned heard as far behind that as the speaker was.
     let ahead = late() as f64 / f64::from(SR);
-    assert!((mixer.latency_sec() - 0.1 - ahead).abs() < 1e-9);
-    assert!((alone.latency_sec() - ahead).abs() < 1e-12);
+    assert!((mixer.lookahead_sec() - ahead).abs() < 1e-12);
+    assert!((mixer.output_latency_sec() - 0.1).abs() < 1e-9);
+    assert!(alone.output_latency_sec().abs() < 1e-12);
 }
 
 /// A keyer at `tone_hz` and `volume`, at 25 WPM.

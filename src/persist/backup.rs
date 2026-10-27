@@ -112,7 +112,8 @@ pub fn backup_name(date: &str) -> String {
 /// have, in the order they were practised, and how many that was; and how
 /// many of its own it filled in. A session is the same session if it
 /// finished at the same moment on the same day. A contest run whose log an
-/// older version dropped is filled in from a copy that kept it.
+/// older version dropped is filled in from a copy that kept it, and so are
+/// the per-character records ([`cw_core::CharTimes`]) of the same groups.
 pub fn merge_sessions(
     current: &[SessionResult],
     restored: Vec<SessionResult>,
@@ -127,6 +128,14 @@ pub fn merge_sessions(
                 *kept = session;
                 filled += 1;
             }
+            Some(kept) if dropped_char_times(kept, &session) => {
+                for (timing, restored) in kept.group_timings.iter_mut().zip(session.group_timings) {
+                    if timing.char_times.is_none() {
+                        timing.char_times = restored.char_times;
+                    }
+                }
+                filled += 1;
+            }
             Some(_) => {}
             None => {
                 merged.push(session);
@@ -138,6 +147,18 @@ pub fn merge_sessions(
         merged.sort_by_key(|session| session.timestamp);
     }
     (merged, added, filled)
+}
+
+/// Whether `restored`, the same groups as `kept`, holds per-character
+/// records `kept` has not: an older version drops them.
+fn dropped_char_times(kept: &SessionResult, restored: &SessionResult) -> bool {
+    kept.groups == restored.groups
+        && kept.group_timings.len() == restored.group_timings.len()
+        && kept
+            .group_timings
+            .iter()
+            .zip(&restored.group_timings)
+            .any(|(kept, restored)| kept.char_times.is_none() && restored.char_times.is_some())
 }
 
 /// How many of `sessions` finished after the backup saved at `last`: all of
@@ -263,6 +284,33 @@ mod tests {
         assert_eq!(merged[0].char_set_mode, cw_core::CharSetMode::Contest);
         let (_, _, again) = merge_sessions(&merged, merged.clone());
         assert_eq!(again, 0, "a log already here is not filled in twice");
+    }
+
+    /// A session whose per-character records an older version dropped takes
+    /// them back from a copy that kept them; one that has them keeps its
+    /// own.
+    #[test]
+    fn restoring_fills_in_dropped_character_times() {
+        let times = |key: u32| cw_core::CharTimes {
+            ends: vec![300],
+            keys: vec![Some(key)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        };
+        let session = |kept: Option<u32>| {
+            let mut session =
+                crate::testing::stored_session("2026-10-10", &[("K", "K"), ("M", "M")]);
+            session.timestamp = 10;
+            session.group_timings[1].char_times = kept.map(times);
+            session
+        };
+        let (merged, added, filled) = merge_sessions(&[session(None)], vec![session(Some(700))]);
+        assert_eq!((added, filled), (0, 1));
+        assert_eq!(merged[0].group_timings[1].char_times, Some(times(700)));
+        let (merged, _, filled) = merge_sessions(&merged, vec![session(Some(900))]);
+        assert_eq!(filled, 0, "its own kept");
+        assert_eq!(merged[0].group_timings[1].char_times, Some(times(700)));
     }
 
     /// An assisted run, `contest:wpx:a`, read back from a backup is still a

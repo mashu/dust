@@ -7,14 +7,14 @@ use std::rc::Rc;
 
 use cw_core::{
     CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, MonoMs, Sampler,
-    SendStart, Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX,
-    VOLUME_MIN, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX, VOLUME_MIN,
+    compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
     generate_training_group, hear_qsos, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::player::{AudioError, Lease};
+use crate::player::{AudioError, Lease, SendNews};
 use crate::state::AppCtx;
 use crate::time::{mono_ms, seed_rng};
 
@@ -293,7 +293,10 @@ async fn play_qsos(
         let asked = lease.ask_to_send();
         let started = {
             let (lease, showing, sends) = (lease.clone(), showing.clone(), sends.clone());
-            move |start: &SendStart| {
+            move |news: SendNews<'_>| {
+                let SendNews::Started(start) = news else {
+                    return;
+                };
                 let heard_after_sec = start.heard_at().since(MonoMs(mono_ms())) as f64 / 1_000.0;
                 showing.set(showing.get() + 1);
                 let shows = (showing.clone(), showing.get());

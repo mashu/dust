@@ -13,7 +13,7 @@ use crate::contest::bot::{Copied, copy_of};
 use crate::contest::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
-use crate::recognition::{CharTimes, KeyLog, recognise};
+use crate::recognition::{CharTimes, KeyLog, Keys, recognise};
 use crate::score::MIN_RESPONSE_MS_PER_CHAR;
 use crate::session::{SendStart, whole_ms};
 use crate::timing::{SEND_RELEASE_SEC, resolve_pileup};
@@ -309,14 +309,16 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
 }
 
 /// Keys about `now`, as many as a box might hold, in order or not, some
-/// untimed.
-fn random_keys(rng: &mut SplitMix64, now: u64) -> Vec<Option<MonoMs>> {
-    (0..rng.usize_in(0, 14))
+/// untimed, some corrections.
+fn random_keys(rng: &mut SplitMix64, now: u64) -> Keys<MonoMs> {
+    let at: Vec<Option<MonoMs>> = (0..rng.usize_in(0, 14))
         .map(|_| {
             (rng.f64() < 0.9)
                 .then(|| MonoMs((now + rng.usize_in(0, 6_000) as u64).saturating_sub(3_000)))
         })
-        .collect()
+        .collect();
+    let corrected = (0..at.len()).filter(|_| rng.f64() < 0.2).collect();
+    Keys { at, corrected }
 }
 
 /// A send's start as the runtime might report it: any speed, character ends
@@ -345,10 +347,10 @@ fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -
         .map(|_| KEYS[rng.usize_in(0, KEYS.len() - 1)])
         .collect();
     match rng.usize_in(0, 8) {
+        0 if rng.f64() < 0.2 => SessionEvent::PlaybackHeldUp { index },
         0 => SessionEvent::PlaybackEnded {
             index,
             duration_sec: rng.pick_in_range(0.0, 5.0),
-            on_time: rng.f64() < 0.8,
         },
         1 => SessionEvent::PlaybackStopped { index },
         2 => SessionEvent::Input {
@@ -582,18 +584,21 @@ fn coherent(
         }
         SessionEvent::Input { .. } => SessionEvent::Input {
             index: current,
-            keys: ends
-                .iter()
-                .map(|end| Some(end.plus(100 + rng.usize_in(0, 250) as u64)))
-                .collect(),
+            keys: Keys {
+                at: ends
+                    .iter()
+                    .map(|end| Some(end.plus(100 + rng.usize_in(0, 250) as u64)))
+                    .collect(),
+                corrected: Vec::new(),
+            },
             text: sent,
         },
         other => other,
     }
 }
 
-/// The rule of docs/recognition.md, stated plainly, for the soaks to hold
-/// [`recognise`] to.
+/// The rule of docs/recognition.md, stated plainly and position by
+/// position, for the soaks to hold [`recognise`] to.
 fn stated_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>> {
     let sent: Vec<char> = sent.chars().collect();
     let typed: Vec<char> = received.chars().collect();
@@ -606,28 +611,34 @@ fn stated_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>
     if n > 1 && !(times.box_open && key(0).is_some_and(|k| u64::from(k) <= reached(n - 1))) {
         return vec![None; n];
     }
-    // Lined up: every place for an answer as long; else before the first
-    // difference, less the run of a letter that could be the one missed.
-    let lined = if typed.len() == n {
-        n
-    } else {
-        let mut p = (0..n.min(typed.len()))
-            .take_while(|&i| sent[i] == typed[i])
-            .count();
-        while p > 0 && (sent.get(p) == Some(&sent[p - 1]) || typed.get(p) == Some(&sent[p - 1])) {
-            p -= 1;
+    // Where the answer first differs from what was sent, if it is not as
+    // long; and whether position `at` is in its place: in an answer as
+    // long, every one; else one before the difference, unless it and all
+    // up to the difference are one letter, which the character at the
+    // difference, sent or typed, repeats: then any of them could be the
+    // one missed or added.
+    let differs = (0..n.max(typed.len()))
+        .find(|&i| sent.get(i) != typed.get(i))
+        .unwrap_or(n);
+    let in_place = |at: usize| {
+        if typed.len() == n {
+            return true;
         }
-        p
+        let letter = sent[at];
+        let one_letter = (at..differs).all(|i| sent[i] == letter);
+        let repeated = sent.get(differs) == Some(&letter) || typed.get(differs) == Some(&letter);
+        at < differs && !(one_letter && repeated)
     };
     (0..n)
         .map(|at| {
             let k = key(at)?;
             let end = times.ends[at];
-            let typed_right = at < lined && typed.get(at) == Some(&sent[at]);
+            let typed_right = in_place(at) && typed.get(at) == Some(&sent[at]);
+            let own = !times.corrected.contains(&at);
             let heard = u64::from(k) >= u64::from(end) + 100;
             let keeping_up =
                 at == 0 || key(at - 1).is_some_and(|before| u64::from(before) <= reached(at));
-            (typed_right && heard && keeping_up).then(|| (k - end).min(RECOGNITION_MAX_MS))
+            (typed_right && own && heard && keeping_up).then(|| (k - end).min(RECOGNITION_MAX_MS))
         })
         .collect()
 }
@@ -691,9 +702,11 @@ fn a_recognition_time_is_only_ever_what_the_rule_says() {
                     .then(|| (from + rng.usize_in(0, lag_most) as u32).saturating_sub(200))
             })
             .collect();
+        let corrected = (0..keys.len()).filter(|_| rng.f64() < 0.15).collect();
         let times = CharTimes {
             ends,
             keys,
+            corrected,
             latency_ms: if rng.f64() < 0.5 {
                 0
             } else {
@@ -1166,15 +1179,21 @@ fn contest_key(rng: &mut SplitMix64, now: u64, seen: &Seen) -> ContestEvent {
     let call_edited = stamp(rng);
     let exch_complete = (rng.f64() < 0.7).then(|| stamp(rng));
     // Each character keyed a moment before the next, the last as its field
-    // was last edited, drawing nothing more from the stream.
+    // was last edited, drawing nothing more from the stream; in a text of
+    // an odd length of three or more, its second character slipped first
+    // and put right.
     let keyed = |chars: Vec<char>, last: MonoMs| {
         let mut log = KeyLog::default();
         for typed in 1..=chars.len() {
-            let before = 150 * (chars.len() - typed) as u64;
-            log.typed(
-                chars[..typed].iter().copied(),
-                Some(MonoMs(last.0.saturating_sub(before))),
-            );
+            let at = Some(MonoMs(
+                last.0.saturating_sub(150 * (chars.len() - typed) as u64),
+            ));
+            if typed == 2 && chars.len() >= 3 && chars.len() % 2 == 1 {
+                let slip = if chars[1] == 'Q' { 'Z' } else { 'Q' };
+                log.typed([chars[0], slip], at);
+                log.typed([chars[0]], at);
+            }
+            log.typed(chars[..typed].iter().copied(), at);
         }
         log
     };
@@ -1507,10 +1526,13 @@ fn random_contest_event(
             heard_from: MonoMs(now + rng.usize_in(0, 200) as u64),
             output_from: MonoMs(now + rng.usize_in(0, 200) as u64),
         }
-    } else if draw < 0.62 {
+    } else if draw < 0.61 {
         ContestEvent::TurnEnded {
             id: pick(rng, &seen.turns),
-            on_time: rng.f64() < 0.9,
+        }
+    } else if draw < 0.62 {
+        ContestEvent::TurnHeldUp {
+            id: pick(rng, &seen.turns),
         }
     } else if draw < 0.65 {
         ContestEvent::TurnCancelled {
@@ -1682,7 +1704,7 @@ fn soak_contest_runs(style: RunStyle) {
     let mut logged_in: std::collections::BTreeMap<&str, u32> = Default::default();
     let mut logged_with: std::collections::BTreeMap<&str, u32> = Default::default();
     let mut heard_with: std::collections::BTreeMap<&str, HabitsHeard> = Default::default();
-    // Copies kept with their sound's timeline: some must be.
+    // Copies kept with their sound's timeline, as the rule could time them.
     let mut timed_groups = 0u32;
     let seeds = match style {
         RunStyle::Single => 0..CONTEST_SEEDS,
@@ -1772,6 +1794,10 @@ fn soak_contest_runs(style: RunStyle) {
             );
             assert!(
                 times.keys.is_empty() || times.keys.len() == group.received.chars().count(),
+                "seed {seed}: {group:?} {times:?}"
+            );
+            assert!(
+                times.corrected.iter().all(|at| *at < times.keys.len()),
                 "seed {seed}: {group:?} {times:?}"
             );
             assert!(
@@ -1953,8 +1979,10 @@ fn soak_contest_runs(style: RunStyle) {
             );
         }
     }
+    // Some in every style, pile-ups too, where most calls are heard over
+    // another's: a floor that keeps the checks above from going quiet.
     assert!(
-        timed_groups >= 100,
+        timed_groups >= 25,
         "{style:?}: only {timed_groups} copies kept with their sound"
     );
 }

@@ -15,14 +15,16 @@ the speaker or headphones its key went in:
   cannot be known, so it is not guessed at: it is in every time alike, as is
   the moment after a character's last element before it can be told from a
   longer one.
-- **The key's moment** is when the answer box, or a contest field, first
-  held that character in that place: the keyboard's or the keypad's key,
-  read before anything else the handler does, or, for a paddle letter, the
-  first paddle contact of the letter (the keyer's `KeyedLetter::began`),
-  which goes in only once its letter space has run out. A character typed
-  where another was, or where one was taken out, is a correction and has no
-  moment (`KeyLog`). Text typed for you (the guided setup's Show me) has
-  none either.
+- **The key's moment** is when that place of the answer box, or of a
+  contest field, was first keyed: the keyboard's or the keypad's key, read
+  before anything else the handler does, or, for a paddle letter, the first
+  paddle contact of the letter (the keyer's `KeyedLetter::began`), which
+  goes in only once its letter space has run out. A character typed where
+  another was, typed again where one was taken out, or put in inside the
+  text is a **correction** (`KeyLog`): it is no recognition of its own, but
+  its place keeps the moment it was first keyed, which still says whether
+  you were keeping up, so putting a slip right costs the characters around
+  it nothing. Text typed for you (the guided setup's Show me) has no moment.
 
 Nothing is polled for it and nothing waits on it: each key reads the clock
 once and the box's `KeyLog` takes the moment as the text changes; each
@@ -40,14 +42,15 @@ mixing rule versions:
 
 ```json
 "charTimes": { "ends": [180, 540, 900], "keys": [420, 760, null],
-               "latencyMs": 40, "boxOpen": true }
+               "corrected": [1], "latencyMs": 40, "boxOpen": true }
 ```
 
 - `ends` — where each character sent ended, in ms after the send's first
   sample went out.
-- `keys` — when each position of the answer first held its character, on the
-  same clock; `null` where it cannot be timed: retyped after a mistake, typed
-  for you, or before the send began.
+- `keys` — when each position of the answer was first keyed, on the same
+  clock; `null` where it cannot be: typed for you, before the send began, or
+  after it was sent again.
+- `corrected` — the positions holding a correction; left out when none do.
 - `latencyMs` — the delay the device reports after the output. Used only to
   decide whether you were keeping up (below), never added to or taken off a
   time. Android reports none worth reading (its cpal host stamps the playback
@@ -56,8 +59,14 @@ mixing rule versions:
 
 A group has `charTimes` only when its timeline can be trusted: its first send
 played on time and once (a send the audio held up or parked, or one tried
-again, is left out). Keys after a group's second send began are `null`: it
-was heard twice. A contest call or exchange token keeps the same record (see
+again, is left out), and only when the rule could read a time from it: a
+key to time, and, for more than one character, the box open as it was sent.
+A send says it was held up as soon as that is known, whether it was heard
+out or stopped by an answer (`SendNews::HeldUp`). The web player reads that
+from its audio clock against the app's; the native player, which has no
+clock to report, from what each send has played against the wall clock at
+every callback. Keys after a group's second send began are `null`: it was
+heard twice. A contest call or exchange token keeps the same record (see
 Contest, below). The record is read leniently: a shape this build does not
 know reads as untimed, never as a lost session.
 
@@ -69,16 +78,17 @@ still written for them, which need both.
 `recognise` (crates/cw-core/src/recognition.rs) times character *i* of what
 was sent when all of these hold:
 
-1. **It was typed right, in its place.** Positions line up only where the
-   answer is as long as what was sent; otherwise only the run before the
-   first difference, less any letter repeated at its end (`KMM` typed `KM`
-   could be either `M`).
+1. **It was typed right, in its place, and not as a correction.** Positions
+   line up only where the answer is as long as what was sent; otherwise only
+   those before the first difference, less a run of one letter up to it that
+   the character at the difference, sent or typed, repeats (`KMM` typed `KM`:
+   either `M` could be the one missed).
 2. **It was heard before it was typed**, by a believable reaction: the key
    at least `REACTION_MIN_MS` (100 ms) after the sound. Sooner is a guess,
    or a letter read ahead from the word.
 3. **You were keeping up.** The key for the character before it was in by
-   the time this one reached you (`end + latency + KEEPING_UP_MS`, 100 ms):
-   otherwise its time is the backlog. A group of more than one character is
+   the time this one reached you (`end + latency + KEEPING_UP_MS`, 100 ms),
+   put right since or not: otherwise its time is the backlog. A group of more than one character is
    timed only if typed along — its first key in by then for its last
    character — and only with the box open: copied whole and typed after, it
    says how fast you recall, not recognise. With the box shut, only a group
@@ -97,6 +107,13 @@ says, rather than leaving the slowest tries out.
   so: no estimate stands in for it.
 - **Results**: the session's median over its timed characters, and how many
   were timed, where "Avg time" was.
+
+The paddles key a training group's box as the keyboard types into it: along
+with the send when typing is not locked while it plays.
+
+In group training the station you copy is always the strongest on the band
+and apart in pitch from any calling across it, so it is timed under them; a
+contest's callers are not, so one heard under another is not timed.
 
 Every mode is timed by the same rule, contest runs included. The mode only
 decides what is sent.
@@ -127,8 +144,10 @@ A caller's call, or an exchange token, is timed the same way, in run time:
   your own message sounding over it) and as one word in its send, with no
   other sending of it begun before (its caller's timeouts counted), in a
   turn that played on time and was not retried, with Show copy off. Keys
-  from its second sending on are `null`, as a group's are. A turn found
-  late after its QSO was logged takes the time back when the run is kept.
+  from its second sending on are `null`, as a group's are, and so are keys
+  after a pause: run time stands still while paused, and would leave the
+  pause out of the time. A turn found held up after its QSO was logged
+  takes the time back when the run is kept.
 
 So a pile-up leaves most calls untimed, and Simple QSO's doubled calls and
 exchanges leave all of them untimed: both are honest.

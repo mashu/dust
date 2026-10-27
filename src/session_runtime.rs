@@ -13,8 +13,8 @@
 
 use cw_core::{
     AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate, KeyLog,
-    MonoMs, Sampler, SendStart, SessionEffect, SessionEvent, SessionId, SessionMachine,
-    SessionResult, SplitMix64, Transmission, answer_chars, apply_auto_level, complete_session,
+    Keys, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult,
+    SplitMix64, Transmission, answer_chars, apply_auto_level, complete_session,
     generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
@@ -22,7 +22,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::{LiveContest, send_run_event, start_run};
 use crate::playback::Preview;
-use crate::player::{AudioError, Lease};
+use crate::player::{AudioError, Lease, SendNews};
 use crate::state::{AppCtx, Finished, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
@@ -129,12 +129,12 @@ struct Outbox {
 }
 
 /// What the box held when it was handed over: group `index`'s answer so far,
-/// and when each of its characters went in.
+/// and its keys.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedAnswer {
     pub index: usize,
     pub text: String,
-    pub keys: Vec<Option<MonoMs>>,
+    pub keys: Keys<MonoMs>,
 }
 
 impl From<TypedAnswer> for SessionEvent {
@@ -177,7 +177,7 @@ impl AnswerOutbox {
     pub fn take(mut self) -> Option<TypedAnswer> {
         let mut outbox = self.0.write();
         let (index, text) = outbox.waiting.take()?;
-        let keys = outbox.keys.moments().to_vec();
+        let keys = outbox.keys.keys();
         Some(TypedAnswer { index, text, keys })
     }
 
@@ -463,16 +463,22 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     spawn_forever(async move {
         // The send's timeline, the moment its first sample goes out: what
         // its characters are timed from, and the speed it went at, however
-        // soon the group is answered.
-        let started = |start: &SendStart| {
-            let start = start.clone();
-            dispatch(ctx, &lease, SessionEvent::PlaybackStarted { index, start });
+        // soon the group is answered; and whether it was held up on its
+        // way, however it ended.
+        let news = |news: SendNews<'_>| {
+            let event = match news {
+                SendNews::Started(start) => SessionEvent::PlaybackStarted {
+                    index,
+                    start: start.clone(),
+                },
+                SendNews::HeldUp => SessionEvent::PlaybackHeldUp { index },
+            };
+            dispatch(ctx, &lease, event);
         };
-        let event = match lease.send(&transmission, &settings, started).await {
+        let event = match lease.send(&transmission, &settings, news).await {
             Ok(sent) => SessionEvent::PlaybackEnded {
                 index,
                 duration_sec: sent.duration_sec,
-                on_time: sent.on_time,
             },
             Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
             Err(failure) => {
@@ -1684,7 +1690,6 @@ mod tests {
                     SessionEvent::PlaybackEnded {
                         index: 0,
                         duration_sec: 1.0,
-                        on_time: true,
                     },
                 )
             });

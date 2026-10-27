@@ -25,7 +25,7 @@ use super::exchange::Field;
 use super::parse::{ExchangeState, normalize_call, parse_exchange};
 use super::rules::{ContestRules, Fill, Side};
 use crate::callsign::parse_callsign;
-use crate::recognition::KeyLog;
+use crate::recognition::{KeyLog, Keys};
 use crate::session::MonoMs;
 
 /// What Enter needs to know of the QSO in progress.
@@ -183,10 +183,10 @@ impl Fields {
         }
     }
 
-    /// When each character of the exchange's word `word` first held its
-    /// place ([`super::parse::ReadField::word`]): none for a word it has no
-    /// keys for.
-    pub fn exch_word_keys(&self, word: usize) -> &[Option<MonoMs>] {
+    /// The keys of the exchange's word `word`
+    /// ([`super::parse::ReadField::word`]): none for a word it has no keys
+    /// for.
+    pub fn exch_word_keys(&self, word: usize) -> Keys<MonoMs> {
         let mut start = None;
         let range = self
             .exch
@@ -206,7 +206,7 @@ impl Fields {
             })
             .nth(word);
         range
-            .and_then(|range| self.exch_keys.moments().get(range))
+            .map(|range| self.exch_keys.keys().within(range))
             .unwrap_or_default()
     }
 }

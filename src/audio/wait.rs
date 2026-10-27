@@ -24,18 +24,26 @@ pub const PLAYBACK_TAIL_MS: u32 = 24;
 /// How far behind the app's clock a send's audio clock may fall over the
 /// send, and its characters still be timed from when it was scheduled: past
 /// the steps either clock takes. Further, it was held up on its way.
-const LATE_MS: u64 = 100;
+pub(crate) const LATE_MS: u64 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackOutcome {
-    /// It played to its end, on time unless its audio was held up on its
-    /// way: parked, or its clock fallen behind.
-    Completed { on_time: bool },
+    /// It played to its end.
+    Completed,
     /// Something else took the audio over: a new session, a stop, a new send.
     Cancelled,
     /// The send never reached its end — a dead stream, or an audio clock that
     /// stopped moving. The caller rebuilds the player and tries again.
     Failed,
+}
+
+/// How waiting on a send ended, and whether its audio was held up on its
+/// way: parked, or its clock fallen behind this one while it played. Its
+/// characters then went out later than planned, however it ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Waited {
+    pub outcome: PlaybackOutcome,
+    pub held_up: bool,
 }
 
 /// What a backend knows about the send in flight.
@@ -54,6 +62,10 @@ pub struct WaitFlags {
     /// Audio-clock progress, for backends that have one. `None` means the
     /// backend can only report `finished`.
     pub played_ms: Option<u32>,
+    /// The backend found the sound fall behind the wall clock as it played,
+    /// by more than [`LATE_MS`]: held up on its way. A backend with no
+    /// audio clock to report watches for that itself.
+    pub late: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,13 +92,13 @@ pub fn next_wait_step(
         return WaitStep::Done(PlaybackOutcome::Failed);
     }
     if flags.finished {
-        return WaitStep::Done(PlaybackOutcome::Completed { on_time: true });
+        return WaitStep::Done(PlaybackOutcome::Completed);
     }
     let target = duration_ms.saturating_add(PLAYBACK_TAIL_MS);
     if let Some(played) = flags.played_ms
         && played >= target
     {
-        return WaitStep::Done(PlaybackOutcome::Completed { on_time: true });
+        return WaitStep::Done(PlaybackOutcome::Completed);
     }
     // A send whose clock is parked is not stalling, it is waiting for the
     // listener to come back, and the scheduled tone is still there to play
@@ -260,7 +272,7 @@ impl PlaybackWait {
         whole_ms(self.duration_sec)
     }
 
-    pub async fn wait(self) -> PlaybackOutcome {
+    pub async fn wait(self) -> Waited {
         let duration_ms = self.duration_ms();
         let heard_after_ms = whole_ms(self.timing.heard_after_sec());
         // A send waiting for the moment it was asked to start at, a
@@ -268,24 +280,21 @@ impl PlaybackWait {
         let grace_ms = STALL_GRACE_MS.saturating_add(heard_after_ms);
         let mut waited = 0u32;
         let mut polled_at = mono_ms();
-        let mut parked = false;
+        // Parked, or found late by the backend, at any poll.
+        let mut held = false;
         loop {
             let flags = self.signal.poll();
-            parked |= flags.suspended;
-            match next_wait_step(flags, waited, duration_ms, grace_ms) {
-                WaitStep::Done(PlaybackOutcome::Completed { .. }) => {
-                    // How far its audio clock fell behind this one: nothing,
-                    // however late this poll came, unless it was held up.
-                    let behind = flags.played_ms.map(|played| {
-                        MonoMs(mono_ms())
-                            .since(self.started)
-                            .saturating_sub(u64::from(heard_after_ms) + u64::from(played))
-                    });
-                    let on_time = !parked && behind.is_none_or(|behind| behind <= LATE_MS);
-                    return PlaybackOutcome::Completed { on_time };
-                }
-                WaitStep::Done(outcome) => return outcome,
-                WaitStep::KeepWaiting => {}
+            held |= flags.suspended || flags.late;
+            if let WaitStep::Done(outcome) = next_wait_step(flags, waited, duration_ms, grace_ms) {
+                // How far its audio clock fell behind this one: nothing,
+                // however late this poll came, unless it was held up.
+                let behind = flags.played_ms.map(|played| {
+                    MonoMs(mono_ms())
+                        .since(self.started)
+                        .saturating_sub(u64::from(heard_after_ms) + u64::from(played))
+                });
+                let held_up = held || behind.is_some_and(|behind| behind > LATE_MS);
+                return Waited { outcome, held_up };
             }
             sleep_ms(POLL_MS).await;
             // The time that really passed, not the time asked for: a timer
@@ -356,7 +365,7 @@ mod tests {
         done.played_ms = Some(1_000 + PLAYBACK_TAIL_MS);
         assert_eq!(
             next_wait_step(done, 1, 1_000, 2_000),
-            WaitStep::Done(PlaybackOutcome::Completed { on_time: true })
+            WaitStep::Done(PlaybackOutcome::Completed)
         );
         // The wall clock on its own never completes a send.
         assert_eq!(
@@ -371,7 +380,7 @@ mod tests {
         done.finished = true;
         assert_eq!(
             next_wait_step(done, 10, 10_000, 2_000),
-            WaitStep::Done(PlaybackOutcome::Completed { on_time: true })
+            WaitStep::Done(PlaybackOutcome::Completed)
         );
     }
 
@@ -439,7 +448,15 @@ mod tests {
         }
     }
 
-    fn run(future: impl std::future::Future<Output = PlaybackOutcome>) -> PlaybackOutcome {
+    /// Ended as `outcome`, never held up.
+    fn on_time(outcome: PlaybackOutcome) -> Waited {
+        Waited {
+            outcome,
+            held_up: false,
+        }
+    }
+
+    fn run(future: impl std::future::Future<Output = Waited>) -> Waited {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .start_paused(true)
@@ -471,8 +488,8 @@ mod tests {
         playing.played_ms = Some(0);
         let mut done = flags();
         done.finished = true;
-        let outcome = run(scripted(0.1, vec![playing, playing, done]).wait());
-        assert_eq!(outcome, PlaybackOutcome::Completed { on_time: true });
+        let waited = run(scripted(0.1, vec![playing, playing, done]).wait());
+        assert_eq!(waited, on_time(PlaybackOutcome::Completed));
     }
 
     #[test]
@@ -517,7 +534,10 @@ mod tests {
         // from when it was scheduled.
         assert_eq!(
             run(scripted(1.0, steps).wait()),
-            PlaybackOutcome::Completed { on_time: false },
+            Waited {
+                outcome: PlaybackOutcome::Completed,
+                held_up: true,
+            },
             "a backgrounded tab must not cost the listener the group"
         );
     }
@@ -554,18 +574,18 @@ mod tests {
         };
         assert_eq!(
             after_a_gap(vec![playing, done]),
-            PlaybackOutcome::Completed { on_time: true },
+            on_time(PlaybackOutcome::Completed),
             "finished by the time the waiter woke"
         );
         assert_eq!(
-            after_a_gap(vec![playing, playing, done]),
+            after_a_gap(vec![playing, playing, done]).outcome,
             PlaybackOutcome::Failed,
             "still playing when the waiter woke, and finished a poll later"
         );
         // Polled as often as asked, the same send is heard out.
         assert_eq!(
             run(scripted(1.0, vec![playing, playing, done]).wait()),
-            PlaybackOutcome::Completed { on_time: true }
+            on_time(PlaybackOutcome::Completed)
         );
     }
 
@@ -582,13 +602,29 @@ mod tests {
         held.push(at(100 + PLAYBACK_TAIL_MS));
         assert_eq!(
             run(scripted(0.1, held).wait()),
-            PlaybackOutcome::Completed { on_time: false }
+            Waited {
+                outcome: PlaybackOutcome::Completed,
+                held_up: true,
+            }
+        );
+        // Stuck as long, then stopped: held up all the same.
+        let mut stopped = vec![at(0); 20];
+        stopped.push(WaitFlags {
+            cancelled: true,
+            ..at(0)
+        });
+        assert_eq!(
+            run(scripted(0.1, stopped).wait()),
+            Waited {
+                outcome: PlaybackOutcome::Cancelled,
+                held_up: true,
+            }
         );
         // Each poll's worth played as it came: on time.
         let steady: Vec<WaitFlags> = (0..10).map(|poll| at(poll * POLL_MS)).collect();
         assert_eq!(
             run(scripted(0.1, steady).wait()),
-            PlaybackOutcome::Completed { on_time: true }
+            on_time(PlaybackOutcome::Completed)
         );
     }
 
@@ -599,7 +635,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            run(scripted(0.05, vec![stalled]).wait()),
+            run(scripted(0.05, vec![stalled]).wait()).outcome,
             PlaybackOutcome::Failed
         );
     }
@@ -612,7 +648,7 @@ mod tests {
         };
         assert_eq!(
             run(scripted(0.0, vec![done]).wait()),
-            PlaybackOutcome::Completed { on_time: true }
+            on_time(PlaybackOutcome::Completed)
         );
         // A silly duration cannot overflow the countdown.
         assert_eq!(
@@ -623,7 +659,8 @@ mod tests {
                     ..Default::default()
                 }]
             )
-            .wait()),
+            .wait())
+            .outcome,
             PlaybackOutcome::Cancelled
         );
         assert_eq!(
@@ -635,7 +672,7 @@ mod tests {
                 }]
             )
             .wait()),
-            PlaybackOutcome::Completed { on_time: true }
+            on_time(PlaybackOutcome::Completed)
         );
     }
 }

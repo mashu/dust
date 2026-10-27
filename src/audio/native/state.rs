@@ -56,6 +56,8 @@ impl PlayerState {
 pub struct ToneSignal {
     ticket: Ticket,
     finished: Arc<AtomicBool>,
+    /// The send's word that it played late ([`crate::audio::WaitFlags::late`]).
+    late: Arc<AtomicBool>,
     /// The word of the stream the send was started on that it broke. A send
     /// is never moved to another stream: one that replaces a broken stream
     /// may run at another rate.
@@ -70,12 +72,14 @@ impl ToneSignal {
     pub fn new(
         ticket: Ticket,
         finished: Arc<AtomicBool>,
+        late: Arc<AtomicBool>,
         stream_failed: Arc<AtomicBool>,
         timing: SendTiming,
     ) -> Self {
         Self {
             ticket,
             finished,
+            late,
             stream_failed,
             timing,
         }
@@ -98,8 +102,10 @@ impl PlaybackSignal for ToneSignal {
             // here that parks it the way a browser parks a hidden tab.
             suspended: false,
             // cpal gives no clock of its own: the send having been heard to
-            // its end is the only word on when it is over.
+            // its end is the only word on when it is over, and the send says
+            // itself whether it played late.
             played_ms: None,
+            late: self.late.load(Ordering::Acquire),
         }
     }
 }
@@ -145,11 +151,18 @@ mod tests {
         let armed = state.arm();
         let finished = Arc::new(AtomicBool::new(false));
         let broken = Arc::new(AtomicBool::new(false));
+        let late = Arc::new(AtomicBool::new(false));
         let timing = SendTiming {
             lead_sec: 0.0,
             latency_sec: 0.04,
         };
-        let signal = ToneSignal::new(armed, Arc::clone(&finished), Arc::clone(&broken), timing);
+        let signal = ToneSignal::new(
+            armed,
+            Arc::clone(&finished),
+            Arc::clone(&late),
+            Arc::clone(&broken),
+            timing,
+        );
         assert_eq!(signal.timing().heard_after_sec(), 0.04);
         assert_eq!(
             signal.poll(),
@@ -159,9 +172,12 @@ mod tests {
                 failed: false,
                 suspended: false,
                 played_ms: None,
+                late: false,
             }
         );
 
+        late.store(true, Ordering::Release);
+        assert!(signal.poll().late, "the send's word that it played late");
         finished.store(true, Ordering::Release);
         assert!(signal.poll().finished);
 

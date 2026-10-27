@@ -889,6 +889,7 @@ mod tests {
         CharTimes {
             ends: vec![300],
             keys: vec![Some(300 + took)],
+            corrected: Vec::new(),
             latency_ms: 0,
             box_open: false,
         }

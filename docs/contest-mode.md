@@ -658,9 +658,12 @@ so a seed and an event list give one run. Its state:
 
 ```rust
 pub enum ContestEvent {
-    Key { key: OpKey, fields: Fields }, // after a paddle letter finishes
-    TurnStarted { id: u64, heard_from: MonoMs }, // each attempt, retries too
+    Key { key: OpKey, fields: Box<Fields> }, // after a paddle letter finishes
+    // each attempt, retries too: when its sound goes to the output, and
+    // when it reaches the ear
+    TurnStarted { id: u64, heard_from: MonoMs, output_from: MonoMs },
     TurnEnded { id: u64 },
+    TurnHeldUp { id: u64 },     // its audio was held up: nothing in it is timed
     TurnCancelled { id: u64 },  // a stop or a newer send: always ignored
     TurnFailed { id: u64 },     // the sound failed after every retry
     TimerFired { id: u64 },
@@ -690,9 +693,10 @@ The machine needs the fields only at a key press. The runtime maps
 | Running, Turn | Key but StopTx | what of the turn has reached you counts first, so Enter decides on what you have heard; a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing |
 | Running, Turn | TimerFired (heard) | what of the turn has reached you counts, a look at the clock (6.3): Enter's QSO and the screen follow the audio, a correction is said, and the checks whose TU is out show; the timer runs on to the next end of a send of the station you work, or to those checks → Turn |
 | Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange of the message keyed last not fully sent (`Main.pas:884-891`), not for one carried from an earlier key, heard then; the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it; your message cut short, the callers listening answer what they heard of it as garbage (5.2) → a turn of their replies, or Silent |
-| Turn(id) | TurnStarted{id} | `heard_from` re-stamped; no effects, no limit check |
+| Turn(id) | TurnStarted{id} | `heard_from` and `output_from` re-stamped; a second start, a retry, marks the turn untimed (docs/recognition.md); no effects, no limit check |
 | Turn(id) | TurnEnded{id} | all segments count; each caller waits as the turn planned it (4.3); the patience timer starts if anyone waits → Silent |
 | Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused, but not time the clock was read at since (6.3), so the run bar steps back by the retries; every caller in the turn sends again after Resume, as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout that never began, which waits afresh; timers forgotten; `ReleaseAudio` → Paused{Sound} |
+| any | TurnHeldUp{id} | the turn is marked untimed, on the air or not; no effects |
 | any | TurnCancelled, or another id | ignored |
 | Silent | TimerFired (patience) | waiting callers call again (4.3); if the station you work has left, "K5XYZ has gone" is announced, by the call it put yours right with, or else the call you had for it, or "The station", and Enter starts afresh, as after a CQ, calling CQ in place of its call (4.4) → a turn of replies |
 | Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count. A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout, which waits afresh; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
@@ -1452,9 +1456,11 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   a key or End run still end it, its failure pauses it with the retries
   given back, and the run end waits till its last attempt would have
   failed.
-- **Heard time.** `send_planned` calls `on_start` after each attempt starts,
-  with no `Player` borrow held (`player.rs:194-212`). The runtime dispatches
-  `TurnStarted{id, heard_from}`: the start plus the player's lead and
+- **Heard time.** `send_planned` tells `on_news` after each attempt starts,
+  with no `Player` borrow held, and when a send was held up on its way
+  (`SendNews`, `player.rs`). The runtime dispatches
+  `TurnStarted{id, heard_from, output_from}` (`TurnHeldUp{id}` for the
+  latter): the start plus the player's lead and
   latency estimate (web `schedule_lead_sec` and `heard_latency`,
   `wait.rs:124-132`, `web/mod.rs:122`; native `latency_frames`,
   `audio/native.rs:272-280`), and, as built (5a), for a continuation the

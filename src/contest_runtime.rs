@@ -11,15 +11,14 @@
 
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestRules, EntryField, Esm,
-    Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, SendStart, Side,
-    TrainingSettings, Turn, esm, loggable, normalize_call, parse_exchange, plan_turn,
-    space_to_call,
+    Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, Side, TrainingSettings,
+    Turn, esm, loggable, normalize_call, parse_exchange, plan_turn, space_to_call,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::playback::Preview;
-use crate::player::{AudioError, Lease};
+use crate::player::{AudioError, Lease, SendNews};
 use crate::session_runtime::{Live, keep_and_show};
 use crate::state::{AppCtx, Finished, Said, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
@@ -571,8 +570,7 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     let Some(transcript) = turn.transcript() else {
         // A turn with nothing in it is over as soon as it begins; the
         // machine never plays one.
-        let ended = ContestEvent::TurnEnded { id, on_time: true };
-        dispatch(ctx, &lease, ended);
+        dispatch(ctx, &lease, ContestEvent::TurnEnded { id });
         return;
     };
     let plan = plan_turn(&turn, &settings);
@@ -587,23 +585,24 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
         let heard = lease.clone();
         // Each attempt, retries too: when its sound goes to the output, and
         // when it reaches the ear, the player's lead, any wait for its
-        // moment and latency after it starts.
-        let started = move |start: &SendStart| {
-            let event = ContestEvent::TurnStarted {
-                id,
-                heard_from: start.heard_at(),
-                output_from: start.output_at,
+        // moment and latency after it starts; and whether it was held up on
+        // its way, however it ended.
+        let news = move |news: SendNews<'_>| {
+            let event = match news {
+                SendNews::Started(start) => ContestEvent::TurnStarted {
+                    id,
+                    heard_from: start.heard_at(),
+                    output_from: start.output_at,
+                },
+                SendNews::HeldUp => ContestEvent::TurnHeldUp { id },
             };
             dispatch(ctx, &heard, event);
         };
         let event = match lease
-            .send_planned(asked, &plan, &transcript, &settings, starts_at, started)
+            .send_planned(asked, &plan, &transcript, &settings, starts_at, news)
             .await
         {
-            Ok(sent) => ContestEvent::TurnEnded {
-                id,
-                on_time: sent.on_time,
-            },
+            Ok(_) => ContestEvent::TurnEnded { id },
             // A stop, a newer turn, a pause: the machine has moved on.
             Err(AudioError::Cancelled) => ContestEvent::TurnCancelled { id },
             Err(failure) => {

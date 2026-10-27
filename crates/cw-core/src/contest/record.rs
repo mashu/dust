@@ -329,12 +329,7 @@ impl ContestRun {
             timestamp: finished_at,
             accuracy: tally.accuracy(),
             tally,
-            avg_response_ms: compute_average_response_ms(
-                groups
-                    .iter()
-                    .zip(&timings)
-                    .map(|(group, timing)| timing.ms_per_char(&group.sent)),
-            ),
+            avg_response_ms: compute_average_response_ms(&groups, &timings),
             total_chars: calculate_total_chars(&sent),
             score: 0.0,
             level: settings.level(LevelAxis::Callsign),

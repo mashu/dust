@@ -261,10 +261,16 @@ impl MorseBackend for MorsePlayer {
         // the end of that statement, and the voice would be built — its
         // allocations and all — with the audio callback locked out of the
         // mixer.
-        let (rate, latency_sec) = {
+        let (rate, lookahead_sec, output_latency_sec) = {
             let mixer = self.mixer();
-            (mixer.sample_rate(), mixer.latency_sec())
+            (
+                mixer.sample_rate(),
+                mixer.lookahead_sec(),
+                mixer.output_latency_sec(),
+            )
         };
+        // How long after it starts a send is heard.
+        let latency_sec = lookahead_sec + output_latency_sec;
         let now = Instant::now();
         let opening_sec = now.saturating_duration_since(entered).as_secs_f64();
         let sr = f64::from(rate);
@@ -285,7 +291,7 @@ impl MorseBackend for MorsePlayer {
             rate,
             self.opened_at.elapsed().as_secs_f64() + wait_sec,
         );
-        let finished = voice.finished_flag();
+        let (finished, late) = (voice.finished_flag(), voice.late_flag());
         let armed = self.state.arm();
         let mut waits = 0;
         self.with_mixer(|mixer, swept| {
@@ -296,10 +302,13 @@ impl MorseBackend for MorsePlayer {
         Ok(Rc::new(ToneSignal::new(
             armed,
             finished,
+            late,
             failed,
+            // Its samples go to the output once the receiver has looked
+            // ahead at them.
             SendTiming {
-                lead_sec: opening_sec + rendered_in,
-                latency_sec,
+                lead_sec: opening_sec + rendered_in + lookahead_sec,
+                latency_sec: output_latency_sec,
             },
         )))
     }

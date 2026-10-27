@@ -618,15 +618,23 @@ pub fn TrainingView(
         let held = inputs.get(current).filter(|_| !current_done)?;
         (!held.is_empty()).then(|| (current, held.clone()))
     });
-    let can_paddle = !playing && !locked && !current_done;
+    // The open slot shows the group in focus: the one being sent or
+    // answered, or, between two groups, the one about to be sent.
+    let open = focused;
+    let open_done = confirmed.get(open).copied().unwrap_or(false);
+    let is_active = focused_box_open(current, focused, &confirmed);
+    let awaiting_play = !is_active && !open_done;
+    let input_locked = (locked && is_active) || awaiting_play;
+    let live = is_active && !input_locked;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
-    // The paddles key into the box that is open, and only while it is: a
-    // letter timed from its first contact, though it goes in only once its
-    // letter space has run out.
+    // The paddles key into the box while the keyboard can, along with the
+    // send when typing is not locked while it plays: a letter timed from its
+    // first contact, though it goes in only once its letter space has run
+    // out.
     let keys = use_context::<PaddleKeys>();
     {
         let sent_now = sent_now.clone();
-        keys.use_answer_box(can_paddle, move |letter, keyed| {
+        keys.use_answer_box(live, move |letter, keyed| {
             draft.push(current, letter, &sent_now, keyed);
         });
     }
@@ -641,14 +649,6 @@ pub fn TrainingView(
         keys.stop();
     }));
 
-    // The open slot shows the group in focus: the one being sent or
-    // answered, or, between two groups, the one about to be sent.
-    let open = focused;
-    let open_done = confirmed.get(open).copied().unwrap_or(false);
-    let is_active = focused_box_open(current, focused, &confirmed);
-    let awaiting_play = !is_active && !open_done;
-    let input_locked = (locked && is_active) || awaiting_play;
-    let live = is_active && !input_locked;
     let placeholder = if countdown.is_some() {
         "Get ready…"
     } else if awaiting_play {

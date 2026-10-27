@@ -72,7 +72,7 @@ impl<S: CallSource> Runtime<S> {
 
     /// Apply `event` now, and carry out what comes of it.
     pub(crate) fn apply(&mut self, event: ContestEvent) -> Vec<ContestEffect> {
-        if let ContestEvent::TurnEnded { id, .. } = event
+        if let ContestEvent::TurnEnded { id } = event
             && self.playing.as_ref().is_some_and(|(_, turn)| turn.id == id)
             && let Some((_, turn)) = self.playing.take()
         {
@@ -140,8 +140,7 @@ impl<S: CallSource> Runtime<S> {
                             output_from: MonoMs(starts),
                         },
                     ));
-                    let ended = ContestEvent::TurnEnded { id, on_time: true };
-                    self.due.push((starts + ms, ended));
+                    self.due.push((starts + ms, ContestEvent::TurnEnded { id }));
                     self.playing = Some((starts, turn.clone()));
                     self.turns.push(turn.clone());
                 }
@@ -171,8 +170,7 @@ impl<S: CallSource> Runtime<S> {
         self.due.retain(|(_, event)| {
             !matches!(
                 event,
-                ContestEvent::TurnStarted { id: due, .. }
-                    | ContestEvent::TurnEnded { id: due, .. }
+                ContestEvent::TurnStarted { id: due, .. } | ContestEvent::TurnEnded { id: due }
                     if *due == id
             )
         });

@@ -20,6 +20,7 @@
 
 use crate::alignment::align_group;
 use crate::morse::is_scored_char;
+use crate::session::{GroupResult, SessionTiming};
 
 const MAX_EFFECTIVE_ALPHABET: f64 = 48.0;
 
@@ -186,11 +187,14 @@ pub fn calculate_effective_alphabet_size(sent_groups: &[impl AsRef<str>]) -> f64
     h.exp().clamp(1.0, MAX_EFFECTIVE_ALPHABET)
 }
 
-/// The average of a session's answer times a character, as older builds
-/// show it ([`crate::SessionResult::avg_response_ms`]).
-pub fn compute_average_response_ms(samples: impl IntoIterator<Item = f64>) -> f64 {
-    let (sum, count) = samples
-        .into_iter()
+/// The average of a session's answer times a character, its `groups` timed
+/// as `timings` say, as older builds show it
+/// ([`crate::SessionResult::avg_response_ms`]).
+pub fn compute_average_response_ms(groups: &[GroupResult], timings: &[SessionTiming]) -> f64 {
+    let (sum, count) = groups
+        .iter()
+        .zip(timings)
+        .map(|(group, timing)| timing.ms_per_char(&group.sent))
         .filter(|v| v.is_finite() && *v > 0.0)
         .fold((0.0, 0u32), |(sum, count), v| (sum + v, count + 1));
     if count == 0 {

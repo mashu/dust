@@ -46,6 +46,7 @@ impl PlaybackSignal for SilentSignal {
             // Nothing is playing, so the app's own clock is the only clock
             // there is.
             played_ms: Some(u32::try_from(elapsed).unwrap_or(u32::MAX)),
+            late: false,
         }
     }
 }
@@ -90,6 +91,7 @@ impl MorseBackend for MorsePlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::wait::Waited;
     use crate::audio::{PlaybackOutcome, start_planned};
     use crate::testing::{run, test_settings};
     use cw_core::{Segment, Sender, Turn, plan_morse_playback_for, plan_turn, resolve_station};
@@ -143,7 +145,10 @@ mod tests {
             assert_eq!(wait.start().latency_ms, 0);
             assert_eq!(
                 wait.wait().await,
-                PlaybackOutcome::Completed { on_time: true }
+                Waited {
+                    outcome: PlaybackOutcome::Completed,
+                    held_up: false,
+                }
             );
             let took = mono_ms() - started;
             assert!(
@@ -160,7 +165,7 @@ mod tests {
             assert!(first.is_pending());
             crate::time::sleep_ms(200).await;
             player.stop();
-            assert_eq!(waiting.await, PlaybackOutcome::Cancelled);
+            assert_eq!(waiting.await.outcome, PlaybackOutcome::Cancelled);
         });
     }
 }

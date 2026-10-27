@@ -83,7 +83,7 @@ pub use pool::{
     compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
 };
 pub use recognition::{
-    CharTimes, KEEPING_UP_MS, KeyLog, REACTION_MIN_MS, RECOGNITION_BAND_MAX_MS,
+    CharTimes, KEEPING_UP_MS, KeyLog, Keys, REACTION_MIN_MS, RECOGNITION_BAND_MAX_MS,
     RECOGNITION_BAND_MIN_MS, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW,
     Recognition, RecognitionBand, RecognitionBands, RecognitionEdge, answer_chars, recognise,
 };

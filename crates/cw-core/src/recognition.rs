@@ -45,75 +45,167 @@ pub fn answer_chars(text: &str) -> impl Iterator<Item = char> + '_ {
         .map(|c| c.to_ascii_uppercase())
 }
 
-/// When each position of a box first held its character, kept as it is
-/// typed into.
+/// When each position of an answer was first keyed, on one clock, and which
+/// positions hold a correction: a character typed where another was, typed
+/// again where one was taken out, or put in inside the text. A correction is
+/// no recognition of its own, but when its position was first keyed still
+/// says whether you were keeping up, so putting a slip right costs the
+/// characters around it nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Keys<T> {
+    /// Each position's first key; none where it cannot be timed, as typed
+    /// for you.
+    pub at: Vec<Option<T>>,
+    /// The positions holding a correction, in order.
+    pub corrected: Vec<usize>,
+}
+
+impl<T> Default for Keys<T> {
+    fn default() -> Self {
+        Self {
+            at: Vec::new(),
+            corrected: Vec::new(),
+        }
+    }
+}
+
+impl<T: Copy> Keys<T> {
+    /// The same keys, each moment as `f` makes it: on another clock.
+    pub fn map<U>(&self, mut f: impl FnMut(T) -> U) -> Keys<U> {
+        Keys {
+            at: self.at.iter().map(|at| at.map(&mut f)).collect(),
+            corrected: self.corrected.clone(),
+        }
+    }
+
+    /// The keys of positions `range`, as an answer's of their own: a word's
+    /// within a field.
+    pub fn within(&self, range: std::ops::Range<usize>) -> Self {
+        Self {
+            corrected: self
+                .corrected
+                .iter()
+                .filter(|at| range.contains(at))
+                .map(|at| at - range.start)
+                .collect(),
+            at: self.at.get(range).map(<[_]>::to_vec).unwrap_or_default(),
+        }
+    }
+
+    /// As many positions as an answer of `length` characters has: what it
+    /// holds no keys for is untimed.
+    pub fn fitted(&self, length: usize) -> Self {
+        let mut at: Vec<Option<T>> = self.at.iter().copied().take(length).collect();
+        at.resize(length, None);
+        Self {
+            at,
+            corrected: self
+                .corrected
+                .iter()
+                .copied()
+                .filter(|at| *at < length)
+                .collect(),
+        }
+    }
+}
+
+/// The keys of a box, kept as it is typed into ([`Keys`]).
 ///
-/// A position keeps its moment while it holds the same character. One typed
-/// at the end takes the moment given with it; one typed where another
-/// character was, or where one was taken out, is a correction, and has none:
-/// a character got right on the second go was not recognised when it was
-/// typed. An edit inside the text keeps the moments of what follows it.
+/// A character typed at the end takes the moment given with it. One typed
+/// where another was, or again where one was taken out at the end, is a
+/// correction, and keeps the moment its position was first keyed; one put
+/// in inside the text is a correction keyed now. An edit inside the text
+/// moves what follows it, moments and all, and the end with it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KeyLog {
-    chars: Vec<char>,
-    at: Vec<Option<MonoMs>>,
-    /// Positions that have held another character, or been taken out, as
-    /// far as the box has been typed: one typed there again is no
-    /// recognition. As long as `chars` at least.
-    retyped: Vec<bool>,
+    held: Vec<Held>,
+    /// The positions past the end, from the end on, that held a character
+    /// taken out at the end, each with when it was first keyed: an edit
+    /// inside the text moves them with the end.
+    gone: Vec<Option<MonoMs>>,
+}
+
+/// One position of a box: its character, when the position was first keyed,
+/// and whether it holds a correction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Held {
+    ch: char,
+    at: Option<MonoMs>,
+    corrected: bool,
 }
 
 impl KeyLog {
     /// The box now holds `text`, already counted as the box counts it; what
-    /// is new in it was typed at `at`, or for you, untimed, at `None`.
+    /// is new in it was keyed at `at`, or typed for you, untimed, at `None`.
     pub fn typed(&mut self, text: impl IntoIterator<Item = char>, at: Option<MonoMs>) {
         let new: Vec<char> = text.into_iter().collect();
-        let old = &self.chars;
-        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let old = &self.held;
+        let same = |(held, ch): (&Held, &char)| held.ch == *ch;
+        let prefix = old.iter().zip(&new).take_while(|pair| same(*pair)).count();
         let suffix = old[prefix..]
             .iter()
             .rev()
             .zip(new[prefix..].iter().rev())
-            .take_while(|(a, b)| a == b)
+            .take_while(|pair| same(*pair))
             .count();
         let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
-        let mut moments = Vec::with_capacity(new.len());
-        let mut retyped = Vec::with_capacity(new.len().max(self.retyped.len()));
-        moments.extend_from_slice(&self.at[..prefix]);
-        retyped.extend_from_slice(&self.retyped[..prefix]);
-        for position in prefix..new_end {
-            let again = position < old_end || self.retyped.get(position).copied().unwrap_or(false);
-            moments.push(if again { None } else { at });
-            retyped.push(again);
+        let replaced = &old[prefix..old_end];
+        let inside = suffix > 0;
+        let mut held = Vec::with_capacity(new.len());
+        held.extend_from_slice(&old[..prefix]);
+        for (k, &ch) in new[prefix..new_end].iter().enumerate() {
+            let first = match replaced.get(k) {
+                Some(was) => Some(was.at),
+                None if inside => None,
+                None => self.gone.get(k - replaced.len()).copied(),
+            };
+            held.push(match first {
+                Some(first) => Held {
+                    ch,
+                    at: first,
+                    corrected: true,
+                },
+                None => Held {
+                    ch,
+                    at,
+                    corrected: inside,
+                },
+            });
         }
-        moments.extend_from_slice(&self.at[old_end..]);
-        retyped.extend_from_slice(&self.retyped[old_end..old.len()]);
-        if suffix == 0 {
-            // Taken out at the end, now or before: typed there again, it is
-            // a correction. After an edit inside the text the positions
-            // past its end have moved, and are forgotten.
-            let held = old.len().max(self.retyped.len());
-            for position in new.len()..held {
-                let gone = position < old.len();
-                retyped.push(gone || self.retyped.get(position).copied().unwrap_or(false));
+        held.extend_from_slice(&old[old_end..]);
+        // An edit at the end types over what was taken out there, or takes
+        // out more; one inside moves the end with what follows it.
+        let typed = new_end - prefix;
+        if !inside {
+            if typed >= replaced.len() {
+                let past = (typed - replaced.len()).min(self.gone.len());
+                self.gone.drain(..past);
+            } else {
+                let taken = replaced[typed..].iter().map(|was| was.at);
+                self.gone.splice(0..0, taken);
             }
         }
-        self.chars = new;
-        self.at = moments;
-        self.retyped = retyped;
+        self.held = held;
     }
 
-    /// When each position of the box first held its character, if it can be
-    /// timed.
-    pub fn moments(&self) -> &[Option<MonoMs>] {
-        &self.at
+    /// The box's keys as they stand.
+    pub fn keys(&self) -> Keys<MonoMs> {
+        Keys {
+            at: self.held.iter().map(|held| held.at).collect(),
+            corrected: self
+                .held
+                .iter()
+                .enumerate()
+                .filter(|(_, held)| held.corrected)
+                .map(|(at, _)| at)
+                .collect(),
+        }
     }
 
     /// The box emptied for a new answer: nothing in it was a correction.
     pub fn clear(&mut self) {
-        self.chars.clear();
-        self.at.clear();
-        self.retyped.clear();
+        self.held.clear();
+        self.gone.clear();
     }
 }
 
@@ -125,10 +217,13 @@ pub struct CharTimes {
     /// Where each character sent ended, its last sample gone to the output,
     /// in milliseconds after the sending's first sample did.
     pub ends: Vec<u32>,
-    /// When each position of the answer first held its character, on the
-    /// same clock; none where it cannot be timed: a correction, typed for
-    /// you, before the sending began, or after it was sent again.
+    /// When each position of the answer was first keyed, on the same clock;
+    /// none where it cannot be timed: typed for you, before the sending
+    /// began, or after it was sent again.
     pub keys: Vec<Option<u32>>,
+    /// The positions holding a correction ([`Keys::corrected`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrected: Vec<usize>,
     /// The delay the device reports from its output to the ear. It decides
     /// only whether you were keeping up, and is never added to a time.
     pub latency_ms: u32,
@@ -138,29 +233,39 @@ pub struct CharTimes {
 
 impl CharTimes {
     /// A sending whose first sample went out at `origin`, its characters
-    /// ending `ends` milliseconds after it, keyed at `keys`: every moment in
-    /// milliseconds on one clock, the app's or a contest run's. A key before
-    /// the sending, or from `resent` on, when it was sent again, says
-    /// nothing.
+    /// ending `ends` milliseconds after it, keyed as `keys` say: every moment
+    /// in milliseconds on one clock, the app's or a contest run's. A key
+    /// before the sending, or from `until` on (it was sent again, or a
+    /// contest run paused), says nothing.
     pub fn of(
         origin: u64,
         ends: &[u32],
-        keys: impl IntoIterator<Item = Option<u64>>,
-        resent: Option<u64>,
+        keys: &Keys<u64>,
+        until: Option<u64>,
         latency_ms: u32,
         box_open: bool,
     ) -> Self {
-        let heard = |key: &u64| *key >= origin && resent.is_none_or(|resent| *key < resent);
+        let heard = |key: &u64| *key >= origin && until.is_none_or(|until| *key < until);
         let after = |key: u64| u32::try_from(key - origin).unwrap_or(u32::MAX);
         Self {
             ends: ends.to_vec(),
             keys: keys
-                .into_iter()
+                .at
+                .iter()
                 .map(|key| key.filter(heard).map(after))
                 .collect(),
+            corrected: keys.corrected.clone(),
             latency_ms,
             box_open,
         }
+    }
+
+    /// Whether the rule could read a time from these at all: a key to time,
+    /// and, for more than one character, the box open as it was sent. What
+    /// it could not is not kept, as it would cost a browser's store room for
+    /// nothing.
+    pub fn can_be_timed(&self) -> bool {
+        (self.box_open || self.ends.len() == 1) && self.keys.iter().any(Option::is_some)
     }
 }
 
@@ -185,11 +290,12 @@ pub(crate) fn lenient_char_times<'de, D: Deserializer<'de>>(
 /// typed and `times` keep it: in milliseconds, none where the rule says
 /// nothing (docs/recognition.md):
 ///
-/// 1. typed right, in its place ([`lined_up`]);
+/// 1. typed right, in its place ([`lined_up`]), and not as a correction;
 /// 2. typed no sooner than [`REACTION_MIN_MS`] after it sounded;
 /// 3. keeping up: the key before it in by [`KEEPING_UP_MS`] after it
 ///    reached you, and a group of more than one character typed along, the
-///    box open and its first key in by then for its last character.
+///    box open and its first key in by then for its last character. A
+///    position's first key says so, put right since or not.
 ///
 /// A gap past [`RECOGNITION_MAX_MS`] counts as that.
 pub fn recognise(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>> {
@@ -229,7 +335,9 @@ pub fn recognise(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u3
                 .flatten()
                 .is_some_and(|before| before <= reached(at)),
         };
-        if typed[at] == sent[at] && key >= end.saturating_add(REACTION_MIN_MS) && keeping_up {
+        let own = !times.corrected.contains(&at);
+        if typed[at] == sent[at] && own && key >= end.saturating_add(REACTION_MIN_MS) && keeping_up
+        {
             *time = Some((key - end).min(RECOGNITION_MAX_MS));
         }
     }
@@ -389,35 +497,117 @@ mod tests {
         Some(MonoMs(ms))
     }
 
-    /// A key log's moments, as milliseconds.
-    fn moments(log: &KeyLog) -> Vec<Option<u64>> {
-        log.moments().iter().map(|at| at.map(|at| at.0)).collect()
+    /// A key log's keys, as milliseconds, and its corrections.
+    fn keys(log: &KeyLog) -> (Vec<Option<u64>>, Vec<usize>) {
+        let keys = log.keys().map(|at| at.0);
+        (keys.at, keys.corrected)
     }
 
-    /// Typed at the end, each character takes its moment; taken out and
-    /// typed again, it has none; an edit inside keeps what follows it; typed
-    /// for you, none.
+    /// Typed at the end, each character takes its moment. Taken out and
+    /// typed again, or typed over another, it is a correction keeping the
+    /// moment its position was first keyed; put in inside the text, a
+    /// correction keyed then. An edit inside moves what follows it, moments
+    /// and all. Typed for you, none.
     #[test]
-    fn a_key_log_keeps_the_first_moment_of_each_character() {
+    fn a_key_log_keeps_when_each_position_was_first_keyed() {
         let mut log = KeyLog::default();
         log.typed(answer_chars("k"), at(100));
         log.typed(answer_chars("k m"), at(200));
-        assert_eq!(moments(&log), [Some(100), Some(200)]);
-        // X typed, taken out, M typed in its place: a correction.
+        assert_eq!(keys(&log), (vec![Some(100), Some(200)], vec![]));
+        // X typed, taken out, R typed in its place: a correction, keyed
+        // first as X was.
         log.typed(answer_chars("KMX"), at(300));
         log.typed(answer_chars("KM"), at(350));
         log.typed(answer_chars("KMR"), at(400));
-        assert_eq!(moments(&log), [Some(100), Some(200), None]);
-        // R typed over M: that position is a correction, what follows keeps.
+        assert_eq!(keys(&log), (vec![Some(100), Some(200), Some(300)], vec![2]));
+        // Typed on past where the box ever reached: its own again.
         log.typed(answer_chars("KMRU"), at(500));
+        assert_eq!(keys(&log).1, [2]);
+        // M put right inside: a correction, keyed first as M was; what
+        // follows keeps its moments.
         log.typed(answer_chars("KXRU"), at(600));
-        assert_eq!(moments(&log), [Some(100), None, None, Some(500)]);
+        assert_eq!(
+            keys(&log),
+            (vec![Some(100), Some(200), Some(300), Some(500)], vec![1, 2])
+        );
+        // X taken out inside, and M put in there: a correction keyed then.
+        log.typed(answer_chars("KRU"), at(700));
+        log.typed(answer_chars("KMRU"), at(800));
+        assert_eq!(
+            keys(&log),
+            (vec![Some(100), Some(800), Some(300), Some(500)], vec![1, 2])
+        );
         // Typed for you: none.
-        log.typed(answer_chars("KXRUE"), None);
-        assert_eq!(moments(&log).last(), Some(&None));
+        log.typed(answer_chars("KMRUE"), None);
+        assert_eq!(keys(&log).0.last(), Some(&None));
         log.clear();
         log.typed(answer_chars("K"), at(900));
-        assert_eq!(moments(&log), [Some(900)]);
+        assert_eq!(keys(&log), (vec![Some(900)], vec![]));
+    }
+
+    /// Two letters taken out at the end and typed again: both corrections,
+    /// keyed first as they were; and once past them, the box's own again.
+    #[test]
+    fn letters_taken_out_at_the_end_are_corrections_when_typed_again() {
+        let mut log = KeyLog::default();
+        log.typed(answer_chars("K"), at(100));
+        log.typed(answer_chars("KX"), at(200));
+        log.typed(answer_chars("KXY"), at(300));
+        log.typed(answer_chars("K"), at(400));
+        log.typed(answer_chars("KM"), at(500));
+        log.typed(answer_chars("KMR"), at(600));
+        log.typed(answer_chars("KMRU"), at(700));
+        assert_eq!(
+            keys(&log),
+            (vec![Some(100), Some(200), Some(300), Some(700)], vec![1, 2])
+        );
+        // A selection typed over at the end: the same.
+        log.typed(answer_chars("KME"), at(800));
+        assert_eq!(
+            keys(&log),
+            (vec![Some(100), Some(200), Some(300)], vec![1, 2])
+        );
+        log.typed(answer_chars("KMEE"), at(900));
+        assert_eq!(keys(&log).1, [1, 2, 3]);
+        // A letter taken out at the end, the text put right inside, and the
+        // letter typed again: still a correction, keyed first as it was.
+        let mut log = KeyLog::default();
+        for (text, ms) in [("K", 100), ("KM", 200), ("KMR", 300), ("KMRU", 400)] {
+            log.typed(answer_chars(text), at(ms));
+        }
+        log.typed(answer_chars("KMR"), at(500));
+        log.typed(answer_chars("KXR"), at(600));
+        log.typed(answer_chars("KXRU"), at(700));
+        assert_eq!(
+            keys(&log),
+            (vec![Some(100), Some(200), Some(300), Some(400)], vec![1, 3])
+        );
+    }
+
+    /// Keys on another clock, a word's of a field, and as many as an
+    /// answer holds.
+    #[test]
+    fn keys_move_clocks_and_cut_as_an_answer_needs() {
+        let keys = Keys {
+            at: vec![Some(10), None, Some(30), Some(40)],
+            corrected: vec![1, 3],
+        };
+        assert_eq!(
+            keys.map(|at| at + 1).at,
+            [Some(11), None, Some(31), Some(41)]
+        );
+        let word = keys.within(2..4);
+        assert_eq!(
+            (word.at, word.corrected),
+            (vec![Some(30), Some(40)], vec![1])
+        );
+        assert_eq!(keys.within(3..9).at, Vec::<Option<u64>>::new());
+        let fitted = keys.fitted(2);
+        assert_eq!(
+            (fitted.at, fitted.corrected),
+            (vec![Some(10), None], vec![1])
+        );
+        assert_eq!(keys.fitted(5).at.len(), 5);
     }
 
     /// Characters ending 300, 700 and 1000 ms into a send heard through no
@@ -426,6 +616,7 @@ mod tests {
         CharTimes {
             ends: vec![300, 700, 1_000],
             keys: keys.to_vec(),
+            corrected: Vec::new(),
             latency_ms: 0,
             box_open: open,
         }
@@ -463,9 +654,32 @@ mod tests {
         );
         let just = times(&[Some(550), Some(1_100), Some(1_300)], true);
         assert_eq!(recognise("KMR", "KMR", &just)[2], Some(300));
-        // A key untimed (a correction) says nothing of the one after it.
-        let corrected = times(&[Some(550), None, Some(1_250)], true);
-        assert_eq!(recognise("KMR", "KMR", &corrected), [Some(250), None, None]);
+        // A key with no moment says nothing of the one after it.
+        let untimed = times(&[Some(550), None, Some(1_250)], true);
+        assert_eq!(recognise("KMR", "KMR", &untimed), [Some(250), None, None]);
+    }
+
+    /// A slip put right is no recognition of its own, but costs the
+    /// characters around it nothing: its position's first key still says
+    /// you were keeping up, and a group whose first was put right is still
+    /// typed along. Left wrong, it is the same.
+    #[test]
+    fn a_slip_put_right_is_untimed_and_costs_the_rest_nothing() {
+        let mut fixed = times(&[Some(550), Some(900), Some(1_250)], true);
+        fixed.corrected = vec![1];
+        assert_eq!(
+            recognise("KMR", "KMR", &fixed),
+            [Some(250), None, Some(250)]
+        );
+        assert_eq!(
+            recognise("KMR", "KXR", &fixed),
+            [Some(250), None, Some(250)]
+        );
+        fixed.corrected = vec![0];
+        assert_eq!(
+            recognise("KMR", "KMR", &fixed),
+            [None, Some(200), Some(250)]
+        );
     }
 
     /// The device's delay counts towards keeping up, never towards the time.
@@ -495,6 +709,7 @@ mod tests {
         let one = CharTimes {
             ends: vec![300],
             keys: vec![Some(620)],
+            corrected: Vec::new(),
             latency_ms: 0,
             box_open: false,
         };
@@ -509,6 +724,7 @@ mod tests {
         let missed = CharTimes {
             ends: vec![300, 700, 1_000],
             keys: vec![Some(550), Some(1_250)],
+            corrected: Vec::new(),
             latency_ms: 0,
             box_open: true,
         };
@@ -557,16 +773,14 @@ mod tests {
 
     #[test]
     fn char_times_are_kept_from_the_sending_on() {
-        let times = CharTimes::of(
-            1_000,
-            &[300, 700],
-            [Some(990), Some(1_550), Some(2_100), None],
-            Some(2_000),
-            40,
-            true,
-        );
+        let keys = Keys {
+            at: vec![Some(990), Some(1_550), Some(2_100), None],
+            corrected: vec![1],
+        };
+        let times = CharTimes::of(1_000, &[300, 700], &keys, Some(2_000), 40, true);
         assert_eq!(times.ends, [300, 700]);
         assert_eq!(times.keys, [None, Some(550), None, None]);
+        assert_eq!(times.corrected, [1]);
     }
 
     /// Kept under the keys a save names, and a shape this build does not
@@ -578,9 +792,10 @@ mod tests {
             #[serde(default, deserialize_with = "lenient_char_times")]
             times: Option<CharTimes>,
         }
-        let times = CharTimes {
+        let mut times = CharTimes {
             ends: vec![300, 700],
             keys: vec![Some(550), None],
+            corrected: Vec::new(),
             latency_ms: 40,
             box_open: true,
         };
@@ -589,6 +804,13 @@ mod tests {
             json,
             r#"{"ends":[300,700],"keys":[550,null],"latencyMs":40,"boxOpen":true}"#
         );
+        times.corrected = vec![1];
+        let fixed = serde_json::to_string(&times).expect("serialize");
+        assert!(fixed.contains(r#""corrected":[1]"#), "{fixed}");
+        let read: Holder =
+            serde_json::from_str(&format!(r#"{{"times":{fixed}}}"#)).expect("a save loads");
+        assert_eq!(read.times.as_ref(), Some(&times));
+        times.corrected.clear();
         let read: Holder =
             serde_json::from_str(&format!(r#"{{"times":{json}}}"#)).expect("a save loads");
         assert_eq!(read.times, Some(times));

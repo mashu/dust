@@ -132,10 +132,16 @@ impl Mixer {
         self.metering.meter()
     }
 
-    /// How long after it starts a send is heard, in seconds: the receiver's
-    /// look-ahead, and how far behind the last callback found the speaker.
-    pub fn latency_sec(&self) -> f64 {
-        (self.latency + self.late_len) as f64 / f64::from(self.sample_rate)
+    /// How long after it starts a send goes to the output, in seconds: the
+    /// receiver's look-ahead.
+    pub fn lookahead_sec(&self) -> f64 {
+        self.late_len as f64 / f64::from(self.sample_rate)
+    }
+
+    /// How far behind the output the last callback found the speaker, in
+    /// seconds, as the device says.
+    pub fn output_latency_sec(&self) -> f64 {
+        self.latency as f64 / f64::from(self.sample_rate)
     }
 
     /// Play at `gains` from here on.

@@ -6,6 +6,7 @@
 //! the sampler learns from each answer. The runtime only plays, waits, and
 //! reports back.
 
+use crate::recognition::Keys;
 use crate::session::{
     Answered, GroupSession, MonoMs, SendStart, SessionId, SessionPhase, answer_length_matches,
 };
@@ -40,12 +41,16 @@ pub enum SessionEvent {
         index: usize,
         start: SendStart,
     },
-    /// A send played to its end, `on_time` unless the audio held it up on
-    /// its way: a suspended clock, a stall.
+    /// A send played to its end.
     PlaybackEnded {
         index: usize,
         duration_sec: f64,
-        on_time: bool,
+    },
+    /// A send of the group was held up on its way, its audio parked or its
+    /// clock fallen behind, however it ended: it went out later than
+    /// planned, and a first send so cannot be timed from.
+    PlaybackHeldUp {
+        index: usize,
     },
     /// The send stopped before it finished — cancelled from outside, or the
     /// audio failed. Either way the session ends with what it has scored.
@@ -57,7 +62,7 @@ pub enum SessionEvent {
     Input {
         index: usize,
         text: String,
-        keys: Vec<Option<MonoMs>>,
+        keys: Keys<MonoMs>,
     },
     Confirm,
     /// A timer the machine started has run out. What it was for is the
@@ -248,6 +253,7 @@ impl<S: GroupSource> SessionMachine<S> {
             }
             SessionEvent::PlaybackStarted { .. }
             | SessionEvent::PlaybackEnded { .. }
+            | SessionEvent::PlaybackHeldUp { .. }
             | SessionEvent::PlaybackStopped { .. }
             | SessionEvent::Input { .. }
             | SessionEvent::Abort => None,
@@ -277,8 +283,13 @@ impl<S: GroupSource> SessionMachine<S> {
             SessionEvent::PlaybackEnded {
                 index,
                 duration_sec,
-                on_time,
-            } => self.playback_ended(index, now, duration_sec, on_time),
+            } => self.playback_ended(index, now, duration_sec),
+            // Whenever it comes, the group answered or not: its timing is
+            // read once the session is kept.
+            SessionEvent::PlaybackHeldUp { index } => {
+                self.session.note_held_up(index);
+                Vec::new()
+            }
             SessionEvent::Input { index, text, keys } => self.input(index, &text, &keys, now),
             SessionEvent::Confirm => self.confirm_current(now),
             SessionEvent::TimerFired { id } => self.timer_fired(id, now),
@@ -308,19 +319,17 @@ impl<S: GroupSource> SessionMachine<S> {
         }
     }
 
-    /// Send `index` ended at `now`, having lasted `duration_sec`, on time or
-    /// not.
+    /// Send `index` ended at `now`, having lasted `duration_sec`.
     fn playback_ended(
         &mut self,
         index: usize,
         now: MonoMs,
         duration_sec: f64,
-        on_time: bool,
     ) -> Vec<SessionEffect> {
         if self.playing_index() != Some(index) {
             return Vec::new();
         }
-        self.session.note_play_finished(index, on_time);
+        self.session.note_play_finished(index);
         let played_ms = if duration_sec.is_finite() {
             (duration_sec.max(0.0) * 1000.0).round() as u64
         } else {
@@ -329,15 +338,11 @@ impl<S: GroupSource> SessionMachine<S> {
         self.group_elapsed_ms = self.group_elapsed_ms.saturating_add(played_ms);
         if self.repeats_left > 1 {
             self.repeats_left -= 1;
-            let playback = &self.session.settings().playback;
-            let (char_wpm, effective_wpm) = self
-                .session
-                .played_wpm(index)
-                .unwrap_or((playback.char_wpm_min, playback.effective_wpm_min));
+            let (char_wpm, effective_wpm) = self.session.sent_wpm(index);
             let gap = compute_group_gap_for_wpm(
                 char_wpm,
                 effective_wpm,
-                playback.extra_word_space_multiplier,
+                self.session.settings().playback.extra_word_space_multiplier,
             );
             self.group_elapsed_ms = self.group_elapsed_ms.saturating_add(u64::from(gap));
             self.set_phase(SessionPhase::RepeatGap { index });
@@ -362,7 +367,7 @@ impl<S: GroupSource> SessionMachine<S> {
         &mut self,
         index: usize,
         text: &str,
-        keys: &[Option<MonoMs>],
+        keys: &Keys<MonoMs>,
         now: MonoMs,
     ) -> Vec<SessionEffect> {
         let current = match self.phase() {
@@ -507,10 +512,7 @@ impl<S: GroupSource> SessionMachine<S> {
 
     fn group_gap_ms(&self, next: usize) -> u32 {
         let playback = &self.session.settings().playback;
-        let (char_wpm, effective_wpm) = self
-            .session
-            .played_wpm(next.saturating_sub(1))
-            .unwrap_or((playback.char_wpm_min, playback.effective_wpm_min));
+        let (char_wpm, effective_wpm) = self.session.sent_wpm(next.saturating_sub(1));
         compute_after_group_gap_ms(
             char_wpm,
             effective_wpm,
@@ -604,7 +606,6 @@ mod tests {
         SessionEvent::PlaybackEnded {
             index,
             duration_sec: 0.5,
-            on_time: true,
         }
     }
 
@@ -626,7 +627,7 @@ mod tests {
         SessionEvent::Input {
             index,
             text: text.into(),
-            keys: Vec::new(),
+            keys: Keys::default(),
         }
     }
 
@@ -1201,7 +1202,6 @@ mod tests {
             SessionEvent::PlaybackEnded {
                 index: 0,
                 duration_sec: 0.0,
-                on_time: true,
             },
             MonoMs(10),
         );
@@ -1227,7 +1227,6 @@ mod tests {
             SessionEvent::PlaybackEnded {
                 index: 0,
                 duration_sec: 2.0,
-                on_time: true,
             },
             MonoMs(500),
         );
@@ -1257,7 +1256,10 @@ mod tests {
         let typed = SessionEvent::Input {
             index: 0,
             text: "KM".into(),
-            keys: vec![Some(MonoMs(450)), Some(MonoMs(800))],
+            keys: Keys {
+                at: vec![Some(MonoMs(450)), Some(MonoMs(800))],
+                corrected: Vec::new(),
+            },
         };
         let _ = m.apply(typed, MonoMs(800));
         let effects = m.apply(SessionEvent::Confirm, MonoMs(820));
@@ -1269,34 +1271,46 @@ mod tests {
         assert_eq!(crate::recognise("KM", "KM", times), [Some(250), Some(240)]);
     }
 
-    /// A send that played late cannot be timed; its speed is kept all the
-    /// same.
+    /// A first send held up on its way cannot be timed, whether it was
+    /// heard out or the group was answered and the send stopped before the
+    /// news came; its speed is kept all the same.
     #[test]
-    fn a_send_that_played_late_is_not_timed() {
-        let mut m = start_with(settings(1, true, 10.0), script(&["K"], 1));
-        let start = SendStart {
-            char_wpm: 22.0,
-            effective_wpm: 22.0,
-            output_at: MonoMs(20),
-            char_ends_ms: vec![150],
-            latency_ms: 0,
-        };
-        let _ = m.apply(
-            SessionEvent::PlaybackStarted { index: 0, start },
-            MonoMs(10),
-        );
-        let late = SessionEvent::PlaybackEnded {
-            index: 0,
-            duration_sec: 0.15,
-            on_time: false,
-        };
-        let _ = m.apply(late, MonoMs(900));
-        let _ = m.apply(typed(0, "K"), MonoMs(1_200));
-        let _ = m.apply(SessionEvent::Confirm, MonoMs(1_200));
-        let timing = &m.session().result(1_300, "2026-09-01".into()).group_timings[0];
-        assert_eq!(
-            (timing.char_wpm, timing.char_times.clone()),
-            (Some(22.0), None)
-        );
+    fn a_send_held_up_on_its_way_is_not_timed() {
+        for answered_first in [false, true] {
+            let mut m = start_with(settings(1, false, 10.0), script(&["K"], 1));
+            let start = SendStart {
+                char_wpm: 22.0,
+                effective_wpm: 22.0,
+                output_at: MonoMs(20),
+                char_ends_ms: vec![150],
+                latency_ms: 0,
+            };
+            let _ = m.apply(
+                SessionEvent::PlaybackStarted { index: 0, start },
+                MonoMs(10),
+            );
+            if answered_first {
+                let _ = m.apply(typed(0, "K"), MonoMs(400));
+                let effects = m.apply(SessionEvent::Confirm, MonoMs(420));
+                assert!(effects.contains(&SessionEffect::StopAudio));
+                let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(450));
+                let _ = m.apply(SessionEvent::PlaybackStopped { index: 0 }, MonoMs(450));
+            } else {
+                let _ = m.apply(SessionEvent::PlaybackHeldUp { index: 0 }, MonoMs(900));
+                let ended = SessionEvent::PlaybackEnded {
+                    index: 0,
+                    duration_sec: 0.15,
+                };
+                let _ = m.apply(ended, MonoMs(900));
+                let _ = m.apply(typed(0, "K"), MonoMs(1_200));
+                let _ = m.apply(SessionEvent::Confirm, MonoMs(1_200));
+            }
+            let timing = &m.session().result(1_300, "2026-09-01".into()).group_timings[0];
+            assert_eq!(
+                (timing.char_wpm, timing.char_times.clone()),
+                (Some(22.0), None),
+                "answered first: {answered_first}"
+            );
+        }
     }
 }

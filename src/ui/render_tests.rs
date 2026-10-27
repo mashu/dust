@@ -2531,6 +2531,7 @@ mod interactions {
             timing.char_times = Some(cw_core::CharTimes {
                 ends,
                 keys,
+                corrected: Vec::new(),
                 latency_ms: 0,
                 box_open: true,
             });
@@ -3660,7 +3661,8 @@ mod interactions {
             );
             let answer = handed("KE").expect("handed over");
             assert_eq!(answer.index, 0);
-            assert_eq!(answer.keys, [Some(typed_at), Some(pressed_at)]);
+            assert_eq!(answer.keys.at, [Some(typed_at), Some(pressed_at)]);
+            assert!(answer.keys.corrected.is_empty());
             assert!(
                 crate::time::mono_ms() > pressed_at.0 + 200,
                 "the letter went in after its letter space"
@@ -4019,6 +4021,31 @@ mod interactions {
             tap_dits(&mut ui, "group-input-0", 1).await;
             assert!(box_shows(&ui, "KE"), "{}", ui.input_tag("group-input-0"));
             assert!(ui.has("committed:KE"), "{}", ui.html());
+        });
+    }
+
+    /// The paddles key as the keyboard types: along with the send when
+    /// typing is not locked while it plays.
+    #[test]
+    fn the_paddles_key_along_with_a_send_left_unlocked() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(RepeatingHarness, ());
+            tap_dits(&mut ui, "group-input-0", 1).await;
+            assert!(box_shows(&ui, "E"), "{}", ui.input_tag("group-input-0"));
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:E"), "{}", ui.html());
+        });
+    }
+
+    /// And not into a box locked while its group is sent, as the keyboard
+    /// does not.
+    #[test]
+    fn the_paddles_key_nothing_into_a_box_locked_while_it_is_sent() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(TrainingHarness, ());
+            tap_dits(&mut ui, "group-input-0", 2).await;
+            ui.advance(500).await;
+            assert!(box_shows(&ui, ""), "{}", ui.input_tag("group-input-0"));
         });
     }
 

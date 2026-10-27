@@ -29,7 +29,7 @@ pub fn PrivacyCard() -> Element {
                 }
             }
             p { class: "muted",
-                "Dust stores your settings and practice history only on this device: speed and alphabet, the groups that were sent, what you typed and how soon after each character's sound you keyed it, and the scores. There is no account, and that history is not uploaded. Up to 500 sessions are kept; in a browser, as many of the newest as fit. Any of them can be deleted under Stats → History."
+                "Dust stores your settings and practice history only on this device: speed and alphabet, the groups that were sent, what you typed and how soon after each character's sound you keyed it, with the delay your audio device reports, and the scores. There is no account, and that history is not uploaded. Up to 500 sessions are kept; in a browser, as many of the newest as fit. Any of them can be deleted under Stats → History."
             }
             p { class: "muted", "{CONTEST_PRIVACY}" }
             p { class: "muted",

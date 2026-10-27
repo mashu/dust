@@ -122,7 +122,6 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
             SessionEvent::PlaybackEnded {
                 index,
                 duration_sec: 0.5,
-                on_time: true,
             },
             now,
         );
@@ -130,7 +129,7 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
         let typed = SessionEvent::Input {
             index,
             text: (*answer).to_string(),
-            keys: Vec::new(),
+            keys: cw_core::Keys::default(),
         };
         let _ = machine.apply(typed, now);
         for effect in machine.apply(SessionEvent::Confirm, now) {
@@ -402,7 +401,7 @@ impl Harness {
         self.send(SessionEvent::Input {
             index,
             text: text.to_string(),
-            keys: Vec::new(),
+            keys: cw_core::Keys::default(),
         });
     }
 

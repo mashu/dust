@@ -48,7 +48,7 @@ use crate::alignment::CopyTally;
 use crate::band::Qsb;
 use crate::callsign::parse_callsign;
 use crate::machine::COUNTDOWN_STEP_MS;
-use crate::recognition::CharTimes;
+use crate::recognition::{CharTimes, Keys};
 use crate::rng::{Rng, SplitMix64};
 use crate::score::MIN_RESPONSE_MS_PER_CHAR;
 use crate::session::{Answered, GroupResult, MonoMs, SessionResult, SessionTiming, whole_ms};
@@ -149,11 +149,14 @@ pub enum ContestEvent {
         heard_from: MonoMs,
         output_from: MonoMs,
     },
-    /// A turn's sound has ended, and whether it played on time: a turn the
-    /// audio held up cannot be timed from.
     TurnEnded {
         id: u64,
-        on_time: bool,
+    },
+    /// A turn's sound was held up on its way, its audio parked or its clock
+    /// fallen behind, however it ended: it went out later than planned, and
+    /// nothing heard in it can be timed from.
+    TurnHeldUp {
+        id: u64,
     },
     /// A turn was stopped, or a newer one replaced it: always ignored.
     TurnCancelled {
@@ -474,12 +477,14 @@ struct Shown {
 }
 
 /// How many sends of a station's call, or of its exchange, began to reach
-/// you, and when the second began to go out, in run time: a key from then
-/// on came after hearing it twice.
+/// you, and from when on a key says nothing of how soon you recognised it,
+/// in run time: its second sending began to go out, or the run paused.
+/// Run time stands still while paused, so a key after a pause would leave
+/// the pause out of its time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Sends {
     count: u32,
-    again: Option<u64>,
+    until: Option<u64>,
 }
 
 impl Sends {
@@ -487,8 +492,19 @@ impl Sends {
     fn began(&mut self, out_run: u64) {
         self.count = self.count.saturating_add(1);
         if self.count == 2 {
-            self.again = Some(out_run);
+            self.cut(out_run);
         }
+    }
+
+    /// The run paused at `run`, once any of it had reached you.
+    fn paused(&mut self, run: u64) {
+        if self.count > 0 {
+            self.cut(run);
+        }
+    }
+
+    fn cut(&mut self, at: u64) {
+        self.until = Some(self.until.map_or(at, |until| until.min(at)));
     }
 }
 
@@ -507,29 +523,30 @@ struct Sounded {
 }
 
 impl Sounded {
-    /// Its copy `copy`'s times, heard again from `again` on. The fields
-    /// take keys all through a run.
-    fn timed(&self, copy: &Typed, again: Option<u64>) -> Timed {
-        Timed {
+    /// Its copy `copy`'s times, its keys saying nothing from `until` on
+    /// ([`Sends`]), if the rule could read any. The fields take keys all
+    /// through a run.
+    fn timed(&self, copy: &Typed, until: Option<u64>) -> Option<Timed> {
+        let times = CharTimes::of(
+            self.from,
+            &self.ends,
+            &copy.keys,
+            until,
+            self.latency_ms,
+            true,
+        );
+        times.can_be_timed().then_some(Timed {
             turn: self.turn,
-            times: CharTimes::of(
-                self.from,
-                &self.ends,
-                copy.keys.iter().copied(),
-                again,
-                self.latency_ms,
-                true,
-            ),
-        }
+            times,
+        })
     }
 }
 
-/// A copy as a key read it: its text, and when each of its characters went
-/// in, in run time; none where that cannot be timed.
+/// A copy as a key read it: its text, and its keys, in run time.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Typed {
     text: String,
-    keys: Vec<Option<u64>>,
+    keys: Keys<u64>,
 }
 
 impl Typed {
@@ -540,7 +557,7 @@ impl Typed {
             keys: if self.text == text {
                 self.keys.clone()
             } else {
-                Vec::new()
+                Keys::default()
             },
         }
     }
@@ -606,7 +623,7 @@ impl Heard {
             Some((had, asked)) => (
                 Typed {
                     text: had.clone(),
-                    keys: Vec::new(),
+                    keys: Keys::default(),
                 },
                 0,
                 &self.call_asks[..(*asked).min(self.call_asks.len())],
@@ -618,7 +635,7 @@ impl Heard {
         let timed = self
             .call_sounded
             .as_ref()
-            .map(|sounded| sounded.timed(&copy, self.call_sends.again));
+            .and_then(|sounded| sounded.timed(&copy, self.call_sends.until));
         group(sent, &copy.text, ms, sends, voice, timed)
     }
 
@@ -742,7 +759,7 @@ impl Heard {
                     .filter(|_| shown == 0 && copy == typed);
                 let timed = keyed
                     .zip(self.sounded(*field))
-                    .map(|(keyed, sounded)| sounded.timed(&keyed, self.exch_sends.again));
+                    .and_then(|(keyed, sounded)| sounded.timed(&keyed, self.exch_sends.until));
                 group(
                     token,
                     &copy,
@@ -1408,15 +1425,17 @@ impl<S: CallSource> ContestMachine<S> {
                     // far behind the key the player's sound is. One tried
                     // again went out twice, or in part: nothing in it can be
                     // timed.
-                    if air.first_start.is_some() {
-                        self.untrusted.push(id);
-                    } else if air.turn.starts_at.is_none() {
+                    let retried = air.first_start.is_some();
+                    if !retried && air.turn.starts_at.is_none() {
                         let lead = heard_from.0.saturating_sub(air.keyed_at.0);
                         self.lead_ms = lead.min(LEAD_MOST_MS);
                     }
                     air.heard_from = heard_from;
                     air.output_from = output_from;
                     air.first_start.get_or_insert(heard_from);
+                    if retried {
+                        self.untrust(id);
+                    }
                 }
                 return Vec::new();
             }
@@ -1425,8 +1444,11 @@ impl<S: CallSource> ContestMachine<S> {
             // time that was not run time cannot end the run.
             ContestEvent::TurnFailed { id } if self.on_air(id) => return self.sound_failed(now),
             ContestEvent::Pause { why, at } => return self.pause(why, at, now),
-            ContestEvent::TurnEnded { id, on_time } if !on_time && self.on_air(id) => {
-                self.untrusted.push(id);
+            // On the air or not, its QSOs logged or not: the run's groups
+            // are read once it is kept.
+            ContestEvent::TurnHeldUp { id } => {
+                self.untrust(id);
+                return Vec::new();
             }
             _ => {}
         }
@@ -1438,7 +1460,7 @@ impl<S: CallSource> ContestMachine<S> {
         }
         match event {
             ContestEvent::Key { key, fields } => self.key(key, &fields, now),
-            ContestEvent::TurnEnded { id, .. } if self.on_air(id) => self.turn_ended(now),
+            ContestEvent::TurnEnded { id } if self.on_air(id) => self.turn_ended(now),
             ContestEvent::TimerFired { id } => self.timer_fired(id, now),
             ContestEvent::Resume => self.resume(now),
             ContestEvent::Speed { delta } => {
@@ -1697,7 +1719,7 @@ impl<S: CallSource> ContestMachine<S> {
     fn keeps_reading(&self, event: &ContestEvent) -> bool {
         match event {
             ContestEvent::Key { .. } | ContestEvent::FinishNow => true,
-            ContestEvent::TurnEnded { id, .. } => self.on_air(*id),
+            ContestEvent::TurnEnded { id } => self.on_air(*id),
             _ => false,
         }
     }
@@ -1706,6 +1728,14 @@ impl<S: CallSource> ContestMachine<S> {
     /// when its last attempt would have failed.
     fn retrying_until(&self, now: MonoMs) -> Option<MonoMs> {
         self.air.as_ref().and_then(|air| air.retrying_until(now))
+    }
+
+    /// Turn `id`'s sound went out otherwise than planned: nothing heard in
+    /// it is timed.
+    fn untrust(&mut self, id: u64) {
+        if !self.untrusted.contains(&id) {
+            self.untrusted.push(id);
+        }
     }
 
     fn fresh_id(&mut self) -> u64 {
@@ -2251,12 +2281,7 @@ impl<S: CallSource> ContestMachine<S> {
     /// keys and its last edit in run time, as nothing that comes later can
     /// convert them (an Esc hears the message again after a pause).
     fn read_call(&mut self, fields: &Fields, now: MonoMs) -> CallRead {
-        let keys = fields
-            .call_keys
-            .moments()
-            .iter()
-            .map(|key| key.map(|key| self.run_at(key, now)))
-            .collect();
+        let keys = fields.call_keys.keys().map(|key| self.run_at(key, now));
         CallRead {
             typed: Typed {
                 text: call_copied(&fields.call),
@@ -2312,8 +2337,7 @@ impl<S: CallSource> ContestMachine<S> {
             let call = shown(heard.call_shown)
                 .filter(|_| heard.call_frozen.is_none() && heard.first_call.is_none())
                 .map(|shown| {
-                    let typed = fields.text_at(EntryField::Call, shown.at);
-                    let typed = normalize_call(typed).replace('?', "");
+                    let typed = call_copied(fields.text_at(EntryField::Call, shown.at));
                     let another =
                         self.signed_by_another(index, &typed) || self.qso.gone.contains(&typed);
                     let not_this = match self.style {
@@ -3370,8 +3394,9 @@ impl<S: CallSource> ContestMachine<S> {
             // once, whole and alone, is what their copies' characters are
             // timed from: not a rest carried on from a turn you keyed over.
             if timeable && segment.skip_sec == 0.0 && texts.get(at) == Some(&segment.text) {
+                let spans = char_spans(&segment.text, &self.settings, &segment.voice);
                 let sounded = |within: std::ops::Range<usize>, token: &str| {
-                    let ends = sounded_alone(turn, at, within, token, &self.settings)?;
+                    let ends = sounded_alone(turn, at, &spans, within, token)?;
                     Some(Sounded {
                         turn: turn.id,
                         from: out_start,
@@ -3961,9 +3986,7 @@ impl<S: CallSource> ContestMachine<S> {
             .map(|read| {
                 let keys = fields
                     .exch_word_keys(read.word)
-                    .iter()
-                    .map(|key| key.map(|key| self.run_at(key, now)))
-                    .collect();
+                    .map(|key| self.run_at(key, now));
                 let text = read.token.clone();
                 (read.field, Typed { text, keys })
             })
@@ -4386,6 +4409,12 @@ impl<S: CallSource> ContestMachine<S> {
                     let carried = self.cut(air, run_ms, false, &mut effects);
                     self.resolve(&carried.pending, &mut effects);
                 }
+                // What reached you by the pause counted, a key after it says
+                // nothing of a sound heard before it.
+                for station in &mut self.stations {
+                    station.heard.call_sends.paused(run_ms);
+                    station.heard.exch_sends.paused(run_ms);
+                }
                 self.timers = Timers::default();
                 self.phase = ContestPhase::Paused { why };
                 effects.push(ContestEffect::Announce("Paused".to_string()));
@@ -4527,17 +4556,18 @@ fn misses(exchange: &[(Field, String)], voice: &StationVoice) -> Vec<Kept> {
         .collect()
 }
 
-/// Where each character of `token` ends in segment `at` of `turn`, in
-/// milliseconds after the segment starts, when it is there once as a word
-/// within the bytes `within` of its text, and nothing else in the turn, a
-/// caller, QRM or your own message, sounds while it does: a token heard
-/// twice in one send, or under another, is no measure of hearing it.
+/// Where each character of `token` ends in segment `at` of `turn`, whose
+/// characters sound at `spans`, in milliseconds after the segment starts,
+/// when it is there once as a word within the bytes `within` of its text,
+/// and nothing else in the turn, a caller, QRM or your own message, sounds
+/// while it does: a token heard twice in one send, or under another, is no
+/// measure of hearing it.
 fn sounded_alone(
     turn: &Turn,
     at: usize,
+    spans: &[CharSpan],
     within: std::ops::Range<usize>,
     token: &str,
-    settings: &TrainingSettings,
 ) -> Option<Vec<u32>> {
     let segment = turn.segments.get(at)?;
     let part = segment.text.get(within.clone())?;
@@ -4552,8 +4582,8 @@ fn sounded_alone(
         return None;
     }
     let bytes = within.start + from..within.start + from + token.len();
-    let spans: Vec<CharSpan> = char_spans(&segment.text, settings, &segment.voice)
-        .into_iter()
+    let spans: Vec<&CharSpan> = spans
+        .iter()
         .filter(|span| bytes.contains(&span.at))
         .collect();
     let (first, last) = (spans.first()?, spans.last()?);
@@ -7008,13 +7038,7 @@ mod tests {
             ContestMachine::start(1, MonoMs(0), settings, ScriptCalls::new(&["K5XYZ"]));
         let run_end = first_timer(&effects).expect("the run end");
         let cq = played(&effects).expect("the CQ").id;
-        let ended = machine.apply(
-            ContestEvent::TurnEnded {
-                id: cq,
-                on_time: true,
-            },
-            MonoMs(5_000),
-        );
+        let ended = machine.apply(ContestEvent::TurnEnded { id: cq }, MonoMs(5_000));
         let patience = first_timer(&ended).expect("the patience timer");
         let fields = Fields {
             call: "K5XYZ".into(),
@@ -7074,13 +7098,7 @@ mod tests {
         // The retry plays after all: its end ends the run, at the limit.
         let (mut ended, run_end, _, _, turn) = retrying_near_the_end();
         let _ = ended.apply(ContestEvent::TimerFired { id: run_end }, MonoMs(60_000));
-        let effects = ended.apply(
-            ContestEvent::TurnEnded {
-                id: turn,
-                on_time: true,
-            },
-            MonoMs(67_500),
-        );
+        let effects = ended.apply(ContestEvent::TurnEnded { id: turn }, MonoMs(67_500));
         assert!(effects.contains(&ContestEffect::Announce("Time's up".into())));
         assert_eq!(ended.ended.map(|(run_ms, _)| run_ms), Some(60_000));
 
@@ -12214,6 +12232,37 @@ mod tests {
         }
     }
 
+    /// A key after a pause says nothing of a call heard before it: run time
+    /// stands still while paused, and would leave the pause out of its time.
+    #[test]
+    fn a_key_after_a_pause_is_not_timed_for_a_call_heard_before_it() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        runtime.finish_turn();
+        assert!(runtime.machine.stations[0].heard.call_sounded.is_some());
+        let at = MonoMs(runtime.now);
+        runtime.apply(ContestEvent::Pause {
+            why: PauseWhy::You,
+            at,
+        });
+        runtime.now += 60_000;
+        runtime.apply(ContestEvent::Resume);
+        runtime.now += 300;
+        runtime.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(typed(&[(EntryField::Call, "K5XYZ", runtime.now)])),
+        });
+        let nr = serial(replies(runtime.last_turn())[0]);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
+        // Nothing of its keys says how soon it was recognised, so nothing of
+        // it is kept.
+        assert_eq!(result.group_timings[0].char_times, None);
+    }
+
     /// With Show copy, what you copy may be read off the screen: nothing of
     /// the run is timed.
     #[test]
@@ -12256,10 +12305,8 @@ mod tests {
         let end = whole_ms(cq.duration_sec());
         late.run_to(end.saturating_sub(1));
         late.now = end;
-        late.apply(ContestEvent::TurnEnded {
-            id: cq.id,
-            on_time: false,
-        });
+        late.apply(ContestEvent::TurnHeldUp { id: cq.id });
+        late.apply(ContestEvent::TurnEnded { id: cq.id });
         assert!(late.machine.untrusted.contains(&cq.id));
         assert_eq!(late.machine.stations[0].heard.call_sounded, None);
     }
@@ -12272,6 +12319,7 @@ mod tests {
         let times = CharTimes {
             ends: vec![300],
             keys: vec![Some(700)],
+            corrected: Vec::new(),
             latency_ms: 0,
             box_open: true,
         };
@@ -12316,8 +12364,9 @@ mod tests {
         };
         let caller = Sender::Caller(0);
         let whole = |turn: &Turn, token: &str| {
-            let length = turn.segments[0].text.len();
-            sounded_alone(turn, 0, 0..length, token, &settings)
+            let segment = &turn.segments[0];
+            let spans = char_spans(&segment.text, &settings, &segment.voice);
+            sounded_alone(turn, 0, &spans, 0..segment.text.len(), token)
         };
         let alone = turn(vec![segment(caller, "DE K5XYZ", 0.0)]);
         let ends = whole(&alone, "K5XYZ").expect("heard once, alone");
