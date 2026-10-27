@@ -1,17 +1,22 @@
-use cw_core::band::{FilterDesign, heard_snr_db};
+use cw_core::band::{FilterDesign, NOISE_LEVEL_PER_DB, heard_snr_db};
 use cw_core::{
-    BandSettings, CallerHabits, CharSetMode, ContestRules, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN,
-    Field, FilterShape, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
-    PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RangeSetting, RunStyle, STATIONS_MAX,
-    STATIONS_MIN, SettingsSection, Side, TrainingSettings, filter_capacity,
+    AGC_THRESHOLD_MAX_DB, AGC_THRESHOLD_MIN_DB, AgcDecay, BandSettings, CallerHabits, CharSetMode,
+    ContestRules, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Field, FilterShape, PILEUP_LEVEL_MAX_DB,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
+    RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RunStyle, STATIONS_MAX, STATIONS_MIN,
+    SettingsSection, Side, TrainingSettings, filter_capacity,
 };
 use dioxus::prelude::*;
 
 use crate::ui::format::counted;
 use crate::ui::help;
+use crate::ui::scope::LevelScope;
 use crate::ui::widgets::{
     CardHead, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch, control_id,
 };
+
+/// The AGC's decays, in the order the control offers them.
+const AGC_DECAYS: [(AgcDecay, &str); 2] = [(AgcDecay::Fast, "Fast"), (AgcDecay::Slow, "Slow")];
 
 /// The filter shapes, in the order the control offers them.
 const FILTER_SHAPES: [(FilterShape, &str); 3] = [
@@ -27,14 +32,6 @@ const CALLER_HABITS: [(CallerHabits, &str); 3] = [
     (CallerHabits::Real, "Real"),
     (CallerHabits::Rough, "Rough"),
 ];
-
-/// The word the Band card calls `habits` by.
-pub(crate) fn habits_label(habits: CallerHabits) -> &'static str {
-    CALLER_HABITS
-        .iter()
-        .find(|(each, _)| *each == habits)
-        .map_or("Easy", |(_, label)| label)
-}
 
 /// What the habits line says in a contest of `rules`, from `side`: each
 /// habit in a sentence, the numbers cut as that contest's callers cut
@@ -211,12 +208,12 @@ pub fn BandConditionsCard(
             }
             if previewing {
                 p { class: "muted", style: "margin: 0;",
-                    "Looping “CQ” with the current mix. Move a slider and you hear it immediately."
+                    "Looping “CQ” loud, medium and weak in turn (100%, 30% and 10% strength) through the current mix. Move a slider and you hear the change."
                 }
             }
             div { class: "field-grid",
                 SliderField {
-                    label: "Filter width (-6 dB)".to_string(),
+                    label: "Filter width".to_string(),
                     id: "slider-filter-width".to_string(),
                     value_label: format!("{:.0} Hz", b.filter_width_hz),
                     value: b.filter_width_hz,
@@ -244,7 +241,7 @@ pub fn BandConditionsCard(
                 }
             }
             p { class: "muted", style: "margin: 0;",
-                "Everything you hear comes through this. Narrow it and less noise gets in and the filter rings longer, but a station off your pitch fades with it. Sharp: a modern DSP filter, flat with steep sides. Soft: rounded like an older crystal filter. Peaked: Sharp plus the rig's audio peak filter — a resonance at your pitch; stations off your pitch come out a few dB weaker."
+                "Everything you hear comes through this. Its width is read between the points 6 dB down, as a rig quotes a CW filter, and it costs a station on your pitch nothing: narrow it and less noise gets in, so the S/N of the band noise rises, while that station stays as strong. It rings longer, and a station off your pitch fades with it. Sharp: a modern DSP filter, flat with steep sides. Soft: rounded like an older crystal filter. Peaked: Sharp plus the rig's audio peak filter — a resonance at your pitch; stations off your pitch come out a few dB weaker."
             }
             SettingsRange {
                 settings,
@@ -374,16 +371,89 @@ pub fn BandConditionsCard(
                 value: b.noise_level,
                 min: 0.0,
                 max: 1.0,
-                step: 0.05,
+                step: NOISE_LEVEL_PER_DB,
                 disabled: !b.noise_enabled,
                 onchange: move |v| settings.write().band.noise_level = v,
             }
+            SliderField {
+                label: "RF gain".to_string(),
+                value_label: rf_gain_label(b.rf_gain_db),
+                value: b.rf_gain_db,
+                min: RF_GAIN_MIN_DB,
+                max: RF_GAIN_MAX_DB,
+                step: 1.0,
+                disabled: false,
+                onchange: move |v: f64| settings.write().band.rf_gain_db = v.round(),
+            }
+            p { id: "rf-gain-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                "Turns down everything reaching the receiver, ahead of the AGC: the noise, the static and every station. With the AGC on, the strong stations it was riding stay nearly as loud while the noise and the weak ones drop; with it off, the whole band gets quieter. The volume does not make it up."
+            }
             Switch {
                 title: "AGC".to_string(),
-                description: "The receiver rides its gain: the band ducks under a strong station and behind a crash.".to_string(),
+                description: "The receiver rides its gain: stations over its threshold come out nearly as loud as each other, and the hiss ducks under them and comes back between overs.".to_string(),
                 checked: b.agc_enabled,
                 onchange: move |on| settings.write().band.agc_enabled = on,
             }
+            if b.agc_enabled {
+                div { class: "field",
+                    span { class: "field-label", "AGC decay" }
+                    div { class: "segmented",
+                        for (decay, label) in AGC_DECAYS {
+                            Seg {
+                                label,
+                                id: control_id("seg", &format!("agc {label}")),
+                                active: b.agc_decay == decay,
+                                onclick: move |_| settings.write().band.agc_decay = decay,
+                            }
+                        }
+                    }
+                }
+                p { id: "agc-decay-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "How fast the gain comes back once a signal has gone: Fast by the next word, Slow over a second or so, holding the band steady through an over."
+                }
+            }
+            SliderField {
+                label: "AGC threshold".to_string(),
+                value_label: threshold_label(b.agc_threshold_db),
+                value: b.agc_threshold_db,
+                min: AGC_THRESHOLD_MIN_DB,
+                max: AGC_THRESHOLD_MAX_DB,
+                step: 1.0,
+                disabled: !b.agc_enabled,
+                onchange: move |v: f64| settings.write().band.agc_threshold_db = v.round(),
+            }
+            p { id: "agc-threshold-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                if b.agc_enabled {
+                    "How strong a signal has to be before the AGC turns it down; at its lowest, just over the quietest hiss, so every station you can copy is evened out. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss ducks less. The volume follows, so the strongest station stays as loud."
+                } else {
+                    "With the AGC off there is no threshold to set."
+                }
+            }
+            if previewing {
+                LevelScope { settings }
+            } else {
+                p { id: "scope-hint", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "Play the live preview to hear and watch it: CQ comes loud, medium and weak in turn. Peaks over the dashed line are evened out by the AGC; under it they keep their own level."
+                }
+            }
         }
+    }
+}
+
+/// What the RF gain reads as: "Full", or "−12 dB" backed off.
+fn rf_gain_label(db: f64) -> String {
+    if db >= RF_GAIN_MAX_DB {
+        "Full".to_string()
+    } else {
+        format!("\u{2212}{:.0} dB", -db)
+    }
+}
+
+/// What the AGC's threshold reads as: "Lowest", or "+12 dB" raised.
+fn threshold_label(db: f64) -> String {
+    if db <= AGC_THRESHOLD_MIN_DB {
+        "Lowest".to_string()
+    } else {
+        format!("+{db:.0} dB")
     }
 }

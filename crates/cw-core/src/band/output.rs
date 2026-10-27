@@ -4,6 +4,10 @@
 use super::agc::CompressorSetting;
 use super::dsp::db_to_gain;
 
+/// Where [`soft_limit`] starts to bend, as a share of full scale: below it
+/// whatever is played comes out exactly as it went in.
+pub const SOFT_LIMIT_KNEE: f64 = 0.7;
+
 /// What a receiver does with a loud crash: catches it, rather than letting it
 /// square off. Linear up to the knee, asymptotic to full scale above it — so
 /// the biggest static is loud without turning into a buzz.
@@ -12,18 +16,19 @@ use super::dsp::db_to_gain;
 /// the band, the Morse over it and the paddle's sidetone. Limited apart and
 /// then added, any two of them could still square off.
 pub fn soft_limit(x: f64) -> f64 {
-    const KNEE: f64 = 0.7;
     let magnitude = x.abs();
-    if magnitude <= KNEE {
+    if magnitude <= SOFT_LIMIT_KNEE {
         return x;
     }
-    let over = (magnitude - KNEE) / (1.0 - KNEE);
-    (KNEE + (1.0 - KNEE) * over.tanh()).copysign(x)
+    let over = (magnitude - SOFT_LIMIT_KNEE) / (1.0 - SOFT_LIMIT_KNEE);
+    (SOFT_LIMIT_KNEE + (1.0 - SOFT_LIMIT_KNEE) * over.tanh()).copysign(x)
 }
 
 /// How far past full scale [`soft_limit_curve`] reaches before it simply holds
 /// at its last value. Far beyond anything the band and the Morse add up to.
-const SOFT_LIMIT_HEADROOM: f64 = 4.0;
+/// Everything on its way into the browser's limiter is this many times
+/// quieter than it is played ([`limiter_feed`]).
+pub const SOFT_LIMIT_HEADROOM: f64 = 4.0;
 
 /// `soft_limit` as a lookup table, for a Web Audio `WaveShaperNode`.
 ///

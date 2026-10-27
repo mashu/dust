@@ -1,21 +1,29 @@
 //! The receiver's automatic gain control.
 //!
 //! One static law, shared by both backends: below a fixed knee the gain is
-//! left alone, and above it the gain comes down half a decibel for every
-//! decibel of excess, never more than [`AGC_MAX_DUCK_DB`]. The native player
-//! runs that law sample by sample in [`Agc`], with a hang; the browser can only
+//! left alone, and above it the gain comes down nine decibels for every ten
+//! of excess, never more than [`AGC_MAX_DUCK_DB`]. The native player runs
+//! that law sample by sample in [`Agc`], with a hang; the browser can only
 //! run it through a `DynamicsCompressorNode`, set by [`agc_compressor`] from
 //! that node's own curve so the two land on the same law.
 //!
-//! What it is tuned to is what operators hear and what MorseRunner — the
-//! benchmark contesters train on — does with its AGC on:
+//! What it is tuned to is what an operator hears from a rig's AGC:
 //!
-//! - Under a keyed station the band's hiss sits a steady 3 to 5 dB down, from
-//!   the first element of the over to the last. No swell at the start, no
-//!   pumping between elements: the hang carries the gain across the gaps.
-//! - In a long pause the hiss is audibly back.
+//! - Everything over the knee comes out within a few decibels of everything
+//!   else: a station 20 dB down plays nearly as loud as the strongest, and
+//!   only those under the knee keep their own level. The knee is the AGC's
+//!   threshold, and raising it lets more of them keep it.
+//! - Under a keyed station the band's hiss sits a steady way down, as far as
+//!   the station stands over the knee, from the first element of the over to
+//!   the last. No swell at the start, no pumping between elements: the hang
+//!   carries the gain across the gaps. Backing the RF gain off is what makes
+//!   it duck less.
+//! - In a pause the hiss is back, as fast as the decay setting lets it.
 //! - A crash pulls the gain for a moment and lets go; it does not dig a hole
 //!   in the band for the next second.
+//! - The first element of an over is caught before it plays: the receiver
+//!   listens [`AGC_LOOKAHEAD_SEC`] ahead of what it plays, so nothing slips
+//!   past the gain wide open and comes out louder than the AGC holds it.
 //!
 //! The knee is fixed, set from the band's floor, rather than learned from
 //! what is heard: an AGC that learns the band's level learns the station with
@@ -24,36 +32,52 @@
 //! receivers do neither.
 
 use super::dsp::{db_to_gain, gain_to_db};
+use crate::settings::AgcDecay;
 
 /// How far above the floor's own peaks the knee sits: a level has to stand
 /// 2.2 times (about 7 dB) above the highest the hiss ordinarily reaches before
 /// the gain moves. The floor alone never gets there, so on an empty band the
 /// receiver leaves the noise exactly as the filter shaped it.
 pub const AGC_TRIGGER: f64 = 2.2;
-/// Decibels of gain reduction per decibel above the knee: a 2:1 compressor.
+/// Decibels of gain reduction per decibel above the knee: a 10:1
+/// compressor, one decibel out for every ten in, as a rig's AGC holds its
+/// audio within a few decibels from S3 to S9 and over.
 ///
-/// Under the default station — 21 dB over the floor in 500 Hz, about 10 dB
-/// over the knee at its peaks — this ducks the band 5 dB, and 3.5 dB at the
-/// bottom of the volume range: MorseRunner's 3.4 to 4.3 dB and the "noise
-/// drops under a strong station" operators describe. A real receiver run at
-/// full RF gain can duck deeper; this is the knob that would do it.
-pub const AGC_SLOPE: f64 = 0.5;
-/// The most the gain ever comes down, in decibels. Past this a crash is
-/// silencing the band rather than riding over it.
-pub const AGC_MAX_DUCK_DB: f64 = 12.0;
-/// Seconds for the gain to close on a level it has to duck to. Fast, because
-/// a receiver has to catch a crash before it is deafening.
+/// The strongest station the band sends stands about 28 dB over the lowest
+/// knee and comes out under 3 dB over it; one 20 dB weaker comes out a
+/// decibel over it. Under the strongest the band's hiss ducks 25 dB.
+pub const AGC_SLOPE: f64 = 0.9;
+/// The most the gain ever comes down, in decibels: more than the strongest
+/// station ever needs over the lowest knee, with room left for a crash.
+pub const AGC_MAX_DUCK_DB: f64 = 40.0;
+/// Seconds for the gain to close on a level it has to duck to, in decibels:
+/// a station 28 dB over the knee is within a decibel of its gain in under
+/// seven milliseconds, well inside the look-ahead. Fast, because a receiver
+/// has to catch a crash before it is deafening.
 pub const AGC_ATTACK_SEC: f64 = 0.002;
-/// How long the gain holds after the last sustained signal: long enough to
-/// carry it across the gaps between elements and characters (165 ms at
-/// 22 WPM), short enough that a word gap or a pause lets the band back.
-/// Operators prefer hang AGC on CW for exactly this: a per-element pumping
-/// AGC is the one everyone dislikes.
+/// How long the gain holds after the last sustained signal at Fast decay:
+/// long enough to carry it across the gaps between elements and characters
+/// (165 ms at 22 WPM), short enough that a word gap or a pause lets the band
+/// back. Operators prefer hang AGC on CW for exactly this: a per-element
+/// pumping AGC is the one everyone dislikes.
 pub const AGC_HANG_SEC: f64 = 0.22;
-/// Once the hang has run out, the time constant the gain recovers with:
-/// between the FAST and MID settings of a typical transceiver (0.1 and 0.5 s;
-/// SLOW is 1.2 s), so a pause of a second has the band fully back.
+/// Once the hang has run out, the time constant the gain recovers with at
+/// Fast decay: between the FAST and MID settings of a typical transceiver
+/// (0.1 and 0.5 s), so a pause of a second has the band fully back.
 pub const AGC_RELEASE_SEC: f64 = 0.3;
+/// The hang at Slow decay: across a word gap at 15 WPM (0.56 s), so the band
+/// stays down from one word of an over to the next.
+pub const AGC_SLOW_HANG_SEC: f64 = 0.6;
+/// The release at Slow decay: a typical transceiver's SLOW.
+pub const AGC_SLOW_RELEASE_SEC: f64 = 1.2;
+
+/// The hang and the release `decay` runs the AGC with, in seconds.
+pub fn agc_decay_sec(decay: AgcDecay) -> (f64, f64) {
+    match decay {
+        AgcDecay::Fast => (AGC_HANG_SEC, AGC_RELEASE_SEC),
+        AgcDecay::Slow => (AGC_SLOW_HANG_SEC, AGC_SLOW_RELEASE_SEC),
+    }
+}
 /// The detector's smoothing: a one-pole average of power with this time
 /// constant, which weighs the last five milliseconds or so. A tone reads as
 /// steady through it, while a two-millisecond click is spread thin.
@@ -72,18 +96,31 @@ pub const AGC_PEAK_HOLD_SEC: f64 = 0.003;
 /// How quickly the gain comes back after a short impulse that never armed the
 /// hang. MorseRunner's AGC is back 20-30 ms after a click; so is this one.
 pub const AGC_LIMIT_RELEASE_SEC: f64 = 0.02;
-/// The most the receiver lets through to its audio stage, as an amplitude:
-/// about where the soft limiter after it is 0.997 of full scale. A loud enough
-/// crash on a wide-open filter would otherwise drive the limiter flat.
-pub const AGC_CEILING: f64 = 1.5;
-/// How far ahead of what it plays the receiver listens, so the ceiling is in
-/// place by the time a stroke's first crest arrives rather than a couple of
-/// milliseconds after it. A DSP receiver's AGC delays its audio the same way;
-/// MorseRunner's looks 28 ms ahead.
-pub const AGC_LOOKAHEAD_SEC: f64 = 0.002;
+/// The most the receiver lets through to its audio stage, in decibels over
+/// the knee: about three over where the law holds the strongest station. A
+/// crash comes and goes faster than the law rides it, and full volume lifts
+/// what the AGC plays as far as that station plays clean, so a crash let
+/// through as it came would drive the limiter flat.
+pub const AGC_CEILING_DB: f64 = 6.0;
+/// How far ahead of what it plays the receiver listens: long enough that the
+/// gain is down before the first element of an over is played, the
+/// detector, the attack and the keying's own rise all included, and the
+/// ceiling in place before a stroke's first crest. A DSP receiver's AGC
+/// delays its audio the same way; MorseRunner's looks 28 ms ahead.
+pub const AGC_LOOKAHEAD_SEC: f64 = 0.01;
 /// How fast the ceiling closes: a fifth of the look-ahead, so it has finished
 /// before the crest it saw coming is played.
 const AGC_CEILING_ATTACK_SEC: f64 = AGC_LOOKAHEAD_SEC / 5.0;
+
+/// How many samples the receiver plays its audio late at `sample_rate`:
+/// [`AGC_LOOKAHEAD_SEC`], and never none. What the AGC delays the band by,
+/// and what the player has to delay the send by for the AGC to have heard it
+/// coming.
+pub fn agc_lookahead_samples(sample_rate: u32) -> usize {
+    (AGC_LOOKAHEAD_SEC * f64::from(sample_rate.max(1)))
+        .round()
+        .max(1.0) as usize
+}
 /// Where the detector's power counts as nothing: a tone 300 dB under full
 /// scale, far below any knee.
 const SETTLED_POWER: f64 = 1e-30;
@@ -93,7 +130,7 @@ const SETTLED_POWER: f64 = 1e-30;
 /// threshold sits half of this below the native knee to centre the soft knee
 /// on the hard one.
 pub const AGC_COMPRESSOR_KNEE_DB: f64 = 6.0;
-/// The compressor ratio that is [`AGC_SLOPE`]: one decibel out for every two
+/// The compressor ratio that is [`AGC_SLOPE`]: one decibel out for every ten
 /// in above the knee.
 pub const AGC_COMPRESSOR_RATIO: f64 = 1.0 / (1.0 - AGC_SLOPE);
 
@@ -226,11 +263,11 @@ fn amplitude_to_db(amplitude: f64) -> f64 {
 /// static law when it is exceeded. Two paths decide how long that lasts:
 ///
 /// - **Hang.** A level that stays above the knee for [`AGC_QUALIFY_SEC`] is a
-///   signal, not a click. It sets the gain, and the gain then holds for
-///   [`AGC_HANG_SEC`] after the signal last stood there before recovering with
-///   [`AGC_RELEASE_SEC`]. Under a keyed station that hold is unbroken from
-///   the first element to the last, so the band sits a steady few decibels
-///   down for the whole over and comes back in the pauses.
+///   signal, not a click. It sets the gain, and the gain then holds for the
+///   decay's hang after the signal last stood there before recovering at its
+///   release ([`agc_decay_sec`]). Under a keyed station that hold is unbroken
+///   from the first element to the last, so the band sits steadily down for
+///   the whole over and comes back in the pauses.
 /// - **Limiter.** Anything above the knee pulls the gain down within
 ///   [`AGC_ATTACK_SEC`], but if it never qualified for the hang it lets go
 ///   again within [`AGC_LIMIT_RELEASE_SEC`]. A lightning stroke is squashed
@@ -238,23 +275,28 @@ fn amplitude_to_db(amplitude: f64) -> f64 {
 ///   carries on at full level.
 ///
 /// Under both, a ceiling: whatever the law says, nothing louder than
-/// [`AGC_CEILING`] reaches the audio stage. The receiver plays the band
-/// [`AGC_LOOKAHEAD_SEC`] late ([`Agc::process`]) so the ceiling is already
-/// down when the crest it saw coming is played.
+/// [`AGC_CEILING_DB`] over the knee reaches the audio stage.
+///
+/// The receiver plays everything [`AGC_LOOKAHEAD_SEC`] late, at the gain
+/// worked out from what it has heard up to now ([`Agc::process`]): the gain
+/// leads what it is played on by the look-ahead, so it is already down when
+/// the first element of an over, or the first crest of a stroke, is played.
 ///
 /// The detector is the power of everything reaching it — the band and the
 /// send playing over it, sample by sample, as a real receiver's AGC hears
 /// them — smoothed over a few milliseconds and read as the amplitude of a
 /// steady tone of the same power. A station keyed at amplitude `a` reads `a`,
-/// whether it is the one being copied or one of the band's own. Whether it has *stayed* above the
-/// knee is judged on the peaks of the last few milliseconds as well, which
-/// fall away as soon as a sound has gone however loud it was: the smoothed
-/// level takes longer to forget a loud stroke than a stroke lasts, and would
-/// otherwise let the loudest ones pass for signals.
+/// whether it is the one being copied or one of the band's own. Whether it
+/// has *stayed* above the knee is judged on the peaks of the last few
+/// milliseconds as well, which fall away as soon as a sound has gone however
+/// loud it was: the smoothed level takes longer to forget a loud stroke than
+/// a stroke lasts, and would otherwise let the loudest ones pass for signals.
 pub struct Agc {
     /// The knee, as the amplitude of a steady tone. Infinite when switched
     /// off.
     knee: f64,
+    /// The most it lets through, [`AGC_CEILING_DB`] over the knee.
+    ceiling_level: f64,
     /// The detector: smoothed power, in squared tone amplitude.
     power: f64,
     smoothing: f64,
@@ -264,6 +306,13 @@ pub struct Agc {
     last_peak: f64,
     peak_left: u32,
     peak_hold: u32,
+    /// The loudest crest of this stretch as long as the look-ahead and of the
+    /// one before it, and how long this one has left: everything still
+    /// waiting to be played is in one of the two.
+    crest: f64,
+    last_crest: f64,
+    crest_left: u32,
+    crest_hold: u32,
     /// Samples the detector has stood above the knee without a break.
     above: u32,
     qualify: u32,
@@ -273,7 +322,7 @@ pub struct Agc {
     held: f64,
     /// The gain the limiter wants.
     limited: f64,
-    /// The gain that keeps the loudest recent crest under the ceiling.
+    /// The gain that keeps the loudest crest coming under the ceiling.
     ceiling: f64,
     gain: f64,
     deepest: f64,
@@ -287,22 +336,31 @@ pub struct Agc {
 }
 
 impl Agc {
-    /// An AGC with its knee at `knee`, the amplitude of a steady tone.
-    pub fn new(sample_rate: u32, knee: f64) -> Self {
+    /// An AGC with its knee at `knee`, the amplitude of a steady tone, that
+    /// lets the gain back up as `decay` does.
+    pub fn new(sample_rate: u32, knee: f64, decay: AgcDecay) -> Self {
         let sr = f64::from(sample_rate.max(1));
         let coefficient = |seconds: f64| (-1.0 / (seconds * sr)).exp();
         let samples = |seconds: f64| (seconds * sr).round().max(1.0) as u32;
+        let knee = if knee > 0.0 { knee } else { f64::INFINITY };
+        let lookahead = agc_lookahead_samples(sample_rate);
+        let (hang, release) = agc_decay_sec(decay);
         Self {
-            knee: if knee > 0.0 { knee } else { f64::INFINITY },
+            knee,
+            ceiling_level: knee * db_to_gain(AGC_CEILING_DB),
             power: 0.0,
             smoothing: coefficient(AGC_DETECTOR_SEC),
             peak: 0.0,
             last_peak: 0.0,
             peak_left: samples(AGC_PEAK_HOLD_SEC),
             peak_hold: samples(AGC_PEAK_HOLD_SEC),
+            crest: 0.0,
+            last_crest: 0.0,
+            crest_left: lookahead as u32,
+            crest_hold: lookahead as u32,
             above: 0,
             qualify: samples(AGC_QUALIFY_SEC),
-            hang: samples(AGC_HANG_SEC),
+            hang: samples(hang),
             hang_left: 0,
             held: 1.0,
             limited: 1.0,
@@ -310,18 +368,20 @@ impl Agc {
             gain: 1.0,
             deepest: db_to_gain(-AGC_MAX_DUCK_DB),
             attack: coefficient(AGC_ATTACK_SEC),
-            release: coefficient(AGC_RELEASE_SEC),
+            release: coefficient(release),
             limit_release: coefficient(AGC_LIMIT_RELEASE_SEC),
             ceiling_attack: coefficient(AGC_CEILING_ATTACK_SEC),
             // Allocated here, once: the audio callback only ever writes into it.
-            delay: vec![0.0; samples(AGC_LOOKAHEAD_SEC) as usize],
+            delay: vec![0.0; lookahead],
             delay_at: 0,
         }
     }
 
-    /// A receiver run on its RF gain: the gain is one, whatever arrives.
-    pub fn off() -> Self {
-        Self::new(1, f64::INFINITY)
+    /// A receiver run on its RF gain: the gain is one, whatever arrives, and
+    /// the band is played the look-ahead late all the same, so switching the
+    /// AGC on or off never moves it against the send.
+    pub fn off(sample_rate: u32) -> Self {
+        Self::new(sample_rate, f64::INFINITY, AgcDecay::Fast)
     }
 
     pub fn is_off(&self) -> bool {
@@ -330,28 +390,20 @@ impl Agc {
 
     /// Feed one sample of the band as the receiver hears it, and one of the
     /// send playing over it, through the same filter; get back the band to
-    /// play, at the gain the receiver is riding at and [`AGC_LOOKAHEAD_SEC`]
-    /// late. The send is played at [`Agc::gain`]. Switched off, the band goes
-    /// straight through.
-    ///
-    /// Only the ceiling gets the benefit of the look-ahead. The law's gain
-    /// waits in the delay with the sample it was worked out on, so a crash's
-    /// first crest still gets through before the AGC catches it — the crack a
-    /// receiver's AGC is too slow for, and most of what makes static sound
-    /// like static.
+    /// play, [`AGC_LOOKAHEAD_SEC`] late, at the gain worked out from
+    /// everything heard up to now. The send is to be played the same
+    /// look-ahead late, at [`Agc::gain`]. Switched off, the band goes
+    /// through at one.
     pub fn process(&mut self, heard: f64, send: f64) -> f64 {
-        if self.is_off() {
-            return heard;
-        }
-        self.next_gain(heard + send);
-        let ridden = heard * self.limited.min(self.held);
-        let due = std::mem::replace(&mut self.delay[self.delay_at], ridden);
+        let gain = self.next_gain(heard + send);
+        let due = std::mem::replace(&mut self.delay[self.delay_at], heard);
         self.delay_at = (self.delay_at + 1) % self.delay.len();
-        due * self.ceiling
+        due * gain
     }
 
     /// Feed one sample of everything reaching the AGC — the band and the send
-    /// over it, together; get back the gain both should ride at.
+    /// over it, together; get back the gain what was heard the look-ahead ago
+    /// should be played at.
     pub fn next_gain(&mut self, sample: f64) -> f64 {
         if self.is_off() {
             return 1.0;
@@ -372,24 +424,35 @@ impl Agc {
         let wanted = self.law(level);
 
         // Down fast, and up again fast — on its own this is a limiter.
-        let coefficient = if wanted < self.limited {
-            self.attack
+        self.limited = if wanted < self.limited {
+            closer_in_db(self.limited, wanted, self.attack)
         } else {
-            self.limit_release
+            wanted + (self.limited - wanted) * self.limit_release
         };
-        self.limited = wanted + (self.limited - wanted) * coefficient;
 
         // The peaks of the last few milliseconds, for judging whether
-        // anything is still there.
-        if sample.is_finite() {
-            self.peak = self.peak.max(sample.abs());
-        }
+        // anything is still there, and the crests of the last look-ahead,
+        // for the ceiling.
+        let magnitude = if sample.is_finite() {
+            sample.abs()
+        } else {
+            0.0
+        };
+        self.peak = self.peak.max(magnitude);
         self.peak_left -= 1;
         let recent = self.peak.max(self.last_peak);
         if self.peak_left == 0 {
             self.last_peak = self.peak;
             self.peak = 0.0;
             self.peak_left = self.peak_hold;
+        }
+        self.crest = self.crest.max(magnitude);
+        self.crest_left -= 1;
+        let coming = self.crest.max(self.last_crest);
+        if self.crest_left == 0 {
+            self.last_crest = self.crest;
+            self.crest = 0.0;
+            self.crest_left = self.crest_hold;
         }
 
         // The hang: only a level that has stood above the knee long enough to
@@ -401,23 +464,27 @@ impl Agc {
         };
         if self.above >= self.qualify {
             self.hang_left = self.hang;
-            let coefficient = if wanted < self.held {
-                self.attack
+            self.held = if wanted < self.held {
+                closer_in_db(self.held, wanted, self.attack)
             } else {
-                self.release
+                wanted + (self.held - wanted) * self.release
             };
-            self.held = wanted + (self.held - wanted) * coefficient;
         } else if self.hang_left > 0 {
             self.hang_left -= 1;
         } else {
             self.held = 1.0 + (self.held - 1.0) * self.release;
         }
 
-        // The ceiling. The crests of the last few milliseconds include
-        // everything still waiting in the look-ahead, so a gain that keeps
-        // them under the ceiling keeps what is about to be played there too.
-        let room = if recent > AGC_CEILING {
-            AGC_CEILING / recent
+        // The ceiling, on the crests still waiting to be played, at the gain
+        // the law is on its way to: by the time a station's first crests are
+        // played the law has them, and the ceiling is for what it never will,
+        // a crash gone before it is caught. Judged on the gain as it stands,
+        // the ceiling would take the first element of every over down a
+        // second time while the law caught up.
+        let law = self.limited.min(self.held);
+        let loudest = coming * wanted.min(self.held);
+        let room = if loudest > self.ceiling_level {
+            self.ceiling_level / loudest
         } else {
             1.0
         };
@@ -428,7 +495,7 @@ impl Agc {
         };
         self.ceiling = room + (self.ceiling - room) * coefficient;
 
-        self.gain = self.limited.min(self.held).min(self.ceiling);
+        self.gain = law * self.ceiling;
         self.gain
     }
 
@@ -449,6 +516,8 @@ impl Agc {
         self.power = previous.power;
         self.peak = previous.peak;
         self.last_peak = previous.last_peak;
+        self.crest = previous.crest;
+        self.last_crest = previous.last_crest;
         self.above = previous.above;
         self.hang_left = previous.hang_left.min(self.hang);
         self.held = previous.held;
@@ -470,6 +539,14 @@ impl Agc {
     }
 }
 
+/// One step of a one-pole from `from` towards `to`, taken in decibels, with
+/// `coefficient` the share of the way left: a gain closing on one 30 dB down
+/// gets there as fast in decibels as one closing on 3 dB, where a step in
+/// amplitude would take the last twenty of the thirty at a crawl.
+fn closer_in_db(from: f64, to: f64, coefficient: f64) -> f64 {
+    to * (from / to).powf(coefficient)
+}
+
 /// The static law in decibels, written out from its definition rather than
 /// taken from [`Agc`]: how far the gain comes down for a level `over_db`
 /// above the knee. What both backends are held to.
@@ -488,8 +565,10 @@ mod tests {
     use std::f64::consts::TAU;
 
     use crate::band::BandMixer;
-    use crate::band::calibration::{REFERENCE_NOISE_LEVEL, reference_floor_rms};
-    use crate::band::knee::{FLOOR_MEASURE_RATE, band_standing_level, reference_floor_level};
+    use crate::band::calibration::{
+        NOISE_LEVEL_PER_DB, REFERENCE_NOISE_LEVEL, reference_floor_rms,
+    };
+    use crate::band::knee::{FLOOR_MEASURE_RATE, band_standing_level, quietest_floor_level};
     use crate::band::noise::NoiseFloor;
     use crate::band::test_support::{knee_for, receiver_for, rms};
     use crate::settings::{FILTER_WIDTH_MAX, FilterShape, TrainingSettings};
@@ -620,22 +699,27 @@ mod tests {
         (t * f64::from(SR)) as usize
     }
 
-    /// The law the two backends share: nothing at the knee, half a decibel per
-    /// decibel above it, never more than twelve.
+    /// The law the two backends share: nothing at the knee, nine decibels
+    /// for every ten above it, never more than forty.
     #[test]
-    fn the_static_law_is_two_to_one_above_the_knee_and_stops_at_twelve() {
+    fn the_static_law_is_ten_to_one_above_the_knee_and_stops_at_forty() {
         assert_eq!(agc_law_db(-5.0), 0.0);
         assert_eq!(agc_law_db(0.0), 0.0);
         assert_eq!(agc_law_db(f64::NAN), 0.0);
-        assert!((agc_law_db(10.0) + 5.0).abs() < 1e-12);
-        assert!((agc_law_db(24.0) + 12.0).abs() < 1e-12);
-        assert!((agc_law_db(60.0) + 12.0).abs() < 1e-12);
+        assert!((agc_law_db(10.0) + 9.0).abs() < 1e-12);
+        assert!((agc_law_db(40.0) + 36.0).abs() < 1e-12);
+        assert!((agc_law_db(60.0) + 40.0).abs() < 1e-12);
         // The gain the native AGC settles at under a steady tone is that law,
-        // whether the tone is in the band or is the send.
-        let knee = 0.1;
-        for over_db in [3.0, 10.0, 20.0, 30.0] {
+        // whether the tone is in the band or is the send, and at either decay.
+        let knee = 0.01;
+        for (over_db, decay) in [
+            (3.0, AgcDecay::Fast),
+            (10.0, AgcDecay::Slow),
+            (20.0, AgcDecay::Fast),
+            (30.0, AgcDecay::Slow),
+        ] {
             let amplitude = knee * 10f64.powf(over_db / 20.0);
-            let (mut heard, mut sent) = (Agc::new(SR, knee), Agc::new(SR, knee));
+            let (mut heard, mut sent) = (Agc::new(SR, knee, decay), Agc::new(SR, knee, decay));
             for i in 0..SR / 2 {
                 let tone = amplitude * (TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
                 heard.process(tone, 0.0);
@@ -688,8 +772,8 @@ mod tests {
         let early = mean_db(&gain, at(0.0, 0.5));
         let late = mean_db(&gain, at(4.0, 8.0));
         assert!(
-            (-8.0..=-3.0).contains(&late),
-            "the band should sit 3-8 dB down under the station, was {late:.2} dB"
+            (-15.0..=-9.0).contains(&late),
+            "the band should sit 9-15 dB down under the station, was {late:.2} dB"
         );
         assert!(
             (early - late).abs() <= 1.0,
@@ -780,7 +864,7 @@ mod tests {
                 settings.band.filter_shape, settings.band.filter_width_hz
             );
             let knee = knee_for(&settings).unwrap();
-            let mut agc = Agc::new(SR, knee);
+            let mut agc = Agc::new(SR, knee, AgcDecay::Fast);
             let mut floor = NoiseFloor::new(SR, reference_floor_rms(), 3);
             let mut receiver = receiver_for(SR, &settings);
             // An impulse whose peak through a 500 Hz filter is the default
@@ -825,10 +909,8 @@ mod tests {
     ///
     /// Through the default receiver and through the widest filter of every
     /// shape. The stroke is sixty decibels over the floor as the static is
-    /// calibrated, through a 500 Hz filter, where it came out fifteen times
-    /// the ceiling; through the default narrow one it comes out five times
-    /// it — a narrow filter takes the edge off a crash — and through the
-    /// widest up to fifty.
+    /// calibrated, which through any of them comes out tens of times the
+    /// ceiling.
     #[test]
     fn the_loudest_crash_is_held_under_the_ceiling() {
         let widest = |shape: FilterShape| {
@@ -847,7 +929,9 @@ mod tests {
                 "{:?} {:.0} Hz",
                 settings.band.filter_shape, settings.band.filter_width_hz
             );
-            let mut agc = Agc::new(SR, knee_for(&settings).unwrap());
+            let knee = knee_for(&settings).unwrap();
+            let ceiling = knee * db_to_gain(AGC_CEILING_DB);
+            let mut agc = Agc::new(SR, knee, AgcDecay::Fast);
             let mut receiver = receiver_for(SR, &settings);
             // A return stroke sixty decibels over the reference floor: ten
             // impulses across three milliseconds.
@@ -864,35 +948,74 @@ mod tests {
                 loudest_out = loudest_out.max(agc.process(heard, 0.0).abs());
             }
             assert!(
-                loudest_in > 4.0 * AGC_CEILING,
-                "{name}: not a loud enough stroke, {loudest_in:.2}"
+                loudest_in > 4.0 * ceiling,
+                "{name}: not a loud enough stroke, {loudest_in:.3} against {ceiling:.3}"
             );
             assert!(
-                loudest_out <= AGC_CEILING * 1.02,
-                "{name}: {loudest_out:.2} reached the audio stage"
+                loudest_out <= ceiling * 1.02,
+                "{name}: {loudest_out:.3} reached the audio stage, over {ceiling:.3}"
             );
         }
 
         // The band is played exactly the look-ahead late, and untouched when
-        // nothing is happening.
-        let mut agc = Agc::new(SR, 1.0);
-        let lag = seconds(AGC_LOOKAHEAD_SEC);
-        let played: Vec<f64> = (0..lag + 2)
-            .map(|i| agc.process(if i == 0 { 0.01 } else { 0.0 }, 0.0))
-            .collect();
-        assert_eq!(played[lag], 0.01);
+        // nothing is happening; switched off, as late, at one.
+        let lag = agc_lookahead_samples(SR);
+        assert_eq!(lag, seconds(AGC_LOOKAHEAD_SEC));
+        for mut agc in [Agc::new(SR, 1.0, AgcDecay::Fast), Agc::off(SR)] {
+            let played: Vec<f64> = (0..lag + 2)
+                .map(|i| agc.process(if i == 0 { 0.01 } else { 0.0 }, 0.0))
+                .collect();
+            assert_eq!(played[lag], 0.01);
+            assert!(
+                played
+                    .iter()
+                    .enumerate()
+                    .all(|(i, s)| i == lag || *s == 0.0)
+            );
+        }
+    }
+
+    /// The gain leads what it is played on by the look-ahead, so the first
+    /// element of an over, keyed as hard as the keying goes and well over
+    /// the knee, never plays louder than the AGC holds it once it has it.
+    #[test]
+    fn the_first_element_is_caught_before_it_plays() {
+        let knee = 0.01;
+        let over_db = 28.0;
+        let amplitude = knee * db_to_gain(over_db);
+        let mut agc = Agc::new(SR, knee, AgcDecay::Fast);
+        // A hundred milliseconds of silence, then a tone switched straight
+        // on: harder than any keying.
+        let tone = |i: usize| {
+            if i < seconds(0.1) {
+                0.0
+            } else {
+                amplitude * (TAU * 600.0 * i as f64 / f64::from(SR)).sin()
+            }
+        };
+        let lag = agc_lookahead_samples(SR);
+        let mut sent = vec![0.0; lag];
+        let mut loudest = 0.0f64;
+        for i in 0..seconds(0.5) {
+            let now = tone(i);
+            let gain = agc.next_gain(now);
+            let due = std::mem::replace(&mut sent[i % lag], now);
+            loudest = loudest.max((due * gain).abs());
+        }
+        let held = amplitude * db_to_gain(agc_law_db(over_db));
         assert!(
-            played
-                .iter()
-                .enumerate()
-                .all(|(i, s)| i == lag || *s == 0.0)
+            db(loudest / held) < 1.0,
+            "the onset came out {:.2} dB over what the AGC holds",
+            db(loudest / held)
         );
-        // Switched off, straight through.
-        assert_eq!(Agc::off().process(5.0, 0.0), 5.0);
     }
 
     /// (4): ten minutes of the default band, crashes and all, and the floor
-    /// never sags behind them.
+    /// all but never sags behind them. Now and then a long rumble stands
+    /// over the knee long enough to pass for a signal and hold the band down
+    /// for a hang, as static pumps a rig's AGC; at ten to one that hang is a
+    /// deep one, so it counts, but it is one quarter second in a hundred or
+    /// two.
     ///
     /// Read off the gain the receiver rides at, the robust gain of each
     /// quarter second — the median of its 5 ms frames, which a crash's own
@@ -904,7 +1027,7 @@ mod tests {
     /// hiss.
     #[test]
     fn the_floor_does_not_sag_behind_the_static() {
-        for (qrn, length, most) in [(0.25, 600, 0.01), (0.5, 300, 0.03)] {
+        for (qrn, length, most) in [(0.25, 600, 0.02), (0.5, 300, 0.03)] {
             let mut settings = floor_only();
             settings.band.qrn_enabled = true;
             settings.band.qrn_level = qrn;
@@ -1005,7 +1128,7 @@ mod tests {
         let keyed = station(&settings, &["TEST"], 0.2, 0.0);
         let (_, gain) = ride(&settings, &keyed.samples, 3.0);
         assert!(gain.iter().all(|g| *g == 1.0));
-        let mut agc = Agc::off();
+        let mut agc = Agc::off(SR);
         assert!(agc.is_off());
         assert_eq!(agc.next_gain(10.0), 1.0);
     }
@@ -1017,7 +1140,7 @@ mod tests {
     #[test]
     fn a_crash_ducks_the_band_and_it_comes_back() {
         // The knee a band at 0.05 would have: its peaks, 2.2 times over.
-        let mut agc = Agc::new(SR, 0.05 * AGC_TRIGGER);
+        let mut agc = Agc::new(SR, 0.05 * AGC_TRIGGER, AgcDecay::Fast);
         let tone =
             |amplitude: f64, i: u32| amplitude * (TAU * 600.0 * f64::from(i) / f64::from(SR)).sin();
         let mut steady = 1.0;
@@ -1054,7 +1177,7 @@ mod tests {
     /// of a silent band.
     #[test]
     fn the_detector_comes_to_rest_in_silence() {
-        let mut agc = Agc::new(SR, 0.1);
+        let mut agc = Agc::new(SR, 0.1, AgcDecay::Fast);
         for i in 0..SR / 10 {
             let phase = TAU * 600.0 * f64::from(i) / f64::from(SR);
             agc.next_gain(0.5 * phase.sin());
@@ -1070,20 +1193,20 @@ mod tests {
     }
 
     /// The knee follows a louder floor up, so plain hiss never pumps the
-    /// gain, but not a quieter one down: closing the filter or quieting the
-    /// band takes noise out from under the knee and leaves the station as
-    /// loud as it was.
+    /// gain, but not a quieter one down past the quietest hiss the noise
+    /// control sets: switching the noise off or closing the filter takes
+    /// noise out from under the knee and leaves the station as loud as it
+    /// was.
     ///
-    /// The knee's floor is the reference floor's: the reference noise level
-    /// through the 500 Hz filter. The default receiver, the peaked 300 Hz
-    /// one, lets in 163 Hz of noise bandwidth against its 503 — 4.9 dB less —
-    /// and the narrower hiss peaks a little less high on the follower too, so
-    /// that floor through it stands 5.8 dB under and its knee is the held
-    /// one. A louder floor raises it by the 11.4 dB three tenths of the
-    /// control add, less the way it had to come up to reach the reference.
-    /// A wide filter lets more noise in and raises it — a sharp one 2 kHz wide
-    /// by 5 dB; the peak filter's resonance holds the noise bandwidth near the
-    /// reference's however wide the IF filter behind it goes.
+    /// The knee's floor is the quietest floor's, through the 500 Hz filter.
+    /// The default receiver, a sharp one 300 Hz wide, lets in 2.5 to 3.5 dB
+    /// less noise than that, so even the quietest hiss through it holds the
+    /// knee there. The reference floor is 18 dB louder than the quietest and
+    /// raises the knee by that less what the narrower receiver takes off;
+    /// three tenths of the control more add 11.4 dB. A wide filter lets more
+    /// noise in and raises it — a sharp one 2 kHz wide by 5 dB; the peak
+    /// filter's resonance holds the noise bandwidth near the reference's
+    /// however wide the IF filter behind it goes.
     #[test]
     fn the_knee_rises_with_a_loud_floor_and_holds_for_a_quiet_one() {
         let knee = |edit: fn(&mut TrainingSettings)| {
@@ -1091,46 +1214,61 @@ mod tests {
             edit(&mut s);
             knee_for(&s.clamp()).unwrap()
         };
-        let held = AGC_TRIGGER * reference_floor_level();
+        let held = AGC_TRIGGER * quietest_floor_level();
         let reference = knee(|_| {});
         let loud = knee(|s| s.band.noise_level = 0.8);
-        let wide = knee(|s| s.band.filter_width_hz = FILTER_WIDTH_MAX);
+        let wide = knee(|s| {
+            s.band.filter_width_hz = FILTER_WIDTH_MAX;
+            s.band.filter_shape = FilterShape::Peaked;
+        });
         let wide_sharp = knee(|s| {
             s.band.filter_width_hz = FILTER_WIDTH_MAX;
             s.band.filter_shape = FilterShape::Sharp;
         });
-        let narrow = knee(|s| s.band.filter_width_hz = 150.0);
-        let quiet = knee(|s| s.band.noise_level = 0.1);
+        let quietest = knee(|s| s.band.noise_level = NOISE_LEVEL_PER_DB);
+        let narrow = knee(|s| {
+            s.band.noise_level = NOISE_LEVEL_PER_DB;
+            s.band.filter_width_hz = 150.0;
+        });
         let silent = knee(|s| s.band.noise_enabled = false);
-        // Through the default receiver the floor is under the reference
-        // floor, by about what the noise bandwidths say.
+        // Through the default receiver the floor is under the same floor
+        // through the 500 Hz one, by about what the noise bandwidths say.
         let floor = floor_only();
         let receiver = crate::band::FilterDesign::from_settings(&floor);
-        let under = db(reference_floor_level()
-            / band_standing_level(FLOOR_MEASURE_RATE, &floor.band, &receiver));
+        let through_500 = quietest_floor_level() * db_to_gain(18.0);
+        let under =
+            db(through_500 / band_standing_level(FLOOR_MEASURE_RATE, &floor.band, &receiver));
         assert!(
-            (4.5..7.0).contains(&under),
+            (2.5..3.5).contains(&under),
             "the default floor is {under:.2} dB under"
         );
-        // Below the reference floor the knee holds at the reference floor's.
-        for other in [reference, narrow, quiet, silent] {
+        // Below the quietest floor the knee holds at the quietest floor's.
+        for other in [quietest, narrow, silent] {
             assert_eq!(other, held);
         }
-        // Three tenths of the control is 11.4 dB more floor.
-        let rise = db(loud / held) + under;
+        // The reference floor raises it 18 dB, less what the receiver takes
+        // off; three tenths of the control more, 11.4 dB more.
+        let rise = db(reference / held) + under;
         assert!(
-            (10.0..13.0).contains(&rise),
-            "a louder floor raised the knee {:.1} dB, {rise:.1} dB from the default floor",
-            db(loud / held)
+            (17.0..19.0).contains(&rise),
+            "the reference floor raised the knee {:.1} dB",
+            db(reference / held)
         );
+        let louder = db(loud / reference);
         assert!(
-            db(wide_sharp / held) > 4.0,
+            (10.0..13.0).contains(&louder),
+            "a louder floor raised the knee {louder:.1} dB"
+        );
+        // Against the same floor through the 500 Hz filter.
+        let reference_500 = AGC_TRIGGER * through_500;
+        assert!(
+            db(wide_sharp / reference_500) > 4.0,
             "a wide sharp filter left the knee put"
         );
         assert!(
-            wide >= held && db(wide / held) < 2.0,
+            wide >= reference_500 && db(wide / reference_500) < 2.0,
             "wide and peaked: {:.2} dB",
-            db(wide / held)
+            db(wide / reference_500)
         );
         // And that floor, through the AGC, is left alone.
         let mut s = floor_only();

@@ -69,6 +69,7 @@ impl TrainingSettings {
                 self.band.volume_min = d.band.volume_min;
                 self.band.volume_max = d.band.volume_max;
                 self.band.link_volume = d.band.link_volume;
+                self.band.master_volume = d.band.master_volume;
                 self.contest.my_sending_db = d.contest.my_sending_db;
                 self.contest.contest_qsk = d.contest.contest_qsk;
             }
@@ -80,7 +81,10 @@ impl TrainingSettings {
                 self.band.qrn_level = d.band.qrn_level;
                 self.band.noise_enabled = d.band.noise_enabled;
                 self.band.noise_level = d.band.noise_level;
+                self.band.rf_gain_db = d.band.rf_gain_db;
                 self.band.agc_enabled = d.band.agc_enabled;
+                self.band.agc_decay = d.band.agc_decay;
+                self.band.agc_threshold_db = d.band.agc_threshold_db;
                 self.band.filter_width_hz = d.band.filter_width_hz;
                 self.band.filter_shape = d.band.filter_shape;
                 self.band.stations_min = d.band.stations_min;

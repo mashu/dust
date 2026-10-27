@@ -15,9 +15,9 @@ use cpal::{BufferSize, FromSample, SampleFormat, SizedSample};
 use cw_core::band::{BandMixer, FilterDesign, Qsb};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
-use super::mixer::{BandVoice, Mixer, Output, SendVoice, SidetoneControl, Swept};
-use super::shape::ToneRequest;
-use super::{MorseBackend, PlaybackSignal};
+use super::mixer::{BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept};
+use super::shape::{Gains, ToneRequest};
+use super::{MeterFrame, MorseBackend, PlaybackSignal};
 use state::{PlayerState, ToneSignal};
 
 /// The furthest behind the callback the speaker is believed to be. A host
@@ -55,6 +55,14 @@ pub struct MorsePlayer {
     /// be: what a send asked to start at a given time takes over from it
     /// against.
     heard_at: Option<Instant>,
+    /// The gains the mixer was last asked to play at, so it is locked for
+    /// them only when they move: a callback that finds it held plays a
+    /// buffer without it.
+    gains: Gains,
+    /// The mixer's meter, read without its lock, and how many of its frames
+    /// have been taken.
+    meter: Arc<Meter>,
+    metered: usize,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -103,14 +111,19 @@ impl MorsePlayer {
         #[cfg(target_os = "ios")]
         claim_audio_session();
         let (device, supported) = default_output()?;
+        let mixer = Mixer::new(supported.sample_rate().0);
+        let meter = mixer.meter();
         let mut player = Self {
             state: PlayerState::new(),
-            mixer: Arc::new(Mutex::new(Mixer::new(supported.sample_rate().0))),
+            mixer: Arc::new(Mutex::new(mixer)),
             sidetone: Arc::new(SidetoneControl::new()),
             stream: None,
             opened_at: Instant::now(),
             refused_at: None,
             heard_at: None,
+            gains: Gains::UNITY,
+            meter,
+            metered: 0,
         };
         if let Err(err) = player.open(&device, &supported) {
             eprintln!("audio output: {err}");
@@ -203,6 +216,11 @@ impl MorseBackend for MorsePlayer {
     fn apply_band(&mut self, settings: &TrainingSettings) {
         // A stream that will not open is reported by the next send.
         self.ensure_output_unless_refused();
+        let gains = Gains::of(settings);
+        if gains != self.gains {
+            self.mixer().set_gains(gains);
+            self.gains = gains;
+        }
         if !self.state.band_needs_rebuild(settings) {
             return;
         }
@@ -301,6 +319,10 @@ impl MorseBackend for MorsePlayer {
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
         self.sidetone.set(ToneRequest::new(on, frequency_hz, gain));
         self.ensure_output_unless_refused();
+    }
+
+    fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
+        self.meter.read_since(&mut self.metered, into);
     }
 }
 

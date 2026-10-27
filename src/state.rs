@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
 use crate::persist::backup::{Backup, backup_name, merge_sessions, write_backup};
-use crate::persist::{HistorySaved, Store};
+use crate::persist::{HistorySaved, Store, merge_settings};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live};
@@ -197,14 +197,35 @@ impl AppCtx {
     }
 
     /// Store the settings as they are now, clamped, unless they are stored
-    /// so already.
-    pub fn store_settings(self) {
-        let persist = self.settings.peek().clone().clamp();
+    /// so already, and give back the settings stored.
+    ///
+    /// Another tab, window or copy of the app may have stored settings since
+    /// this one last read or wrote them. Those are kept: only what changed
+    /// here is laid over them, and whatever they changed is taken up here
+    /// too, so a copy left open on old settings never puts them back.
+    pub fn store_settings(self) -> TrainingSettings {
+        let mut settings = self.settings;
+        let ours = settings.peek().clone().clamp();
         let mut stored = self.stored_settings;
-        if *stored.peek() != persist {
-            self.app().store.save_settings(&persist);
-            stored.set(persist);
+        let base = stored.peek().clone();
+        let store = self.app().store;
+        let elsewhere = store.read_settings().filter(|theirs| *theirs != base);
+        let merged = match &elsewhere {
+            Some(theirs) => merge_settings(&base, &ours, theirs),
+            None => ours.clone(),
+        };
+        if elsewhere.as_ref().unwrap_or(&base) != &merged {
+            store.save_settings(&merged);
         }
+        if base != merged {
+            stored.set(merged.clone());
+        }
+        // Only what came from elsewhere: the settings screen leaves its
+        // own values as typed until they are left.
+        if merged != ours {
+            settings.set(merged.clone());
+        }
+        merged
     }
 
     /// Stop whatever is playing outside a session.

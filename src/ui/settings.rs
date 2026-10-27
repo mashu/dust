@@ -9,10 +9,11 @@ use cw_core::{
     CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ContestSettings,
     ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC,
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    KeyerMode, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, NUM_GROUPS_MAX, NUM_GROUPS_MIN,
-    RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RangeSetting, RecognitionEdge,
-    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX,
-    VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section,
+    KeyerMode, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB,
+    NUM_GROUPS_MAX, NUM_GROUPS_MIN, RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RangeSetting,
+    RecognitionEdge, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, SpeedPath,
+    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on,
+    adapts_group_size, adapts_speed, aim_section,
 };
 use dioxus::prelude::*;
 
@@ -152,13 +153,12 @@ pub fn SettingsView(
     }
 }
 
-/// What a preset sets, in a line: "20 groups of 2–3 · 15–25 WPM".
+/// What a preset sets, in a line: "Groups of 2–3 · 15–25 WPM".
 fn experience_summary(experience: Experience) -> String {
     let (fewest, most) = experience.group_size();
     let (slowest, fastest) = experience.char_wpm();
     format!(
-        "{} groups of {} · {} WPM",
-        experience.groups(),
+        "Groups of {} · {} WPM",
         range_label(f64::from(fewest), f64::from(most)),
         range_label(slowest, fastest),
     )
@@ -172,7 +172,7 @@ fn ExperienceCard(settings: Signal<TrainingSettings>) -> Element {
     let on = use_memo(move || Experience::of(&settings.read()))();
     let note = match on {
         Some(experience) => experience_summary(experience),
-        None => "Sets session length, group size and speed to start from.".to_string(),
+        None => "Sets group size and speed to start from.".to_string(),
     };
     rsx! {
         div { class: "card experience",
@@ -701,7 +701,29 @@ fn YourSpeed(settings: Signal<TrainingSettings>) -> Element {
     }
 }
 
-/// What your sending reads as: "−9 dB", or "Off" at the bottom.
+/// How loud everything plays, the band, the stations, your sending and the
+/// paddle's sidetone together, as a share of full: the one control for
+/// that, the station strength below being how strong a station is against
+/// the band. It reads its own value, so the card around it never redraws
+/// for it.
+#[component]
+fn MasterVolume(settings: Signal<TrainingSettings>) -> Element {
+    let volume = use_memo(move || settings.read().band.master_volume)();
+    rsx! {
+        SliderField {
+            label: "Volume",
+            value_label: format!("{:.0}%", volume * 100.0),
+            value: volume,
+            min: MASTER_VOLUME_MIN,
+            max: MASTER_VOLUME_MAX,
+            step: 0.05,
+            disabled: false,
+            onchange: move |v: f64| settings.write().band.master_volume = (v * 100.0).round() / 100.0,
+        }
+    }
+}
+
+/// What your sending reads as: "−3 dB", or "Off" at the bottom.
 fn sending_label(db: i32) -> String {
     if db <= MY_SENDING_OFF_DB {
         "Off".to_string()
@@ -714,8 +736,8 @@ fn sending_label(db: i32) -> String {
 
 /// How loud you hear your own messages in a run, in Contest mode only: from
 /// off to the loudest, in decibels as MorseRunner's self-monitor reads,
-/// whatever the volume range above says. It reads its own value, so the
-/// card around it never redraws for it.
+/// whatever the station strength range above says, at the volume. It reads
+/// its own value, so the card around it never redraws for it.
 #[component]
 fn SendingLevel(settings: Signal<TrainingSettings>) -> Element {
     let sending = use_memo(move || {
@@ -739,7 +761,7 @@ fn SendingLevel(settings: Signal<TrainingSettings>) -> Element {
             onchange: move |v: f64| settings.write().contest.my_sending_db = v.round() as i32,
         }
         p { id: "sending-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
-            "Your own messages in a run, apart from the volume above: 0 dB is the loudest, {start} about level with an average caller, and Off silent, the run keeping its time."
+            "Your own messages in a run, apart from the station strength above: 0 dB is the loudest, {start} about level with an average caller, and Off silent, the run keeping its time."
         }
     }
 }
@@ -768,9 +790,9 @@ fn FullBreakIn(settings: Signal<TrainingSettings>) -> Element {
     }
 }
 
-/// Nothing but ranges, which read their own values, and in Contest mode
-/// your sending and full break-in, which read their own: this card itself
-/// never redraws for a setting.
+/// Nothing but the volume and ranges, which read their own values, and in
+/// Contest mode your sending and full break-in, which read their own: this
+/// card itself never redraws for a setting.
 #[component]
 fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
     rsx! {
@@ -778,11 +800,12 @@ fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
             SectionHead {
                 icon: IconName::Volume,
                 title: "Tone & volume",
-                note: "Side tone pitch and sending level",
+                note: "Volume, pitch and station strength",
                 settings,
                 section: SettingsSection::ToneAndVolume,
                 help: help::tone(),
             }
+            MasterVolume { settings }
             SettingsRange {
                 settings,
                 which: RangeSetting::SideTone,
@@ -796,11 +819,13 @@ fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
             SettingsRange {
                 settings,
                 which: RangeSetting::Volume,
-                label: "Volume",
-                unit: "gain",
+                label: "Station strength",
+                unit: "%",
                 min_bound: VOLUME_MIN,
                 max_bound: VOLUME_MAX,
                 step: 0.05,
+                percent: true,
+                hint: "How far the station stands over the band's noise, not how loud it plays. A range draws a fresh strength per group.",
             }
             SendingLevel { settings }
             FullBreakIn { settings }

@@ -7,7 +7,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    BackupSaving, HistorySaved, Store, load_settings_from, newest, newest_that_fit, parse_sessions,
+    BackupSaving, HistorySaved, Store, newest, newest_that_fit, parse_sessions, read_settings_from,
     saved_now,
 };
 
@@ -115,11 +115,9 @@ impl Store for WebStore {
         }
     }
 
-    fn load_settings(&self) -> TrainingSettings {
-        let raw = storage()
-            .and_then(|store| store.get_item(SETTINGS_KEY).ok().flatten())
-            .unwrap_or_default();
-        load_settings_from(&raw)
+    fn read_settings(&self) -> Option<TrainingSettings> {
+        let raw = storage()?.get_item(SETTINGS_KEY).ok().flatten()?;
+        read_settings_from(&raw)
     }
 
     fn save_settings(&self, settings: &TrainingSettings) {

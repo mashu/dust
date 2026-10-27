@@ -6,7 +6,7 @@
 //! quoted. The static and the other stations are set against the reference
 //! floor in that filter: absolute, like the station you are copying, so that
 //! turning the hiss down does not take the storm or the band's traffic down
-//! with it. The AGC's knee holds at what the reference floor peaks at.
+//! with it. The AGC's knee holds at what the quietest floor peaks at.
 
 use std::f64::consts::SQRT_2;
 
@@ -24,8 +24,7 @@ pub const REFERENCE_BANDWIDTH_HZ: f64 = 500.0;
 /// The setting of the noise control the band is calibrated against: the
 /// middle of it, where the floor is a station 21 dB down in the reference
 /// bandwidth. The static and the stations are set against this floor whether
-/// or not the floor itself is switched on, and the AGC's knee never sits
-/// lower than this floor puts it.
+/// or not the floor itself is switched on.
 pub const REFERENCE_NOISE_LEVEL: f64 = 0.5;
 
 /// Signal-to-noise in the reference bandwidth at each end of the noise
@@ -34,6 +33,18 @@ pub const REFERENCE_NOISE_LEVEL: f64 = 0.5;
 /// trained ear still gets most of it.
 const NOISE_SNR_QUIET_DB: f64 = 40.0;
 const NOISE_SNR_LOUD_DB: f64 = 2.0;
+
+/// How far the noise control moves for one decibel of signal-to-noise. The
+/// control is linear in decibels ([`noise_floor_snr_db`]), so this is the
+/// step it moves in and the levels it is held to: every step of the slider
+/// is one decibel, wherever it stands.
+pub const NOISE_LEVEL_PER_DB: f64 = 1.0 / (NOISE_SNR_QUIET_DB - NOISE_SNR_LOUD_DB);
+
+/// `level` held to the nearest whole decibel of signal-to-noise, as the
+/// control moves it.
+pub fn whole_db_noise_level(level: f64) -> f64 {
+    (level / NOISE_LEVEL_PER_DB).round() * NOISE_LEVEL_PER_DB
+}
 
 /// How loud the band's noise floor is set, from 0 to 1: nothing when it is
 /// switched off, whatever its level says.
@@ -128,6 +139,24 @@ mod tests {
         let receiver = super::super::FilterDesign::from_settings(&settings);
         let snr = heard_snr_db(noise_level(&settings.band), receiver.noise_bandwidth_hz());
         assert!((40.0..41.5).contains(&snr), "{snr} dB");
+    }
+
+    /// A step of the noise control is a decibel, at either end and in the
+    /// middle; held to whole decibels, a level stays put, and the reference
+    /// floor is one of them.
+    #[test]
+    fn a_step_of_the_noise_control_is_one_decibel() {
+        for level in [0.0, REFERENCE_NOISE_LEVEL, 1.0 - NOISE_LEVEL_PER_DB] {
+            let step = noise_floor_snr_db(level) - noise_floor_snr_db(level + NOISE_LEVEL_PER_DB);
+            assert!((step - 1.0).abs() < 1e-9, "{step} dB from {level}");
+        }
+        assert_eq!(
+            whole_db_noise_level(REFERENCE_NOISE_LEVEL),
+            REFERENCE_NOISE_LEVEL
+        );
+        let held = whole_db_noise_level(0.1);
+        assert_eq!(whole_db_noise_level(held), held);
+        assert!((noise_floor_snr_db(held) - 36.0).abs() < 1e-9);
     }
 
     #[test]

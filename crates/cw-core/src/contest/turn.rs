@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use crate::band::Qsb;
+use crate::band::{Qsb, SOFT_LIMIT_KNEE};
 use crate::morse::morse_for;
 use crate::session::MonoMs;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
@@ -27,26 +27,23 @@ use crate::timing::{
     plan_from, plan_morse_playback_at, plan_morse_playback_for,
 };
 
-/// The loudest you hear your own message, as a peak of full scale: your
-/// sending at 0 dB, which the Tone and volume card turns down from here
-/// ([`crate::ContestSettings::sending_level`]). It is played past the
-/// receiver, as a rig's sidetone is, so no band setting moves its level or
-/// takes any of it away.
+/// The loudest you hear your own message, as a peak of full scale at full
+/// volume: your sending at 0 dB, which the Tone and volume card turns down
+/// from here ([`crate::ContestSettings::sending_level`]). It is monitored,
+/// not received, as a rig's sidetone is: played past the receiver and past
+/// its AF gain, at the level it is heard at, turned down by the volume alone,
+/// so no band setting moves its level or takes any of it away.
 ///
-/// Half of full scale: about 3 dB under the paddle's sidetone at the default
-/// volume floor (0.7), so a message sounds like your own keying; 4.4 dB over
-/// the loudest caller (0.3, before the AGC), so at the hardest noise the
-/// floor sits about 11 dB under it through the default filter, where the
-/// loudest caller stands 7 dB clear; and under the output stage's limiter,
-/// which starts to bend at 0.7, so it is never bent on its own and the
-/// band's crests on top of it are caught rather than clipped.
+/// Where the output stage's limiter starts to bend: at its loudest your
+/// message peaks right there and never past it, as loud as the strongest
+/// station a receiver plays at full volume and as the paddle's sidetone at
+/// the default strength floor (0.7).
 ///
-/// The worst band is the widest filter at the hardest noise and static:
-/// there your message is only about 5 dB over the band's RMS, and the
-/// limiter takes the band's crests on top of it for some 6% of the time. A
-/// steady tone still stands well clear of hiss spread over two kilohertz,
-/// and going louder would only bend more of it.
-pub const MONITOR_LEVEL: f64 = 0.5;
+/// On the worst band, the widest filter at the hardest noise and static,
+/// the limiter takes the band's crests on top of it some of the time, as it
+/// always has: a steady tone still stands clear of hiss spread over two
+/// kilohertz, and going louder would only bend more of it.
+pub const MONITOR_LEVEL: f64 = SOFT_LIMIT_KNEE;
 
 /// Who sends a segment of a turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

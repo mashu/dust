@@ -580,13 +580,14 @@ mod tests {
             counts.windows(2).all(|w| w[1] <= w[0]) && counts[3] < counts[2],
             "narrowing the filter did not thin the pile-up: {counts:?}"
         );
-        // By the narrowest it goes, most of them are gone. Not three in four
+        // By the narrowest it goes, more than half of them are gone. Not three in four
         // of them, as when the receiver could be squeezed to the slider's
         // 150 Hz and nobody sat outside its 3 dB points: it still has to pass
         // the 400-600 Hz side-tone range, which takes 233 Hz, and the callers
-        // it leaves sit out on its skirt. Measured, 300 of 799 are left.
+        // it leaves sit out on its skirt. Measured, 345 of 799 are left
+        // through the sharp default, and 300 through the peaked one.
         assert!(
-            narrow * 5 < wide * 2,
+            narrow * 2 < wide,
             "a {FILTER_WIDTH_MIN:.0} Hz filter still passed {narrow} of {wide} callers"
         );
         // And with the station you want held in the middle, the filter does

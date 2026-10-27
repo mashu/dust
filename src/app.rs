@@ -8,6 +8,7 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::refocus_run;
 use crate::keep_awake::use_keep_awake;
+use crate::page_hidden::{APP_HIDDEN, use_page_hidden};
 use crate::routes::Route;
 use crate::session_runtime::finish_run;
 use crate::state::{AppCtx, AppState, Screen, ToastAction};
@@ -272,11 +273,12 @@ pub fn App() -> Element {
 /// are left as typed, so a field part-way through a number is not snapped
 /// under the cursor, and they are stored once they have been still for a
 /// moment. Anywhere else they are clamped in place and stored at once, which
-/// is also what stores an edit the moment its screen is left. Settings that
-/// are stored already are not stored again: moving between screens writes
-/// nothing.
+/// is also what stores an edit the moment its screen is left, or the page is
+/// put out of sight. Settings that are stored already are not stored again:
+/// moving between screens writes nothing.
 fn use_stored_settings(ctx: AppCtx) {
     let edits = use_hook(|| Rc::new(Cell::new(0u64)));
+    use_page_hidden(APP_HIDDEN, move || store_settings_now(ctx));
     use_effect(move || {
         let AppCtx {
             screen,
@@ -306,6 +308,16 @@ fn use_stored_settings(ctx: AppCtx) {
             ctx.store_settings();
         }
     });
+}
+
+/// Store the settings at once, rather than once an edit on the settings
+/// screen has been still for a moment: the page has gone out of sight, and a
+/// tab closed or an app put away straight after an edit would lose it while
+/// it waited. Not while a session runs, which stores nothing until it ends.
+fn store_settings_now(ctx: AppCtx) {
+    if *ctx.screen.peek() != Screen::Training {
+        ctx.store_settings();
+    }
 }
 
 /// Scroll the page back to its top. The script outlives the component that
@@ -376,7 +388,7 @@ mod ui_tests {
     use crate::persist::Store;
     use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
-    use dioxus::prelude::{Code, Key, ReadableExt};
+    use dioxus::prelude::{Code, Key, ReadableExt, WritableExt};
 
     fn short_session() -> TrainingSettings {
         let mut settings = test_settings();
@@ -514,6 +526,79 @@ mod ui_tests {
             assert_eq!(ui.store.load_settings().band.steepness, 12.0);
             ui.advance(1_000).await;
             assert_eq!(saves(&ui), 2, "the waiting edit was stored twice");
+        });
+    }
+
+    /// An edit on the settings screen still waiting to be stored is stored
+    /// the moment the page goes out of sight, as a tab closed or an app put
+    /// away may never come back to store it; a session stores nothing.
+    #[test]
+    fn a_waiting_edit_is_stored_when_the_page_goes_out_of_sight() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            ui.open_disclosures();
+            ui.type_into("slider-rise-time", "12");
+            assert_eq!(ui.store.settings_saves.get(), 0, "still waiting");
+            ui.with_app(super::store_settings_now);
+            assert_eq!(ui.store.settings_saves.get(), 1);
+            assert_eq!(ui.store.load_settings().band.steepness, 12.0);
+            ui.advance(1_000).await;
+            assert_eq!(ui.store.settings_saves.get(), 1, "and stored again");
+
+            ui.click("nav-practice");
+            ui.click("btn-start-training");
+            ui.with_app(|ctx| {
+                let mut settings = ctx.settings;
+                settings.write().band.steepness = 20.0;
+            });
+            ui.with_app(super::store_settings_now);
+            assert_eq!(ui.store.settings_saves.get(), 1, "stored mid-session");
+        });
+    }
+
+    /// Another copy of the app on the same store, a second tab or window,
+    /// stores changes of its own. This copy, left open on the settings it
+    /// had, keeps them when it stores a change of its own rather than
+    /// putting back everything it held, and takes them up itself: a value
+    /// changed in one copy used to go back the next time the other stored.
+    #[test]
+    fn a_copy_left_open_never_puts_back_what_another_stored() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            let mut theirs = ui.store.load_settings();
+            theirs.curriculum.num_groups = 9;
+            theirs.band.qsb_enabled = false;
+            ui.store.save_settings(&theirs);
+
+            ui.click("nav-settings");
+            ui.open_disclosures();
+            ui.type_into("slider-rise-time", "12");
+            let stored = ui.stored_settings().await;
+            assert_eq!(stored.band.steepness, 12.0, "this copy's change");
+            assert_eq!(
+                stored.curriculum.num_groups, 9,
+                "the other copy's, put back"
+            );
+            assert!(!stored.band.qsb_enabled, "the other copy's, put back");
+            let live = ui.with_app(|ctx| ctx.settings.peek().clone());
+            assert_eq!(live, stored, "this copy still shows its old settings");
+
+            // Moving between screens takes up a change stored meanwhile,
+            // writing nothing, and a session starts on it.
+            let mut theirs = ui.store.load_settings();
+            theirs.curriculum.num_groups = 1;
+            ui.store.save_settings(&theirs);
+            let saves = ui.store.settings_saves.get();
+            ui.click("nav-practice");
+            assert_eq!(ui.store.settings_saves.get(), saves);
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            let session = ui
+                .with_app(|ctx| ctx.runtime.peek().clone())
+                .expect("a session");
+            assert_eq!(session.settings().curriculum.num_groups, 1);
+            assert_eq!(session.settings().band.steepness, 12.0);
         });
     }
 
@@ -1413,6 +1498,42 @@ mod ui_tests {
         ui.click("btn-band-preview");
         assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
         (ui, recorder)
+    }
+
+    /// While the band preview plays, the Band card's scope takes what the
+    /// player metered and reads it against the AGC's line; stopped, the
+    /// scope goes and says what it is for.
+    #[test]
+    fn the_level_scope_reads_the_receiver_while_the_band_plays() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            assert!(ui.shows("level-scope"), "{}", ui.html());
+            assert!(!ui.shows("scope-hint"));
+            let db = |db: f64| 10f64.powf(db / 20.0) as f32;
+            let line = crate::ui::scope::threshold(&with_receiver().clamp()) as f32;
+            recorder.meter.borrow_mut().extend(std::iter::repeat_n(
+                crate::audio::MeterFrame {
+                    input: line * db(9.0),
+                    gain: db(-4.0),
+                    output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
+                },
+                60,
+            ));
+            ui.advance(120).await;
+            assert!(
+                ui.has("Peaks 9 dB over the AGC · AGC takes 4 dB · 3 dB under the limiter"),
+                "{}",
+                ui.html()
+            );
+            assert!(
+                recorder.meter.borrow().is_empty(),
+                "the scope took the frames"
+            );
+
+            ui.click("btn-band-stop");
+            assert!(!ui.shows("level-scope"));
+            assert!(ui.shows("scope-hint"));
+        });
     }
 
     /// A follow measures the band's AGC before it takes the settings, so a

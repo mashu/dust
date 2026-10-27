@@ -1009,6 +1009,37 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   background: linear-gradient(90deg, var(--copper), var(--copper-lift));
 }
 
+/* Level scope — what reaches the receiver's AGC, against where the AGC
+   starts, with how far the AGC takes it down in the lane under it. */
+.scope { display: flex; flex-direction: column; gap: 0.3rem; }
+.scope-plot { display: block; width: 100%; height: 96px; border-radius: 8px; }
+.scope-pane { fill: var(--surface-sunken); }
+.scope-level {
+  fill: var(--copper-soft);
+  stroke: var(--copper);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.scope-threshold {
+  stroke: var(--info);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+}
+.scope-threshold.off { stroke: var(--ink-dim); }
+.scope-agc {
+  fill: var(--info-soft);
+  stroke: var(--info);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.scope-legend { margin: 0; font-size: 0.75rem; }
+.scope-reading {
+  margin: 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.78rem;
+}
+
 /* Slider — paint the track/knob ourselves so the control is visible even
    when native range thumbs are unstyled. */
 .slider { display: flex; flex-direction: column; gap: 0.3rem; flex: 1; min-width: 150px; }

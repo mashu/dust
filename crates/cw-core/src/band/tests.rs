@@ -346,11 +346,14 @@ fn the_hiss_churns_at_a_rate_set_by_the_filter() {
 // --------------------------------------------------------------------- static
 
 /// QRN is lightning, not hiss: sparse and wildly uneven, which is what crest
-/// factor and kurtosis both measure.
+/// factor and kurtosis both measure. As it reaches the receiver: the AGC
+/// rides the loudest crashes down, as a rig's does.
 #[test]
 fn static_arrives_in_crashes_rather_than_as_a_hiss() {
     for level in [0.2, 0.5, 1.0] {
-        let x = background(&only_qrn(level), 8);
+        let mut settings = only_qrn(level);
+        settings.band.agc_enabled = false;
+        let x = background(&settings, 8);
         assert!(
             crest(&x) > 12.0,
             "at {level} the crest was only {:.1}",
@@ -576,8 +579,41 @@ fn a_loud_send_rides_the_gain_down_too() {
     }
 }
 
+/// The RF gain turns everything reaching the AGC down by its decibels, the
+/// band and the send alike, so the AGC has less to ride; set on a band
+/// already running, it is the same receiver as one built with it.
+#[test]
+fn the_rf_gain_turns_down_what_reaches_the_agc() {
+    let settings = only_noise(0.3);
+    // Half a second under a send at full scale: the loudest that reached
+    // the AGC, and the lowest it took the gain to.
+    let run = |mixer: &mut BandMixer| {
+        (0..SR as usize / 2).fold((0.0f64, 1.0f64), |(input, gain), i| {
+            let received = mixer.next(tone(1.0, i));
+            (input.max(received.input.abs()), gain.min(received.gain))
+        })
+    };
+    let (full_in, full_gain) = run(&mut BandMixer::new(SR, &settings, 7));
+    let mut backed = settings.clone();
+    backed.band.rf_gain_db = -20.0;
+    let (backed_in, backed_gain) = run(&mut BandMixer::new(SR, &backed, 7));
+    let backed_off = 20.0 * (backed_in / full_in).log10();
+    assert!((backed_off + 20.0).abs() < 1e-6, "{backed_off:.3} dB");
+    assert!(
+        full_gain < 0.8 && backed_gain > full_gain,
+        "the AGC rode {full_gain:.3} at full and {backed_gain:.3} backed off"
+    );
+    let mut turned = BandMixer::new(SR, &settings, 7);
+    turned.set_rf_gain(0.1);
+    turned.set_rf_gain(f64::NAN);
+    turned.set_rf_gain(-1.0);
+    assert_eq!(run(&mut turned), (backed_in, backed_gain));
+}
+
 /// The send is ducked with the band sample by sample, from its first
-/// element: the gain it rides never jumps.
+/// element: the gain it rides never jumps. It closes on a station 28 dB
+/// over the knee in a few milliseconds, a fraction of a decibel a sample,
+/// and all of it before the station's first element is played.
 ///
 /// The native player used to hand the gain from the band to the send once a
 /// callback, and the send's level back a callback late: every send began a
@@ -610,7 +646,7 @@ fn the_send_rides_the_gain_without_a_step() {
         .map(|w| (20.0 * (w[1] / w[0]).log10()).abs())
         .fold(0.0_f64, f64::max);
     assert!(
-        biggest < 0.1,
+        biggest < 0.5,
         "the gain stepped {biggest:.2} dB between two samples"
     );
 }
@@ -841,8 +877,9 @@ fn the_receiver_hisses_faintly_outside_its_filter() {
 /// A narrow filter leaves no wideband hiss to hear. The floor spreads over
 /// the whole of the audio stage where the hiss comes through the filter's
 /// width alone, and with a station keyed the AGC turns the hiss down and
-/// never the floor; even so, at the narrowest filter, in every shape, its
-/// power stays more than 35 dB under the hiss's, and 45 between stations.
+/// never the floor — 18 dB under a station 20 dB over the knee; even so, at
+/// the narrowest filter, in every shape, its power stays more than 30 dB
+/// under the hiss's, and 45 between stations.
 #[test]
 fn a_narrow_filter_leaves_no_wideband_hiss_to_hear() {
     for shape in ALL_SHAPES {
@@ -850,7 +887,7 @@ fn a_narrow_filter_leaves_no_wideband_hiss_to_hear() {
         settings.band.filter_shape = shape;
         let settings = settings.clamp();
         let knee = knee_for(&settings).expect("the AGC is on by default");
-        for (when, send, under_db) in [("idle", 0.0, 45.0), ("keyed", 10.0 * knee, 35.0)] {
+        for (when, send, under_db) in [("idle", 0.0, 45.0), ("keyed", 10.0 * knee, 30.0)] {
             let floored = with_and_without_floor(&settings, send, 5);
             let power = |v: &[f32]| v.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>();
             let floor_db = 10.0 * (power(&floored.added) / power(&floored.band)).log10();
@@ -949,8 +986,9 @@ fn the_agc_ducks_the_hiss_but_not_the_audio_floor() {
         .sum::<f64>()
         / samples as f64;
     let duck = 20.0 * mean.log10();
-    // Ten times the knee is 20 dB over it, which the 2:1 law takes 10 dB off.
-    assert!((duck - agc_law_db(20.0)).abs() < 0.2, "ducked {duck:.2} dB");
+    // Ten times the knee is 20 dB over it, which the 10:1 law takes 18 dB
+    // off, give or take the tone's ripple in the detector.
+    assert!((duck - agc_law_db(20.0)).abs() < 0.4, "ducked {duck:.2} dB");
     let (quiet, under) = (welch(&quiet, STAGE_SEGMENT), welch(&under, STAGE_SEGMENT));
     let change = |low: f64, high: f64| median_db(&under, low, high) - median_db(&quiet, low, high);
     let hiss = change(pitch - 20.0, pitch + 20.0);

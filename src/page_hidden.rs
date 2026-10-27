@@ -1,6 +1,7 @@
 //! Hears the page go out of sight: a tab left, a phone locked, a window
 //! minimised. Whatever plays to the learner must not play on to nobody: a
-//! contest run pauses, and Hear a QSO stops.
+//! contest run pauses, and Hear a QSO stops. And an edit to the settings
+//! still waiting to be stored is stored, as the page may never come back.
 //!
 //! Each screen that listens keeps its listener on the page under a slot of
 //! its own, so that one screen taking its listener off, as it goes, never
@@ -9,10 +10,12 @@
 use dioxus::prelude::*;
 
 /// Where the run screen, and the Settings and Listen screens, which play
-/// Hear a QSO, keep their listeners on the page.
+/// Hear a QSO, keep their listeners on the page; and the app itself, which
+/// stores the settings.
 pub const RUN_HIDDEN: &str = "__dustRunHidden";
 pub const SETTINGS_HIDDEN: &str = "__dustSettingsHidden";
 pub const LISTEN_HIDDEN: &str = "__dustListenHidden";
+pub const APP_HIDDEN: &str = "__dustAppHidden";
 
 /// While the calling component is mounted, `on_hidden` hears each time the
 /// page goes out of sight, through the listener kept at `slot`.
@@ -117,7 +120,7 @@ mod tests {
         let on = script.find("addEventListener").expect("put on");
         assert!(off < on, "{script}");
         assert!(stop_watching(RUN_HIDDEN).contains("window.__dustRunHidden = null;"));
-        let slots = [RUN_HIDDEN, SETTINGS_HIDDEN, LISTEN_HIDDEN];
+        let slots = [RUN_HIDDEN, SETTINGS_HIDDEN, LISTEN_HIDDEN, APP_HIDDEN];
         for slot in slots {
             let script = visibility_script(slot);
             assert!(

@@ -615,7 +615,7 @@ fn settings_renders_every_card() {
         "Ultimatic",
         "Speed",
         // dioxus-ssr escapes the ampersand, so match the card note instead.
-        "Side tone pitch and sending level",
+        "Volume, pitch and station strength",
         "Keying envelope",
         "Auto level",
         "Character sampling",
@@ -3185,12 +3185,70 @@ mod interactions {
 
     /// Out of the box the band is one station, fixed, under a subtle hiss,
     /// and the 300 Hz filter is built wider to pass the 300-600 Hz pitches.
+    /// The noise moves a decibel of signal-to-noise a step, either way.
     #[test]
     fn the_band_card_out_of_the_box() {
-        let ui = Ui::new(DefaultBandHarness, ());
+        let mut ui = Ui::new(DefaultBandHarness, ());
         assert!(ui.shows("fixed-stations-calling"), "{}", ui.html());
         assert!(ui.has("class=\"slider-value\">S/N 41 dB<"), "{}", ui.html());
         assert!(ui.has("300 Hz — widened to 353 Hz to pass your pitch range"));
+        // The 6 dB is where the width is read, not a loss, and the label
+        // does not make it look like one.
+        assert!(ui.has(r#"<span class="slider-name">Filter width</span>"#));
+        assert!(!ui.has("-6 dB") && !ui.has("−6 dB"));
+        assert!(ui.has("Its width is read between the points 6 dB down"));
+        for (button, reading) in [
+            ("more-slider-noise-level", 40),
+            ("more-slider-noise-level", 39),
+            ("more-slider-noise-level", 38),
+            ("less-slider-noise-level", 39),
+            ("less-slider-noise-level", 40),
+            ("less-slider-noise-level", 41),
+        ] {
+            ui.click(button);
+            let says = format!("class=\"slider-value\">S/N {reading} dB<");
+            assert!(ui.has(&says), "{button}: {}", ui.html());
+        }
+        // A step under the quietest hiss there is, it is off.
+        ui.click("less-slider-noise-level");
+        assert!(ui.has("class=\"slider-value\">Off<"));
+
+        // The RF gain starts at full and backs off a decibel a step.
+        assert!(ui.has(r#"<span class="slider-name">RF gain</span>"#));
+        assert!(ui.has(r#"<span class="slider-value">Full</span>"#));
+        assert!(ui.input_tag("more-slider-rf-gain").contains("disabled"));
+        ui.click("less-slider-rf-gain");
+        assert!(ui.has("<span class=\"slider-value\">\u{2212}1 dB</span>"));
+
+        // The AGC's threshold starts at its lowest and rises a decibel a
+        // step; with the AGC off there is none to set, while the RF gain
+        // still turns the band down.
+        assert!(ui.has(r#"<span class="slider-name">AGC threshold</span>"#));
+        assert!(ui.has(r#"<span class="slider-value">Lowest</span>"#));
+        assert!(
+            ui.input_tag("less-slider-agc-threshold")
+                .contains("disabled")
+        );
+        ui.click("more-slider-agc-threshold");
+        assert!(ui.has(r#"<span class="slider-value">+1 dB</span>"#));
+
+        // The AGC's decay is Fast until you pick Slow, and is there only
+        // while the AGC is on.
+        assert!(ui.has(r#"<span class="field-label">AGC decay</span>"#));
+        assert!(ui.input_tag("seg-agc-fast").contains("seg active"));
+        ui.click("seg-agc-slow");
+        assert!(ui.input_tag("seg-agc-slow").contains("seg active"));
+        assert!(!ui.input_tag("seg-agc-fast").contains("active"));
+        ui.commit("switch-agc", "false");
+        assert!(!ui.has("AGC decay"));
+        assert!(
+            ui.input_tag("more-slider-agc-threshold")
+                .contains("disabled")
+        );
+        assert!(ui.has("With the AGC off there is no threshold to set."));
+        assert!(!ui.input_tag("less-slider-rf-gain").contains("disabled"));
+        ui.click("less-slider-rf-gain");
+        assert!(ui.has("<span class=\"slider-value\">\u{2212}2 dB</span>"));
     }
 
     #[test]
@@ -3222,8 +3280,8 @@ mod interactions {
         );
 
         // The filter shape is a real choice, and it shows which one is in:
-        // the peaked one out of the box.
-        assert!(ui.has("id=\"seg-filter-peaked\" class=\"seg active\""));
+        // the sharp one out of the box.
+        assert!(ui.has("id=\"seg-filter-sharp\" class=\"seg active\""));
         ui.click("seg-filter-soft");
         assert!(ui.has("id=\"seg-filter-soft\" class=\"seg active\""));
         ui.click("seg-filter-sharp");

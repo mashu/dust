@@ -2269,6 +2269,18 @@ it before the reset or after it, as the reset turns the callers' switch
 back on and so can bring the Aim onto the card (`reset_section`).
 
 **Presets** (phase 2): First QSO, Club and Contester on the contest card.
+As built after operator feedback (2026-10-25), each sets the callers'
+speed and nothing else: the character range, and the spacing's with it as
+below. A preset that wrote the tier, the run style, the habits, the
+stations, the band and your speed put back whatever the learner had set
+there, and the tier, the stations and the band are group training's too.
+The learner sets those, and a preset leaves them as they are. The card
+reads "Callers at 15–18 WPM", or on none "Custom · a preset sets how fast
+the callers come, and nothing else", and reads Custom once the callers'
+speed is edited, as Experience does; Experience in turn sets the group
+size and the speed, and no longer the session's length. What follows is
+the presets as they were built before that, kept for the record.
+
 Each writes shared fields (speed ranges, tier, stations, QSB, QRN) and
 the contest's run style and Caller habits (as built, 4a), and flutter (as
 built, 5a), and reads
@@ -2406,8 +2418,8 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   card's note reads "The callers' speeds, Farnsworth spacing, and yours"
   in Contest mode, and its line under the ranges "Callers come at speeds
   drawn from these ranges." Read back, a number is kept for the clamp to
-  bound and anything else is 0. The card's reset puts it back to 0, and so
-  does a preset (above).
+  bound and anything else is 0. The card's reset puts it back to 0; a
+  preset, which once did too, leaves it as it is (above).
 - **Adapt callers' speed to me** (as built, adaptive callers' speed,
   2026-10-22). A switch on the Speed card in Contest mode, where group
   training's "Adapt speed to me" sits and in its place, after the line
@@ -4234,7 +4246,7 @@ keying with the paddles, a contest level, and more contests.
 | Board | per group within a kind; full runs ≥ 5 min | one Contest pill; 10 groups | exchange length would order it; 3 QSOs could top it |
 | Labels | "Points"; "QSO pts · Mults · Score" | "Score" for both | two scores, two words |
 | Keys | Tab as on any page; `;`; Alt+S, Alt+E | MRCE's Tab cycle, Insert | no trapped focus; screen readers keep Insert |
-| Difficulty | presets writing shared fields | a contest level | a level would own stations and tier |
+| Difficulty | presets setting the callers' speed only (2026-10-25; they wrote shared fields before) | a contest level | a level would own stations and tier; a preset writing them put back what the learner had set |
 | Your call in a run | not stored; side, country, continent, zone are | stored | no score needs it |
 | Numbers | yours cut (Sprint's serial and Simple QSO's 599 plain); callers' by habits, the Sprint's serials plain under every habit | always cut | what operators send; learners start plain; a Sprint serial cut to letters alone reads as a state |
 | QRM (4a) | inside the turns on the air, carried over a key, never a station; one station at a time, starting as often as MRCE's | turns of its own; stations over one another, as MRCE's | the players hold one send; QRM is nothing to answer, so nothing to plan a turn for; one at a time, no station sends over itself |

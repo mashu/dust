@@ -9,7 +9,7 @@
 
 use super::calibration::{noise_level, qrn_level};
 use super::memo::Exact;
-use crate::settings::{BandSettings, FilterShape, STATIONS_MIN};
+use crate::settings::{AgcDecay, BandSettings, FilterShape, STATIONS_MIN};
 
 /// Everything the band is built from. Two settings with the same key sound
 /// the same, so a player rebuilds its band only when this changes.
@@ -31,6 +31,10 @@ pub struct BandKey {
     qrn: Exact,
     stations_max: u32,
     agc_enabled: bool,
+    /// The AGC's threshold, which moves its knee, and its decay; nothing
+    /// with the AGC off.
+    agc_threshold_db: Option<Exact>,
+    agc_decay: Option<AgcDecay>,
 }
 
 impl BandKey {
@@ -45,6 +49,8 @@ impl BandKey {
             qrn: Exact(qrn_level(band)),
             stations_max: band.stations_max,
             agc_enabled: band.agc_enabled,
+            agc_threshold_db: band.agc_enabled.then_some(Exact(band.agc_threshold_db)),
+            agc_decay: band.agc_enabled.then_some(band.agc_decay),
         }
     }
 }
@@ -56,7 +62,8 @@ mod tests {
     use crate::settings::TrainingSettings;
 
     /// Every setting the band is built from moves its key, and nothing else
-    /// does: not the fading, which plays on the Morse, nor the speed.
+    /// does: not the fading, which plays on the Morse, nor the speed, nor
+    /// the RF gain, which the player turns as the band runs.
     #[test]
     fn the_band_key_moves_with_what_the_band_is_built_from() {
         let base = TrainingSettings::default();
@@ -82,6 +89,8 @@ mod tests {
                 s.band.volume_min = 0.3;
             },
             |s| s.band.agc_enabled = false,
+            |s| s.band.agc_threshold_db = 10.0,
+            |s| s.band.agc_decay = AgcDecay::Slow,
             |s| s.band.filter_width_hz = 250.0,
             |s| s.band.filter_shape = FilterShape::Soft,
         ];
@@ -109,6 +118,7 @@ mod tests {
             (|s| s.playback.char_wpm_min = 40.0) as fn(&mut TrainingSettings),
             |s| s.band.pileup_spread_hz = 500.0,
             |s| s.band.pileup_level_db = 3.0,
+            |s| s.band.rf_gain_db = -12.0,
         ] {
             assert_eq!(key(edit), (band, qsb));
         }
