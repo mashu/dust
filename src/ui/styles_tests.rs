@@ -849,3 +849,112 @@ fn a_session_fits_a_small_phone_down_to_the_keypads_last_row() {
         );
     }
 }
+
+/// A webview painting by the processor blurs each layer of a box-shadow
+/// over its box and a margin three times the blur wide, on every repaint:
+/// scrolling Settings on a virtual display, a single layer on each card cut
+/// its work by about a fifteenth. A card casts one blurred layer, in every
+/// palette. A panel fixed over the page, painted again with everything that
+/// scrolls under it, casts one of at most 36px: the guide's, at 60px, cost
+/// about a tenth of every frame drawn under it.
+#[test]
+fn cards_and_floating_panels_cast_one_blurred_shadow() {
+    let css = without_comments(CSS);
+    let rules = rules(&css);
+    for token in ["--shadow-md", "--shadow-float"] {
+        let values: Vec<&str> = rules
+            .iter()
+            .flat_map(|(_, declarations)| declarations)
+            .filter(|(property, _)| *property == token)
+            .map(|(_, value)| *value)
+            .collect();
+        assert_eq!(
+            values.len(),
+            3,
+            "{token} in the light palette and in both dark ones"
+        );
+        for value in values {
+            // A shadow's layers part at the commas outside brackets, as a
+            // selector list's selectors do.
+            let layers = selector_list(value);
+            assert_eq!(layers.len(), 1, "{token}: {value}");
+            if token == "--shadow-float" {
+                let blur = layers[0].split_whitespace().nth(2).map(length);
+                assert!(
+                    matches!(blur, Some((px, "px")) if px <= 36.0),
+                    "{token}: {value}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        last_value(&rules, ".card", "box-shadow").as_deref(),
+        Some("var(--shadow-md)")
+    );
+    for floating in [
+        ".bottom-nav",
+        ".tour",
+        ".select-bar",
+        ".pair-card",
+        ".toast",
+    ] {
+        assert_eq!(
+            last_value(&rules, floating, "box-shadow").as_deref(),
+            Some("var(--shadow-float)"),
+            "{floating} floats over the page"
+        );
+    }
+}
+
+/// Easing a box's size or place lays the page out again on every frame it
+/// eases. A session's progress bar and the Auto level meters ease their
+/// width, once a group or a session, and the switch's knob slides with
+/// left (above); nothing else does. A run's clock steps its bar every
+/// second, so that bar does not ease at all. `all` would ease whatever a
+/// state changes, so every rule names what it eases.
+#[test]
+fn only_a_few_boxes_ease_their_size_or_place() {
+    let css = without_comments(CSS);
+    let rules = rules(&css);
+    let lays_out = |property: &str| {
+        matches!(
+            property,
+            "all" | "width" | "height" | "top" | "left" | "right" | "bottom" | "inset"
+        ) || ["margin", "padding", "min-", "max-"]
+            .iter()
+            .any(|start| property.starts_with(start))
+    };
+    let mut eased = Vec::new();
+    for (selector, declarations) in &rules {
+        for (property, value) in declarations {
+            let properties: Vec<&str> = match *property {
+                "transition" => selector_list(value)
+                    .iter()
+                    .filter_map(|one| one.split_whitespace().next())
+                    .collect(),
+                "transition-property" => selector_list(value),
+                _ => continue,
+            };
+            eased.extend(
+                properties
+                    .into_iter()
+                    .filter(|property| lays_out(property))
+                    .map(|property| format!("{selector}: {property}")),
+            );
+        }
+    }
+    eased.sort_unstable();
+    assert_eq!(
+        eased,
+        [
+            ".meter-track > span: width",
+            ".progress-bar > span: width",
+            ".switch i: left",
+        ]
+    );
+    assert_eq!(
+        last_value(&rules, ".progress-bar.timer > span", "transition").as_deref(),
+        Some("none"),
+        "a run's clock steps its bar"
+    );
+}
