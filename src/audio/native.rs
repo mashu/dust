@@ -147,7 +147,8 @@ impl MorsePlayer {
         drop(swept);
     }
 
-    /// Make sure the output stream is up, reopening it if the device broke.
+    /// Make sure the output stream is up: opened again after it slept, or
+    /// after the device broke.
     fn ensure_output(&mut self) -> Result<(), String> {
         if self
             .stream
@@ -325,6 +326,19 @@ impl MorseBackend for MorsePlayer {
         self.with_mixer(|mixer, swept| mixer.set_band(None, swept));
         self.state.forget_band();
         self.sidetone.off();
+    }
+
+    /// Closed, not paused: a host that cannot pause would play silence on,
+    /// and cpal does not say which cannot. Closed, it lets the device and
+    /// the sound server rest. The next band, send or sidetone opens it again
+    /// ([`MorsePlayer::ensure_output`]), as a new player does.
+    fn sleep(&mut self) {
+        if self.stream.take().is_none() {
+            return;
+        }
+        // What has faded out is let go of now: with the stream closed, no
+        // send or band comes in to make way for it.
+        self.with_mixer(|mixer, swept| mixer.sweep(swept));
     }
 
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
@@ -537,6 +551,32 @@ mod device_tests {
         settings.band.qrn_enabled = false;
         settings.band.noise_enabled = false;
         player.apply_band(&settings);
+        player.shutdown();
+    }
+
+    /// Asleep, the stream is closed and calls back no more, so nothing is
+    /// metered, and the next sidetone opens it to play on.
+    #[test]
+    fn a_sleeping_stream_calls_back_no_more_until_it_is_woken() {
+        let Some(mut player) = player() else {
+            return;
+        };
+        let metered = |player: &mut MorsePlayer, ms: u64| {
+            let mut frames = Vec::new();
+            player.take_meter(&mut frames);
+            std::thread::sleep(Duration::from_millis(ms));
+            frames.clear();
+            player.take_meter(&mut frames);
+            frames.len()
+        };
+        assert!(metered(&mut player, 200) > 0, "the stream plays");
+        player.shutdown();
+        player.sleep();
+        assert!(player.stream.is_none());
+        assert_eq!(metered(&mut player, 300), 0, "metered asleep");
+        player.set_live_tone(false, 600.0, 0.2);
+        assert!(player.stream.is_some(), "the sidetone opened it");
+        assert!(metered(&mut player, 300) > 0, "woken, it plays");
         player.shutdown();
     }
 

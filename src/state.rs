@@ -94,6 +94,12 @@ impl AppState {
     pub fn ensure_live_sidetone(&self, settings: &TrainingSettings) -> Result<(), AudioError> {
         self.player.ensure_live_sidetone(settings)
     }
+
+    /// Keep the output awake for the first squeeze while `ready`, or let it
+    /// sleep once quiet.
+    pub fn keep_output_ready(&self, ready: bool) {
+        self.player.keep_ready(ready);
+    }
 }
 
 /// One session of the history, as a screen names it to delete it: where it

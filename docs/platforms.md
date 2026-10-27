@@ -58,6 +58,13 @@ The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
 Android devices will not open two at once.
 
+That stream is closed once nothing has sounded for a second, away from
+Settings, so the phone (or a desktop's sound card and sound server) can rest
+with the app open on a screen or in the background. The next send, band or
+paddle squeeze opens it again. Settings keeps it open for the paddle's first
+squeeze, and a session or a run holds it open from start to end. The browser
+build suspends its audio a moment after it goes quiet.
+
 If a toolchain bring-up ever blocks on oboe, `--features mobile-silent` builds
 the same app with a player that keeps a session's timing but makes no sound,
 and the practice screen says so.

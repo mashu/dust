@@ -194,7 +194,9 @@ pub fn use_paddle_keys(
     // is not the next one's. Settings is where the paddles are tried, so
     // arriving there opens the sidetone ahead of the first squeeze — the
     // first element is then one audio buffer late, not a stream start — and
-    // finds out whether it can sound at all.
+    // finds out whether it can sound at all, and the output is kept awake
+    // there. Anywhere else it sleeps once quiet, and the first squeeze
+    // wakes it.
     use_effect(move || {
         let on_settings = screen() == Screen::Settings;
         keys.stop();
@@ -202,6 +204,7 @@ pub fn use_paddle_keys(
         if !heard.peek().is_empty() {
             heard.set(String::new());
         }
+        keys.app.read().keep_output_ready(on_settings);
         if on_settings {
             keys.open_sidetone();
         }

@@ -910,6 +910,61 @@ mod ui_tests {
         });
     }
 
+    /// Left quiet away from Settings, the output sleeps a second on, and
+    /// whatever sounds next wakes it: a stream left running with nothing to
+    /// play keeps the audio thread and the sound device from ever resting.
+    /// Settings keeps it awake for the paddle's first squeeze; a session, or
+    /// the sidetone while it sounds, holds it awake too.
+    #[test]
+    fn the_output_sleeps_once_quiet_but_on_settings() {
+        run(|| async {
+            // A straight key, whose tone lasts as long as it is held down.
+            let mut settings = test_settings();
+            settings.playback.keyer_mode = cw_core::KeyerMode::Straight;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.advance(3_000).await;
+            assert!(!recorder.asleep.get(), "Settings keeps it ready");
+
+            ui.click("nav-practice");
+            ui.advance(600).await;
+            assert!(
+                !recorder.asleep.get(),
+                "not before it has been quiet a while"
+            );
+            ui.advance(600).await;
+            assert!(recorder.asleep.get(), "asleep on Home");
+
+            // A squeeze wakes it, and it sleeps again once the paddle rests.
+            let dit = || Key::Character("[".into());
+            ui.press_key("btn-guided-setup", dit(), Code::BracketLeft);
+            ui.advance(20).await;
+            assert!(!recorder.asleep.get(), "the squeeze woke it");
+            ui.advance(1_500).await;
+            assert!(!recorder.asleep.get(), "not while the sidetone sounds");
+            ui.release_key("btn-guided-setup", dit(), Code::BracketLeft);
+            ui.advance(1_500).await;
+            assert!(recorder.asleep.get(), "asleep once the paddle rests");
+
+            // Each from a moment after a screen let the audio go, so that it
+            // is about to sleep: a key held down past then, and a session.
+            let sleeps = recorder.sleeps.get();
+            ui.click("nav-stats");
+            ui.click("nav-practice");
+            ui.advance(500).await;
+            ui.press_key("btn-guided-setup", dit(), Code::BracketLeft);
+            ui.advance(1_500).await;
+            assert_eq!(recorder.sleeps.get(), sleeps, "asleep under a held key");
+            ui.release_key("btn-guided-setup", dit(), Code::BracketLeft);
+            ui.advance(500).await;
+            ui.click("btn-start-training");
+            ui.advance(4_000).await;
+            assert!(!recorder.texts().is_empty(), "the session sends");
+            assert!(!recorder.asleep.get());
+            assert_eq!(recorder.sleeps.get(), sleeps, "asleep under a session");
+        });
+    }
+
     /// Starting the next session puts away what the last one left to say.
     #[test]
     fn starting_a_session_puts_the_notice_away() {

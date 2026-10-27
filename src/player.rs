@@ -17,7 +17,7 @@ use cw_core::band::SOFT_LIMIT_KNEE;
 use cw_core::{MonoMs, PlannedTransmission, SendStart, TrainingSettings, Transmission};
 
 use crate::audio::{MeterFrame, MorseBackend, PlaybackOutcome, PlaybackWait};
-use crate::time::{POLL_MS, sleep_ms};
+use crate::time::{POLL_MS, mono_ms, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
 /// without a sound card.
@@ -31,6 +31,11 @@ const SEND_ATTEMPTS: u32 = 3;
 /// The quietest the live sidetone is played at full volume, whatever the
 /// floor of the station strength range: a paddle you cannot hear is no use.
 const SIDETONE_FLOOR: f64 = 0.15;
+
+/// How long the audio is quiet before the output is let sleep: long after
+/// the last fade has played out, and long enough that a screen left and
+/// come back to, or the next squeeze of a paddle, does not wake it.
+const SLEEP_AFTER_MS: u64 = 1_000;
 
 /// Why audio did not happen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +95,17 @@ struct Shared {
     /// for, so a send that has not started yet — one waiting out a retry —
     /// can tell it is no longer wanted.
     sends: Cell<u64>,
+    /// When the audio was last claimed, given back or keyed: it has been
+    /// quiet since.
+    stirred_at: Cell<u64>,
+    /// A lease is out, and has not been given back.
+    held: Cell<bool>,
+    /// The paddle's sidetone is sounding.
+    keyed: Cell<bool>,
+    /// A screen has the output kept awake for the first squeeze.
+    kept_ready: Cell<bool>,
+    /// A wait to let the output sleep is under way.
+    sleep_waiting: Cell<bool>,
 }
 
 impl Player {
@@ -99,6 +115,11 @@ impl Player {
             make,
             turn: Cell::new(0),
             sends: Cell::new(0),
+            stirred_at: Cell::new(0),
+            held: Cell::new(false),
+            keyed: Cell::new(false),
+            kept_ready: Cell::new(false),
+            sleep_waiting: Cell::new(false),
         }))
     }
 
@@ -110,6 +131,7 @@ impl Player {
     pub fn claim(&self, settings: &TrainingSettings) -> Result<Lease, AudioError> {
         self.stop_sending();
         let turn = self.next_turn();
+        self.stir(true);
         match self.open(settings) {
             Ok(()) => Ok(Lease {
                 player: self.clone(),
@@ -117,6 +139,7 @@ impl Player {
             }),
             Err(err) => {
                 self.with_backend(|backend| backend.shutdown());
+                self.stir(false);
                 Err(err)
             }
         }
@@ -124,10 +147,67 @@ impl Player {
 
     /// Give the audio back: every lease ends, and nothing sounds, the
     /// receiver included. What "stop" means when the user pressed it, or
-    /// walked away from the screen that was making the sound.
+    /// walked away from the screen that was making the sound. Once it has
+    /// been quiet a while, the output sleeps.
     pub fn release(&self) {
         self.next_turn();
         self.with_backend(|backend| backend.shutdown());
+        self.stir(false);
+    }
+
+    /// Keep the output awake for the paddle's first squeeze, `ready`, as
+    /// the screen the paddles are tried on does; or let it sleep once
+    /// quiet, as everywhere else.
+    pub fn keep_ready(&self, ready: bool) {
+        self.0.kept_ready.set(ready);
+        if !ready {
+            self.sleep_once_quiet();
+        }
+    }
+
+    /// Something claimed the audio, `held`, or gave it back or keyed it: it
+    /// is quiet from now, and the output sleeps once it has been a while.
+    fn stir(&self, held: bool) {
+        self.0.held.set(held);
+        self.0.stirred_at.set(mono_ms());
+        self.sleep_once_quiet();
+    }
+
+    /// Let the output sleep once nothing has claimed, given back or keyed
+    /// the audio for [`SLEEP_AFTER_MS`], unless a lease holds it, the
+    /// sidetone sounds, or a screen keeps it ready. One wait at a time,
+    /// which reads the latest stir. Without the app's runtime, as in a test
+    /// of the player alone, there is nothing to wait with, and it never
+    /// sleeps.
+    fn sleep_once_quiet(&self) {
+        let shared = &self.0;
+        if shared.held.get()
+            || shared.keyed.get()
+            || shared.kept_ready.get()
+            || shared.sleep_waiting.get()
+            || dioxus::core::Runtime::try_current().is_none()
+        {
+            return;
+        }
+        shared.sleep_waiting.set(true);
+        let player = self.clone();
+        dioxus::core::spawn_forever(async move {
+            let shared = &player.0;
+            loop {
+                let due = shared.stirred_at.get() + SLEEP_AFTER_MS;
+                let now = mono_ms();
+                if now >= due {
+                    break;
+                }
+                sleep_ms(u32::try_from(due - now).unwrap_or(u32::MAX)).await;
+            }
+            shared.sleep_waiting.set(false);
+            // Whatever has woken it meanwhile waits on in turn when it is
+            // done.
+            if !(shared.held.get() || shared.keyed.get() || shared.kept_ready.get()) {
+                player.with_backend(|backend| backend.sleep());
+            }
+        });
     }
 
     /// Bring the band in line with settings that have just changed, while a
@@ -161,9 +241,13 @@ impl Player {
 
     fn gate_live_tone(&self, on: bool, settings: &TrainingSettings) -> Result<(), AudioError> {
         let (hz, gain) = live_tone(settings);
-        let mut backend = self.opened()?;
-        backend.resume_from_gesture();
-        backend.set_live_tone(on, hz, gain);
+        {
+            let mut backend = self.opened()?;
+            backend.resume_from_gesture();
+            backend.set_live_tone(on, hz, gain);
+        }
+        self.0.keyed.set(on);
+        self.stir(self.0.held.get());
         Ok(())
     }
 
@@ -191,13 +275,15 @@ impl Player {
         RefMut::filter_map(slot, Option::as_mut).map_err(|_| unavailable())
     }
 
-    /// Open the player if there is none, and set it up for `settings`.
+    /// Open the player if there is none, and set it up for `settings`, the
+    /// sidetone silent.
     fn open(&self, settings: &TrainingSettings) -> Result<(), AudioError> {
         let (hz, gain) = live_tone(settings);
         let mut backend = self.opened()?;
         backend.resume_from_gesture();
         backend.apply_band(settings);
         backend.set_live_tone(false, hz, gain);
+        self.0.keyed.set(false);
         Ok(())
     }
 

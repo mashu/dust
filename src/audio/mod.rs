@@ -93,6 +93,13 @@ pub trait MorseBackend {
     /// Silence everything, background included.
     fn shutdown(&mut self);
 
+    /// Let the output sleep, silenced already: nothing sounds until the next
+    /// band, send or sidetone, which wakes it. A stream left running with
+    /// nothing to play wakes the audio thread hundreds of times a second,
+    /// and keeps the sound device, and the sound server's graph, from ever
+    /// resting. The browser's player sleeps by its own clock.
+    fn sleep(&mut self) {}
+
     /// Gate a live sidetone for paddle practice. Kept as a running stream so a
     /// squeeze is one buffer of latency, not a stream start.
     fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
@@ -242,6 +249,11 @@ pub mod fake {
         pub latency_sec: Cell<f64>,
         /// Meter frames for the level scope to take, as a test puts them.
         pub meter: RefCell<Vec<MeterFrame>>,
+        /// The output is asleep, as the native player's stream sleeps: until
+        /// a band, a send or the sidetone wakes it.
+        pub asleep: Cell<bool>,
+        /// How many times it was put to sleep.
+        pub sleeps: Cell<u32>,
     }
 
     impl Recorder {
@@ -408,6 +420,7 @@ pub mod fake {
 
     impl MorseBackend for FakePlayer {
         fn apply_band(&mut self, settings: &TrainingSettings) {
+            self.recorder.asleep.set(false);
             self.recorder
                 .calls
                 .borrow_mut()
@@ -424,6 +437,7 @@ pub mod fake {
             settings: &TrainingSettings,
             heard_in: Option<f64>,
         ) -> Result<Rc<dyn PlaybackSignal>, String> {
+            self.recorder.asleep.set(false);
             self.recorder
                 .calls
                 .borrow_mut()
@@ -465,7 +479,13 @@ pub mod fake {
             self.epoch.bump();
         }
 
+        fn sleep(&mut self) {
+            self.recorder.asleep.set(true);
+            self.recorder.sleeps.set(self.recorder.sleeps.get() + 1);
+        }
+
         fn set_live_tone(&mut self, on: bool, _frequency_hz: f64, _gain: f64) {
+            self.recorder.asleep.set(false);
             self.recorder.calls.borrow_mut().push(Call::LiveTone(on));
         }
 
