@@ -426,7 +426,7 @@ pub fn ProgressHeader(
                     span { class: "mono progress-figure", "{figure}" }
                 }
             }
-            div { class: if timer { "progress-bar timer" } else { "progress-bar" },
+            div { class: "progress-bar",
                 span { style: "width: {pct}%;" }
             }
             {children}

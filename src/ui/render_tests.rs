@@ -2078,8 +2078,6 @@ fn between_groups_the_header_says_the_next_group_is_coming() {
         html.contains(r#"<span class="status-dot"></span>"#),
         "{html}"
     );
-    // A session's bar eases from group to group; only a run's clock does not.
-    assert!(html.contains(r#"class="progress-bar""#), "{html}");
     assert!(!html.contains("Your turn"), "{html}");
     assert!(!html.contains("status-dot ready"), "{html}");
     assert!(!html.contains("status-dot live"), "{html}");

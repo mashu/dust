@@ -1618,8 +1618,6 @@ mod tests {
             let tx = text_of(&ui, "run-line run-tx");
             assert!(tx.starts_with("TX ▸CQ DL1ABC"), "{tx}");
             assert!(ui.has(r#"role="timer""#) && ui.has(r#"aria-live="off""#));
-            // The clock's bar steps with it, without easing (styles.css).
-            assert!(ui.has(r#"class="progress-bar timer""#), "{}", ui.html());
             assert!(
                 ui.run_until(8_000, |ui| text_of(ui, "run-line run-rx")
                     .contains("1 calling"))
