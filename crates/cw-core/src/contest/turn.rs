@@ -19,11 +19,10 @@
 use std::sync::Arc;
 
 use crate::band::{Qsb, SOFT_LIMIT_KNEE};
-use crate::morse::morse_for;
 use crate::session::MonoMs;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
 use crate::timing::{
-    Interferer, PlannedTransmission, PlaybackPlan, StationVoice, ToneEvent, Transmission,
+    CharSpan, Interferer, PlannedTransmission, PlaybackPlan, StationVoice, ToneEvent, Transmission,
     plan_from, plan_morse_playback_at, plan_morse_playback_for,
 };
 
@@ -238,45 +237,31 @@ pub(super) fn sending_sec(text: &str, settings: &TrainingSettings, voice: &Stati
 /// first of the next: where a message sent after one that has just ended
 /// would start, as the two were one text.
 pub(super) fn word_gap_sec(settings: &TrainingSettings, voice: &StationVoice) -> f64 {
-    let spans = char_spans("E E", settings, voice);
-    match spans[..] {
-        [(_, _, first_end), (_, second_start, _)] => second_start - first_end,
+    match char_spans("E E", settings, voice)[..] {
+        [first, second] => second.start_sec - first.end_sec,
         _ => 0.0,
     }
 }
 
 /// Where each character of `text` that sounds starts and ends, in seconds
-/// from the start of the text: its byte index, start and end.
+/// from the start of the text, as `voice` sends it.
 pub(super) fn char_spans(
     text: &str,
     settings: &TrainingSettings,
     voice: &StationVoice,
-) -> Vec<(usize, f64, f64)> {
-    let plan = plan_morse_playback_for(text, settings, voice);
-    let mut tones = plan.events.iter();
-    text.char_indices()
-        .filter(|(_, c)| *c != ' ')
-        .filter_map(|(at, c)| {
-            let elements = morse_for(c)?.len();
-            let first = tones.next()?;
-            let mut end = first.start_sec + first.duration_sec;
-            for tone in tones.by_ref().take(elements - 1) {
-                end = tone.start_sec + tone.duration_sec;
-            }
-            Some((at, first.start_sec, end))
-        })
-        .collect()
+) -> Vec<CharSpan> {
+    plan_morse_playback_for(text, settings, voice).chars
 }
 
 /// The byte index of the character sounding `at_sec` into a text with
 /// `spans`, or of the next one when `at_sec` falls between two: where the
 /// rest of it starts, that character sent again whole. None once all of it
 /// has been sent.
-pub(super) fn sounding_at(spans: &[(usize, f64, f64)], at_sec: f64) -> Option<usize> {
+pub(super) fn sounding_at(spans: &[CharSpan], at_sec: f64) -> Option<usize> {
     spans
         .iter()
-        .find(|(_, _, end)| *end > at_sec)
-        .map(|(at, _, _)| *at)
+        .find(|span| span.end_sec > at_sec)
+        .map(|span| span.at)
 }
 
 /// The sound of `turn`. `wanted` is your message, stretched to end with the
@@ -329,10 +314,15 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
         for tone in &mut plan.events {
             tone.start_sec += segment.start_sec;
         }
+        for span in &mut plan.chars {
+            span.start_sec += segment.start_sec;
+            span.end_sec += segment.start_sec;
+        }
         plan.duration_sec += segment.start_sec;
         match (segment.who, wanted.as_mut()) {
             (Sender::You, Some(yours)) => {
                 yours.events.extend(plan.events);
+                yours.chars.extend(plan.chars);
                 yours.duration_sec = yours.duration_sec.max(plan.duration_sec);
             }
             (Sender::You, None) => wanted = Some(plan),
@@ -351,6 +341,7 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
         });
         PlaybackPlan {
             events: Vec::new(),
+            chars: Vec::new(),
             duration_sec: 0.0,
             resolved_char_wpm: char_wpm,
             resolved_effective_wpm: effective_wpm,
@@ -961,21 +952,25 @@ mod tests {
         let spans = char_spans(text, &settings, &voice);
         assert_eq!(spans.len(), text.chars().filter(|c| *c != ' ').count());
         let length = sending_sec(text, &settings, &voice);
-        assert!((spans.last().map_or(0.0, |span| span.2) - length).abs() < 1e-9);
+        assert!((spans.last().map_or(0.0, |span| span.end_sec) - length).abs() < 1e-9);
         for step in 0..=200 {
             let at_sec = length * f64::from(step) / 200.0 - 0.05;
             let sent: String = spans
                 .iter()
-                .filter(|(_, _, end)| *end <= at_sec)
-                .map(|(at, _, _)| &text[*at..=*at])
+                .filter(|span| span.end_sec <= at_sec)
+                .map(|span| &text[span.at..=span.at])
                 .collect();
             let rest = sounding_at(&spans, at_sec).map_or("", |from| &text[from..]);
             let whole: String = text.chars().filter(|c| *c != ' ').collect();
             let rest: String = rest.chars().filter(|c| *c != ' ').collect();
             assert_eq!(format!("{sent}{rest}"), whole, "cut at {at_sec:.3} s");
             // A character sounding at the cut goes again, from its start.
-            if let Some((at, ..)) = spans.iter().find(|(_, s, e)| *s <= at_sec && at_sec < *e) {
-                assert_eq!(sounding_at(&spans, at_sec), Some(*at));
+            if let Some(at) = spans
+                .iter()
+                .find(|span| span.start_sec <= at_sec && at_sec < span.end_sec)
+                .map(|span| span.at)
+            {
+                assert_eq!(sounding_at(&spans, at_sec), Some(at));
             }
         }
         assert_eq!(sounding_at(&spans, length + 1.0), None);

@@ -94,9 +94,12 @@ impl<S: CallSource> Runtime<S> {
             exch: exch.to_string(),
             call_edited: MonoMs(self.now),
             exch_complete: (!exch.is_empty()).then_some(MonoMs(self.now)),
-            earlier: Vec::new(),
+            ..Fields::default()
         };
-        self.apply(ContestEvent::Key { key, fields })
+        self.apply(ContestEvent::Key {
+            key,
+            fields: Box::new(fields),
+        })
     }
 
     /// Deliver everything owed until the turn on the air has ended.

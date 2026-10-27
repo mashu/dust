@@ -1,9 +1,9 @@
-use cw_core::{ChosenSpeed, answer_length_matches};
+use cw_core::{ChosenSpeed, MonoMs, answer_length_matches};
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
-use crate::session_runtime::AnswerOutbox;
-use crate::time::sleep_ms;
+use crate::session_runtime::{AnswerOutbox, TypedAnswer};
+use crate::time::{mono_ms, sleep_ms};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
     CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool,
@@ -108,7 +108,7 @@ struct AnswerDraft {
     /// The view the debounce belongs to, so one still waiting ends with it,
     /// whoever started it — a key in the box, the keypad, or the paddles.
     owner: ScopeId,
-    on_change: EventHandler<(usize, String)>,
+    on_change: EventHandler<TypedAnswer>,
 }
 
 impl AnswerDraft {
@@ -116,7 +116,7 @@ impl AnswerDraft {
     /// on, if it opens on anything.
     fn use_new(
         outbox: AnswerOutbox,
-        on_change: EventHandler<(usize, String)>,
+        on_change: EventHandler<TypedAnswer>,
         held: impl FnOnce() -> Option<(usize, String)>,
     ) -> Self {
         use_hook(|| {
@@ -145,15 +145,16 @@ impl AnswerDraft {
         (*self.at.peek() == Some(idx)).then(|| self.text.peek().clone())
     }
 
-    /// The box for `idx` now holds `text`, so nothing is drawn for it. The
-    /// session is handed it at once when its length matches the group's —
-    /// auto-confirm starts from there — and otherwise once typing has paused,
-    /// or sooner if anything happens to the session first.
-    fn edit(mut self, idx: usize, text: String, sent: &str) {
+    /// The box for `idx` now holds `text`, so nothing is drawn for it: what
+    /// is new in it keyed at `keyed`, or typed for you, untimed, at `None`.
+    /// The session is handed it at once when its length matches the group's
+    /// — auto-confirm starts from there — and otherwise once typing has
+    /// paused, or sooner if anything happens to the session first.
+    fn edit(mut self, idx: usize, text: String, sent: &str, keyed: Option<MonoMs>) {
         let full = answer_length_matches(sent, &text);
         self.at.set(Some(idx));
         self.text.set(text.clone());
-        self.outbox.hold(idx, text);
+        self.outbox.hold(idx, text, keyed);
         let epoch = self.cancel_pending();
         if full {
             self.hand_over();
@@ -173,20 +174,13 @@ impl AnswerDraft {
         });
     }
 
-    /// A paddle keyed `letter` into the box for `idx`: as the keypad does,
-    /// and the group's keys go untimed, a keyed letter going in only once
-    /// its letter space has run out.
-    fn push_keyed(self, idx: usize, letter: char, sent: &str) {
-        self.outbox.paddled(idx);
-        self.push(idx, letter, sent);
-    }
-
-    /// The keypad or a paddle keyed `letter` into the box for `idx`. The page
-    /// has not seen it, so the box is drawn again to show it.
-    fn push(self, idx: usize, letter: char, sent: &str) {
+    /// The keypad or a paddle keyed `letter` into the box for `idx` at
+    /// `keyed`. The page has not seen it, so the box is drawn again to show
+    /// it.
+    fn push(self, idx: usize, letter: char, sent: &str, keyed: Option<MonoMs>) {
         let mut text = self.peek_for(idx).unwrap_or_default();
         text.push(letter);
-        self.edit(idx, text, sent);
+        self.edit(idx, text, sent, keyed);
         self.redraw();
     }
 
@@ -194,7 +188,7 @@ impl AnswerDraft {
     fn pop(self, idx: usize, sent: &str) {
         let mut text = self.peek_for(idx).unwrap_or_default();
         if text.pop().is_some() {
-            self.edit(idx, text, sent);
+            self.edit(idx, text, sent, None);
             self.redraw();
         }
     }
@@ -360,8 +354,10 @@ fn AnswerBox(
             inputmode: ANSWER_INPUT_MODE,
             lang: "zxx",
             oninput: move |e| {
+                // The key's moment, before anything else is done with it.
+                let keyed = MonoMs(mono_ms());
                 if live {
-                    draft.edit(idx, e.value(), &sent);
+                    draft.edit(idx, e.value(), &sent, Some(keyed));
                 } else {
                     draft.redraw();
                 }
@@ -608,7 +604,7 @@ pub fn TrainingView(
     speed: Option<ChosenSpeed>,
     /// Where the box's text waits on its way to the session.
     answer: AnswerOutbox,
-    on_change: EventHandler<(usize, String)>,
+    on_change: EventHandler<TypedAnswer>,
     on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
@@ -624,12 +620,14 @@ pub fn TrainingView(
     });
     let can_paddle = !playing && !locked && !current_done;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
-    // The paddles key into the box that is open, and only while it is.
+    // The paddles key into the box that is open, and only while it is: a
+    // letter timed from its first contact, though it goes in only once its
+    // letter space has run out.
     let keys = use_context::<PaddleKeys>();
     {
         let sent_now = sent_now.clone();
-        keys.use_answer_box(can_paddle, move |letter: char| {
-            draft.push_keyed(current, letter, &sent_now);
+        keys.use_answer_box(can_paddle, move |letter, keyed| {
+            draft.push(current, letter, &sent_now, keyed);
         });
     }
     // A letter keyed in full is in the answer when it closes, even with its
@@ -666,11 +664,12 @@ pub fn TrainingView(
         .checked_sub(1)
         .filter(|&idx| confirmed.get(idx).copied().unwrap_or(false));
     let on_key = use_callback(move |pressed: PadKey| {
+        let keyed = MonoMs(mono_ms());
         if !live {
             return;
         }
         match pressed {
-            PadKey::Char(ch) => draft.push(current, ch, &sent_now),
+            PadKey::Char(ch) => draft.push(current, ch, &sent_now, Some(keyed)),
             PadKey::Back => draft.pop(current, &sent_now),
             PadKey::Next => on_confirm.call(()),
             // A run's keys: the keys a group is answered with have neither.

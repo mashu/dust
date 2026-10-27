@@ -10,7 +10,7 @@ use std::rc::Rc;
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::epoch::{Epoch, Ticket};
-use super::{MorseBackend, PlaybackSignal, WaitFlags};
+use super::{MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
 use crate::time::mono_ms;
 
 pub struct MorsePlayer {
@@ -27,8 +27,12 @@ struct SilentSignal {
 }
 
 impl PlaybackSignal for SilentSignal {
-    fn heard_after_sec(&self) -> f64 {
-        self.wait_ms as f64 / 1_000.0
+    fn timing(&self) -> SendTiming {
+        // Nothing sounds, so nothing is late to the ear.
+        SendTiming {
+            lead_sec: self.wait_ms as f64 / 1_000.0,
+            latency_sec: 0.0,
+        }
     }
 
     fn poll(&self) -> WaitFlags {
@@ -136,8 +140,11 @@ mod tests {
             let started = mono_ms();
             let wait =
                 start_planned(&mut player, &plan, &transcript, &settings, None).expect("sent");
-            assert_eq!(wait.heard_after_sec, 0.0);
-            assert_eq!(wait.wait().await, PlaybackOutcome::Completed);
+            assert_eq!(wait.start().latency_ms, 0);
+            assert_eq!(
+                wait.wait().await,
+                PlaybackOutcome::Completed { on_time: true }
+            );
             let took = mono_ms() - started;
             assert!(
                 (planned_ms..planned_ms + 100).contains(&took),

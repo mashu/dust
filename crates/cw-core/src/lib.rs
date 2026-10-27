@@ -20,7 +20,9 @@ mod keyer;
 mod level;
 mod machine;
 mod morse;
+mod numeric;
 mod pool;
+mod recognition;
 mod rng;
 mod sampling;
 mod score;
@@ -72,13 +74,18 @@ pub use endurance::{
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
 };
-pub use keyer::{Keyer, KeyerMode, KeyerOutput, Paddle, paddle_from_bracket};
+pub use keyer::{KeyedLetter, Keyer, KeyerMode, KeyerOutput, Paddle, paddle_from_bracket};
 pub use machine::{
     AUTO_CONFIRM_DELAY_MS, AnswerClose, GroupSource, SessionEffect, SessionEvent, SessionMachine,
 };
 pub use morse::{MAX_DIGITS_LEVEL, morse_for};
 pub use pool::{
     compute_char_pool, current_practice_window, newest_unlocked, unlocked_practice_count,
+};
+pub use recognition::{
+    CharTimes, KEEPING_UP_MS, KeyLog, REACTION_MIN_MS, RECOGNITION_BAND_MAX_MS,
+    RECOGNITION_BAND_MIN_MS, RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW,
+    Recognition, RecognitionBand, RecognitionBands, RecognitionEdge, answer_chars, recognise,
 };
 pub use rng::{Rng, SplitMix64};
 pub use sampling::{
@@ -87,8 +94,8 @@ pub use sampling::{
 };
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
-    Answered, ChosenSpeed, Group, GroupResult, GroupSession, KeyTimes, MonoMs, RECOGNITION_MAX_MS,
-    SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, answer_length_matches,
+    Answered, ChosenSpeed, Group, GroupResult, GroupSession, MonoMs, SendStart, SessionId,
+    SessionPhase, SessionResult, SessionTiming, SessionView, answer_length_matches,
 };
 pub use settings::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AGC_THRESHOLD_MAX_DB,
@@ -101,21 +108,21 @@ pub use settings::{
     MY_NAME_MAX, MY_POWER_MAX, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_ZONE_MAX,
     MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
     PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ,
-    QSB_RATE_MIN_HZ, RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RF_GAIN_MAX_DB,
-    RF_GAIN_MIN_DB, RangeSetting, RangeValues, RecognitionEdge, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
-    STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, SettingsSection,
-    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, class_reading, power_reading,
-    section_code, state_code,
+    QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
+    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
+    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, class_reading,
+    power_reading, section_code, state_code,
 };
 pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};
 pub use stats::{
-    AccuracyPoint, BUILDING_MIN_ACCURACY, BigramCell, BigramHeatmap, CONTEST_TIMES_NOTE, CharTally,
+    AccuracyPoint, BUILDING_MIN_ACCURACY, BigramCell, BigramHeatmap, CharTally,
     CharacterDiagnostic, ConfusionEntry, GROUP_START_BIGRAM_TOKEN, HARD_PAIR_MIN_TRIES,
     HARD_PAIR_RATIO, HardPair, MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MasteryStatus,
-    MistakeStats, RECENT_TRIES, RECOGNITION_MIN_TRIES, RecognitionBand, SamplingRow,
-    SessionHistoryRow, accuracy_chart, character_diagnostics, group_length_forecast, mistake_stats,
-    practised_modes, sampling_rows, session_history, span_history, speed_forecast, speed_history,
+    MistakeStats, RECENT_TRIES, SamplingRow, SessionHistoryRow, SessionRecognition, accuracy_chart,
+    character_diagnostics, group_length_forecast, mastered_count, mistake_stats, practised_modes,
+    sampling_rows, session_history, session_recognition, span_history, speed_forecast,
+    speed_history,
 };
 pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{

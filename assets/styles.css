@@ -2289,9 +2289,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .rec-chip.rec-icr, .err-chip.rec-icr { background: var(--warn-soft); color: var(--warn); }
 .rec-chip.rec-slow { background: var(--copper-soft); color: var(--copper-deep); }
 .rec-chip.rec-too-slow { background: var(--bad-soft); color: var(--bad); }
-/* A group's answer time, where nothing is timed: lighter than the line, as
-   it is not a recognition time. */
-.rec-answer { font-weight: 500; }
 .err-swatch.rec-fast { background: var(--good); }
 .err-swatch.rec-icr { background: var(--warn); }
 .err-swatch.rec-slow { background: var(--copper); }

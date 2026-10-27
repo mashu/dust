@@ -72,7 +72,7 @@ impl<S: CallSource> Runtime<S> {
 
     /// Apply `event` now, and carry out what comes of it.
     pub(crate) fn apply(&mut self, event: ContestEvent) -> Vec<ContestEffect> {
-        if let ContestEvent::TurnEnded { id } = event
+        if let ContestEvent::TurnEnded { id, .. } = event
             && self.playing.as_ref().is_some_and(|(_, turn)| turn.id == id)
             && let Some((_, turn)) = self.playing.take()
         {
@@ -137,9 +137,11 @@ impl<S: CallSource> Runtime<S> {
                         ContestEvent::TurnStarted {
                             id,
                             heard_from: MonoMs(starts),
+                            output_from: MonoMs(starts),
                         },
                     ));
-                    self.due.push((starts + ms, ContestEvent::TurnEnded { id }));
+                    let ended = ContestEvent::TurnEnded { id, on_time: true };
+                    self.due.push((starts + ms, ended));
                     self.playing = Some((starts, turn.clone()));
                     self.turns.push(turn.clone());
                 }
@@ -169,7 +171,8 @@ impl<S: CallSource> Runtime<S> {
         self.due.retain(|(_, event)| {
             !matches!(
                 event,
-                ContestEvent::TurnStarted { id: due, .. } | ContestEvent::TurnEnded { id: due }
+                ContestEvent::TurnStarted { id: due, .. }
+                    | ContestEvent::TurnEnded { id: due, .. }
                     if *due == id
             )
         });
@@ -373,7 +376,7 @@ impl Operator {
             exch: self.exch.clone(),
             call_edited: MonoMs(typed_at),
             exch_complete: (!self.exch.is_empty()).then_some(MonoMs(typed_at)),
-            earlier: Vec::new(),
+            ..Fields::default()
         };
         (typed_at + per_key, key, fields)
     }
@@ -447,7 +450,10 @@ pub(crate) fn work_until<S: CallSource>(
         } else if key_at == Some(next) && runtime.next_due().is_none_or(|due| due >= next) {
             runtime.run_to(next);
             if let Some((_, key, fields)) = pending.take() {
-                runtime.apply(ContestEvent::Key { key, fields });
+                runtime.apply(ContestEvent::Key {
+                    key,
+                    fields: Box::new(fields),
+                });
             }
         } else {
             runtime.step();

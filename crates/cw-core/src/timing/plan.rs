@@ -35,25 +35,34 @@ pub struct ToneEvent {
 #[derive(Clone, Debug)]
 pub struct PlaybackPlan {
     pub events: Vec<ToneEvent>,
+    /// Each character of the text that sounds, in order, as the plan lays
+    /// it down: what per-character timing and a splice read.
+    pub chars: Vec<CharSpan>,
     pub duration_sec: f64,
     pub resolved_char_wpm: f64,
     pub resolved_effective_wpm: f64,
 }
 
-impl PlaybackPlan {
-    /// Where each character of `text` that sounds finishes, in seconds from
-    /// the start of the send: the end of its last element, as this plan,
-    /// made from `text`, sends it.
-    pub fn char_ends(&self, text: &str) -> Vec<f64> {
-        let mut tones = self.events.iter();
-        text.chars()
-            .filter(|c| *c != ' ')
-            .filter_map(|c| {
-                let elements = morse_for(c.to_ascii_uppercase())?.chars().count();
-                let last = tones.by_ref().take(elements).last()?;
-                Some(last.start_sec + last.duration_sec)
-            })
-            .collect()
+/// Where one character of a send sounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CharSpan {
+    /// Its byte index in the text planned.
+    pub at: usize,
+    /// When its first element starts and its last ends, in seconds from the
+    /// start of the send.
+    pub start_sec: f64,
+    pub end_sec: f64,
+}
+
+impl CharSpan {
+    /// The span `by` seconds later.
+    #[must_use]
+    fn later(self, by: f64) -> Self {
+        Self {
+            start_sec: self.start_sec + by,
+            end_sec: self.end_sec + by,
+            ..self
+        }
     }
 }
 
@@ -130,6 +139,12 @@ pub fn plan_transmission(
                 event.start_sec += delay;
                 event.start_sec + event.duration_sec <= ends_at
             });
+            plan.chars = plan
+                .chars
+                .into_iter()
+                .map(|span| span.later(delay))
+                .filter(|span| span.end_sec <= ends_at)
+                .collect();
             plan.duration_sec = (plan.duration_sec + delay).min(ends_at);
             plan
         })
@@ -195,8 +210,9 @@ pub(crate) fn plan_morse_playback_at(
     });
     let mut current_time = 0.0;
     let mut events = Vec::new();
+    let mut spans = Vec::new();
 
-    for (i, raw) in chars.iter().enumerate() {
+    for ((i, raw), (at, _)) in chars.iter().enumerate().zip(text.char_indices()) {
         if *raw == ' ' {
             current_time += (word_space - char_space).max(0.0);
             continue;
@@ -205,6 +221,8 @@ pub(crate) fn plan_morse_playback_at(
         let Some(morse) = morse_for(ch) else {
             continue;
         };
+        let start_sec = current_time;
+        let mut end_sec = current_time;
         let last_symbol = morse.chars().count().saturating_sub(1);
         for (k, symbol) in morse.chars().enumerate() {
             let (duration, envelope) = if symbol == '.' {
@@ -220,6 +238,7 @@ pub(crate) fn plan_morse_playback_at(
                 envelope: Arc::clone(envelope),
             });
             current_time += duration;
+            end_sec = current_time;
             // The send ends on its last element. A gap after it would be
             // added to the word space whoever plays this puts before the
             // next group, and the groups would sit a dit too far apart.
@@ -227,6 +246,11 @@ pub(crate) fn plan_morse_playback_at(
                 current_time += symbol_space;
             }
         }
+        spans.push(CharSpan {
+            at,
+            start_sec,
+            end_sec,
+        });
         if last_morse_idx != Some(i) {
             // The letter gap is measured from where the element would have
             // ended at a keyer's weight, so it takes the fist's difference
@@ -238,6 +262,7 @@ pub(crate) fn plan_morse_playback_at(
 
     PlaybackPlan {
         events,
+        chars: spans,
         duration_sec: current_time,
         resolved_char_wpm,
         resolved_effective_wpm,
@@ -278,8 +303,21 @@ pub(crate) fn plan_from(
             Some(tone)
         })
         .collect();
+    // A character sounding at `from_sec` goes on from there; those before it
+    // are gone.
+    let chars = plan
+        .chars
+        .iter()
+        .filter(|span| span.end_sec > from_sec)
+        .map(|span| CharSpan {
+            start_sec: (span.start_sec - from_sec).max(0.0),
+            end_sec: span.end_sec - from_sec,
+            ..*span
+        })
+        .collect();
     PlaybackPlan {
         events,
+        chars,
         duration_sec: (plan.duration_sec - from_sec).max(0.0),
         ..plan
     }
@@ -323,13 +361,29 @@ mod tests {
     fn each_character_ends_with_its_last_element() {
         let settings = fixed_speed(20.0);
         let plan = planned("KM", &settings, &mut Fixed(0.5));
-        let ends = plan.char_ends("KM");
-        assert_eq!(ends.len(), 2);
+        let spans = &plan.chars;
+        assert_eq!(spans.len(), 2);
         let tones: Vec<&ToneEvent> = plan.events.iter().collect();
-        assert!((ends[0] - (tones[2].start_sec + tones[2].duration_sec)).abs() < 1e-9);
-        assert!((ends[1] - plan.duration_sec).abs() < 1e-9, "{ends:?}");
-        assert!(ends[0] < ends[1]);
-        assert!(plan.char_ends("").is_empty());
+        assert_eq!((spans[0].at, spans[1].at), (0, 1));
+        assert_eq!(spans[0].start_sec, 0.0);
+        assert!((spans[0].end_sec - (tones[2].start_sec + tones[2].duration_sec)).abs() < 1e-9);
+        assert!((spans[1].start_sec - tones[3].start_sec).abs() < 1e-9);
+        assert!(
+            (spans[1].end_sec - plan.duration_sec).abs() < 1e-9,
+            "{spans:?}"
+        );
+        assert!(planned("", &settings, &mut Fixed(0.5)).chars.is_empty());
+        // Words keep their bytes; a space sounds nothing.
+        let words = planned("K M", &settings, &mut Fixed(0.5));
+        assert_eq!(
+            words.chars.iter().map(|span| span.at).collect::<Vec<_>>(),
+            [0, 2]
+        );
+        // A send gone on from the middle of K keeps K from there, and M.
+        let cut = plan_from(plan.clone(), spans[0].end_sec - 0.05, &settings);
+        assert_eq!(cut.chars.len(), 2);
+        assert!((cut.chars[0].end_sec - 0.05).abs() < 1e-9);
+        assert_eq!(cut.chars[0].start_sec, 0.0);
     }
 
     fn fist(variation: f64) -> TrainingSettings {

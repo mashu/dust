@@ -30,11 +30,14 @@ pub enum ExchangeState {
     Complete,
 }
 
-/// One field read: the token as typed, and its value.
+/// One field read: the token as typed, which word of the text it is, and
+/// its value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadField {
     pub field: Field,
     pub token: String,
+    /// Its place among the text's words: where its characters were keyed.
+    pub word: usize,
     /// The canonical value, as the contest reads it
     /// ([`ContestRules::canonical`]).
     pub value: String,
@@ -143,6 +146,7 @@ pub fn parse_exchange(rules: &ContestRules, side: Side, text: &str) -> Reading {
                     ReadField {
                         field,
                         token: tokens[at].clone(),
+                        word: at,
                         value,
                     },
                 ));

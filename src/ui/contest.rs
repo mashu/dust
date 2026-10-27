@@ -52,7 +52,7 @@ pub fn ContestRunView() -> Element {
     // paddles land in their own fields.
     keys.use_fields(
         running,
-        move |letter| entry.push(letter),
+        move |letter, keyed| entry.push(letter, keyed),
         move || field_space(ctx),
     );
     entry.use_letters(move || keys.finish_letter());
@@ -502,7 +502,9 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
             inputmode: ANSWER_INPUT_MODE,
             lang: "zxx",
             oninput: move |e| {
-                entry.edit(field, e.value());
+                // The key's moment, before anything else is done with it.
+                let keyed = MonoMs(mono_ms());
+                entry.edit(field, e.value(), Some(keyed));
                 // Typing ends the paddles' word: their word space is not to
                 // move the cursor from what is being typed. A letter keyed
                 // in full lands after it, as the page has it already.
@@ -544,7 +546,7 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
                         // here instead, after the letter.
                         None if landed => {
                             e.prevent_default();
-                            entry.push(' ');
+                            entry.push_space();
                         }
                         None => {}
                     }
@@ -576,7 +578,7 @@ fn space_goes_to(ctx: AppCtx, field: EntryField) -> Option<EntryField> {
 fn field_space(ctx: AppCtx) {
     match space_goes_to(ctx, ctx.entry.focus()) {
         Some(to) => focus_field(ctx, to),
-        None => ctx.entry.push(' '),
+        None => ctx.entry.push_space(),
     }
 }
 
@@ -771,7 +773,7 @@ fn SpaceKey(qso: QsoState, live: bool) -> Element {
                 ctx.entry.finish_letter();
                 match space_goes_to(ctx, ctx.entry.focus()) {
                     Some(to) => focus_field(ctx, to),
-                    None => from_button(ctx, || ctx.entry.push(' ')),
+                    None => from_button(ctx, || ctx.entry.push_space()),
                 }
             },
             kbd { "Space" }
@@ -791,11 +793,12 @@ fn RunKeypad(qso: QsoState, open: bool) -> Element {
         .map(|enter| enter.label)
         .unwrap_or_default();
     let on_key = use_callback(move |pressed: PadKey| {
+        let keyed = MonoMs(mono_ms());
         // A letter keyed in full on the paddles lands before the key's own,
         // and their word is over, so no word space follows the key.
         entry.finish_letter();
         match pressed {
-            PadKey::Char(ch) => entry.push(ch),
+            PadKey::Char(ch) => entry.push(ch, Some(keyed)),
             PadKey::Back => entry.pop(),
             PadKey::Field => field_space(ctx),
             PadKey::Send(_) | PadKey::Next => press_key(ctx, OpKey::Esm),

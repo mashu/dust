@@ -1108,6 +1108,11 @@ impl Caller {
         Some(said)
     }
 
+    /// Its exchange's tokens, once it has drawn them ([`Self::exchange`]).
+    pub(super) fn sent_exchange(&self) -> Option<&[(Field, String)]> {
+        self.exchange.as_deref()
+    }
+
     /// Its exchange, each copied field with the token it sends for it,
     /// fixed the first time it is asked for: a station sends one serial in
     /// a QSO however often it repeats it.

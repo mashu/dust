@@ -10,7 +10,7 @@ use cw_core::TrainingSettings;
 use cw_core::band::BandKey;
 
 use crate::audio::epoch::{Epoch, Ticket};
-use crate::audio::{PlaybackSignal, WaitFlags};
+use crate::audio::{PlaybackSignal, SendTiming, WaitFlags};
 
 pub struct PlayerState {
     epoch: Epoch,
@@ -60,13 +60,10 @@ pub struct ToneSignal {
     /// is never moved to another stream: one that replaces a broken stream
     /// may run at another rate.
     stream_failed: Arc<AtomicBool>,
-    /// How long after it was started the send is heard, in seconds: how
-    /// long it waits to be rendered, and how far behind the stream's
-    /// callback the speaker was as it started.
-    heard_after_sec: f64,
-    /// How long after it was started the send is rendered, its first sample
-    /// going to the output.
-    sent_after_sec: f64,
+    /// How long it waits to be rendered, its first sample going to the
+    /// output, and how far behind the stream's callback the speaker was as
+    /// it started.
+    timing: SendTiming,
 }
 
 impl ToneSignal {
@@ -74,26 +71,20 @@ impl ToneSignal {
         ticket: Ticket,
         finished: Arc<AtomicBool>,
         stream_failed: Arc<AtomicBool>,
-        heard_after_sec: f64,
-        sent_after_sec: f64,
+        timing: SendTiming,
     ) -> Self {
         Self {
             ticket,
             finished,
             stream_failed,
-            heard_after_sec,
-            sent_after_sec,
+            timing,
         }
     }
 }
 
 impl PlaybackSignal for ToneSignal {
-    fn heard_after_sec(&self) -> f64 {
-        self.heard_after_sec
-    }
-
-    fn sent_after_sec(&self) -> f64 {
-        self.sent_after_sec
+    fn timing(&self) -> SendTiming {
+        self.timing
     }
 
     fn poll(&self) -> WaitFlags {
@@ -154,8 +145,12 @@ mod tests {
         let armed = state.arm();
         let finished = Arc::new(AtomicBool::new(false));
         let broken = Arc::new(AtomicBool::new(false));
-        let signal = ToneSignal::new(armed, Arc::clone(&finished), Arc::clone(&broken), 0.04, 0.0);
-        assert_eq!(signal.heard_after_sec(), 0.04);
+        let timing = SendTiming {
+            lead_sec: 0.0,
+            latency_sec: 0.04,
+        };
+        let signal = ToneSignal::new(armed, Arc::clone(&finished), Arc::clone(&broken), timing);
+        assert_eq!(signal.timing().heard_after_sec(), 0.04);
         assert_eq!(
             signal.poll(),
             WaitFlags {

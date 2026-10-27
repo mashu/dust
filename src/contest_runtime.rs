@@ -11,8 +11,9 @@
 
 use cw_core::{
     ContestEffect, ContestEvent, ContestMachine, ContestPhase, ContestRules, EntryField, Esm,
-    Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, Side, TrainingSettings,
-    Turn, esm, loggable, normalize_call, parse_exchange, plan_turn, space_to_call,
+    Field, Fields, MonoMs, OpKey, PauseWhy, QsoState, Reading, Sampler, SendStart, Side,
+    TrainingSettings, Turn, esm, loggable, normalize_call, parse_exchange, plan_turn,
+    space_to_call,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
@@ -106,14 +107,21 @@ impl ContestEntry {
         }
     }
 
-    /// A character the paddles or the keypad typed into the field with the
-    /// cursor. The page has not seen it, so that input is drawn again.
-    pub fn push(mut self, letter: char) {
+    /// A character the paddles or the keypad keyed into the field with the
+    /// cursor at `keyed`. The page has not seen it, so that input is drawn
+    /// again.
+    pub fn push(mut self, letter: char, keyed: Option<MonoMs>) {
         let field = *self.focus.peek();
         let mut text = self.text(field);
         text.push(letter);
-        self.edit(field, text);
+        self.edit(field, text, keyed);
         *self.repaint.write() += 1;
+    }
+
+    /// A space typed into the field with the cursor: it parts the
+    /// exchange's items, and is no character of one.
+    pub fn push_space(self) {
+        self.push(' ', None);
     }
 
     /// The keypad's ⌫ took the last character out of the field with the
@@ -122,7 +130,7 @@ impl ContestEntry {
         let field = *self.focus.peek();
         let mut text = self.text(field);
         if text.pop().is_some() {
-            self.edit(field, text);
+            self.edit(field, text, None);
             *self.repaint.write() += 1;
         }
     }
@@ -135,8 +143,9 @@ impl ContestEntry {
     }
 
     /// `field` now holds `text`, as its input does already, so nothing is
-    /// drawn for it.
-    pub fn edit(mut self, field: EntryField, text: String) {
+    /// drawn for it: what is new in it keyed at `keyed`, or untimed at
+    /// `None`.
+    pub fn edit(mut self, field: EntryField, text: String, keyed: Option<MonoMs>) {
         // Only a run has fields to type in, and it reads them from the
         // start.
         let Some((rules, side)) = *self.reads.peek() else {
@@ -144,7 +153,7 @@ impl ContestEntry {
         };
         self.fields
             .write()
-            .edit(field, text, MonoMs(mono_ms()), rules, side);
+            .edit(field, text, MonoMs(mono_ms()), keyed, rules, side);
         *self.typed.write() += 1;
     }
 
@@ -323,7 +332,13 @@ pub fn press_key(ctx: AppCtx, key: OpKey) {
     };
     lease.wake();
     let fields = ctx.entry.snapshot();
-    apply(ctx, Some(ContestEvent::Key { key, fields }));
+    apply(
+        ctx,
+        Some(ContestEvent::Key {
+            key,
+            fields: Box::new(fields),
+        }),
+    );
 }
 
 /// − / +: your speed, moved by `delta` WPM from your next message on, and
@@ -556,7 +571,8 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     let Some(transcript) = turn.transcript() else {
         // A turn with nothing in it is over as soon as it begins; the
         // machine never plays one.
-        dispatch(ctx, &lease, ContestEvent::TurnEnded { id });
+        let ended = ContestEvent::TurnEnded { id, on_time: true };
+        dispatch(ctx, &lease, ended);
         return;
     };
     let plan = plan_turn(&turn, &settings);
@@ -569,17 +585,25 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     let asked = lease.ask_to_send();
     spawn_forever(async move {
         let heard = lease.clone();
-        // Each attempt, retries too: its sound reaches the ear the player's
-        // lead, any wait for its moment and latency after it starts.
-        let started = move |heard_after_sec: f64| {
-            let heard_from = MonoMs(mono_ms()).plus_sec(heard_after_sec);
-            dispatch(ctx, &heard, ContestEvent::TurnStarted { id, heard_from });
+        // Each attempt, retries too: when its sound goes to the output, and
+        // when it reaches the ear, the player's lead, any wait for its
+        // moment and latency after it starts.
+        let started = move |start: &SendStart| {
+            let event = ContestEvent::TurnStarted {
+                id,
+                heard_from: start.heard_at(),
+                output_from: start.output_at,
+            };
+            dispatch(ctx, &heard, event);
         };
         let event = match lease
             .send_planned(asked, &plan, &transcript, &settings, starts_at, started)
             .await
         {
-            Ok(_) => ContestEvent::TurnEnded { id },
+            Ok(sent) => ContestEvent::TurnEnded {
+                id,
+                on_time: sent.on_time,
+            },
             // A stop, a newer turn, a pause: the machine has moved on.
             Err(AudioError::Cancelled) => ContestEvent::TurnCancelled { id },
             Err(failure) => {
@@ -720,7 +744,7 @@ mod tests {
 
     fn type_into(h: &mut Harness, field: EntryField, text: &str) {
         let entry = h.ctx.entry;
-        h.in_app(|| entry.edit(field, text.to_string()));
+        h.in_app(|| entry.edit(field, text.to_string(), Some(MonoMs(mono_ms()))));
     }
 
     /// What the callers sent in the last turn, as the player was told it.
@@ -1395,7 +1419,7 @@ mod tests {
             assert_eq!(repaints(&h), drawn, "typing drew the fields");
 
             h.in_app(|| entry.set_focus(EntryField::Exchange));
-            h.in_app(|| entry.push('5'));
+            h.in_app(|| entry.push('5', Some(MonoMs(mono_ms()))));
             assert_eq!(entry.snapshot().exch, "2145");
             assert_eq!(repaints(&h), drawn + 1, "a paddle letter is drawn");
 

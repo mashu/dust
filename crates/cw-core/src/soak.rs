@@ -13,7 +13,9 @@ use crate::contest::bot::{Copied, copy_of};
 use crate::contest::{FLUTTER_DEPTH, FLUTTER_RATE_HZ, QRS_MOST};
 use crate::level::LEVEL_MIN;
 use crate::machine::{GroupSource, SessionEffect, SessionEvent, SessionMachine};
-use crate::session::{MIN_RESPONSE_MS_PER_CHAR, whole_ms};
+use crate::recognition::{CharTimes, KeyLog, recognise};
+use crate::score::MIN_RESPONSE_MS_PER_CHAR;
+use crate::session::{SendStart, whole_ms};
 use crate::timing::{SEND_RELEASE_SEC, resolve_pileup};
 use crate::{
     Aim, Answered, AutoLevelCounters, CALLSIGN_TIER_MAX, CallerHabits, CharSamplingState,
@@ -23,8 +25,8 @@ use crate::{
     RECOGNITION_MAX_MS, Rng, RowStatus, RunStyle, STATIONS_MAX, STATIONS_MIN, Sampler, ScoredQso,
     Sender, SessionId, SessionPhase, SessionResult, SplitMix64, TrainingSettings, Transmission,
     WPM_MIN, align_group, compute_char_pool, contest_score, evaluate_auto_level,
-    generate_training_group, parse_exchange, plan_morse_playback_for, plan_transmission, plan_turn,
-    read_number, resolve_station,
+    generate_training_group, normalize_call, parse_exchange, plan_morse_playback_for,
+    plan_transmission, plan_turn, read_number, resolve_station,
 };
 
 /// Enough seeds to be worth running on every commit, and cheap enough to.
@@ -306,12 +308,29 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
     }
 }
 
-/// Moments about `now`, as many as a send or a box might hold, in order or
-/// not: when a send's characters reached the ear, or when keys went in.
-fn random_moments(rng: &mut SplitMix64, now: u64) -> Vec<MonoMs> {
+/// Keys about `now`, as many as a box might hold, in order or not, some
+/// untimed.
+fn random_keys(rng: &mut SplitMix64, now: u64) -> Vec<Option<MonoMs>> {
     (0..rng.usize_in(0, 14))
-        .map(|_| MonoMs((now + rng.usize_in(0, 6_000) as u64).saturating_sub(3_000)))
+        .map(|_| {
+            (rng.f64() < 0.9)
+                .then(|| MonoMs((now + rng.usize_in(0, 6_000) as u64).saturating_sub(3_000)))
+        })
         .collect()
+}
+
+/// A send's start as the runtime might report it: any speed, character ends
+/// as many as the group's or not, in order or not, through any delay.
+fn random_start(rng: &mut SplitMix64, now: u64) -> SendStart {
+    SendStart {
+        char_wpm: rng.pick_in_range(0.0, 60.0),
+        effective_wpm: rng.pick_in_range(0.0, 60.0),
+        output_at: MonoMs(now + rng.usize_in(0, 200) as u64),
+        char_ends_ms: (0..rng.usize_in(0, 14))
+            .map(|_| rng.usize_in(0, 6_000) as u32)
+            .collect(),
+        latency_ms: rng.usize_in(0, 500) as u32,
+    }
 }
 
 /// One of everything the runtime can send, including events for the wrong
@@ -325,16 +344,18 @@ fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -
     let text: String = (0..rng.usize_in(0, 12))
         .map(|_| KEYS[rng.usize_in(0, KEYS.len() - 1)])
         .collect();
-    match rng.usize_in(0, 7) {
+    match rng.usize_in(0, 8) {
         0 => SessionEvent::PlaybackEnded {
             index,
             duration_sec: rng.pick_in_range(0.0, 5.0),
-            char_wpm: rng.pick_in_range(1.0, 60.0),
-            effective_wpm: rng.pick_in_range(1.0, 60.0),
-            heard_at: random_moments(rng, now),
+            on_time: rng.f64() < 0.8,
         },
         1 => SessionEvent::PlaybackStopped { index },
-        2 => SessionEvent::Input { index, text },
+        2 => SessionEvent::Input {
+            index,
+            text,
+            keys: random_keys(rng, now),
+        },
         3 => SessionEvent::Confirm,
         // A timer the machine started, or one it never did.
         4 => SessionEvent::TimerFired {
@@ -346,6 +367,10 @@ fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -
         5 => SessionEvent::FinishNow,
         6 => SessionEvent::TimerFired {
             id: timers.last().copied().unwrap_or(0),
+        },
+        7 => SessionEvent::PlaybackStarted {
+            index,
+            start: random_start(rng, now),
         },
         _ => SessionEvent::Abort,
     }
@@ -385,19 +410,21 @@ fn adaptive_lengths_never_leave_the_range() {
     }
 }
 
+/// Seeds past [`SEEDS`] get to answers, where the first ones mostly count
+/// down and end before any group is answered: no count down, the box shut
+/// or not, no end for a while, and now and then a send and its copy that fit.
+const ANSWERING_SEEDS: u64 = SEEDS / 2;
+
 #[test]
 fn no_run_of_events_can_put_a_session_somewhere_impossible() {
-    // Across every seed: groups scored, and characters timed. Neither may be
+    // Across every seed: groups scored, and groups timed. Neither may be
     // none, or the checks on them below have nothing to check.
     let (mut scored, mut timed) = (0usize, 0usize);
-    for seed in 0..SEEDS {
+    for seed in 0..SEEDS + ANSWERING_SEEDS {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x2545_F491).wrapping_add(7));
         let mut settings = wild_settings(&mut rng).clamp();
-        // Half the seeds get to answers: no count down, the box shut or not,
-        // and for a while no end. Most of the others count down, and end
-        // before a group is answered.
-        let reaches = seed % 2 == 0;
-        if reaches {
+        let answering = seed >= SEEDS;
+        if answering {
             settings.playback.countdown_sec = 0;
             settings.playback.lock_input_during_group_playback = rng.f64() < 0.5;
         }
@@ -408,9 +435,9 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
 
         let mut now = 0u64;
         let mut timers: Vec<u64> = Vec::new();
-        // When the current group's characters were last said to reach the
-        // ear, for keys that follow them.
-        let mut heard: Vec<MonoMs> = Vec::new();
+        // Where the current group's characters were last said to end, for
+        // keys that follow them.
+        let mut ends: Vec<MonoMs> = Vec::new();
         for step in 0..200 {
             check_effects(&effects, groups, seed, step);
             timers.extend(effects.iter().filter_map(|effect| match effect {
@@ -422,20 +449,13 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
             // arrives late — a send that was in flight, a timer, a keystroke —
             // must be dropped, not turned into more work.
             let was_terminal = machine.is_terminal();
-            // Keys as the box saw them, for any group, as the runtime notes
-            // them before each event.
-            let typing = rng.usize_in(0, groups);
-            machine.note_keys(typing, &random_moments(&mut rng, now));
             let mut event = random_event(&mut rng, now, groups, &timers);
-            if reaches && step < 150 {
+            if answering && step < 150 {
                 if matches!(event, SessionEvent::Abort | SessionEvent::FinishNow) {
                     event = SessionEvent::Confirm;
                 }
-                // Now and then the current group's own send, 300 ms a
-                // character, and its own copy typed along: each key a
-                // little after its character reached the ear.
                 if rng.f64() < 0.3 {
-                    event = coherent(&mut rng, &mut machine, &mut heard, event, now);
+                    event = coherent(&mut rng, &machine, &mut ends, event, now);
                 }
             }
             effects = machine.apply(event.clone(), MonoMs(now));
@@ -500,43 +520,39 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 .all(|t| t.time_to_complete_ms >= MIN_RESPONSE_MS_PER_CHAR),
             "seed {seed}: an answer quicker than anyone types"
         );
-        // A recognition time is one a character of the group's, within the
-        // cap, and a run of them never ends untimed.
+        // A group's keys are its answer's, and what is read from them is the
+        // rule's, whatever the runtime said.
         for (group, timing) in result.groups.iter().zip(&result.group_timings) {
-            let times = &timing.recognition_ms;
-            assert!(
-                times.len() <= group.sent.chars().count(),
-                "seed {seed}: more times than characters: {times:?} for {:?}",
-                group.sent
+            let Some(times) = &timing.char_times else {
+                continue;
+            };
+            assert_eq!(
+                times.keys.len(),
+                group.received.chars().count(),
+                "seed {seed}: keys for {:?}",
+                group.received
             );
-            assert!(
-                times
-                    .iter()
-                    .flatten()
-                    .all(|&ms| u64::from(ms) <= RECOGNITION_MAX_MS),
-                "seed {seed}: {times:?} past the cap"
+            let recognised = recognise(&group.sent, &group.received, times);
+            assert_eq!(
+                recognised,
+                stated_rule(&group.sent, &group.received, times),
+                "seed {seed}: {group:?} {times:?}"
             );
-            assert!(times.last() != Some(&None), "seed {seed}: {times:?}");
+            timed += usize::from(recognised.iter().any(Option::is_some));
         }
         scored += result.groups.len();
-        timed += result
-            .group_timings
-            .iter()
-            .map(|timing| timing.recognition_ms.iter().flatten().count())
-            .sum::<usize>();
     }
     assert!(scored > 0, "no seed scored a group");
-    assert!(timed > 0, "no seed timed a character");
+    assert!(timed > 0, "no seed timed a group");
 }
 
-/// `event` made the current group's: a send ending now, its characters
-/// said to reach the ear 300 ms apart, kept in `heard`; or its own copy,
-/// each key noted a moment after its character was heard. Anything else
-/// as it was.
+/// `event` made the current group's: a send starting now, its characters
+/// ending 300 ms apart, kept in `ends`; or its own copy, each key a moment
+/// after its character ended. Anything else as it was.
 fn coherent(
     rng: &mut SplitMix64,
-    machine: &mut SessionMachine<Sampler>,
-    heard: &mut Vec<MonoMs>,
+    machine: &SessionMachine<Sampler>,
+    ends: &mut Vec<MonoMs>,
     event: SessionEvent,
     now: u64,
 ) -> SessionEvent {
@@ -546,132 +562,157 @@ fn coherent(
         .group(current)
         .map(|group| group.sent().to_string())
         .unwrap_or_default();
-    let length = sent.chars().count() as u64;
+    let length = sent.chars().count() as u32;
     match event {
-        SessionEvent::PlaybackEnded {
-            char_wpm,
-            effective_wpm,
-            ..
-        } => {
-            *heard = (0..length)
-                .map(|at| MonoMs(now.saturating_sub((length - 1 - at) * 300)))
-                .collect();
-            SessionEvent::PlaybackEnded {
-                index: current,
-                duration_sec: 0.0,
-                char_wpm,
-                effective_wpm,
-                heard_at: heard.clone(),
-            }
-        }
-        SessionEvent::Input { .. } => {
-            let keys: Vec<MonoMs> = heard
+        SessionEvent::PlaybackStarted { start, .. } => {
+            let char_ends_ms: Vec<u32> = (1..=length).map(|at| at * 300).collect();
+            *ends = char_ends_ms
                 .iter()
-                .map(|at| at.plus(rng.usize_in(0, 250) as u64))
+                .map(|end| MonoMs(now).plus(u64::from(*end)))
                 .collect();
-            machine.note_keys(current, &keys);
-            SessionEvent::Input {
+            SessionEvent::PlaybackStarted {
                 index: current,
-                text: sent,
+                start: SendStart {
+                    output_at: MonoMs(now),
+                    char_ends_ms,
+                    latency_ms: 0,
+                    ..start
+                },
             }
         }
+        SessionEvent::Input { .. } => SessionEvent::Input {
+            index: current,
+            keys: ends
+                .iter()
+                .map(|end| Some(end.plus(100 + rng.usize_in(0, 250) as u64)))
+                .collect(),
+            text: sent,
+        },
         other => other,
     }
 }
 
-/// Whatever a send's sound and the keys after it say, a recognition time is
-/// a character's own: typed right, in its place, no sooner than it reached
-/// the ear, its gap capped; none in a group sent twice, or of more than one
-/// character with the box shut, and nothing untimed at the end.
+/// The rule of docs/recognition.md, stated plainly, for the soaks to hold
+/// [`recognise`] to.
+fn stated_rule(sent: &str, received: &str, times: &CharTimes) -> Vec<Option<u32>> {
+    let sent: Vec<char> = sent.chars().collect();
+    let typed: Vec<char> = received.chars().collect();
+    let n = sent.len();
+    if n == 0 || times.ends.len() != n {
+        return vec![None; n];
+    }
+    let key = |at: usize| times.keys.get(at).copied().flatten();
+    let reached = |at: usize| u64::from(times.ends[at]) + u64::from(times.latency_ms) + 100;
+    if n > 1 && !(times.box_open && key(0).is_some_and(|k| u64::from(k) <= reached(n - 1))) {
+        return vec![None; n];
+    }
+    // Lined up: every place for an answer as long; else before the first
+    // difference, less the run of a letter that could be the one missed.
+    let lined = if typed.len() == n {
+        n
+    } else {
+        let mut p = (0..n.min(typed.len()))
+            .take_while(|&i| sent[i] == typed[i])
+            .count();
+        while p > 0 && (sent.get(p) == Some(&sent[p - 1]) || typed.get(p) == Some(&sent[p - 1])) {
+            p -= 1;
+        }
+        p
+    };
+    (0..n)
+        .map(|at| {
+            let k = key(at)?;
+            let end = times.ends[at];
+            let typed_right = at < lined && typed.get(at) == Some(&sent[at]);
+            let heard = u64::from(k) >= u64::from(end) + 100;
+            let keeping_up =
+                at == 0 || key(at - 1).is_some_and(|before| u64::from(before) <= reached(at));
+            (typed_right && heard && keeping_up).then(|| (k - end).min(RECOGNITION_MAX_MS))
+        })
+        .collect()
+}
+
+/// Whatever a send's sound and the keys after it say, the rule reads them
+/// as it is stated: over sends of every length, typed right, wrong, short
+/// and long, early and late, with the box open or shut, through any delay.
 #[test]
-fn a_recognition_time_is_only_ever_what_the_keys_say() {
+fn a_recognition_time_is_only_ever_what_the_rule_says() {
     const SENDABLE: [char; 8] = ['K', 'M', 'U', 'R', 'E', '5', '/', '?'];
     let mut timed = 0usize;
     for seed in 0..SEEDS {
         let mut rng = SplitMix64::new(seed.wrapping_mul(0x9E37_79B9).wrapping_add(3));
-        let locked = rng.f64() < 0.4;
-        let repeats = if rng.f64() < 0.85 { 1 } else { 2 };
+        // Repeated letters now and then, where a short answer is ambiguous.
         let sent: String = (0..rng.usize_in(1, 8))
-            .map(|_| SENDABLE[rng.usize_in(0, SENDABLE.len() - 1)])
+            .map(|_| {
+                let top = if rng.f64() < 0.3 {
+                    1
+                } else {
+                    SENDABLE.len() - 1
+                };
+                SENDABLE[rng.usize_in(0, top)]
+            })
             .collect();
         let length = sent.chars().count();
-        let mut settings = TrainingSettings::default();
-        settings.playback.lock_input_during_group_playback = locked;
-        let mut session = crate::GroupSession::new(SessionId::new(seed), 1, settings);
-        session.set_group(0, sent.clone(), repeats);
-        let start = 1_000 + rng.usize_in(0, 500) as u64;
-        session.begin_group(0, MonoMs(start));
-        // Each character's end, 150 to 600 ms apart; now and then one too
-        // few or too many, as a send whose plan the group does not match.
-        let mut at = start + rng.usize_in(0, 400) as u64;
-        let mut heard: Vec<MonoMs> = (0..length)
+        let mut at = rng.usize_in(0, 400) as u32;
+        let mut ends: Vec<u32> = (0..length)
             .map(|_| {
-                at += rng.usize_in(150, 600) as u64;
-                MonoMs(at)
+                at += rng.usize_in(150, 600) as u32;
+                at
             })
             .collect();
         match rng.usize_in(0, 9) {
             0 => {
-                heard.pop();
+                ends.pop();
             }
-            1 => heard.push(MonoMs(at + 300)),
+            1 => ends.push(at + 300),
             _ => {}
         }
-        let end = MonoMs(at + rng.usize_in(0, 200) as u64);
-        session.end_playback(0, end, 20.0, 20.0, heard.clone());
-        // The copy: mostly right, now and then a character wrong, short or
-        // long; each key from well before its character to well after.
         let mut typed: Vec<char> = sent.chars().collect();
         for ch in typed.iter_mut() {
             if rng.f64() < 0.1 {
                 *ch = 'T';
             }
         }
-        match rng.usize_in(0, 9) {
+        match rng.usize_in(0, 7) {
             0 => {
                 typed.pop();
             }
             1 => typed.push('E'),
+            2 if typed.len() > 1 => {
+                typed.remove(rng.usize_in(0, typed.len() - 1));
+            }
             _ => {}
         }
         let lag_most = if rng.f64() < 0.5 { 700 } else { 4_000 };
-        let keys: Vec<MonoMs> = typed
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                let from = heard.get(i).copied().unwrap_or(end);
-                MonoMs((from.0 + rng.usize_in(0, lag_most) as u64).saturating_sub(200))
+        let keys: Vec<Option<u32>> = (0..typed.len())
+            .map(|i| {
+                let from = ends.get(i).copied().unwrap_or(at);
+                (rng.f64() < 0.95)
+                    .then(|| (from + rng.usize_in(0, lag_most) as u32).saturating_sub(200))
             })
             .collect();
+        let times = CharTimes {
+            ends,
+            keys,
+            latency_ms: if rng.f64() < 0.5 {
+                0
+            } else {
+                rng.usize_in(0, 400) as u32
+            },
+            box_open: rng.f64() < 0.7,
+        };
         let typed: String = typed.into_iter().collect();
-        session.set_input(0, &typed);
-        session.note_keys(0, &keys);
-        session.confirm(0, MonoMs(at + 5_000));
-        let result = session.result(at + 6_000, "2026-10-24".into());
-        let times = &result.group_timings[0].recognition_ms;
-
-        let case = format!("seed {seed}: {sent} as {typed}, locked {locked}, sent {repeats}x");
-        assert!(times.len() <= length, "{case}: {times:?}");
-        assert!(times.last() != Some(&None), "{case}: {times:?}");
-        if repeats > 1 || heard.len() != length || (locked && length > 1) {
-            assert!(times.is_empty(), "{case}: {times:?}");
-        }
-        let sent: Vec<char> = sent.chars().collect();
-        let typed: Vec<char> = typed.chars().collect();
-        for (i, took) in times.iter().enumerate() {
-            let Some(took) = took else { continue };
-            assert_eq!(typed.get(i), sent.get(i), "{case}: {i} timed, typed wrong");
-            assert!(keys[i] >= heard[i], "{case}: {i} keyed before it was heard");
-            assert_eq!(
-                u64::from(*took),
-                keys[i].since(heard[i]).min(RECOGNITION_MAX_MS),
-                "{case}: {i}"
-            );
-            timed += 1;
-        }
+        let recognised = recognise(&sent, &typed, &times);
+        assert_eq!(recognised.len(), length, "seed {seed}");
+        assert_eq!(
+            recognised,
+            stated_rule(&sent, &typed, &times),
+            "seed {seed}: {sent} as {typed}, {times:?}"
+        );
+        timed += recognised.iter().flatten().count();
     }
-    // Some 1,300 characters are timed over the seeds; one for every four
-    // seeds is a floor that keeps these checks from going quiet.
+    // Some thousands of characters are timed over the seeds; one for every
+    // four seeds is a floor that keeps these checks from going quiet.
     assert!(
         timed > usize::try_from(SEEDS / 4).unwrap_or(0),
         "only {timed} timed"
@@ -1122,14 +1163,42 @@ fn contest_key(rng: &mut SplitMix64, now: u64, seen: &Seen) -> ContestEvent {
         (junk(rng), junk(rng))
     };
     let stamp = |rng: &mut SplitMix64| MonoMs(now.saturating_sub(rng.usize_in(0, 3_000) as u64));
+    let call_edited = stamp(rng);
+    let exch_complete = (rng.f64() < 0.7).then(|| stamp(rng));
+    // Each character keyed a moment before the next, the last as its field
+    // was last edited, drawing nothing more from the stream.
+    let keyed = |chars: Vec<char>, last: MonoMs| {
+        let mut log = KeyLog::default();
+        for typed in 1..=chars.len() {
+            let before = 150 * (chars.len() - typed) as u64;
+            log.typed(
+                chars[..typed].iter().copied(),
+                Some(MonoMs(last.0.saturating_sub(before))),
+            );
+        }
+        log
+    };
+    let call_keys = keyed(
+        normalize_call(&call).replace('?', "").chars().collect(),
+        call_edited,
+    );
+    let exch_keys = keyed(
+        exch.chars().map(|c| c.to_ascii_uppercase()).collect(),
+        exch_complete.unwrap_or(call_edited),
+    );
     let fields = Fields {
         call,
         exch,
-        call_edited: stamp(rng),
-        exch_complete: (rng.f64() < 0.7).then(|| stamp(rng)),
-        earlier: Vec::new(),
+        call_edited,
+        exch_complete,
+        call_keys,
+        exch_keys,
+        ..Fields::default()
     };
-    ContestEvent::Key { key, fields }
+    ContestEvent::Key {
+        key,
+        fields: Box::new(fields),
+    }
 }
 
 /// What came of every contest run across the seeds, to show the soak
@@ -1436,10 +1505,12 @@ fn random_contest_event(
         ContestEvent::TurnStarted {
             id: pick(rng, &seen.turns),
             heard_from: MonoMs(now + rng.usize_in(0, 200) as u64),
+            output_from: MonoMs(now + rng.usize_in(0, 200) as u64),
         }
     } else if draw < 0.62 {
         ContestEvent::TurnEnded {
             id: pick(rng, &seen.turns),
+            on_time: rng.f64() < 0.9,
         }
     } else if draw < 0.65 {
         ContestEvent::TurnCancelled {
@@ -1611,6 +1682,8 @@ fn soak_contest_runs(style: RunStyle) {
     let mut logged_in: std::collections::BTreeMap<&str, u32> = Default::default();
     let mut logged_with: std::collections::BTreeMap<&str, u32> = Default::default();
     let mut heard_with: std::collections::BTreeMap<&str, HabitsHeard> = Default::default();
+    // Copies kept with their sound's timeline: some must be.
+    let mut timed_groups = 0u32;
     let seeds = match style {
         RunStyle::Single => 0..CONTEST_SEEDS,
         RunStyle::Pileup => CONTEST_SEEDS..CONTEST_SEEDS + PILEUP_SEEDS,
@@ -1681,6 +1754,36 @@ fn soak_contest_runs(style: RunStyle) {
                     >= MIN_RESPONSE_MS_PER_CHAR * g.sent.chars().count() as f64),
             "seed {seed}: a copy quicker than anyone types"
         );
+        // A copy is timed by the rule alone, from the sound of what was
+        // sent and the keys of what was kept, and nothing with Show copy.
+        for (group, timing) in result.groups.iter().zip(&result.group_timings) {
+            let Some(times) = &timing.char_times else {
+                continue;
+            };
+            timed_groups += 1;
+            assert!(
+                !settings.contest.contest_show_copy,
+                "seed {seed}: timed with Show copy"
+            );
+            assert_eq!(
+                times.ends.len(),
+                group.sent.chars().count(),
+                "seed {seed}: {group:?} {times:?}"
+            );
+            assert!(
+                times.keys.is_empty() || times.keys.len() == group.received.chars().count(),
+                "seed {seed}: {group:?} {times:?}"
+            );
+            assert!(
+                times.ends.windows(2).all(|pair| pair[0] < pair[1]),
+                "seed {seed}: {times:?}"
+            );
+            assert_eq!(
+                recognise(&group.sent, &group.received, times),
+                stated_rule(&group.sent, &group.received, times),
+                "seed {seed}: {group:?} {times:?}"
+            );
+        }
         let json = serde_json::to_string(&result).expect("a run serializes");
         let back: SessionResult = serde_json::from_str(&json).expect("a run reads back");
         assert_eq!(back, result, "seed {seed}: the round trip changed the run");
@@ -1850,4 +1953,8 @@ fn soak_contest_runs(style: RunStyle) {
             );
         }
     }
+    assert!(
+        timed_groups >= 100,
+        "{style:?}: only {timed_groups} copies kept with their sound"
+    );
 }

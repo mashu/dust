@@ -25,6 +25,15 @@ enum Phase {
     Word { since: u64 },
 }
 
+/// A letter keyed: what it spells, and when it began.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyedLetter {
+    pub letter: char,
+    /// The instant of the paddle contact that opened it. The letter goes in
+    /// only once its letter space has run out; this is when keying it began.
+    pub began: u64,
+}
+
 /// What the host has to do now that the keyer has moved.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[must_use = "the sidetone, the letter and the next wake are the host's to act on"]
@@ -32,7 +41,7 @@ pub struct KeyerOutput {
     /// The sidetone goes on, or off, when it has changed.
     pub tone: Option<bool>,
     /// A letter that has just ended and spells a character.
-    pub letter: Option<char>,
+    pub letter: Option<KeyedLetter>,
     /// A word space has run out after the last letter: the word is over,
     /// which a screen of fields takes as Space.
     pub space: bool,
@@ -56,6 +65,8 @@ pub struct Keyer {
     decoder: PaddleDecoder,
     dit_ms: u64,
     phase: Phase,
+    /// When the letter under way began: the contact that opened it.
+    began: u64,
 }
 
 impl Keyer {
@@ -65,6 +76,7 @@ impl Keyer {
             decoder: PaddleDecoder::default(),
             dit_ms: dit_ms_for_wpm(wpm),
             phase: Phase::Idle,
+            began: 0,
         }
     }
 
@@ -104,6 +116,9 @@ impl Keyer {
     /// would be the whole character feeling late.
     pub fn press(&mut self, paddle: Paddle, now: u64) -> KeyerOutput {
         let was_sounding = self.sounding();
+        if !self.letter_open() {
+            self.began = now;
+        }
         self.paddles.press(paddle, now);
         if self.mode().is_straight() {
             self.phase = Phase::Contact;
@@ -143,7 +158,7 @@ impl Keyer {
             }
             Phase::Space { until } if now >= until => self.start_next(now),
             Phase::Gap { since } if now >= since.saturating_add(self.letter_gap_ms()) => {
-                letter = self.decoder.take_letter();
+                letter = self.take_letter();
                 // A letter begins a word; what spells nothing begins none.
                 self.phase = if letter.is_some() {
                     Phase::Word { since }
@@ -185,7 +200,7 @@ impl Keyer {
             return self.output(self.sounding(), None);
         }
         self.phase = Phase::Idle;
-        let letter = self.decoder.take_letter();
+        let letter = self.take_letter();
         self.output(false, letter)
     }
 
@@ -213,6 +228,14 @@ impl Keyer {
         };
     }
 
+    fn take_letter(&mut self) -> Option<KeyedLetter> {
+        let letter = self.decoder.take_letter()?;
+        Some(KeyedLetter {
+            letter,
+            began: self.began,
+        })
+    }
+
     fn letter_gap_ms(&self) -> u64 {
         self.dit_ms.saturating_mul(LETTER_GAP_DITS)
     }
@@ -226,7 +249,7 @@ impl Keyer {
         self.dit_ms.saturating_mul(WORD_GAP_DITS - keyed_space)
     }
 
-    fn output(&self, was_sounding: bool, letter: Option<char>) -> KeyerOutput {
+    fn output(&self, was_sounding: bool, letter: Option<KeyedLetter>) -> KeyerOutput {
         let sounding = self.sounding();
         KeyerOutput {
             tone: (sounding != was_sounding).then_some(sounding),
@@ -256,6 +279,8 @@ mod tests {
         keyer: Keyer,
         wake: Option<u64>,
         log: Vec<String>,
+        /// Each letter keyed, with when it began.
+        letters: Vec<KeyedLetter>,
     }
 
     impl Host {
@@ -264,6 +289,7 @@ mod tests {
                 keyer: Keyer::new(mode, WPM),
                 wake: None,
                 log: Vec::new(),
+                letters: Vec::new(),
             }
         }
 
@@ -272,8 +298,9 @@ mod tests {
                 self.log
                     .push(format!("{now} {}", if on { "on" } else { "off" }));
             }
-            if let Some(letter) = out.letter {
-                self.log.push(format!("{now} {letter}"));
+            if let Some(keyed) = out.letter {
+                self.log.push(format!("{now} {}", keyed.letter));
+                self.letters.push(keyed);
             }
             if out.space {
                 self.log.push(format!("{now} space"));
@@ -365,6 +392,49 @@ mod tests {
             host.heard(),
             ["0 on", "60 off", "200 on", "260 off", "440 I", "680 space"]
         );
+    }
+
+    /// A letter began with the contact that opened it, however long it took
+    /// to key and its letter space to run out: one carried on in its letter
+    /// space keeps its beginning, and the word's next letter has its own.
+    #[test]
+    fn a_letter_began_with_the_contact_that_opened_it() {
+        let mut host = Host::new(KeyerMode::IambicA);
+        // E carried on into I in its letter space, then T in the word space.
+        host.press(Dit, 1_000);
+        host.release(Dit, 1_030);
+        host.press(Dit, 1_200);
+        host.release(Dit, 1_230);
+        host.run_to(1_500);
+        host.press(Dah, 1_520);
+        host.release(Dah, 1_540);
+        host.heard();
+        let began = |host: &Host| {
+            host.letters
+                .iter()
+                .map(|keyed| (keyed.letter, keyed.began))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(began(&host), [('I', 1_000), ('T', 1_520)]);
+
+        // A straight key's letter, the same; and one finished early.
+        let mut host = Host::new(KeyerMode::Straight);
+        host.press(Dit, 2_000);
+        host.release(Dit, 2_060);
+        host.run_to(2_100);
+        let out = host.keyer.finish_letter();
+        host.act(2_100, out);
+        assert_eq!(began(&host), [('E', 2_000)]);
+
+        // A letter dropped half keyed leaves nothing behind for the next.
+        let mut host = Host::new(KeyerMode::IambicA);
+        host.press(Dah, 3_000);
+        let out = host.keyer.stop();
+        host.act(3_010, out);
+        host.press(Dit, 3_500);
+        host.release(Dit, 3_530);
+        host.heard();
+        assert_eq!(began(&host), [('E', 3_500)]);
     }
 
     /// A word space after a letter ends the word: seven dits of quiet after
@@ -461,7 +531,7 @@ mod tests {
         );
         let out = host.keyer.finish_letter();
         assert!(!host.keyer.letter_open());
-        assert_eq!(out.letter, Some('T'));
+        assert_eq!(out.letter.map(|keyed| keyed.letter), Some('T'));
         assert_eq!(out.wake_at, None);
         host.act(250, out);
         assert_eq!(host.heard(), ["0 on", "180 off", "250 T"]);
@@ -471,7 +541,10 @@ mod tests {
         host.press(Dit, 0);
         host.release(Dit, 30);
         host.run_to(90);
-        assert_eq!(host.keyer.finish_letter().letter, Some('E'));
+        assert_eq!(
+            host.keyer.finish_letter().letter.map(|keyed| keyed.letter),
+            Some('E')
+        );
     }
 
     /// A letter still being keyed is not cut short: what it would have been

@@ -133,10 +133,14 @@ pub fn ResultsView(
     }
     let acc_pct = (result.accuracy * 100.0).round();
     let correct = result.groups.iter().filter(|g| g.correct).count();
-    let avg = if result.avg_response_ms > 0.0 {
-        format!("{}ms", result.avg_response_ms.round())
-    } else {
-        "—".into()
+    // How fast its characters were recognised, from their sound to their
+    // key, as far as any was timed (docs/recognition.md).
+    let (recognised, timed) = match cw_core::session_recognition(&result) {
+        Some(recognition) => (
+            format!("{:.0} ms", recognition.median_ms),
+            format!("{} timed", recognition.timed),
+        ),
+        None => ("—".to_string(), "none timed".to_string()),
     };
     // About the copy, not the level: whether the level moves is the
     // learner's own rule, and the banner below says so when it does.
@@ -185,8 +189,9 @@ pub fn ResultsView(
                     div { class: "value", "{correct}/{result.groups.len()}" }
                 }
                 div { class: "kpi purple",
-                    div { class: "tiny", "Avg time" }
-                    div { class: "value", "{avg}" }
+                    div { class: "tiny", "Recognised in" }
+                    div { class: "value", "{recognised}" }
+                    div { class: "tiny", "{timed}" }
                 }
                 div { class: "kpi indigo",
                     div { class: "tiny", "Points" }

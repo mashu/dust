@@ -6,9 +6,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, Sampler, Sender,
-    SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX, VOLUME_MIN,
-    compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, MonoMs, Sampler,
+    SendStart, Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX,
+    VOLUME_MIN, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
     generate_training_group, hear_qsos, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 
 use crate::player::{AudioError, Lease};
 use crate::state::AppCtx;
-use crate::time::seed_rng;
+use crate::time::{mono_ms, seed_rng};
 
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
@@ -293,7 +293,8 @@ async fn play_qsos(
         let asked = lease.ask_to_send();
         let started = {
             let (lease, showing, sends) = (lease.clone(), showing.clone(), sends.clone());
-            move |heard_after_sec: f64| {
+            move |start: &SendStart| {
+                let heard_after_sec = start.heard_at().since(MonoMs(mono_ms())) as f64 / 1_000.0;
                 showing.set(showing.get() + 1);
                 let shows = (showing.clone(), showing.get());
                 spawn_forever(show_sends(
@@ -449,7 +450,11 @@ async fn play_chars(
             lease.sleep(gap_ms).await?;
         }
         lease
-            .send(&Transmission::alone(ch.to_string(), voice), &settings)
+            .send(
+                &Transmission::alone(ch.to_string(), voice),
+                &settings,
+                |_| {},
+            )
             .await?;
     }
     Ok(())
@@ -463,7 +468,7 @@ async fn play_sample(
 ) -> Result<(), AudioError> {
     let (voice, _) = new_station(&settings);
     lease
-        .send(&Transmission::alone(text, voice), &settings)
+        .send(&Transmission::alone(text, voice), &settings, |_| {})
         .await
         .map(|_| ())
 }
@@ -496,7 +501,7 @@ async fn loop_band_preview(
         let call = Transmission::calling(&settings_now, text, voice, &mut rng, |rng| {
             generate_callsign(CALLSIGN_TIER_MAX, rng)
         });
-        lease.send(&call, &settings_now).await?;
+        lease.send(&call, &settings_now, |_| {}).await?;
         lease.sleep(gap_ms).await?;
     }
 }
@@ -534,7 +539,7 @@ async fn loop_stream(
             generate_training_group(&settings_now, &mut CharSamplingState::default(), rng)
         });
         // Sent as often as a session would send it, a word space apart.
-        let mut sent = lease.send(&call, &settings_now).await?;
+        let mut sent = lease.send(&call, &settings_now, |_| {}).await?;
         for _ in 1..repeats.max(1) {
             lease
                 .sleep(compute_group_gap_for_wpm(
@@ -543,7 +548,7 @@ async fn loop_stream(
                     settings_now.playback.extra_word_space_multiplier,
                 ))
                 .await?;
-            sent = lease.send(&call, &settings_now).await?;
+            sent = lease.send(&call, &settings_now, |_| {}).await?;
         }
         heard.with_mut(|list| {
             list.push(HeardGroup {

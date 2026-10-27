@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 mod clock;
 
-pub use clock::{Keyer, KeyerOutput};
+pub use clock::{KeyedLetter, Keyer, KeyerOutput};
 
 use crate::morse::{decode_morse_pattern, is_morse_code_prefix};
 use crate::timing::dot_seconds;

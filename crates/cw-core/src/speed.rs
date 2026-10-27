@@ -836,8 +836,7 @@ mod tests {
                 char_wpm: Some(speed),
                 effective_wpm: Some(speed),
                 sends: 1,
-                recognition_ms: Vec::new(),
-                typed_along: false,
+                ..SessionTiming::default()
             }],
             ..SessionResult::empty_for_test()
         }
@@ -908,8 +907,7 @@ mod tests {
                     char_wpm: Some(30.0),
                     effective_wpm: Some(30.0),
                     sends: 1,
-                    recognition_ms: Vec::new(),
-                    typed_along: false,
+                    ..SessionTiming::default()
                 })
                 .collect(),
             groups,

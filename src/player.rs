@@ -14,10 +14,10 @@ use std::fmt;
 use std::rc::Rc;
 
 use cw_core::band::SOFT_LIMIT_KNEE;
-use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
+use cw_core::{MonoMs, PlannedTransmission, SendStart, TrainingSettings, Transmission};
 
 use crate::audio::{MeterFrame, MorseBackend, PlaybackOutcome, PlaybackWait};
-use crate::time::{POLL_MS, mono_ms, sleep_ms};
+use crate::time::{POLL_MS, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
 /// without a sound card.
@@ -31,11 +31,6 @@ const SEND_ATTEMPTS: u32 = 3;
 /// The quietest the live sidetone is played at full volume, whatever the
 /// floor of the station strength range: a paddle you cannot hear is no use.
 const SIDETONE_FLOOR: f64 = 0.15;
-
-/// How long after it was due a send may be over and its characters still be
-/// timed: the wait's own tail and poll, and room besides. Later, it started
-/// late.
-const LATE_SEND_MS: u64 = 150;
 
 /// Why audio did not happen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,19 +55,15 @@ impl fmt::Display for AudioError {
     }
 }
 
-/// A send that played to its end: how long it was, and the speeds it went at.
-#[derive(Clone, Debug, PartialEq)]
+/// A send that played to its end: how long it was, the speeds it went at,
+/// and whether it played on time, its audio not held up on its way
+/// ([`PlaybackOutcome::Completed`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sent {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
-    /// When each character of the send was heard, finished, taken as when
-    /// its last sample went to the audio output: from when the send was
-    /// started, how far ahead it was scheduled, and where the character ends
-    /// in it. The delay on to the ear, a speaker's or a headset's, cannot be
-    /// known and is not guessed at. Empty for a send planned whole, a
-    /// contest's turn, and one that played late.
-    pub heard_at: Vec<MonoMs>,
+    pub on_time: bool,
 }
 
 /// The one audio player the app has. Cheap to clone; every clone is the same
@@ -349,11 +340,13 @@ impl Lease {
     /// [`SEND_ATTEMPTS`] in all, and the last failure is the one reported.
     /// A send that is stopped — the lease ending, or [`Lease::stop_sending`]
     /// — comes back [`AudioError::Cancelled`] from wherever it had got to,
-    /// a retry included.
+    /// a retry included. Each attempt, once started, is told to `on_start`,
+    /// as for [`Lease::send_planned`].
     pub async fn send(
         &self,
         transmission: &Transmission,
         settings: &TrainingSettings,
+        mut on_start: impl FnMut(&SendStart),
     ) -> Result<Sent, AudioError> {
         let begin = |backend: &mut dyn MorseBackend| {
             crate::audio::start_send(backend, transmission, settings)
@@ -361,7 +354,7 @@ impl Lease {
         // A session sends a group only once the one before is over or
         // stopped, so this is the send from when it starts.
         let asked = Asked(self.player.0.sends.get());
-        self.send_with(asked, &begin, settings, &mut |_| {}).await
+        self.send_with(asked, &begin, settings, &mut on_start).await
     }
 
     /// Send a contest's turn, planned already, and wait for it to be heard:
@@ -371,10 +364,10 @@ impl Lease {
     /// sound is to reach the ear: each attempt asks the player for it, and
     /// one after it has passed, a retry, starts as soon as it can.
     ///
-    /// Each attempt, once started, calls `on_start` with how long after now
-    /// its sound reaches the ear, in seconds: the player's lead in starting
-    /// it, any wait for the moment asked, and its latency to the ear. No
-    /// borrow of the player is held then, so `on_start` may use it.
+    /// Each attempt, once started, calls `on_start` with the send as it
+    /// starts ([`SendStart`]): when it goes to the output and reaches the
+    /// ear, and where its characters end. No borrow of the player is held
+    /// then, so `on_start` may use it.
     pub async fn send_planned(
         &self,
         asked: Asked,
@@ -382,7 +375,7 @@ impl Lease {
         transcript: &Transmission,
         settings: &TrainingSettings,
         starts_at: Option<MonoMs>,
-        mut on_start: impl FnMut(f64),
+        mut on_start: impl FnMut(&SendStart),
     ) -> Result<Sent, AudioError> {
         let begin = |backend: &mut dyn MorseBackend| {
             crate::audio::start_planned(backend, plan, transcript, settings, starts_at)
@@ -400,7 +393,7 @@ impl Lease {
         asked: Asked,
         begin: &Begin<'_>,
         settings: &TrainingSettings,
-        on_start: &mut dyn FnMut(f64),
+        on_start: &mut dyn FnMut(&SendStart),
     ) -> Result<Sent, AudioError> {
         let ticket = Ticket {
             lease: self,
@@ -460,40 +453,23 @@ impl Ticket<'_> {
     async fn attempt(
         &self,
         begin: &Begin<'_>,
-        on_start: &mut dyn FnMut(f64),
+        on_start: &mut dyn FnMut(&SendStart),
     ) -> Result<Sent, AudioError> {
         let player = &self.lease.player;
         self.check()?;
         // In a statement of its own: the player is borrowed only while the
         // send starts, never while `on_start` runs.
         let wait = player.start(begin)?;
-        let output_from = wait.started.plus_sec(wait.sent_after_sec);
-        let heard_from = wait.started.plus_sec(wait.heard_after_sec);
-        // When the player said the send would be over, heard to its end.
-        let due = heard_from.plus_sec(wait.duration_sec);
-        // How long from now, as `on_start` runs: a device the player opened
-        // as it started is behind us already.
-        on_start(heard_from.0.saturating_sub(mono_ms()) as f64 / 1_000.0);
-        let mut sent = Sent {
-            duration_sec: wait.duration_sec,
-            char_wpm: wait.char_wpm,
-            effective_wpm: wait.effective_wpm,
-            heard_at: wait
-                .char_ends_sec
-                .iter()
-                .map(|end| output_from.plus_sec(*end))
-                .collect(),
-        };
+        let start = wait.start();
+        on_start(&start);
+        let duration_sec = wait.duration_sec;
         match wait.wait().await {
-            PlaybackOutcome::Completed => {
-                // Over well after it was due, it started late, a parked
-                // audio clock or a stall: every character's moment would be
-                // that much early, so none is kept.
-                if MonoMs(mono_ms()) > due.plus(LATE_SEND_MS) {
-                    sent.heard_at.clear();
-                }
-                self.check().map(|()| sent)
-            }
+            PlaybackOutcome::Completed { on_time } => self.check().map(|()| Sent {
+                duration_sec,
+                char_wpm: start.char_wpm,
+                effective_wpm: start.effective_wpm,
+                on_time,
+            }),
             PlaybackOutcome::Cancelled => Err(AudioError::Cancelled),
             // The send never reached its end: rebuilding the player on the
             // next attempt is what recovers it.
@@ -610,7 +586,10 @@ mod tests {
         run(|| async {
             let (player, recorder) = player();
             let lease = player.claim(&test_settings()).expect("a player");
-            let sent = lease.send(&cq(), &test_settings()).await.expect("sent");
+            let sent = lease
+                .send(&cq(), &test_settings(), |_| {})
+                .await
+                .expect("sent");
             assert!(sent.duration_sec > 0.0);
             assert_eq!(sent.char_wpm, 40.0);
             assert_eq!(recorder.texts(), vec!["CQ".to_string()]);
@@ -624,7 +603,7 @@ mod tests {
             let lease = player.claim(&test_settings()).expect("a player");
             player.release();
             assert_eq!(
-                lease.send(&cq(), &test_settings()).await,
+                lease.send(&cq(), &test_settings(), |_| {}).await,
                 Err(AudioError::Cancelled)
             );
             assert!(recorder.texts().is_empty());
@@ -641,7 +620,7 @@ mod tests {
             let lease = player.claim(&test_settings()).expect("a player");
             recorder.set(Behaviour::FailMidSend);
             assert_eq!(
-                lease.send(&cq(), &test_settings()).await,
+                lease.send(&cq(), &test_settings(), |_| {}).await,
                 Err(AudioError::Stalled)
             );
             assert_eq!(recorder.texts().len(), SEND_ATTEMPTS as usize);
@@ -649,7 +628,7 @@ mod tests {
 
             recorder.set(Behaviour::RefuseToStart);
             assert_eq!(
-                lease.send(&cq(), &test_settings()).await,
+                lease.send(&cq(), &test_settings(), |_| {}).await,
                 Err(AudioError::Device("Audio stream: device is gone".into()))
             );
         });
@@ -662,7 +641,7 @@ mod tests {
             let lease = player.claim(&test_settings()).expect("a player");
             // The player is gone, the way a failed rebuild leaves it.
             player.0.backend.borrow_mut().take();
-            assert!(lease.send(&cq(), &test_settings()).await.is_ok());
+            assert!(lease.send(&cq(), &test_settings(), |_| {}).await.is_ok());
             assert_eq!(recorder.players_built.get(), 2);
         });
     }
@@ -689,16 +668,14 @@ mod tests {
                     &transmission,
                     &settings,
                     None,
-                    |heard_after| {
-                        starts.push(heard_after);
-                    },
+                    |start: &SendStart| starts.push(start.latency_ms),
                 )
                 .await;
             assert_eq!(
                 sent.map(|sent| sent.duration_sec),
                 Ok(plan.wanted.duration_sec)
             );
-            assert_eq!(starts, [0.25, 0.25], "one call for each attempt");
+            assert_eq!(starts, [250, 250], "one call for each attempt");
             let kept = recorder.starts();
             assert_eq!(kept.len(), 2);
             assert_eq!(kept[0].transcript, transmission);
@@ -729,19 +706,18 @@ mod tests {
                     &transmission,
                     &settings,
                     Some(at),
-                    |heard_after| {
-                        starts.push(heard_after);
-                    },
+                    |start: &SendStart| starts.push(start.heard_at()),
                 )
                 .await;
             assert!(sent.is_ok());
-            assert_eq!(starts, [0.4]);
+            assert_eq!(starts, [at]);
             assert_eq!(recorder.starts()[0].heard_in, Some(0.4));
             let took = crate::time::mono_ms() - began;
             let planned = (plan.wanted.duration_sec * 1_000.0) as u64;
             assert!(took >= 400 + planned, "done {took} ms in, of {planned}");
 
-            let past = MonoMs(crate::time::mono_ms() - 200);
+            let now = MonoMs(crate::time::mono_ms());
+            let past = MonoMs(now.0 - 200);
             let mut starts = Vec::new();
             let asked = lease.ask_to_send();
             let sent = lease
@@ -751,36 +727,45 @@ mod tests {
                     &transmission,
                     &settings,
                     Some(past),
-                    |heard_after| {
-                        starts.push(heard_after);
-                    },
+                    |start: &SendStart| starts.push(start.heard_at()),
                 )
                 .await;
             assert!(sent.is_ok());
-            assert_eq!(starts, [0.0], "at once");
+            assert_eq!(starts, [now], "at once");
             assert_eq!(recorder.starts()[1].heard_in, Some(-0.2));
         });
     }
 
-    /// Each character is timed from when it goes to the output, whatever
-    /// delay the device says follows; a send held up on its way, its clock
-    /// parked, is over late, and none of it is timed.
+    /// A send says as it starts when it goes to the output and where its
+    /// characters end after that, the delay the device says follows apart;
+    /// and once over, whether it played on time: one held up on its way, its
+    /// clock parked, did not.
     #[test]
-    fn a_send_is_timed_from_its_output_unless_it_played_late() {
+    fn a_send_says_its_timeline_as_it_starts_and_whether_it_played_on_time() {
         run(|| async {
             let (player, recorder) = player();
             let settings = test_settings();
             let lease = player.claim(&settings).expect("a player");
             recorder.latency_sec.set(0.25);
             let began = MonoMs(crate::time::mono_ms());
-            let sent = lease.send(&cq(), &settings).await.expect("sent");
-            assert_eq!(sent.heard_at.len(), 2, "{sent:?}");
-            // The last character ends the send, a quarter second before the
-            // device says it is heard.
+            let mut starts = Vec::new();
+            let sent = lease
+                .send(&cq(), &settings, |start| starts.push(start.clone()))
+                .await
+                .expect("sent");
+            let [start] = starts.as_slice() else {
+                panic!("one start: {starts:?}");
+            };
+            assert_eq!(start.output_at, began);
+            assert_eq!(start.latency_ms, 250);
+            assert_eq!(start.heard_at(), began.plus(250));
+            // The last character ends the send.
+            assert_eq!(start.char_ends_ms.len(), 2, "{start:?}");
             assert_eq!(
-                sent.heard_at.last(),
-                Some(&began.plus_sec(sent.duration_sec))
+                start.char_ends_ms.last().copied(),
+                Some((sent.duration_sec * 1_000.0).round() as u32)
             );
+            assert!(sent.on_time);
 
             let parked = async {
                 sleep_ms(100).await;
@@ -789,8 +774,8 @@ mod tests {
                 recorder.set_page_hidden(false);
             };
             let cq = cq();
-            let (sent, ()) = tokio::join!(lease.send(&cq, &settings), parked);
-            assert_eq!(sent.map(|sent| sent.heard_at), Ok(Vec::new()));
+            let (sent, ()) = tokio::join!(lease.send(&cq, &settings, |_| {}), parked);
+            assert_eq!(sent.map(|sent| sent.on_time), Ok(false));
         });
     }
 
@@ -870,7 +855,7 @@ mod tests {
             let lease = player.claim(&test_settings()).expect("a player");
             recorder.set(Behaviour::FailMidSend);
             assert_eq!(
-                lease.send(&cq(), &test_settings()).await,
+                lease.send(&cq(), &test_settings(), |_| {}).await,
                 Err(AudioError::Stalled)
             );
             assert!(player.0.backend.borrow().is_none());
@@ -878,7 +863,7 @@ mod tests {
             let built = recorder.players_built.get();
             let lease = player.claim(&test_settings()).expect("a player");
             assert_eq!(recorder.players_built.get(), built + 1);
-            assert!(lease.send(&cq(), &test_settings()).await.is_ok());
+            assert!(lease.send(&cq(), &test_settings(), |_| {}).await.is_ok());
         });
     }
 

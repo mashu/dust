@@ -11,8 +11,8 @@ use cw_core::{
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
     KeyerMode, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB,
     NUM_GROUPS_MAX, NUM_GROUPS_MIN, RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RangeSetting,
-    RecognitionEdge, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection, SpeedPath,
-    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on,
+    RecognitionBands, RecognitionEdge, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection,
+    SpeedPath, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on,
     adapts_group_size, adapts_speed, aim_section,
 };
 use dioxus::prelude::*;
@@ -894,19 +894,16 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
 /// others as it moves.
 #[component]
 fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
-    let auto = use_auto_level(settings);
-    let a = auto.read();
-    let (fast, icr, slow) = (
-        a.recognition_fast_ms,
-        a.recognition_icr_ms,
-        a.recognition_slow_ms,
-    );
+    let bands = use_memo(move || settings.read().recognition);
+    let RecognitionBands {
+        fast_ms: fast,
+        icr_ms: icr,
+        slow_ms: slow,
+    } = bands();
     let edge = move |which: RecognitionEdge| {
         move |ms: f64| {
-            settings
-                .write()
-                .auto_level
-                .set_recognition_edge(which, ms.round() as u32);
+            let mut settings = settings.write();
+            settings.recognition = settings.recognition.with(which, ms.round() as u32);
         }
     };
     let (low, high) = (

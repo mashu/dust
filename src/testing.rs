@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use cw_core::{
-    GroupSource, MonoMs, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult,
-    TrainingSettings,
+    GroupSource, MonoMs, SendStart, SessionEffect, SessionEvent, SessionId, SessionMachine,
+    SessionResult, TrainingSettings,
 };
 use dioxus::core::{ElementId, NoOpMutations};
 use dioxus::prelude::*;
@@ -105,15 +105,24 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
     let (mut machine, _) =
         SessionMachine::start(SessionId::new(1), MonoMs(0), settings, Scripted(texts));
     let mut now = MonoMs(0);
-    for (index, (_, answer)) in sent.iter().enumerate() {
+    for (index, (text, answer)) in sent.iter().enumerate() {
+        // Its characters end evenly over its half second; nothing typed is
+        // timed.
+        let chars = text.chars().count().max(1) as u32;
+        let start = SendStart {
+            char_wpm: 40.0,
+            effective_wpm: 40.0,
+            output_at: now,
+            char_ends_ms: (1..=chars).map(|at| at * 500 / chars).collect(),
+            latency_ms: 0,
+        };
+        let _ = machine.apply(SessionEvent::PlaybackStarted { index, start }, now);
         now = now.plus(500);
         let _ = machine.apply(
             SessionEvent::PlaybackEnded {
                 index,
                 duration_sec: 0.5,
-                char_wpm: 40.0,
-                effective_wpm: 40.0,
-                heard_at: Vec::new(),
+                on_time: true,
             },
             now,
         );
@@ -121,6 +130,7 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
         let typed = SessionEvent::Input {
             index,
             text: (*answer).to_string(),
+            keys: Vec::new(),
         };
         let _ = machine.apply(typed, now);
         for effect in machine.apply(SessionEvent::Confirm, now) {
@@ -231,8 +241,7 @@ fn stored_contest_run(
                 char_wpm: Some(26.0),
                 effective_wpm: Some(26.0),
                 sends: 1,
-                recognition_ms: Vec::new(),
-                typed_along: false,
+                ..cw_core::SessionTiming::default()
             })
             .collect(),
         groups,
@@ -393,6 +402,7 @@ impl Harness {
         self.send(SessionEvent::Input {
             index,
             text: text.to_string(),
+            keys: Vec::new(),
         });
     }
 

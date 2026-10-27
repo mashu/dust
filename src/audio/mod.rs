@@ -19,7 +19,7 @@ mod wait;
 #[cfg(feature = "web")]
 mod web;
 
-pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
+pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, SendTiming, WaitFlags};
 
 use std::rc::Rc;
 
@@ -120,10 +120,7 @@ pub fn start_send(
     settings: &TrainingSettings,
 ) -> Result<PlaybackWait, String> {
     let plan = plan_transmission(transmission, settings);
-    let mut wait = start_planned(player, &plan, transmission, settings, None)?;
-    // Off the plan played, so they are where its sound is.
-    wait.char_ends_sec = plan.wanted.char_ends(&transmission.text);
-    Ok(wait)
+    start_planned(player, &plan, transmission, settings, None)
 }
 
 /// Send a send planned already on `player`, and hand back something to wait
@@ -215,6 +212,9 @@ pub mod fake {
         /// For a send that was to start at a given time, how long after it
         /// was started its sound was to reach the ear.
         pub heard_in: Option<f64>,
+        /// When it was handed over, on the app's clock: with no wait, when
+        /// its first sample goes out.
+        pub at: MonoMs,
     }
 
     #[derive(Default)]
@@ -343,12 +343,11 @@ pub mod fake {
     }
 
     impl PlaybackSignal for FakeSignal {
-        fn heard_after_sec(&self) -> f64 {
-            self.latency_sec + f64::from(self.wait_ms) / 1_000.0
-        }
-
-        fn sent_after_sec(&self) -> f64 {
-            f64::from(self.wait_ms) / 1_000.0
+        fn timing(&self) -> SendTiming {
+            SendTiming {
+                lead_sec: f64::from(self.wait_ms) / 1_000.0,
+                latency_sec: self.latency_sec,
+            }
         }
 
         fn poll(&self) -> WaitFlags {
@@ -434,6 +433,7 @@ pub mod fake {
                 qsb: Qsb::of(&settings.band),
                 transcript: transmission.clone(),
                 heard_in,
+                at: MonoMs(mono_ms()),
             });
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
@@ -506,7 +506,8 @@ mod tests {
 
         let plan = plan_transmission(&transmission, &settings).wanted;
         assert_eq!(wait.duration_sec, plan.duration_sec);
-        assert_eq!(wait.char_wpm, plan.resolved_char_wpm);
-        assert_eq!(wait.effective_wpm, plan.resolved_effective_wpm);
+        let start = wait.start();
+        assert_eq!(start.char_wpm, plan.resolved_char_wpm);
+        assert_eq!(start.effective_wpm, plan.resolved_effective_wpm);
     }
 }

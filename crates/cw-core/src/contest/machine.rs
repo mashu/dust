@@ -30,7 +30,9 @@ use super::check::{QsoCheck, QsoText, check_qso};
 use super::clock::RunClock;
 use super::data::places::home_country;
 use super::data::zones::home_continent;
-use super::esm::{EntryField, Fields, MessagePart, QsoState, esm, loggable, message_text};
+use super::esm::{
+    EntryField, Fields, MessagePart, QsoState, call_copied, esm, loggable, message_text,
+};
 use super::exchange::Field;
 use super::parse::{Reading, normalize_call, parse_exchange};
 use super::place::{filter_capacity, place_contest_caller};
@@ -46,12 +48,13 @@ use crate::alignment::CopyTally;
 use crate::band::Qsb;
 use crate::callsign::parse_callsign;
 use crate::machine::COUNTDOWN_STEP_MS;
+use crate::recognition::CharTimes;
 use crate::rng::{Rng, SplitMix64};
-use crate::session::{
-    Answered, GroupResult, MIN_RESPONSE_MS_PER_CHAR, MonoMs, SessionResult, SessionTiming, whole_ms,
-};
+use crate::score::MIN_RESPONSE_MS_PER_CHAR;
+use crate::session::{Answered, GroupResult, MonoMs, SessionResult, SessionTiming, whole_ms};
 use crate::settings::{STATIONS_MAX, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
 use crate::speed::tells_speed;
+use crate::timing::CharSpan;
 use crate::timing::{SEND_RELEASE_SEC, StationVoice};
 
 /// Why a run is paused.
@@ -132,19 +135,25 @@ impl OpKey {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContestEvent {
     /// A key, once any paddle letter in progress has finished, with the
-    /// fields as they are then.
+    /// fields as they are then: boxed, as they are the most any event
+    /// carries.
     Key {
         key: OpKey,
-        fields: Fields,
+        fields: Box<Fields>,
     },
     /// A turn's sound has started, on each attempt, retries too:
-    /// `heard_from` is when it reaches the ear.
+    /// `output_from` is when it goes to the audio output, `heard_from` when
+    /// it reaches the ear, as far as the device says.
     TurnStarted {
         id: u64,
         heard_from: MonoMs,
+        output_from: MonoMs,
     },
+    /// A turn's sound has ended, and whether it played on time: a turn the
+    /// audio held up cannot be timed from.
     TurnEnded {
         id: u64,
+        on_time: bool,
     },
     /// A turn was stopped, or a newer one replaced it: always ignored.
     TurnCancelled {
@@ -400,6 +409,14 @@ struct Heard {
     /// timed from, in order: the first, and each a key of yours drew (CQ,
     /// TU, `?`, a partial), but not one sent on its timeout.
     call_ends: Vec<u64>,
+    /// The sends of its call, and of its exchange, that began to reach you,
+    /// those on its timeouts too.
+    call_sends: Sends,
+    exch_sends: Sends,
+    /// Its call's first sending, and each field's token in its exchange's,
+    /// heard once, whole and alone: what their characters are timed from.
+    call_sounded: Option<Sounded>,
+    exch_sounded: Vec<(Field, Sounded)>,
     /// For each repeat of its call you asked for and heard, before you sent
     /// it with your exchange, the Call field as read at the key, without
     /// `?`.
@@ -410,7 +427,7 @@ struct Heard {
     /// The call you first sent it with your exchange, and how long its copy
     /// took: from the end of its call heard last before the Call field's
     /// last edit, to that edit.
-    first_call: Option<(String, u64)>,
+    first_call: Option<(Typed, u64)>,
     /// Its exchange has begun to reach you: one you ask for now is a
     /// repeat, and what you log of it is a copy.
     exch_begun: bool,
@@ -426,7 +443,7 @@ struct Heard {
     /// NIL's groups are against it.
     recorded: bool,
     /// The Call field as last seen while you worked it, without `?`.
-    typed: String,
+    typed: Typed,
     /// The call last sent that it took for its own or answered, without
     /// `?`: what a message of yours with no call in it goes with.
     call_sent: String,
@@ -456,11 +473,118 @@ struct Shown {
     run: u64,
 }
 
+/// How many sends of a station's call, or of its exchange, began to reach
+/// you, and when the second began to go out, in run time: a key from then
+/// on came after hearing it twice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Sends {
+    count: u32,
+    again: Option<u64>,
+}
+
+impl Sends {
+    /// Another began to reach you, gone out at `out_run`.
+    fn began(&mut self, out_run: u64) {
+        self.count = self.count.saturating_add(1);
+        if self.count == 2 {
+            self.again = Some(out_run);
+        }
+    }
+}
+
+/// A token's first sending, heard once, whole and alone, as it went to the
+/// output: what its copy's characters are timed from (docs/recognition.md).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Sounded {
+    /// The turn it went out in, which may yet turn out late or retried.
+    turn: u64,
+    /// When the send it is in began to go out, in run time.
+    from: u64,
+    /// Where each of its characters ended, in milliseconds after `from`.
+    ends: Vec<u32>,
+    /// The delay the device reports from its output to the ear.
+    latency_ms: u32,
+}
+
+impl Sounded {
+    /// Its copy `copy`'s times, heard again from `again` on. The fields
+    /// take keys all through a run.
+    fn timed(&self, copy: &Typed, again: Option<u64>) -> Timed {
+        Timed {
+            turn: self.turn,
+            times: CharTimes::of(
+                self.from,
+                &self.ends,
+                copy.keys.iter().copied(),
+                again,
+                self.latency_ms,
+                true,
+            ),
+        }
+    }
+}
+
+/// A copy as a key read it: its text, and when each of its characters went
+/// in, in run time; none where that cannot be timed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Typed {
+    text: String,
+    keys: Vec<Option<u64>>,
+}
+
+impl Typed {
+    /// This, as a copy of `text`: with its keys only if it is that text.
+    fn as_copy(&self, text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            keys: if self.text == text {
+                self.keys.clone()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
+
+/// The Call field as a key read it, as copied, and when it was last
+/// edited, in run time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CallRead {
+    typed: Typed,
+    edited_run: u64,
+}
+
+/// A group's recognition record, and the turn its sound went out in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Timed {
+    turn: u64,
+    times: CharTimes,
+}
+
+/// A group a QSO keeps, and the turn its timing comes from, if it is timed:
+/// a turn found late or retried takes that back ([`Kept::stored`]).
+#[derive(Clone, Debug, PartialEq)]
+struct Kept {
+    group: GroupResult,
+    timing: SessionTiming,
+    heard_in: Option<u64>,
+}
+
+impl Kept {
+    /// As the run keeps it: untimed where its sound's turn is `untrusted`.
+    fn stored(&self, untrusted: &[u64]) -> (GroupResult, SessionTiming) {
+        let mut timing = self.timing.clone();
+        if self.heard_in.is_some_and(|turn| untrusted.contains(&turn)) {
+            timing.char_times = None;
+        }
+        (self.group.clone(), timing)
+    }
+}
+
 impl Heard {
-    fn note_typed(&mut self, call: &str) {
-        let typed: String = normalize_call(call).chars().filter(|c| *c != '?').collect();
-        if !typed.is_empty() {
-            self.typed = typed;
+    fn note_typed(&mut self, typed: &Typed) {
+        if !typed.text.is_empty() {
+            self.typed.clone_from(typed);
         }
     }
 
@@ -472,26 +596,30 @@ impl Heard {
         u32::try_from(asks).unwrap_or(u32::MAX)
     }
 
-    /// Its call group's copy, how long it took and its sends, given the
-    /// copy kept without Show copy: what you had when its text showed, if
-    /// it showed before you copied it, with the showing a send of its own
-    /// and only the repeats asked before it; else the copy as kept, timed
-    /// as `ms`.
-    fn call_copy(&self, kept: &str, ms: u64) -> (String, u64, u32) {
+    /// Its call group, given the copy kept without Show copy: what you had
+    /// when its text showed, if it showed before you copied it, with the
+    /// showing a send of its own and only the repeats asked before it, and
+    /// untimed; else the copy as kept, timed as `ms`, and its characters
+    /// from its first sending, if that was heard so.
+    fn call_group(&self, sent: &str, kept: &Typed, ms: u64, voice: &StationVoice) -> Kept {
         let (copy, ms, asks, shown) = match &self.call_frozen {
             Some((had, asked)) => (
-                had.as_str(),
+                Typed {
+                    text: had.clone(),
+                    keys: Vec::new(),
+                },
                 0,
                 &self.call_asks[..(*asked).min(self.call_asks.len())],
                 1,
             ),
-            None => (kept, ms, &self.call_asks[..], 0),
+            None => (kept.clone(), ms, &self.call_asks[..], 0),
         };
-        (
-            copy.to_string(),
-            ms,
-            1 + shown + Self::call_repeats(asks, copy),
-        )
+        let sends = 1 + shown + Self::call_repeats(asks, &copy.text);
+        let timed = self
+            .call_sounded
+            .as_ref()
+            .map(|sounded| sounded.timed(&copy, self.call_sends.again));
+        group(sent, &copy.text, ms, sends, voice, timed)
     }
 
     /// A send of `says` began to reach you in `voice`: of a call put right
@@ -529,6 +657,10 @@ impl Heard {
         self.first = now.first;
         self.call_begun = now.call_begun;
         self.call_ends.clone_from(&now.call_ends);
+        self.call_sends = now.call_sends;
+        self.exch_sends = now.exch_sends;
+        self.call_sounded.clone_from(&now.call_sounded);
+        self.exch_sounded.clone_from(&now.exch_sounded);
         self.call_asks.clone_from(&now.call_asks);
         self.exch_begun = now.exch_begun;
         self.exch_ends.clone_from(&now.exch_ends);
@@ -544,20 +676,21 @@ impl Heard {
         u32::try_from(self.call_asks.len() + self.exch_asks.len()).unwrap_or(u32::MAX)
     }
 
-    /// A group for each field of `sent`, read as `reading`, the field first
-    /// read complete at `done_run`: as keyed, once its exchange has begun to
-    /// reach you, and a miss before that, as a guess is no copy. With Show
-    /// copy, an exchange whose text showed before you logged it keeps the
-    /// fields as they read then, the showing a send of its own, and only
-    /// the repeats asked before it. `rules` say what values are the same.
+    /// A group for each field of `sent`, as `read` at the key that logs:
+    /// as keyed, once its exchange has begun to reach you, and a miss
+    /// before that, as a guess is no copy. With Show copy, an exchange
+    /// whose text showed before you logged it keeps the fields as they read
+    /// then, the showing a send of its own, and only the repeats asked
+    /// before it. `rules` say what values are the same. A field typed as
+    /// it was sent is timed from its token's first sending, if that was
+    /// heard so.
     fn field_groups(
         &self,
         rules: &ContestRules,
         sent: &[(Field, String)],
-        reading: &Reading,
-        done_run: u64,
+        read: &LogRead,
         voice: &StationVoice,
-    ) -> Vec<(GroupResult, SessionTiming)> {
+    ) -> Vec<Kept> {
         if !self.exch_begun {
             return misses(sent, voice);
         }
@@ -567,7 +700,7 @@ impl Heard {
                 &self.exch_asks[..(*asked).min(self.exch_asks.len())],
                 1,
             ),
-            None => (reading, &self.exch_asks[..], 0),
+            None => (&read.reading, &self.exch_asks[..], 0),
         };
         // The exchange is timed from the end of the last one heard that the
         // clock runs from, before the field first read complete, shared
@@ -576,7 +709,7 @@ impl Heard {
         let exch_ms = if shown > 0 {
             0
         } else {
-            copy_ms(&self.exch_ends, done_run)
+            copy_ms(&self.exch_ends, read.done_run)
         };
         let length = sent
             .iter()
@@ -598,15 +731,37 @@ impl Heard {
                     .filter(|asked| asked.value(*field).is_none_or(|then| Some(then) != value))
                     .count();
                 let share = exch_ms * token.chars().count() as u64 / length;
+                let copy = rules.keyed_token(*field, token, typed);
+                // Its keys are its characters' only as typed, and only as
+                // read at the key that logs.
+                let keyed = read
+                    .exch
+                    .iter()
+                    .find(|(read, _)| read == field)
+                    .map(|(_, keyed)| keyed.as_copy(&copy))
+                    .filter(|_| shown == 0 && copy == typed);
+                let timed = keyed
+                    .zip(self.sounded(*field))
+                    .map(|(keyed, sounded)| sounded.timed(&keyed, self.exch_sends.again));
                 group(
                     token,
-                    &rules.keyed_token(*field, token, typed),
+                    &copy,
                     share,
                     1 + shown + u32::try_from(asks).unwrap_or(u32::MAX),
                     voice,
+                    timed,
                 )
             })
             .collect()
+    }
+
+    /// Its exchange's first sending of `field`'s token, if it was heard
+    /// once, whole and alone.
+    fn sounded(&self, field: Field) -> Option<&Sounded> {
+        self.exch_sounded
+            .iter()
+            .find(|(sounded, _)| *sounded == field)
+            .map(|(_, sounded)| sounded)
     }
 }
 
@@ -626,6 +781,20 @@ struct Timers {
     /// The next moment the turn on the air reaches you that Enter and the
     /// screen are to hear of ([`ContestMachine::arm_heard`]).
     heard: Option<u64>,
+}
+
+/// The fields as the key that logs read them, in run time: what the QSO's
+/// groups are copied from.
+#[derive(Clone, Debug, PartialEq)]
+struct LogRead {
+    /// The QSO as logged.
+    logged: QsoText,
+    reading: Reading,
+    /// Each field read, as keyed.
+    exch: Vec<(Field, Typed)>,
+    call: CallRead,
+    /// When the exchange first read complete, or else when it was logged.
+    done_run: u64,
 }
 
 /// The fields as a key read them: what a reply it drew is charged by.
@@ -726,10 +895,9 @@ struct Unheard {
     from: usize,
     /// The callers it was keyed over, still sending, who never heard it.
     deaf: Vec<usize>,
-    /// The fields it was keyed with, and the run time of the call's last
-    /// edit.
+    /// The fields it was keyed with, and the Call field as it read them.
     fields: Fields,
-    edited_run: u64,
+    call: CallRead,
     /// Where the QSOs the message itself lost begin in the log, and where
     /// the log ended after it. Those it lost go with it; a QSO logged or
     /// lost by a key since is final, and the callers stay as they are.
@@ -746,6 +914,9 @@ struct Air {
     keyed_at: MonoMs,
     /// When its sound reached the ear, as last stamped.
     heard_from: MonoMs,
+    /// When its sound went to the audio output, as last stamped: what its
+    /// characters are timed from.
+    output_from: MonoMs,
     /// When its first attempt started.
     first_start: Option<MonoMs>,
     /// Your message's parts, each with the byte in your text it ends before.
@@ -780,6 +951,18 @@ impl Air {
     /// its key and its start without taking it off the air.
     fn heard_run(&self) -> u64 {
         self.turn.at_run_ms + self.heard_from.since(self.keyed_at)
+    }
+
+    /// The delay the device reports from its output to the ear.
+    fn latency_ms(&self) -> u32 {
+        u32::try_from(self.heard_from.since(self.output_from)).unwrap_or(u32::MAX)
+    }
+
+    /// Run time when its sound went to the output: what its characters are
+    /// timed from.
+    fn output_run(&self) -> u64 {
+        self.heard_run()
+            .saturating_sub(u64::from(self.latency_ms()))
     }
 
     /// The callers a pause `why` at `run_now` cuts short, to send again
@@ -924,7 +1107,7 @@ struct Row {
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     record: QsoRecord,
-    groups: Vec<(GroupResult, SessionTiming)>,
+    groups: Vec<Kept>,
     row: Option<Row>,
     /// The station it was with, or its groups are against.
     station: Option<usize>,
@@ -1016,6 +1199,9 @@ pub struct ContestMachine<S> {
     /// With Show copy on, what the stations sent in the turn last on the
     /// air, kept once it ends naturally, till the next turn or a pause.
     shown_last: Vec<ShownText>,
+    /// The turns whose sound nothing can be timed from: tried again, or
+    /// played late.
+    untrusted: Vec<u64>,
 }
 
 impl<S: CallSource> ContestMachine<S> {
@@ -1083,6 +1269,7 @@ impl<S: CallSource> ContestMachine<S> {
             lead_ms: 0,
             ended: None,
             shown_last: Vec::new(),
+            untrusted: Vec::new(),
         };
         let effects = if countdown == 0 {
             machine.begin_run(now)
@@ -1139,7 +1326,7 @@ impl<S: CallSource> ContestMachine<S> {
         let station = &self.stations[index];
         let heard = &station.heard;
         let own = &station.caller.call.text;
-        let mut gone = vec![heard.typed.clone(), heard.call_sent.clone()];
+        let mut gone = vec![heard.typed.text.clone(), heard.call_sent.clone()];
         if heard.call_begun {
             gone.push(own.clone());
         }
@@ -1148,8 +1335,8 @@ impl<S: CallSource> ContestMachine<S> {
         gone.dedup();
         let name = if corrected {
             own.clone()
-        } else if parse_callsign(&heard.typed).is_some() && !partial {
-            heard.typed.clone()
+        } else if parse_callsign(&heard.typed.text).is_some() && !partial {
+            heard.typed.text.clone()
         } else {
             "The station".to_string()
         };
@@ -1211,15 +1398,24 @@ impl<S: CallSource> ContestMachine<S> {
         match event {
             // A start says only when the sound reached the ear; checking the
             // limit on it would end a run on a retry's stamp.
-            ContestEvent::TurnStarted { id, heard_from } => {
+            ContestEvent::TurnStarted {
+                id,
+                heard_from,
+                output_from,
+            } => {
                 if let Some(air) = self.air.as_mut().filter(|air| air.turn.id == id) {
                     // A turn started at once, on its first try, says how
-                    // far behind the key the player's sound is.
-                    if air.turn.starts_at.is_none() && air.first_start.is_none() {
+                    // far behind the key the player's sound is. One tried
+                    // again went out twice, or in part: nothing in it can be
+                    // timed.
+                    if air.first_start.is_some() {
+                        self.untrusted.push(id);
+                    } else if air.turn.starts_at.is_none() {
                         let lead = heard_from.0.saturating_sub(air.keyed_at.0);
                         self.lead_ms = lead.min(LEAD_MOST_MS);
                     }
                     air.heard_from = heard_from;
+                    air.output_from = output_from;
                     air.first_start.get_or_insert(heard_from);
                 }
                 return Vec::new();
@@ -1229,6 +1425,9 @@ impl<S: CallSource> ContestMachine<S> {
             // time that was not run time cannot end the run.
             ContestEvent::TurnFailed { id } if self.on_air(id) => return self.sound_failed(now),
             ContestEvent::Pause { why, at } => return self.pause(why, at, now),
+            ContestEvent::TurnEnded { id, on_time } if !on_time && self.on_air(id) => {
+                self.untrusted.push(id);
+            }
             _ => {}
         }
         // While the sound on the air may be being tried again, the limit is
@@ -1239,7 +1438,7 @@ impl<S: CallSource> ContestMachine<S> {
         }
         match event {
             ContestEvent::Key { key, fields } => self.key(key, &fields, now),
-            ContestEvent::TurnEnded { id } if self.on_air(id) => self.turn_ended(now),
+            ContestEvent::TurnEnded { id, .. } if self.on_air(id) => self.turn_ended(now),
             ContestEvent::TimerFired { id } => self.timer_fired(id, now),
             ContestEvent::Resume => self.resume(now),
             ContestEvent::Speed { delta } => {
@@ -1378,7 +1577,8 @@ impl<S: CallSource> ContestMachine<S> {
         let groups = self
             .entries
             .iter()
-            .flat_map(|entry| entry.groups.iter().cloned())
+            .flat_map(|entry| &entry.groups)
+            .map(|kept| kept.stored(&self.untrusted))
             .collect();
         run.result(groups, &self.settings, finished_at, date)
     }
@@ -1430,7 +1630,12 @@ impl<S: CallSource> ContestMachine<S> {
         self.entries
             .iter()
             .filter(|entry| entry.record.k == LOST || entry.record.k == NIL)
-            .filter_map(|entry| Some((entry.station?, entry.groups.first()?.0.received.as_str())))
+            .filter_map(|entry| {
+                Some((
+                    entry.station?,
+                    entry.groups.first()?.group.received.as_str(),
+                ))
+            })
     }
 
     /// In a pile-up, the copies lost or charged as a NIL since the run held
@@ -1468,7 +1673,7 @@ impl<S: CallSource> ContestMachine<S> {
                     || heard
                         .first_call
                         .as_ref()
-                        .is_some_and(|(call, _)| call == received)
+                        .is_some_and(|(call, _)| call.text == received)
             };
             let theirs = self.stations.iter().enumerate().any(|(other, station)| {
                 other != index
@@ -1492,7 +1697,7 @@ impl<S: CallSource> ContestMachine<S> {
     fn keeps_reading(&self, event: &ContestEvent) -> bool {
         match event {
             ContestEvent::Key { .. } | ContestEvent::FinishNow => true,
-            ContestEvent::TurnEnded { id } => self.on_air(*id),
+            ContestEvent::TurnEnded { id, .. } => self.on_air(*id),
             _ => false,
         }
     }
@@ -1566,7 +1771,8 @@ impl<S: CallSource> ContestMachine<S> {
         let (id, end) = self.start_timer(self.limit_ms);
         self.timers.run_end = Some(id);
         let mut effects = vec![end];
-        effects.extend(self.send(vec![MessagePart::Cq], &Fields::default(), now, false));
+        let call = CallRead::default();
+        effects.extend(self.send(vec![MessagePart::Cq], &Fields::default(), &call, now, false));
         effects
     }
 
@@ -1660,22 +1866,23 @@ impl<S: CallSource> ContestMachine<S> {
         // station you work, a wipe before it clears it; one that sends has
         // it read once the callers have heard who you work ([`Self::went_on`]),
         // and one that logs reads it for the QSO it logs.
+        let call = self.read_call(fields, now);
         if action.message.is_empty()
             && !action.logs
             && let Some(working) = self.working
         {
-            self.note_typed(working, &fields.call);
+            self.note_typed(working, &call.typed);
         }
         if action.wipe {
             self.forget_qso();
             effects.push(ContestEffect::ClearFields);
         }
         if !action.message.is_empty() {
-            effects.extend(self.send(action.message, fields, now, action.logs));
+            effects.extend(self.send(action.message, fields, &call, now, action.logs));
         } else if action.logs {
             // Logged without sending, once what has reached you has
             // counted: the check shows at once.
-            let row = self.log(fields, run_ms, now);
+            let row = self.log(fields, &call, run_ms, now);
             self.resolve(&[row], &mut effects);
         }
         if action.logs {
@@ -1798,11 +2005,11 @@ impl<S: CallSource> ContestMachine<S> {
         &mut self,
         message: Vec<MessagePart>,
         fields: &Fields,
+        call: &CallRead,
         now: MonoMs,
         logs: bool,
     ) -> Vec<ContestEffect> {
         let run_ms = self.run_ms(now);
-        let edited_run = self.run_at(fields.call_edited, now);
         // Your exchange carries this QSO's serial, taken before a TU in the
         // same message logs it, and so does the number of the QSO its TU
         // closes.
@@ -1854,7 +2061,7 @@ impl<S: CallSource> ContestMachine<S> {
             from: carried.parts.len(),
             deaf: deaf.clone(),
             fields: fields.clone(),
-            edited_run,
+            call: call.clone(),
             lost_from: 0,
             entries: 0,
         };
@@ -1869,8 +2076,8 @@ impl<S: CallSource> ContestMachine<S> {
         }
         let worked = self.working;
         self.note_sent(&message);
-        let (mut replying, took) = self.hear(&message, fields, edited_run, &deaf, logs);
-        self.went_on(worked, took, fields, true);
+        let (mut replying, took) = self.hear(&message, fields, call, &deaf, logs);
+        self.went_on(worked, took, &call.typed, true);
         let (mut text, mut parts) = (carried.text, carried.parts);
         // A TU that greets the station by name greets it as you copied it.
         let his_name = parse_exchange(self.rules, self.side, &fields.exch)
@@ -1932,7 +2139,7 @@ impl<S: CallSource> ContestMachine<S> {
         }
         let mut pending = carried.pending;
         if logs {
-            pending.push(self.log(fields, run_ms, now));
+            pending.push(self.log(fields, call, run_ms, now));
         }
         if self.brings_callers(&message) {
             // Their first call: nothing to time it from, nothing asked.
@@ -2005,7 +2212,7 @@ impl<S: CallSource> ContestMachine<S> {
         })
     }
 
-    /// After the callers heard a message keyed with `fields`: if the
+    /// After the callers heard a message keyed with the Call field `call`: if the
     /// station your call reached is not the one it reached before,
     /// `worked`, you went on to another station, or in a pile-up left it
     /// for a call that fits nobody, and Enter's QSO is the new one's: your
@@ -2015,10 +2222,10 @@ impl<S: CallSource> ContestMachine<S> {
     /// copy of the station you still work, but never of one the message
     /// left: the call you typed for the next station is no copy of the
     /// last.
-    fn went_on(&mut self, worked: Option<usize>, took: bool, fields: &Fields, notes: bool) {
+    fn went_on(&mut self, worked: Option<usize>, took: bool, call: &Typed, notes: bool) {
         if self.working == worked {
             if let Some(index) = worked {
-                self.note_typed(index, &fields.call);
+                self.note_typed(index, call);
             }
             if notes && took {
                 self.qso.exchange_sent = true;
@@ -2028,17 +2235,35 @@ impl<S: CallSource> ContestMachine<S> {
         }
     }
 
-    /// Read the Call field, `call`, as a copy of station `index`, the one
-    /// you work. In a pile-up a call another station signs, or took from
-    /// you for its own, was typed for that station, and is no copy of this
-    /// one: you are about to go on to it, or have just been working it. A
-    /// single caller is the only station there.
-    fn note_typed(&mut self, index: usize, call: &str) {
-        let typed = normalize_call(call).replace('?', "");
-        if self.typed_for_another(index, &typed) {
+    /// Read the Call field, as `call` holds it, as a copy of station
+    /// `index`, the one you work. In a pile-up a call another station
+    /// signs, or took from you for its own, was typed for that station, and
+    /// is no copy of this one: you are about to go on to it, or have just
+    /// been working it. A single caller is the only station there.
+    fn note_typed(&mut self, index: usize, call: &Typed) {
+        if self.typed_for_another(index, &call.text) {
             return;
         }
         self.stations[index].heard.note_typed(call);
+    }
+
+    /// The Call field as `fields` hold it at `now`: the call as copied, its
+    /// keys and its last edit in run time, as nothing that comes later can
+    /// convert them (an Esc hears the message again after a pause).
+    fn read_call(&mut self, fields: &Fields, now: MonoMs) -> CallRead {
+        let keys = fields
+            .call_keys
+            .moments()
+            .iter()
+            .map(|key| key.map(|key| self.run_at(key, now)))
+            .collect();
+        CallRead {
+            typed: Typed {
+                text: call_copied(&fields.call),
+                keys,
+            },
+            edited_run: self.run_at(fields.call_edited, now),
+        }
     }
 
     /// Whether `typed`, a call without `?`, is one another station than
@@ -2094,7 +2319,7 @@ impl<S: CallSource> ContestMachine<S> {
                     let not_this = match self.style {
                         RunStyle::Single => {
                             self.stations.iter().enumerate().any(|(other, station)| {
-                                other != index && station.heard.typed == typed
+                                other != index && station.heard.typed.text == typed
                             })
                         }
                         RunStyle::Pileup => !matches!(
@@ -2140,7 +2365,7 @@ impl<S: CallSource> ContestMachine<S> {
                 || heard
                     .first_call
                     .as_ref()
-                    .is_some_and(|(first, _)| first == had)
+                    .is_some_and(|(first, _)| first.text == *had)
         };
         let station = &self.stations[index];
         let own = took(&station.heard) || station.caller.call.text == *had;
@@ -2260,12 +2485,12 @@ impl<S: CallSource> ContestMachine<S> {
         &mut self,
         message: &[MessagePart],
         fields: &Fields,
-        edited_run: u64,
+        call: &CallRead,
         deaf: &[usize],
         logs: bool,
     ) -> (Vec<Replying>, bool) {
         let keyed = Keyed {
-            call: normalize_call(&fields.call).replace('?', ""),
+            call: call.typed.text.clone(),
             exch: parse_exchange(self.rules, self.side, &fields.exch),
         };
         let call_sent = message.iter().rev().find_map(|part| match part {
@@ -2319,7 +2544,7 @@ impl<S: CallSource> ContestMachine<S> {
             heard.engaged |=
                 reaction.took_exchange || (reaction.matched && (single || reaction.called));
             if reaction.matched {
-                heard.note_typed(&fields.call);
+                heard.note_typed(&call.typed);
                 if let Some(call) = &call_sent {
                     heard.call_sent.clone_from(call);
                 }
@@ -2327,7 +2552,7 @@ impl<S: CallSource> ContestMachine<S> {
                 // Its call went out: how long the copy took, should it go
                 // no further.
                 if heard.first_call.is_none() {
-                    heard.call_ms = Some(copy_ms(&heard.call_ends, edited_run));
+                    heard.call_ms = Some(copy_ms(&heard.call_ends, call.edited_run));
                 }
             }
             if reaction.took_exchange {
@@ -2338,13 +2563,13 @@ impl<S: CallSource> ContestMachine<S> {
             // it, should the message hold none.
             let with_exchange = reaction.took_exchange || reaction.missed_exchange;
             if with_exchange && self.working == Some(index) && heard.first_call.is_none() {
-                let took_ms = copy_ms(&heard.call_ends, edited_run);
-                let call = if heard.call_sent.is_empty() {
-                    &heard.typed
+                let took_ms = copy_ms(&heard.call_ends, call.edited_run);
+                let copy = if heard.call_sent.is_empty() {
+                    heard.typed.clone()
                 } else {
-                    &heard.call_sent
+                    call.typed.as_copy(&heard.call_sent)
                 };
-                heard.first_call = Some((call.clone(), took_ms));
+                heard.first_call = Some((copy, took_ms));
             }
             if reaction.replies {
                 replying.push(Replying {
@@ -2430,7 +2655,7 @@ impl<S: CallSource> ContestMachine<S> {
             your_end = lead_sec + sending_sec(&mine.text, &self.settings, &voice);
             my_chars = char_spans(&mine.text, &self.settings, &voice)
                 .into_iter()
-                .map(|(at, _, end)| (at, lead_sec + end))
+                .map(|span| (span.at, lead_sec + span.end_sec))
                 .collect();
             self.sent_wpm.push(voice.char_wpm);
             segments.push(Segment {
@@ -2580,6 +2805,7 @@ impl<S: CallSource> ContestMachine<S> {
             turn: turn.clone(),
             keyed_at: starts,
             heard_from: starts,
+            output_from: starts,
             first_start: None,
             parts: mine.parts,
             my_chars,
@@ -2832,15 +3058,15 @@ impl<S: CallSource> ContestMachine<S> {
         let at_sec = (run_now as f64 - heard_run as f64) / 1_000.0 - yours.start_sec;
         let soonest = at_sec + self.lead_ms as f64 / 1_000.0 + SEND_RELEASE_SEC;
         let run_at = |sec: f64| (heard_run + whole_ms(yours.start_sec + sec)).max(run_now);
-        if let Some((from, start, _)) = spans.iter().find(|(_, start, _)| *start >= soonest) {
+        if let Some(next) = spans.iter().find(|span| span.start_sec >= soonest) {
             return Some(Splice {
-                run: run_at(*start),
-                from: Some(*from),
+                run: run_at(next.start_sec),
+                from: Some(next.at),
                 lead_sec: 0.0,
             });
         }
-        let (_, _, end) = spans.last()?;
-        if *end <= at_sec {
+        let end = spans.last()?.end_sec;
+        if end <= at_sec {
             return None;
         }
         let gap = word_gap_sec(&self.settings, &yours.voice);
@@ -2909,7 +3135,7 @@ impl<S: CallSource> ContestMachine<S> {
         let spans = char_spans(&segment.text, &self.settings, &segment.voice);
         let at_sec = elapsed.max(0.0) + segment.skip_sec;
         let from = sounding_at(&spans, at_sec)?;
-        let first = spans.first().map(|(at, ..)| *at);
+        let first = spans.first().map(|span| span.at);
         if segment.start_sec == 0.0 && Some(from) == first {
             Some((0, at_sec))
         } else {
@@ -3010,9 +3236,15 @@ impl<S: CallSource> ContestMachine<S> {
         effects: &mut Vec<ContestEffect>,
     ) {
         let heard_run = air.heard_run();
+        let output_run = air.output_run();
+        let latency_ms = air.latency_ms();
         let heard_from = air.heard_from;
         let show_copy = self.settings.contest.contest_show_copy;
         let qsk = self.settings.contest.contest_qsk;
+        // What Show copy shows is read off the screen, and a turn tried
+        // again or played late went out otherwise than planned: neither
+        // times a copy.
+        let timeable = !show_copy && !self.untrusted.contains(&air.turn.id);
         if upto.is_none_or(|upto| heard_run + whole_ms(air.checks_at_sec) <= upto) {
             let pending = std::mem::take(&mut air.pending);
             self.resolve(&pending, effects);
@@ -3021,15 +3253,19 @@ impl<S: CallSource> ContestMachine<S> {
             turn,
             replies,
             counted,
+            texts,
             ..
         } = air;
         let callers = turn
             .segments
             .iter()
-            .filter(|segment| segment.who.is_caller());
-        for ((segment, (reply, says)), counted) in callers.zip(replies.iter()).zip(counted) {
+            .enumerate()
+            .filter(|(_, segment)| segment.who.is_caller());
+        for (((at, segment), (reply, says)), counted) in callers.zip(replies.iter()).zip(counted) {
             let start = heard_run + whole_ms(segment.start_sec);
             let end = heard_run + whole_ms(segment.end_sec);
+            // When it began to go out to the output.
+            let out_start = output_run + whole_ms(segment.start_sec);
             let muted = turn.muted(segment, qsk);
             let station = &mut self.stations[reply.station];
             let heard = &mut station.heard;
@@ -3066,11 +3302,18 @@ impl<S: CallSource> ContestMachine<S> {
                 }
                 heard.note_voice(*says, segment.voice);
                 match says {
-                    Says::Call | Says::Correction => heard.call_begun = true,
-                    Says::Exchange => heard.exch_begun = true,
+                    Says::Call | Says::Correction => {
+                        heard.call_begun = true;
+                        heard.call_sends.began(out_start);
+                    }
+                    Says::Exchange => {
+                        heard.exch_begun = true;
+                        heard.exch_sends.began(out_start);
+                    }
                     // Its call, and its exchange once that begins too.
                     Says::CorrectionAndExchange => {
                         heard.call_begun = true;
+                        heard.call_sends.began(out_start);
                         if let Some(exchange_from) = exchange_at(&segment.text) {
                             *counted = Counted::CallBegun { exchange_from };
                         }
@@ -3101,9 +3344,9 @@ impl<S: CallSource> ContestMachine<S> {
                 let spans = char_spans(&segment.text, &self.settings, &segment.voice);
                 let begins_sec = spans
                     .iter()
-                    .find(|(at, ..)| *at >= exchange_from)
-                    .map_or(segment.end_sec - segment.start_sec, |(_, from, _)| {
-                        (*from - segment.skip_sec).max(0.0)
+                    .find(|span| span.at >= exchange_from)
+                    .map_or(segment.end_sec - segment.start_sec, |span| {
+                        (span.start_sec - segment.skip_sec).max(0.0)
                     });
                 if upto.is_none_or(|upto| start + whole_ms(begins_sec) < upto) {
                     *counted = Counted::Begun;
@@ -3115,6 +3358,7 @@ impl<S: CallSource> ContestMachine<S> {
                     }
                     heard.note_voice(Says::Exchange, segment.voice);
                     heard.exch_begun = true;
+                    heard.exch_sends.began(out_start + whole_ms(begins_sec));
                 }
             }
             if *counted == Counted::Whole || upto.is_some_and(|upto| end > upto) {
@@ -3122,6 +3366,47 @@ impl<S: CallSource> ContestMachine<S> {
             }
             *counted = Counted::Whole;
             heard.first.get_or_insert(start.min(run_now));
+            // The first sending of its call, and of its exchange, heard
+            // once, whole and alone, is what their copies' characters are
+            // timed from: not a rest carried on from a turn you keyed over.
+            if timeable && segment.skip_sec == 0.0 && texts.get(at) == Some(&segment.text) {
+                let sounded = |within: std::ops::Range<usize>, token: &str| {
+                    let ends = sounded_alone(turn, at, within, token, &self.settings)?;
+                    Some(Sounded {
+                        turn: turn.id,
+                        from: out_start,
+                        ends,
+                        latency_ms,
+                    })
+                };
+                let length = segment.text.len();
+                let exchange_from = match says {
+                    Says::Exchange => Some(0),
+                    Says::CorrectionAndExchange => exchange_at(&segment.text),
+                    _ => None,
+                };
+                let call_to = match says {
+                    Says::Call | Says::Correction => Some(length),
+                    Says::CorrectionAndExchange => Some(exchange_from.unwrap_or(length)),
+                    _ => None,
+                };
+                if let Some(call_to) = call_to
+                    && heard.call_sends.count == 1
+                    && heard.call_sounded.is_none()
+                {
+                    heard.call_sounded = sounded(0..call_to, &station.caller.call.text);
+                }
+                if let Some(from) = exchange_from
+                    && heard.exch_sends.count == 1
+                    && heard.exch_sounded.is_empty()
+                    && let Some(tokens) = station.caller.sent_exchange()
+                {
+                    heard.exch_sounded = tokens
+                        .iter()
+                        .filter_map(|(field, token)| Some((*field, sounded(from..length, token)?)))
+                        .collect();
+                }
+            }
             // With Show copy on, its text shows a moment after it ends:
             // what you had of its call, or its exchange, by then is the
             // copy its groups keep.
@@ -3304,14 +3589,8 @@ impl<S: CallSource> ContestMachine<S> {
             self.note_sent(sent);
         }
         // Esc takes back only a message that logged nothing.
-        let (_, took) = self.hear(
-            sent,
-            &unheard.fields,
-            unheard.edited_run,
-            &unheard.deaf,
-            false,
-        );
-        self.went_on(unheard.working, took, &unheard.fields, notes);
+        let (_, took) = self.hear(sent, &unheard.fields, &unheard.call, &unheard.deaf, false);
+        self.went_on(unheard.working, took, &unheard.call.typed, notes);
         self.thank(unheard.working, sent, &unheard.fields, notes);
         self.close_finished(run_ms);
     }
@@ -3646,7 +3925,7 @@ impl<S: CallSource> ContestMachine<S> {
     /// Log the QSO in the fields at `run_ms`, checked against the station
     /// you work, or else the one your TU closed, if the call is its own or
     /// close to it; otherwise not in its log. Returns its entry.
-    fn log(&mut self, fields: &Fields, run_ms: u64, now: MonoMs) -> usize {
+    fn log(&mut self, fields: &Fields, call: &CallRead, run_ms: u64, now: MonoMs) -> usize {
         let reading = parse_exchange(self.rules, self.side, &fields.exch);
         let logged = QsoText {
             call: normalize_call(&fields.call),
@@ -3673,15 +3952,32 @@ impl<S: CallSource> ContestMachine<S> {
         {
             self.lose(thanked, run_ms);
         }
-        let edited_run = self.run_at(fields.call_edited, now);
         let done_run = fields
             .exch_complete
             .map_or(run_ms, |at| self.run_at(at, now));
+        let exch = reading
+            .fields
+            .iter()
+            .map(|read| {
+                let keys = fields
+                    .exch_word_keys(read.word)
+                    .iter()
+                    .map(|key| key.map(|key| self.run_at(key, now)))
+                    .collect();
+                let text = read.token.clone();
+                (read.field, Typed { text, keys })
+            })
+            .collect();
+        let read = LogRead {
+            logged,
+            reading,
+            exch,
+            call: call.clone(),
+            done_run,
+        };
         let entry = match worked {
-            Some(index) => {
-                self.worked_entry(index, &logged, &reading, done_run, edited_run, run_ms)
-            }
-            None => self.nil_entry(&logged, &reading, done_run, edited_run, run_ms),
+            Some(index) => self.worked_entry(index, &read, run_ms),
+            None => self.nil_entry(&read, run_ms),
         };
         let with = entry.station;
         self.entries.push(entry);
@@ -3708,8 +4004,8 @@ impl<S: CallSource> ContestMachine<S> {
         let source = &mut self.source;
         for entry in self.entries.get(self.taught..upto).unwrap_or_default() {
             let copies = entry.record.group_copies(|at| copied.get(at).copied());
-            for ((group, timing), copy) in entry.groups.iter().zip(copies) {
-                learn(source, group, timing, tells_speed(copy));
+            for (kept, copy) in entry.groups.iter().zip(copies) {
+                learn(source, &kept.group, &kept.timing, tells_speed(copy));
             }
         }
         self.taught = self.taught.max(upto);
@@ -3732,15 +4028,8 @@ impl<S: CallSource> ContestMachine<S> {
     /// is no copy. A station logged before, or charged with a NIL, has its
     /// copy kept already: one station, one copy. What no group holds, the
     /// record does, for the check.
-    fn worked_entry(
-        &mut self,
-        index: usize,
-        logged: &QsoText,
-        reading: &Reading,
-        done_run: u64,
-        edited_run: u64,
-        run_ms: u64,
-    ) -> Entry {
+    fn worked_entry(&mut self, index: usize, read: &LogRead, run_ms: u64) -> Entry {
+        let (logged, reading) = (&read.logged, &read.reading);
         let clean = self.logged_clean();
         let nr = self.serial_sent();
         let (rules, side) = (self.rules, self.side);
@@ -3763,20 +4052,15 @@ impl<S: CallSource> ContestMachine<S> {
         let (first_call, call_ms) = heard.first_call.clone().unwrap_or_else(|| {
             let ms = heard
                 .call_ms
-                .unwrap_or_else(|| copy_ms(&heard.call_ends, edited_run));
-            (logged.call.clone(), ms)
+                .unwrap_or_else(|| copy_ms(&heard.call_ends, read.call.edited_run));
+            (read.call.typed.as_copy(&logged.call), ms)
         });
-        let (call_copy, call_ms, call_sends) = heard.call_copy(&first_call, call_ms);
+        let call = heard.call_group(&sent.call, &first_call, call_ms, &call_voice);
+        let call_copy = call.group.received.clone();
         let mut groups = Vec::new();
         if !again {
-            groups.push(group(
-                &sent.call,
-                &call_copy,
-                call_ms,
-                call_sends,
-                &call_voice,
-            ));
-            groups.extend(heard.field_groups(rules, &sent.fields, reading, done_run, &exch_voice));
+            groups.push(call);
+            groups.extend(heard.field_groups(rules, &sent.fields, read, &exch_voice));
         }
         // The field groups hold the exchange as logged, unless Show copy
         // kept them as they read when its text showed: then the record
@@ -3849,7 +4133,7 @@ impl<S: CallSource> ContestMachine<S> {
                 || heard
                     .first_call
                     .as_ref()
-                    .is_some_and(|(first, _)| first == call)
+                    .is_some_and(|(first, _)| first.text == call)
                 || (heard.engaged && self.stations[*index].caller.call.text == call)
         };
         if let Some(owner) = (0..self.stations.len()).find(took) {
@@ -3896,14 +4180,8 @@ impl<S: CallSource> ContestMachine<S> {
     /// the call logged, and a group for each field as a QSO logged with it
     /// has them: as keyed once its exchange has begun to reach you, and a
     /// miss before that. With none, `lc` holds the call.
-    fn nil_entry(
-        &mut self,
-        logged: &QsoText,
-        reading: &Reading,
-        done_run: u64,
-        edited_run: u64,
-        run_ms: u64,
-    ) -> Entry {
+    fn nil_entry(&mut self, read: &LogRead, run_ms: u64) -> Entry {
+        let (logged, reading) = (&read.logged, &read.reading);
         let check = check_qso(self.rules, logged, None, |_| false);
         let against = self.nil_target(&logged.call);
         let nr = self.serial_sent();
@@ -3915,17 +4193,12 @@ impl<S: CallSource> ContestMachine<S> {
                 station.heard.recorded = true;
                 let exchange = station.caller.exchange(rules, side, run_ms).to_vec();
                 let heard = &station.heard;
-                let took = copy_ms(&heard.call_ends, edited_run);
+                let took = copy_ms(&heard.call_ends, read.call.edited_run);
                 let (call_voice, exch_voice) = heard.voices(station.caller.voice);
-                let (call_copy, took, sends) = heard.call_copy(&logged.call, took);
-                let mut groups = vec![group(
-                    &station.caller.call.text,
-                    &call_copy,
-                    took,
-                    sends,
-                    &call_voice,
-                )];
-                groups.extend(heard.field_groups(rules, &exchange, reading, done_run, &exch_voice));
+                let copy = read.call.typed.as_copy(&logged.call);
+                let mut groups =
+                    vec![heard.call_group(&station.caller.call.text, &copy, took, &call_voice)];
+                groups.extend(heard.field_groups(rules, &exchange, read, &exch_voice));
                 (groups, heard.first, Some(row_wpm(call_voice, exch_voice)))
             }
             None => (Vec::new(), None, None),
@@ -3947,7 +4220,7 @@ impl<S: CallSource> ContestMachine<S> {
                 // where Show copy kept another copy in its call group.
                 lc: if groups
                     .first()
-                    .is_none_or(|(call, _)| call.received != logged.call)
+                    .is_none_or(|call| call.group.received != logged.call)
                 {
                     logged.call.clone()
                 } else {
@@ -3991,14 +4264,8 @@ impl<S: CallSource> ContestMachine<S> {
             None => (&heard.typed, heard.call_ms.unwrap_or(0)),
         };
         let (call_voice, exch_voice) = heard.voices(station.caller.voice);
-        let (received, call_ms, sends) = heard.call_copy(received, call_ms);
-        let mut groups = vec![group(
-            &station.caller.call.text,
-            &received,
-            call_ms,
-            sends,
-            &call_voice,
-        )];
+        let mut groups =
+            vec![heard.call_group(&station.caller.call.text, received, call_ms, &call_voice)];
         groups.extend(misses(&exchange, &exch_voice));
         self.entries.push(Entry {
             record: QsoRecord {
@@ -4218,23 +4485,25 @@ fn group(
     ms: u64,
     sends: u32,
     voice: &StationVoice,
-) -> (GroupResult, SessionTiming) {
+    timed: Option<Timed>,
+) -> Kept {
     let floor = MIN_RESPONSE_MS_PER_CHAR * sent.chars().count().max(1) as f64;
-    (
-        GroupResult {
+    let (heard_in, char_times) = timed.map(|timed| (timed.turn, timed.times)).unzip();
+    Kept {
+        group: GroupResult {
             sent: sent.to_string(),
             received: received.to_string(),
             correct: sent == received,
         },
-        SessionTiming {
+        timing: SessionTiming {
             time_to_complete_ms: (ms as f64).max(floor),
             char_wpm: Some(tenth(voice.char_wpm)),
             effective_wpm: Some(tenth(voice.effective_wpm)),
             sends,
-            recognition_ms: Vec::new(),
-            typed_along: false,
+            char_times,
         },
-    )
+        heard_in,
+    }
 }
 
 /// Whether `voice` sends slower than `than`.
@@ -4251,11 +4520,61 @@ fn row_wpm(call: StationVoice, exch: StationVoice) -> f64 {
 /// A missed group for each field of `exchange`, sent at `voice`: what a
 /// station's copy holds of an exchange logged before it was heard, as a
 /// guess is no copy, or never logged at all, as walking away is none.
-fn misses(exchange: &[(Field, String)], voice: &StationVoice) -> Vec<(GroupResult, SessionTiming)> {
+fn misses(exchange: &[(Field, String)], voice: &StationVoice) -> Vec<Kept> {
     exchange
         .iter()
-        .map(|(_, token)| group(token, "", 0, 1, voice))
+        .map(|(_, token)| group(token, "", 0, 1, voice, None))
         .collect()
+}
+
+/// Where each character of `token` ends in segment `at` of `turn`, in
+/// milliseconds after the segment starts, when it is there once as a word
+/// within the bytes `within` of its text, and nothing else in the turn, a
+/// caller, QRM or your own message, sounds while it does: a token heard
+/// twice in one send, or under another, is no measure of hearing it.
+fn sounded_alone(
+    turn: &Turn,
+    at: usize,
+    within: std::ops::Range<usize>,
+    token: &str,
+    settings: &TrainingSettings,
+) -> Option<Vec<u32>> {
+    let segment = turn.segments.get(at)?;
+    let part = segment.text.get(within.clone())?;
+    let word = |(from, _): &(usize, &str)| {
+        let before = part[..*from].chars().next_back();
+        let after = part[from + token.len()..].chars().next();
+        before.is_none_or(char::is_whitespace) && after.is_none_or(char::is_whitespace)
+    };
+    let mut found = part.match_indices(token).filter(word);
+    let (from, _) = found.next().filter(|_| !token.is_empty())?;
+    if found.next().is_some() {
+        return None;
+    }
+    let bytes = within.start + from..within.start + from + token.len();
+    let spans: Vec<CharSpan> = char_spans(&segment.text, settings, &segment.voice)
+        .into_iter()
+        .filter(|span| bytes.contains(&span.at))
+        .collect();
+    let (first, last) = (spans.first()?, spans.last()?);
+    if spans.len() != token.chars().count() {
+        return None;
+    }
+    let (begins, ends) = (
+        segment.start_sec + first.start_sec,
+        segment.start_sec + last.end_sec,
+    );
+    let alone = turn
+        .segments
+        .iter()
+        .enumerate()
+        .all(|(other, over)| other == at || over.end_sec <= begins || over.start_sec >= ends);
+    alone.then(|| {
+        spans
+            .iter()
+            .map(|span| u32::try_from(whole_ms(span.end_sec)).unwrap_or(u32::MAX))
+            .collect()
+    })
 }
 
 /// How long a copy finished at `done` took: from the end of the last send
@@ -4908,8 +5227,8 @@ mod tests {
             // begun before the continuation can take over, to its end.
             let before: String = spans
                 .iter()
-                .filter(|(_, start, _)| *start < soonest)
-                .map(|(at, ..)| &"K5XYZ"[*at..=*at])
+                .filter(|span| span.start_sec < soonest)
+                .map(|span| &"K5XYZ"[span.at..=span.at])
                 .collect();
             let again = yours(&turn).replace(' ', "");
             assert_eq!(
@@ -4922,10 +5241,14 @@ mod tests {
                 .iter()
                 .find(|segment| segment.who == Sender::You)
                 .expect("your message");
-            match spans.iter().find(|(_, start, _)| *start >= soonest) {
+            match spans
+                .iter()
+                .find(|span| span.start_sec >= soonest)
+                .map(|span| span.start_sec)
+            {
                 // The rest goes on where its first character starts.
-                Some((_, start, _)) => {
-                    assert_eq!(turn.at_run_ms, call.at_run_ms + whole_ms(*start));
+                Some(start) => {
+                    assert_eq!(turn.at_run_ms, call.at_run_ms + whole_ms(start));
                     assert_eq!(turn.starts_at, Some(MonoMs(turn.at_run_ms)));
                     assert_eq!(mine.start_sec, 0.0);
                 }
@@ -4970,7 +5293,7 @@ mod tests {
             exch: String::new(),
             call_edited: MonoMs(at),
             exch_complete: None,
-            earlier: Vec::new(),
+            ..Fields::default()
         };
         for after_ms in (0..(call_sec * 1_000.0) as u64).step_by(40) {
             let mut runtime = runtime(&["K5XYZ"]);
@@ -4980,7 +5303,7 @@ mod tests {
             let effects = machine.apply(
                 ContestEvent::Key {
                     key: OpKey::HisCall,
-                    fields: fields(keyed),
+                    fields: Box::new(fields(keyed)),
                 },
                 MonoMs(keyed),
             );
@@ -4990,6 +5313,7 @@ mod tests {
             let started = ContestEvent::TurnStarted {
                 id: call.id,
                 heard_from,
+                output_from: heard_from,
             };
             assert!(machine.apply(started, MonoMs(keyed)).is_empty());
             assert_eq!(machine.lead_ms, lead_ms);
@@ -4997,7 +5321,7 @@ mod tests {
             let effects = machine.apply(
                 ContestEvent::Key {
                     key: OpKey::Exchange,
-                    fields: fields(at),
+                    fields: Box::new(fields(at)),
                 },
                 MonoMs(at),
             );
@@ -5012,8 +5336,8 @@ mod tests {
             let soonest = (after_ms + lead_ms) as f64 / 1_000.0 + SEND_RELEASE_SEC;
             let before: String = spans
                 .iter()
-                .filter(|(_, start, _)| *start < soonest)
-                .map(|(at, ..)| &"K5XYZ"[*at..=*at])
+                .filter(|span| span.start_sec < soonest)
+                .map(|span| &"K5XYZ"[span.at..=span.at])
                 .collect();
             assert_eq!(
                 format!("{before}{}", yours(&turn).replace(' ', "")),
@@ -5021,9 +5345,13 @@ mod tests {
                 "{after_ms} ms in"
             );
             let heard = heard_from.0 as f64 / 1_000.0;
-            match spans.iter().find(|(_, start, _)| *start >= soonest) {
-                Some((_, start, _)) => {
-                    assert_eq!(starts, heard_from.0 + whole_ms(*start), "{after_ms} ms in");
+            match spans
+                .iter()
+                .find(|span| span.start_sec >= soonest)
+                .map(|span| span.start_sec)
+            {
+                Some(start) => {
+                    assert_eq!(starts, heard_from.0 + whole_ms(start), "{after_ms} ms in");
                 }
                 None => {
                     let mine = turn
@@ -5041,6 +5369,7 @@ mod tests {
             let started = ContestEvent::TurnStarted {
                 id: turn.id,
                 heard_from: MonoMs(starts + 40),
+                output_from: MonoMs(starts + 40),
             };
             assert!(machine.apply(started, MonoMs(at)).is_empty());
             assert_eq!(machine.lead_ms, lead_ms);
@@ -5055,6 +5384,7 @@ mod tests {
         let retried = ContestEvent::TurnStarted {
             id,
             heard_from: MonoMs(keyed + 2_000),
+            output_from: MonoMs(keyed + 2_000),
         };
         assert!(
             runtime
@@ -5071,6 +5401,7 @@ mod tests {
         let held_up = ContestEvent::TurnStarted {
             id,
             heard_from: MonoMs(held.now + 5_000),
+            output_from: MonoMs(held.now + 5_000),
         };
         assert!(held.apply(held_up).is_empty());
         assert_eq!(held.machine.lead_ms, LEAD_MOST_MS);
@@ -5298,10 +5629,12 @@ mod tests {
         runtime.apply(ContestEvent::TurnStarted {
             id: current,
             heard_from: MonoMs(50_100),
+            output_from: MonoMs(50_100),
         });
         runtime.apply(ContestEvent::TurnStarted {
             id: current,
             heard_from: MonoMs(55_000),
+            output_from: MonoMs(55_000),
         });
         runtime.now = 62_000;
         let effects = runtime.apply(ContestEvent::TurnFailed { id: current });
@@ -5330,6 +5663,7 @@ mod tests {
         let effects = runtime.apply(ContestEvent::TurnStarted {
             id,
             heard_from: MonoMs(700_050),
+            output_from: MonoMs(700_050),
         });
         assert!(effects.is_empty());
         assert_eq!(runtime.machine.phase(), ContestPhase::Running);
@@ -5509,7 +5843,7 @@ mod tests {
             };
             runtime.apply(ContestEvent::Key {
                 key: OpKey::Esm,
-                fields,
+                fields: Box::new(fields),
             });
             let exchange = replies(runtime.last_turn())[0].to_string();
             runtime.finish_turn();
@@ -6185,7 +6519,7 @@ mod tests {
             exch: exch.into(),
             call_edited: MonoMs(edited),
             exch_complete: Some(MonoMs(done)),
-            earlier: Vec::new(),
+            ..Fields::default()
         };
         let nr_copy = |ask: bool| {
             let mut runtime = runtime(&["K5XYZ"]);
@@ -6200,14 +6534,14 @@ mod tests {
                 let fields = fields(&nr, edited, typed);
                 runtime.apply(ContestEvent::Key {
                     key: OpKey::Again,
-                    fields,
+                    fields: Box::new(fields),
                 });
                 runtime.finish_turn();
             }
             let fields = fields(&nr, edited, typed);
             runtime.apply(ContestEvent::Key {
                 key: OpKey::Esm,
-                fields,
+                fields: Box::new(fields),
             });
             runtime.finish_turn();
             runtime.apply(ContestEvent::FinishNow);
@@ -6235,7 +6569,10 @@ mod tests {
         let edited = runtime.now;
         for key in [OpKey::HisCall, OpKey::Cq] {
             let fields = fields(edited);
-            runtime.apply(ContestEvent::Key { key, fields });
+            runtime.apply(ContestEvent::Key {
+                key,
+                fields: Box::new(fields),
+            });
             runtime.finish_turn();
         }
         runtime.apply(ContestEvent::FinishNow);
@@ -6671,7 +7008,13 @@ mod tests {
             ContestMachine::start(1, MonoMs(0), settings, ScriptCalls::new(&["K5XYZ"]));
         let run_end = first_timer(&effects).expect("the run end");
         let cq = played(&effects).expect("the CQ").id;
-        let ended = machine.apply(ContestEvent::TurnEnded { id: cq }, MonoMs(5_000));
+        let ended = machine.apply(
+            ContestEvent::TurnEnded {
+                id: cq,
+                on_time: true,
+            },
+            MonoMs(5_000),
+        );
         let patience = first_timer(&ended).expect("the patience timer");
         let fields = Fields {
             call: "K5XYZ".into(),
@@ -6680,7 +7023,7 @@ mod tests {
         };
         let key = ContestEvent::Key {
             key: OpKey::Esm,
-            fields,
+            fields: Box::new(fields),
         };
         let turn = played(&machine.apply(key, MonoMs(50_000)))
             .expect("a turn")
@@ -6689,6 +7032,7 @@ mod tests {
             let started = ContestEvent::TurnStarted {
                 id: turn,
                 heard_from: MonoMs(heard_from),
+                output_from: MonoMs(heard_from),
             };
             let _ = machine.apply(started, MonoMs(now));
         }
@@ -6730,7 +7074,13 @@ mod tests {
         // The retry plays after all: its end ends the run, at the limit.
         let (mut ended, run_end, _, _, turn) = retrying_near_the_end();
         let _ = ended.apply(ContestEvent::TimerFired { id: run_end }, MonoMs(60_000));
-        let effects = ended.apply(ContestEvent::TurnEnded { id: turn }, MonoMs(67_500));
+        let effects = ended.apply(
+            ContestEvent::TurnEnded {
+                id: turn,
+                on_time: true,
+            },
+            MonoMs(67_500),
+        );
         assert!(effects.contains(&ContestEffect::Announce("Time's up".into())));
         assert_eq!(ended.ended.map(|(run_ms, _)| run_ms), Some(60_000));
 
@@ -7454,7 +7804,7 @@ mod tests {
             exch: exch.into(),
             call_edited: MonoMs(call_edited),
             exch_complete: done.map(MonoMs),
-            earlier: Vec::new(),
+            ..Fields::default()
         };
         let mut runtime = runtime(&["K5XYZ"]);
         runtime.finish_turn();
@@ -7462,7 +7812,10 @@ mod tests {
         let typed = runtime.now;
         for key in [OpKey::Again, OpKey::Esm] {
             let fields = fields(typed, "", None);
-            runtime.apply(ContestEvent::Key { key, fields });
+            runtime.apply(ContestEvent::Key {
+                key,
+                fields: Box::new(fields),
+            });
             runtime.finish_turn();
         }
         let nr = serial(replies(&runtime.turns[runtime.turns.len() - 1])[0]);
@@ -7470,7 +7823,10 @@ mod tests {
         let done = runtime.now;
         for key in [OpKey::Again, OpKey::Esm] {
             let fields = fields(typed, &nr, Some(done));
-            runtime.apply(ContestEvent::Key { key, fields });
+            runtime.apply(ContestEvent::Key {
+                key,
+                fields: Box::new(fields),
+            });
             runtime.finish_turn();
         }
         runtime.apply(ContestEvent::FinishNow);
@@ -8048,7 +8404,7 @@ mod tests {
         let call = sent_by(&cq, 0)[0].clone();
         let spans = char_spans(&call.text, &runtime.machine.settings, &call.voice);
         // Halfway into its second character, longer than your own.
-        let (_, from, to) = spans[1];
+        let (from, to) = (spans[1].start_sec, spans[1].end_sec);
         assert!(to - from > 0.8, "{:?}", spans[1]);
         runtime.run_to(runtime.now + ms(call.start_sec + (from + to) / 2.0));
         let keyed = runtime.now;
@@ -8476,6 +8832,7 @@ mod tests {
         runtime.apply(ContestEvent::TurnStarted {
             id: carried.id,
             heard_from: MonoMs(runtime.now + 120),
+            output_from: MonoMs(runtime.now + 120),
         });
         let heard = runtime.machine.stations[0].heard.clone();
         runtime.now += 50;
@@ -8503,6 +8860,7 @@ mod tests {
         runtime.apply(ContestEvent::TurnStarted {
             id: carried.id,
             heard_from: MonoMs(runtime.now + 120),
+            output_from: MonoMs(runtime.now + 120),
         });
         runtime.now += 50;
         runtime.apply(ContestEvent::Pause {
@@ -8849,7 +9207,7 @@ mod tests {
             runtime.key(OpKey::Esm, "W7ABC", "");
             assert_eq!(runtime.machine.working, Some(1));
             assert_eq!(
-                runtime.machine.stations[0].heard.typed, "K5XYZ",
+                runtime.machine.stations[0].heard.typed.text, "K5XYZ",
                 "the call typed for W7ABC is no reading of K5XYZ"
             );
             runtime.finish_turn();
@@ -9285,7 +9643,10 @@ mod tests {
                 }
             }
             runtime.finish_turn();
-            assert_eq!(runtime.machine.stations[0].heard.typed, "K5XYZ", "{key:?}");
+            assert_eq!(
+                runtime.machine.stations[0].heard.typed.text, "K5XYZ",
+                "{key:?}"
+            );
             // K5XYZ, waiting for your exchange, would wait on: a NIL with the
             // Call field empty sends it away, and W7ABC is still there.
             runtime.key(OpKey::Nil, "", "");
@@ -9316,7 +9677,7 @@ mod tests {
         runtime.finish_turn();
         runtime.key(OpKey::Esm, "W7ABD", "");
         assert_eq!(runtime.machine.working, Some(1), "W7ABC takes the slip");
-        assert_eq!(runtime.machine.stations[0].heard.typed, "K5XYZ");
+        assert_eq!(runtime.machine.stations[0].heard.typed.text, "K5XYZ");
         runtime.finish_turn();
         let lost = runtime.machine.nil_and_lost_copies();
         runtime.apply(ContestEvent::FinishNow);
@@ -9888,6 +10249,7 @@ mod tests {
         runtime.apply(ContestEvent::TurnStarted {
             id: turn.id,
             heard_from: MonoMs(runtime.now),
+            output_from: MonoMs(runtime.now),
         });
         runtime.key(OpKey::Cq, "", "");
         let after = sent_by(runtime.last_turn(), 0);
@@ -10682,7 +11044,7 @@ mod tests {
             .first_call
             .clone()
             .expect("it took your exchange");
-        assert_eq!(copy, "K5XYZ");
+        assert_eq!(copy.text, "K5XYZ");
         let typed = runtime.now - ended;
         assert!(
             took + 50 >= typed,
@@ -10904,7 +11266,11 @@ mod tests {
             let into = if begun {
                 let from = exchange_at(&fix.text).expect("its exchange");
                 let spans = char_spans(&fix.text, &settings, &fix.voice);
-                let start = spans.iter().find(|(at, ..)| *at >= from).expect("sent").1;
+                let start = spans
+                    .iter()
+                    .find(|span| span.at >= from)
+                    .expect("sent")
+                    .start_sec;
                 ms(start) + 50
             } else {
                 300
@@ -11049,6 +11415,7 @@ mod tests {
             runtime.apply(ContestEvent::TurnStarted {
                 id,
                 heard_from: MonoMs(keyed + 6_000),
+                output_from: MonoMs(keyed + 6_000),
             });
             runtime.now = keyed + 7_000;
             runtime.key(OpKey::Again, "K5XYZ", "");
@@ -11256,6 +11623,7 @@ mod tests {
                 *field,
                 (*text).to_string(),
                 MonoMs(*at),
+                Some(MonoMs(*at)),
                 crate::contest::ContestKind::Wpx.rules(),
                 Side::Dx,
             );
@@ -11324,7 +11692,7 @@ mod tests {
         ]);
         runtime.apply(ContestEvent::Key {
             key: OpKey::Esm,
-            fields: fields.clone(),
+            fields: Box::new(fields.clone()),
         });
         let exchange = replies(runtime.last_turn())[0].to_string();
         let nr = serial(&exchange);
@@ -11337,6 +11705,7 @@ mod tests {
             Exchange,
             first.to_string(),
             MonoMs(exch_shown - 100),
+            Some(MonoMs(exch_shown - 100)),
             crate::contest::ContestKind::Wpx.rules(),
             Side::Dx,
         );
@@ -11344,13 +11713,14 @@ mod tests {
             Exchange,
             nr.clone(),
             MonoMs(exch_shown + 400),
+            Some(MonoMs(exch_shown + 400)),
             crate::contest::ContestKind::Wpx.rules(),
             Side::Dx,
         );
         runtime.now = exch_shown + 1_000;
         runtime.apply(ContestEvent::Key {
             key: OpKey::Esm,
-            fields,
+            fields: Box::new(fields),
         });
         runtime.finish_turn();
         assert_eq!(view(&runtime).clean, 1, "the log keeps what you logged");
@@ -11555,7 +11925,7 @@ mod tests {
         runtime.now = last + 500;
         runtime.apply(ContestEvent::Key {
             key: OpKey::Esm,
-            fields: typed(&[(EntryField::Call, "K5XYZ", first - 300)]),
+            fields: Box::new(typed(&[(EntryField::Call, "K5XYZ", first - 300)])),
         });
         let frozen: Vec<Option<&str>> = runtime
             .machine
@@ -11594,7 +11964,7 @@ mod tests {
         runtime.now = first - SHOWN_AFTER_MS + 300;
         runtime.apply(ContestEvent::Key {
             key: OpKey::Again,
-            fields: typed(&[(Call, "K5X", first - 1_500)]),
+            fields: Box::new(typed(&[(Call, "K5X", first - 1_500)])),
         });
         assert_eq!(runtime.machine.stations[0].heard.call_shown, None);
         runtime.finish_turn();
@@ -11603,11 +11973,11 @@ mod tests {
         runtime.now = again + 500;
         runtime.apply(ContestEvent::Key {
             key: OpKey::Esm,
-            fields: typed(&[
+            fields: Box::new(typed(&[
                 (Call, "K5X", first - 1_500),
                 (Call, "K5XY", again - 100),
                 (Call, "K5XYZ", again + 200),
-            ]),
+            ])),
         });
         let nr = serial(replies(runtime.last_turn())[0]);
         runtime.finish_turn();
@@ -11641,7 +12011,7 @@ mod tests {
         // the nearer, takes it.
         runtime.apply(ContestEvent::Key {
             key: OpKey::Esm,
-            fields: typed(&[(EntryField::Call, "K5XW", shown[0].at.0 - 300)]),
+            fields: Box::new(typed(&[(EntryField::Call, "K5XW", shown[0].at.0 - 300)])),
         });
         let (taker, other) = (1, 0);
         assert_eq!(runtime.machine.working, Some(taker));
@@ -11694,5 +12064,319 @@ mod tests {
         runtime.apply(ContestEvent::FinishNow);
         let (result, _) = result(&runtime);
         assert_eq!(kept(&result)[1], (nr.as_str(), nr.as_str(), 2));
+    }
+
+    /// When each character of the word `token` ends in `segment` of a turn
+    /// whose sound went out at `from`, in run time.
+    fn token_ends(
+        runtime: &Runtime<ScriptCalls>,
+        from: u64,
+        segment: &Segment,
+        token: &str,
+    ) -> Vec<u64> {
+        let at = segment
+            .text
+            .split(' ')
+            .scan(0, |next, word| {
+                let at = *next;
+                *next += word.len() + 1;
+                Some((at, word))
+            })
+            .find(|(_, word)| *word == token)
+            .map(|(at, _)| at)
+            .unwrap_or_else(|| panic!("{token} in {:?}", segment.text));
+        char_spans(&segment.text, &runtime.machine.settings, &segment.voice)
+            .into_iter()
+            .filter(|span| (at..at + token.len()).contains(&span.at))
+            .map(|span| from + whole_ms(segment.start_sec) + whole_ms(span.end_sec))
+            .collect()
+    }
+
+    /// `text` keyed into `field` a character at a time, each `after` ms
+    /// after the moment beside it ends: the edits [`typed`] takes.
+    fn keyed_along(
+        field: EntryField,
+        before: &str,
+        text: &str,
+        ends: &[u64],
+        after: u64,
+    ) -> Vec<(EntryField, String, u64)> {
+        text.char_indices()
+            .zip(ends)
+            .map(|((at, ch), end)| {
+                let held = format!("{before}{}", &text[..at + ch.len_utf8()]);
+                (field, held, end + after)
+            })
+            .collect()
+    }
+
+    /// K5XYZ's call keyed along as it is heard, then its exchange as that
+    /// is, `after` ms after each character ends, and logged: the run's
+    /// result, and what it sent for its exchange.
+    fn worked_keying_along(
+        runtime: &mut Runtime<ScriptCalls>,
+        after: u64,
+    ) -> (SessionResult, String) {
+        let cq = runtime.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        assert_eq!(call.text, "K5XYZ", "a call alone");
+        let mut edits = keyed_along(
+            EntryField::Call,
+            "",
+            "K5XYZ",
+            &token_ends(runtime, 0, &call, "K5XYZ"),
+            after,
+        );
+        runtime.finish_turn();
+        let typed_by = edits.last().map_or(0, |(_, _, at)| *at);
+        runtime.now = runtime.now.max(typed_by + 10);
+        let as_typed = |edits: &[(EntryField, String, u64)]| {
+            let edits: Vec<(EntryField, &str, u64)> = edits
+                .iter()
+                .map(|(field, text, at)| (*field, text.as_str(), *at))
+                .collect();
+            typed(&edits)
+        };
+        runtime.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(as_typed(&edits)),
+        });
+        let sent_at = runtime.now;
+        let turn = runtime.last_turn().clone();
+        let reply = sent_by(&turn, 0)[0].clone();
+        let tokens: Vec<String> = runtime.machine.stations[0]
+            .caller
+            .sent_exchange()
+            .expect("its exchange drawn")
+            .iter()
+            .map(|(_, token)| token.clone())
+            .collect();
+        let mut exchange = String::new();
+        for token in &tokens {
+            let before = if exchange.is_empty() {
+                String::new()
+            } else {
+                format!("{exchange} ")
+            };
+            let ends = token_ends(runtime, sent_at, &reply, token);
+            edits.extend(keyed_along(
+                EntryField::Exchange,
+                &before,
+                token,
+                &ends,
+                after,
+            ));
+            exchange = format!("{before}{token}");
+        }
+        runtime.finish_turn();
+        let typed_by = edits.last().map_or(0, |(_, _, at)| *at);
+        runtime.now = runtime.now.max(typed_by + 10);
+        runtime.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(as_typed(&edits)),
+        });
+        runtime.finish_turn();
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        (result(runtime).0, exchange)
+    }
+
+    /// Each group's recognition times, as Letters reads them.
+    fn recognised(result: &SessionResult) -> Vec<Vec<Option<u32>>> {
+        result
+            .groups
+            .iter()
+            .zip(&result.group_timings)
+            .map(|(group, timing)| {
+                timing.char_times.as_ref().map_or_else(Vec::new, |times| {
+                    crate::recognition::recognise(&group.sent, &group.received, times)
+                })
+            })
+            .collect()
+    }
+
+    /// A caller's call heard alone and once, and its exchange so, keyed
+    /// along as each character is heard: every character is timed from its
+    /// sound going out to its key, as a group's are.
+    #[test]
+    fn a_call_and_an_exchange_keyed_along_are_timed_by_the_character() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        let (result, exchange) = worked_keying_along(&mut runtime, 300);
+        let times = recognised(&result);
+        assert_eq!(result.groups[0].received, "K5XYZ");
+        assert_eq!(times.len(), 1 + exchange.split(' ').count(), "{times:?}");
+        for (group, times) in result.groups.iter().zip(&times) {
+            assert_eq!(times.len(), group.sent.chars().count(), "{group:?} untimed");
+            for took in times {
+                let took = took.unwrap_or_else(|| panic!("{group:?}: {times:?}"));
+                assert!((299..=302).contains(&took), "{group:?}: {times:?}");
+            }
+        }
+    }
+
+    /// With Show copy, what you copy may be read off the screen: nothing of
+    /// the run is timed.
+    #[test]
+    fn nothing_is_timed_with_show_copy() {
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_show_copy = true;
+        let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
+        let (result, _) = worked_keying_along(&mut runtime, 300);
+        assert!(!result.groups.is_empty());
+        assert!(
+            result
+                .group_timings
+                .iter()
+                .all(|timing| timing.char_times.is_none()),
+            "{:?}",
+            result.group_timings
+        );
+    }
+
+    /// A turn whose sound was tried again, or played late, went out
+    /// otherwise than planned: nothing heard in it is timed.
+    #[test]
+    fn nothing_heard_in_a_turn_tried_again_or_played_late_is_timed() {
+        // Tried again as it plays.
+        let mut retried = runtime(&["K5XYZ"]);
+        let cq = retried.last_turn().id;
+        retried.step();
+        retried.apply(ContestEvent::TurnStarted {
+            id: cq,
+            heard_from: MonoMs(retried.now),
+            output_from: MonoMs(retried.now),
+        });
+        let (result, _) = worked_keying_along(&mut retried, 300);
+        assert_eq!(result.group_timings[0].char_times, None, "the call");
+        assert!(result.group_timings[1].char_times.is_some(), "the exchange");
+
+        // Played late.
+        let mut late = runtime(&["K5XYZ"]);
+        let cq = late.last_turn().clone();
+        let end = whole_ms(cq.duration_sec());
+        late.run_to(end.saturating_sub(1));
+        late.now = end;
+        late.apply(ContestEvent::TurnEnded {
+            id: cq.id,
+            on_time: false,
+        });
+        assert!(late.machine.untrusted.contains(&cq.id));
+        assert_eq!(late.machine.stations[0].heard.call_sounded, None);
+    }
+
+    /// A group timed from a turn found late after it was logged is kept
+    /// untimed.
+    #[test]
+    fn a_group_kept_from_a_turn_found_late_is_untimed() {
+        let voice = your_voice(&run_settings(25.0), 25.0);
+        let times = CharTimes {
+            ends: vec![300],
+            keys: vec![Some(700)],
+            latency_ms: 0,
+            box_open: true,
+        };
+        let kept = group(
+            "K",
+            "K",
+            400,
+            1,
+            &voice,
+            Some(Timed {
+                turn: 7,
+                times: times.clone(),
+            }),
+        );
+        assert_eq!(kept.stored(&[]).1.char_times, Some(times));
+        assert_eq!(kept.stored(&[3, 7]).1.char_times, None);
+    }
+
+    /// A token is timed only from a send it is in once, as a word, with
+    /// nothing else sounding over it.
+    #[test]
+    fn a_token_is_timed_only_heard_once_and_alone() {
+        let settings = run_settings(25.0);
+        let voice = your_voice(&settings, 25.0);
+        let segment = |who: Sender, text: &str, start_sec: f64| {
+            let end_sec = start_sec + sending_sec(text, &settings, &voice);
+            Segment {
+                who,
+                text: text.to_string(),
+                voice,
+                start_sec,
+                end_sec,
+                fade: None,
+                skip_sec: 0.0,
+            }
+        };
+        let turn = |segments: Vec<Segment>| Turn {
+            id: 1,
+            at_run_ms: 0,
+            starts_at: None,
+            segments,
+        };
+        let caller = Sender::Caller(0);
+        let whole = |turn: &Turn, token: &str| {
+            let length = turn.segments[0].text.len();
+            sounded_alone(turn, 0, 0..length, token, &settings)
+        };
+        let alone = turn(vec![segment(caller, "DE K5XYZ", 0.0)]);
+        let ends = whole(&alone, "K5XYZ").expect("heard once, alone");
+        assert_eq!(ends.len(), 5);
+        assert!(ends.windows(2).all(|pair| pair[0] < pair[1]), "{ends:?}");
+        let spans = char_spans("DE K5XYZ", &settings, &voice);
+        assert_eq!(
+            ends.last().copied(),
+            Some(whole_ms(spans[spans.len() - 1].end_sec) as u32)
+        );
+        // Twice in the send, or not as a word of its own.
+        assert_eq!(
+            whole(&turn(vec![segment(caller, "K5XYZ K5XYZ", 0.0)]), "K5XYZ"),
+            None
+        );
+        assert_eq!(
+            whole(&turn(vec![segment(caller, "K5XYZW", 0.0)]), "K5XYZ"),
+            None
+        );
+        // Under QRM, or under your own message with full break-in.
+        for over in [Sender::Qrm, Sender::You] {
+            let under = turn(vec![
+                segment(caller, "K5XYZ", 0.0),
+                segment(over, "CQ TEST", 0.2),
+            ]);
+            assert_eq!(whole(&under, "K5XYZ"), None, "{over:?}");
+        }
+        // Something sounding only before or after it is no matter.
+        let after = turn(vec![
+            segment(caller, "K5XYZ", 0.0),
+            segment(Sender::Qrm, "CQ", 5.0),
+        ]);
+        assert!(whole(&after, "K5XYZ").is_some());
+    }
+
+    /// In a pile-up the callers call over one another: no call heard under
+    /// another is timed.
+    #[test]
+    fn a_call_heard_under_another_is_not_timed() {
+        let mut runtime = pileup(&["K5XYZ", "W7ABC", "G4ABC"], 3, 3);
+        let cq = runtime.last_turn().clone();
+        runtime.finish_turn();
+        let callers: Vec<&Segment> = cq.segments.iter().filter(|s| s.who.is_caller()).collect();
+        let mut overlapped = 0;
+        for segment in &callers {
+            let Sender::Caller(station) = segment.who else {
+                continue;
+            };
+            let over = cq.segments.iter().any(|other| {
+                !std::ptr::eq(other, *segment)
+                    && other.start_sec < segment.end_sec
+                    && other.end_sec > segment.start_sec
+            });
+            if over {
+                overlapped += 1;
+                let heard = &runtime.machine.stations[station as usize].heard;
+                assert_eq!(heard.call_sounded, None, "{:?}", segment.text);
+            }
+        }
+        assert!(overlapped > 0, "no caller called over another");
     }
 }

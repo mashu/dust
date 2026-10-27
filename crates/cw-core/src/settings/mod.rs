@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::keyer::KeyerMode;
 use crate::level::LEVEL_MIN;
+use crate::recognition::RecognitionBands;
 
 // The range each setting is kept in, declared once: `clamp` holds the
 // settings to them and the settings screen draws its controls from them.
@@ -61,12 +62,6 @@ pub const ADJUST_THRESHOLD_MAX_PCT: f64 = 100.0;
 /// characters it has not sent yet this session.
 pub const ERROR_WEIGHT_MAX: f64 = 10.0;
 pub const COVERAGE_STRENGTH_MAX: f64 = 8.0;
-
-/// The bounds of a recognition band's edge, in milliseconds: from as fast
-/// as a key follows a sound to the longest gap still timed
-/// ([`crate::session::RECOGNITION_MAX_MS`]).
-pub const RECOGNITION_BAND_MIN_MS: u32 = 100;
-pub const RECOGNITION_BAND_MAX_MS: u32 = 3_000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -578,49 +573,6 @@ pub struct AutoLevelSettings {
     pub error_weight_strength: f64,
     pub char_sampling_coverage_strength: f64,
     pub char_sampling_thompson: bool,
-    /// The edges of the recognition bands, in milliseconds from a character
-    /// sounding to its key: under the first is fast, under the second
-    /// instant character recognition (ICR), under the third slow, and from
-    /// the third on too slow. Ascending.
-    pub recognition_fast_ms: u32,
-    pub recognition_icr_ms: u32,
-    pub recognition_slow_ms: u32,
-}
-
-/// One edge of the recognition bands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecognitionEdge {
-    /// Under it is fast.
-    Fast,
-    /// Under it is instant character recognition (ICR).
-    Icr,
-    /// Under it is slow; from it on, too slow.
-    Slow,
-}
-
-impl AutoLevelSettings {
-    /// Set one edge of the recognition bands to `ms`, kept in bounds,
-    /// moving the others only as far as it takes to keep them in order.
-    pub fn set_recognition_edge(&mut self, edge: RecognitionEdge, ms: u32) {
-        let ms = ms.clamp(RECOGNITION_BAND_MIN_MS, RECOGNITION_BAND_MAX_MS);
-        match edge {
-            RecognitionEdge::Fast => {
-                self.recognition_fast_ms = ms;
-                self.recognition_icr_ms = self.recognition_icr_ms.max(ms);
-                self.recognition_slow_ms = self.recognition_slow_ms.max(ms);
-            }
-            RecognitionEdge::Icr => {
-                self.recognition_icr_ms = ms;
-                self.recognition_fast_ms = self.recognition_fast_ms.min(ms);
-                self.recognition_slow_ms = self.recognition_slow_ms.max(ms);
-            }
-            RecognitionEdge::Slow => {
-                self.recognition_slow_ms = ms;
-                self.recognition_icr_ms = self.recognition_icr_ms.min(ms);
-                self.recognition_fast_ms = self.recognition_fast_ms.min(ms);
-            }
-        }
-    }
 }
 
 impl Default for AutoLevelSettings {
@@ -634,9 +586,6 @@ impl Default for AutoLevelSettings {
             error_weight_strength: 3.0,
             char_sampling_coverage_strength: 1.0,
             char_sampling_thompson: false,
-            recognition_fast_ms: 400,
-            recognition_icr_ms: 600,
-            recognition_slow_ms: 800,
         }
     }
 }
@@ -730,6 +679,9 @@ pub struct TrainingSettings {
     pub playback: PlaybackSettings,
     pub band: BandSettings,
     pub auto_level: AutoLevelSettings,
+    /// Where recognising a character counts as fast, instant, slow and too
+    /// slow, on Letter accuracy.
+    pub recognition: RecognitionBands,
     pub contest: ContestSettings,
 }
 
@@ -1596,57 +1548,27 @@ mod tests {
         }
     }
 
-    /// An edge of the recognition bands moves the others only to keep them
-    /// in order, and stays in bounds; a save holding them out of order is
-    /// put in order.
+    /// The recognition bands are kept under their own keys, read back in
+    /// order, and an older save with none loads them as they ship.
     #[test]
-    fn the_recognition_bands_stay_in_order() {
-        let mut a = AutoLevelSettings::default();
-        assert_eq!(
-            (
-                a.recognition_fast_ms,
-                a.recognition_icr_ms,
-                a.recognition_slow_ms
-            ),
-            (400, 600, 800)
-        );
-        a.set_recognition_edge(RecognitionEdge::Fast, 700);
-        assert_eq!(
-            (
-                a.recognition_fast_ms,
-                a.recognition_icr_ms,
-                a.recognition_slow_ms
-            ),
-            (700, 700, 800)
-        );
-        a.set_recognition_edge(RecognitionEdge::Slow, 300);
-        assert_eq!(
-            (
-                a.recognition_fast_ms,
-                a.recognition_icr_ms,
-                a.recognition_slow_ms
-            ),
-            (300, 300, 300)
-        );
-        a.set_recognition_edge(RecognitionEdge::Icr, 9_999);
-        assert_eq!(a.recognition_icr_ms, RECOGNITION_BAND_MAX_MS);
-        assert_eq!(a.recognition_slow_ms, RECOGNITION_BAND_MAX_MS);
-        let mut s = TrainingSettings::default();
-        s.auto_level.recognition_fast_ms = 900;
-        s.auto_level.recognition_icr_ms = 500;
-        s.auto_level.recognition_slow_ms = 10;
-        let s = s.clamp();
-        assert_eq!(
-            (
-                s.auto_level.recognition_fast_ms,
-                s.auto_level.recognition_icr_ms,
-                s.auto_level.recognition_slow_ms
-            ),
-            (900, 900, 900)
-        );
-        // An older save, with no bands, loads them as they ship.
+    fn the_recognition_bands_are_saved_and_read_in_order() {
+        let s = TrainingSettings {
+            recognition: RecognitionBands {
+                fast_ms: 900,
+                icr_ms: 500,
+                slow_ms: 10,
+            },
+            ..TrainingSettings::default()
+        };
+        let json = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(json["recognitionFastMs"], 900);
+        assert_eq!(json["recognitionIcrMs"], 500);
+        assert_eq!(json["recognitionSlowMs"], 10);
+        let read: TrainingSettings = serde_json::from_value(json).expect("a save loads");
+        let read = read.clamp().recognition;
+        assert_eq!((read.fast_ms, read.icr_ms, read.slow_ms), (900, 900, 900));
         let old: TrainingSettings = serde_json::from_str("{}").expect("an empty save");
-        assert_eq!(old.auto_level.recognition_icr_ms, 600);
+        assert_eq!(old.recognition, RecognitionBands::default());
     }
 
     /// The reset buttons have to cover everything between them, or one card
@@ -1805,9 +1727,11 @@ mod tests {
         s.auto_level.error_weight_strength = 0.9;
         s.auto_level.char_sampling_coverage_strength = 0.9;
         s.auto_level.char_sampling_thompson = false;
-        s.auto_level.recognition_fast_ms = 300;
-        s.auto_level.recognition_icr_ms = 500;
-        s.auto_level.recognition_slow_ms = 1_000;
+        s.recognition = RecognitionBands {
+            fast_ms: 300,
+            icr_ms: 500,
+            slow_ms: 1_000,
+        };
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_habits = crate::contest::CallerHabits::Real;

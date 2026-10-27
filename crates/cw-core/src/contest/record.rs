@@ -319,13 +319,6 @@ impl ContestRun {
             tally.add(&group.sent, &group.received);
         }
         let sent: Vec<&str> = groups.iter().map(|group| group.sent.as_str()).collect();
-        let per_char: Vec<f64> = groups
-            .iter()
-            .zip(&timings)
-            .map(|(group, timing)| {
-                timing.time_to_complete_ms / group.sent.chars().count().max(1) as f64
-            })
-            .collect();
         let mean = |speeds: Vec<f64>| {
             (!speeds.is_empty()).then(|| speeds.iter().sum::<f64>() / speeds.len() as f64)
         };
@@ -336,7 +329,12 @@ impl ContestRun {
             timestamp: finished_at,
             accuracy: tally.accuracy(),
             tally,
-            avg_response_ms: compute_average_response_ms(&per_char),
+            avg_response_ms: compute_average_response_ms(
+                groups
+                    .iter()
+                    .zip(&timings)
+                    .map(|(group, timing)| timing.ms_per_char(&group.sent)),
+            ),
             total_chars: calculate_total_chars(&sent),
             score: 0.0,
             level: settings.level(LevelAxis::Callsign),
@@ -1030,8 +1028,7 @@ mod tests {
             char_wpm: Some(24.0),
             effective_wpm: Some(22.0),
             sends,
-            recognition_ms: Vec::new(),
-            typed_along: false,
+            ..SessionTiming::default()
         };
         let groups = vec![
             (group("K5XYZ", "K5XYZ"), timing(1)),
@@ -1097,8 +1094,7 @@ mod tests {
             char_wpm: Some(wpm),
             effective_wpm: Some(wpm),
             sends,
-            recognition_ms: Vec::new(),
-            typed_along: false,
+            ..SessionTiming::default()
         };
         // Its sends count only the repeats charged to the copy: the record
         // holds those you asked for.
@@ -1180,8 +1176,7 @@ mod tests {
             char_wpm: Some(24.0),
             effective_wpm: Some(24.0),
             sends: 1,
-            recognition_ms: Vec::new(),
-            typed_along: false,
+            ..SessionTiming::default()
         };
         let groups = ["K5XYZ", "214", "DL2XYZ", "TT7", "W1AW"]
             .map(|sent| (group(sent, sent), timing.clone()))
@@ -1247,8 +1242,7 @@ mod tests {
             char_wpm: Some(24.0),
             effective_wpm: Some(24.0),
             sends: 1,
-            recognition_ms: Vec::new(),
-            typed_along: false,
+            ..SessionTiming::default()
         };
         let groups = ["K5XYZ", "214", "DL2XYZ", "TT7", "W1AW"]
             .map(|sent| (group(sent, sent), timing.clone()))

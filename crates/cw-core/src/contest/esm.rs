@@ -25,6 +25,7 @@ use super::exchange::Field;
 use super::parse::{ExchangeState, normalize_call, parse_exchange};
 use super::rules::{ContestRules, Fill, Side};
 use crate::callsign::parse_callsign;
+use crate::recognition::KeyLog;
 use crate::session::MonoMs;
 
 /// What Enter needs to know of the QSO in progress.
@@ -85,7 +86,8 @@ pub struct QsoState {
 }
 
 /// The two fields as typed, with when they were typed: a copy is timed from
-/// the end of what it copies to the edit that finished it.
+/// the end of what it copies to the edit that finished it, and each of its
+/// characters from its sound to its key (docs/recognition.md).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Fields {
     pub call: String,
@@ -102,6 +104,17 @@ pub struct Fields {
     /// made after a text showed can pass for what you had then; the fields
     /// are cleared at every log and wipe, and when a run starts.
     pub earlier: Vec<(EntryField, MonoMs, String)>,
+    /// When each character of the call as copied ([`call_copied`]) first
+    /// held its place.
+    pub call_keys: KeyLog,
+    /// The same for every character of the exchange, spaces too, so each
+    /// token's are its word's ([`Self::exch_word_keys`]).
+    pub exch_keys: KeyLog,
+}
+
+/// The call in `text` as it is copied: read as a call, without `?`.
+pub fn call_copied(text: &str) -> String {
+    normalize_call(text).replace('?', "")
 }
 
 impl Fields {
@@ -129,15 +142,18 @@ impl Fields {
             )
     }
 
-    /// `field` now holds `text`, typed at `now`. The call is stamped at
-    /// every edit. The exchange, read by `rules` from `side`, is stamped
-    /// the first time it reads complete since it was last empty: a copy is
-    /// timed to there, however much is typed after it.
+    /// `field` now holds `text`, typed at `now`: what is new in it keyed
+    /// at `keyed`, a paddle letter's first contact coming before it goes
+    /// in, or untimed at none. The call is stamped at every edit. The
+    /// exchange, read by `rules` from `side`, is stamped the first time it
+    /// reads complete since it was last empty: a copy is timed to there,
+    /// however much is typed after it.
     pub fn edit(
         &mut self,
         field: EntryField,
         text: String,
         now: MonoMs,
+        keyed: Option<MonoMs>,
         rules: &ContestRules,
         side: Side,
     ) {
@@ -148,10 +164,13 @@ impl Fields {
         self.earlier.push((field, now, before.clone()));
         match field {
             EntryField::Call => {
+                self.call_keys.typed(call_copied(&text).chars(), keyed);
                 self.call = text;
                 self.call_edited = now;
             }
             EntryField::Exchange => {
+                self.exch_keys
+                    .typed(text.chars().map(|c| c.to_ascii_uppercase()), keyed);
                 if text.trim().is_empty() {
                     self.exch_complete = None;
                 } else if self.exch_complete.is_none()
@@ -162,6 +181,33 @@ impl Fields {
                 self.exch = text;
             }
         }
+    }
+
+    /// When each character of the exchange's word `word` first held its
+    /// place ([`super::parse::ReadField::word`]): none for a word it has no
+    /// keys for.
+    pub fn exch_word_keys(&self, word: usize) -> &[Option<MonoMs>] {
+        let mut start = None;
+        let range = self
+            .exch
+            .chars()
+            .chain(std::iter::once(' '))
+            .enumerate()
+            .filter_map(|(at, c)| match (c.is_whitespace(), start) {
+                (false, None) => {
+                    start = Some(at);
+                    None
+                }
+                (true, Some(from)) => {
+                    start = None;
+                    Some(from..at)
+                }
+                _ => None,
+            })
+            .nth(word);
+        range
+            .and_then(|range| self.exch_keys.moments().get(range))
+            .unwrap_or_default()
     }
 }
 
@@ -576,7 +622,14 @@ mod tests {
     #[test]
     fn the_fields_keep_when_they_were_typed() {
         let edit = |fields: &mut Fields, field, text: &str, at| {
-            fields.edit(field, text.to_string(), MonoMs(at), rules(), Side::Dx);
+            fields.edit(
+                field,
+                text.to_string(),
+                MonoMs(at),
+                Some(MonoMs(at)),
+                rules(),
+                Side::Dx,
+            );
         };
         let mut fields = Fields::cleared(MonoMs(100));
         assert_eq!(fields.call_edited, MonoMs(100));
@@ -614,7 +667,14 @@ mod tests {
     #[test]
     fn the_fields_say_what_they_held_at_a_moment_past() {
         let edit = |fields: &mut Fields, field, text: &str, at| {
-            fields.edit(field, text.to_string(), MonoMs(at), rules(), Side::Dx);
+            fields.edit(
+                field,
+                text.to_string(),
+                MonoMs(at),
+                Some(MonoMs(at)),
+                rules(),
+                Side::Dx,
+            );
         };
         let mut fields = Fields::cleared(MonoMs(100));
         edit(&mut fields, EntryField::Call, "K5", 200);

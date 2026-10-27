@@ -241,8 +241,7 @@ mod tests {
                 char_wpm: Some(20.0),
                 effective_wpm: None,
                 sends: 1,
-                recognition_ms: Vec::new(),
-                typed_along: false,
+                ..SessionTiming::default()
             })
             .collect();
         out

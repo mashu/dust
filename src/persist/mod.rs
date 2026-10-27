@@ -391,9 +391,11 @@ pub(crate) mod tests {
         a.error_weight_strength = 0.9;
         a.char_sampling_coverage_strength = 0.9;
         a.char_sampling_thompson = true;
-        a.recognition_fast_ms = 350;
-        a.recognition_icr_ms = 550;
-        a.recognition_slow_ms = 900;
+        s.recognition = cw_core::RecognitionBands {
+            fast_ms: 350,
+            icr_ms: 550,
+            slow_ms: 900,
+        };
         let k = &mut s.contest;
         k.contest_kind = cw_core::ContestKind::Sprint;
         k.contest_style = cw_core::RunStyle::Pileup;
@@ -581,8 +583,7 @@ pub(crate) mod tests {
             char_wpm: Some(35.0),
             effective_wpm: None,
             sends: 1,
-            recognition_ms: Vec::new(),
-            typed_along: false,
+            ..cw_core::SessionTiming::default()
         }];
         stored.char_wpm = 35.0;
         stored.effective_wpm = 35.0;

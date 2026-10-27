@@ -30,8 +30,8 @@ use web_sys::{AudioContext, AudioContextState, GainNode};
 use super::band_queue::Reservation;
 use super::epoch::{Epoch, Ticket};
 use super::shape::{Gains, GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest};
-use super::wait::{heard_after_sec, heard_ms, schedule_lead_sec};
-use super::{METER_FRAME_SEC, MeterFrame, MorseBackend, PlaybackSignal, WaitFlags};
+use super::wait::{heard_ms, schedule_lead_sec, send_timing};
+use super::{METER_FRAME_SEC, MeterFrame, MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
 use crate::time::mono_ms;
 use chain::Chain;
 use param::{Retiring, ramp_to};
@@ -95,21 +95,14 @@ struct WebSignal {
     ctx: AudioContext,
     ticket: Ticket,
     started_at: f64,
-    /// How long after it was started the send reaches the ear: its lead on
-    /// the clock, and the latency the browser reports, read as it started.
-    heard_after_sec: f64,
-    /// How long after it was started the send goes to the output: its lead
-    /// on the clock alone.
-    sent_after_sec: f64,
+    /// Its lead on the clock, and the latency the browser reports, read as
+    /// it started.
+    timing: SendTiming,
 }
 
 impl PlaybackSignal for WebSignal {
-    fn heard_after_sec(&self) -> f64 {
-        self.heard_after_sec
-    }
-
-    fn sent_after_sec(&self) -> f64 {
-        self.sent_after_sec
+    fn timing(&self) -> SendTiming {
+        self.timing
     }
 
     fn poll(&self) -> WaitFlags {
@@ -346,16 +339,13 @@ impl MorseBackend for MorsePlayer {
                 start + plan.wanted.duration_sec,
             ));
         }
-        // Its lead alone is when it goes to the output.
-        let sent_after_sec = heard_after_sec(start - now, 0.0);
-        let heard_after_sec = heard_after_sec(start - now, latency);
-        self.heard = Some((now_heard + heard_after_sec, start));
+        let timing = send_timing(start - now, latency);
+        self.heard = Some((now_heard + timing.heard_after_sec(), start));
         Ok(Rc::new(WebSignal {
             ctx: self.ctx.clone(),
             ticket,
             started_at: start,
-            heard_after_sec,
-            sent_after_sec,
+            timing,
         }))
     }
 

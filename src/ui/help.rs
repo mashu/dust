@@ -3,10 +3,10 @@
 //! and its help reads as one text.
 
 use cw_core::{
-    AutoLevelSettings, BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS,
-    ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES,
-    MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RECENT_TRIES,
-    RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, Ranking,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
+    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, MASTERED_MIN_ACCURACY,
+    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS,
+    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -62,14 +62,14 @@ pub fn next_up(limit: f64) -> Element {
     }
 }
 
-/// Letter accuracy: where each character stands, its trend and its time.
-/// Letter accuracy, its recognition times in the bands `bands` set.
-pub fn letters(bands: &AutoLevelSettings) -> Element {
-    let (fast, icr, slow) = (
-        bands.recognition_fast_ms,
-        bands.recognition_icr_ms,
-        bands.recognition_slow_ms,
-    );
+/// Letter accuracy: where each character stands, its trend, and its
+/// recognition time in the bands `bands` set.
+pub fn letters(bands: RecognitionBands) -> Element {
+    let RecognitionBands {
+        fast_ms: fast,
+        icr_ms: icr,
+        slow_ms: slow,
+    } = bands;
     let mastered = pct(MASTERED_MIN_ACCURACY);
     let building = pct(BUILDING_MIN_ACCURACY);
     rsx! {
@@ -92,7 +92,7 @@ pub fn letters(bands: &AutoLevelSettings) -> Element {
             }
             dt { "Recognised in" }
             dd {
-                "How soon you type a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest timed tries. A try is timed when you type it right on the keyboard while keeping up, the one before it already typed when it ended, in a group sent once; a group of more than one character only when you start typing before it ends. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Type each character the moment you hear it."
+                "How soon you key a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest {RECOGNITION_WINDOW} timed tries. The key is the keyboard's or the keypad's, or for the paddles the first contact of the letter. A try is timed when you key it right, in its place, at least {REACTION_MIN_MS} ms after it sounded, while keeping up: the one before it already keyed when it reached you. A group of more than one character is timed only when you key along, starting before it ends; keys after a group is sent again are not. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Key each character the moment you hear it."
             }
             dt { "The bands" }
             dd {
@@ -102,7 +102,7 @@ pub fn letters(bands: &AutoLevelSettings) -> Element {
             dd { "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band." }
             dt { "Not timed yet" }
             dd {
-                "Only groups sent once are timed (Sends per group 1×), and with Lock typing while sending on, only groups of one character: turn it off (group training, Settings → Session shape) to type along. Keys from paddles and contest runs are not timed. Until any character is timed, each row shows how long its groups took to answer after their send, shared out over their characters: it cannot say which one held you up."
+                "With Lock typing while sending on, only groups of one character are timed: turn it off (group training, Settings → Session shape) to key along. In a contest run, a call or an exchange is timed when it was heard once and alone, with Show copy off. A send the audio held up is not timed, nor is what the guided setup types for you. Nothing stands in for a time: a character never timed says so."
             }
         }
     }

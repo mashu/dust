@@ -14,7 +14,7 @@ use dioxus::prelude::*;
 use crate::page_hidden::{LISTEN_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
 use crate::playback;
-use crate::session_runtime::{send_event, start_session};
+use crate::session_runtime::{TypedAnswer, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen, SessionPick};
 use crate::time::{local_date_string, sleep_ms};
 use crate::ui::backup::Backups;
@@ -343,9 +343,7 @@ fn TrainingRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     // A contest run has a screen of its own, which reads the run itself.
     let contest = use_memo(move || ctx.contest.read().is_some());
-    let on_change = use_callback(move |(index, text): (usize, String)| {
-        send_event(ctx, SessionEvent::Input { index, text });
-    });
+    let on_change = use_callback(move |typed: TypedAnswer| send_event(ctx, typed.into()));
     let on_confirm = use_callback(move |()| send_event(ctx, SessionEvent::Confirm));
     let on_submit = use_callback(move |()| send_event(ctx, SessionEvent::FinishNow));
     let on_stop = use_callback(move |()| send_event(ctx, SessionEvent::Abort));

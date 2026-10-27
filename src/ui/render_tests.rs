@@ -27,7 +27,7 @@ use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
 use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView, focused_box_open};
 use crate::audio::fake::Recorder;
-use crate::session_runtime::AnswerOutbox;
+use crate::session_runtime::{AnswerOutbox, TypedAnswer};
 use crate::state::{AppState, Screen};
 use crate::testing::reads_as;
 
@@ -37,6 +37,9 @@ std::thread_local! {
     /// What the session behind a `ManyGroupsHarness` has been handed, kept
     /// off the page so that its hearing an answer draws nothing of its own.
     static HEARD: std::cell::RefCell<Vec<(usize, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Every answer a `KeyMomentsHarness` handed over, with its keys.
+    static HANDED: std::cell::RefCell<Vec<TypedAnswer>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -95,7 +98,7 @@ fn TrainingScreen(
     locked: bool,
     repeat_total: u32,
     repeat_done: u32,
-    on_change: EventHandler<(usize, String)>,
+    on_change: EventHandler<TypedAnswer>,
     on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
@@ -175,8 +178,7 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
             char_wpm: Some(20.0),
             effective_wpm: None,
             sends: 1,
-            recognition_ms: Vec::new(),
-            typed_along: false,
+            ..SessionTiming::default()
         }],
         accuracy,
         avg_response_ms: 450.0,
@@ -412,28 +414,6 @@ fn home_without_history_invites_a_first_session() {
     });
     assert!(html.contains("First session"));
     assert!(!html.contains("Last accuracy"));
-}
-
-/// Once the history holds a contest run, the Letters tab says its times
-/// are left out of the letters' times.
-#[test]
-fn the_letters_tab_says_when_contest_times_are_left_out() {
-    let says = |sessions: Vec<SessionResult>| {
-        let props = StatsViewProps {
-            settings: TrainingSettings::default(),
-            sessions,
-            on_delete: None,
-            backups: None,
-        };
-        let mut ui = crate::testing::Ui::new(StatsView, props);
-        ui.click("seg-letters");
-        assert!(ui.has("Letter accuracy"));
-        ui.has(cw_core::CONTEST_TIMES_NOTE)
-    };
-    assert!(!says(vec![session("2026-09-01", 0.9)]));
-    let mut contest = session("2026-09-02", 0.9);
-    contest.char_set_mode = CharSetMode::Contest;
-    assert!(says(vec![session("2026-09-01", 0.9), contest]));
 }
 
 #[test]
@@ -1818,7 +1798,7 @@ fn training_shows_the_send_counter_while_repeating() {
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1846,7 +1826,7 @@ fn training_without_repeats_omits_the_counter() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1881,7 +1861,7 @@ fn a_count_down_shows_where_the_last_group_will() {
                 repeat_total: 1,
                 repeat_done: 0,
                 countdown: Some(3),
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1934,7 +1914,7 @@ fn an_unlocked_answer_box_does_not_look_disabled() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1968,7 +1948,7 @@ fn a_locked_answer_box_is_neither_readonly_nor_disabled() {
                 locked: true,
                 repeat_total: 1,
                 repeat_done: 0,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -2007,7 +1987,7 @@ fn a_confirmed_group_moves_up_and_leaves_no_box() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -2046,7 +2026,7 @@ fn between_groups_the_header_says_the_next_group_is_coming() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -2089,7 +2069,7 @@ fn an_open_box_is_your_turn() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -2535,13 +2515,25 @@ mod interactions {
 
     /// K timed eight times at 320 ms, M at 520, R at 700 and S at 900, U
     /// three times, and E never: a band each, a provisional time, and none.
-    /// E is also sent alone, answered half a second after each send, so it
-    /// has an answer time.
+    /// Its characters a second apart, each keyed while the next one sounds,
+    /// as keeping up is. E is also sent alone, answered after its send.
     fn timed_history() -> Vec<SessionResult> {
         let mut session = stored_session("2026-09-01", &[("KMRSUE", "KMRSUE"); 8]);
         for (n, timing) in session.group_timings.iter_mut().enumerate() {
             let u = (n < 3).then_some(410);
-            timing.recognition_ms = vec![Some(320), Some(520), Some(700), Some(900), u, None];
+            let ends: Vec<u32> = (1..=6).map(|at| at * 1_000).collect();
+            let took = [Some(320), Some(520), Some(700), Some(900), u, None];
+            let keys = ends
+                .iter()
+                .zip(took)
+                .map(|(end, took)| took.map(|took| end + took))
+                .collect();
+            timing.char_times = Some(cw_core::CharTimes {
+                ends,
+                keys,
+                latency_ms: 0,
+                box_open: true,
+            });
         }
         vec![session, stored_session("2026-09-02", &[("E", "E"); 8])]
     }
@@ -2577,23 +2569,18 @@ mod interactions {
         // visible text, where the label has ", ".
         assert!(line("letter-u").contains(" · about 410 ms so far, 3 of 8 tries timed"));
         assert!(line("letter-e").contains(" · not timed yet"));
-        // With others timed, a group's answer time is not set beside them,
-        // though E has one.
         let e = cw_core::character_diagnostics(&timed_history())
             .into_iter()
             .find(|letter| letter.letter == 'E')
             .expect("E");
-        assert_eq!((e.recognition_tries, e.answer_ms), (0, Some(500.0)));
-        assert!(!line("letter-e").contains("groups answered"));
+        assert_eq!((e.recognition_tries, e.recognition_ms), (0, None));
         assert!(ui.has(">Instant (ICR) · 2<"), "{}", ui.html());
         assert!(ui.has(r#"class="err-chip rec-fast group-text">K<"#));
         assert!(ui.has(r#"class="err-chip rec-icr group-text">M<"#));
         assert!(ui.has("ICR, under 600"));
-        assert!(!ui.has("Until then"));
     }
 
-    /// KM answered half a second after each send, the box shut while it
-    /// was sent, as it ships.
+    /// KM answered after each send, nothing keyed along, as it ships.
     #[component]
     fn UntimedLettersHarness() -> Element {
         let session = stored_session("2026-09-01", &[("KM", "KM"); 8]);
@@ -2602,26 +2589,20 @@ mod interactions {
         }
     }
 
-    /// Nothing timed yet: the card says how to be, and each row shows its
-    /// groups' answer time, shared out over their characters, lighter.
+    /// Nothing timed yet: the card says once how a character is timed, and
+    /// no row says more. Nothing stands in for a time.
     #[test]
-    fn untimed_letters_show_their_groups_answer_time() {
+    fn untimed_letters_say_how_to_be_timed_and_show_no_time() {
         let ui = Ui::new(UntimedLettersHarness, ());
-        assert!(ui.has("timed as you type along"), "{}", ui.html());
-        assert!(ui.has(" Until then, each row shows how long its groups took to answer"));
-        assert!(ui.has(
-            r#"<span class="rec-answer"> · groups answered in about 250 ms a character</span>"#
-        ));
+        assert!(ui.has("as you key along"), "{}", ui.html());
         assert!(!ui.has("not timed yet"));
+        assert!(!ui.has(" ms"), "a time with nothing timed: {}", ui.html());
         assert!(
             !ui.has("Recognised in"),
             "no bands' legend with nothing in them"
         );
         let k = ui.input_tag("letter-k");
-        assert!(
-            k.contains(", its groups answered in about 250 ms a character\""),
-            "{k}"
-        );
+        assert!(!k.contains("recognised"), "{k}");
     }
 
     /// Koch at level 3, K and M heard, M often missed.
@@ -3526,7 +3507,7 @@ mod interactions {
                         repeat_total: 1,
                         repeat_done: 1,
                         answer,
-                        on_change: move |(_, value): (usize, String)| typed.set(value),
+                        on_change: move |answer: TypedAnswer| typed.set(answer.text),
                         on_confirm: move |()| {},
                         on_submit: move |_| {},
                         on_stop: move |_| {},
@@ -3578,7 +3559,7 @@ mod interactions {
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 0,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| typed.set("confirmed".into()),
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3615,7 +3596,7 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3624,6 +3605,67 @@ mod interactions {
                 p { id: "committed-answer", "committed:{typed()}" }
             }
         }
+    }
+
+    /// An open box whose every hand-over is kept, keys and all.
+    #[component]
+    fn KeyMomentsHarness() -> Element {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 1,
+                groups: vec!["KE".to_string()],
+                inputs: vec![String::new()],
+                confirmed: vec![false],
+                focused: 0,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |answer: TypedAnswer| HANDED.with(|handed| handed.borrow_mut().push(answer)),
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    }
+
+    /// Each character goes to the session with when it was keyed: a key
+    /// typed at its keystroke, a paddle letter at the contact that began
+    /// it, though it goes in only once its letter space has run out.
+    #[test]
+    fn each_character_goes_to_the_session_with_when_it_was_keyed() {
+        crate::testing::run(|| async {
+            HANDED.with(|handed| handed.borrow_mut().clear());
+            let mut ui = Ui::new(KeyMomentsHarness, ());
+            let typed_at = cw_core::MonoMs(crate::time::mono_ms());
+            ui.type_into("group-input-0", "K");
+            ui.advance(200).await;
+            let pressed_at = cw_core::MonoMs(crate::time::mono_ms());
+            tap_dits(&mut ui, "group-input-0", 1).await;
+            let handed = |text: &str| {
+                HANDED.with(|handed| {
+                    handed
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .find(|answer| answer.text == text)
+                        .cloned()
+                })
+            };
+            assert!(
+                ui.run_until(2_000, |_| handed("KE").is_some()).await,
+                "{}",
+                ui.html()
+            );
+            let answer = handed("KE").expect("handed over");
+            assert_eq!(answer.index, 0);
+            assert_eq!(answer.keys, [Some(typed_at), Some(pressed_at)]);
+            assert!(
+                crate::time::mono_ms() > pressed_at.0 + 200,
+                "the letter went in after its letter space"
+            );
+        });
     }
 
     #[component]
@@ -3642,7 +3684,7 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| confirms += 1,
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3744,7 +3786,7 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3773,9 +3815,9 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(index, value): (usize, String)| {
-                    HEARD.with(|heard| heard.borrow_mut().push((index, value.clone())));
-                    typed.set(value);
+                on_change: move |answer: TypedAnswer| {
+                    HEARD.with(|heard| heard.borrow_mut().push((answer.index, answer.text.clone())));
+                    typed.set(answer.text);
                 },
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
@@ -3996,7 +4038,7 @@ mod interactions {
                 locked: false,
                 repeat_total: 2,
                 repeat_done: sends_done(),
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -4057,7 +4099,7 @@ mod interactions {
                         repeat_total: 1,
                         repeat_done: 1,
                         answer,
-                        on_change: move |(_, value): (usize, String)| typed.set(value),
+                        on_change: move |answer: TypedAnswer| typed.set(answer.text),
                         on_confirm: move |()| {},
                         on_submit: move |_| {},
                         on_stop: move |_| {},
@@ -4116,7 +4158,7 @@ mod interactions {
                 repeat_total: 1,
                 repeat_done: 1,
                 keyer_mode: KeyerMode::Straight,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -4159,7 +4201,7 @@ mod interactions {
                 locked: locked(),
                 repeat_total: 1,
                 repeat_done: if playing() { 0 } else { 1 },
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},

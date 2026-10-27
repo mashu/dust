@@ -9,7 +9,10 @@
 
 use std::rc::Rc;
 
-use cw_core::{Keyer, KeyerMode, KeyerOutput, Paddle, TrainingSettings, paddle_from_bracket};
+use cw_core::{
+    KeyedLetter, Keyer, KeyerMode, KeyerOutput, MonoMs, Paddle, TrainingSettings,
+    paddle_from_bracket,
+};
 use dioxus::prelude::*;
 
 use crate::state::{AppState, Screen};
@@ -133,9 +136,14 @@ fn paddle_for_key(key: &str, code: &str, shortcut: bool, swap: bool) -> Option<P
 #[derive(Clone, Copy)]
 struct AnswerBox {
     open: CopyValue<bool>,
-    letter: Callback<char>,
+    letter: Callback<BoxLetter>,
     space: Option<Callback>,
 }
+
+/// A letter for a box, and when it was keyed: the first contact of its
+/// letter, on the app's clock. None when it was typed for you, which is
+/// never timed.
+type BoxLetter = (char, Option<MonoMs>);
 
 /// The app's paddle keyer, as the shell and the screens reach it.
 ///
@@ -288,8 +296,12 @@ impl PaddleKeys {
     /// Key into an answer box rather than the practice pad, for as long as
     /// the calling component is mounted, and only while `open`. A group has
     /// no spaces, so a word space keyed there does nothing.
-    pub fn use_answer_box(self, open: bool, letter: impl FnMut(char) + 'static) {
-        let letter = use_callback(letter);
+    pub fn use_answer_box(
+        self,
+        open: bool,
+        mut letter: impl FnMut(char, Option<MonoMs>) + 'static,
+    ) {
+        let letter = use_callback(move |(ch, at): BoxLetter| letter(ch, at));
         self.use_lent(open, letter, None);
     }
 
@@ -299,16 +311,16 @@ impl PaddleKeys {
     pub fn use_fields(
         self,
         open: bool,
-        letter: impl FnMut(char) + 'static,
+        mut letter: impl FnMut(char, Option<MonoMs>) + 'static,
         mut space: impl FnMut() + 'static,
     ) {
-        let letter = use_callback(letter);
+        let letter = use_callback(move |(ch, at): BoxLetter| letter(ch, at));
         let space = use_callback(move |()| space());
         self.use_lent(open, letter, Some(space));
     }
 
     /// Lend the keyer the calling screen's box, while it is mounted.
-    fn use_lent(self, open: bool, letter: Callback<char>, space: Option<Callback>) {
+    fn use_lent(self, open: bool, letter: Callback<BoxLetter>, space: Option<Callback>) {
         let mut gate = use_hook(|| CopyValue::new(open));
         gate.set(open);
         let mut answer = self.answer;
@@ -328,8 +340,9 @@ impl PaddleKeys {
         });
     }
 
-    /// Put `letter` in the open answer box, the way a keyed letter goes in:
-    /// how the guided setup's Show me copies a group. Whether a box took it.
+    /// Put `letter` in the open answer box, the way a keyed letter goes in,
+    /// but untimed: how the guided setup's Show me copies a group. Whether a
+    /// box took it.
     pub fn type_letter(self, letter: char) -> bool {
         let Some(answer) = *self.answer.peek() else {
             return false;
@@ -337,7 +350,7 @@ impl PaddleKeys {
         if !*answer.open.peek() {
             return false;
         }
-        answer.letter.call(letter);
+        answer.letter.call((letter, None));
         true
     }
 
@@ -367,8 +380,8 @@ impl PaddleKeys {
         if let Some(on) = out.tone {
             self.sound(on);
         }
-        if let Some(letter) = out.letter {
-            self.deliver(letter);
+        if let Some(keyed) = out.letter {
+            self.deliver(keyed);
         }
         if out.space {
             self.deliver_space();
@@ -387,10 +400,12 @@ impl PaddleKeys {
         self.app.read().set_live_tone(on, &self.settings.peek());
     }
 
-    fn deliver(mut self, letter: char) {
+    fn deliver(mut self, keyed: KeyedLetter) {
         if let Some(answer) = *self.answer.peek() {
             if *answer.open.peek() {
-                answer.letter.call(letter);
+                answer
+                    .letter
+                    .call((keyed.letter, Some(MonoMs(keyed.began))));
             }
             return;
         }
@@ -398,7 +413,7 @@ impl PaddleKeys {
             return;
         }
         let mut heard = self.heard.write();
-        heard.push(letter);
+        heard.push(keyed.letter);
         let excess = heard.chars().count().saturating_sub(HEARD_KEEP);
         if let Some((cut, _)) = heard.char_indices().nth(excess) {
             heard.drain(..cut);

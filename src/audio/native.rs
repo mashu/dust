@@ -17,7 +17,7 @@ use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::mixer::{BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept};
 use super::shape::{Gains, ToneRequest};
-use super::{MeterFrame, MorseBackend, PlaybackSignal};
+use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming};
 use state::{PlayerState, ToneSignal};
 
 /// The furthest behind the callback the speaker is believed to be. A host
@@ -297,8 +297,10 @@ impl MorseBackend for MorsePlayer {
             armed,
             finished,
             failed,
-            opening_sec + latency_sec + rendered_in,
-            opening_sec + rendered_in,
+            SendTiming {
+                lead_sec: opening_sec + rendered_in,
+                latency_sec,
+            },
         )))
     }
 
@@ -500,7 +502,7 @@ mod device_tests {
             crate::audio::start_send(&mut player, &Transmission::alone("K", voice), &settings())
                 .expect("the device should take a send");
         assert!(wait.duration_sec > 0.0);
-        assert!(wait.char_wpm >= 40.0);
+        assert!(wait.start().char_wpm >= 40.0);
 
         // A second send retires the first.
         let second =

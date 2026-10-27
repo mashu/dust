@@ -30,8 +30,11 @@ pub const REFERENCE_WPM: f64 = 20.0;
 pub const POINTS_PER_CHAR: f64 = 10.0;
 /// The alphabet a character is worth [`POINTS_PER_CHAR`] in: the letters.
 const REFERENCE_ALPHABET: f64 = 26.0;
-/// An answer this quick a character costs nothing: as fast as anyone types.
-const FREE_ANSWER_MS_PER_CHAR: f64 = 100.0;
+/// The quickest a listener can be said to answer, per character: as fast
+/// as anyone types one. An answer this quick costs nothing, and none is kept
+/// as quicker: one finished while the group was still being sent, typed
+/// along, has no response time worth the name.
+pub const MIN_RESPONSE_MS_PER_CHAR: f64 = 100.0;
 /// What each tenfold of time a character beyond that costs, of the points.
 const TIME_COST_PER_DECADE: f64 = 0.25;
 /// The least a slow answer keeps: slowness costs, but never everything.
@@ -99,11 +102,11 @@ pub fn error_factor(errors: u32) -> f64 {
 /// fast as anyone types, a quarter less for each tenfold beyond that.
 pub fn time_factor(ms_per_char: f64) -> f64 {
     let ms = if ms_per_char.is_finite() {
-        ms_per_char.max(FREE_ANSWER_MS_PER_CHAR)
+        ms_per_char.max(MIN_RESPONSE_MS_PER_CHAR)
     } else {
-        FREE_ANSWER_MS_PER_CHAR
+        MIN_RESPONSE_MS_PER_CHAR
     };
-    (1.0 - TIME_COST_PER_DECADE * (ms / FREE_ANSWER_MS_PER_CHAR).log10()).max(SLOWEST_KEEPS)
+    (1.0 - TIME_COST_PER_DECADE * (ms / MIN_RESPONSE_MS_PER_CHAR).log10()).max(SLOWEST_KEEPS)
 }
 
 /// What is left of a group sent `sends` times: half for each send after the
@@ -183,16 +186,17 @@ pub fn calculate_effective_alphabet_size(sent_groups: &[impl AsRef<str>]) -> f64
     h.exp().clamp(1.0, MAX_EFFECTIVE_ALPHABET)
 }
 
-pub fn compute_average_response_ms(samples: &[f64]) -> f64 {
-    let valid: Vec<f64> = samples
-        .iter()
-        .copied()
+/// The average of a session's answer times a character, as older builds
+/// show it ([`crate::SessionResult::avg_response_ms`]).
+pub fn compute_average_response_ms(samples: impl IntoIterator<Item = f64>) -> f64 {
+    let (sum, count) = samples
+        .into_iter()
         .filter(|v| v.is_finite() && *v > 0.0)
-        .collect();
-    if valid.is_empty() {
+        .fold((0.0, 0u32), |(sum, count), v| (sum + v, count + 1));
+    if count == 0 {
         NO_ANSWERS_MS
     } else {
-        valid.iter().sum::<f64>() / valid.len() as f64
+        sum / f64::from(count)
     }
 }
 
@@ -205,7 +209,7 @@ mod tests {
             chars,
             errors: 0,
             wpm,
-            ms_per_char: FREE_ANSWER_MS_PER_CHAR,
+            ms_per_char: MIN_RESPONSE_MS_PER_CHAR,
             sends: 1,
         }
     }
