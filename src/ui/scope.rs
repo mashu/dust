@@ -50,8 +50,9 @@ const LANE_HEIGHT: f64 = 18.0;
 pub(crate) struct BandKnee(pub Signal<Option<f64>>);
 
 /// What the scope's line is set by: the band these settings describe with
-/// its AGC on, whether it is or not, and their receiver.
-fn knee_asked(settings: &TrainingSettings) -> (BandSettings, FilterDesign) {
+/// its AGC on, whether it is or not, and their receiver. The question the
+/// band follow measures ahead, the AGC being on or off one question.
+pub(crate) fn knee_asked(settings: &TrainingSettings) -> (BandSettings, FilterDesign) {
     let on = BandSettings {
         agc_enabled: true,
         ..settings.band.clone()

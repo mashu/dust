@@ -852,11 +852,11 @@ fn a_session_fits_a_small_phone_down_to_the_keypads_last_row() {
 
 /// A webview painting by the processor blurs each layer of a box-shadow
 /// over its box and a margin three times the blur wide, on every repaint:
-/// scrolling Settings on a virtual display, a single layer on each card cut
-/// its work by about a fifteenth. A card casts one blurred layer, in every
-/// palette. A panel fixed over the page, painted again with everything that
-/// scrolls under it, casts one of at most 36px: the guide's, at 60px, cost
-/// about a tenth of every frame drawn under it.
+/// scrolling Settings on a virtual display, one layer on each card and a
+/// tighter shadow on the nav cut its work by about a fifteenth. A card casts
+/// one blurred layer, in every palette. A panel fixed over the page, painted
+/// again with everything that scrolls under it, casts one of at most 36px:
+/// the guide's, at 60px, cost about a tenth of every frame drawn under it.
 #[test]
 fn cards_and_floating_panels_cast_one_blurred_shadow() {
     let css = without_comments(CSS);

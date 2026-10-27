@@ -7,8 +7,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use cw_core::band::{FilterDesign, agc_knee, loudest_station};
-use cw_core::{BandSettings, CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
+use cw_core::band::{agc_knee, loudest_station, remembered_agc_knee};
+use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
 use crate::page_hidden::{LISTEN_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
@@ -23,7 +23,7 @@ use crate::ui::contest_results::NothingKept;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
-use crate::ui::scope::BandKnee;
+use crate::ui::scope::{BandKnee, knee_asked};
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
@@ -177,13 +177,29 @@ fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
 /// its way and the newest settings are still the last to land. A move that
 /// changed the band is measured in its turn before the follow takes it, up
 /// to [`BAND_WARM_ROUNDS`] measurements in all, so a slider being dragged
-/// finds its knee remembered too. The knee measured last is the level
-/// scope's ([`BandKnee`]), which draws its line by it.
+/// finds its knee remembered too.
+///
+/// The level scope draws its line by the knee of the band that plays
+/// ([`BandKnee`]): each one measured, while the preview runs. Settings the
+/// follow took unmeasured, moved in every measurement, have theirs from the
+/// band built for them, which measured it with the AGC on; with it off they
+/// wait to be measured in their turn, as a move does. A preview stopped
+/// takes its knee with it.
 fn use_band_follow(ctx: AppCtx) {
     let latest = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
     let BandKnee(mut band_knee) = use_context_provider(|| BandKnee(Signal::new(None)));
+    let mut give_knee = move |knee: f64| {
+        if *band_knee.peek() != Some(knee) {
+            band_knee.set(Some(knee));
+        }
+    };
     use_effect(move || {
         if !ctx.preview.read().is_band() {
+            // The next preview's scope waits for a knee of its own, not one
+            // of settings that may have moved since.
+            if band_knee.peek().is_some() {
+                band_knee.set(None);
+            }
             return;
         }
         let settings = ctx.settings.read().clone().clamp();
@@ -194,35 +210,62 @@ fn use_band_follow(ctx: AppCtx) {
         let latest = latest.clone();
         spawn(async move {
             sleep_ms(BAND_FOLLOW_MS).await;
-            for _ in 0..BAND_WARM_ROUNDS {
-                // Copied out in a statement of its own: a borrow still held
-                // over the await below is the one the next slider move would
-                // panic on.
-                let waiting = latest.borrow().clone();
-                let Some(waiting) = waiting else {
-                    break;
+            loop {
+                // The band whose knee the scope was given last.
+                let mut measured = None;
+                for _ in 0..BAND_WARM_ROUNDS {
+                    // Copied out in a statement of its own: a borrow still
+                    // held over the await below is the one the next slider
+                    // move would panic on.
+                    let waiting = latest.borrow().clone();
+                    let Some(waiting) = waiting else {
+                        break;
+                    };
+                    let knee = warm_agc_knee(&waiting).await;
+                    // A stopped preview has no band left to build, so
+                    // nothing to measure for, and no scope to draw by it.
+                    if !ctx.preview.peek().is_band() {
+                        break;
+                    }
+                    if let Some(knee) = knee {
+                        give_knee(knee);
+                        measured = Some(waiting.band.clone());
+                    }
+                    // The knee is asked of the band settings alone, the
+                    // receiver being worked out from them too, so only a
+                    // move that changed them asks it anew.
+                    let moved =
+                        latest.borrow().as_ref().map(|newest| &newest.band) != Some(&waiting.band);
+                    if !moved {
+                        break;
+                    }
+                }
+                let settings = latest.borrow_mut().take();
+                // A preview stopped meanwhile stays silent.
+                let Some(settings) = settings.filter(|_| ctx.preview.peek().is_band()) else {
+                    return;
                 };
-                if let Some(knee) = warm_agc_knee(&waiting).await
-                    && *band_knee.peek() != Some(knee)
-                {
-                    band_knee.set(Some(knee));
-                }
-                // The knee is asked of the band settings alone, the receiver
-                // being worked out from them too, so only a move that changed
-                // them asks it anew. A stopped preview has no band left to
-                // build, so nothing to measure for.
-                let moved =
-                    latest.borrow().as_ref().map(|newest| &newest.band) != Some(&waiting.band);
-                if !moved || !ctx.preview.peek().is_band() {
-                    break;
-                }
-            }
-            let settings = latest.borrow_mut().take();
-            // A preview stopped meanwhile stays silent.
-            if let Some(settings) = settings
-                && ctx.preview.peek().is_band()
-            {
                 ctx.app().player.follow_band(&settings);
+                if measured.as_ref() == Some(&settings.band) {
+                    return;
+                }
+                let (on, receiver) = knee_asked(&settings);
+                if let Some(knee) = remembered_agc_knee(&on, &receiver) {
+                    give_knee(knee);
+                    return;
+                }
+                if measured.is_none() {
+                    // The worker measuring failed: the scope waits for the
+                    // next move rather than drawing by another band's knee.
+                    if band_knee.peek().is_some() {
+                        band_knee.set(None);
+                    }
+                    return;
+                }
+                // Put back, with nothing awaited since they were taken, so
+                // no second follow starts: measured next, and taken again,
+                // which rebuilds nothing.
+                *latest.borrow_mut() = Some(settings);
             }
         });
     });
@@ -235,28 +278,23 @@ fn use_band_follow(ctx: AppCtx) {
 /// It is the question both players ask of the settings a follow hands them:
 /// the band they describe, through the receiver they describe. The native
 /// player clamps them once more first, which moves nothing the knee is
-/// remembered by. It is asked only of a band there will be. The receiver is
-/// worked out here, on the thread that draws the band card: the card has
-/// just asked for the same one, and asking for it anywhere else would have
-/// the two keep forgetting each other's. Should the settings move after the
-/// follow's last measurement, the band measures its own knee, as it always
-/// did.
+/// remembered by. The receiver is worked out here, on the thread that draws
+/// the band card: the card has just asked for the same one, and asking for
+/// it anywhere else would have the two keep forgetting each other's. Should
+/// the settings move after the follow's last measurement, the band measures
+/// its own knee, as it always did.
 ///
 /// It is measured with the AGC on whether it is or not: one question either
 /// way, the knee being remembered by the floor and the receiver alone, and
-/// the one the level scope draws its line by, AGC on or off, looking it up
-/// rather than measuring it on the thread that draws.
+/// the one the level scope draws its line by, AGC on or off ([`BandKnee`]),
+/// so that the scope never measures it on the thread that draws.
 ///
 /// And with it, for a band with a background, how loud the strongest
 /// station comes out of that receiver ([`loudest_station`]), which full
 /// volume is sized by: a few milliseconds more, and asked of the knee just
 /// measured. The knee, unless the worker measuring it failed.
 async fn warm_agc_knee(settings: &TrainingSettings) -> Option<f64> {
-    let receiver = FilterDesign::from_settings(settings);
-    let on = BandSettings {
-        agc_enabled: true,
-        ..settings.band.clone()
-    };
+    let (on, receiver) = knee_asked(settings);
     let band = settings.band.has_background().then(|| settings.clone());
     let measure = move || {
         let knee = agc_knee(&on, &receiver);

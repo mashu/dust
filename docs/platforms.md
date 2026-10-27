@@ -62,7 +62,9 @@ That stream is closed once nothing has sounded for a second, away from
 Settings, so the phone (or a desktop's sound card and sound server) can rest
 with the app open on a screen or in the background. The next send, band or
 paddle squeeze opens it again. Settings keeps it open for the paddle's first
-squeeze, and a session or a run holds it open from start to end. The browser
+squeeze, and a session, or a run while it is not paused, holds it open. The
+volume keys turn the media volume meanwhile, which Dust plays at: before
+Android 9 they would turn the ringer with no stream playing. The browser
 build suspends its audio a moment after it goes quiet.
 
 If a toolchain bring-up ever blocks on oboe, `--features mobile-silent` builds

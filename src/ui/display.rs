@@ -26,6 +26,13 @@ enum Drawn {
         allow(dead_code)
     )]
     CardCopied { name: String, why: String },
+    /// The processor paints the page, and the graphics card, by name, only
+    /// puts its tiles together, for the reason given if there is one.
+    #[cfg_attr(
+        not(any(test, all(feature = "desktop", target_os = "linux"))),
+        allow(dead_code)
+    )]
+    PaintedByProcessor { card: String, why: Option<String> },
     /// The processor, by the name of the software that does it.
     Processor(String),
     /// The webview gives no word on it.
@@ -72,6 +79,11 @@ fn drawn_text(looked: &Looked) -> String {
         Drawn::CardCopied { name, why } => format!(
             "Drawn on the graphics card ({name}), but each frame is copied to the window by the processor, which costs it a little on every scroll: {why}."
         ),
+        Drawn::PaintedByProcessor { card, why } => format!(
+            "Painted by the processor, and only put together on the graphics card ({card}): scrolling and animation cost the processor, and can lag{}.",
+            why.as_ref()
+                .map_or(String::new(), |why| format!(", as {why}"))
+        ),
         Drawn::Processor(name) => format!(
             "Drawn by the processor ({name}), with no graphics card: scrolling and animation cost the processor, and can lag. The webview falls back to this when it cannot use the graphics driver."
         ),
@@ -99,7 +111,8 @@ struct GpuPage {
     renderer: Option<String>,
     /// What the window takes them through: none under X11.
     native_interface: Option<String>,
-    /// What paints the page's tiles: "GPU (2 threads)", or "CPU".
+    /// What paints the page's tiles: "GPU (2 threads)", "CPU (4 threads)",
+    /// or "Disabled" with no painting threads. WebKitGTK says so from 2.52.
     threaded: Option<String>,
 }
 
@@ -135,26 +148,33 @@ fn classify(
     } else {
         None
     };
-    let painted_by_processor = page
-        .threaded
+    // Skia paints on the processor where the page says so; with no word
+    // from it (before 2.52, or no painting threads), where the variable
+    // WebKitGTK reads asks it to.
+    let cpu_asked = on(&env, "WEBKIT_SKIA_ENABLE_CPU_RENDERING");
+    let painted_by_processor = match page.threaded.as_deref().map(str::to_ascii_uppercase) {
+        Some(threads) if threads.starts_with("CPU") => true,
+        Some(threads) if threads.starts_with("GPU") => false,
+        _ => cpu_asked,
+    };
+    // Only the DMA-BUF renderer hands frames over in buffers: WebKitGTK's
+    // older backing stores, "XWindow" under X11 and "WPE", say no more than
+    // their name, and copy nothing through the processor.
+    let dmabuf = page
+        .renderer
         .as_deref()
-        .is_some_and(|threads| threads.to_ascii_uppercase().starts_with("CPU"));
+        .is_some_and(|renderer| renderer.starts_with("DMABuf"));
     let drawn = match drawn_by(page.gl_renderer.clone()) {
-        Drawn::Card(name) if painted_by_processor => {
-            let set = if on(&env, "WEBKIT_SKIA_ENABLE_CPU_RENDERING") {
-                ", as WEBKIT_SKIA_ENABLE_CPU_RENDERING asks"
-            } else {
-                ""
-            };
-            Drawn::Processor(format!(
-                "its painter, Skia, on the processor{set}; {name} only composites"
-            ))
-        }
+        Drawn::Card(card) if painted_by_processor => Drawn::PaintedByProcessor {
+            card,
+            why: cpu_asked.then(|| "WEBKIT_SKIA_ENABLE_CPU_RENDERING asks".to_string()),
+        },
         Drawn::Card(name)
-            if page
-                .renderer
-                .as_deref()
-                .is_some_and(|renderer| !renderer.contains("Hardware")) =>
+            if dmabuf
+                && page
+                    .renderer
+                    .as_deref()
+                    .is_some_and(|renderer| !renderer.contains("Hardware")) =>
         {
             let why = if on(&env, "WEBKIT_DMABUF_RENDERER_FORCE_SHM") {
                 "WEBKIT_DMABUF_RENDERER_FORCE_SHM is set"
@@ -167,10 +187,11 @@ fn classify(
             }
         }
         Drawn::Card(name)
-            if page
-                .native_interface
-                .as_deref()
-                .is_some_and(|interface| interface.eq_ignore_ascii_case("none")) =>
+            if dmabuf
+                && page
+                    .native_interface
+                    .as_deref()
+                    .is_some_and(|interface| interface.eq_ignore_ascii_case("none")) =>
         {
             let wayland = env("XDG_SESSION_TYPE").is_some_and(|kind| kind == "wayland");
             let why = if wayland {
@@ -494,10 +515,69 @@ mod tests {
             env(&[("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1")]),
             None,
         );
-        assert!(
-            matches!(&skia.drawn, Drawn::Processor(name) if name.contains("WEBKIT_SKIA_ENABLE_CPU_RENDERING")),
-            "{skia:?}"
+        assert_eq!(
+            skia.drawn,
+            Drawn::PaintedByProcessor {
+                card: INTEL.into(),
+                why: Some("WEBKIT_SKIA_ENABLE_CPU_RENDERING asks".into()),
+            }
         );
+        let said = drawn_text(&skia);
+        assert!(
+            said.starts_with(
+                "Painted by the processor, and only put together on the graphics card (Mesa Intel"
+            ) && said.ends_with("can lag, as WEBKIT_SKIA_ENABLE_CPU_RENDERING asks."),
+            "{said}"
+        );
+        // Before 2.52 the page has no word on it, and with no painting
+        // threads it says "Disabled": the variable says it then.
+        for threaded in [None, Some("Disabled".to_string())] {
+            let quiet = GpuPage {
+                threaded: threaded.clone(),
+                ..page(INTEL)
+            };
+            let asked = classify(
+                &quiet,
+                env(&[("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1")]),
+                None,
+            );
+            assert!(
+                matches!(asked.drawn, Drawn::PaintedByProcessor { .. }),
+                "{threaded:?}: {asked:?}"
+            );
+            assert_eq!(
+                classify(&quiet, env(&[]), None).drawn,
+                Drawn::Card(INTEL.into()),
+                "{threaded:?}"
+            );
+        }
+        // The page's own word wins over the variable.
+        assert_eq!(
+            classify(
+                &page(INTEL),
+                env(&[("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1")]),
+                None
+            )
+            .drawn,
+            Drawn::Card(INTEL.into())
+        );
+
+        // WebKitGTK 2.42's older backing stores, with the DMA-BUF renderer
+        // off: X11's XComposite and WPE copy nothing through the processor,
+        // and under X11 there is no native interface to name.
+        for renderer in ["XWindow", "WPE"] {
+            let older = GpuPage {
+                renderer: Some(renderer.into()),
+                native_interface: Some("None".into()),
+                threaded: None,
+                ..page(INTEL)
+            };
+            assert_eq!(
+                classify(&older, env(&[("XDG_SESSION_TYPE", "wayland")]), None).drawn,
+                Drawn::Card(INTEL.into()),
+                "{renderer}"
+            );
+        }
 
         let soft = classify(&page("llvmpipe (LLVM 20.1.2, 256 bits)"), env(&[]), None);
         assert!(matches!(soft.drawn, Drawn::Processor(_)), "{soft:?}");

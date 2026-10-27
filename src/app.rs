@@ -1986,6 +1986,103 @@ mod ui_tests {
         });
     }
 
+    /// The scope reads what the band hears at the AGC against the line of
+    /// the band that plays: a tone `over` dB over it, metered once the
+    /// scope next looks, and what the scope says of it.
+    async fn scope_reads(
+        ui: &mut Ui,
+        recorder: &crate::audio::fake::Recorder,
+        settings: &TrainingSettings,
+        over: f64,
+    ) -> String {
+        let db = |db: f64| 10f64.powf(db / 20.0) as f32;
+        let line = crate::ui::scope::threshold(settings) as f32;
+        recorder.meter.borrow_mut().extend(std::iter::repeat_n(
+            crate::audio::MeterFrame {
+                input: line * db(over),
+                gain: 1.0,
+                output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
+            },
+            60,
+        ));
+        ui.advance(60).await;
+        ui.html()
+            .split("id=\"scope-reading\"")
+            .nth(1)
+            .and_then(|rest| rest.split_once('>'))
+            .and_then(|(_, text)| text.split('<').next())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// A slider moved in every measurement has the follow take its newest
+    /// move unmeasured. With the AGC off nothing else measures that move's
+    /// knee, and the scope must not draw on by the last one measured, a
+    /// filter several times wider: it is measured in its turn.
+    #[test]
+    fn the_scope_takes_the_knee_of_the_move_the_band_took() {
+        run(|| async {
+            let mut settings = with_receiver();
+            settings.band.agc_enabled = false;
+            settings.band.noise_level = 0.9;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            // Widths no other test asks the knee of: the memo it is kept in
+            // is the whole app's.
+            ui.type_into("slider-filter-width", "1710");
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
+            for width_hz in [1_720, 1_730, 610]
+                .iter()
+                .take(crate::routes::BAND_WARM_ROUNDS)
+            {
+                ui.type_into("slider-filter-width", &format!("{width_hz}"));
+                ui.advance(1).await;
+            }
+            ui.advance(200).await;
+            let taken = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
+            let mut wide = taken.clone();
+            wide.band.filter_width_hz = 1_720.0;
+            let apart = 20.0
+                * (crate::ui::scope::threshold(&wide) / crate::ui::scope::threshold(&taken))
+                    .log10();
+            assert!(apart > 1.5, "the two knees are {apart:.1} dB apart");
+            let said = scope_reads(&mut ui, &recorder, &taken, 9.0).await;
+            assert!(said.starts_with("Peaks 9 dB over the AGC"), "{said}");
+        });
+    }
+
+    /// A preview stopped takes its scope's knee with it: started again on
+    /// settings moved meanwhile, the scope waits for the knee of the band
+    /// now playing rather than reading by the old one.
+    #[test]
+    fn a_restarted_preview_waits_for_its_own_knee() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            // The first preview's scope has its knee.
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
+            let first = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
+            let said = scope_reads(&mut ui, &recorder, &first, 9.0).await;
+            assert!(said.starts_with("Peaks 9 dB over the AGC"), "{said}");
+            ui.click("btn-band-stop");
+            ui.with_app(|ctx| {
+                let mut settings = ctx.settings;
+                settings.write().band.filter_width_hz = 1_810.0;
+            });
+            ui.click("btn-band-preview");
+            assert!(ui.shows("level-scope"));
+            let settings = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
+            let said = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
+            assert_eq!(said, "Listening…", "read by the old knee");
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
+            let said = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
+            assert!(said.starts_with("Peaks 9 dB over the AGC"), "{said}");
+        });
+    }
+
     #[test]
     fn the_band_preview_can_be_stopped_where_it_was_started() {
         run(|| async {
