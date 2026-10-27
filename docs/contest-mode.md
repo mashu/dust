@@ -1120,12 +1120,12 @@ key that sends nothing reads no other caller's call into it (9.1).
   is no Enter in the fields; the listener hears it as log without sending.
   With the Command key, which the listener passes by, it is Enter still.
 - Paddles key into the focused field (`paddle.rs:287-299`) and never
-  transmit; phase 5 adds a field space after a 7-dit gap. As built (5b),
-  the keyer ends a word once seven dits of quiet follow a letter's last
-  element, as it ends the letter once three have (`Keyer`, its word gap in
-  `keyer/clock.rs`; a straight key, which keys no space after an element,
-  ends the letter a dit sooner but is held to the same seven dits for the
-  word, as its timing is the least even), and the run takes the word's end
+  transmit; phase 5 adds a field space after a word gap. As built, the
+  keyer ends a word once six dits of quiet follow a letter's last element,
+  a dit short of a word space so one sent on time always ends it, as it
+  ends the letter once two have, the split between a letter's one and the
+  three between letters (`Keyer`, its gaps in `keyer/clock.rs`; the same
+  for a straight key and the paddles), and the run takes the word's end
   as Space, by the Space key's rule (`space_goes_to`): on from Call to
   Exchange, and from Exchange back to Call where the exchange has one item
   to type or the items typed read whole, else the space before the next

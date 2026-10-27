@@ -2289,22 +2289,23 @@ mod tests {
     }
 
     /// Key `letter` on the paddles from the field `on`, then quiet until its
-    /// letter space has ended it, three dits after its last element.
+    /// letter space has ended it, two dits after its last element.
     async fn key_letter(ui: &mut Ui, on: &str, letter: char) {
+        // The elements end with a dit of space keyed after the last.
         key_elements(ui, on, letter).await;
-        ui.advance(2 * DIT_MS + 8).await;
+        ui.advance(DIT_MS + 8).await;
     }
 
     /// From the letter space that ended a letter on to the end of its word
-    /// space, seven dits after the letter's last element, and a step more.
+    /// space, six dits after the letter's last element, and a step more.
     const TO_WORD_SPACE_MS: u64 = 4 * DIT_MS + 8;
 
     /// The paddles key into the field with the cursor, and quiet for a word
-    /// space after a letter, seven dits at the keyer's speed, they press
+    /// space after a letter, six dits at the keyer's speed, they press
     /// Space: on from Call to Exchange, back to Call from a WPX
     /// exchange, the cursor at the end of the field each time and nothing
     /// typed, and in a Sprint's exchange the space before its next item, as
-    /// the Space key does. A hesitation of six dits between two letters
+    /// the Space key does. A hesitation of five dits between two letters
     /// keeps them in one field, quiet after the word presses Space once, and
     /// a key pressed in the word space ends the word with no Space after it.
     #[test]

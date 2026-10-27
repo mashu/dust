@@ -309,7 +309,7 @@ impl PaddleKeys {
     }
 
     /// The same for a screen of fields, the run's Call and Exchange, where a
-    /// word space keyed — the paddles quiet for seven dits after a letter —
+    /// word space keyed — the paddles quiet for six dits after a letter —
     /// does what Space does: `space`.
     pub fn use_fields(
         self,

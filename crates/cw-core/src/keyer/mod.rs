@@ -11,7 +11,9 @@
 //!   is the dit/dah split.
 //! - **Iambic A** (Curtis) — squeeze alternates. Releasing both during an
 //!   element finishes that element and stops. A tap of the opposite paddle
-//!   during an element is remembered once.
+//!   during an element is remembered once, and sent next, whether or not the
+//!   first paddle is still held: hold the dit and tap the dah for U, hold the
+//!   dah and tap the dit for N... and Y is a held dah with a dit tapped in.
 //! - **Iambic B** (Accu-keyer) — same squeeze, but the opposite paddle being
 //!   down at any point in the element latches one extra opposite element after
 //!   you let go. That extra dit after a squeeze-released dah is the whole
@@ -40,19 +42,20 @@ pub fn dit_ms_for_wpm(wpm: f64) -> u64 {
     (dot_seconds(wpm) * 1000.0).round().clamp(1.0, 1_000.0) as u64
 }
 
-/// Gap, in dits, at which a letter is over. Intra-character spacing is one
-/// dit; inter-character is three. Two is the split between them.
+/// Quiet, in dits, after an element at which its letter is over.
+/// Intra-character spacing is one dit; inter-character is three. Two is the
+/// split between them, as an autospacing keyer and a decoder take it, for
+/// every kind of key.
 const LETTER_GAP_DITS: u64 = 2;
 
-/// Quiet, in dits, after a letter's last element at which its word is over:
-/// a word space. A run takes the word's end as Space, to move between its
-/// fields, so it is the whole of a word space and not the split between a
-/// letter space and a word space: a pause of a few dits between the letters
-/// of a call never moves the cursor out of it. A straight key is held to the
-/// same seven dits, though its letter ends a dit sooner than an electronic
-/// keyer's: its timing is the least even, and a hesitation is likeliest on
-/// it.
-const WORD_GAP_DITS: u64 = 7;
+/// Quiet, in dits, after a letter's last element at which its word is over.
+/// A run takes the word's end as Space, to move between its fields, so it
+/// is held near a whole word space of seven, not at the split of five: a
+/// pause of five dits between the letters of a call never moves the cursor
+/// out of it. A dit short of seven, though, so a word space sent on time
+/// always ends the word, rather than half the time, as one judged at
+/// exactly seven would.
+const WORD_GAP_DITS: u64 = 6;
 
 /// Hold longer than this many dits and a straight key is a dah.
 const STRAIGHT_DAH_DITS: u64 = 2;
@@ -290,13 +293,11 @@ impl PaddleKeyer {
         })
     }
 
-    /// Ultimatic: a tap of the opposite paddle inserts one remembered element
-    /// even while the other paddle is still held. That has to win over the
-    /// generic "held paddle repeats" rule below.
-    fn ultimatic_memory_override(&self) -> Option<Paddle> {
-        if self.mode != KeyerMode::Ultimatic {
-            return None;
-        }
+    /// A tap of the opposite paddle inserts one remembered element even
+    /// while the other paddle is still held, in every mode, as a Curtis
+    /// keyer, a WinKeyer or a K3 does it: that is how F, L, Y and Q are
+    /// sent. It has to win over the "held paddle repeats" rule below.
+    fn memory_override(&self) -> Option<Paddle> {
         if self.dit_held && self.dah_mem {
             Some(Paddle::Dah)
         } else if self.dah_held && self.dit_mem {
@@ -322,7 +323,7 @@ impl PaddleKeyer {
                     .unwrap_or(Paddle::Dit),
                 KeyerMode::Straight => return None,
             }
-        } else if let Some(paddle) = self.ultimatic_memory_override() {
+        } else if let Some(paddle) = self.memory_override() {
             paddle
         } else if self.dit_held {
             Paddle::Dit
@@ -481,6 +482,30 @@ mod tests {
         keyer.release(Paddle::Dah);
         assert_eq!(keyer.next_element(), Some(Paddle::Dit));
         assert_eq!(keyer.next_element(), None);
+    }
+
+    /// Hold one paddle and tap the other during an element: the tap is sent
+    /// next, then the held paddle carries on, in Iambic A and B alike. It
+    /// used to wait for both paddles to open, at the end of the letter.
+    #[test]
+    fn iambic_sends_a_tap_next_while_the_other_paddle_is_held() {
+        for mode in [KeyerMode::IambicA, KeyerMode::IambicB] {
+            let mut keyer = PaddleKeyer::with_mode(mode);
+            keyer.press(Paddle::Dit, 0);
+            assert_eq!(keyer.next_element(), Some(Paddle::Dit), "{mode:?}");
+            keyer.press(Paddle::Dah, 0);
+            keyer.release(Paddle::Dah);
+            assert_eq!(keyer.next_element(), Some(Paddle::Dah), "{mode:?}");
+            assert_eq!(keyer.next_element(), Some(Paddle::Dit), "{mode:?}");
+
+            let mut keyer = PaddleKeyer::with_mode(mode);
+            keyer.press(Paddle::Dah, 0);
+            assert_eq!(keyer.next_element(), Some(Paddle::Dah), "{mode:?}");
+            keyer.press(Paddle::Dit, 0);
+            keyer.release(Paddle::Dit);
+            assert_eq!(keyer.next_element(), Some(Paddle::Dit), "{mode:?}");
+            assert_eq!(keyer.next_element(), Some(Paddle::Dah), "{mode:?}");
+        }
     }
 
     #[test]
