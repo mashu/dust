@@ -41,13 +41,23 @@ pub fn agc_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
     if !band.agc_enabled {
         return None;
     }
-    static LAST: LastAnswer<KneeAsk, f64> = LastAnswer::new();
-    Some(LAST.get_or(KneeAsk::of(band, receiver), || {
+    Some(KNEE.get_or(KneeAsk::of(band, receiver), || {
         let floor =
             band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(quietest_floor_level());
         AGC_TRIGGER * floor
     }))
 }
+
+/// The knee [`agc_knee`] last measured, if it was for this band heard
+/// through `receiver`, AGC switched on or not: never measured here. Whether
+/// something has spent three seconds of band on these settings, as the
+/// settings screen must not on the thread that draws while a slider moves.
+pub fn remembered_agc_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
+    KNEE.remembered(&KneeAsk::of(band, receiver))
+}
+
+/// The last knee measured, and what it was measured for.
+static KNEE: LastAnswer<KneeAsk, f64> = LastAnswer::new();
 
 /// Where the receiver's AGC starts to turn the gain down for these band
 /// settings, heard through `receiver`, at the threshold they set: the band's
@@ -198,6 +208,22 @@ mod tests {
         assert!((20.0 * (highest / lowest).log10() - AGC_THRESHOLD_MAX_DB).abs() < 1e-9);
         settings.band.agc_enabled = false;
         assert_eq!(receiver_knee(&settings.band, &receiver), None);
+    }
+
+    /// The knee is one question whether the AGC is on or off, so a knee
+    /// measured with it on is the one the level scope finds with it off;
+    /// and looking finds nothing for a band whose floor no one measured.
+    /// (The memo is the whole app's: other tests ask it meanwhile, so what
+    /// it holds is looked at in its own tests.)
+    #[test]
+    fn the_knee_is_one_question_with_the_agc_on_or_off() {
+        let mut settings = TrainingSettings::default();
+        let receiver = FilterDesign::from_settings(&settings);
+        let on = KneeAsk::of(&settings.band, &receiver);
+        settings.band.agc_enabled = false;
+        assert_eq!(KneeAsk::of(&settings.band, &receiver), on);
+        settings.band.noise_level = 0.0123;
+        assert_eq!(remembered_agc_knee(&settings.band, &receiver), None);
     }
 
     /// The band preview measures the knee ahead of building the band, for

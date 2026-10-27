@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use cw_core::band::{FilterDesign, agc_knee, loudest_station};
-use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
+use cw_core::{BandSettings, CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
 use crate::page_hidden::{LISTEN_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
@@ -23,6 +23,7 @@ use crate::ui::contest_results::NothingKept;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
+use crate::ui::scope::BandKnee;
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
@@ -176,9 +177,11 @@ fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
 /// its way and the newest settings are still the last to land. A move that
 /// changed the band is measured in its turn before the follow takes it, up
 /// to [`BAND_WARM_ROUNDS`] measurements in all, so a slider being dragged
-/// finds its knee remembered too.
+/// finds its knee remembered too. The knee measured last is the level
+/// scope's ([`BandKnee`]), which draws its line by it.
 fn use_band_follow(ctx: AppCtx) {
     let latest = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
+    let BandKnee(mut band_knee) = use_context_provider(|| BandKnee(Signal::new(None)));
     use_effect(move || {
         if !ctx.preview.read().is_band() {
             return;
@@ -199,7 +202,11 @@ fn use_band_follow(ctx: AppCtx) {
                 let Some(waiting) = waiting else {
                     break;
                 };
-                warm_agc_knee(&waiting).await;
+                if let Some(knee) = warm_agc_knee(&waiting).await
+                    && *band_knee.peek() != Some(knee)
+                {
+                    band_knee.set(Some(knee));
+                }
                 // The knee is asked of the band settings alone, the receiver
                 // being worked out from them too, so only a move that changed
                 // them asks it anew. A stopped preview has no band left to
@@ -235,24 +242,34 @@ fn use_band_follow(ctx: AppCtx) {
 /// follow's last measurement, the band measures its own knee, as it always
 /// did.
 ///
-/// And with it how loud the strongest station comes out of that receiver
-/// ([`loudest_station`]), which full volume is sized by: a few milliseconds
-/// more, and asked of the knee just measured.
-async fn warm_agc_knee(settings: &TrainingSettings) {
-    if !settings.band.has_background() {
-        return;
-    }
+/// It is measured with the AGC on whether it is or not: one question either
+/// way, the knee being remembered by the floor and the receiver alone, and
+/// the one the level scope draws its line by, AGC on or off, looking it up
+/// rather than measuring it on the thread that draws.
+///
+/// And with it, for a band with a background, how loud the strongest
+/// station comes out of that receiver ([`loudest_station`]), which full
+/// volume is sized by: a few milliseconds more, and asked of the knee just
+/// measured. The knee, unless the worker measuring it failed.
+async fn warm_agc_knee(settings: &TrainingSettings) -> Option<f64> {
     let receiver = FilterDesign::from_settings(settings);
+    let on = BandSettings {
+        agc_enabled: true,
+        ..settings.band.clone()
+    };
+    let band = settings.band.has_background().then(|| settings.clone());
+    let measure = move || {
+        let knee = agc_knee(&on, &receiver);
+        if let Some(settings) = band {
+            loudest_station(&settings);
+        }
+        knee
+    };
     // A worker measures it, and the slider is not held up at all. A worker
     // that panicked has measured nothing, which leaves it to the band.
     #[cfg(all(not(target_arch = "wasm32"), not(test)))]
     {
-        let settings = settings.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            agc_knee(&settings.band, &receiver);
-            loudest_station(&settings);
-        })
-        .await;
+        tokio::task::spawn_blocking(measure).await.ok().flatten()
     }
     // The browser has the one thread. It measures here, then lets the page
     // draw and take input before the band is built: two short tasks rather
@@ -261,9 +278,9 @@ async fn warm_agc_knee(settings: &TrainingSettings) {
     // would land a different number of steps later every run.
     #[cfg(any(target_arch = "wasm32", test))]
     {
-        agc_knee(&settings.band, &receiver);
-        loudest_station(settings);
+        let knee = measure();
         sleep_ms(1).await;
+        knee
     }
 }
 

@@ -1751,6 +1751,50 @@ mod ui_tests {
         });
     }
 
+    /// Dragging a control the AGC's knee hangs on measures no knee on the
+    /// thread that draws, which would be three seconds of band at every
+    /// step: the follow measures it once the drag pauses, and the scope's
+    /// line is that knee's from then on.
+    #[test]
+    fn dragging_the_filter_measures_no_knee_on_the_page() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            // Widths no other test asks the knee of: the memo it is kept in
+            // is the whole app's.
+            for width in (1_310..=1_400).step_by(10) {
+                ui.with_app(|ctx| {
+                    let mut settings = ctx.settings;
+                    settings.write().band.filter_width_hz = f64::from(width);
+                });
+            }
+            let settings = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
+            let receiver = cw_core::band::FilterDesign::from_settings(&settings);
+            assert_eq!(
+                cw_core::band::remembered_agc_knee(&settings.band, &receiver),
+                None,
+                "a knee was measured as the filter moved"
+            );
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
+            let db = |db: f64| 10f64.powf(db / 20.0) as f32;
+            let line = crate::ui::scope::threshold(&settings) as f32;
+            recorder.meter.borrow_mut().extend(std::iter::repeat_n(
+                crate::audio::MeterFrame {
+                    input: line * db(9.0),
+                    gain: db(-4.0),
+                    output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
+                },
+                60,
+            ));
+            ui.advance(120).await;
+            assert!(
+                ui.has("Peaks 9 dB over the AGC"),
+                "the line is the new knee's: {}",
+                ui.html()
+            );
+        });
+    }
+
     /// A follow measures the band's AGC before it takes the settings, so a
     /// stop can land in between. The band must not come back up behind it.
     #[test]

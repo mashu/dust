@@ -69,7 +69,7 @@ pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
 };
 pub use key::BandKey;
-pub use knee::{agc_knee, receiver_knee, threshold_raise};
+pub use knee::{agc_knee, receiver_knee, remembered_agc_knee, threshold_raise};
 pub use loudness::{full_volume_gain, loudest_station};
 pub use noise::AudioFloor;
 pub use output::{

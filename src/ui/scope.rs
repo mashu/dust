@@ -41,17 +41,33 @@ const LEVEL_HEIGHT: f64 = 72.0;
 const LANE_TOP: f64 = 78.0;
 const LANE_HEIGHT: f64 = 18.0;
 
-/// Where the AGC starts to act for these settings, as the amplitude of a
-/// steady tone at the AGC, after the RF gain: what the scope's line is
-/// drawn at. The RF gain moves what reaches the line, not the line. With
-/// the AGC off, where it would act if it were switched on, so the line
-/// still says where a station stands.
-pub(crate) fn threshold(settings: &TrainingSettings) -> f64 {
-    let receiver = FilterDesign::from_settings(settings);
+/// The AGC knee of the band the preview plays, with the AGC on whether it
+/// is or not, as the band follow on the settings screen last measured it
+/// ahead (`use_band_follow`): off the thread that draws, where there is
+/// another. The scope draws its line by it, and so never measures one, which
+/// is three seconds of band.
+#[derive(Clone, Copy)]
+pub(crate) struct BandKnee(pub Signal<Option<f64>>);
+
+/// What the scope's line is set by: the band these settings describe with
+/// its AGC on, whether it is or not, and their receiver.
+fn knee_asked(settings: &TrainingSettings) -> (BandSettings, FilterDesign) {
     let on = BandSettings {
         agc_enabled: true,
         ..settings.band.clone()
     };
+    (on, FilterDesign::from_settings(settings))
+}
+
+/// Where the AGC starts to act for these settings, as the amplitude of a
+/// steady tone at the AGC, after the RF gain: what the scope's line is
+/// drawn at. The RF gain moves what reaches the line, not the line. With
+/// the AGC off, where it would act if it were switched on, so the line
+/// still says where a station stands. Measured, should it not be
+/// remembered: what tests hold the scope's line to.
+#[cfg(test)]
+pub(crate) fn threshold(settings: &TrainingSettings) -> f64 {
+    let (on, receiver) = knee_asked(settings);
     agc_knee(&on, &receiver).unwrap_or(1.0) * threshold_raise(&settings.band)
 }
 
@@ -142,11 +158,32 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
             });
         }
     });
+    // The line follows a move as the band does, once the follow has
+    // measured its knee; the threshold, which only raises it, at once.
+    let band_knee = try_use_context::<BandKnee>();
     let (threshold, agc_on) = use_memo(move || {
         let settings = settings.read();
-        (threshold(&settings), settings.band.agc_enabled)
+        let knee = match band_knee {
+            Some(BandKnee(knee)) => knee(),
+            // Drawn on its own, as a card is in a test, with no follow to
+            // measure it.
+            None => {
+                let (on, receiver) = knee_asked(&settings);
+                agc_knee(&on, &receiver)
+            }
+        };
+        (
+            knee.map(|knee| knee * threshold_raise(&settings.band)),
+            settings.band.agc_enabled,
+        )
     })();
+    // Nothing is placed against a line not yet known.
     let frames = frames.read();
+    let frames = match threshold {
+        Some(_) => &*frames,
+        None => &VecDeque::new(),
+    };
+    let threshold = threshold.unwrap_or(1.0);
     let step = WIDTH / SHOWN as f64;
     // The newest frame at the right-hand edge, the rest running back from it.
     let start = SHOWN.saturating_sub(frames.len());
@@ -163,7 +200,7 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
     level += &format!(" {WIDTH:.1},{LEVEL_HEIGHT:.1}");
     agc += &format!(" {WIDTH:.1},{LANE_TOP:.1}");
     let line = level_y(0.0);
-    let reading = Reading::of(&frames, threshold);
+    let reading = Reading::of(frames, threshold);
     let says = reading.map_or_else(|| "Listening…".to_string(), |reading| reading.says(agc_on));
     let view_box = format!("0 0 {WIDTH} {}", LANE_TOP + LANE_HEIGHT);
     rsx! {
