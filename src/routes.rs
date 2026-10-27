@@ -209,8 +209,10 @@ fn use_band_follow(ctx: AppCtx) {
         }
         let latest = latest.clone();
         spawn(async move {
-            sleep_ms(BAND_FOLLOW_MS).await;
             loop {
+                // Every follow waits its turn, one for settings put back
+                // too, so a drag rebuilds the band at most this often.
+                sleep_ms(BAND_FOLLOW_MS).await;
                 // The band whose knee the scope was given last.
                 let mut measured = None;
                 for _ in 0..BAND_WARM_ROUNDS {
@@ -263,8 +265,8 @@ fn use_band_follow(ctx: AppCtx) {
                     return;
                 }
                 // Put back, with nothing awaited since they were taken, so
-                // no second follow starts: measured next, and taken again,
-                // which rebuilds nothing.
+                // no second follow starts: measured in the next follow, and
+                // taken again, which rebuilds nothing.
                 *latest.borrow_mut() = Some(settings);
             }
         });

@@ -42,10 +42,11 @@ const LANE_TOP: f64 = 78.0;
 const LANE_HEIGHT: f64 = 18.0;
 
 /// The AGC knee of the band the preview plays, with the AGC on whether it
-/// is or not, as the band follow on the settings screen last measured it
-/// ahead (`use_band_follow`): off the thread that draws, where there is
-/// another. The scope draws its line by it, and so never measures one, which
-/// is three seconds of band.
+/// is or not (`use_band_follow`): as the band follow on the settings screen
+/// last measured it ahead, off the thread that draws where there is
+/// another, or, for settings the follow took unmeasured with the AGC on, as
+/// the band built for them measured it. The scope draws its line by it, and
+/// so never measures one, which is three seconds of band.
 #[derive(Clone, Copy)]
 pub(crate) struct BandKnee(pub Signal<Option<f64>>);
 

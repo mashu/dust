@@ -1701,6 +1701,38 @@ mod ui_tests {
         });
     }
 
+    /// With the AGC off the band measures no knee of its own, so a follow
+    /// that took a move unmeasured puts it back to be measured: that follow
+    /// waits its turn as any other does, and a slider dragged without a
+    /// pause still has the band follow it at most every BAND_FOLLOW_MS.
+    #[test]
+    fn a_slider_dragged_with_the_agc_off_is_followed_at_most_so_often() {
+        run(|| async {
+            let mut settings = with_receiver();
+            settings.band.agc_enabled = false;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            // Each send brings its band in line too: counted apart.
+            let follows = || bands(&recorder).len() - recorder.texts().len();
+            let (before, from) = (follows(), crate::time::mono_ms());
+            // A move at every step of the clock, so in every measurement.
+            for step in 0..400 {
+                let width = if step % 2 == 0 { "1910" } else { "1920" };
+                ui.type_into("slider-filter-width", width);
+                ui.advance(1).await;
+            }
+            let dragged_ms = crate::time::mono_ms() - from;
+            let followed = follows() - before;
+            let most = (dragged_ms / u64::from(crate::routes::BAND_FOLLOW_MS) + 1) as usize;
+            assert!(
+                (1..=most).contains(&followed),
+                "{followed} follows in {dragged_ms} ms of dragging, at most {most}"
+            );
+        });
+    }
+
     /// Dragging a band slider during the preview moves the band a few times
     /// a second, not on every frame: each move rebuilds the band and
     /// measures its AGC, on the thread the slider is drawn on.
