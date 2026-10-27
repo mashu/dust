@@ -50,6 +50,35 @@ pub fn mono_ms() -> u64 {
     }
 }
 
+/// How long ago, in seconds, [`mono_ms`] stood at `at`: to well under a
+/// millisecond, where `mono_ms` drops the part of one it has run into, so
+/// an edge the paddle keyer timed at `at` is placed where it was meant.
+/// On the thread that read the clock, which natively has an origin of its
+/// own; never less than nothing.
+pub fn mono_secs_since(at: u64) -> f64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // The origin is set by whatever read `at`; reading it here first
+        // sets it now, which is as good a zero as any.
+        let _ = mono_ms();
+        CLOCK_ORIGIN.with(|origin| {
+            origin.get().map_or(0.0, |start| {
+                let then = start + std::time::Duration::from_millis(at);
+                tokio::time::Instant::now()
+                    .saturating_duration_since(then)
+                    .as_secs_f64()
+            })
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let now = web_sys::window()
+            .and_then(|window| window.performance())
+            .map_or(at as f64, |performance| performance.now());
+        ((now - at as f64) / 1_000.0).max(0.0)
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 std::thread_local! {
     static CLOCK_ORIGIN: std::cell::Cell<Option<tokio::time::Instant>> =
@@ -136,6 +165,19 @@ mod tests {
             assert!(now >= last);
             last = now;
         }
+    }
+
+    /// An instant read off the clock is placed to well under a millisecond,
+    /// where the clock itself counts whole ones.
+    #[test]
+    fn an_instant_is_placed_finer_than_the_clock_counts() {
+        let at = super::mono_ms();
+        let since = super::mono_secs_since(at);
+        assert!((0.0..0.5).contains(&since), "{since}");
+        assert_eq!(super::mono_secs_since(at + 60_000), 0.0, "never ahead");
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let later = super::mono_secs_since(at);
+        assert!(later >= 0.003 && later > since, "{since} then {later}");
     }
 
     /// A pinned seed starts the same sequence every time, another seed

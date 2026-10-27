@@ -34,12 +34,29 @@ pub struct KeyedLetter {
     pub began: u64,
 }
 
+/// How late a tick can come and the keyer still keep to its own time: the
+/// element it ends is over at the instant it was due, and the space after
+/// it no longer for the wait. A tick later than this has met a stall, not
+/// a slow timer, and the keyer goes on from where it is.
+const LATE_TICK_MS: u64 = 25;
+
+/// The sidetone going on or off, and the instant it does on the keyer's
+/// clock: the instant the element or space was due to end, not the instant
+/// a late tick got round to it. A host that sounds every edge a constant
+/// lead after its instant hears each element and space as long as it was
+/// keyed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToneEdge {
+    pub on: bool,
+    pub at: u64,
+}
+
 /// What the host has to do now that the keyer has moved.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[must_use = "the sidetone, the letter and the next wake are the host's to act on"]
 pub struct KeyerOutput {
     /// The sidetone goes on, or off, when it has changed.
-    pub tone: Option<bool>,
+    pub tone: Option<ToneEdge>,
     /// A letter that has just ended and spells a character.
     pub letter: Option<KeyedLetter>,
     /// A word space has run out after the last letter: the word is over,
@@ -56,9 +73,12 @@ pub struct KeyerOutput {
 /// early: the host acts on each [`KeyerOutput`] — sounds the tone, takes the
 /// letter or the word's end — and calls [`Keyer::tick`] when `wake_at` comes
 /// round. A tick that comes before then, or twice, changes nothing, so a
-/// timer the host forgot to cancel is harmless. Each phase is timed from the
-/// instant it really began, so a tick that comes late lengthens the element
-/// that was sounding rather than eating into the space after it.
+/// timer the host forgot to cancel is harmless. A tick that comes late, by
+/// up to `LATE_TICK_MS`, ends its element or space at the instant it was
+/// due, as a keyer on a clock of its own would have: the edge it reports
+/// is that instant's, and the rhythm keeps its time. Later than that, the
+/// element sounding is lengthened by the wait, and the space after it is
+/// still whole.
 #[derive(Clone, Debug)]
 pub struct Keyer {
     paddles: PaddleKeyer,
@@ -67,6 +87,8 @@ pub struct Keyer {
     phase: Phase,
     /// When the letter under way began: the contact that opened it.
     began: u64,
+    /// When a paddle last closed.
+    pressed_at: u64,
 }
 
 impl Keyer {
@@ -77,6 +99,7 @@ impl Keyer {
             dit_ms: dit_ms_for_wpm(wpm),
             phase: Phase::Idle,
             began: 0,
+            pressed_at: 0,
         }
     }
 
@@ -84,12 +107,13 @@ impl Keyer {
         self.paddles.mode()
     }
 
-    /// Key another way. Whatever was half keyed the old way is dropped.
-    pub fn set_mode(&mut self, mode: KeyerMode) -> KeyerOutput {
+    /// Key another way, at `now`. Whatever was half keyed the old way is
+    /// dropped.
+    pub fn set_mode(&mut self, mode: KeyerMode, now: u64) -> KeyerOutput {
         if mode == self.mode() {
             return KeyerOutput::default();
         }
-        let out = self.stop();
+        let out = self.stop(now);
         self.paddles.set_mode(mode);
         out
     }
@@ -124,6 +148,7 @@ impl Keyer {
         if !self.letter_open() {
             self.began = now;
         }
+        self.pressed_at = now;
         self.paddles.press(paddle, now);
         if self.mode().is_straight() {
             self.phase = Phase::Contact;
@@ -135,7 +160,7 @@ impl Keyer {
         }
         KeyerOutput {
             space,
-            ..self.output(was_sounding, ended)
+            ..self.output(self.edge(was_sounding, now), ended)
         }
     }
 
@@ -173,7 +198,7 @@ impl Keyer {
             }
             self.phase = Phase::Gap { since: now };
         }
-        self.output(was_sounding, None)
+        self.output(self.edge(was_sounding, now), None)
     }
 
     /// The clock has reached `now`: end whatever was due to end by then.
@@ -181,13 +206,22 @@ impl Keyer {
         let was_sounding = self.sounding();
         let mut letter = None;
         let mut space = false;
+        // The instant the phase ended, which the next is timed from.
+        let mut ended = now;
         match self.phase {
             Phase::Element { until } if now >= until => {
+                ended = kept_time(until, now);
                 self.phase = Phase::Space {
-                    until: now.saturating_add(self.dit_ms),
+                    until: ended.saturating_add(self.dit_ms),
                 };
             }
-            Phase::Space { until } if now >= until => self.start_next(now),
+            Phase::Space { until } if now >= until => {
+                // Never before the paddle that keys the next element closed:
+                // one closed while the tick was late came after the space
+                // had ended, as into the letter's gap.
+                ended = kept_time(until, now).max(self.pressed_at);
+                self.start_next(ended);
+            }
             Phase::Gap { since } if now >= since.saturating_add(self.letter_gap_ms()) => {
                 letter = self.take_letter();
                 // A letter begins a word; what spells nothing begins none.
@@ -205,7 +239,7 @@ impl Keyer {
         }
         KeyerOutput {
             space,
-            ..self.output(was_sounding, letter)
+            ..self.output(self.edge(was_sounding, ended), letter)
         }
     }
 
@@ -223,26 +257,28 @@ impl Keyer {
             Phase::Space { .. } => !self.paddles.any_held() && !self.paddles.any_remembered(),
             Phase::Word { .. } => {
                 self.phase = Phase::Idle;
-                return self.output(false, None);
+                return self.output(None, None);
             }
             Phase::Idle | Phase::Contact | Phase::Element { .. } => false,
         };
+        // Nothing here sounds or falls silent: a letter keyed in full has
+        // no element sounding, and one still being keyed is left as it is.
         if !keyed_in_full {
-            return self.output(self.sounding(), None);
+            return self.output(None, None);
         }
         self.phase = Phase::Idle;
         let letter = self.take_letter();
-        self.output(false, letter)
+        self.output(None, letter)
     }
 
     /// Drop everything — the element sounding, the paddles held, the letter
-    /// half keyed — and fall silent.
-    pub fn stop(&mut self) -> KeyerOutput {
+    /// half keyed — and fall silent at `now`.
+    pub fn stop(&mut self, now: u64) -> KeyerOutput {
         let was_sounding = self.sounding();
         self.paddles.reset();
         self.decoder = PaddleDecoder::default();
         self.phase = Phase::Idle;
-        self.output(was_sounding, None)
+        self.output(self.edge(was_sounding, now), None)
     }
 
     /// Send the next element now, or start the letter space when there is
@@ -285,10 +321,16 @@ impl Keyer {
         u64::from(!self.mode().is_straight())
     }
 
-    fn output(&self, was_sounding: bool, letter: Option<KeyedLetter>) -> KeyerOutput {
-        let sounding = self.sounding();
+    /// The sidetone's edge at `at`, if it has changed since it was
+    /// `was_sounding`.
+    fn edge(&self, was_sounding: bool, at: u64) -> Option<ToneEdge> {
+        let on = self.sounding();
+        (on != was_sounding).then_some(ToneEdge { on, at })
+    }
+
+    fn output(&self, tone: Option<ToneEdge>, letter: Option<KeyedLetter>) -> KeyerOutput {
         KeyerOutput {
-            tone: (sounding != was_sounding).then_some(sounding),
+            tone,
             letter,
             space: false,
             wake_at: match self.phase {
@@ -298,6 +340,16 @@ impl Keyer {
                 Phase::Word { since } => Some(since.saturating_add(self.word_gap_ms())),
             },
         }
+    }
+}
+
+/// The instant a phase due to end at `until` ended, for a tick at `now`:
+/// when it was due, unless the tick is later than [`LATE_TICK_MS`].
+fn kept_time(until: u64, now: u64) -> u64 {
+    if now - until <= LATE_TICK_MS {
+        until
+    } else {
+        now
     }
 }
 
@@ -330,9 +382,9 @@ mod tests {
         }
 
         fn act(&mut self, now: u64, out: KeyerOutput) {
-            if let Some(on) = out.tone {
-                self.log
-                    .push(format!("{now} {}", if on { "on" } else { "off" }));
+            if let Some(edge) = out.tone {
+                let on = if edge.on { "on" } else { "off" };
+                self.log.push(format!("{} {on}", edge.at));
             }
             if let Some(keyed) = out.letter {
                 self.log.push(format!("{now} {}", keyed.letter));
@@ -519,7 +571,7 @@ mod tests {
         // The letter's space ran out at 300, and its tick never came.
         let out = keyer.press(Dit, 305);
         assert_eq!(out.letter.map(|keyed| keyed.letter), Some('T'));
-        assert_eq!(out.tone, Some(true));
+        assert_eq!(out.tone, Some(ToneEdge { on: true, at: 305 }));
         // And one closed after the word's space ran out ends the word too.
         let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
         let _ = keyer.press(Dit, 0);
@@ -566,7 +618,7 @@ mod tests {
         // A letter dropped half keyed leaves nothing behind for the next.
         let mut host = Host::new(KeyerMode::IambicA);
         host.press(Dah, 3_000);
-        let out = host.keyer.stop();
+        let out = host.keyer.stop(3_010);
         host.act(3_010, out);
         host.press(Dit, 3_500);
         host.release(Dit, 3_530);
@@ -737,17 +789,55 @@ mod tests {
                 }
             );
         }
-        assert_eq!(keyer.tick(60).tone, Some(false));
+        assert_eq!(keyer.tick(60).tone, Some(ToneEdge { on: false, at: 60 }));
         assert_eq!(keyer.tick(60).tone, None);
     }
 
+    /// A slow timer does not set the rhythm: a tick a few milliseconds late
+    /// ends its element, and then its space, at the instants they were due,
+    /// and says so, for the host to sound them on time.
     #[test]
-    fn a_late_tick_lengthens_the_element_and_keeps_the_space_whole() {
+    fn a_tick_a_little_late_keeps_the_keyer_on_time() {
+        let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
+        let _ = keyer.press(Dah, 0);
+        let off = keyer.tick(200);
+        assert_eq!(off.tone, Some(ToneEdge { on: false, at: 180 }));
+        assert_eq!(off.wake_at, Some(240), "the space from when the dah ended");
+        let on = keyer.tick(240 + LATE_TICK_MS);
+        assert_eq!(on.tone, Some(ToneEdge { on: true, at: 240 }));
+        assert_eq!(on.wake_at, Some(420), "the next dah from when it was due");
+        // A letter's gap is timed from when it began too.
+        let _ = keyer.release(Dah, 300);
+        let _ = keyer.tick(430);
+        let gap = keyer.tick(490);
+        assert_eq!(gap.tone, None);
+        assert_eq!(gap.wake_at, Some(540), "two dits of quiet from 420");
+    }
+
+    /// A paddle closed while the tick ending a space was late came after
+    /// the space: its element starts then, not back when the space ended.
+    #[test]
+    fn an_element_never_starts_before_its_paddle_closed() {
+        let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
+        let _ = keyer.press(Dit, 0);
+        let _ = keyer.release(Dit, 30);
+        let _ = keyer.tick(60);
+        // The space ended at 120; the dah closed at 125, before its tick.
+        let _ = keyer.press(Dah, 125);
+        let next = keyer.tick(130);
+        assert_eq!(next.tone, Some(ToneEdge { on: true, at: 125 }));
+        assert_eq!(next.wake_at, Some(305));
+    }
+
+    /// A tick held up longer than [`LATE_TICK_MS`] met a stall: the element
+    /// sounding is lengthened by it, and the space after it is still whole.
+    #[test]
+    fn a_stalled_tick_lengthens_the_element_and_keeps_the_space_whole() {
         let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
         let _ = keyer.press(Dit, 0);
         let _ = keyer.release(Dit, 10);
         let late = keyer.tick(100);
-        assert_eq!(late.tone, Some(false));
+        assert_eq!(late.tone, Some(ToneEdge { on: false, at: 100 }));
         assert_eq!(late.wake_at, Some(160), "a whole dit of space after it");
     }
 
@@ -755,18 +845,18 @@ mod tests {
     fn stopping_drops_the_half_keyed_letter_and_silences_the_tone() {
         let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
         let _ = keyer.press(Dah, 0);
-        let stopped = keyer.stop();
+        let stopped = keyer.stop(50);
         assert_eq!(
             stopped,
             KeyerOutput {
-                tone: Some(false),
+                tone: Some(ToneEdge { on: false, at: 50 }),
                 ..KeyerOutput::default()
             }
         );
         // The timer for the dah that was sounding comes round to nothing.
         assert_eq!(keyer.tick(180), KeyerOutput::default());
         assert_eq!(keyer.tick(10_000), KeyerOutput::default());
-        assert_eq!(keyer.stop(), KeyerOutput::default(), "already quiet");
+        assert_eq!(keyer.stop(10_000), KeyerOutput::default(), "already quiet");
     }
 
     #[test]
@@ -774,12 +864,12 @@ mod tests {
         let mut host = Host::new(KeyerMode::IambicA);
         host.press(Dit, 0);
         host.release(Dit, 30);
-        let out = host.keyer.set_mode(KeyerMode::Straight);
+        let out = host.keyer.set_mode(KeyerMode::Straight, 40);
         host.act(40, out);
         assert_eq!(host.keyer.mode(), KeyerMode::Straight);
         assert_eq!(host.heard(), ["0 on", "40 off"]);
         assert_eq!(
-            host.keyer.set_mode(KeyerMode::Straight),
+            host.keyer.set_mode(KeyerMode::Straight, 50),
             KeyerOutput::default()
         );
     }

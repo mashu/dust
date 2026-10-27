@@ -1544,23 +1544,23 @@ spacing and no fist variation.
   7 dB before the AGC). Hear a QSO plays your message at it too.
 - **The paddles' sidetone** does not follow it. In a run the paddles key
   letters into the fields and never transmit (§4.5), so their sidetone is
-  the sound of typing into the log, not your sending; it plays at the
-  Tone and volume card's volume floor in every mode, never under 0.15
-  (`live_tone`, `player.rs`), and a setting of Contest mode's would make
+  the sound of typing into the log, not your sending; it plays at a level
+  of its own in every mode, as a rig's sidetone does, half the limiter's
+  knee (0.35 of full scale, `SIDETONE_LEVEL`, `audio/tone.rs`), turned
+  down with the volume alone, and a setting of Contest mode's would make
   the same paddle sound different in another mode. Following it would
   also cost keying its sidetone: with your sending off the paddles would
-  key in silence, and few can send without hearing it. The cost of
-  leaving it is a level gap: at the default volume floor (0.7) the
-  paddles sound about 12 dB over your messages at -9 dB (0.18 of full
-  scale) and about 9 dB over an average caller before the AGC (0.25), and
-  the only way to turn them down is the volume floor, which moves the
-  callers' strengths too. A contester who keys the log with paddles hears
-  that gap; one who types, as at 235 QSOs an hour, does not. Left as it
-  is, it is a question for the user (§15.1): the choice would be to cap
-  the paddles' sidetone in a run at your sending's level, with a floor
-  that keeps it heard. Should keying with the paddles transmit one day
-  (§14, later), their sidetone in a run would be your sending, and should
-  follow it then.
+  key in silence, and few can send without hearing it. It once followed
+  the station strength floor, which set how far the stations stand over
+  the noise, not how loud anything plays; at the default floor (0.7) the
+  paddles sounded about 12 dB over your messages. At its own level they
+  sound about 6 dB over your messages at -9 dB (0.18 of full scale), 3 dB
+  over an average caller before the AGC (0.25) and some 6 dB under the
+  loudest station the receiver plays. A contester who keys the log with
+  paddles hears that gap; one who types, as at 235 QSOs an hour, does
+  not. Should keying with the paddles transmit one day (§14, later),
+  their sidetone in a run would be your sending, and should follow it
+  then.
 - **The receiver gate** (as built, 5a). A rig without full break-in mutes
   its receiver while it transmits, as MorseRunner's does unless its QSK is
   on (`Contest.pas:806-834`; `Qsk`, `Ini.pas:251`, off as it ships).
@@ -4263,7 +4263,7 @@ keying with the paddles, a contest level, and more contests.
 | The Runs card (4b) | under the Contest pill on Scores, which shows once a run is kept | a tab or a card of its own | the board's contest and its runs side by side, and no new place to look |
 | Space in Exchange (operator feedback) | back to Call where the exchange has one item to type, or what is typed reads whole, is nothing or ends in a space; else the space before the next item | a space, always | MorseRunner's and N1MM's space bar toggles the fields, so a call is put right with one key; a longer exchange still needs its spaces, and none is typed only to be dropped |
 | Your sending (operator feedback) | a level of its own, off to the loudest in dB, -9 dB to start | a fixed monitor level | painfully loud against weak callers; -9 dB is level with an average caller as heard through the AGC |
-| The paddles' sidetone (operator feedback; for the user to confirm) | the volume floor, in every mode | your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The cost: at the defaults the paddles sound about 12 dB over your messages and 9 dB over an average caller, turned down only with the volume floor, which moves the callers too (§5.3) |
+| The paddles' sidetone (operator feedback; audit 2026-10-27) | a level of its own, half the limiter's knee, in every mode, turned down with the volume | the volume floor; your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The volume floor set how far the stations stand over the noise, so it moved the paddles 7 to 13 dB with it; a rig's sidetone level is its own. At the defaults the paddles sound about 6 dB over your messages and 3 dB over an average caller (§5.3) |
 | Your call in TU (operator feedback) | every QSO, every third or never, in a pile-up, where the contest's TU leaves it; the callers call after every TU | every third, always | MorseRunner's station ID rate is a setting; its callers come on every TU, signed or not, so none waits for your call |
 | Callers' speed (2026-10-22) | each newcomer's drawn from the copy-speed belief within the Speed card's ranges, on as it ships, a switch of the contest's own; aiming at the Aim's share of characters right; QRS slowing from that speed | MorseRunner's keys alone; RufzXP's step up on a right call and down on a miss; group training's switch; a fixed contest target | the user asked for callers that speed up as calls are copied clean; Dust's speeds come from a posterior, so they move smoothly and as surely as the copies say; group training's switch stays off and its own; one aim for every adaptive feature, shown where it steers |
 | Presets and the callers' speed (2026-10-22) | leave the switch alone | each set it | a preset says how fast callers may come; how they are drawn within that is yours, and toggling it keeps the preset |

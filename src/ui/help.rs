@@ -476,7 +476,7 @@ pub fn envelope() -> Element {
             dt { "Rise time" }
             dd { "How long an element takes to reach full volume and to fade. Short is crisp but clicks at speed; long is soft but blurs fast dits." }
             dt { "Edge smoothing" }
-            dd { "The shape of that ramp: harder edges snap, smoother ones are gentler on the ear." }
+            dd { "The shape of that ramp: harder edges snap, smoother ones are gentler on the ear. Your paddle's sidetone opens and closes the same way, as a rig's follows its transmitter." }
             dt { "Dit · Dah · CQ" }
             dd { "Hear the envelope as it is now." }
         }

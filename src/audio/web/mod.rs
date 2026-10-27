@@ -27,9 +27,10 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use web_sys::{AudioContext, AudioContextState, GainNode};
 
+use super::ToneRequest;
 use super::band_queue::Reservation;
 use super::epoch::{Epoch, Ticket};
-use super::shape::{Gains, GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest};
+use super::shape::{Gains, GateSchedule, GateStep, SEND_RELEASE_SEC};
 use super::wait::{heard_ms, schedule_lead_sec, send_timing};
 use super::{METER_FRAME_SEC, MeterFrame, MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
 use crate::time::mono_ms;
@@ -391,9 +392,8 @@ impl MorseBackend for MorsePlayer {
     /// for the sidetone of the key in your hand — and around the volume, as
     /// it comes at the level it is heard at, but through the limiter: added
     /// after it, a squeeze on top of a crash squared off.
-    fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
+    fn set_live_tone(&mut self, tone: ToneRequest) {
         self.resume_from_gesture();
-        let tone = ToneRequest::new(on, frequency_hz, gain);
         let _ = self.sidetone.set(&self.ctx, &self.chain.sidetone_in, tone);
     }
 

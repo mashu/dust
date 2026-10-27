@@ -1345,6 +1345,22 @@ mod tests {
         assert_eq!(s.side_tone_center(), 400.0);
     }
 
+    /// The sidetone rises as the keying envelope does, but never over more
+    /// than a quarter of a dit at the paddles' speed, and never in less
+    /// than the envelope's shortest rise, whatever is set.
+    #[test]
+    fn the_sidetone_rises_with_the_envelope_within_a_quarter_dit() {
+        let mut s = TrainingSettings::default();
+        assert_eq!(s.sidetone_rise_sec(), 0.006);
+        s.band.steepness = 50.0;
+        s.playback.keyer_wpm = 20.0;
+        assert_eq!(s.sidetone_rise_sec(), 0.015, "a quarter of a 60 ms dit");
+        s.playback.keyer_wpm = WPM_MAX;
+        assert_eq!(s.sidetone_rise_sec(), 1.2 / WPM_MAX / 4.0);
+        s.band.steepness = f64::NAN;
+        assert_eq!(s.sidetone_rise_sec(), STEEPNESS_MIN_MS / 1_000.0);
+    }
+
     #[test]
     fn opening_a_fixed_side_tone_spreads_it_without_leaving_the_dial() {
         let mut s = TrainingSettings::default();

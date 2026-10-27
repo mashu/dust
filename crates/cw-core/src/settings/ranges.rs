@@ -2,8 +2,8 @@ use std::ops::RangeInclusive;
 
 use super::{
     MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting,
-    RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, TrainingSettings,
-    VOLUME_MAX, VOLUME_MIN,
+    RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
+    STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 use crate::band::full_volume_gain;
 
@@ -211,6 +211,19 @@ impl TrainingSettings {
     pub fn side_tone_center(&self) -> f64 {
         let range = self.side_tone_range();
         range.start() + (range.end() - range.start()) / 2.0
+    }
+
+    /// How long the paddle's sidetone takes to open and to close, in
+    /// seconds: the keying envelope's rise time, as a rig shapes its
+    /// sidetone with its transmitter's, but never more than a quarter of a
+    /// dit at the paddles' speed, so a fast fist's elements stay apart.
+    pub fn sidetone_rise_sec(&self) -> f64 {
+        let rise = finite_within(self.band.steepness, STEEPNESS_MIN_MS, STEEPNESS_MAX_MS);
+        let wpm = finite_within(self.playback.keyer_wpm, WPM_MIN, WPM_MAX);
+        let quarter_dit = crate::timing::dot_seconds(wpm) / 4.0;
+        (rise / 1_000.0)
+            .min(quarter_dit)
+            .max(STEEPNESS_MIN_MS / 1_000.0)
     }
 }
 

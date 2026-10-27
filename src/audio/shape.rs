@@ -1,10 +1,9 @@
 //! What both players share about how a change sounds: how long a stop, a
-//! band change and the receiver's gate take, the shapes they take, and the
-//! range the paddle's sidetone plays in. Kept in one place so the desktop
-//! and the browser cannot drift apart — values that had to match used to be
-//! copied by hand.
+//! band change and the receiver's gate take, and the shapes they take. Kept
+//! in one place so the desktop and the browser cannot drift apart — values
+//! that had to match used to be copied by hand.
 
-use cw_core::{SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, TrainingSettings};
+use cw_core::TrainingSettings;
 
 /// How long a stopped send takes to reach silence: kept with the plans, as
 /// a contest's machine splices a continuation onto a send no sooner than
@@ -194,39 +193,314 @@ pub fn fade_curve(points: usize, rising: bool, from: f64) -> Vec<f32> {
         .collect()
 }
 
-/// What the paddle's sidetone is asked to play, held to what either player
-/// will play: a pitch inside the side-tone range the settings allow, and a
-/// level no louder than full scale.
+/// How many straight lines a browser draws a whole edge of the sidetone's
+/// gate with: a fifth of a millisecond each at the default rise, close
+/// enough to the curve that what is left over is 60 dB down.
+#[cfg(any(feature = "web", test))]
+const SIDETONE_EDGE_LINES: f64 = 32.0;
+
+/// How long the key has to be quiet before the browser's sidetone takes a
+/// fresh reading of where the keyer's clock stands on the context's.
+#[cfg(any(feature = "web", test))]
+const SIDETONE_QUIET_SEC: f64 = 0.5;
+
+/// The most a burst of keying is ever played later than it was keyed for:
+/// for the context's own unevenness, or for the first edge coming late.
+/// Past this, an edge sounds as soon as it can.
+#[cfg(any(feature = "web", test))]
+const SIDETONE_LATE_MAX_SEC: f64 = 0.1;
+
+/// One edge of the browser's sidetone gate, as scheduled.
+#[cfg(any(feature = "web", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ToneRequest {
-    pub on: bool,
-    pub hz: f32,
-    pub gain: f32,
+struct GateEdge {
+    /// When it was keyed, on the keyer's clock, and when it plays, on the
+    /// context's.
+    keyed: f64,
+    at: f64,
+    /// How far up the gate stood as it began, which way it went, and how
+    /// long a whole edge takes.
+    from: f64,
+    on: bool,
+    rise: f64,
 }
 
-impl ToneRequest {
-    pub fn new(on: bool, frequency_hz: f64, gain: f64) -> Self {
-        let hz = if frequency_hz.is_finite() {
-            frequency_hz.clamp(SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ)
+#[cfg(any(feature = "web", test))]
+impl GateEdge {
+    /// How far up the gate stands at `t`.
+    fn progress_at(&self, t: f64) -> f64 {
+        let moved = ((t - self.at) / self.rise).max(0.0);
+        if self.on {
+            (self.from + moved).min(1.0)
         } else {
-            SIDE_TONE_MIN_HZ
-        };
-        let gain = if gain.is_finite() {
-            gain.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        Self {
-            on,
-            hz: hz as f32,
-            gain: gain as f32,
+            (self.from - moved).max(0.0)
         }
     }
+}
+
+/// The paddle's sidetone gate as a browser is told to play it.
+///
+/// A browser renders a device buffer at a time, so a gain set "now" changes
+/// at the start of whichever buffer comes next: every element and space a
+/// whole number of buffers long. What it plays exactly is what it is told
+/// ahead of time. So each edge goes on the context's clock a constant lead
+/// after the instant the keyer meant it for: the keyer's clock is read
+/// against the context's at the first edge after a quiet spell, and every
+/// edge of that burst is that far on. Should the context have run further
+/// ahead than the lead allows for, the rest of the burst moves along, and
+/// the bursts after allow for as much; a burst whose first edge comes late
+/// keeps its time from there; any other edge late sounds as soon as it
+/// can, the rest on time.
+///
+/// Each edge is drawn as straight lines along the keying envelope's edge,
+/// from wherever the gate stands as it begins, so one that turns the gate
+/// back mid-edge never steps.
+#[cfg(any(feature = "web", test))]
+#[derive(Debug, Default)]
+pub struct SidetoneGate {
+    /// Context seconds less keyer seconds, the lead included, for this burst.
+    offset: Option<f64>,
+    /// How much further ahead than the lead the context has been seen to
+    /// run, which each burst allows for.
+    spread: f64,
+    last: Option<GateEdge>,
+}
+
+#[cfg(any(feature = "web", test))]
+impl SidetoneGate {
+    /// The steps that play an edge keyed at `keyed` on the keyer's clock,
+    /// the gate opening if `on` or closing, and when they begin: what was
+    /// scheduled from then on is theirs to replace. None for an edge that
+    /// changes nothing, the gate going the way it is going already.
+    pub fn edge(
+        &mut self,
+        on: bool,
+        keyed: f64,
+        clocks: SidetoneClocks,
+        shape: ToneShape,
+    ) -> Option<(f64, Vec<GateStep>)> {
+        let SidetoneClocks {
+            now,
+            current,
+            soonest,
+            lead,
+        } = clocks;
+        if self.last.map_or(!on, |last| last.on == on) {
+            return None;
+        }
+        // A held key is not a quiet one: its edges keep the burst's reading.
+        let quiet = self
+            .last
+            .is_none_or(|last| !last.on && keyed - last.keyed >= SIDETONE_QUIET_SEC);
+        let mut offset = match self.offset {
+            Some(offset) if !quiet => offset,
+            _ => current - now + lead + self.spread,
+        };
+        // Where an edge keyed now would go, too soon: the context's clock
+        // has run further ahead of the keyer's than the lead allows for.
+        let short = soonest - (now + offset);
+        if short > 0.0 {
+            offset += short;
+            self.spread = (self.spread + short).min(SIDETONE_LATE_MAX_SEC);
+        }
+        let mut at = keyed + offset;
+        if at < soonest {
+            if quiet && soonest - at <= SIDETONE_LATE_MAX_SEC {
+                offset += soonest - at;
+            }
+            at = soonest;
+        }
+        self.offset = Some(offset);
+        if let Some(last) = self.last {
+            at = at.max(last.at);
+        }
+        let from = self.last.map_or(0.0, |last| last.progress_at(at));
+        let rise = shape.rise_sec.max(1e-4);
+        self.last = Some(GateEdge {
+            keyed,
+            at,
+            from,
+            on,
+            rise,
+        });
+        Some((at, edge_steps(from, on, at, rise, shape.smoothing)))
+    }
+}
+
+/// Where the keyer's clock and a browser's audio clock stand as an edge is
+/// keyed: the keyer's now; the context's now, and the soonest it will
+/// still play anything scheduled; and how far behind its instant an edge
+/// is meant to sound.
+#[cfg(any(feature = "web", test))]
+#[derive(Clone, Copy, Debug)]
+pub struct SidetoneClocks {
+    pub now: f64,
+    pub current: f64,
+    pub soonest: f64,
+    pub lead: f64,
+}
+
+/// How an edge of the sidetone's gate moves: how long a whole one takes,
+/// and its shape ([`cw_core::edge_gain`]).
+#[cfg(any(feature = "web", test))]
+#[derive(Clone, Copy, Debug)]
+pub struct ToneShape {
+    pub rise_sec: f64,
+    pub smoothing: f64,
+}
+
+/// The straight lines that draw the gate's edge from `from` of the way up,
+/// opening if `on` or closing, starting at `at`: the first one to where it
+/// stands then, which finishes whatever line was being drawn when the edge
+/// came.
+#[cfg(any(feature = "web", test))]
+fn edge_steps(from: f64, on: bool, at: f64, rise: f64, smoothing: f64) -> Vec<GateStep> {
+    let level = |p: f64| cw_core::edge_gain(p, smoothing) as f32;
+    let target = if on { 1.0 } else { 0.0 };
+    let distance = (target - from).abs();
+    let lines = (distance * SIDETONE_EDGE_LINES).ceil() as usize;
+    let mut steps = vec![GateStep::Ramp(level(from), at)];
+    for k in 1..=lines {
+        let through = k as f64 / lines as f64;
+        let p = from + (target - from) * through;
+        steps.push(GateStep::Ramp(level(p), at + distance * rise * through));
+    }
+    steps
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A browser's automation, as it plays a gain: the steps scheduled on
+    /// it, each edge's replacing whatever was to play from where it begins.
+    #[derive(Default)]
+    struct Automation(Vec<GateStep>);
+
+    impl Automation {
+        fn schedule(&mut self, (at, steps): (f64, Vec<GateStep>)) {
+            self.0.retain(|step| step.at() < at);
+            self.0.extend(steps);
+        }
+
+        /// The gain at `t`, shut before anything was scheduled.
+        fn at(&self, t: f64) -> f64 {
+            let mut steps = vec![GateStep::Set(0.0, f64::MIN)];
+            steps.extend_from_slice(&self.0);
+            gate_at(&steps, t)
+        }
+    }
+
+    const QUANTUM: f64 = 128.0 / 48_000.0;
+    const SHAPE: ToneShape = ToneShape {
+        rise_sec: 0.006,
+        smoothing: 0.75,
+    };
+
+    /// A browser rendering 10 ms at a time, its clock `ahead` of the
+    /// keyer's: where both stand at `now`, with a lead that allows for one
+    /// buffer.
+    fn clocks(now: f64, ahead: f64) -> SidetoneClocks {
+        let period = 0.01;
+        let current = ((now + ahead) / period).floor() * period;
+        SidetoneClocks {
+            now,
+            current,
+            soonest: current + QUANTUM,
+            lead: period + QUANTUM + 0.002,
+        }
+    }
+
+    /// Edges keyed 37 ms apart are played 37 ms apart, to the sample, though
+    /// the browser's clock moves 10 ms at a time and each edge reaches it a
+    /// little late; and none is ever played sooner than it can be.
+    #[test]
+    fn the_browser_sidetone_keeps_the_keyers_time() {
+        let mut gate = SidetoneGate::default();
+        let mut placed = Vec::new();
+        for k in 0..40 {
+            let keyed = 1.0 + f64::from(k) * 0.037;
+            let now = keyed + f64::from(k % 7) * 0.000_15;
+            let clocks = clocks(now, 0.3);
+            let (at, _) = gate
+                .edge(k % 2 == 0, keyed, clocks, SHAPE)
+                .expect("each edge turns the gate");
+            assert!(at >= clocks.soonest, "edge {k} too soon");
+            placed.push(at);
+        }
+        for pair in placed.windows(2) {
+            assert!((pair[1] - pair[0] - 0.037).abs() < 1e-9, "{placed:?}");
+        }
+    }
+
+    /// A burst whose first edge came late keeps its time from there; the
+    /// next, keyed on time after a quiet spell, is as late as the lead and
+    /// no later.
+    #[test]
+    fn a_late_burst_keeps_its_time_and_the_next_is_on_time() {
+        let mut gate = SidetoneGate::default();
+        let edge = |gate: &mut SidetoneGate, on: bool, keyed: f64, now: f64| {
+            gate.edge(on, keyed, clocks(now, 0.3), SHAPE)
+                .expect("an edge")
+                .0
+        };
+        let on = edge(&mut gate, true, 1.0, 1.04);
+        let off = edge(&mut gate, false, 1.06, 1.06);
+        assert!((off - on - 0.06).abs() < 1e-9, "{on} then {off}");
+        let on = edge(&mut gate, true, 3.0, 3.0);
+        let latest = clocks(3.0, 0.3);
+        assert!(
+            on - latest.current <= latest.lead + 1e-9,
+            "{on} against {latest:?}"
+        );
+    }
+
+    /// An edge that turns the gate back mid-edge goes on from where it
+    /// stands, never stepping, along the envelope's edge; a whole edge takes
+    /// the rise, ends where it was going, and never turns back.
+    #[test]
+    fn the_browser_sidetone_never_steps() {
+        let mut gate = SidetoneGate::default();
+        let mut gain = Automation::default();
+        let shape = ToneShape {
+            rise_sec: 0.008,
+            smoothing: 1.0,
+        };
+        let keyed = [(true, 1.0), (false, 1.002), (true, 1.003), (false, 1.2)];
+        for (on, keyed) in keyed {
+            gain.schedule(
+                gate.edge(on, keyed, clocks(keyed, 0.3), shape)
+                    .expect("an edge"),
+            );
+        }
+        assert!(
+            gate.edge(false, 1.3, clocks(1.3, 0.3), shape).is_none(),
+            "shut already"
+        );
+        let start = gain.0[0].at();
+        let mut last = 0.0;
+        let mut biggest = 0.0f64;
+        for i in 0..48_000 {
+            let value = gain.at(start - 0.01 + f64::from(i) / 48_000.0);
+            biggest = biggest.max((value - last).abs());
+            last = value;
+        }
+        assert!(biggest < 0.01, "a step of {biggest}");
+
+        let (at, steps) = SidetoneGate::default()
+            .edge(true, 1.0, clocks(1.0, 0.3), SHAPE)
+            .expect("an edge");
+        let levels: Vec<f32> = steps
+            .iter()
+            .map(|step| match step {
+                GateStep::Ramp(level, _) | GateStep::Set(level, _) => *level,
+            })
+            .collect();
+        assert!(levels.windows(2).all(|w| w[1] >= w[0]), "{levels:?}");
+        assert_eq!((levels[0], levels[levels.len() - 1]), (0.0, 1.0));
+        let took = steps.last().expect("steps").at() - at;
+        assert!((took - SHAPE.rise_sec).abs() < 1e-9, "{took}");
+    }
 
     #[test]
     fn the_release_shape_runs_from_full_to_silent() {
@@ -349,23 +623,5 @@ mod tests {
         gate.schedule(20.0, Some(1.0), 19.9);
         assert!(gate.0.len() <= 5, "{:?}", gate.0);
         assert_eq!(gate.at(19.95), 1.0);
-    }
-
-    /// One rule for the sidetone's range on both players.
-    #[test]
-    fn the_sidetone_is_held_to_the_side_tone_range() {
-        let tone = ToneRequest::new(true, 600.0, 0.4);
-        assert_eq!((tone.hz, tone.gain), (600.0, 0.4));
-        assert_eq!(
-            ToneRequest::new(true, 20.0, 2.0).hz,
-            SIDE_TONE_MIN_HZ as f32
-        );
-        assert_eq!(ToneRequest::new(true, 9e9, 2.0).gain, 1.0);
-        assert_eq!(
-            ToneRequest::new(true, 5_000.0, 0.1).hz,
-            SIDE_TONE_MAX_HZ as f32
-        );
-        let nonsense = ToneRequest::new(true, f64::NAN, f64::NAN);
-        assert!(nonsense.hz.is_finite() && nonsense.gain == 0.0);
     }
 }

@@ -13,11 +13,10 @@ use std::cell::{Cell, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
-use cw_core::band::SOFT_LIMIT_KNEE;
-use cw_core::{MonoMs, PlannedTransmission, SendStart, TrainingSettings, Transmission};
+use cw_core::{MonoMs, PlannedTransmission, SendStart, ToneEdge, TrainingSettings, Transmission};
 
-use crate::audio::{MeterFrame, MorseBackend, PlaybackOutcome, PlaybackWait};
-use crate::time::{POLL_MS, mono_ms, sleep_ms};
+use crate::audio::{MeterFrame, MorseBackend, PlaybackOutcome, PlaybackWait, ToneRequest};
+use crate::time::{POLL_MS, mono_ms, mono_secs_since, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
 /// without a sound card.
@@ -27,10 +26,6 @@ pub type BackendFactory = Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>>;
 /// gone. Each retry rebuilds the player, which is what picks up a device that
 /// was swapped, unplugged or suspended mid-send.
 const SEND_ATTEMPTS: u32 = 3;
-
-/// The quietest the live sidetone is played at full volume, whatever the
-/// floor of the station strength range: a paddle you cannot hear is no use.
-const SIDETONE_FLOOR: f64 = 0.15;
 
 /// How long the audio is quiet before the output is let sleep: long after
 /// the last fade has played out, and long enough that a screen left and
@@ -224,29 +219,30 @@ impl Player {
         self.with_backend(|backend| backend.take_meter(into));
     }
 
-    /// Gate the live sidetone for paddle practice. Opens the player if there
-    /// is none, so a squeeze outside training still has somewhere to go.
-    pub fn set_live_tone(&self, on: bool, settings: &TrainingSettings) {
+    /// Gate the live sidetone for paddle practice, at the edge the keyer
+    /// timed it for. Opens the player if there is none, so a squeeze
+    /// outside training still has somewhere to go.
+    pub fn set_live_tone(&self, edge: ToneEdge, settings: &TrainingSettings) {
         // A key that cannot sound has nowhere to report it mid-squeeze;
         // `ensure_live_sidetone` is where the reason is surfaced.
-        let _ = self.gate_live_tone(on, settings);
+        let tone = ToneRequest::keyed(edge.on, settings, mono_secs_since(edge.at));
+        let _ = self.gate_live_tone(tone);
     }
 
     /// Open the silent sidetone stream, so the first paddle squeeze is one
     /// audio buffer of lag rather than a stream start. Says why when it
     /// cannot.
     pub fn ensure_live_sidetone(&self, settings: &TrainingSettings) -> Result<(), AudioError> {
-        self.gate_live_tone(false, settings)
+        self.gate_live_tone(ToneRequest::keyed(false, settings, 0.0))
     }
 
-    fn gate_live_tone(&self, on: bool, settings: &TrainingSettings) -> Result<(), AudioError> {
-        let (hz, gain) = live_tone(settings);
+    fn gate_live_tone(&self, tone: ToneRequest) -> Result<(), AudioError> {
         {
             let mut backend = self.opened()?;
             backend.resume_from_gesture();
-            backend.set_live_tone(on, hz, gain);
+            backend.set_live_tone(tone);
         }
-        self.0.keyed.set(on);
+        self.0.keyed.set(tone.on);
         self.stir(self.0.held.get());
         Ok(())
     }
@@ -278,11 +274,10 @@ impl Player {
     /// Open the player if there is none, and set it up for `settings`, the
     /// sidetone silent.
     fn open(&self, settings: &TrainingSettings) -> Result<(), AudioError> {
-        let (hz, gain) = live_tone(settings);
         let mut backend = self.opened()?;
         backend.resume_from_gesture();
         backend.apply_band(settings);
-        backend.set_live_tone(false, hz, gain);
+        backend.set_live_tone(ToneRequest::keyed(false, settings, 0.0));
         self.0.keyed.set(false);
         Ok(())
     }
@@ -327,22 +322,6 @@ type Begin<'a> = dyn Fn(&mut dyn MorseBackend) -> Result<PlaybackWait, String> +
 
 fn unavailable() -> AudioError {
     AudioError::Device("Audio is unavailable.".into())
-}
-
-/// The live sidetone's pitch and level for `settings`: at full volume the
-/// floor of the station strength range, never below [`SIDETONE_FLOOR`] and
-/// never past where the limiter starts to bend, and turned down with the
-/// volume. The players add it after their volume, so this is the level it
-/// is heard at.
-fn live_tone(settings: &TrainingSettings) -> (f64, f64) {
-    let level = settings
-        .band
-        .volume_min
-        .clamp(SIDETONE_FLOOR, SOFT_LIMIT_KNEE);
-    (
-        settings.side_tone_center(),
-        level * settings.master_volume(),
-    )
 }
 
 /// The audio, held: a claim nothing has superseded yet.
@@ -639,22 +618,6 @@ mod tests {
             );
             assert!(!first.is_current());
         });
-    }
-
-    /// The volume turns the paddle's sidetone down with everything else:
-    /// at full volume it is the strength range's floor, as it always was,
-    /// though never past where the limiter starts to bend, and at half
-    /// volume half that, its own floor turned down too.
-    #[test]
-    fn the_volume_turns_the_sidetone_down_with_the_rest() {
-        let mut settings = TrainingSettings::default();
-        assert_eq!(live_tone(&settings).1, 0.7);
-        settings.band.volume_min = 1.0;
-        assert_eq!(live_tone(&settings).1, SOFT_LIMIT_KNEE);
-        settings.band.master_volume = 0.5;
-        assert_eq!(live_tone(&settings).1, SOFT_LIMIT_KNEE * 0.5);
-        settings.band.volume_min = 0.1;
-        assert_eq!(live_tone(&settings).1, SIDETONE_FLOOR * 0.5);
     }
 
     #[test]

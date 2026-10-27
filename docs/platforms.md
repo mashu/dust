@@ -58,6 +58,26 @@ The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
 Android devices will not open two at once.
 
+The paddle's sidetone keeps the keyer's time, not the audio callback's. An
+output renders a whole buffer at once, 10 ms on Windows and in most browsers
+and about 23 ms on iOS unless asked, so a gate it only read would open at the
+start of whichever buffer came next, and a 40 ms dit would play as 30 or 50.
+Instead the keyer stamps each edge with the instant it meant it for, and the
+player sounds every edge a constant lead later: the longest buffer the device
+has lately asked for, and 2 ms for the keyer's own timer to be late. Natively
+the callback places each edge on the frame it falls on
+([`src/audio/mixer/sidetone.rs`](../src/audio/mixer/sidetone.rs)); the browser
+is told each edge ahead of time on its own clock
+([`SidetoneGate`](../src/audio/shape.rs)). Every element and space then sounds
+as long as it was keyed, on every platform, at the cost of about half a buffer
+of lag on average. A burst of keying that reaches the output late — the
+squeeze that wakes a sleeping stream — keeps its own time, that much later,
+until the next quiet spell. iOS is asked for a 5 ms buffer: cpal cannot set
+one there, and the session's default would leave the sidetone some 25 ms
+behind the paddle. The sidetone opens and closes along the keying
+envelope's edge, as a rig shapes its sidetone with its transmitter's, at a
+level of its own, half the limiter's knee.
+
 That stream is closed once nothing has sounded for a second, away from
 Settings, so the phone (or a desktop's sound card and sound server) can rest
 with the app open on a screen or in the background. The next send, band or

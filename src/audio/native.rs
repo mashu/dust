@@ -15,8 +15,9 @@ use cpal::{BufferSize, FromSample, SampleFormat, SizedSample};
 use cw_core::band::{BandMixer, FilterDesign, Qsb};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
+use super::ToneRequest;
 use super::mixer::{BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept};
-use super::shape::{Gains, ToneRequest};
+use super::shape::Gains;
 use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming};
 use state::{PlayerState, ToneSignal};
 
@@ -73,6 +74,10 @@ struct OpenStream {
     failed: Arc<AtomicBool>,
 }
 
+/// The audio buffer iOS is asked for: as short as the desktop's.
+#[cfg(target_os = "ios")]
+const IO_BUFFER_SEC: f64 = 0.005;
+
 /// iOS starts an app with no audio session, which leaves output silent, tied to
 /// the ringer switch and interrupted by anything else on the device. Claiming
 /// the playback category before the first stream opens is what makes the Morse
@@ -87,9 +92,9 @@ fn claim_audio_session() {
         AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayback,
     };
 
-    // Safety: both calls are plain messages to the process-wide shared session,
-    // and every failure is reported through the returned NSError rather than a
-    // trap. Nothing here can leave the session half-configured.
+    // Safety: every call is a plain message to the process-wide shared
+    // session, and every failure is reported through the returned NSError
+    // rather than a trap. Nothing here can leave the session half-configured.
     unsafe {
         let session = AVAudioSession::sharedInstance();
         if let Some(playback) = AVAudioSessionCategoryPlayback {
@@ -98,6 +103,12 @@ fn claim_audio_session() {
                 AVAudioSessionCategoryOptions::MixWithOthers,
             );
         }
+        // cpal's iOS host takes no buffer size of its own, so a stream runs
+        // on the session's, about 23 ms unless asked: the paddle's sidetone
+        // that much and a buffer late. Asked for about 256 frames; iOS
+        // rounds it to what the hardware allows, and may give more while
+        // another app's audio is mixed in.
+        let _ = session.setPreferredIOBufferDuration_error(IO_BUFFER_SEC);
         let _ = session.setActive_error(true);
     }
 }
@@ -369,8 +380,8 @@ impl MorseBackend for MorsePlayer {
         self.with_mixer(|mixer, swept| mixer.sweep(swept));
     }
 
-    fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
-        self.sidetone.set(ToneRequest::new(on, frequency_hz, gain));
+    fn set_live_tone(&mut self, tone: ToneRequest) {
+        self.sidetone.set(tone);
         self.ensure_output_unless_refused();
     }
 
@@ -602,7 +613,7 @@ mod device_tests {
         player.sleep();
         assert!(player.stream.is_none());
         assert_eq!(metered(&mut player, 300), 0, "metered asleep");
-        player.set_live_tone(false, 600.0, 0.2);
+        player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
         assert!(player.stream.is_some(), "the sidetone opened it");
         assert!(metered(&mut player, 300) > 0, "woken, it plays");
         player.shutdown();
@@ -613,9 +624,9 @@ mod device_tests {
         let Some(mut player) = player() else {
             return;
         };
-        player.set_live_tone(false, 600.0, 0.2);
-        player.set_live_tone(true, 600.0, 0.2);
-        player.set_live_tone(false, 600.0, 0.2);
+        player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+        player.set_live_tone(ToneRequest::new(true, 600.0, 0.2));
+        player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
         player.shutdown();
     }
 }

@@ -768,7 +768,7 @@ fn the_output_stage_catches_rather_than_clips() {
 }
 
 /// The audio thread never waits: a callback that finds the UI holding the
-/// mixer goes without it for one buffer, and the paddle's sidetone, which
+/// mixer goes without it for that buffer, and the paddle's sidetone, which
 /// needs no lock, plays regardless. A lock poisoned elsewhere is still a
 /// good one.
 #[test]
@@ -789,11 +789,15 @@ fn the_stream_never_waits_for_the_mixer() {
         SR,
     );
 
-    control.set(crate::audio::shape::ToneRequest::new(true, 700.0, 0.2));
+    let mut clock = OnTime::now();
+    control.set(crate::audio::ToneRequest::new(true, 700.0, 0.2));
+    // A few buffers: the sidetone's edge is played a buffer late.
     let mut out = vec![0.0f32; 512];
     {
         let _held = mixer.lock().expect("mixer");
-        output.fill(&mut out, 0);
+        for chunk in out.chunks_mut(128) {
+            clock.fill(&mut output, chunk, 0);
+        }
     }
     let peak = out.iter().fold(0.0f32, |a, s| a.max(s.abs()));
     assert!(
@@ -810,12 +814,27 @@ fn the_stream_never_waits_for_the_mixer() {
     assert!(mixer.is_poisoned());
     control.off();
     let mut out = vec![0.0f32; SR as usize / 5];
-    output.fill(&mut out, 0);
+    clock.fill(&mut output, &mut out, 0);
     assert!(
         out.iter().skip(SR as usize / 50).any(|s| s.abs() > 0.05),
         "the send still plays through a poisoned lock"
     );
     assert!(!failed.load(Ordering::Acquire));
+}
+
+/// The stream's clock, for callbacks that come exactly on time however fast
+/// the test runs them: each the length of the one before after it.
+struct OnTime(f64);
+
+impl OnTime {
+    fn now() -> Self {
+        Self(clock_sec())
+    }
+
+    fn fill(&mut self, output: &mut Output, out: &mut [f32], latency: usize) {
+        output.fill_at(out, latency, self.0);
+        self.0 += out.len() as f64 / f64::from(SR);
+    }
 }
 
 /// The system's allocator, handed every call unchanged, which also counts
@@ -977,6 +996,7 @@ fn the_audio_callback_never_allocates_or_frees() {
         SR,
     );
     let mut rng = SplitMix64::new(11);
+    let mut clock = OnTime::now();
     // Made once, as the stream's own scratch buffer is.
     let mut buffer = vec![0.0f32; FRAMES.into_iter().max().unwrap_or(0)];
     let mut sends = Vec::new();
@@ -1007,11 +1027,7 @@ fn the_audio_callback_never_allocates_or_frees() {
         }
         if k % 3 == 0 {
             let pitch = 500.0 + 50.0 * (k % 7) as f64;
-            control.set(crate::audio::shape::ToneRequest::new(
-                k % 6 == 0,
-                pitch,
-                0.2,
-            ));
+            control.set(crate::audio::ToneRequest::new(k % 6 == 0, pitch, 0.2));
         }
 
         let frames = if burst {
@@ -1021,7 +1037,7 @@ fn the_audio_callback_never_allocates_or_frees() {
         };
         let out = &mut buffer[..frames];
         let held = (k % 50 == 7).then(|| mixer.lock().expect("mixer"));
-        let counts = counted(|| output.fill(out, LATENCY));
+        let counts = counted(|| clock.fill(&mut output, out, LATENCY));
         drop(held);
 
         if counts != Counts::default() && first.is_none() {
@@ -1207,10 +1223,15 @@ fn the_paddle_sidetone_is_never_muted() {
             mixer.set_band(Some(band(&settings, 6)), &mut swept);
             mixer.start(SendVoice::new(&gated, &receiver, None, SR, 0.0), &mut swept);
         }
-        control.set(crate::audio::shape::ToneRequest::new(sidetone, 700.0, 0.4));
+        control.set(crate::audio::ToneRequest::new(sidetone, 700.0, 0.4));
         let mut output = Output::new(mixer, control, Arc::new(AtomicBool::new(false)), SR);
+        // In buffers as a device asks for them: the sidetone's edge is a
+        // buffer late, and none of one rendered whole is left to it.
+        let mut clock = OnTime::now();
         let mut out = vec![0.0f32; SR as usize / 2];
-        output.fill(&mut out, 0);
+        for chunk in out.chunks_mut(256) {
+            clock.fill(&mut output, chunk, 0);
+        }
         out
     };
     // Once your message is heard, the look-ahead in.

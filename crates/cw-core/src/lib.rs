@@ -74,7 +74,9 @@ pub use endurance::{
 pub use heatmap::{
     HEATMAP_MONTHS, HeatmapCell, HeatmapColorMode, HeatmapGrid, HeatmapMonth, build_heatmap,
 };
-pub use keyer::{KeyedLetter, Keyer, KeyerMode, KeyerOutput, Paddle, paddle_from_bracket};
+pub use keyer::{
+    KeyedLetter, Keyer, KeyerMode, KeyerOutput, Paddle, ToneEdge, paddle_from_bracket,
+};
 pub use machine::{
     AUTO_CONFIRM_DELAY_MS, AnswerClose, GroupSource, SessionEffect, SessionEvent, SessionMachine,
 };
@@ -128,6 +130,6 @@ pub use streak::{StreakState, StreakStatus, compute_streak_status};
 pub use timing::{
     EnvelopePoint, EnvelopeShape, Interferer, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC,
     StationVoice, ToneEvent, Transmission, compute_after_group_gap_ms, compute_group_gap_for_wpm,
-    envelope_shape, plan_morse_playback_for, plan_transmission, resolve_station,
+    edge_gain, envelope_shape, plan_morse_playback_for, plan_transmission, resolve_station,
 };
 pub use words::{STARTER_WORDS, WORD_LIST_MAX, WordList, clean_word};

@@ -15,10 +15,12 @@ mod native;
 mod shape;
 #[cfg(feature = "silent-audio")]
 mod silent;
+mod tone;
 mod wait;
 #[cfg(feature = "web")]
 mod web;
 
+pub use tone::ToneRequest;
 pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, SendTiming, WaitFlags};
 
 use std::rc::Rc;
@@ -100,10 +102,12 @@ pub trait MorseBackend {
     /// resting. The browser's player sleeps by its own clock.
     fn sleep(&mut self) {}
 
-    /// Gate a live sidetone for paddle practice. Kept as a running stream so a
-    /// squeeze is one buffer of latency, not a stream start.
-    fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
-        let _ = (on, frequency_hz, gain);
+    /// Gate a live sidetone for paddle practice: on or off, its edge sounded
+    /// a constant lead after the instant the keyer meant it for, so each
+    /// element and space is as long as it was keyed. Kept as a running
+    /// stream so a squeeze is that lead late, not a stream start.
+    fn set_live_tone(&mut self, tone: ToneRequest) {
+        let _ = tone;
     }
 
     /// The receiver's meter frames since the last were taken, oldest first,
@@ -484,9 +488,12 @@ pub mod fake {
             self.recorder.sleeps.set(self.recorder.sleeps.get() + 1);
         }
 
-        fn set_live_tone(&mut self, on: bool, _frequency_hz: f64, _gain: f64) {
+        fn set_live_tone(&mut self, tone: ToneRequest) {
             self.recorder.asleep.set(false);
-            self.recorder.calls.borrow_mut().push(Call::LiveTone(on));
+            self.recorder
+                .calls
+                .borrow_mut()
+                .push(Call::LiveTone(tone.on));
         }
 
         fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {

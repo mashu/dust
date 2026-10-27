@@ -8,6 +8,17 @@ use crate::settings::TrainingSettings;
 /// not a two-point straight line at the speeds the trainer sends.
 pub const ENVELOPE_SAMPLE_RATE: u32 = 1200;
 
+/// How far up an edge of the keying envelope stands, `progress` of the way
+/// through it: a blend of a straight line and a raised cosine, `smoothing`
+/// of the way to the cosine. A rise reads it forwards and a fall backwards,
+/// and the paddle's sidetone opens and closes along it too, so your own
+/// key sounds as the stations and your messages do.
+pub fn edge_gain(progress: f64, smoothing: f64) -> f64 {
+    let p = progress.clamp(0.0, 1.0);
+    let cosine = (1.0 - (std::f64::consts::PI * p).cos()) / 2.0;
+    p * (1.0 - smoothing) + cosine * smoothing
+}
+
 pub fn build_envelope_curve(
     duration_sec: f64,
     rise_time_sec: f64,
@@ -38,10 +49,7 @@ pub fn build_envelope_curve(
     let mut idx = 0;
     for i in 0..attack_steps {
         let t = i as f64 / (attack_steps - 1) as f64;
-        let linear = t;
-        let cosine = (1.0 - (std::f64::consts::PI * t).cos()) / 2.0;
-        let blend = linear * (1.0 - smoothing) + cosine * smoothing;
-        curve[idx] = (target_gain * blend) as f32;
+        curve[idx] = (target_gain * edge_gain(t, smoothing)) as f32;
         idx += 1;
     }
     for _ in 0..sustain_steps {
@@ -50,11 +58,8 @@ pub fn build_envelope_curve(
     }
     for i in 0..decay_steps {
         let t = i as f64 / (decay_steps - 1) as f64;
-        let linear = 1.0 - t;
-        let cosine = (1.0 + (std::f64::consts::PI * t).cos()) / 2.0;
-        let blend = linear * (1.0 - smoothing) + cosine * smoothing;
         if idx < curve.len() {
-            curve[idx] = (target_gain * blend) as f32;
+            curve[idx] = (target_gain * edge_gain(1.0 - t, smoothing)) as f32;
             idx += 1;
         }
     }

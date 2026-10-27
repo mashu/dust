@@ -14,7 +14,7 @@ mod pileup;
 mod plan;
 mod station;
 
-pub use envelope::{EnvelopePoint, EnvelopeShape, envelope_shape};
+pub use envelope::{EnvelopePoint, EnvelopeShape, edge_gain, envelope_shape};
 #[cfg(test)]
 pub(crate) use pileup::resolve_pileup;
 pub use pileup::{Interferer, Transmission};

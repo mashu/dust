@@ -10,7 +10,7 @@
 use std::rc::Rc;
 
 use cw_core::{
-    KeyedLetter, Keyer, KeyerMode, KeyerOutput, MonoMs, Paddle, TrainingSettings,
+    KeyedLetter, Keyer, KeyerMode, KeyerOutput, MonoMs, Paddle, ToneEdge, TrainingSettings,
     paddle_from_bracket,
 };
 use dioxus::prelude::*;
@@ -198,7 +198,7 @@ pub fn use_paddle_keys(
 
     let mode = use_memo(move || settings.read().playback.keyer_mode);
     use_effect(move || {
-        let out = keys.keyer.write().set_mode(mode());
+        let out = keys.keyer.write().set_mode(mode(), mono_ms());
         keys.act(out);
     });
 
@@ -325,7 +325,7 @@ impl PaddleKeys {
 
     /// Drop whatever is half keyed and fall silent: a new group, a new screen.
     pub fn stop(mut self) {
-        let out = self.keyer.write().stop();
+        let out = self.keyer.write().stop(mono_ms());
         self.act(out);
     }
 
@@ -413,8 +413,8 @@ impl PaddleKeys {
     }
 
     fn act(self, out: KeyerOutput) {
-        if let Some(on) = out.tone {
-            self.sound(on);
+        if let Some(edge) = out.tone {
+            self.sound(edge);
         }
         if let Some(keyed) = out.letter {
             self.deliver(keyed);
@@ -425,7 +425,7 @@ impl PaddleKeys {
         self.arm(out.wake_at);
     }
 
-    fn sound(self, on: bool) {
+    fn sound(self, edge: ToneEdge) {
         // Only when the sidetone was there at the start of the squeeze. The
         // player opens itself on demand, so asking a missing device for every
         // element of it would be a device search twice an element. Nothing
@@ -433,7 +433,7 @@ impl PaddleKeys {
         if self.sidetone_error.peek().is_some() {
             return;
         }
-        self.app.read().set_live_tone(on, &self.settings.peek());
+        self.app.read().set_live_tone(edge, &self.settings.peek());
     }
 
     fn deliver(mut self, keyed: KeyedLetter) {

@@ -85,9 +85,9 @@ impl AppState {
         }
     }
 
-    /// Gate a live sidetone for paddle practice.
-    pub fn set_live_tone(&self, on: bool, settings: &TrainingSettings) {
-        self.player.set_live_tone(on, settings);
+    /// Gate a live sidetone for paddle practice, at the keyer's edge.
+    pub fn set_live_tone(&self, edge: cw_core::ToneEdge, settings: &TrainingSettings) {
+        self.player.set_live_tone(edge, settings);
     }
 
     /// Open the sidetone stream ahead of the first squeeze.

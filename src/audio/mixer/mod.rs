@@ -34,6 +34,8 @@ pub use band::BandVoice;
 pub use meter::Meter;
 use meter::Metering;
 pub use send::{SendSample, SendVoice};
+#[cfg(test)]
+use sidetone::clock_sec;
 pub use sidetone::{Sidetone, SidetoneControl};
 
 /// How many bands may be fading out at once. One band hands over to the next
@@ -360,6 +362,12 @@ impl Output {
     /// ever does to swap a band or a send in — goes without the mixer for
     /// that one buffer; the sidetone needs no lock and plays regardless.
     pub fn fill(&mut self, out: &mut [f32], latency: usize) {
+        self.fill_at(out, latency, sidetone::clock_sec());
+    }
+
+    /// [`Self::fill`], for a callback that came at `now` on the sidetone's
+    /// clock.
+    pub fn fill_at(&mut self, out: &mut [f32], latency: usize, now: f64) {
         out.fill(0.0);
         if !self.abandoned {
             let guard = match self.mixer.try_lock() {
@@ -379,7 +387,7 @@ impl Output {
                 out.fill(0.0);
             }
         }
-        self.sidetone.add_to(out, &self.control);
+        self.sidetone.add_to(out, &self.control, now);
         for sample in out {
             *sample = finish(*sample);
         }
