@@ -385,7 +385,10 @@ impl Default for PlaybackSettings {
             group_timeout: 10.0,
             group_pause_sec: 0.0,
             countdown_sec: 3,
-            lock_input_during_group_playback: true,
+            // Typed along, a group's characters are each timed from their
+            // sound (docs/recognition.md); locked, none longer than one can
+            // be. Who chose either keeps it: only a new install starts here.
+            lock_input_during_group_playback: false,
             paddle_swap: false,
             keyer_mode: KeyerMode::IambicB,
             keyer_wpm: 20.0,
@@ -970,7 +973,7 @@ mod tests {
     fn missing_json_fields_use_training_defaults() {
         let s: TrainingSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.curriculum.mixed_letters_percent, 70);
-        assert!(s.playback.lock_input_during_group_playback);
+        assert!(!s.playback.lock_input_during_group_playback);
         assert!(s.playback.link_char_to_effective);
         assert_eq!(s.playback.group_timeout, 10.0);
         assert_eq!(s.playback.group_pause_sec, 0.0);
@@ -987,7 +990,7 @@ mod tests {
         let koch: TrainingSettings = serde_json::from_str(r#"{"charSetMode":"koch"}"#).unwrap();
         assert_eq!(koch.curriculum.char_set_mode, CharSetMode::Koch);
         assert_eq!(koch.curriculum.mixed_letters_percent, 70);
-        assert!(koch.playback.lock_input_during_group_playback);
+        assert!(!koch.playback.lock_input_during_group_playback);
     }
 
     #[test]

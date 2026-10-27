@@ -398,7 +398,7 @@ pub(crate) mod tests {
         p.group_timeout = 30.0;
         p.group_pause_sec = 6.0;
         p.countdown_sec = 7;
-        p.lock_input_during_group_playback = false;
+        p.lock_input_during_group_playback = true;
         p.paddle_swap = true;
         p.keyer_mode = cw_core::KeyerMode::Ultimatic;
         p.keyer_wpm = 32.0;
