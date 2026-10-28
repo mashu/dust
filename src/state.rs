@@ -163,35 +163,45 @@ pub struct AppCtx {
     app: CopyValue<AppState>,
 }
 
+/// Make what `make` makes in the root scope, above the app's own, so that
+/// it is owned there. What lasts as long as the app belongs there: the tasks
+/// that outlive a screen run there too (`spawn_forever`), and a debug build
+/// warns of every read or write of a value above the scope that owns it.
+pub fn in_root<T>(make: impl FnOnce() -> T) -> T {
+    dioxus::core::Runtime::current().in_scope(ScopeId::ROOT, make)
+}
+
 impl AppCtx {
-    /// A fresh app around `app`, starting from what was stored. Made in the
-    /// scope that owns the app, as everything in it lives as long as that.
+    /// A fresh app around `app`, starting from what was stored. Everything
+    /// in it lives as long as the app, so it is made in the root scope.
     pub fn new(app: AppState, settings: TrainingSettings, sessions: Vec<SessionResult>) -> Self {
-        let last_backup = app.store.last_backup();
-        let stored_settings = CopyValue::new(settings.clone().clamp());
-        Self {
-            screen: Signal::new(Screen::Home),
-            settings: Signal::new(settings),
-            sessions: Signal::new(sessions),
-            runtime: Signal::new(None),
-            contest: Signal::new(None),
-            announced: Signal::new(None),
-            result: Signal::new(None),
-            auto_message: Signal::new(None),
-            toasts: Toasts::new(),
-            preview: Signal::new(Preview::Idle),
-            stream_heard: Signal::new(Vec::new()),
-            dialogue: Signal::new(None),
-            answer: AnswerOutbox::new(),
-            entry: ContestEntry::new(),
-            tour: Signal::new(None),
-            last_backup: Signal::new(last_backup),
-            notices: Signal::new(Vec::new()),
-            trash: Signal::new(Vec::new()),
-            before_restore: Signal::new(None),
-            stored_settings,
-            app: CopyValue::new(app),
-        }
+        in_root(move || {
+            let last_backup = app.store.last_backup();
+            let stored_settings = CopyValue::new(settings.clone().clamp());
+            Self {
+                screen: Signal::new(Screen::Home),
+                settings: Signal::new(settings),
+                sessions: Signal::new(sessions),
+                runtime: Signal::new(None),
+                contest: Signal::new(None),
+                announced: Signal::new(None),
+                result: Signal::new(None),
+                auto_message: Signal::new(None),
+                toasts: Toasts::new(),
+                preview: Signal::new(Preview::Idle),
+                stream_heard: Signal::new(Vec::new()),
+                dialogue: Signal::new(None),
+                answer: AnswerOutbox::new(),
+                entry: ContestEntry::new(),
+                tour: Signal::new(None),
+                last_backup: Signal::new(last_backup),
+                notices: Signal::new(Vec::new()),
+                trash: Signal::new(Vec::new()),
+                before_restore: Signal::new(None),
+                stored_settings,
+                app: CopyValue::new(app),
+            }
+        })
     }
 
     pub fn app(self) -> AppState {

@@ -16,7 +16,7 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::page_hidden::{PADDLES_HIDDEN, use_page_hidden};
-use crate::state::{AppState, Screen};
+use crate::state::{AppState, Screen, in_root};
 use crate::time::mono_ms;
 #[cfg(not(all(feature = "desktop", not(test))))]
 use crate::time::sleep_ms;
@@ -115,7 +115,7 @@ fn paddle_for_key(key: &str, code: &str, shortcut: bool, swap: bool) -> Option<P
 /// what a word space keyed does there.
 #[derive(Clone, Copy)]
 struct AnswerBox {
-    open: CopyValue<bool>,
+    open: bool,
     letter: Callback<BoxLetter>,
     space: Option<Callback>,
 }
@@ -150,18 +150,21 @@ pub fn use_paddle_keys(
     screen: Signal<Screen>,
     app: Rc<AppState>,
 ) -> PaddleKeys {
+    // In the root scope, where the keyer's timer runs.
     let mut keys = use_context_provider(|| {
-        let playback = &settings.peek().playback;
-        PaddleKeys {
-            keyer: CopyValue::new(Keyer::new(playback.keyer_mode, playback.keyer_wpm)),
-            armed: CopyValue::new(None),
-            answer: CopyValue::new(None),
-            app: CopyValue::new(app),
-            settings,
-            screen,
-            heard: Signal::new(String::new()),
-            sidetone_error: Signal::new(None),
-        }
+        in_root(|| {
+            let playback = &settings.peek().playback;
+            PaddleKeys {
+                keyer: CopyValue::new(Keyer::new(playback.keyer_mode, playback.keyer_wpm)),
+                armed: CopyValue::new(None),
+                answer: CopyValue::new(None),
+                app: CopyValue::new(app),
+                settings,
+                screen,
+                heard: Signal::new(String::new()),
+                sidetone_error: Signal::new(None),
+            }
+        })
     });
 
     let mode = use_memo(move || settings.read().playback.keyer_mode);
@@ -327,16 +330,22 @@ impl PaddleKeys {
 
     /// Lend the keyer the calling screen's box, while it is mounted.
     fn use_lent(self, open: bool, letter: Callback<BoxLetter>, space: Option<Callback>) {
-        let mut gate = use_hook(|| CopyValue::new(open));
-        gate.set(open);
         let mut answer = self.answer;
         use_hook(move || {
             answer.set(Some(AnswerBox {
-                open: gate,
+                open,
                 letter,
                 space,
             }));
         });
+        // Whether it is taking letters now, said into the box itself rather
+        // than a value of this screen's: the keyer reads it from its own
+        // timer, and from the shell, neither of which is under this screen.
+        if let Some(held) = answer.write().as_mut()
+            && held.letter == letter
+        {
+            held.open = open;
+        }
         use_drop(move || {
             // Only its own: a box that has already taken over stays.
             if answer.peek().is_some_and(|held| held.letter == letter) {
@@ -353,7 +362,7 @@ impl PaddleKeys {
         let Some(answer) = *self.answer.peek() else {
             return false;
         };
-        if !*answer.open.peek() {
+        if !answer.open {
             return false;
         }
         answer.letter.call((letter, None));
@@ -362,7 +371,7 @@ impl PaddleKeys {
 
     fn taking_paddles(self) -> bool {
         match *self.answer.peek() {
-            Some(answer) => *answer.open.peek(),
+            Some(answer) => answer.open,
             // Training keys into its answer box or not at all.
             None => *self.screen.peek() != Screen::Training,
         }
@@ -408,7 +417,7 @@ impl PaddleKeys {
 
     fn deliver(mut self, keyed: KeyedLetter) {
         if let Some(answer) = *self.answer.peek() {
-            if *answer.open.peek() {
+            if answer.open {
                 answer
                     .letter
                     .call((keyed.letter, Some(MonoMs(keyed.began))));
@@ -434,7 +443,7 @@ impl PaddleKeys {
             space: Some(space),
             ..
         }) = *self.answer.peek()
-            && *open.peek()
+            && open
         {
             space.call(());
         }
