@@ -57,6 +57,7 @@
 //! they send encoded once, when the band is built.
 
 use std::f64::consts::{PI, SQRT_2, TAU};
+use std::sync::Arc;
 
 use super::calibration::{REFERENCE_BANDWIDTH_HZ, SIGNAL_RMS, reference_floor_rms};
 use super::dsp::{db_to_gain, finite_or, gain_to_db};
@@ -247,7 +248,9 @@ pub struct BandActivity {
     unit: f64,
     level_median_db: f64,
     wpm_median: f64,
-    /// Station arrivals per second, across the whole spawn window.
+    /// Station arrivals per kHz of band per minute, and per second across
+    /// the whole spawn window.
+    arrivals_per_khz_minute: f64,
     station_rate: f64,
     chirp_rate: f64,
     next_station: u64,
@@ -257,7 +260,9 @@ pub struct BandActivity {
     /// many of those a pile-up is using right now.
     cap: usize,
     reserved: usize,
-    traffic: Traffic,
+    /// Written once and only read, so a copy of a band shares it: copying a
+    /// band on the air allocates nothing.
+    traffic: Arc<Traffic>,
     emitters: [Emitter; MAX_EMITTERS],
 }
 
@@ -307,7 +312,7 @@ impl TrafficProfile {
 /// Where the band is listened to from: which pitches stations may land on,
 /// and the station they have to keep clear of.
 #[derive(Clone, Copy, Debug)]
-struct Tuning {
+pub(super) struct Tuning {
     low_hz: f64,
     high_hz: f64,
     guard_low_hz: f64,
@@ -326,7 +331,7 @@ impl Tuning {
     /// The band `band` describes, listened to through `receiver`: the filter
     /// as it is really built, at least wide enough for the side-tone range,
     /// and with the skirts its shape gives it.
-    fn new(band: &BandSettings, receiver: &FilterDesign) -> Self {
+    pub(super) fn new(band: &BandSettings, receiver: &FilterDesign) -> Self {
         let defaults = BandSettings::default();
         let tone_min = finite_or(band.side_tone_min, defaults.side_tone_min).max(100.0);
         let tone_max = finite_or(band.side_tone_max, defaults.side_tone_max).max(tone_min);
@@ -415,6 +420,7 @@ impl BandActivity {
             unit: SQRT_2 * reference_floor_rms() * db_to_gain(-bin_over_reference_db()),
             level_median_db: LEVEL_MEDIAN_DB + CONTEST_LEVEL_RISE_DB * contest,
             wpm_median: WPM_MEDIAN + CONTEST_WPM_RISE * contest,
+            arrivals_per_khz_minute: profile.arrivals_per_khz_minute.max(0.0),
             station_rate: profile.arrivals_per_khz_minute.max(0.0) * tuning.width_khz() / 60.0,
             chirp_rate: CHIRPS_PER_KHZ_MINUTE * tuning.width_khz() / 60.0,
             next_station: u64::MAX,
@@ -422,17 +428,27 @@ impl BandActivity {
             control_left: 0,
             cap: profile.cap,
             reserved: 0,
-            traffic: Traffic::default(),
+            traffic: Arc::default(),
             emitters: [Emitter::default(); MAX_EMITTERS],
             random: Draw::new(seed ^ STATIONS_SEED),
         };
         let contest_share = CONTEST_SHARE.0 + (CONTEST_SHARE.1 - CONTEST_SHARE.0) * contest;
-        band.traffic = Traffic::write(contest_share, &mut band.random);
+        band.traffic = Arc::new(Traffic::write(contest_share, &mut band.random));
         band.light_carriers();
         band.populate();
         band.next_station = band.random.wait(band.station_rate, fs);
         band.next_chirp = band.random.wait(band.chirp_rate, fs);
         band
+    }
+
+    /// The same band listened to from `tuning`: another receiver turned to
+    /// it. Who is on the air stays on, where they are, as loud as they are;
+    /// the stations that come along from here keep to the new receiver's
+    /// earshot and guard, and arrive at the rate its window takes in.
+    pub(super) fn retune(&mut self, tuning: Tuning) {
+        self.tuning = tuning;
+        self.station_rate = self.arrivals_per_khz_minute * tuning.width_khz() / 60.0;
+        self.chirp_rate = CHIRPS_PER_KHZ_MINUTE * tuning.width_khz() / 60.0;
     }
 
     /// A pile-up is calling with `callers` stations besides yours: they come

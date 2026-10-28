@@ -401,8 +401,10 @@ impl Agc {
         self.power = previous.power;
         self.peak = previous.peak;
         self.last_peak = previous.last_peak;
+        self.peak_left = previous.peak_left.clamp(1, self.peak_hold);
         self.crest = previous.crest;
         self.last_crest = previous.last_crest;
+        self.crest_left = previous.crest_left.clamp(1, self.crest_hold);
         self.above = previous.above;
         self.hang_left = previous.hang_left.min(self.hang);
         self.held = previous.held;

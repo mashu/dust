@@ -1,9 +1,9 @@
 //! The receiver's band, as the audio callback plays it, fading in and out.
 
 use cw_core::TrainingSettings;
-use cw_core::band::{BandMixer, Received};
+use cw_core::band::{BandMixer, Received, Receiver};
 
-use crate::audio::shape::{BAND_FADE_SEC, fade_in_gain};
+use crate::audio::shape::{BAND_FADE_SEC, fade_in_gain, release_gain};
 
 /// How long a new band runs before it is heard, so that it comes in warm:
 /// the narrowest filter has filled with noise to a tenth of a decibel by
@@ -14,12 +14,45 @@ const PRE_ROLL_SEC: f64 = 0.03;
 /// Where a band is in its life on the air.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Fade {
+    /// Running unheard, in step with the band it is to take over from,
+    /// until it is warm: samples left.
+    Warming(usize),
     /// Coming in: samples into its fade.
     In(usize),
     Steady,
+    /// Heard as it is while the one taking over from it warms: samples left.
+    Holding(usize),
     /// On its way out: samples into its fade.
     Out(usize),
     Gone,
+}
+
+/// How two bands cross: unrelated noises, whose powers add, or one band
+/// through two receivers, the same noise and stations twice, whose
+/// amplitudes do. Each way, gains that keep the hiss level through it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Crossfade {
+    EqualPower,
+    Complementary,
+}
+
+impl Crossfade {
+    /// The gain `progress` of the way in.
+    fn rise(self, progress: f64) -> f64 {
+        match self {
+            Self::EqualPower => fade_in_gain(progress),
+            Self::Complementary => 1.0 - release_gain(progress),
+        }
+    }
+
+    /// How far in a band is that stands at `gain`.
+    fn progress_at(self, gain: f64) -> f64 {
+        let gain = gain.clamp(0.0, 1.0);
+        match self {
+            Self::EqualPower => gain.asin() / std::f64::consts::FRAC_PI_2,
+            Self::Complementary => (1.0 - 2.0 * gain).acos() / std::f64::consts::PI,
+        }
+    }
 }
 
 /// A gain moving to where it was last asked to be over a fixed time, a
@@ -87,7 +120,9 @@ impl Glide {
 pub struct BandVoice {
     mixer: BandMixer,
     fade: Fade,
+    crossfade: Crossfade,
     fade_len: usize,
+    warm_len: usize,
     af: Glide,
 }
 
@@ -112,15 +147,46 @@ impl BandVoice {
     /// work the audio callback should not do.
     pub fn new(mut mixer: BandMixer, sample_rate: u32) -> Self {
         let sr = f64::from(sample_rate.max(1));
-        for _ in 0..(PRE_ROLL_SEC * sr) as usize {
+        let warm_len = (PRE_ROLL_SEC * sr) as usize;
+        for _ in 0..warm_len {
             mixer.next(0.0);
         }
         Self {
             mixer,
             fade: Fade::In(0),
+            crossfade: Crossfade::EqualPower,
             fade_len: ((BAND_FADE_SEC * sr).round() as usize).max(1),
+            warm_len,
             af: Glide::at(1.0),
         }
+    }
+
+    /// This band, carried on through `receiver` at AF gain `af`: warming
+    /// unheard in step with this one, on the same noise and stations, then
+    /// coming in as this one goes ([`Self::give_way`]). Allocates nothing,
+    /// so the audio thread may make it.
+    pub fn retuned(&self, receiver: Receiver, af: f64) -> Self {
+        Self {
+            mixer: self.mixer.retuned(receiver),
+            fade: Fade::Warming(self.warm_len),
+            crossfade: Crossfade::Complementary,
+            fade_len: self.fade_len,
+            warm_len: self.warm_len,
+            af: Glide::at(af),
+        }
+    }
+
+    /// Give way to a copy of itself through another receiver: held as it is
+    /// while that one warms, then fading as it comes in, the two gains
+    /// summing to one, as the same band twice does.
+    pub fn give_way(&mut self) {
+        self.crossfade = Crossfade::Complementary;
+        self.fade = Fade::Holding(self.warm_len);
+    }
+
+    /// Whether it is on the air at full, coming and going neither.
+    pub fn is_steady(&self) -> bool {
+        self.fade == Fade::Steady
     }
 
     /// The receiver `settings` run, seeded with `seed`, if they run one: a
@@ -156,14 +222,24 @@ impl BandVoice {
         self.mixer.hear_ahead(send);
     }
 
-    /// Start fading out, from wherever its fade has got to: a band replaced
-    /// while it was still coming in goes from the level it had reached.
+    /// Start fading out under a band of its own, from wherever its fade has
+    /// got to: one replaced while it was still coming in goes from the level
+    /// it had reached, and one still warming is never heard at all.
     pub fn fade_out(&mut self) {
-        self.fade = match self.fade {
-            Fade::In(done) => Fade::Out(self.fade_len.saturating_sub(done)),
-            Fade::Steady => Fade::Out(0),
-            other => other,
+        let len = self.fade_len as f64;
+        let level = match self.fade {
+            Fade::Warming(_) | Fade::Gone => {
+                self.fade = Fade::Gone;
+                return;
+            }
+            Fade::In(done) => self.crossfade.rise(done as f64 / len),
+            Fade::Steady | Fade::Holding(_) => 1.0,
+            Fade::Out(done) => self.crossfade.rise(1.0 - done as f64 / len),
         };
+        // The band coming in is another noise: their powers add.
+        self.crossfade = Crossfade::EqualPower;
+        let through = self.crossfade.progress_at(level);
+        self.fade = Fade::Out(((1.0 - through) * len).round() as usize);
     }
 
     pub fn is_gone(&self) -> bool {
@@ -178,6 +254,7 @@ impl BandVoice {
     /// `rf`.
     pub fn next(&mut self, send: f64, rf: f64) -> Played {
         let progress = |done: usize| done as f64 / self.fade_len as f64;
+        let rise = |progress: f64| self.crossfade.rise(progress);
         let (weight, fade) = match self.fade {
             Fade::Gone => {
                 return Played {
@@ -188,11 +265,15 @@ impl BandVoice {
                     input: send * rf,
                 };
             }
+            Fade::Warming(0) => (0.0, Fade::In(0)),
+            Fade::Warming(left) => (0.0, Fade::Warming(left - 1)),
             Fade::Steady => (1.0, Fade::Steady),
             Fade::In(done) if done >= self.fade_len => (1.0, Fade::Steady),
-            Fade::In(done) => (fade_in_gain(progress(done)), Fade::In(done + 1)),
+            Fade::In(done) => (rise(progress(done)), Fade::In(done + 1)),
+            Fade::Holding(0) => (1.0, Fade::Out(0)),
+            Fade::Holding(left) => (1.0, Fade::Holding(left - 1)),
             Fade::Out(done) if done >= self.fade_len => (0.0, Fade::Gone),
-            Fade::Out(done) => (fade_in_gain(1.0 - progress(done)), Fade::Out(done + 1)),
+            Fade::Out(done) => (rise(1.0 - progress(done)), Fade::Out(done + 1)),
         };
         self.fade = fade;
         self.mixer.set_rf_gain(rf);

@@ -6,7 +6,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
-use cw_core::band::{BandMixer, FilterDesign, Qsb, SOFT_LIMIT_KNEE, agc_lookahead_samples};
+use cw_core::band::{
+    BandMixer, FilterDesign, Qsb, Receiver, SOFT_LIMIT_KNEE, agc_lookahead_samples,
+};
 use cw_core::{
     CALLSIGN_TIER_MAX, FILTER_WIDTH_MIN, MONITOR_LEVEL, PlannedTransmission, STATIONS_MAX, Segment,
     Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, Turn, VOLUME_MAX, VOLUME_MIN,
@@ -1180,6 +1182,17 @@ fn the_audio_callback_never_allocates_or_frees() {
             let next = (cycle != 130).then(|| band(&settings, k as u64));
             on_ui(&mixer, |mixer, swept| mixer.set_band(next, swept));
         }
+        // And the receiver's controls turned, the band on the air retuned
+        // under them, the retune made on the audio thread.
+        if burst || (20..70).contains(&cycle) {
+            let mut turned = settings.clone();
+            turned.band.filter_width_hz = 200.0 + 50.0 * (k % 9) as f64;
+            turned.band.agc_enabled = k % 4 != 0;
+            let receiver = Receiver::new(SR, &turned);
+            on_ui(&mixer, |mixer, swept| {
+                let _ = mixer.retune_band(receiver, Gains::UNITY, swept);
+            });
+        }
         if burst || (cycle < 100 && cycle % 8 == 0) {
             let at_sec = played as f64 / f64::from(SR);
             let voice = pile_up(&settings, &mut rng, at_sec, sends.len() % 2 == 0);
@@ -1875,4 +1888,129 @@ fn fading_is_heard_under_the_agc_out_of_the_box() {
     let (station, under) = (range(|s| s.0), range(|s| s.1));
     assert!(station < 4.5, "the station moved {station:.1} dB");
     assert!(under >= 9.0, "the hiss under it moved {under:.1} dB");
+}
+
+/// The hiss in 5 ms windows over a retune's handover, in decibels against
+/// the hiss before it, averaged over many retunes from `from` to `to`, with
+/// one back between each; and how far the retune moved the hiss.
+fn hiss_across_retunes(from: &TrainingSettings, to: &TrainingSettings) -> (f64, Vec<f64>) {
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.set_band(Some(band(from, 1)), &mut swept);
+    render(&mut mixer, SR as usize / 2);
+    let window = SR as usize / 200;
+    let windows = 16;
+    let (mut before, mut across, mut after) = (0.0, vec![0.0; windows], 0.0);
+    let retunes = 300;
+    for _ in 0..retunes {
+        before += power(&render(&mut mixer, window * windows));
+        let mut swept = Swept::new();
+        assert!(mixer.retune_band(Receiver::new(SR, to), Gains::UNITY, &mut swept));
+        for (w, chunk) in render(&mut mixer, window * windows)
+            .chunks(window)
+            .enumerate()
+        {
+            across[w] += power(chunk);
+        }
+        after += power(&render(&mut mixer, window * windows));
+        assert!(mixer.retune_band(Receiver::new(SR, from), Gains::UNITY, &mut swept));
+        render(&mut mixer, window * windows);
+    }
+    (
+        db(after / before),
+        across.iter().map(|p| db(p / before)).collect(),
+    )
+}
+
+/// A receiver control turned retunes the band on the air: the new filter
+/// and AGC warm unheard on the same noise and stations, then the two cross
+/// with gains that sum to one, as the same band twice adds. Retuned to the
+/// receiver it has, it plays on exactly as the band left alone, through the
+/// handover and after; to another, the hiss goes from the one level to the
+/// other without a hole or a swell past either.
+#[test]
+fn a_retune_carries_the_band_on_without_a_hole() {
+    let settings = hiss();
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.set_band(Some(band(&settings, 2)), &mut swept);
+    render(&mut mixer, SR as usize / 2);
+    for _ in 0..20 {
+        let mut alone = mixer.clone();
+        assert!(mixer.retune_band(Receiver::new(SR, &settings), Gains::UNITY, &mut swept));
+        let (heard, left) = (
+            render(&mut mixer, SR as usize / 10),
+            render(&mut alone, SR as usize / 10),
+        );
+        let off = |from: usize| {
+            heard[from..]
+                .iter()
+                .zip(&left[from..])
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max)
+                / loudest(&left)
+        };
+        // The new filter has filled by the handover, if not yet to the
+        // waveform; a few tens of milliseconds on it is the old one's.
+        assert!(off(0) < 0.05, "{:.4} off the band left alone", off(0));
+        let after = SR as usize / 12;
+        assert!(off(after) < 1e-3, "{:.5} off it after", off(after));
+        mixer.sweep(&mut swept);
+    }
+    let settings = hiss();
+    for edit in [
+        (|s| s.band.filter_width_hz = 250.0) as fn(&mut TrainingSettings),
+        |s| s.band.filter_shape = cw_core::FilterShape::Peaked,
+        |s| s.band.agc_enabled = false,
+    ] {
+        let mut turned = settings.clone();
+        edit(&mut turned);
+        let (moved, levels) = hiss_across_retunes(&settings, &turned);
+        let (low, high) = (moved.min(0.0) - 1.0, moved.max(0.0) + 1.0);
+        assert!(
+            levels.iter().all(|level| (low..high).contains(level)),
+            "the hiss across a retune that moves it {moved:.2} dB: {levels:.2?}"
+        );
+    }
+}
+
+/// A slider dragged sends retunes faster than a handover takes. They do not
+/// queue up: each handover goes to where the slider has got to, and once it
+/// stops the band is heard through the receiver it stopped at, the very
+/// band a single retune there would have left.
+#[test]
+fn a_dragged_slider_ends_on_the_receiver_it_stops_at() {
+    let settings = hiss();
+    let mut dragged = Mixer::new(SR);
+    let mut swept = Swept::new();
+    dragged.set_band(Some(band(&settings, 4)), &mut swept);
+    render(&mut dragged, SR as usize / 2);
+    let mut once = dragged.clone();
+    let mut last = settings;
+    for step in 0..40 {
+        last.band.filter_width_hz = 600.0 - 10.0 * f64::from(step);
+        let receiver = Receiver::new(SR, &last);
+        assert!(dragged.retune_band(receiver, Gains::UNITY, &mut swept));
+        render(&mut dragged, SR as usize / 100);
+        dragged.sweep(&mut swept);
+    }
+    assert!(once.retune_band(Receiver::new(SR, &last), Gains::UNITY, &mut swept));
+    render(&mut once, SR as usize * 40 / 100);
+    let (a, b) = (
+        render(&mut dragged, SR as usize),
+        render(&mut once, SR as usize),
+    );
+    let worst = a
+        .iter()
+        .zip(&b)
+        .skip(SR as usize / 2)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(power(&a) > 1e-8, "nothing played");
+    assert!(worst < 1e-5, "{worst} off the band retuned once");
+    dragged.sweep(&mut swept);
+    assert!(dragged.fading.is_empty(), "handovers left over");
+    // With no band on the air there is nothing to retune.
+    let mut quiet = Mixer::new(SR);
+    assert!(!quiet.retune_band(Receiver::new(SR, &last), Gains::UNITY, &mut swept));
 }

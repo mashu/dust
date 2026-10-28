@@ -216,15 +216,20 @@ pub struct SendVoice {
     /// The most other stations calling across this send at once.
     callers: usize,
     finished: Arc<AtomicBool>,
-    /// When its first sample was played, on the wall clock. The native
-    /// stream's alone: it renders as it plays, where the browser's renders
-    /// ahead of the clock and has the clock's word for where it has got to.
+    /// When it was queued, on the wall clock, and every sample it has played
+    /// since, its wait among them: what the player said of when it would be
+    /// heard counts from there. The native stream's alone: it renders as it
+    /// plays, where the browser's renders ahead of the clock and has the
+    /// clock's word for where it has got to.
     #[cfg(feature = "native-audio")]
-    first_played: Option<Instant>,
-    /// Set once what it has played falls behind the wall clock since its
-    /// first sample by more than [`LATE_MS`]: the stream was held up while
-    /// it played, so it went out later than planned. The stream has no
-    /// audio clock to report, so the send watches for itself.
+    queued_at: Instant,
+    #[cfg(feature = "native-audio")]
+    rendered: usize,
+    /// Set once what it has played falls behind the wall clock since it was
+    /// queued by more than [`LATE_MS`]: the stream was held up while it
+    /// waited or played, or first called back late, so it went out later
+    /// than planned. The stream has no audio clock to report, so the send
+    /// watches for itself.
     #[cfg(feature = "native-audio")]
     late: Arc<AtomicBool>,
 }
@@ -268,7 +273,9 @@ impl SendVoice {
             callers: plan.others_at_once(),
             finished: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "native-audio")]
-            first_played: None,
+            queued_at: Instant::now(),
+            #[cfg(feature = "native-audio")]
+            rendered: 0,
             #[cfg(feature = "native-audio")]
             late: Arc::new(AtomicBool::new(false)),
         }
@@ -371,15 +378,15 @@ impl SendVoice {
     /// The next sample: what the receiver hears of it before its AGC, what
     /// of it is played past the receiver, and whether you are sending.
     pub fn next(&mut self) -> SendSample {
+        #[cfg(feature = "native-audio")]
+        {
+            self.rendered += 1;
+        }
         if self.wait > 0 {
             self.wait -= 1;
             return SendSample::default();
         }
         let pos = self.pos;
-        #[cfg(feature = "native-audio")]
-        if pos == 0 {
-            self.first_played = Some(Instant::now());
-        }
         self.pos += 1;
         if pos >= self.sound_ends_at() {
             return SendSample::default();
@@ -423,17 +430,18 @@ impl SendVoice {
     /// speaker is. Called once per callback, after the buffer.
     ///
     /// Until then it also says whether it is playing late: what it has
-    /// played behind the wall clock since its first sample, as a stream held
-    /// up between callbacks leaves it. A buffer renders ahead of the wall
-    /// clock, never behind it, while the stream keeps up.
+    /// played, its wait among it, behind the wall clock since it was queued,
+    /// as a stream held up between callbacks, or slow to call back at all,
+    /// leaves it. A buffer renders ahead of the wall clock, never behind it,
+    /// while the stream keeps up.
     pub fn settle(&self, latency: usize) {
         if self.is_finished() {
             return;
         }
         #[cfg(feature = "native-audio")]
-        if let Some(first) = self.first_played {
-            let played_ms = self.pos as f64 * 1_000.0 / self.sample_rate;
-            let behind_ms = first.elapsed().as_secs_f64() * 1_000.0 - played_ms;
+        {
+            let played_ms = self.rendered as f64 * 1_000.0 / self.sample_rate;
+            let behind_ms = self.queued_at.elapsed().as_secs_f64() * 1_000.0 - played_ms;
             if behind_ms > LATE_MS as f64 {
                 self.late.store(true, Ordering::Release);
             }
@@ -769,10 +777,30 @@ mod tests {
 
     /// A send whose stream keeps up plays ahead of the wall clock, a buffer
     /// at a time; one held up between callbacks falls behind it, and is
-    /// found late.
+    /// found late, as is one held up while it waited to start, or whose
+    /// stream first called back late: it is timed from when it was queued.
     #[test]
     fn a_send_held_up_between_callbacks_is_found_late() {
+        // Held up before it began: while it waited, or before the stream
+        // first called back.
         let plan = planned("TTT", &[]);
+        let mut waiting = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
+        waiting.wait(SR as usize);
+        let late = waiting.late_flag();
+        play(&mut waiting, 64);
+        waiting.settle(0);
+        assert!(!late.load(Ordering::Acquire), "waiting ahead of the clock");
+        std::thread::sleep(std::time::Duration::from_millis(LATE_MS + 50));
+        play(&mut waiting, 64);
+        waiting.settle(0);
+        assert!(late.load(Ordering::Acquire), "held up while it waited");
+        let mut first_late = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
+        let late = first_late.late_flag();
+        std::thread::sleep(std::time::Duration::from_millis(LATE_MS + 50));
+        play(&mut first_late, 64);
+        first_late.settle(0);
+        assert!(late.load(Ordering::Acquire), "first called back late");
+
         let mut steady = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
         let late = steady.late_flag();
         play(&mut steady, SR as usize / 10);

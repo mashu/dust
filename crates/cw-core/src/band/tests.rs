@@ -997,3 +997,39 @@ fn the_agc_ducks_the_hiss_but_not_the_audio_floor() {
     assert!((hiss - duck).abs() < 0.5, "{report}");
     assert!(floor.abs() < 1.0, "{report}");
 }
+
+/// Turning a receiver control retunes the band on the air rather than
+/// drawing another: the same noise, static and stations from where they
+/// are, only heard through another filter and AGC. A band retuned a second
+/// in puts out exactly what the band left alone does, sample for sample,
+/// whatever the receiver is turned to.
+#[test]
+fn a_retuned_band_is_the_same_band() {
+    let mut settings = TrainingSettings::default();
+    settings.band.stations_max = 4;
+    let mut kept = BandMixer::new(SR, &settings, 21);
+    for _ in 0..SR {
+        kept.next(0.0);
+    }
+    let mut turned = settings.clone();
+    turned.band.filter_width_hz = 250.0;
+    turned.band.filter_shape = FilterShape::Soft;
+    turned.band.agc_decay = crate::settings::AgcDecay::Slow;
+    let mut retuned = kept.retuned(Receiver::new(SR, &turned));
+    let (mut differ, mut heard) = (0usize, 0.0f64);
+    for _ in 0..SR {
+        let (a, b) = (kept.source.next_sample(), retuned.source.next_sample());
+        differ += usize::from(a != b);
+        heard = heard.max(a.abs());
+    }
+    assert_eq!(differ, 0, "the band changed under the receiver");
+    assert!(heard > 0.0, "nothing was on the band");
+    // Retuned to the receiver it had, it plays on as if left alone, once
+    // the new filter has filled and its AGC's look-ahead with it.
+    let mut same = kept.retuned(Receiver::new(SR, &settings));
+    let worst = (0..SR as usize)
+        .map(|i| (i, (kept.next(0.0).band - same.next(0.0).band).abs()))
+        .filter(|(i, _)| *i > SR as usize / 10)
+        .fold(0.0f64, |worst, (_, off)| worst.max(off));
+    assert!(worst < 1e-6, "{worst} off the band left alone");
+}

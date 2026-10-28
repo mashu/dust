@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use cw_core::TrainingSettings;
-use cw_core::band::BandKey;
+use cw_core::band::{BandChange, BandKey};
 
 use crate::audio::epoch::{Epoch, Ticket};
 use crate::audio::{PlaybackSignal, SendTiming, WaitFlags};
@@ -26,10 +27,11 @@ impl PlayerState {
         }
     }
 
-    /// Whether the band has to be rebuilt for these settings. The fading is
-    /// not part of it: it is applied to the Morse, a send at a time.
-    pub fn band_needs_rebuild(&self, settings: &TrainingSettings) -> bool {
-        self.band != Some(BandKey::of(&settings.band))
+    /// Whether the band has to be retuned or rebuilt for these settings.
+    /// The fading is not part of it: it is applied to the Morse, a send at a
+    /// time.
+    pub fn band_change(&self, settings: &TrainingSettings) -> BandChange {
+        BandKey::of(&settings.band).change_from(self.band.as_ref())
     }
 
     pub fn note_band(&mut self, settings: &TrainingSettings) {
@@ -50,6 +52,22 @@ impl PlayerState {
     pub fn retire(&mut self) {
         self.epoch.bump();
     }
+}
+
+/// How long an open stream may go uncalled before it is taken for broken:
+/// longer than the longest buffer a host's default gives, a third of a
+/// second or so, with room for a busy machine.
+pub const SILENT_AFTER: Duration = Duration::from_millis(1_500);
+
+/// Whether a stream whose callback has counted `beat` calls, last `seen`,
+/// has gone silent by `now`: not called since it was last seen to be, for
+/// longer than [`SILENT_AFTER`]. A count that has moved is seen afresh.
+pub fn went_silent(seen: &mut (u32, Instant), beat: u32, now: Instant) -> bool {
+    if beat != seen.0 {
+        *seen = (beat, now);
+        return false;
+    }
+    now.saturating_duration_since(seen.1) > SILENT_AFTER
 }
 
 /// What the stream tells a waiter.
@@ -114,22 +132,52 @@ impl PlaybackSignal for ToneSignal {
 mod tests {
     use super::*;
 
+    /// A stream is taken for broken once it has not been called for longer
+    /// than a host's longest buffer and then some, counted from when it was
+    /// last seen to be called; never for a long gap between looks at one
+    /// that was called in it.
+    #[test]
+    fn a_stream_left_uncalled_has_gone_silent() {
+        let opened = Instant::now();
+        let at = |sec: f64| opened + Duration::from_secs_f64(sec);
+        let mut seen = (0, opened);
+        assert!(!went_silent(&mut seen, 0, at(1.0)));
+        assert!(went_silent(&mut seen, 0, at(1.6)));
+        let mut seen = (0, opened);
+        assert!(!went_silent(&mut seen, 7, at(1.0)), "it was called");
+        assert!(!went_silent(&mut seen, 7, at(2.4)));
+        assert!(went_silent(&mut seen, 7, at(2.6)));
+        let mut seen = (7, opened);
+        assert!(
+            !went_silent(&mut seen, 9_000, at(600.0)),
+            "called all along"
+        );
+        // The count wraps; a wrapped count has moved all the same.
+        let mut seen = (u32::MAX, opened);
+        assert!(!went_silent(&mut seen, u32::MAX.wrapping_add(1), at(9.0)));
+    }
+
     #[test]
     fn the_background_is_rebuilt_only_when_its_settings_change() {
         let mut state = PlayerState::new();
         let settings = TrainingSettings::default();
-        assert!(state.band_needs_rebuild(&settings));
+        assert_eq!(state.band_change(&settings), BandChange::Rebuild);
         state.note_band(&settings);
-        assert!(!state.band_needs_rebuild(&settings));
+        assert_eq!(state.band_change(&settings), BandChange::None);
 
         let mut louder = settings.clone();
         louder.band.qrn_level = 0.9;
-        assert!(state.band_needs_rebuild(&louder));
+        assert_eq!(state.band_change(&louder), BandChange::Rebuild);
+
+        // The receiver's controls retune the band on the air.
+        let mut narrower = settings.clone();
+        narrower.band.filter_width_hz = 250.0;
+        assert_eq!(state.band_change(&narrower), BandChange::Retune);
 
         // Speed is not a band setting.
         let mut faster = settings.clone();
         faster.playback.char_wpm_min = 40.0;
-        assert!(!state.band_needs_rebuild(&faster));
+        assert_eq!(state.band_change(&faster), BandChange::None);
 
         // Nor is the fading: it plays on the Morse, a send at a time, and a
         // new band would only be a new draw of stations and static for
@@ -137,12 +185,12 @@ mod tests {
         let mut fading = settings.clone();
         fading.band.qsb_depth = 0.9;
         fading.band.qsb_rate_hz = 0.5;
-        assert!(!state.band_needs_rebuild(&fading));
+        assert_eq!(state.band_change(&fading), BandChange::None);
         fading.band.qsb_enabled = false;
-        assert!(!state.band_needs_rebuild(&fading));
+        assert_eq!(state.band_change(&fading), BandChange::None);
 
         state.forget_band();
-        assert!(state.band_needs_rebuild(&settings));
+        assert_eq!(state.band_change(&settings), BandChange::Rebuild);
     }
 
     #[test]

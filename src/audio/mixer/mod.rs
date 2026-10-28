@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 #[cfg(doc)]
 use cw_core::band::AGC_LOOKAHEAD_SEC;
-use cw_core::band::{AudioHighPass, agc_lookahead_samples};
+use cw_core::band::{AudioHighPass, Receiver, agc_lookahead_samples};
 
 use crate::audio::shape::{BAND_FADE_SEC, GATE_RAMP_SEC, Gains};
 
@@ -68,6 +68,10 @@ pub struct Mixer {
     band: Option<BandVoice>,
     /// Bands that were replaced, fading out: the newest last.
     fading: Vec<BandVoice>,
+    /// A receiver the band playing is to be retuned to, once it is steady:
+    /// one handover at a time, so a slider dragged across its range retunes
+    /// to where it has got to each time the last has finished.
+    retune: Option<Receiver>,
     send: Option<SendVoice>,
     /// Sends a newer one replaced, riding out their release.
     retiring: Vec<SendVoice>,
@@ -111,6 +115,7 @@ pub struct Mixer {
 pub struct Swept {
     bands: Vec<BandVoice>,
     sends: Vec<SendVoice>,
+    receivers: Vec<Receiver>,
 }
 
 impl Swept {
@@ -119,6 +124,7 @@ impl Swept {
         Self {
             bands: Vec::with_capacity(FADING_BANDS + 2),
             sends: Vec::with_capacity(RETIRING_SENDS + 2),
+            receivers: Vec::with_capacity(1),
         }
     }
 }
@@ -131,6 +137,7 @@ impl Mixer {
             sample_rate: sample_rate.max(1),
             band: None,
             fading: Vec::with_capacity(FADING_BANDS + 1),
+            retune: None,
             send: None,
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
             latency: 0,
@@ -222,10 +229,45 @@ impl Mixer {
         ((BAND_FADE_SEC * f64::from(self.sample_rate)).round() as usize).max(1)
     }
 
+    /// Retune the band playing to `receiver`, at `gains`, keeping it on the
+    /// air: the same noise, static and stations, carried on from where they
+    /// are, through the new filter and AGC — as a rig's controls act on what
+    /// is on the band, never change who is on it. The new receiver warms in
+    /// step with the old, unheard, and the two then cross over a band's
+    /// fade. Whether there was a band to retune.
+    pub fn retune_band(&mut self, receiver: Receiver, gains: Gains, swept: &mut Swept) -> bool {
+        if self.band.is_none() {
+            swept.receivers.push(receiver);
+            return false;
+        }
+        self.ask(gains);
+        swept.receivers.extend(self.retune.replace(receiver));
+        self.sweep(swept);
+        true
+    }
+
+    /// Start the retune asked for, if the band playing is steady and there
+    /// is room for it to go: on the audio thread, at the top of a buffer.
+    /// Nothing is allocated: the new band is the old one copied, the room
+    /// for the old one made long since.
+    fn start_retune(&mut self) {
+        let ready = self.band.as_ref().is_some_and(BandVoice::is_steady)
+            && self.fading.len() < FADING_BANDS;
+        let (Some(current), Some(receiver)) = (self.band.as_mut(), self.retune.take_if(|_| ready))
+        else {
+            return;
+        };
+        let mut old = std::mem::replace(current, current.retuned(receiver, self.gains_asked.af));
+        old.give_way();
+        self.fading.push(old);
+    }
+
     /// Put a new band in, or take the band away. The one going out is not
     /// cut off: it fades out while the new one fades in, and the receiver's
-    /// gain carries across, so a station being copied rides straight on.
+    /// gain carries across, so a station being copied rides straight on. A
+    /// retune asked of the old band is for a band that has gone.
     pub fn set_band(&mut self, band: Option<BandVoice>, swept: &mut Swept) {
+        swept.receivers.extend(self.retune.take());
         let mut band = band;
         if let Some(new) = band.as_mut() {
             new.start_at(self.gains_asked.af);
@@ -315,6 +357,7 @@ impl Mixer {
         self.late_at = 0;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
+        swept.receivers.extend(self.retune.take());
         swept.sends.append(&mut self.retiring);
         swept.sends.extend(self.send.take());
     }
@@ -346,6 +389,7 @@ impl Mixer {
     /// sample has been heard, not when it was played.
     pub fn render(&mut self, out: &mut [f32], latency: usize) {
         self.latency = latency;
+        self.start_retune();
         // The band's own traffic makes room for a pile-up while it calls.
         let callers = self.send.as_ref().map_or(0, SendVoice::callers_now);
         if let Some(band) = self.band.as_mut() {

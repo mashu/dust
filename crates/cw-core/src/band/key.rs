@@ -1,35 +1,52 @@
-//! What a player has to rebuild when the settings move, as a value it can
-//! compare.
+//! What a player has to rebuild or retune when the settings move, as values
+//! it can compare.
 //!
-//! The band — its noise, its static, its stations, the receiver they are
-//! heard through and the AGC riding them — is a running generator, built at
-//! random: building it again is a new band, and costs the knee's measurement.
-//! The fading is not part of it: it is applied to the Morse alone, a send at a
-//! time ([`super::Qsb`]), so moving the fading never touches the band.
+//! The band — its noise, its static, its stations — is a running generator,
+//! built at random: building it again is a new band. The receiver it is
+//! heard through, its filter and its AGC, is not the band: a rig's filter and
+//! AGC act on whatever is on the air, so moving them retunes the band playing
+//! ([`super::BandMixer::retuned`]) rather than drawing another. The fading is
+//! part of neither: it is applied to the Morse alone, a send at a time
+//! ([`super::Qsb`]), so moving the fading never touches the band.
 
 use super::calibration::{noise_level, qrn_level};
 use super::memo::Exact;
 use crate::settings::{AgcDecay, BandSettings, FilterShape, STATIONS_MIN};
 
-/// Everything the band is built from. Two settings with the same key sound
-/// the same, so a player rebuilds its band only when this changes.
+/// Everything the band and its receiver are built from. Two settings with
+/// the same key sound the same; two whose keys are the same band
+/// ([`BandKey::same_band`]) are the one band through another receiver.
 ///
 /// Levels are as heard: a layer switched off is the same band whatever its
 /// level control says.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BandKey {
-    /// The receiver: the side-tone range it has to pass, and the width and
-    /// shape asked for.
+    band: SourceKey,
+    receiver: ReceiverKey,
+}
+
+/// What is on the air.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SourceKey {
+    /// Whether there is a receiver running at all: a band to hear, or an AGC
+    /// to ride the station on a band with nothing else on it.
+    runs: bool,
+    /// The side-tone range the station you copy is sent in, and the
+    /// quietest it is sent, which the band's own stations keep clear of;
+    /// the strength nothing to a band with none.
     side_tone_min: Exact,
     side_tone_max: Exact,
-    filter_width_hz: Exact,
-    filter_shape: FilterShape,
-    /// The quietest the station you are copying is sent, which the band's
-    /// own stations keep clear of; nothing to a band with none.
     volume_min: Option<Exact>,
     noise: Exact,
     qrn: Exact,
     stations_max: u32,
+}
+
+/// What it is heard through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ReceiverKey {
+    filter_width_hz: Exact,
+    filter_shape: FilterShape,
     agc_enabled: bool,
     /// The AGC's threshold, which moves its knee, and its decay; nothing
     /// with the AGC off.
@@ -40,19 +57,51 @@ pub struct BandKey {
 impl BandKey {
     pub fn of(band: &BandSettings) -> Self {
         Self {
-            side_tone_min: Exact(band.side_tone_min),
-            side_tone_max: Exact(band.side_tone_max),
-            filter_width_hz: Exact(band.filter_width_hz),
-            filter_shape: band.filter_shape,
-            volume_min: (band.stations_max > STATIONS_MIN).then_some(Exact(band.volume_min)),
-            noise: Exact(noise_level(band)),
-            qrn: Exact(qrn_level(band)),
-            stations_max: band.stations_max,
-            agc_enabled: band.agc_enabled,
-            agc_threshold_db: band.agc_enabled.then_some(Exact(band.agc_threshold_db)),
-            agc_decay: band.agc_enabled.then_some(band.agc_decay),
+            band: SourceKey {
+                runs: band.runs_receiver(),
+                side_tone_min: Exact(band.side_tone_min),
+                side_tone_max: Exact(band.side_tone_max),
+                volume_min: (band.stations_max > STATIONS_MIN).then_some(Exact(band.volume_min)),
+                noise: Exact(noise_level(band)),
+                qrn: Exact(qrn_level(band)),
+                stations_max: band.stations_max,
+            },
+            receiver: ReceiverKey {
+                filter_width_hz: Exact(band.filter_width_hz),
+                filter_shape: band.filter_shape,
+                agc_enabled: band.agc_enabled,
+                agc_threshold_db: band.agc_enabled.then_some(Exact(band.agc_threshold_db)),
+                agc_decay: band.agc_enabled.then_some(band.agc_decay),
+            },
         }
     }
+
+    /// Whether `other` is this band, perhaps through another receiver: one a
+    /// band on the air can be retuned to, rather than built afresh.
+    pub fn same_band(&self, other: &Self) -> bool {
+        self.band == other.band
+    }
+
+    /// What it takes to bring a player whose band was built from `playing`,
+    /// if it has one, to this key.
+    pub fn change_from(&self, playing: Option<&Self>) -> BandChange {
+        match playing {
+            Some(playing) if playing == self => BandChange::None,
+            Some(playing) if playing.same_band(self) => BandChange::Retune,
+            _ => BandChange::Rebuild,
+        }
+    }
+}
+
+/// What the settings moving asks of the band a player has on the air.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BandChange {
+    /// Nothing: it sounds the same.
+    None,
+    /// The same band through another receiver ([`super::Receiver`]).
+    Retune,
+    /// Another band, or the first.
+    Rebuild,
 }
 
 #[cfg(test)]
@@ -100,6 +149,35 @@ mod tests {
             assert_eq!(fading, qsb, "{changed:?} moved the fading");
             seen.push(changed);
         }
+        // The receiver's controls retune the band on the air; the rest are
+        // another band.
+        let retunes: Vec<fn(&mut TrainingSettings)> = vec![
+            |s| s.band.agc_enabled = false,
+            |s| s.band.agc_threshold_db = 10.0,
+            |s| s.band.agc_decay = AgcDecay::Slow,
+            |s| s.band.filter_width_hz = 250.0,
+            |s| s.band.filter_shape = FilterShape::Soft,
+        ];
+        for edit in retunes {
+            let (changed, _) = key(edit);
+            assert!(changed != band && changed.same_band(&band), "{changed:?}");
+        }
+        for edit in [
+            (|s| s.band.side_tone_min = 333.0) as fn(&mut TrainingSettings),
+            |s| s.band.qrn_enabled = false,
+            |s| s.band.noise_level = 0.9,
+            |s| s.band.stations_max = 3,
+        ] {
+            assert!(!key(edit).0.same_band(&band));
+        }
+        // With nothing on the band, the AGC is the whole receiver: switched
+        // off, there is none to retune.
+        let mut dead = base.clone();
+        dead.band.noise_enabled = false;
+        dead.band.qrn_enabled = false;
+        let running = BandKey::of(&dead.band);
+        dead.band.agc_enabled = false;
+        assert!(!BandKey::of(&dead.band).same_band(&running));
         let fades: Vec<fn(&mut TrainingSettings)> = vec![
             |s| s.band.qsb_enabled = false,
             |s| s.band.qsb_depth = 0.9,

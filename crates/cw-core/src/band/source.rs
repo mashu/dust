@@ -1,6 +1,6 @@
 //! Everything the band puts into the receiver.
 
-use super::activity::BandActivity;
+use super::activity::{BandActivity, Tuning};
 use super::filter::FilterDesign;
 use super::noise::{Atmospherics, NoiseFloor};
 use crate::settings::BandSettings;
@@ -27,6 +27,15 @@ impl BandSource {
             floor: NoiseFloor::for_band(sample_rate, band, seed),
             atmospherics: Atmospherics::for_band(sample_rate, band, seed),
             activity: BandActivity::for_band(sample_rate, band, receiver, seed),
+        }
+    }
+
+    /// The same band, listened to from `tuning`: a receiver turned to it in
+    /// place of the one it was built for. The noise and the static are the
+    /// band's whatever hears them; the stations keep on as they are.
+    pub(super) fn retune(&mut self, tuning: Tuning) {
+        if let Some(activity) = &mut self.activity {
+            activity.retune(tuning);
         }
     }
 

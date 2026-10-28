@@ -15,7 +15,7 @@ mod stream;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::band::{BandKey, FilterDesign, Qsb};
+use cw_core::band::{BandChange, BandKey, FilterDesign, Qsb, Receiver};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -183,18 +183,32 @@ impl MorsePlayer {
             ..gains
         };
         let key = BandKey::of(&settings.band);
-        if self.band_key != Some(key) {
+        let rate = self.ctx.sample_rate() as u32;
+        let mut change = key.change_from(self.band_key.as_ref());
+        if change == BandChange::Retune {
+            // The band on the air carries on through the new receiver.
+            let tuned = Receiver::new(rate, settings);
+            let mut retuned = false;
+            self.stream.change(|mixer, swept| {
+                retuned = mixer.retune_band(tuned, receiver, swept);
+            });
+            change = if retuned {
+                BandChange::None
+            } else {
+                BandChange::Rebuild
+            };
+        } else if change == BandChange::None && self.gains != Some(receiver) {
+            self.stream.change(|mixer, _| mixer.set_gains(receiver));
+        }
+        if change == BandChange::Rebuild {
             // A fresh band every time, as the native player's is: with
             // stations on it, a fixed seed would replay the same callsigns at
             // the same moments on every visit.
-            let rate = self.ctx.sample_rate() as u32;
             let band = BandVoice::for_settings(settings, rate, crate::time::seed_rng());
             self.stream
                 .change(|mixer, swept| mixer.set_band_at(band, receiver, swept));
-            self.band_key = Some(key);
-        } else if self.gains != Some(receiver) {
-            self.stream.change(|mixer, _| mixer.set_gains(receiver));
         }
+        self.band_key = Some(key);
         self.gains = Some(receiver);
     }
 }

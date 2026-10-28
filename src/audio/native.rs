@@ -6,20 +6,20 @@
 mod state;
 
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, FromSample, SampleFormat, SizedSample};
-use cw_core::band::{FilterDesign, Qsb};
+use cw_core::band::{BandChange, FilterDesign, Qsb, Receiver};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::ToneRequest;
 use super::mixer::{BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept};
 use super::shape::Gains;
 use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming};
-use state::{PlayerState, ToneSignal};
+use state::{PlayerState, ToneSignal, went_silent};
 
 /// The furthest behind the callback the speaker is believed to be. A host
 /// that reports more is reporting nonsense, and a send would wait for it.
@@ -69,9 +69,16 @@ pub struct MorsePlayer {
 /// An output stream, and its own word that it broke: unplugged headphones, a
 /// sound server restart. A send in flight on it reports the failure, so the
 /// session can recover rather than stall.
+///
+/// Some breaks say nothing: an iOS interruption, a call or Siri, stops the
+/// stream without a word. So the callback counts its calls, and a stream
+/// found not to have been called for a while is taken for broken too.
 struct OpenStream {
     _stream: cpal::Stream,
     failed: Arc<AtomicBool>,
+    beat: Arc<AtomicU32>,
+    /// The count last seen, and when it was seen to move.
+    seen: (u32, Instant),
 }
 
 /// The audio buffer iOS is asked for: as short as the desktop's.
@@ -189,15 +196,21 @@ impl MorsePlayer {
     /// Make sure the output stream is up: opened again after it slept, or
     /// after the device broke.
     fn ensure_output(&mut self) -> Result<(), String> {
-        if self
-            .stream
-            .as_ref()
-            .is_some_and(|open| open.failed.load(Ordering::Acquire))
-        {
+        if self.stream.as_mut().is_some_and(|open| {
+            let beat = open.beat.load(Ordering::Relaxed);
+            if went_silent(&mut open.seen, beat, Instant::now()) {
+                // Broken without a word: a send waiting on it is told so.
+                open.failed.store(true, Ordering::Release);
+            }
+            open.failed.load(Ordering::Acquire)
+        }) {
             // The old stream goes before a new one opens on the same device.
             // Whatever was playing on it went with it: a send waiting on it
-            // has been told, and the band is rebuilt on the next apply.
+            // has been told, and the band is rebuilt on the next apply. On
+            // iOS the session an interruption took is claimed again first.
             self.stream = None;
+            #[cfg(target_os = "ios")]
+            claim_audio_session();
             let rate = self.mixer().sample_rate();
             self.with_mixer(|mixer, swept| mixer.clear(rate, swept));
             self.state.forget_band();
@@ -257,14 +270,31 @@ impl MorseBackend for MorsePlayer {
         // A stream that will not open is reported by the next send.
         self.ensure_output_unless_refused();
         let gains = Gains::of(settings);
-        if !self.state.band_needs_rebuild(settings) {
-            if gains != self.gains {
-                self.mixer().set_gains(gains);
-                self.gains = gains;
-            }
-            return;
-        }
         let rate = self.mixer().sample_rate();
+        match self.state.band_change(settings) {
+            BandChange::None => {
+                if gains != self.gains {
+                    self.mixer().set_gains(gains);
+                    self.gains = gains;
+                }
+                return;
+            }
+            BandChange::Retune => {
+                // Built here, where it may allocate; the band on the air
+                // carries on through it.
+                let receiver = Receiver::new(rate, settings);
+                let mut retuned = false;
+                self.with_mixer(|mixer, swept| {
+                    retuned = mixer.retune_band(receiver, gains, swept);
+                });
+                if retuned {
+                    self.gains = gains;
+                    self.state.note_band(settings);
+                    return;
+                }
+            }
+            BandChange::Rebuild => {}
+        }
         // A fresh band every time, as the browser's is: with stations on it,
         // a fixed seed would replay the same callsigns at the same moments
         // in every session.
@@ -413,6 +443,7 @@ fn build_stream<T>(
     config: &cpal::StreamConfig,
     mut output: Output,
     failed: Arc<AtomicBool>,
+    beat: Arc<AtomicU32>,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
@@ -431,6 +462,7 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                beat.fetch_add(1, Ordering::Relaxed);
                 let frames = data.len().div_ceil(channels);
                 if scratch.len() < frames {
                     // Only a host handing over more than it ever has before.
@@ -438,9 +470,7 @@ where
                 }
                 let mono = &mut scratch[..frames];
                 output.fill(mono, latency_frames(info, sample_rate));
-                for (frame, sample) in data.chunks_mut(channels).zip(mono.iter()) {
-                    frame.fill(T::from_sample(*sample));
-                }
+                interleave(data, channels, mono);
             },
             move |err| {
                 // The first error is the one worth reading; the stream is
@@ -454,6 +484,18 @@ where
             None,
         )
         .map_err(|e| format!("Audio stream: {e}"))
+}
+
+/// The mono receiver into a device's frames of `channels`: on the front two,
+/// left and right, as a rig's audio and the browser's are played, or the one
+/// a mono device has; the rest, a surround system's centre, rears and LFE or
+/// an interface's other outputs, silent.
+fn interleave<T: SizedSample + FromSample<f32>>(data: &mut [T], channels: usize, mono: &[f32]) {
+    for (frame, sample) in data.chunks_mut(channels.max(1)).zip(mono) {
+        let (front, rest) = frame.split_at_mut(frame.len().min(2));
+        front.fill(T::from_sample(*sample));
+        rest.fill(T::EQUILIBRIUM);
+    }
 }
 
 /// ~5–20 ms first. Default Pulse periods are often a third of a second, which
@@ -497,15 +539,17 @@ fn open_stream(
             Arc::clone(&failed),
             config.sample_rate.0,
         );
+        let beat = Arc::new(AtomicU32::new(0));
+        let (failing, beating) = (Arc::clone(&failed), Arc::clone(&beat));
         let built = match supported.sample_format() {
-            SampleFormat::F32 => build_stream::<f32>(device, &config, output, Arc::clone(&failed)),
-            SampleFormat::F64 => build_stream::<f64>(device, &config, output, Arc::clone(&failed)),
-            SampleFormat::I16 => build_stream::<i16>(device, &config, output, Arc::clone(&failed)),
-            SampleFormat::I32 => build_stream::<i32>(device, &config, output, Arc::clone(&failed)),
-            SampleFormat::U16 => build_stream::<u16>(device, &config, output, Arc::clone(&failed)),
-            SampleFormat::U32 => build_stream::<u32>(device, &config, output, Arc::clone(&failed)),
-            SampleFormat::I8 => build_stream::<i8>(device, &config, output, Arc::clone(&failed)),
-            SampleFormat::U8 => build_stream::<u8>(device, &config, output, Arc::clone(&failed)),
+            SampleFormat::F32 => build_stream::<f32>(device, &config, output, failing, beating),
+            SampleFormat::F64 => build_stream::<f64>(device, &config, output, failing, beating),
+            SampleFormat::I16 => build_stream::<i16>(device, &config, output, failing, beating),
+            SampleFormat::I32 => build_stream::<i32>(device, &config, output, failing, beating),
+            SampleFormat::U16 => build_stream::<u16>(device, &config, output, failing, beating),
+            SampleFormat::U32 => build_stream::<u32>(device, &config, output, failing, beating),
+            SampleFormat::I8 => build_stream::<i8>(device, &config, output, failing, beating),
+            SampleFormat::U8 => build_stream::<u8>(device, &config, output, failing, beating),
             other => Err(format!("Unsupported sample format: {other}")),
         };
         match built.and_then(|stream| {
@@ -516,12 +560,46 @@ fn open_stream(
                 return Ok(OpenStream {
                     _stream: stream,
                     failed,
+                    beat,
+                    seen: (0, Instant::now()),
                 });
             }
             Err(err) => last_err = Some(err),
         }
     }
     Err(last_err.unwrap_or_else(|| "Audio mixer: no stream config worked".to_string()))
+}
+
+#[cfg(test)]
+mod interleave_tests {
+    use super::interleave;
+
+    /// The receiver goes to the front pair, or a mono device's one channel,
+    /// and nowhere else: every other channel is silence, at its format's
+    /// silence.
+    #[test]
+    fn the_receiver_plays_on_the_front_pair_alone() {
+        let mono = [0.5f32, -0.25];
+        let mut stereo = [9.0f32; 4];
+        interleave(&mut stereo, 2, &mono);
+        assert_eq!(stereo, [0.5, 0.5, -0.25, -0.25]);
+        let mut single = [9.0f32; 2];
+        interleave(&mut single, 1, &mono);
+        assert_eq!(single, [0.5, -0.25]);
+        let mut surround = [9.0f32; 12];
+        interleave(&mut surround, 6, &mono);
+        assert_eq!(
+            surround,
+            [
+                0.5, 0.5, 0.0, 0.0, 0.0, 0.0, -0.25, -0.25, 0.0, 0.0, 0.0, 0.0
+            ]
+        );
+        let mut unsigned = [1u16; 12];
+        interleave(&mut unsigned, 6, &mono);
+        assert!(unsigned[2..6].iter().all(|s| *s == 32_768), "{unsigned:?}");
+        assert!(unsigned[0] > 32_768 && unsigned[0] == unsigned[1]);
+        assert!(unsigned[6] < 32_768 && unsigned[6] == unsigned[7]);
+    }
 }
 
 #[cfg(test)]
