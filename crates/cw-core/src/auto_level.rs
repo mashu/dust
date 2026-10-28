@@ -769,6 +769,7 @@ mod tests {
                 effective_wpm: 20.0,
                 output_at: now,
                 char_ends_ms: Vec::new(),
+                first_char_ms: 0,
                 latency_ms: 0,
             };
             let _ = machine.apply(SessionEvent::PlaybackStarted { index, start }, now);

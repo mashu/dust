@@ -82,6 +82,10 @@ pub struct SendStart {
     /// Where each of its characters' last element ends, in milliseconds
     /// after `output_at`.
     pub char_ends_ms: Vec<u32>,
+    /// Where its first character starts, in milliseconds after `output_at`:
+    /// later than its first sample when callers in a pile-up start before
+    /// the station copied.
+    pub first_char_ms: u32,
     /// The delay the device reports from its output to the ear.
     pub latency_ms: u32,
 }
@@ -492,7 +496,10 @@ impl GroupSession {
             }
             (Some(sounding), 0) => sounding.trusted = false,
             (Some(sounding), _) => {
-                sounding.resent.get_or_insert(start.output_at);
+                // Sent again from where the station copied is heard again,
+                // not from the callers starting ahead of it.
+                let again = start.output_at.plus(u64::from(start.first_char_ms));
+                sounding.resent.get_or_insert(again);
             }
             (None, _) => {}
         }
@@ -1134,6 +1141,7 @@ mod tests {
             effective_wpm,
             output_at: MonoMs(0),
             char_ends_ms: Vec::new(),
+            first_char_ms: 0,
             latency_ms: 0,
         }
     }
@@ -1146,6 +1154,7 @@ mod tests {
             effective_wpm: wpm,
             output_at: MonoMs(output_at),
             char_ends_ms: ends.to_vec(),
+            first_char_ms: 0,
             latency_ms: 40,
         }
     }
@@ -1246,6 +1255,34 @@ mod tests {
             Some(vec![Some(500), None])
         );
         assert_eq!(timing.sends, 2);
+    }
+
+    /// In a pile-up the callers can start before the station copied: a key
+    /// made as the group is sent again, before that station is heard again,
+    /// came of hearing it once and keeps its time; one after, not.
+    #[test]
+    fn a_key_before_the_station_is_heard_again_keeps_its_time() {
+        let mut open = TrainingSettings::default();
+        open.playback.lock_input_during_group_playback = false;
+        let mut twice = GroupSession::new(SessionId::new(1), 1, open);
+        twice.set_group(0, "KMR".into(), 2);
+        twice.begin_group(0, MonoMs(980));
+        twice.start_playback(0, &send_start(1_000, 20.0, &[300, 700, 1_000]));
+        twice.note_play_finished(0);
+        let callers_first = SendStart {
+            first_char_ms: 400,
+            ..send_start(2_500, 20.0, &[700, 1_100, 1_400])
+        };
+        twice.start_playback(0, &callers_first);
+        twice.set_input(0, "KMR", &keyed(&[Some(1_500), Some(2_700), Some(3_000)]));
+        twice.note_play_finished(0);
+        twice.end_playback(0, MonoMs(4_000));
+        twice.confirm(0, MonoMs(4_200));
+        let timing = &result(&twice).group_timings[0];
+        assert_eq!(
+            timing.char_times.as_ref().map(|times| times.keys.clone()),
+            Some(vec![Some(500), Some(1_700), None])
+        );
     }
 
     /// A send's speeds are kept as it starts, so a group answered before its

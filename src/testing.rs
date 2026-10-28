@@ -129,6 +129,7 @@ pub fn stored_session(date: &str, sent: &[(&str, &str)]) -> SessionResult {
             effective_wpm: 40.0,
             output_at: now,
             char_ends_ms: (1..=chars).map(|at| at * 500 / chars).collect(),
+            first_char_ms: 0,
             latency_ms: 0,
         };
         let _ = machine.apply(SessionEvent::PlaybackStarted { index, start }, now);

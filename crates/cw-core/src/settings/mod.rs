@@ -473,7 +473,12 @@ pub struct BandSettings {
     /// How deep the fades go, as a share of [`QSB_DEPTH_MAX_DB`]: every bit
     /// of the slider's travel is heard, in decibels, as an ear hears a fade.
     /// Out of the box a 12 dB fade, which under the AGC is the hiss swelling
-    /// up beneath a station that holds roughly steady, as on the air.
+    /// up beneath a station that holds roughly steady, as on the air. Kept
+    /// under a key of its own: saves from before kept a share of the
+    /// signal's amplitude under `qsbDepth`, nearly all of them at that
+    /// default's 3.7 dB, which under the AGC sounded as no fading at all,
+    /// and they load at today's default.
+    #[serde(rename = "qsbDepthShare")]
     pub qsb_depth: f64,
     pub qsb_rate_hz: f64,
     pub qrn_enabled: bool,
@@ -1599,6 +1604,25 @@ mod tests {
         assert_eq!((read.fast_ms, read.icr_ms, read.slow_ms), (900, 900, 900));
         let old: TrainingSettings = serde_json::from_str("{}").expect("an empty save");
         assert_eq!(old.recognition, RecognitionBands::default());
+    }
+
+    /// The fade's depth is kept under its own key: a save from when
+    /// `qsbDepth` was a share of the signal's amplitude loads at today's
+    /// default, and one saved now reads back as it was.
+    #[test]
+    fn a_fade_depth_saved_before_it_was_in_decibels_loads_at_the_default() {
+        let mut json = serde_json::to_value(TrainingSettings::default()).expect("serialize");
+        let keys = json.as_object_mut().expect("an object");
+        assert!(keys.remove("qsbDepthShare").is_some());
+        keys.insert("qsbDepth".into(), 0.35.into());
+        let old: TrainingSettings = serde_json::from_value(json).expect("an old save loads");
+        assert_eq!(old.band.qsb_depth, BandSettings::default().qsb_depth);
+        let mut s = TrainingSettings::default();
+        s.band.qsb_depth = 0.25;
+        let json = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(json["qsbDepthShare"], 0.25);
+        let read: TrainingSettings = serde_json::from_value(json).expect("a save loads");
+        assert_eq!(read.band.qsb_depth, 0.25);
     }
 
     /// The reset buttons have to cover everything between them, or one card

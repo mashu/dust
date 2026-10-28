@@ -335,6 +335,7 @@ fn random_start(rng: &mut SplitMix64, now: u64) -> SendStart {
         char_ends_ms: (0..rng.usize_in(0, 14))
             .map(|_| rng.usize_in(0, 6_000) as u32)
             .collect(),
+        first_char_ms: rng.usize_in(0, 600) as u32,
         latency_ms: rng.usize_in(0, 500) as u32,
     }
 }
@@ -606,6 +607,7 @@ fn coherent(
                 start: SendStart {
                     output_at: MonoMs(now),
                     char_ends_ms,
+                    first_char_ms: 0,
                     latency_ms: 0,
                     ..start
                 },

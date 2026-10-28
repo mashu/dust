@@ -98,18 +98,19 @@ impl<N: Clone> ReceiverStream<N> {
     }
 
     /// Render stretches until the next starts at `until` or later, each
-    /// handed to `play` with the moment it starts: from `now` at the
-    /// soonest, should the clock have run past what was rendered. A
-    /// stretch `play` will not take is not rendered either.
+    /// handed to `play` with the moment it starts: from `soonest` at the
+    /// earliest, the soonest a stretch can still start on time, should the
+    /// clock have run past what was rendered. A stretch `play` will not take
+    /// is not rendered either.
     pub fn render_until<E>(
         &mut self,
-        now: f64,
+        soonest: f64,
         until: f64,
         mut play: impl FnMut(f64, &[f32]) -> Result<N, E>,
     ) -> Result<(), E> {
-        // Fallen behind — a long task, a hidden page — it picks up at the
-        // clock rather than playing into the past all at once.
-        self.next = self.next.max(self.sample_at(now));
+        // Fallen behind — a long task, a hidden page — it picks up from
+        // there rather than playing into the past all at once.
+        self.next = self.next.max(self.sample_at(soonest));
         while !self.idle && self.time(self.next) < until {
             let before = self.mixer.clone();
             let len = self.stretch;
@@ -459,5 +460,27 @@ mod tests {
         );
         assert!(stream.is_idle(), "quiet again once it has rung out");
         assert_eq!(stream.played_by(3.15), [0, 1]);
+    }
+
+    /// A session over, its send stopped and its band taken away, the stream
+    /// goes quiet once the band has faded and the send's release has run
+    /// out, though no change comes after to sweep either out.
+    #[test]
+    fn a_band_taken_away_leaves_the_stream_to_go_quiet() {
+        let settings = settings();
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut browser = Browser::default();
+        stream
+            .render_until(0.0, 1.0, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        assert!(!stream.is_idle());
+        stream.change_at(1.0, |mixer, swept| {
+            mixer.stop();
+            mixer.set_band(None, swept);
+        });
+        stream
+            .render_until(1.0, 2.0, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        assert!(stream.is_idle(), "the band faded, the send released");
     }
 }

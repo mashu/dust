@@ -139,13 +139,15 @@ impl StreamState {
             return;
         }
         let now = self.ctx.current_time();
+        let soonest = self.soonest();
         let (ctx, into) = (&self.ctx, &self.into);
-        // Picked up at the clock only should it have run past what was
-        // rendered: a change is made a margin past it, and the stretch after
-        // the change starts exactly where the change was made.
+        // Picked up only should the clock have run past what was rendered,
+        // and then where a stretch can still start on time, as a change is
+        // made: one started at the clock just read would start in the past,
+        // play at once from its first sample, late, over the next.
         let rendered = self
             .stream
-            .render_until(now, now + lead, |starts, samples| {
+            .render_until(soonest, now + lead, |starts, samples| {
                 schedule(ctx, into, starts, samples)
             });
         // A stretch the browser would not take is tried again on the next

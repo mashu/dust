@@ -46,6 +46,13 @@ impl Biquad {
         }
     }
 
+    /// Turn its output over: every feedforward tap negated, its state with
+    /// it, so it carries on from where it stands the other way up.
+    pub fn negate(&mut self) {
+        self.b = self.b.map(|tap| -tap);
+        self.state = self.state.map(|held| -held);
+    }
+
     /// A low-pass pole pair at `q`, unity at DC and falling off above
     /// `corner_hz`: designed in the analogue domain and brought over by the
     /// bilinear transform, prewarped so the corner lands where it was asked

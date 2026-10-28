@@ -34,9 +34,8 @@ use crate::timing::{
 /// so no band setting moves its level or takes any of it away.
 ///
 /// Where the output stage's limiter starts to bend: at its loudest your
-/// message peaks right there and never past it, as loud as the strongest
-/// station a receiver plays at full volume and as the paddle's sidetone at
-/// the default strength floor (0.7).
+/// message peaks right there and never past it, about as loud as the
+/// strongest station a receiver plays at full volume.
 ///
 /// On the worst band, the widest filter at the hardest noise and static,
 /// the limiter takes the band's crests on top of it some of the time, as it

@@ -6,7 +6,7 @@
 mod state;
 
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -17,11 +17,11 @@ use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::ToneRequest;
 use super::mixer::{
-    BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept, fade_origin_sec,
+    BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept, clock_sec, fade_origin_sec,
 };
 use super::shape::Gains;
 use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming};
-use state::{PlayerState, ToneSignal, moved_off_default, went_silent};
+use state::{Heartbeat, PlayerState, ToneSignal, moved_off_default};
 
 /// The furthest behind the callback the speaker is believed to be. A host
 /// that reports more is reporting nonsense, and a send would wait for it.
@@ -77,16 +77,14 @@ pub struct MorsePlayer {
 /// session can recover rather than stall.
 ///
 /// Some breaks say nothing: an iOS interruption, a call or Siri, stops the
-/// stream without a word. So the callback counts its calls, and a stream
+/// stream without a word. So the callback notes when it ran, and a stream
 /// found not to have been called for a while is taken for broken too.
 struct OpenStream {
     _stream: cpal::Stream,
     /// The device's name, where it has one to read.
     device: Option<String>,
     failed: Arc<AtomicBool>,
-    beat: Arc<AtomicU32>,
-    /// The count last seen, and when it was seen to move.
-    seen: (u32, Instant),
+    heartbeat: Arc<Heartbeat>,
 }
 
 /// The audio buffer iOS is asked for: as short as the desktop's.
@@ -206,9 +204,8 @@ impl MorsePlayer {
     /// Make sure the output stream is up: opened again after it slept, or
     /// after the device broke.
     fn ensure_output(&mut self) -> Result<(), String> {
-        if self.stream.as_mut().is_some_and(|open| {
-            let beat = open.beat.load(Ordering::Relaxed);
-            if went_silent(&mut open.seen, beat, Instant::now()) {
+        if self.stream.as_ref().is_some_and(|open| {
+            if open.heartbeat.went_silent(clock_sec()) {
                 // Broken without a word: a send waiting on it is told so.
                 open.failed.store(true, Ordering::Release);
             }
@@ -352,7 +349,11 @@ impl MorseBackend for MorsePlayer {
             self.state.retire();
             return Err(format!("Audio mixer failed to open: {err}"));
         }
-        let Some(failed) = self.stream.as_ref().map(|open| Arc::clone(&open.failed)) else {
+        let Some((failed, heartbeat)) = self
+            .stream
+            .as_ref()
+            .map(|open| (Arc::clone(&open.failed), Arc::clone(&open.heartbeat)))
+        else {
             self.state.retire();
             return Err("Audio mixer failed to open.".into());
         };
@@ -404,6 +405,7 @@ impl MorseBackend for MorsePlayer {
             finished,
             late,
             failed,
+            heartbeat,
             // Its samples go to the output once the receiver has looked
             // ahead at them.
             SendTiming {
@@ -477,7 +479,7 @@ fn build_stream<T>(
     config: &cpal::StreamConfig,
     mut output: Output,
     failed: Arc<AtomicBool>,
-    beat: Arc<AtomicU32>,
+    heartbeat: Arc<Heartbeat>,
 ) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
@@ -496,7 +498,7 @@ where
         .build_output_stream(
             config,
             move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
-                beat.fetch_add(1, Ordering::Relaxed);
+                heartbeat.beat(clock_sec());
                 let frames = data.len().div_ceil(channels);
                 if scratch.len() < frames {
                     // Only a host handing over more than it ever has before.
@@ -573,8 +575,8 @@ fn open_stream(
             Arc::clone(&failed),
             config.sample_rate.0,
         );
-        let beat = Arc::new(AtomicU32::new(0));
-        let (failing, beating) = (Arc::clone(&failed), Arc::clone(&beat));
+        let heartbeat = Arc::new(Heartbeat::new(clock_sec()));
+        let (failing, beating) = (Arc::clone(&failed), Arc::clone(&heartbeat));
         let built = match supported.sample_format() {
             SampleFormat::F32 => build_stream::<f32>(device, &config, output, failing, beating),
             SampleFormat::F64 => build_stream::<f64>(device, &config, output, failing, beating),
@@ -595,8 +597,7 @@ fn open_stream(
                     _stream: stream,
                     device: device.name().ok(),
                     failed,
-                    beat,
-                    seen: (0, Instant::now()),
+                    heartbeat,
                 });
             }
             Err(err) => last_err = Some(err),

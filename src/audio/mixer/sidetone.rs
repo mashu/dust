@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::time::Instant;
 
 use crate::audio::ToneRequest;
+use crate::audio::shape::GATE_RAMP_SEC;
 use crate::audio::tone::SIDETONE_LEAD_MARGIN_SEC;
 
 /// Seconds on the one clock the UI and the audio callback both read, from
@@ -158,6 +159,10 @@ struct StreamClock {
 /// The oscillator and its gate, owned by the audio callback.
 pub struct Sidetone {
     phase: f32,
+    /// The level the tone plays at: the control's, taken as the gate opens
+    /// and moved to it at the mixer's pace while it sounds, so a volume
+    /// moved under a held paddle never steps the tone.
+    level: f32,
     /// How far through its edge the gate stands: 0 shut, 1 open.
     progress: f64,
     /// Which way the gate is going: open, or shut.
@@ -179,6 +184,7 @@ impl Sidetone {
     pub fn new(sample_rate: u32) -> Self {
         Self {
             phase: 0.0,
+            level: 0.0,
             progress: 0.0,
             keyed: false,
             sample_rate: f64::from(sample_rate.max(1)),
@@ -202,6 +208,7 @@ impl Sidetone {
         let edge = Edge {
             step: (std::f64::consts::TAU * hz / self.sample_rate) as f32,
             gain,
+            level_step: (1.0 / (GATE_RAMP_SEC * self.sample_rate)) as f32,
             slope: 1.0 / (rise * self.sample_rate),
             smoothing,
         };
@@ -318,6 +325,10 @@ impl Sidetone {
         let tau = std::f32::consts::TAU;
         let target = if self.keyed { 1.0 } else { 0.0 };
         for slot in out {
+            if self.progress == 0.0 {
+                // Shut, or opening from shut: at the level asked now.
+                self.level = edge.gain;
+            }
             if self.progress != target {
                 self.progress = if self.keyed {
                     (self.progress + edge.slope).min(1.0)
@@ -336,7 +347,8 @@ impl Sidetone {
             } else {
                 cw_core::edge_gain(self.progress, edge.smoothing) as f32
             };
-            *slot += self.phase.sin() * env * edge.gain;
+            self.level += (edge.gain - self.level).clamp(-edge.level_step, edge.level_step);
+            *slot += self.phase.sin() * env * self.level;
             self.phase += edge.step;
             if self.phase >= tau {
                 self.phase -= tau;
@@ -345,11 +357,13 @@ impl Sidetone {
     }
 }
 
-/// What one buffer plays with: the oscillator's step a frame, its level,
-/// how far the gate moves a frame, and the shape it moves along.
+/// What one buffer plays with: the oscillator's step a frame, its level
+/// and how far the level moves a frame towards it, how far the gate moves a
+/// frame, and the shape it moves along.
 struct Edge {
     step: f32,
     gain: f32,
+    level_step: f32,
     slope: f64,
     smoothing: f64,
 }
@@ -434,6 +448,40 @@ mod tests {
             keyed[keyed.len() - 4_800..].iter().all(|s| *s == 0.0),
             "it never shut"
         );
+    }
+
+    /// The volume moved under a held paddle moves the tone without a step:
+    /// a key-up keyed at half the level the key went down at plays on to
+    /// its fall, easing down, at every place in a buffer it can come.
+    #[test]
+    fn a_volume_moved_under_a_held_paddle_never_steps_the_tone() {
+        for offset in [0usize, 7, 13, 29, 41] {
+            let control = SidetoneControl::new();
+            let mut sidetone = Sidetone::new(SR);
+            let tone = ToneRequest::new(true, 500.0, 0.5).shaped(0.005, 0.75);
+            control.set_at(tone, 0.01);
+            let frames = 256;
+            let mut out = vec![0.0f32; SR as usize / 2];
+            for (k, chunk) in out.chunks_mut(frames).enumerate() {
+                let now = 0.002 + (k * frames + offset) as f64 / f64::from(SR);
+                if k == 40 {
+                    control.set_at(
+                        ToneRequest {
+                            on: false,
+                            gain: 0.25,
+                            ..tone
+                        },
+                        now,
+                    );
+                }
+                sidetone.add_to(chunk, &control, now);
+            }
+            let biggest = out
+                .windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0f32, f32::max);
+            assert!(biggest < 0.036, "{offset}: a step of {biggest}");
+        }
     }
 
     /// The sidetone adds to what is already there.

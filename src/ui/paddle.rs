@@ -637,6 +637,28 @@ const STOP_PAGE_PADDLES: &str = r#"if (window.__dustPaddleKeys) {
     window.__dustPaddleKeys();
 }"#;
 
+/// What the page's word about a key does to the paddles: one closes or
+/// opens, or both open.
+#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageKey {
+    Press(Paddle),
+    Release(Paddle),
+    OpenBoth,
+}
+
+/// The page's word, `kind` of a key `key` at `code`, as the paddles take it:
+/// none for a key that is no paddle.
+#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+fn page_key(kind: &str, key: &str, code: &str, swap: bool) -> Option<PageKey> {
+    match (kind, paddle_for_key(key, code, false, swap)) {
+        ("down", Some(paddle)) => Some(PageKey::Press(paddle)),
+        ("up", Some(paddle)) => Some(PageKey::Release(paddle)),
+        ("open", _) => Some(PageKey::OpenBoth),
+        _ => None,
+    }
+}
+
 #[cfg(all(not(feature = "desktop"), not(feature = "web"), not(test)))]
 fn listen_page_paddles(keys: PaddleKeys) {
     use_hook(move || {
@@ -644,11 +666,11 @@ fn listen_page_paddles(keys: PaddleKeys) {
             let mut page = document::eval(PAGE_PADDLES_SCRIPT);
             while let Ok((kind, key, code)) = page.recv::<(String, String, String)>().await {
                 let swap = keys.settings.peek().playback.paddle_swap;
-                match (kind.as_str(), paddle_for_key(&key, &code, false, swap)) {
-                    ("down", Some(paddle)) => keys.press(paddle),
-                    ("up", Some(paddle)) => keys.release(paddle),
-                    ("open", _) => keys.release_all(),
-                    _ => {}
+                match page_key(&kind, &key, &code, swap) {
+                    Some(PageKey::Press(paddle)) => keys.press(paddle),
+                    Some(PageKey::Release(paddle)) => keys.release(paddle),
+                    Some(PageKey::OpenBoth) => keys.release_all(),
+                    None => {}
                 }
             }
         })
@@ -736,6 +758,10 @@ mod tests {
             r#"window.removeEventListener("blur", blur)"#,
             "if (bracket(e) && !shortcut(e))",
             "if (!e.repeat)",
+            // Every release heard, a modifier held or not, and the Command
+            // key's own, after which a browser sends no other, opening both.
+            "const up = (e) => {\n    if (bracket(e)) {",
+            r#"} else if (e.key === "Meta") {"#,
         ] {
             assert!(script.contains(listened), "{listened}");
         }
@@ -744,6 +770,16 @@ mod tests {
             paddle_for_key("", "BracketRight", false, false),
             Some(Paddle::Dah)
         );
+        assert_eq!(
+            page_key("down", "[", "BracketLeft", false),
+            Some(PageKey::Press(Paddle::Dit))
+        );
+        assert_eq!(
+            page_key("up", "]", "BracketRight", false),
+            Some(PageKey::Release(Paddle::Dah))
+        );
+        assert_eq!(page_key("open", "", "", false), Some(PageKey::OpenBoth));
+        assert_eq!(page_key("up", "a", "KeyA", false), None);
     }
 
     #[test]

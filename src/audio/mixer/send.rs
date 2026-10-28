@@ -224,7 +224,7 @@ pub struct SendVoice {
     release_len: usize,
     /// The most other stations calling across this send at once.
     callers: usize,
-    finished: Arc<AtomicBool>,
+    finished: Finished,
     /// When it was queued, on the wall clock, and every sample it has played
     /// since, its wait among them: what the player said of when it would be
     /// heard counts from there. The native stream's alone: it renders as it
@@ -259,12 +259,7 @@ impl SendVoice {
             .map(|station| Station::heard(station, sr, fading, started_at_sec))
             .collect();
         let samples = |seconds: f64| (seconds * sr).round().max(1.0) as usize;
-        // To the last fall of any station's, which runs on past its key.
-        let ends = std::iter::once(&plan.wanted)
-            .chain(&plan.others)
-            .flat_map(|station| station.events.iter().map(ToneEvent::end_sec))
-            .fold(plan.wanted.duration_sec, f64::max);
-        let length = (ends.max(0.0) * sr).ceil() as usize;
+        let length = (plan.sound_end_sec().max(0.0) * sr).ceil() as usize;
         let at = |seconds: f64| (seconds.max(0.0) * sr).round() as usize;
         Self {
             stations,
@@ -280,7 +275,7 @@ impl SendVoice {
             hands_over: false,
             release_len: samples(SEND_RELEASE_SEC),
             callers: plan.others_at_once(),
-            finished: Arc::new(AtomicBool::new(false)),
+            finished: Finished(Arc::new(AtomicBool::new(false))),
             #[cfg(feature = "native-audio")]
             queued_at: Instant::now(),
             #[cfg(feature = "native-audio")]
@@ -294,7 +289,7 @@ impl SendVoice {
     /// the waiter watches.
     #[cfg(feature = "native-audio")]
     pub fn finished_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.finished)
+        Arc::clone(&self.finished.0)
     }
 
     /// Set once it is found to have played late ([`Self::settle`]).
@@ -456,13 +451,25 @@ impl SendVoice {
             }
         }
         if self.wait == 0 && self.pos >= self.sound_ends_at().saturating_add(latency) {
-            self.finished.store(true, Ordering::Release);
+            self.finished.0.store(true, Ordering::Release);
         }
     }
 
     /// Played out, and heard: the mixer can let it go.
     pub fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::Acquire)
+        self.finished.0.load(Ordering::Acquire)
+    }
+}
+
+/// A send's word that it has played to its end, its own in every copy of
+/// the mixer: the browser's stream renders ahead and keeps copies to go
+/// back to, and the copy that rendered on saying so would have the one it
+/// goes back to, where the send is still sounding, swept out under it.
+struct Finished(Arc<AtomicBool>);
+
+impl Clone for Finished {
+    fn clone(&self) -> Self {
+        Self(Arc::new(AtomicBool::new(self.0.load(Ordering::Acquire))))
     }
 }
 
@@ -785,6 +792,23 @@ mod tests {
         voice.settle(latency);
         assert!(finished.load(Ordering::Acquire));
         assert!(voice.is_finished());
+    }
+
+    /// Each copy of a send has its own word that it has finished: the one
+    /// played on to its end says so, and one kept from before, where it is
+    /// still sounding, does not, nor is it swept for it.
+    #[test]
+    fn a_copy_of_a_send_finishes_on_its_own() {
+        let plan = planned("TTT", &[]);
+        let mut voice = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
+        play(&mut voice, 64);
+        let kept = voice.clone();
+        let end = voice.end;
+        play(&mut voice, end);
+        voice.settle(0);
+        assert!(voice.is_finished());
+        assert!(!kept.is_finished(), "the copy kept is still sounding");
+        assert!(kept.is_sounding());
     }
 
     /// A send whose stream keeps up plays ahead of the wall clock, a buffer

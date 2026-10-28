@@ -771,6 +771,9 @@ impl PhaseScore {
 pub struct ReceiverFilter {
     resonators: [Biquad; MAX_RECEIVER_SECTIONS],
     len: usize,
+    /// What it passes at the pitch, phase and all: its sign there, against
+    /// another's, is what [`Self::align_to`] matches.
+    at_pitch: Complex,
     /// Samples until the resonators are next brought to rest
     /// ([`Biquad::settle`]).
     until_settle: u32,
@@ -794,7 +797,23 @@ impl ReceiverFilter {
                 Biquad::new([b0, b1, 0.0], [a1, a2])
             }),
             len: sections.len,
+            at_pitch: design.translated(design.rotation, design.pitch_hz),
             until_settle: SETTLE_EVERY,
+        }
+    }
+
+    /// Come out the same way up at the pitch as `playing`, the filter it
+    /// takes over from. Two designs a slider step apart can have their BFO
+    /// phases half a turn apart, and handed over as the same band twice,
+    /// their gains summing to one, the two would cancel mid-fade: the hiss
+    /// and every station on the band dropping 20 dB for a few milliseconds.
+    /// Which way up a filter plays is nothing the ear hears on its own.
+    pub fn align_to(&mut self, playing: &ReceiverFilter) {
+        if self.at_pitch.mul(playing.at_pitch.conj()).re < 0.0 {
+            for resonator in &mut self.resonators[..self.len] {
+                resonator.negate();
+            }
+            self.at_pitch = self.at_pitch.scale(-1.0);
         }
     }
 

@@ -1922,6 +1922,54 @@ fn hiss_across_retunes(from: &TrainingSettings, to: &TrainingSettings) -> (f64, 
     )
 }
 
+/// Two bands put in a few milliseconds apart under a station the AGC is
+/// riding: the one put in first goes before the one it replaced, and the
+/// station rides on at the gain it had as each hands over, never at one
+/// with nothing ducked, nor stepping when the last going out has gone.
+#[test]
+fn a_band_replaced_as_it_came_in_never_lets_the_station_jump() {
+    // Nothing on the band but its AGC, ducking the station hard: what
+    // comes out is the station, at what it rides.
+    let mut settings = hiss();
+    settings.band.noise_enabled = false;
+    settings.playback.char_wpm_min = 5.0;
+    settings.playback.char_wpm_max = 5.0;
+    settings.band.link_volume = true;
+    settings.band.volume_min = VOLUME_MAX;
+    let full = Gains::of(&settings.clone().clamp());
+    for volume in [cw_core::MASTER_VOLUME_MIN, 0.3, 0.6, 1.0] {
+        settings.band.master_volume = volume;
+        let settings = settings.clone().clamp();
+        let mut mixer = Mixer::new(SR);
+        let mut swept = Swept::new();
+        // At full with no band on, then the band in and the volume turned
+        // down under it: the AF gain with no band on stays where it was,
+        // as far from what the send rides as the volume was turned.
+        mixer.set_gains(full);
+        render(&mut mixer, SR as usize / 10);
+        mixer.set_band(Some(band(&settings, 1)), &mut swept);
+        mixer.set_gains(Gains::of(&settings));
+        // Well into a dah 0.72 s long, the AGC riding it down.
+        mixer.start(send(&settings, "T"), &mut swept);
+        let before = render(&mut mixer, SR as usize * 3 / 10);
+        mixer.set_band(Some(band(&settings, 2)), &mut swept);
+        let mut after = render(&mut mixer, SR as usize * 3 / 1000);
+        mixer.set_band(Some(band(&settings, 3)), &mut swept);
+        after.extend(render(&mut mixer, SR as usize * 40 / 1000));
+        // Two milliseconds hold a crest at any pitch the dial has.
+        let window = SR as usize / 500;
+        let steady = f64::from(loudest(&before[before.len() - 5 * window..]));
+        for (k, stretch) in after.chunks(window).enumerate() {
+            let moved = 20.0 * (f64::from(loudest(stretch)) / steady).log10();
+            assert!(
+                moved.abs() < 1.0,
+                "volume {volume}: {moved:+.1} dB {} ms after the first band came in",
+                2 * k
+            );
+        }
+    }
+}
+
 /// A receiver control turned retunes the band on the air: the new filter
 /// and AGC warm unheard on the same noise and stations, then the two cross
 /// with gains that sum to one, as the same band twice adds. Retuned to the
@@ -1970,6 +2018,34 @@ fn a_retune_carries_the_band_on_without_a_hole() {
         assert!(
             levels.iter().all(|level| (low..high).contains(level)),
             "the hiss across a retune that moves it {moved:.2} dB: {levels:.2?}"
+        );
+    }
+}
+
+/// One step of the width slider can turn the filter over at the pitch, its
+/// BFO phase half a turn from the last; handed over as the same band twice,
+/// the two cancelled mid-fade, the hiss dropping 8 to 20 dB for a few
+/// milliseconds. The new filter takes the playing one's sign, and the hiss
+/// goes across without a hole.
+#[test]
+fn a_retune_one_step_on_never_cancels_the_band() {
+    use cw_core::FilterShape::{Peaked, Sharp, Soft};
+    for (shape, from, to) in [
+        (Peaked, 400.0, 410.0),
+        (Peaked, 1_590.0, 1_600.0),
+        (Soft, 1_640.0, 1_650.0),
+        (Sharp, 1_250.0, 1_260.0),
+    ] {
+        let mut before = hiss();
+        before.band.filter_shape = shape;
+        before.band.filter_width_hz = from;
+        let mut after = before.clone();
+        after.band.filter_width_hz = to;
+        let (moved, levels) = hiss_across_retunes(&before, &after);
+        let (low, high) = (moved.min(0.0) - 1.5, moved.max(0.0) + 1.5);
+        assert!(
+            levels.iter().all(|level| (low..high).contains(level)),
+            "{shape:?} {from} to {to} Hz, the hiss moving {moved:.2} dB: {levels:.2?}"
         );
     }
 }

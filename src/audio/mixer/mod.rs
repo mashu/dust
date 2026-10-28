@@ -41,9 +41,7 @@ pub use output::Output;
 use output::finish;
 pub use send::{SendSample, SendVoice, fade_origin_sec};
 #[cfg(feature = "native-audio")]
-pub use sidetone::SidetoneControl;
-#[cfg(all(test, feature = "native-audio"))]
-use sidetone::clock_sec;
+pub use sidetone::{SidetoneControl, clock_sec};
 
 /// How many bands may be fading out at once. One band hands over to the next
 /// in a few tens of milliseconds; a slider dragged across its range rebuilds
@@ -104,6 +102,10 @@ pub struct Mixer {
     late: Vec<SendSample>,
     late_len: usize,
     late_at: usize,
+    /// What the send rode on the band going out, last it was on the air,
+    /// while the band coming in has still to come in all the way: the send
+    /// eases on from there, not from no band at all.
+    handed_over: Option<f64>,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -148,6 +150,7 @@ impl Mixer {
             late: vec![SendSample::default(); late_room(sample_rate)],
             late_len: agc_lookahead_samples(sample_rate),
             late_at: 0,
+            handed_over: None,
         }
     }
 
@@ -166,14 +169,16 @@ impl Mixer {
         self.metering.taken()
     }
 
-    /// Whether it has nothing left to play: no band, none fading out, and
-    /// no send sounding or riding out its release. What it plays then is
-    /// silence, once the look-ahead has run out.
+    /// Whether it has nothing left to play: no band, none still fading out,
+    /// and no send sounding or riding out its release. What it plays then is
+    /// silence, once the look-ahead has run out. Those gone are counted
+    /// gone, swept or not: a change sweeps them, and after the last change
+    /// nothing comes to.
     #[cfg(any(feature = "web", test))]
     pub fn is_quiet(&self) -> bool {
         self.band.is_none()
-            && self.fading.is_empty()
-            && self.retiring.is_empty()
+            && self.fading.iter().all(BandVoice::is_gone)
+            && self.retiring.iter().all(|send| !send.is_sounding())
             && self.send.as_ref().is_none_or(|send| !send.is_sounding())
     }
 
@@ -365,6 +370,7 @@ impl Mixer {
             .resize(late_room(self.sample_rate), SendSample::default());
         self.late.fill(SendSample::default());
         self.late_at = 0;
+        self.handed_over = None;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
         swept.receivers.extend(self.retune.take());
@@ -444,23 +450,45 @@ impl Mixer {
                 current = Some(played);
                 input = current.as_ref().map_or(input, |played| played.input);
             }
+            // What the send rides going out is the newest band still on the
+            // air: one gone has no gain of its own to give, and one replaced
+            // as it came in goes before the band it was replacing.
             let mut outgoing = None;
             for band in self.fading.iter_mut().rev() {
+                let on_air = !band.is_gone();
                 let played = band.next(coming.heard, now.rf);
                 background += played.band;
-                outgoing.get_or_insert(played);
+                if on_air {
+                    outgoing.get_or_insert(played);
+                }
             }
             let (gain, riding) = match (current, outgoing) {
                 (Some(new), old) => {
-                    let from = old.map_or(alone, |old| old.gain * old.af);
+                    let from = match &old {
+                        Some(old) => old.gain * old.af,
+                        // Gone before this one came in all the way: from
+                        // what it last gave, or with no band before, none.
+                        None => self.handed_over.unwrap_or(alone),
+                    };
+                    if old.is_some() {
+                        self.handed_over = Some(from);
+                    } else if new.weight >= 1.0 {
+                        self.handed_over = None;
+                    }
                     let to = new.gain * new.af;
                     (new.gain, from + (to - from) * new.weight)
                 }
-                (None, Some(old)) => (
-                    1.0 + (old.gain - 1.0) * old.weight,
-                    alone + (old.gain * old.af - alone) * old.weight,
-                ),
-                (None, None) => (1.0, alone),
+                (None, Some(old)) => {
+                    self.handed_over = None;
+                    (
+                        1.0 + (old.gain - 1.0) * old.weight,
+                        alone + (old.gain * old.af - alone) * old.weight,
+                    )
+                }
+                (None, None) => {
+                    self.handed_over = None;
+                    (1.0, alone)
+                }
             };
             // Your own message comes in after the AGC: the receiver never
             // hears it, so it neither ducks the reply that follows nor is

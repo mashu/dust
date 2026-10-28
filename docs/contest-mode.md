@@ -1553,10 +1553,10 @@ spacing and no fist variation.
   key in silence, and few can send without hearing it. It once followed
   the station strength floor, which set how far the stations stand over
   the noise, not how loud anything plays; at the default floor (0.7) the
-  paddles sounded about 12 dB over your messages. At its own level they
-  sound about 6 dB over your messages at -9 dB (0.18 of full scale), 3 dB
-  over an average caller before the AGC (0.25) and some 6 dB under the
-  loudest station the receiver plays. A contester who keys the log with
+  paddles sounded about 12 dB over your messages. At its own level, 0.35
+  of full scale at full volume, they sound about 3 dB under your messages
+  at the default -3 dB (0.50), some 4 dB under an average caller as heard
+  (0.57) and 5 dB under the loudest station the receiver plays. A contester who keys the log with
   paddles hears that gap; one who types, as at 235 QSOs an hour, does
   not. Should keying with the paddles transmit one day (§14, later),
   their sidetone in a run would be your sending, and should follow it
@@ -3831,7 +3831,7 @@ plus a mark); `scripts/callsign-prefixes.py` (zones and continents).
   faded, and no continuation set to start sooner than a release after its
   key.
 
-- from 5b: the keyer ends a word seven dits of quiet after a letter's last
+- from 5b: the keyer ends a word six dits of quiet after a letter's last
   element, a straight key's too, though its letter ends a dit sooner; a
   paddle closed before then carries the word on, and a key pressed in it
   ends the word with no space, as does a pattern that spells no letter;
@@ -4204,7 +4204,7 @@ copy-speed series; the paddles' field space.
   guide in Contest mode, its button shown there, Start contest, the run
   screen's parts one at a time on desktop and touch, and Discard through
   `abort_run`, its Next never starting a run (§2); and a word space keyed
-  on the paddles after a letter, seven dits of quiet, pressing Space by
+  on the paddles after a letter, six dits of quiet, pressing Space by
   the Space key's rule, the keyer's word gap a cw-core change (§4.5).
 
 **Later, not planned:** Search & Pounce with the Sprint QSY rule, RIT,
@@ -4257,7 +4257,7 @@ keying with the paddles, a contest level, and more contests.
 | The Runs card (4b) | under the Contest pill on Scores, which shows once a run is kept | a tab or a card of its own | the board's contest and its runs side by side, and no new place to look |
 | Space in Exchange (operator feedback) | back to Call where the exchange has one item to type, or what is typed reads whole, is nothing or ends in a space; else the space before the next item | a space, always | MorseRunner's and N1MM's space bar toggles the fields, so a call is put right with one key; a longer exchange still needs its spaces, and none is typed only to be dropped |
 | Your sending (operator feedback) | a level of its own, off to the loudest in dB, -9 dB to start | a fixed monitor level | painfully loud against weak callers; -9 dB is level with an average caller as heard through the AGC |
-| The paddles' sidetone (operator feedback; audit 2026-10-27) | a level of its own, half the limiter's knee, in every mode, turned down with the volume | the volume floor; your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The volume floor set how far the stations stand over the noise, so it moved the paddles 7 to 13 dB with it; a rig's sidetone level is its own. At the defaults the paddles sound about 6 dB over your messages and 3 dB over an average caller (§5.3) |
+| The paddles' sidetone (operator feedback; audit 2026-10-27) | a level of its own, half the limiter's knee, in every mode, turned down with the volume | the volume floor; your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The volume floor set how far the stations stand over the noise, so it moved the paddles 7 to 13 dB with it; a rig's sidetone level is its own. At the defaults the paddles sound about 3 dB under your messages and 4 dB under an average caller (§5.3) |
 | Your call in TU (operator feedback) | every QSO, every third or never, in a pile-up, where the contest's TU leaves it; the callers call after every TU | every third, always | MorseRunner's station ID rate is a setting; its callers come on every TU, signed or not, so none waits for your call |
 | Callers' speed (2026-10-22) | each newcomer's drawn from the copy-speed belief within the Speed card's ranges, on as it ships, a switch of the contest's own; aiming at the Aim's share of characters right; QRS slowing from that speed | MorseRunner's keys alone; RufzXP's step up on a right call and down on a miss; group training's switch; a fixed contest target | the user asked for callers that speed up as calls are copied clean; Dust's speeds come from a posterior, so they move smoothly and as surely as the copies say; group training's switch stays off and its own; one aim for every adaptive feature, shown where it steers |
 | Presets and the callers' speed (2026-10-22) | leave the switch alone | each set it | a preset says how fast callers may come; how they are drawn within that is yours, and toggling it keeps the preset |
@@ -4275,7 +4275,7 @@ keying with the paddles, a contest level, and more contests.
 | How soon a continuation can take over (5a) | the player's lead, as the last turn started at once found it, and a send's release, after the key | the moment your message is at as it reaches the ear | a player plays ahead of the ear, so a character starting inside its lead has begun already, and taking over there sent its start twice; a lead measured on every turn keeps up with the device |
 | What the turn on the air plays up to the splice (5a) | counted at the key, as planned | counted as it plays | everything is decided when you key; the turn on the air would otherwise stay beside the next for every count and timer. The cost: an Esc, a pause or the run's end before the splice, up to about a second after the key at 25 WPM, leaves counted a caller's send there that never sounded: with full break-in, any; without, only a reply starting in the word space before a splice after your message's last character |
 | The contest guide's Next (5b) | moves on, never starting a run; Show me starts one when asked; away from the run screen its steps point the way to it | Next starting the run, as the first session's Next starts the session | a run's callers are sound nobody asked for, and a run is ten minutes of it, where a session's first group is a few seconds |
-| The paddles' field space (5b) | seven dits of quiet after a letter's last element, a whole word space, then Space by its rule | the split between a letter space and a word space, five dits | a Space moves the cursor out of the call, so a hesitation mid-call must never make one |
+| The paddles' field space (5b) | six dits of quiet after a letter's last element, a dit short of a word space so one sent on time always ends it, then Space by its rule | the split between a letter space and a word space, five dits | a Space moves the cursor out of the call, so a hesitation mid-call must never make one |
 | The guide when the mode changes (5b) | that mode's guide, from its first step | the step it was on | the two guides' steps differ, and a step of one is nothing to point at in the other |
 
 ### 15.2 Decisions taken with the user

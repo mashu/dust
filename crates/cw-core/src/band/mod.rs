@@ -178,10 +178,11 @@ impl BandMixer {
     /// shared, so the audio thread may make it.
     pub fn retuned(&self, receiver: Receiver) -> Self {
         let Receiver {
-            filter,
+            mut filter,
             mut agc,
             tuning,
         } = receiver;
+        filter.align_to(&self.receiver);
         let mut source = self.source.clone();
         source.retune(tuning);
         agc.carry_on_from(&self.agc);

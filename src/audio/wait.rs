@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use cw_core::{MonoMs, PlaybackPlan, SendStart};
+use cw_core::{MonoMs, PlannedTransmission, SendStart};
 
 use crate::time::{POLL_MS, mono_ms, sleep_ms};
 
@@ -207,31 +207,43 @@ pub trait PlaybackSignal {
 
 /// Morse already scheduled; wait without holding the player borrow.
 pub struct PlaybackWait {
+    /// To the copied station's last key-up, as its plan has it.
     pub duration_sec: f64,
+    /// To the end of the send's sound: its last element's fall, any
+    /// station's, which is what is waited for.
+    sound_sec: f64,
     char_wpm: f64,
     effective_wpm: f64,
     /// When the send was started, on the app's clock: the moment its
     /// [`SendTiming`] is reckoned from.
     started: MonoMs,
     timing: SendTiming,
-    /// Where each of its characters' last element ends, in seconds from its
-    /// start, as its plan has it.
+    /// Where each of its characters' last element ends, and where its first
+    /// starts, in seconds from its start, as its plan has it.
     char_ends_sec: Vec<f64>,
+    first_char_sec: f64,
     signal: Rc<dyn PlaybackSignal>,
 }
 
 impl PlaybackWait {
     /// Wait on `signal` for a send that plays as `plan` says, started at
-    /// `started`: its length, its characters and the speeds it resolved to
-    /// are the plan's, whoever plays it.
-    pub fn new(plan: &PlaybackPlan, signal: Rc<dyn PlaybackSignal>, started: MonoMs) -> Self {
+    /// `started`: its length, its sound, the copied station's characters
+    /// and the speeds it resolved to are the plan's, whoever plays it.
+    pub fn new(
+        plan: &PlannedTransmission,
+        signal: Rc<dyn PlaybackSignal>,
+        started: MonoMs,
+    ) -> Self {
+        let wanted = &plan.wanted;
         Self {
-            duration_sec: plan.duration_sec,
-            char_wpm: plan.resolved_char_wpm,
-            effective_wpm: plan.resolved_effective_wpm,
+            duration_sec: wanted.duration_sec,
+            sound_sec: plan.sound_end_sec(),
+            char_wpm: wanted.resolved_char_wpm,
+            effective_wpm: wanted.resolved_effective_wpm,
             started,
             timing: signal.timing(),
-            char_ends_sec: plan.chars.iter().map(|span| span.end_sec).collect(),
+            char_ends_sec: wanted.chars.iter().map(|span| span.end_sec).collect(),
+            first_char_sec: wanted.chars.first().map_or(0.0, |span| span.start_sec),
             signal,
         }
     }
@@ -246,16 +258,16 @@ impl PlaybackWait {
             effective_wpm: self.effective_wpm,
             output_at: self.started.plus_sec(self.timing.lead_sec),
             char_ends_ms: self.char_ends_sec.iter().map(|end| ms(*end)).collect(),
+            first_char_ms: ms(self.first_char_sec),
             latency_ms: ms(self.timing.latency_sec),
         }
     }
 
-    fn duration_ms(&self) -> u32 {
-        whole_ms(self.duration_sec)
-    }
-
     pub async fn wait(self) -> Waited {
-        let duration_ms = self.duration_ms();
+        // Over once the last element has fallen silent, not at its key-up:
+        // a soft edge sounds on for its rise time after it, and the answer
+        // window opening then would open on the tone.
+        let duration_ms = whole_ms(self.sound_sec);
         let heard_after_ms = whole_ms(self.timing.heard_after_sec());
         // A send waiting for the moment it was asked to start at, a
         // contest's continuation, is not stalling meanwhile.
@@ -441,22 +453,58 @@ mod tests {
             .block_on(future)
     }
 
+    /// A send keyed up at `duration_sec`, of `events`.
+    fn transmission(duration_sec: f64, events: Vec<cw_core::ToneEvent>) -> PlannedTransmission {
+        PlannedTransmission {
+            wanted: cw_core::PlaybackPlan {
+                events,
+                chars: Vec::new(),
+                duration_sec,
+                resolved_char_wpm: 20.0,
+                resolved_effective_wpm: 18.0,
+                fade_from_sec: 0.0,
+            },
+            others: Vec::new(),
+            dry_wanted: false,
+            muted_until: None,
+        }
+    }
+
     fn scripted(duration_sec: f64, steps: Vec<WaitFlags>) -> PlaybackWait {
-        let plan = PlaybackPlan {
-            events: Vec::new(),
-            chars: Vec::new(),
-            duration_sec,
-            resolved_char_wpm: 20.0,
-            resolved_effective_wpm: 18.0,
-            fade_from_sec: 0.0,
-        };
         PlaybackWait::new(
-            &plan,
+            &transmission(duration_sec, Vec::new()),
             Rc::new(Scripted {
                 steps: RefCell::new(steps),
             }),
             MonoMs(mono_ms()),
         )
+    }
+
+    /// A send is over once its last element has fallen silent, not at its
+    /// key-up: on a soft edge, the audio clock past the key-up and the tail
+    /// but not yet past the fall is still playing it.
+    #[test]
+    fn a_send_is_waited_for_to_its_last_fall() {
+        let fall = cw_core::ToneEvent {
+            start_sec: 0.0,
+            duration_sec: 0.15,
+            keyed_sec: 0.1,
+            frequency_hz: 600.0,
+            target_gain: 1.0,
+            envelope: std::sync::Arc::from(Vec::<f32>::new()),
+        };
+        let at = |ms: u32| WaitFlags {
+            played_ms: Some(ms + PLAYBACK_TAIL_MS),
+            ..flags()
+        };
+        let signal = Rc::new(Scripted {
+            steps: RefCell::new(vec![at(100), at(100), at(150), flags()]),
+        });
+        let plan = transmission(0.1, vec![fall]);
+        let wait = PlaybackWait::new(&plan, Rc::clone(&signal) as _, MonoMs(mono_ms()));
+        assert_eq!(wait.duration_sec, 0.1, "the key-up, as the plan has it");
+        assert_eq!(run(wait.wait()), on_time(PlaybackOutcome::Completed));
+        assert_eq!(signal.steps.borrow().len(), 1, "waited on to the fall");
     }
 
     #[test]

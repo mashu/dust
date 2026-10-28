@@ -78,7 +78,9 @@ pub struct KeyerOutput {
 /// due, as a keyer on a clock of its own would have: the edge it reports
 /// is that instant's, and the rhythm keeps its time. Later than that, the
 /// element sounding is lengthened by the wait, and the space after it is
-/// still whole.
+/// still whole; the element a space owes starts at the tick. A letter's gap
+/// starts where the quiet did, however late its tick: nothing sounds in a
+/// space for a stall to have stretched.
 #[derive(Clone, Debug)]
 pub struct Keyer {
     paddles: PaddleKeyer,
@@ -87,8 +89,6 @@ pub struct Keyer {
     phase: Phase,
     /// When the letter under way began: the contact that opened it.
     began: u64,
-    /// When a paddle last closed.
-    pressed_at: u64,
 }
 
 impl Keyer {
@@ -99,7 +99,6 @@ impl Keyer {
             dit_ms: dit_ms_for_wpm(wpm),
             phase: Phase::Idle,
             began: 0,
-            pressed_at: 0,
         }
     }
 
@@ -139,28 +138,38 @@ impl Keyer {
     /// dit at 20 WPM is 60 ms, and waiting for the next tick to begin it
     /// would be the whole character feeling late.
     ///
-    /// A letter or word space that has run out by `now` has ended its letter
-    /// or word, whether or not its tick has come yet: the host's timer may
-    /// be late, and a paddle closed after the space is the next letter's.
+    /// A space that has run out by `now` has ended, whether or not its tick
+    /// has come yet: the host's timer may be late. One between elements
+    /// starts the element it owed, from the paddles as they stood, and this
+    /// paddle comes after it, as it would on a keyer's own clock; a letter or
+    /// word space has ended its letter or word, and this paddle starts the
+    /// next.
     pub fn press(&mut self, paddle: Paddle, now: u64) -> KeyerOutput {
         let was_sounding = self.sounding();
+        let mut keyed_at = now;
+        if let Phase::Space { until } = self.phase
+            && now >= until
+        {
+            keyed_at = self.end_space(until, now);
+        }
         let (ended, space) = self.end_quiet_spaces(now);
         if !self.letter_open() {
             self.began = now;
         }
-        self.pressed_at = now;
         self.paddles.press(paddle, now);
         if self.mode().is_straight() {
             self.phase = Phase::Contact;
+            keyed_at = now;
         } else if matches!(
             self.phase,
             Phase::Idle | Phase::Gap { .. } | Phase::Word { .. }
         ) {
             self.start_next(now);
+            keyed_at = now;
         }
         KeyerOutput {
             space,
-            ..self.output(self.edge(was_sounding, now), ended)
+            ..self.output(self.edge(was_sounding, keyed_at), ended)
         }
     }
 
@@ -216,11 +225,7 @@ impl Keyer {
                 };
             }
             Phase::Space { until } if now >= until => {
-                // Never before the paddle that keys the next element closed:
-                // one closed while the tick was late came after the space
-                // had ended, as into the letter's gap.
-                ended = kept_time(until, now).max(self.pressed_at);
-                self.start_next(ended);
+                ended = self.end_space(until, now);
             }
             Phase::Gap { since } if now >= since.saturating_add(self.letter_gap_ms()) => {
                 letter = self.take_letter();
@@ -279,6 +284,20 @@ impl Keyer {
         self.decoder = PaddleDecoder::default();
         self.phase = Phase::Idle;
         self.output(self.edge(was_sounding, now), None)
+    }
+
+    /// End the space between elements due at `until`, by `now`, and say
+    /// when what follows it began: the element owed where the space ended,
+    /// or at `now` for a tick too late to keep its time ([`kept_time`]);
+    /// with none owed, the letter's gap where the quiet began, at `until`.
+    fn end_space(&mut self, until: u64, now: u64) -> u64 {
+        let at = kept_time(until, now);
+        self.start_next(at);
+        if let Phase::Gap { since } = &mut self.phase {
+            *since = until;
+            return until;
+        }
+        at
     }
 
     /// Send the next element now, or start the letter space when there is
@@ -815,7 +834,8 @@ mod tests {
     }
 
     /// A paddle closed while the tick ending a space was late came after
-    /// the space: its element starts then, not back when the space ended.
+    /// the space: its element starts then, not back when the space ended,
+    /// and the tick, when it comes, has nothing left to do.
     #[test]
     fn an_element_never_starts_before_its_paddle_closed() {
         let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
@@ -823,10 +843,75 @@ mod tests {
         let _ = keyer.release(Dit, 30);
         let _ = keyer.tick(60);
         // The space ended at 120; the dah closed at 125, before its tick.
-        let _ = keyer.press(Dah, 125);
-        let next = keyer.tick(130);
-        assert_eq!(next.tone, Some(ToneEdge { on: true, at: 125 }));
-        assert_eq!(next.wake_at, Some(305));
+        let pressed = keyer.press(Dah, 125);
+        assert_eq!(pressed.tone, Some(ToneEdge { on: true, at: 125 }));
+        assert_eq!(pressed.wake_at, Some(305));
+        assert_eq!(keyer.tick(130).tone, None);
+    }
+
+    /// Run a keyer's own wakes, on time, to the end, and say what it keyed.
+    fn keyed_to_the_end(keyer: &mut Keyer, mut wake: Option<u64>) -> String {
+        let mut letters = String::new();
+        while let Some(at) = wake {
+            let out = keyer.tick(at);
+            letters.extend(out.letter.map(|keyed| keyed.letter));
+            wake = out.wake_at;
+        }
+        letters
+    }
+
+    /// A paddle closed after a space between elements ran out, before its
+    /// late tick, comes after the element that space owed: that one starts
+    /// where the space ended, from the paddles as they stood, and the new
+    /// paddle is remembered under it, as on a keyer's own clock. A held
+    /// dah and a dit squeezed in 5 ms after its space is G in every mode,
+    /// where the dit used to go first: N, or K in mode B.
+    #[test]
+    fn a_paddle_closed_in_an_overdue_space_comes_after_the_element_owed() {
+        for mode in [KeyerMode::IambicA, KeyerMode::IambicB, KeyerMode::Ultimatic] {
+            let mut keyer = Keyer::new(mode, WPM);
+            let _ = keyer.press(Dah, 0);
+            let _ = keyer.tick(180);
+            // The space ended at 240; its tick comes late, at 248.
+            let owed = keyer.press(Dit, 245);
+            assert_eq!(owed.tone, Some(ToneEdge { on: true, at: 240 }), "{mode:?}");
+            assert_eq!(owed.wake_at, Some(420), "{mode:?}");
+            let _ = keyer.release(Dah, 250);
+            let opened = keyer.release(Dit, 250);
+            assert_eq!(keyer.tick(248).tone, None, "{mode:?}: the late tick");
+            assert_eq!(
+                keyed_to_the_end(&mut keyer, opened.wake_at),
+                "G",
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// A letter's gap starts where the quiet did, however late the tick
+    /// ending the space before it: a paddle closed more than two dits after
+    /// the last element starts a letter of its own, the late tick or none.
+    #[test]
+    fn a_late_tick_never_runs_two_letters_together() {
+        // The tick ending the space comes 30 ms late.
+        let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
+        let _ = keyer.press(Dah, 0);
+        let _ = keyer.release(Dah, 100);
+        let _ = keyer.tick(180);
+        let gap = keyer.tick(270);
+        assert_eq!(gap.wake_at, Some(300), "two dits of quiet from 180");
+        let next = keyer.press(Dit, 310);
+        assert_eq!(next.letter.map(|keyed| keyed.letter), Some('T'));
+        assert_eq!(next.tone, Some(ToneEdge { on: true, at: 310 }));
+        // And with no tick at all before the paddle closed.
+        let mut keyer = Keyer::new(KeyerMode::IambicA, WPM);
+        let _ = keyer.press(Dah, 0);
+        let _ = keyer.release(Dah, 100);
+        let _ = keyer.tick(180);
+        let next = keyer.press(Dit, 305);
+        assert_eq!(next.letter.map(|keyed| keyed.letter), Some('T'));
+        assert_eq!(next.tone, Some(ToneEdge { on: true, at: 305 }));
+        let opened = keyer.release(Dit, 320);
+        assert_eq!(keyed_to_the_end(&mut keyer, opened.wake_at), "E");
     }
 
     /// A tick held up longer than [`LATE_TICK_MS`] met a stall: the element

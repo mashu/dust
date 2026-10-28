@@ -34,11 +34,11 @@ pub const MY_SENDING_OFF_DB: i32 = -60;
 /// it. Its loudest, 0 dB, is the limiter's knee, about where the strongest
 /// station a receiver plays at full volume crests; the AGC holds every
 /// caller over its threshold within a few decibels of that, a caller drawn
-/// anywhere in the default strength range about 1.3 dB under it. Three
-/// down, on the control's own steps, your message sits a decibel and a half
+/// anywhere in the default strength range about 2 dB under it. Three
+/// down, on the control's own steps, your message sits a decibel or so
 /// under the caller, about level, as a rig's sidetone set to the receiver's
 /// audio is. Measured through the default receiver at full volume: the
-/// caller at 0.59 of full scale, your message at 0.50.
+/// caller at 0.57 of full scale, your message at 0.50.
 const MY_SENDING_DEFAULT_DB: i32 = -3;
 
 /// The longest callsign kept: room for a host and a marker around a call,

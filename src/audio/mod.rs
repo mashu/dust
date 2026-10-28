@@ -158,7 +158,7 @@ pub fn start_planned(
     let started = MonoMs(mono_ms());
     let heard_in = starts_at.map(|at| (at.0 as f64 - started.0 as f64) / 1_000.0);
     let signal = player.start(transcript, plan, settings, heard_in)?;
-    Ok(PlaybackWait::new(&plan.wanted, signal, started))
+    Ok(PlaybackWait::new(plan, signal, started))
 }
 
 /// The player this build ships with.
@@ -456,8 +456,9 @@ pub mod fake {
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
             }
-            // The wanted station sets the length; the others are laid over it.
-            let duration_ms = (plan.wanted.duration_sec * 1000.0).ceil().max(0.0) as u32;
+            // As long as it sounds, the last fall of any station's, as a
+            // real player plays it.
+            let duration_ms = (plan.sound_end_sec() * 1000.0).ceil().max(0.0) as u32;
             // Started at its time, as a real player starts a continuation,
             // or at once once that is past.
             let latency_sec = self.recorder.latency_sec.get();

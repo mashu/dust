@@ -124,6 +124,16 @@ pub struct PlannedTransmission {
 }
 
 impl PlannedTransmission {
+    /// Where the send's sound ends, in seconds from its start: the last fall
+    /// of any of its stations', which runs on past its key-up by the
+    /// keying's edge, and never before the copied station's last key-up.
+    pub fn sound_end_sec(&self) -> f64 {
+        std::iter::once(&self.wanted)
+            .chain(&self.others)
+            .flat_map(|station| station.events.iter().map(ToneEvent::end_sec))
+            .fold(self.wanted.duration_sec, f64::max)
+    }
+
     /// The most of `others` sounding at one moment, each from its first
     /// tone to the end of its last: how many stations the band's own
     /// traffic makes room for while the send plays. A contest's turn plans

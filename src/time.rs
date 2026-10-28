@@ -178,6 +178,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(3));
         let later = super::mono_secs_since(at);
         assert!(later >= 0.003 && later > since, "{since} then {later}");
+        // Between the whole milliseconds the clock counts: read a few times
+        // a fraction of one apart, some reading falls between two.
+        let between = (0..20).any(|_| {
+            std::thread::sleep(std::time::Duration::from_micros(300));
+            (super::mono_secs_since(at) * 1_000.0).fract() != 0.0
+        });
+        assert!(between, "placed to the whole millisecond only");
     }
 
     /// A pinned seed starts the same sequence every time, another seed

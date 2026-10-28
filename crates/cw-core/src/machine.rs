@@ -617,6 +617,7 @@ mod tests {
             effective_wpm: 18.0,
             output_at: MonoMs(now.0.saturating_sub(500)),
             char_ends_ms: Vec::new(),
+            first_char_ms: 0,
             latency_ms: 0,
         };
         let _ = m.apply(SessionEvent::PlaybackStarted { index, start }, now);
@@ -1247,6 +1248,7 @@ mod tests {
             effective_wpm: 27.0,
             output_at: MonoMs(20),
             char_ends_ms: vec![180, 540],
+            first_char_ms: 0,
             latency_ms: 0,
         };
         let _ = m.apply(
@@ -1283,6 +1285,7 @@ mod tests {
                 effective_wpm: 22.0,
                 output_at: MonoMs(20),
                 char_ends_ms: vec![150],
+                first_char_ms: 0,
                 latency_ms: 0,
             };
             let _ = m.apply(
