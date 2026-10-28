@@ -453,7 +453,7 @@ pub fn tone() -> Element {
     rsx! {
         dl { class: "help-terms",
             dt { "Volume" }
-            dd { "How loud Dust plays everything: the band, the stations, your sending and the paddle's sidetone. For the band it is the receiver's AF gain, after the AGC. 100% is as loud as the strongest station plays without distorting at full RF gain; your device's volume does the rest." }
+            dd { "How loud Dust plays everything: the band, the stations, your sending and the paddle's sidetone. For the band it is the receiver's AF gain, after the AGC. Full is as loud as the strongest station plays without distorting at full RF gain, and each step down is a decibel quieter, as a rig's AF gain turns; your device's volume does the rest." }
             dt { "Side tone" }
             dd { "The pitch you hear the Morse at. A range picks a fresh pitch for each group, as different stations sound." }
             dt { "Station strength" }

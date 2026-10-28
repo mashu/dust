@@ -88,8 +88,8 @@ fn level_y(level_db: f64) -> f64 {
 }
 
 /// The scope's three readings over its last stretch: the loudest at the AGC
-/// over its threshold, the most the AGC took off, and the loudest played,
-/// under the limiter's knee; all in decibels.
+/// over its threshold, the most the AGC took off, and the loudest played
+/// against the limiter's knee, under it or into it; all in decibels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reading {
     pub over_db: f64,
@@ -124,10 +124,13 @@ impl Reading {
         } else {
             format!("AGC takes {:.0} dB", self.agc_db)
         };
-        let room = if self.headroom_db.is_finite() {
+        // A peak that only grazes the knee is not said to be into it.
+        let room = if !self.headroom_db.is_finite() {
+            "silent".to_string()
+        } else if self.headroom_db > -0.5 {
             format!("{:.0} dB under the limiter", self.headroom_db.max(0.0))
         } else {
-            "silent".to_string()
+            format!("{:.0} dB into the limiter", -self.headroom_db)
         };
         format!("{over} · {agc} · {room}")
     }
@@ -280,6 +283,19 @@ mod tests {
             "Peaks 6 dB under the AGC · AGC off · 17 dB under the limiter"
         );
         assert_eq!(Reading::of(&frames(&[(0.0, 1.0, 0.0)]), threshold), None);
+        // Played past the knee, it says how far into the limiter.
+        let hot = Reading::of(&frames(&[(0.2, 1.0, 1.4)]), threshold).expect("heard");
+        assert!(
+            hot.says(false).ends_with("6 dB into the limiter"),
+            "{}",
+            hot.says(false)
+        );
+        let grazing = Reading {
+            over_db: 0.0,
+            agc_db: 0.0,
+            headroom_db: -0.3,
+        };
+        assert!(grazing.says(true).ends_with("0 dB under the limiter"));
     }
 
     /// The line sits where the AGC starts, as far over its lowest as the

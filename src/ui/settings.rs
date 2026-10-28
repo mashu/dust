@@ -710,17 +710,46 @@ fn YourSpeed(settings: Signal<TrainingSettings>) -> Element {
 #[component]
 fn MasterVolume(settings: Signal<TrainingSettings>) -> Element {
     let volume = use_memo(move || settings.read().band.master_volume)();
+    let db = volume_db(volume);
     rsx! {
         SliderField {
             label: "Volume",
-            value_label: format!("{:.0}%", volume * 100.0),
-            value: volume,
-            min: MASTER_VOLUME_MIN,
-            max: MASTER_VOLUME_MAX,
-            step: 0.05,
+            value_label: volume_label(db),
+            value: db,
+            min: volume_db(MASTER_VOLUME_MIN),
+            max: 0.0,
+            step: 1.0,
             disabled: false,
-            onchange: move |v: f64| settings.write().band.master_volume = (v * 100.0).round() / 100.0,
+            onchange: move |v: f64| settings.write().band.master_volume = volume_share(v),
         }
+    }
+}
+
+/// The volume, a share of full, as its slider stands: in whole decibels
+/// down from full, each step as much louder as the last, as a rig's
+/// audio-taper AF gain turns. The share is what is kept, so older saves load
+/// as they were; the bottom is the decibel nearest the quietest share.
+pub(super) fn volume_db(share: f64) -> f64 {
+    (20.0 * share.clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX).log10())
+        .round()
+        .max((20.0 * MASTER_VOLUME_MIN.log10()).ceil())
+}
+
+/// The share of full volume a slider at `db` keeps: held to the range, and to
+/// a ten-thousandth, which tells every decibel step of it apart.
+pub(super) fn volume_share(db: f64) -> f64 {
+    let share = 10f64
+        .powf(db / 20.0)
+        .clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX);
+    (share * 10_000.0).round() / 10_000.0
+}
+
+/// What the volume reads as: "Full", or "−6 dB" turned down.
+fn volume_label(db: f64) -> String {
+    if db >= 0.0 {
+        "Full".to_string()
+    } else {
+        format!("\u{2212}{:.0} dB", -db)
     }
 }
 

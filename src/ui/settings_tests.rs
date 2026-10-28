@@ -1214,7 +1214,7 @@ fn the_volume_heads_the_tone_card_and_the_range_is_station_strength() {
     run(|| async {
         let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
         ui.click("nav-settings");
-        assert!(ui.has(r#"<span class="slider-value">100%</span>"#));
+        assert!(ui.has(r#"<span class="slider-value">Full</span>"#));
         assert!(ui.input_tag("more-slider-volume").contains("disabled"));
         let html = ui.html();
         let volume = html.find(r#"id="slider-volume""#).expect("the volume");
@@ -1229,17 +1229,45 @@ fn the_volume_heads_the_tone_card_and_the_range_is_station_strength() {
             "no range is called volume"
         );
 
+        // A decibel a step, the share kept.
         ui.click("less-slider-volume");
-        assert_eq!(ui.stored_settings().await.band.master_volume, 0.95);
-        assert!(ui.has(r#"<span class="slider-value">95%</span>"#));
-        ui.type_into("slider-volume", "0.05");
-        assert_eq!(ui.stored_settings().await.band.master_volume, 0.05);
-        assert!(ui.has(r#"<span class="slider-value">5%</span>"#));
+        assert_eq!(ui.stored_settings().await.band.master_volume, 0.8913);
+        assert!(ui.has(r#"<span class="slider-value">−1 dB</span>"#));
+        ui.type_into("slider-volume", "-6");
+        assert_eq!(ui.stored_settings().await.band.master_volume, 0.5012);
+        assert!(ui.has(r#"<span class="slider-value">−6 dB</span>"#));
+        ui.type_into("slider-volume", "-26");
+        assert_eq!(ui.stored_settings().await.band.master_volume, 0.0501);
+        assert!(ui.has(r#"<span class="slider-value">−26 dB</span>"#));
         assert!(ui.input_tag("less-slider-volume").contains("disabled"));
         ui.click("reset-tone-volume");
         assert_eq!(ui.stored_settings().await.band.master_volume, 1.0);
-        assert!(ui.has(r#"<span class="slider-value">100%</span>"#));
+        assert!(ui.has(r#"<span class="slider-value">Full</span>"#));
     });
+}
+
+/// Every step of the volume slider is a decibel, from full to the bottom,
+/// the share it keeps reading back to the step it was set at; a share saved
+/// before it was in decibels reads at the step nearest it.
+#[test]
+fn every_step_of_the_volume_is_a_decibel() {
+    use super::settings::{volume_db, volume_share};
+    let bottom = volume_db(cw_core::MASTER_VOLUME_MIN);
+    assert_eq!(bottom, -26.0);
+    let mut step = 0.0;
+    let mut louder = volume_share(0.0);
+    assert_eq!(louder, 1.0);
+    while step > bottom {
+        step -= 1.0;
+        let share = volume_share(step);
+        assert_eq!(volume_db(share), step, "{share} at {step} dB");
+        let apart = 20.0 * (louder / share).log10();
+        assert!((apart - 1.0).abs() < 0.01, "{apart:.3} dB below {step} dB");
+        louder = share;
+    }
+    assert!(louder >= cw_core::MASTER_VOLUME_MIN);
+    assert_eq!(volume_db(0.5), -6.0);
+    assert_eq!(volume_db(0.05), bottom);
 }
 
 /// The station strength is shown and typed as a percentage of the
