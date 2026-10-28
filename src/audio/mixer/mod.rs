@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 #[cfg(doc)]
 use cw_core::band::AGC_LOOKAHEAD_SEC;
-use cw_core::band::agc_lookahead_samples;
+use cw_core::band::{AudioHighPass, agc_lookahead_samples};
 
 use crate::audio::shape::{BAND_FADE_SEC, GATE_RAMP_SEC, Gains};
 
@@ -87,6 +87,9 @@ pub struct Mixer {
     gains: Gains,
     gains_asked: Gains,
     af: Glide,
+    /// The receiver's audio stage, after its AGC: the roll-off below the
+    /// note, on the band and the stations, not on your own message.
+    audio: AudioHighPass,
     /// What the receiver did, a frame at a time, for the level scope.
     metering: Metering,
     /// What the sends played, waiting out the receiver's look-ahead: its AGC
@@ -123,6 +126,7 @@ impl Swept {
 impl Mixer {
     pub fn new(sample_rate: u32) -> Self {
         Self {
+            audio: AudioHighPass::new(sample_rate),
             metering: Metering::new(Arc::new(Meter::new()), sample_rate),
             sample_rate: sample_rate.max(1),
             band: None,
@@ -301,6 +305,7 @@ impl Mixer {
         self.gate = 1.0;
         self.gains = self.gains_asked;
         self.af = Glide::at(self.gains_asked.af);
+        self.audio = AudioHighPass::new(self.sample_rate);
         self.metering.restart(self.sample_rate);
         self.late_len = agc_lookahead_samples(self.sample_rate);
         // On the UI thread, before the stream at the new rate starts.
@@ -414,10 +419,12 @@ impl Mixer {
             // is never muted.
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
-            let played = ((background + heard) * self.gate + send.dry) * now.volume;
+            let received = self.audio.process(background + heard);
+            let played = (received * self.gate + send.dry) * now.volume;
             *slot += played as f32;
             self.metering.add(input, gain, played);
         }
+        self.audio.settle();
         // A send is heard the look-ahead after it was played, as well as the
         // speaker's own latency.
         for send in self.send.iter().chain(&self.retiring) {

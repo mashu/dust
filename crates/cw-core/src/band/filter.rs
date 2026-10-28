@@ -40,7 +40,7 @@
 //! because that is how a rig's CW filter is quoted: a "300 Hz filter" is
 //! 300 Hz wide at 6 dB, and only about 280 Hz wide at 3 dB.
 
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use super::calibration::REFERENCE_BANDWIDTH_HZ;
 use super::dsp::{Biquad, db_to_gain, finite_or, gain_to_db};
@@ -129,6 +129,10 @@ const MAX_BUMP_DB: f64 = 0.5;
 /// How close to a power sum the fold has to add at the pitch for one phase to
 /// count as good as another there, in decibels.
 const PITCH_TOLERANCE_DB: f64 = 0.02;
+/// How close to a real receiver's the hiss has to come, in decibels, for one
+/// phase to count as good as another there: where the fold is too faint to
+/// move the hiss, every phase does, and the plainest is kept.
+const NOISE_TOLERANCE_DB: f64 = 0.05;
 /// The quietest the pitch itself may come out before the make-up gain, so
 /// that gain stays bounded. A phase that would leave it quieter is never
 /// taken; some phase always leaves it at unity or above.
@@ -152,8 +156,8 @@ fn prototype_poles(shape: FilterShape) -> [Complex; IF_POLES] {
         }
         // Bessel: maximally flat group delay, so a keyed tone comes through
         // with almost no overshoot and dies away without ringing on. Rounder
-        // shoulders and a slower roll-off — the SOFT shape, closer to an older
-        // analogue filter.
+        // shoulders and a slower roll-off — the SOFT shape of a DSP rig. An
+        // older crystal ladder is Chebyshev-like, and rings more than Sharp.
         FilterShape::Soft => {
             let [a, b, c, d] = BESSEL_POLES;
             [a, a.conj(), b, b.conj(), c, c.conj(), d, d.conj()]
@@ -472,13 +476,15 @@ impl FilterDesign {
     /// of it; divided by the response at the pitch squared, which is unity
     /// except where the make-up gain hit its bound.
     fn energy_noise_bandwidth(&self) -> f64 {
+        self.noise_bandwidth_with(self.rotation)
+    }
+
+    /// [`FilterDesign::energy_noise_bandwidth`] for the filter translated
+    /// with `rotation`, whatever gain that leaves at the pitch: the noise
+    /// bandwidth is a ratio to the pitch, so the gain falls out of it.
+    fn noise_bandwidth_with(&self, rotation: Complex) -> f64 {
         let shift = Complex::new(0.0, TAU * self.pitch_hz);
-        let live = |k: usize| {
-            (
-                self.poles[k].add(shift),
-                self.residues[k].mul(self.rotation),
-            )
-        };
+        let live = |k: usize| (self.poles[k].add(shift), self.residues[k].mul(rotation));
         let mut doubled = Complex::ZERO;
         let mut passband = Complex::ZERO;
         for j in 0..self.len {
@@ -490,8 +496,27 @@ impl FilterDesign {
             }
         }
         let energy = 2.0 * doubled.re + 2.0 * passband.re;
-        let at_pitch = self.response_at(self.pitch_hz);
+        let at_pitch = self.translated(rotation, self.pitch_hz).abs();
         0.5 * energy / (at_pitch * at_pitch).max(f64::MIN_POSITIVE)
+    }
+
+    /// What a real receiver's noise bandwidth would be with this filter:
+    /// one that hears the noise of both sidebands, which arrives on two
+    /// independent paths and adds in power whatever the phase of the beat,
+    /// against the pitch, at which the near sideband and the fold add in
+    /// power too. The prototype's whole energy, ∫|H_LP(f)|² df over every
+    /// frequency, is the two sidebands' together over positive frequencies;
+    /// in closed form, Σⱼₖ ρⱼρₖ / −(pⱼ + pₖ).
+    fn two_sideband_noise_bandwidth(&self, image_at_pitch: Complex) -> f64 {
+        let mut energy = Complex::ZERO;
+        for j in 0..self.len {
+            for k in 0..self.len {
+                let (pj, pk) = (self.poles[j], self.poles[k]);
+                let (rj, rk) = (self.residues[j], self.residues[k]);
+                energy = energy.add(rj.mul(rk).div(pj.add(pk).scale(-1.0)));
+            }
+        }
+        energy.re / (1.0 + image_at_pitch.norm_sqr())
     }
 
     /// The resonators the digital receiver is the sum of, at `sample_rate`:
@@ -620,16 +645,24 @@ impl FilterDesign {
     /// whether the two add or cancel. Left at zero, an eight-pole Butterworth
     /// 1640 Hz wide at a 240 Hz pitch cancels the pitch itself by 64 dB.
     ///
-    /// So it is chosen for the two things the fold could spoil. First, no
+    /// So it is chosen for the three things the fold could spoil. First, no
     /// tone in the audible passband (from [`LOWEST_EDGE_HZ`] up) may come out
     /// more than [`MAX_BUMP_DB`] louder than the pitch, or a station sitting
     /// off to one side would be rewarded for it, which no real receiver does.
     /// Then, among the phases that manage that, the fold should add at the
     /// pitch the way two independent sidebands do — in power — so that
     /// bringing the pitch to unity does not drag the rest of the response up
-    /// or down with it; and of those, the one with the least bump. Over every
-    /// pitch and width the controls allow some phase meets the first rule.
-    /// Where the fold cannot reach anything you hear, it stays at zero.
+    /// or down with it. Two families of phases do, half a turn apart, one
+    /// adding the fold's noise below the pitch and one cancelling it; both
+    /// are tried exactly, so which of them the search steps land nearest
+    /// never decides it. Of them, the one whose hiss is nearest a real
+    /// receiver's, which hears both sidebands' noise in power whatever the
+    /// phase ([`FilterDesign::two_sideband_noise_bandwidth`]), so the hiss
+    /// rises smoothly as the filter widens rather than a decibel or two up
+    /// and down with each step of it; and last the one with the least bump.
+    /// Over every pitch and width the controls allow some phase meets the
+    /// first rule. Where the fold cannot reach anything you hear, it stays at
+    /// zero.
     fn bfo_phase(&self) -> f64 {
         let low = LOWEST_EDGE_HZ.min(self.pitch_hz);
         if self.lowpass(low + self.pitch_hz).abs() < NEGLIGIBLE_IMAGE {
@@ -642,11 +675,17 @@ impl FilterDesign {
         let folded: [Complex; PHASE_POINTS] =
             std::array::from_fn(|i| self.lowpass(low + step * i as f64 + self.pitch_hz));
         let image_at_pitch = self.lowpass(2.0 * self.pitch_hz);
-        // What two independent sidebands would come to at the pitch.
+        // What two independent sidebands would come to at the pitch, and
+        // the phases at which the fold comes to exactly that: where it adds
+        // at right angles to the near sideband.
         let power_sum = (1.0 + image_at_pitch.norm_sqr()).sqrt();
+        let exact = ((image_at_pitch.arg() + FRAC_PI_2) / 2.0).rem_euclid(PI);
+        let two_sidebands = self.two_sideband_noise_bandwidth(image_at_pitch);
+        let phases = (0..PHASE_STEPS)
+            .map(|n| PI * n as f64 / PHASE_STEPS as f64)
+            .chain([exact, (exact + FRAC_PI_2).rem_euclid(PI)]);
         let mut best: Option<(PhaseScore, f64)> = None;
-        for n in 0..PHASE_STEPS {
-            let phase = PI * n as f64 / PHASE_STEPS as f64;
+        for phase in phases {
             let turn = Complex::from_angle(phase);
             let at_pitch = turn.add(turn.conj().mul(image_at_pitch)).abs();
             if at_pitch < MIN_PITCH_RESPONSE {
@@ -657,9 +696,11 @@ impl FilterDesign {
                 .zip(&folded)
                 .map(|(a, b)| turn.mul(*a).add(turn.conj().mul(*b)).abs())
                 .fold(0.0, f64::max);
+            let noise_db = (10.0 * (self.noise_bandwidth_with(turn) / two_sidebands).log10()).abs();
             let score = PhaseScore::new(
                 gain_to_db(loudest / at_pitch),
                 gain_to_db(at_pitch / power_sum).abs(),
+                noise_db,
             );
             // Only a real improvement moves it, so ties keep the plainest
             // phase.
@@ -673,24 +714,33 @@ impl FilterDesign {
 
 /// How well one BFO phase does, in the order [`FilterDesign::bfo_phase`]
 /// weighs it: within the bump limit or not, then how far from a power sum the
-/// pitch is, then the bump itself.
+/// pitch is, then how far its hiss is from a real receiver's, then the bump
+/// itself.
 #[derive(Clone, Copy, Debug)]
 struct PhaseScore {
     over_limit: bool,
     pitch_db: f64,
+    noise_db: f64,
     bump_db: f64,
 }
 
 impl PhaseScore {
-    fn new(bump_db: f64, pitch_db: f64) -> Self {
+    fn new(bump_db: f64, pitch_db: f64, noise_db: f64) -> Self {
         let over_limit = bump_db > MAX_BUMP_DB;
+        // Past the limit nothing matters but getting back under it.
+        let pitch_db = if over_limit {
+            0.0
+        } else {
+            (pitch_db - PITCH_TOLERANCE_DB).max(0.0)
+        };
         Self {
             over_limit,
-            // Past the limit nothing matters but getting back under it.
-            pitch_db: if over_limit {
+            pitch_db,
+            // The hiss decides only between phases as good at the pitch.
+            noise_db: if over_limit || pitch_db > 0.0 {
                 0.0
             } else {
-                (pitch_db - PITCH_TOLERANCE_DB).max(0.0)
+                (noise_db - NOISE_TOLERANCE_DB).max(0.0)
             },
             bump_db,
         }
@@ -703,6 +753,9 @@ impl PhaseScore {
         }
         if (self.pitch_db - other.pitch_db).abs() > EPS {
             return self.pitch_db < other.pitch_db;
+        }
+        if (self.noise_db - other.noise_db).abs() > EPS {
+            return self.noise_db < other.noise_db;
         }
         self.bump_db < other.bump_db - EPS
     }
@@ -990,6 +1043,10 @@ impl Complex {
 
     fn abs(self) -> f64 {
         self.re.hypot(self.im)
+    }
+
+    fn arg(self) -> f64 {
+        self.im.atan2(self.re)
     }
 
     fn exp(self) -> Self {

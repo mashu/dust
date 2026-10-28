@@ -1443,3 +1443,55 @@ fn the_passband_edges_are_the_filters_and_mirrors_pass_alike() {
     assert!(passband_edges(f64::NAN, f64::NAN).0.is_finite());
     assert!(mirror_hz(500.0, 0.0).is_finite());
 }
+
+/// The width slider, swept a step at a time through every shape over low and
+/// middling ranges, moves the hiss smoothly, as a real receiver's does: never
+/// a decibel in one step, nor up and down again on the next, the way the
+/// phase once flipped between two that each passed the pitch; and the
+/// passband the stations sit in never jumps either.
+#[test]
+fn the_hiss_moves_smoothly_as_the_filter_widens() {
+    for shape in ALL_SHAPES {
+        for (low, high) in [
+            (200.0, 300.0),
+            (200.0, 400.0),
+            (300.0, 600.0),
+            (500.0, 700.0),
+        ] {
+            let mut settings = TrainingSettings::default();
+            settings.band.filter_shape = shape;
+            settings.band.side_tone_min = low;
+            settings.band.side_tone_max = high;
+            let at = |width: f64| {
+                let mut settings = settings.clone();
+                settings.band.filter_width_hz = width;
+                FilterDesign::from_settings(&settings)
+            };
+            let points: Vec<f64> = (0..9)
+                .map(|k| low + (high - low) * f64::from(k) / 8.0)
+                .collect();
+            let (mut last, mut last_step): (Option<FilterDesign>, f64) = (None, 0.0);
+            let mut width = FILTER_WIDTH_MIN;
+            while width <= FILTER_WIDTH_MAX {
+                let design = at(width);
+                let here = format!("{shape:?} {low}-{high} at {width} Hz");
+                if let Some(before) = &last {
+                    let step =
+                        10.0 * (design.noise_bandwidth_hz() / before.noise_bandwidth_hz()).log10();
+                    assert!(step.abs() < 1.0, "{here}: the hiss stepped {step:+.2} dB");
+                    assert!(
+                        !(step.abs() > 0.5 && last_step.abs() > 0.5 && step * last_step < 0.0),
+                        "{here}: the hiss went {last_step:+.2} then {step:+.2} dB"
+                    );
+                    for hz in &points {
+                        let moved = gain_to_db(design.response_at(*hz) / before.response_at(*hz));
+                        assert!(moved.abs() < 2.0, "{here}: {hz} Hz moved {moved:+.2} dB");
+                    }
+                    last_step = step;
+                }
+                last = Some(design);
+                width += 10.0;
+            }
+        }
+    }
+}

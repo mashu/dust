@@ -110,7 +110,9 @@ fn a_new_band_comes_in_without_a_hole_in_the_hiss() {
 /// volume moves in a straight line at the gate's pace, and the AF gain,
 /// which can move tens of decibels as the receiver changes, glides there a
 /// decibel at a time over a band's fade. A slider moved under a tone never
-/// clicks.
+/// clicks. The AF gain comes ahead of the receiver's audio stage, whose
+/// roll-off lags a glide by a few percent of the level and then holds it
+/// exactly.
 #[test]
 fn the_volume_and_the_af_gain_move_all_the_receiver_plays_without_a_step() {
     // The AGC off, so the Morse plays at its own level rather than held
@@ -134,11 +136,15 @@ fn the_volume_and_the_af_gain_move_all_the_receiver_plays_without_a_step() {
     let plain = play(1.0, 1.0);
     assert!(loudest(&plain) > 0.1, "the Morse was heard");
     let fade = (BAND_FADE_SEC * f64::from(SR)).round();
+    // The audio stage has caught up with the glide 30 ms after it ends.
+    let caught_up = fade + 0.03 * f64::from(SR);
+    let lag = 0.03 * f64::from(loudest(&plain));
     let lifted = play(4.0, 1.0);
     for (i, (a, b)) in plain.iter().zip(&lifted).enumerate() {
         let gain = 4f64.powf(((i + 1) as f64 / fade).min(1.0));
         let off = (f64::from(*b) - gain * f64::from(*a)).abs();
-        assert!(off < 1e-5, "{off} off at {i}, the AF gain lifted");
+        let allowed = if i as f64 >= caught_up { 1e-5 } else { lag };
+        assert!(off < allowed, "{off} off at {i}, the AF gain lifted");
     }
     let step = 1.0 / (GATE_RAMP_SEC * f64::from(SR));
     let quieter = play(1.0, 0.25);
@@ -1779,7 +1785,11 @@ fn a_send_waiting_to_take_over_starts_on_time_or_not_at_all() {
     render(&mut mixer, 500);
     mixer.stop();
     let release = (crate::audio::shape::SEND_RELEASE_SEC * f64::from(SR)).ceil() as usize;
-    // Its release, and the look-ahead it is played behind.
+    // Its release, and the look-ahead it is played behind; then only the
+    // audio stage's own tail, 60 dB down at once and gone within a quarter
+    // of a second.
     render(&mut mixer, release + 1 + late());
-    assert!(render(&mut mixer, SR as usize).iter().all(|s| *s == 0.0));
+    let after = render(&mut mixer, SR as usize);
+    assert!(after.iter().all(|s| s.abs() < 1e-3), "the send played on");
+    assert!(after[SR as usize / 4..].iter().all(|s| *s == 0.0));
 }

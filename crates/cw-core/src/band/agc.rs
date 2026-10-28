@@ -1,11 +1,10 @@
 //! The receiver's automatic gain control.
 //!
-//! One static law, shared by both backends: below a fixed knee the gain is
-//! left alone, and above it the gain comes down nine decibels for every ten
-//! of excess, never more than [`AGC_MAX_DUCK_DB`]. The native player runs
-//! that law sample by sample in [`Agc`], with a hang; the browser can only
-//! run it through a `DynamicsCompressorNode`, set by [`agc_compressor`] from
-//! that node's own curve so the two land on the same law.
+//! One static law: below a fixed knee the gain is left alone, and above it
+//! the gain comes down nine decibels for every ten of excess, never more
+//! than [`AGC_MAX_DUCK_DB`], run sample by sample in [`Agc`], with a hang.
+//! Both players run it, the browser rendering the native mixer ahead of its
+//! clock.
 //!
 //! What it is tuned to is what an operator hears from a rig's AGC:
 //!
@@ -31,7 +30,7 @@
 //! leaves the floor sagging for most of a second after every crash. Real
 //! receivers do neither.
 
-use super::dsp::{db_to_gain, gain_to_db};
+use super::dsp::db_to_gain;
 use crate::settings::AgcDecay;
 
 /// How far above the floor's own peaks the knee sits: a level has to stand
@@ -84,15 +83,6 @@ pub fn agc_decay_sec(decay: AgcDecay) -> (f64, f64) {
     }
 }
 
-/// The release a browser's compressor runs at for `decay`, in its own terms:
-/// the time it takes to bring the gain back up ten decibels. It has no hang,
-/// so it lets go slower than the native AGC recovers once its hang is over.
-pub fn agc_compressor_release_sec(decay: AgcDecay) -> f64 {
-    match decay {
-        AgcDecay::Fast => 0.3,
-        AgcDecay::Slow => 1.2,
-    }
-}
 /// The detector's smoothing: a one-pole average of power with this time
 /// constant, which weighs the last five milliseconds or so. A tone reads as
 /// steady through it, while a two-millisecond click is spread thin.
@@ -139,136 +129,6 @@ pub fn agc_lookahead_samples(sample_rate: u32) -> usize {
 /// Where the detector's power counts as nothing: a tone 300 dB under full
 /// scale, far below any knee.
 const SETTLED_POWER: f64 = 1e-30;
-
-/// The knee width of the browser's compressor, in decibels. Web Audio's knee
-/// starts at the threshold and is fully on six decibels later, so the
-/// threshold sits half of this below the native knee to centre the soft knee
-/// on the hard one.
-pub const AGC_COMPRESSOR_KNEE_DB: f64 = 6.0;
-/// The compressor ratio that is [`AGC_SLOPE`]: one decibel out for every ten
-/// in above the knee.
-pub const AGC_COMPRESSOR_RATIO: f64 = 1.0 / (1.0 - AGC_SLOPE);
-
-/// Where the browser's compressor threshold goes for a native `knee` (an
-/// amplitude): half the compressor's soft knee below it, so the compressor's
-/// curve straddles the native corner rather than starting at it.
-fn agc_compressor_threshold_db(knee: f64) -> f64 {
-    20.0 * knee.max(1e-12).log10() - AGC_COMPRESSOR_KNEE_DB / 2.0
-}
-
-/// How the browser's compressor is set for an AGC with its knee at `knee`
-/// (an amplitude), or for none.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CompressorSetting {
-    pub threshold_db: f64,
-    pub knee_db: f64,
-    pub ratio: f64,
-    /// The make-up gain the node will add of its own accord, which whatever
-    /// follows it has to take back off.
-    pub makeup_db: f64,
-}
-
-/// The browser's compressor for the native AGC's knee. With the AGC off it
-/// is parked at full scale with a ratio of one, where it is transparent and
-/// adds no make-up gain.
-pub fn agc_compressor(knee: Option<f64>) -> CompressorSetting {
-    let (threshold_db, ratio) = match knee {
-        Some(knee) => (agc_compressor_threshold_db(knee), AGC_COMPRESSOR_RATIO),
-        None => (0.0, 1.0),
-    };
-    CompressorSetting {
-        threshold_db,
-        knee_db: AGC_COMPRESSOR_KNEE_DB,
-        ratio,
-        makeup_db: compressor_makeup_db(threshold_db, AGC_COMPRESSOR_KNEE_DB, ratio),
-    }
-}
-
-/// The make-up gain a `DynamicsCompressorNode` adds on its own, in decibels:
-/// the reduction its curve applies at full scale, to the power 0.6. Every
-/// browser applies it, so a compressor that should only ever turn things
-/// down has to be followed by its inverse.
-fn compressor_makeup_db(threshold_db: f64, knee_db: f64, ratio: f64) -> f64 {
-    -0.6 * CompressorCurve::new(threshold_db, knee_db, ratio).gain_db(0.0)
-}
-
-/// The static curve of a Web Audio `DynamicsCompressorNode`, as the
-/// specification's reference implementation (Chromium's, which Firefox and
-/// WebKit share) computes it: the gain in decibels it applies to a steady
-/// input, leaving out its automatic make-up gain ([`compressor_makeup_db`]).
-///
-/// Linear below the threshold; between the threshold and `threshold + knee` an
-/// exponential knee in the amplitude domain whose decibel slope falls from one
-/// to `1 / ratio`; a straight line of slope `1 / ratio` above. The browser
-/// cannot run the native AGC, so this is what holds the two to one law.
-struct CompressorCurve {
-    threshold: f64,
-    knee_end_db: f64,
-    knee_end_out_db: f64,
-    slope: f64,
-    k: f64,
-}
-
-impl CompressorCurve {
-    fn new(threshold_db: f64, knee_db: f64, ratio: f64) -> Self {
-        let threshold = db_to_gain(threshold_db);
-        let slope = 1.0 / ratio.max(1.0);
-        let knee_end_db = threshold_db + knee_db.max(0.0);
-        let knee_end = db_to_gain(knee_end_db);
-        // The knee's sharpness, found the way the reference implementation
-        // finds it: fifteen geometric bisections for the k that makes the
-        // knee's decibel slope at its far end equal the ratio's.
-        let (mut low, mut high, mut k) = (0.1, 10_000.0, 5.0_f64);
-        for _ in 0..15 {
-            if knee_slope(threshold, knee_end, k) < slope {
-                high = k;
-            } else {
-                low = k;
-            }
-            k = (low * high).sqrt();
-        }
-        Self {
-            threshold,
-            knee_end_db,
-            knee_end_out_db: amplitude_to_db(knee_curve(threshold, knee_end, k)),
-            slope,
-            k,
-        }
-    }
-
-    fn gain_db(&self, input_db: f64) -> f64 {
-        let output_db = if input_db < self.knee_end_db {
-            amplitude_to_db(knee_curve(self.threshold, db_to_gain(input_db), self.k))
-        } else {
-            self.knee_end_out_db + self.slope * (input_db - self.knee_end_db)
-        };
-        output_db - input_db
-    }
-}
-
-fn knee_curve(threshold: f64, x: f64, k: f64) -> f64 {
-    if x < threshold {
-        x
-    } else {
-        threshold + (1.0 - (-k * (x - threshold)).exp()) / k
-    }
-}
-
-fn knee_slope(threshold: f64, x: f64, k: f64) -> f64 {
-    if x < threshold {
-        return 1.0;
-    }
-    let x2 = x * 1.001;
-    let rise = amplitude_to_db(knee_curve(threshold, x2, k))
-        - amplitude_to_db(knee_curve(threshold, x, k));
-    rise / (amplitude_to_db(x2) - amplitude_to_db(x))
-}
-
-/// Decibels from an amplitude, with silence held at −600 dB rather than
-/// minus infinity, so the knee's arithmetic stays finite.
-fn amplitude_to_db(amplitude: f64) -> f64 {
-    gain_to_db(amplitude.max(1e-30))
-}
 
 /// The receiver's automatic gain control.
 ///
@@ -610,14 +470,6 @@ mod tests {
         20.0 * gain.log10()
     }
 
-    /// The gain the browser's compressor applies to a steady input at
-    /// `input_db`, leaving its make-up gain out.
-    fn compressor_curve_db(input_db: f64, threshold_db: f64, knee_db: f64, ratio: f64) -> f64 {
-        CompressorCurve::new(threshold_db, knee_db, ratio).gain_db(input_db)
-    }
-
-    /// The default band with nothing on it but the floor, at the reference
-    /// level, and at a fixed pitch.
     fn floor_only() -> TrainingSettings {
         let mut s = TrainingSettings::default();
         s.band.noise_level = REFERENCE_NOISE_LEVEL;
@@ -1130,57 +982,6 @@ mod tests {
         }
     }
 
-    /// (6): the browser's compressor and the native AGC are one law. A
-    /// compressor's knee is soft and it has no hang, but its static curve has
-    /// to land on the native one.
-    #[test]
-    fn the_browsers_compressor_follows_the_native_law() {
-        for knee in [0.01, 0.0914, 0.3] {
-            let threshold = agc_compressor_threshold_db(knee);
-            let knee_db = 20.0 * f64::log10(knee);
-            for over in [6.0, 12.0, 20.0] {
-                let browser = compressor_curve_db(
-                    knee_db + over,
-                    threshold,
-                    AGC_COMPRESSOR_KNEE_DB,
-                    AGC_COMPRESSOR_RATIO,
-                );
-                let native = agc_law_db(over);
-                assert!(
-                    (browser - native).abs() <= 1.5,
-                    "knee {knee}, {over} dB over: browser {browser:.2} dB, native {native:.2} dB"
-                );
-            }
-            // Well below the knee the compressor leaves the band alone.
-            let quiet = compressor_curve_db(
-                knee_db - 10.0,
-                threshold,
-                AGC_COMPRESSOR_KNEE_DB,
-                AGC_COMPRESSOR_RATIO,
-            );
-            assert!(quiet.abs() < 1e-9);
-        }
-        // Its own make-up gain is what it takes off at full scale, to the 0.6.
-        let makeup = compressor_makeup_db(-20.0, 6.0, 2.0);
-        let full = compressor_curve_db(0.0, -20.0, 6.0, 2.0);
-        assert!((makeup + 0.6 * full).abs() < 1e-9 && makeup > 0.0);
-        // What the browser is given: the knee's curve, and its own make-up
-        // gain to take back off.
-        let on = agc_compressor(Some(0.0914));
-        assert_eq!(on.threshold_db, agc_compressor_threshold_db(0.0914));
-        assert_eq!(on.ratio, AGC_COMPRESSOR_RATIO);
-        assert!(on.makeup_db > 0.0);
-        // With the AGC off it is parked where it does nothing at all: every
-        // level the receiver produces is below its threshold, and it adds no
-        // make-up gain.
-        let off = agc_compressor(None);
-        for input in [-80.0, -20.0, -3.0, 0.0] {
-            let gain = compressor_curve_db(input, off.threshold_db, off.knee_db, off.ratio);
-            assert!(gain.abs() < 1e-9, "{input} dB came out {gain} dB off");
-        }
-        assert!(off.makeup_db.abs() < 1e-9);
-    }
-
     /// Off is off: a receiver on its RF gain never moves, whatever arrives.
     #[test]
     fn with_the_agc_off_the_gain_is_one() {
@@ -1330,8 +1131,10 @@ mod tests {
             db(wide_sharp / reference_500) > 4.0,
             "a wide sharp filter left the knee put"
         );
+        // The peak keeps most of the wide filter's hiss out: about 2 dB
+        // more than the 500 Hz filter lets in, where the sharp one lets in 5.
         assert!(
-            wide >= reference_500 && db(wide / reference_500) < 2.0,
+            wide >= reference_500 && db(wide / reference_500) < 2.5,
             "wide and peaked: {:.2} dB",
             db(wide / reference_500)
         );

@@ -59,10 +59,7 @@ mod source;
 
 // What the players, the settings screen and the pile-up planner use. The rest
 // is the band's own business.
-pub use agc::{
-    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_LOOKAHEAD_SEC, AGC_MAX_DUCK_DB, CompressorSetting,
-    agc_compressor, agc_compressor_release_sec, agc_decay_sec, agc_lookahead_samples,
-};
+pub use agc::{AGC_LOOKAHEAD_SEC, AGC_MAX_DUCK_DB, agc_decay_sec, agc_lookahead_samples};
 pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
 pub(crate) use filter::mirror_hz;
 pub use filter::{
@@ -73,7 +70,8 @@ pub use knee::{agc_knee, receiver_knee, remembered_agc_knee, threshold_raise};
 pub use loudness::{full_volume_gain, loudest_station};
 pub use noise::AudioFloor;
 pub use output::{
-    LimiterFeed, SOFT_LIMIT_HEADROOM, SOFT_LIMIT_KNEE, limiter_feed, soft_limit, soft_limit_curve,
+    AUDIO_HIGH_PASS_HZ, AudioHighPass, SOFT_LIMIT_HEADROOM, SOFT_LIMIT_KNEE, soft_limit,
+    soft_limit_curve,
 };
 pub use qsb::Qsb;
 pub use source::BandSource;
