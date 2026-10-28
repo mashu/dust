@@ -182,8 +182,8 @@ pub(crate) fn threshold(settings: &TrainingSettings) -> f64 {
 /// level drawn by its knee with.
 #[cfg(test)]
 pub(crate) fn rf_trace_step(settings: &TrainingSettings, over_db: f64) -> String {
-    let over_lowest = over_db + gain_to_db(threshold_factor(&settings.band));
-    format!("V{}h", tenths(RF.y(over_lowest)))
+    let over_knee = over_db + gain_to_db(threshold_factor(&settings.band));
+    format!("V{}h", tenths(RF.y(over_knee)))
 }
 
 /// Where the scope marks the band's hiss, and what it says of the threshold

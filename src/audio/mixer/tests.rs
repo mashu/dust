@@ -364,8 +364,8 @@ fn switching_the_agc_off_under_a_station_never_drives_it_into_the_limiter() {
 
 /// Taking the threshold down into the hiss under a station, and back, as a
 /// drag along its slider does, never drives the station into the limiter
-/// and leaves it about as loud: the AGC takes more off it, and full volume
-/// makes that up.
+/// and leaves it about as loud, at once and after: the AGC takes more off
+/// it, or less, and full volume makes that up.
 #[test]
 fn moving_the_threshold_into_the_hiss_under_a_station_keeps_it_as_loud() {
     let at = |db: f64| {
@@ -387,12 +387,13 @@ fn moving_the_threshold_into_the_hiss_under_a_station_keeps_it_as_loud() {
     );
     let receiver = FilterDesign::from_settings(&own);
     mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
-    // How loud the station plays: the loudest of its 10 ms stretches but
-    // the very loudest few.
+    // How loud the station plays: the middle of its 10 ms stretches at
+    // their loudest, its dahs filling three quarters of them, so a dip
+    // through any one of them shows.
     let level = |samples: &[f32]| {
         let mut peaks: Vec<f32> = samples.chunks(SR as usize / 100).map(loudest).collect();
         peaks.sort_by(f32::total_cmp);
-        f64::from(peaks[peaks.len() * 9 / 10])
+        f64::from(peaks[peaks.len() / 2])
     };
     let before = level(&render(&mut mixer, SR as usize * 6 / 10));
     for (to, moved) in [(&into, "into the hiss"), (&own, "back")] {
@@ -403,9 +404,12 @@ fn moving_the_threshold_into_the_hiss_under_a_station_keeps_it_as_loud() {
             peak < SOFT_LIMIT_KNEE * 1.05,
             "{moved}: {peak:.3} into the limiter"
         );
-        let settled = level(&after[SR as usize * 3 / 10..]);
-        let change = db((settled / before).powi(2));
-        assert!(change.abs() < 2.0, "{moved}: {change:.2} dB");
+        // Straight after the move, as the band hands over, and once it has.
+        let (first, then) = after.split_at(SR as usize * 3 / 10);
+        for (when, part) in [("at once", first), ("after", then)] {
+            let change = db((level(part) / before).powi(2));
+            assert!(change.abs() < 2.0, "{moved}, {when}: {change:.2} dB");
+        }
     }
 }
 
@@ -476,10 +480,7 @@ fn the_look_ahead_is_the_agcs_at_any_rate() {
 /// where the limiter starts to bend, whatever the AGC and its threshold, the
 /// filter's shape and width, the keying's edges or the pitch, and through
 /// every one of them it comes close, full volume sized to that receiver;
-/// with the threshold down in the hiss too, the hiss riding the AGC. There,
-/// on a wide filter, full volume leaves room for the hiss's crests at the
-/// highest the AGC lets it back up to between its holds on it, which a
-/// crest seldom meets, and the station comes within 4 dB rather than 2.
+/// with the threshold down in the hiss too, the hiss riding the AGC.
 #[test]
 fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
     use cw_core::FilterShape;
@@ -487,6 +488,7 @@ fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
         (true, 0.0),
         (true, 6.0),
         (true, -10.0),
+        (true, -14.0),
         (true, cw_core::AGC_THRESHOLD_MIN_DB),
         (false, 0.0),
     ] {
@@ -525,9 +527,8 @@ fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
                         assert!(peak < SOFT_LIMIT_KNEE, "{peak:.3} with {at}, seed {seed}");
                         loudest_here = loudest_here.max(peak);
                     }
-                    let close = if threshold_db < 0.0 { 0.63 } else { 0.8 };
                     assert!(
-                        loudest_here > close * SOFT_LIMIT_KNEE,
+                        loudest_here > 0.8 * SOFT_LIMIT_KNEE,
                         "only {loudest_here:.3} with the AGC {agc} at {threshold_db:+} dB, {shape:?} {width} Hz, {low}-{high} Hz"
                     );
                 }

@@ -24,6 +24,7 @@ use crate::settings::{
     AgcDecay, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, WPM_MAX, WPM_MIN,
 };
 use crate::timing::{StationVoice, ToneEvent, plan_morse_playback_for};
+use std::sync::Arc;
 
 /// The rate a station is listened to at. A peak is read off samples, and at
 /// this rate the crest of the highest pitch the dial has falls less than 3%
@@ -49,10 +50,10 @@ const LISTEN_AT: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 /// two listened to and a fist that is not a keyer's, which take 3%, and for
 /// a station slower than the fastest, which is the one listened to. Slower,
 /// its gaps run longer and the AGC has opened further by its next element,
-/// whose first crests come out up to 6% over the fastest station's: at 9 to
+/// whose first crests come out up to 7% over the fastest station's: at 9 to
 /// 16 WPM with the fast decay, and at the slowest with the slow one
 /// (`a_slower_station_stays_clean_at_full_volume`).
-const CLEAN_MARGIN: f64 = 0.91;
+const CLEAN_MARGIN: f64 = 0.90;
 
 /// How far over its RMS the band's hiss is allowed to reach on top of the
 /// station: hiss through a filter is Gaussian, and a crest this high comes
@@ -62,12 +63,14 @@ const HISS_CREST: f64 = 3.5;
 
 /// How long the AGC hears the band's hiss alone before the station's first
 /// element: the band is always on, so with the threshold down in the hiss
-/// the station meets an AGC already riding it. Longer than a hang and a few
-/// releases at either decay, so the AGC has settled on the hiss.
+/// the station meets an AGC already riding it. The AGC comes down onto the
+/// hiss at its attack, from wide open, so a few of the hiss's own holds are
+/// long enough for it to settle there.
 const HISS_RUN_IN_SEC: f64 = 0.5;
 
-/// The hiss the station is listened to over: any will do, the same every
-/// time, so the same settings are always sized alike.
+/// The hiss the station is listened to over: any will do, the station
+/// riding it deciding how loud it plays, and the same every time, so the
+/// same settings are always sized alike.
 const HISS_SEED: u64 = 0x4855_5353;
 
 /// How long the filter rings on after the last element listened to, and the
@@ -178,25 +181,18 @@ fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
     settings.band.steepness = ask.steepness_ms.0;
     settings.band.envelope_smoothing = ask.smoothing.0;
     let (low, high) = (ask.low_hz.0, ask.high_hz.0);
-    let hiss = heard_floor_rms(ask.noise.0, ask.receiver.noise_bandwidth_hz());
+    let crest = HISS_CREST * heard_floor_rms(ask.noise.0, ask.receiver.noise_bandwidth_hz());
     // The AGC run in on the hiss alone, and the hiss it hears under the
-    // station after that, the same at every pitch. Switched off, or with no
-    // hiss, there is nothing for it to hear but the station.
-    let sr = f64::from(LISTEN_RATE);
-    let run_in = (HISS_RUN_IN_SEC * sr) as usize;
+    // station after that, the same at every pitch: where the hiss can work
+    // it, its crests reaching the knee. Under it, the hiss never qualifies
+    // nor moves the law, and listening over it would change the answer by
+    // nothing measurable; switched off, or with no hiss, there is nothing
+    // for the AGC to hear but the station.
     let heard = match ask.knee {
-        Some(_) if hiss > 0.0 => {
-            let listened =
-                ((LISTEN_SEC + RING_SEC) * sr) as usize + agc_lookahead_samples(LISTEN_RATE);
-            let mut floor = NoiseFloor::new(LISTEN_RATE, noise_floor_rms(ask.noise.0), HISS_SEED);
-            let mut filter = ReceiverFilter::new(LISTEN_RATE, &ask.receiver);
-            (0..run_in + listened)
-                .map(|_| filter.process(floor.next_sample()))
-                .collect()
-        }
-        _ => Vec::new(),
+        Some(knee) if crest > knee.0 => heard_hiss(ask),
+        _ => Arc::from(Vec::new()),
     };
-    let (before, under) = heard.split_at(run_in.min(heard.len()));
+    let (before, under) = heard.split_at(hiss_run_in().min(heard.len()));
     let mut agc = match ask.knee {
         Some(knee) => Agc::new(LISTEN_RATE, knee.0, ask.decay),
         None => Agc::off(LISTEN_RATE),
@@ -204,6 +200,12 @@ fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
     for sample in before {
         agc.next_gain(*sample);
     }
+    // The hiss on its own, between overs, its crests at the gain the AGC's
+    // law holds it at: at full with the threshold clear of it, and taken
+    // down with the rest with the threshold in it. Worked out rather than
+    // read off a moment of the run-in, which would size the band by
+    // whichever way that moment's hiss happened to fall.
+    let alone = crest * agc.law(crest);
     LISTEN_AT
         .iter()
         .map(|share| {
@@ -216,23 +218,40 @@ fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
                 dash_ratio: 3.0,
             };
             let plan = plan_morse_playback_for(LISTEN_TEXT, &settings, &voice);
-            loudest_through(
-                &plan.events,
-                &ask.receiver,
-                agc.clone(),
-                under,
-                HISS_CREST * hiss,
-            )
+            loudest_through(&plan.events, &ask.receiver, agc.clone(), under, crest)
         })
-        .fold(0.0, f64::max)
+        .fold(alone, f64::max)
+}
+
+/// How many samples the AGC hears the hiss alone for before the station.
+fn hiss_run_in() -> usize {
+    (HISS_RUN_IN_SEC * f64::from(LISTEN_RATE)) as usize
+}
+
+/// The band's hiss through the receiver `ask` describes, as long as the
+/// run-in and the listening after it: remembered, because it depends on the
+/// noise and the receiver alone, so moving the threshold, the decay or the
+/// keying listens over the same hiss again.
+fn heard_hiss(ask: &LoudestAsk) -> Arc<[f64]> {
+    static LAST: LastAnswer<(Exact, FilterDesign), Arc<[f64]>> = LastAnswer::new();
+    LAST.get_or((ask.noise, ask.receiver.clone()), || {
+        let sr = f64::from(LISTEN_RATE);
+        let listened = ((LISTEN_SEC + RING_SEC) * sr) as usize + agc_lookahead_samples(LISTEN_RATE);
+        let mut floor = NoiseFloor::new(LISTEN_RATE, noise_floor_rms(ask.noise.0), HISS_SEED);
+        let mut filter = ReceiverFilter::new(LISTEN_RATE, &ask.receiver);
+        (0..hiss_run_in() + listened)
+            .map(|_| filter.process(floor.next_sample()))
+            .collect()
+    })
 }
 
 /// The loudest sample of `tones` through `receiver` and `agc`, played the
 /// look-ahead late at the gain the AGC rides at, as the native mixer plays
-/// the send, with the crests of the hiss, `crest` high, on top of it: at the
-/// same gain, as the band rides with the station, and at full between
-/// elements, where it is let back up. The AGC hears the station over
-/// `hiss`, the band's hiss through the receiver, sample by sample.
+/// the send, with the crests of the hiss, `crest` high, on top of it at the
+/// same gain, as the band rides with the station: from the station's first
+/// sample played on, through its gaps and the ringing after it. The AGC
+/// hears the station over `hiss`, the band's hiss through the receiver,
+/// sample by sample.
 fn loudest_through(
     tones: &[ToneEvent],
     receiver: &FilterDesign,
@@ -248,12 +267,16 @@ fn loudest_through(
     let mut loudest = 0.0f64;
     let mut at = 0usize;
     let mut hiss = hiss.iter().copied();
+    let mut playing = false;
     let mut listen = |sample: f64| {
         let heard = filter.process(sample);
         let gain = agc.next_gain(heard + hiss.next().unwrap_or(0.0));
         let due = std::mem::replace(&mut waiting[next], heard);
         next = (next + 1) % waiting.len();
-        loudest = loudest.max((due.abs() + crest) * gain);
+        playing |= due != 0.0;
+        if playing {
+            loudest = loudest.max((due.abs() + crest) * gain);
+        }
     };
     let end = (LISTEN_SEC * sr) as usize;
     for tone in tones {
@@ -408,11 +431,61 @@ mod tests {
     /// at any speed down to the slowest, on the receivers where that opens
     /// it most, it still comes out with the room a crest between samples, a
     /// pitch between those listened to and a fist need; with the threshold
-    /// down in the hiss as well, where the hiss holds the AGC between them.
+    /// down at the hiss as well. Further in, the slowest station's gaps are
+    /// the hiss alone, held as the next test has it.
     #[test]
     fn a_slower_station_stays_clean_at_full_volume() {
-        for threshold in [0.0, -10.0, crate::settings::AGC_THRESHOLD_MIN_DB] {
+        for threshold in [0.0, -10.0] {
             slower_stations_stay_clean_at(threshold);
+        }
+    }
+
+    /// Down in the hiss, the hiss alone between overs is held by the AGC
+    /// and lifted by full volume with the rest, and its rarest crests, the
+    /// one in a thousand ten milliseconds loudest, reach no further into the
+    /// limiter than the first two decibels of its soft knee, which nothing
+    /// of them is heard through: on the widest filters, whose hiss is the
+    /// most, and on the default receiver. Clear of the hiss, they stay well
+    /// under it.
+    #[test]
+    fn down_in_the_hiss_its_crests_go_no_further_than_the_soft_knee() {
+        use crate::band::BandMixer;
+        use crate::settings::FilterShape;
+        const SR: u32 = 48_000;
+        for (shape, width) in [
+            (FilterShape::Sharp, crate::settings::DEFAULT_FILTER_WIDTH_HZ),
+            (FilterShape::Sharp, 2_000.0),
+            (FilterShape::Soft, 2_000.0),
+        ] {
+            for (threshold, most_db) in [(0.0, -2.0), (-10.0, 2.0), (-14.0, 2.0), (-20.0, 2.0)] {
+                let mut settings = TrainingSettings::default();
+                settings.band.qrn_enabled = false;
+                settings.band.filter_shape = shape;
+                settings.band.filter_width_hz = width;
+                settings.band.agc_threshold_db = threshold;
+                let settings = settings.clamp();
+                let full = full_volume_gain(&settings);
+                let mut mixer = BandMixer::new(SR, &settings, 7);
+                for _ in 0..SR {
+                    mixer.next(0.0);
+                }
+                // Ten seconds of 10 ms stretches, each at its loudest.
+                let frame = SR as usize / 100;
+                let mut peaks: Vec<f64> = (0..1_000)
+                    .map(|_| {
+                        (0..frame)
+                            .map(|_| (mixer.next(0.0).band * full).abs())
+                            .fold(0.0, f64::max)
+                    })
+                    .collect();
+                peaks.sort_by(f64::total_cmp);
+                let rarest =
+                    crate::band::gain_to_db(peaks[peaks.len() * 999 / 1000] / SOFT_LIMIT_KNEE);
+                assert!(
+                    rarest < most_db,
+                    "{shape:?} {width} Hz at {threshold} dB: the hiss crests {rarest:+.1} dB over the knee"
+                );
+            }
         }
     }
 

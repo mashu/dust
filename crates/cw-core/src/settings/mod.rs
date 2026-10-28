@@ -437,7 +437,7 @@ pub const PILEUP_SPREAD_MAX: f64 = 800.0;
 pub const PILEUP_LEVEL_MIN_DB: f64 = 3.0;
 pub const PILEUP_LEVEL_MAX_DB: f64 = 20.0;
 /// How far the AGC's threshold can be moved from where the band's own floor
-/// puts it, in decibels. At 0, out of the box, it is just clear of the
+/// puts it, in decibels. At 0, out of the box, it is well clear of the
 /// band's own hiss; twenty under, the hiss works the AGC and comes up with
 /// the stations, as a rig's does with its threshold set into the noise;
 /// thirty over, the default station never reaches it.
@@ -514,7 +514,7 @@ pub struct BandSettings {
     pub agc_decay: AgcDecay,
     /// Where the AGC starts to turn signals down, in decibels from where the
     /// band's own floor puts it ([`crate::band::receiver_knee`]): out of the
-    /// box 0, just clear of the band's own hiss, where older saves, which
+    /// box 0, well clear of the band's own hiss, where older saves, which
     /// have no field, load too; down into the hiss, or up over the weaker
     /// stations. The volume follows it, so moving it changes how hard the
     /// AGC works, not how loud the strongest station plays.

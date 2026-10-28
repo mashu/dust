@@ -2166,6 +2166,20 @@ mod ui_tests {
             let (said, drawn) = scope_reads(&mut ui, &recorder, &first, 9.0).await;
             assert_eq!(said, "idle · 3 dB under the limiter");
             assert!(drawn, "{}", ui.html());
+            // Listened to 6 dB down, the same output has 6 dB more room.
+            ui.with_app(|ctx| {
+                let mut settings = ctx.settings;
+                settings.write().band.master_volume = 0.5;
+            });
+            let (said, _) = scope_reads(&mut ui, &recorder, &first, 9.0).await;
+            assert_eq!(said, "idle · 9 dB under the limiter");
+            ui.with_app(|ctx| {
+                let mut settings = ctx.settings;
+                settings.write().band.master_volume = 1.0;
+            });
+            // The follow those moves woke has its turn before the stop.
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
             ui.click("btn-band-stop");
             ui.with_app(|ctx| {
                 let mut settings = ctx.settings;
