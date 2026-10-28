@@ -11,7 +11,7 @@
 
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{CardHead, IconName, control_id, html_bool};
+use crate::ui::widgets::{CardHead, FoldPanel, IconName, control_id, html_bool};
 
 /// What draws the page.
 #[derive(Clone, Debug, PartialEq)]
@@ -361,28 +361,32 @@ pub fn DisplayCard() -> Element {
             looking.set(false);
         });
     };
+    let open = use_signal(|| false);
     rsx! {
         div { class: "card stack-sm",
             CardHead {
                 icon: IconName::Info,
                 title: "Display",
                 note: "How this device draws Dust",
+                fold: open,
             }
-            p { id: "display-drawn", class: "muted", style: "margin: 0;",
-                if let Some(looked) = looked() {
-                    "{drawn_text(&looked)}"
-                } else if looking() {
-                    "Looking…"
-                } else {
-                    "Whether the graphics card draws Dust, or the processor does, which can make scrolling lag."
+            FoldPanel { title: "Display", open,
+                p { id: "display-drawn", class: "muted", style: "margin: 0;",
+                    if let Some(looked) = looked() {
+                        "{drawn_text(&looked)}"
+                    } else if looking() {
+                        "Looking…"
+                    } else {
+                        "Whether the graphics card draws Dust, or the processor does, which can make scrolling lag."
+                    }
                 }
-            }
-            button {
-                id: control_id("btn", "check display"),
-                class: "btn btn-secondary btn-sm",
-                disabled: html_bool(looking()),
-                onclick: check,
-                "Check"
+                button {
+                    id: control_id("btn", "check display"),
+                    class: "btn btn-secondary btn-sm",
+                    disabled: html_bool(looking()),
+                    onclick: check,
+                    "Check"
+                }
             }
         }
     }
@@ -616,6 +620,7 @@ mod tests {
     fn the_webview_is_asked_only_when_check_is_pressed() {
         crate::testing::run(|| async {
             let mut ui = Ui::new(DisplayCard, ());
+            ui.click("disclosure-display");
             assert!(
                 ui.has("Whether the graphics card draws Dust"),
                 "{}",

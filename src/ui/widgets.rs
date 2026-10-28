@@ -472,20 +472,41 @@ pub fn ProgressHeader(
 /// The head every card wears: an icon, a title, a note under it, and the
 /// card's own tools to the right. A card with `help` has an ⓘ beside its
 /// title that opens it under the head (the ? is the guided setup's): what the card's terms, colours and
-/// options mean, out of the way until asked for.
+/// options mean, out of the way until asked for. A card that folds, given
+/// whether it is open as `fold`, is its head alone, with its help under it
+/// if asked for, until it is opened: by the chevron at the right of the
+/// head, or anywhere on its icon, title or note but the ⓘ. Its own tools
+/// show beside the chevron only while it is open, and what it holds goes
+/// in a [`FoldPanel`].
 #[component]
 pub fn CardHead(
     icon: IconName,
     #[props(into)] title: String,
     #[props(into)] note: Option<String>,
     #[props(default)] help: Option<Element>,
+    #[props(default)] fold: Option<Signal<bool>>,
     #[props(default)] children: Element,
 ) -> Element {
     let mut open = use_signal(|| false);
     let id = control_id("help", &title);
+    let shown = fold.is_none_or(|unfolded| unfolded());
+    // What a test opens a folding card by, as a pointer on its title does.
+    let head = fold.map(|_| control_id("head", &title));
+    let class = match fold {
+        None => "card-head",
+        Some(_) if shown => "card-head folds",
+        Some(_) => "card-head folds folded",
+    };
     rsx! {
-        div { class: "card-head",
-            div { class: "card-head-main",
+        div { class,
+            div {
+                id: head,
+                class: "card-head-main",
+                onclick: move |_| {
+                    if let Some(mut unfolded) = fold {
+                        unfolded.toggle();
+                    }
+                },
                 span { class: "card-icon", Icon { name: icon } }
                 div {
                     div { class: "card-title-row",
@@ -498,7 +519,10 @@ pub fn CardHead(
                                 title: if open() { "Hide the help" } else { "What does this mean?" },
                                 aria_label: if open() { "Hide the help" } else { "What does this mean?" },
                                 aria_expanded: open(),
-                                onclick: move |_| open.toggle(),
+                                onclick: move |event| {
+                                    event.stop_propagation();
+                                    open.toggle();
+                                },
                                 Icon { name: if open() { IconName::X } else { IconName::Info } }
                             }
                         }
@@ -508,7 +532,18 @@ pub fn CardHead(
                     }
                 }
             }
-            div { class: "card-tools", {children} }
+            div { class: "card-tools",
+                if shown {
+                    {children}
+                }
+                if let Some(mut unfolded) = fold {
+                    FoldChevron {
+                        title,
+                        open: unfolded(),
+                        on_toggle: move |()| unfolded.toggle(),
+                    }
+                }
+            }
         }
         if open() {
             if let Some(help) = help {
@@ -516,6 +551,74 @@ pub fn CardHead(
             }
         }
     }
+}
+
+/// The chevron a folding card's head opens and closes it by.
+#[component]
+fn FoldChevron(title: String, open: bool, on_toggle: EventHandler<()>) -> Element {
+    let label = if open {
+        format!("Fold {title} away")
+    } else {
+        format!("Open {title}")
+    };
+    rsx! {
+        button {
+            id: control_id(DISCLOSURE, &title),
+            class: if open { "fold-btn open" } else { "fold-btn" },
+            r#type: "button",
+            title: "{label}",
+            aria_label: "{label}",
+            aria_expanded: if open { "true" } else { "false" },
+            aria_controls: fold_panel_id(&title),
+            onclick: move |_| on_toggle.call(()),
+            Icon { name: IconName::Chevron }
+        }
+    }
+}
+
+/// The head of a card with nothing of its own to set, the Privacy and
+/// Credits cards: a title and a note under it, with no icon, and the head
+/// itself the button that opens the card and folds it away again. The
+/// button sits in the card's heading, as an accordion's does, so the card
+/// is still found among the page's headings.
+#[component]
+pub fn FoldHead(title: &'static str, note: &'static str, open: Signal<bool>) -> Element {
+    let mut open = open;
+    rsx! {
+        h3 { class: "fold-title",
+            button {
+                id: control_id(DISCLOSURE, title),
+                class: if open() { "card-head fold-head open" } else { "card-head fold-head" },
+                r#type: "button",
+                aria_expanded: if open() { "true" } else { "false" },
+                aria_controls: fold_panel_id(title),
+                onclick: move |_| open.toggle(),
+                span { class: "card-head-main",
+                    span {
+                        span { class: "card-title", "{title}" }
+                        span { class: "card-note", "{note}" }
+                    }
+                }
+                Icon { name: IconName::Chevron }
+            }
+        }
+    }
+}
+
+/// What a card that folds holds, under its head: there only while the
+/// card is `open`.
+#[component]
+pub fn FoldPanel(#[props(into)] title: String, open: Signal<bool>, children: Element) -> Element {
+    rsx! {
+        if open() {
+            div { id: fold_panel_id(&title), class: "stack-sm", {children} }
+        }
+    }
+}
+
+/// The id of what the card `title` folds away, for its head to point at.
+fn fold_panel_id(title: &str) -> String {
+    control_id("panel", title)
 }
 
 /// One choice among a few: a segment of a `.segmented` control, or with

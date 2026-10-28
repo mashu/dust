@@ -7,7 +7,7 @@
 
 use dioxus::prelude::*;
 
-use crate::ui::widgets::{DISCLOSURE, Icon, IconName, control_id};
+use crate::ui::widgets::{FoldHead, FoldPanel};
 
 /// Where the code, and the issues, live.
 pub const SOURCE_URL: &str = "https://github.com/mashu/dust";
@@ -151,69 +151,54 @@ pub fn CreditsCard(
     #[props(default = TESTERS)] testers: &'static [Tester],
 ) -> Element {
     let version = env!("CARGO_PKG_VERSION");
-    let mut open = use_signal(|| false);
+    let open = use_signal(|| false);
     rsx! {
         div { class: "card stack-sm legal",
-            button {
-                id: control_id(DISCLOSURE, "credits"),
-                class: if open() { "card-head credits-toggle open" } else { "card-head credits-toggle" },
-                aria_expanded: if open() { "true" } else { "false" },
-                aria_controls: "credits-body",
-                onclick: move |_| open.toggle(),
-                span { class: "card-head-main",
-                    span {
-                        span { class: "card-title", "Credits" }
-                        span { class: "card-note", "The people who make Dust" }
+            FoldHead { title: "Credits", note: "The people who make Dust", open }
+            FoldPanel { title: "Credits", open,
+                for (role, people) in by_role(credits) {
+                    div { class: "credit-group",
+                        div { class: "tiny", "{role.heading(people.len())}" }
+                        for person in people {
+                            div { class: "credit",
+                                p { class: "credit-name",
+                                    "{person.name}"
+                                    if let Some(callsign) = person.callsign {
+                                        span { class: "mono credit-call", "{callsign}" }
+                                    }
+                                }
+                                p { class: "muted", "{person.work}" }
+                            }
+                        }
                     }
                 }
-                Icon { name: IconName::Chevron }
-            }
-            if open() {
-                div { id: "credits-body", class: "stack-sm",
-                    for (role, people) in by_role(credits) {
-                        div { class: "credit-group",
-                            div { class: "tiny", "{role.heading(people.len())}" }
-                            for person in people {
-                                div { class: "credit",
-                                    p { class: "credit-name",
-                                        "{person.name}"
-                                        if let Some(callsign) = person.callsign {
-                                            span { class: "mono credit-call", "{callsign}" }
-                                        }
-                                    }
-                                    p { class: "muted", "{person.work}" }
-                                }
-                            }
-                        }
-                    }
-                    if !testers.is_empty() {
-                        div { class: "credit-group",
-                            div { class: "tiny", "Closed testing" }
-                            div { class: "tester-list",
-                                for tester in testers {
-                                    span { class: "tester",
-                                        "{tester.name}"
-                                        if let Some(callsign) = tester.callsign {
-                                            span { class: "mono credit-call", "{callsign}" }
-                                        }
+                if !testers.is_empty() {
+                    div { class: "credit-group",
+                        div { class: "tiny", "Closed testing" }
+                        div { class: "tester-list",
+                            for tester in testers {
+                                span { class: "tester",
+                                    "{tester.name}"
+                                    if let Some(callsign) = tester.callsign {
+                                        span { class: "mono credit-call", "{callsign}" }
                                     }
                                 }
                             }
-                            p { class: "muted",
-                                "Thanks to them and many others for testing Dust and for the useful feedback."
-                            }
+                        }
+                        p { class: "muted",
+                            "Thanks to them and many others for testing Dust and for the useful feedback."
                         }
                     }
-                    p { class: "muted", "{INSPIRATION}" }
-                    p { class: "muted",
-                        "Dust {version} is free software, under the GNU General Public License version 3 or later, with permission to publish it in app stores for iOS, Android or any other platform as long as it stays free of charge and its source stays available: share it and change it, and what is built from it stays free. "
-                        a {
-                            class: "credit-link",
-                            href: SOURCE_URL,
-                            target: "_blank",
-                            rel: "noopener noreferrer",
-                            "Source code and issues"
-                        }
+                }
+                p { class: "muted", "{INSPIRATION}" }
+                p { class: "muted",
+                    "Dust {version} is free software, under the GNU General Public License version 3 or later, with permission to publish it in app stores for iOS, Android or any other platform as long as it stays free of charge and its source stays available: share it and change it, and what is built from it stays free. "
+                    a {
+                        class: "credit-link",
+                        href: SOURCE_URL,
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        "Source code and issues"
                     }
                 }
             }

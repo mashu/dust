@@ -1,12 +1,16 @@
 //! The store listing and the in-app link point at the same page.
 //! `docs/privacy.html` is copied onto GitHub Pages; this card is what a
-//! reviewer finds without leaving Settings, including while offline.
+//! reviewer finds without leaving Settings, including while offline. It
+//! starts folded to its head, as the Credits card beside it does, and opens
+//! when the head is pressed.
 
 /// Public page Play Console should list. Served as a normal HTML document,
 /// not a download.
 pub const PRIVACY_POLICY_URL: &str = "https://mashu.github.io/dust/privacy/";
 
 use dioxus::prelude::*;
+
+use crate::ui::widgets::{FoldHead, FoldPanel};
 
 /// What Contest mode keeps, said on the card and in the policy alike.
 pub const CONTEST_PRIVACY: &str = "In Contest mode, Dust keeps your callsign and the exchange you \
@@ -18,33 +22,29 @@ pub const CONTEST_PRIVACY: &str = "In Contest mode, Dust keeps your callsign and
 
 #[component]
 pub fn PrivacyCard() -> Element {
+    let open = use_signal(|| false);
     rsx! {
         div { class: "card stack-sm legal",
-            div { class: "card-head",
-                div { class: "card-head-main",
-                    div {
-                        h3 { class: "card-title", "Privacy" }
-                        p { class: "card-note", "Practice stays on this device" }
-                    }
+            FoldHead { title: "Privacy", note: "Practice stays on this device", open }
+            FoldPanel { title: "Privacy", open,
+                p { class: "muted",
+                    "Dust stores your settings and practice history only on this device: speed and alphabet, the groups that were sent, what you typed and how soon after each character's sound you keyed it, with the delay your audio device reports, and the scores. There is no account, and that history is not uploaded. Up to 500 sessions are kept; in a browser, as many of the newest as fit. Any of them can be deleted under Stats → History. While a session runs, when it started is kept too, so that one the app closes under is told of when it next opens."
                 }
-            }
-            p { class: "muted",
-                "Dust stores your settings and practice history only on this device: speed and alphabet, the groups that were sent, what you typed and how soon after each character's sound you keyed it, with the delay your audio device reports, and the scores. There is no account, and that history is not uploaded. Up to 500 sessions are kept; in a browser, as many of the newest as fit. Any of them can be deleted under Stats → History. While a session runs, when it started is kept too, so that one the app closes under is told of when it next opens."
-            }
-            p { class: "muted", "{CONTEST_PRIVACY}" }
-            p { class: "muted",
-                "The app does load its typefaces from Google Fonts. That request includes your IP address. Your practice is not part of it. Google is the only third party the app contacts."
-            }
-            p { class: "muted",
-                "Dust does not use the microphone, location, or contacts, and it has no ads or analytics. Uninstalling the app deletes what it stored."
-            }
-            p { class: "muted",
-                a {
-                    class: "privacy-link",
-                    href: PRIVACY_POLICY_URL,
-                    target: "_blank",
-                    rel: "noopener noreferrer",
-                    "Privacy policy"
+                p { class: "muted", "{CONTEST_PRIVACY}" }
+                p { class: "muted",
+                    "The app does load its typefaces from Google Fonts. That request includes your IP address. Your practice is not part of it. Google is the only third party the app contacts."
+                }
+                p { class: "muted",
+                    "Dust does not use the microphone, location, or contacts, and it has no ads or analytics. Uninstalling the app deletes what it stored."
+                }
+                p { class: "muted",
+                    a {
+                        class: "privacy-link",
+                        href: PRIVACY_POLICY_URL,
+                        target: "_blank",
+                        rel: "noopener noreferrer",
+                        "Privacy policy"
+                    }
                 }
             }
         }
@@ -53,6 +53,38 @@ pub fn PrivacyCard() -> Element {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::testing::Ui;
+
+    /// The card starts folded to its head, and opens onto what Dust keeps,
+    /// what Contest mode keeps with it, and the policy.
+    #[test]
+    fn the_card_starts_folded_and_opens_onto_what_dust_keeps() {
+        let mut ui = Ui::new(PrivacyCard, ());
+        assert!(
+            ui.has("Practice stays on this device"),
+            "the head always shows"
+        );
+        assert!(
+            ui.has("<h3 class=\"fold-title\"><button id=\"disclosure-privacy\""),
+            "the card is still found among the page's headings: {}",
+            ui.html()
+        );
+        assert!(!ui.has("Privacy policy"), "the body shows on a folded card");
+        ui.click("disclosure-privacy");
+        assert!(ui.has("aria-expanded=\"true\""));
+        for shown in [
+            "There is no account",
+            CONTEST_PRIVACY,
+            "Google Fonts",
+            PRIVACY_POLICY_URL,
+        ] {
+            assert!(ui.has(shown), "{shown} is missing from the open card");
+        }
+        ui.click("disclosure-privacy");
+        assert!(!ui.has(PRIVACY_POLICY_URL), "the head folds the card again");
+    }
+
     #[test]
     fn the_hosted_policy_is_about_this_app() {
         let policy = include_str!("../../docs/privacy.html");
@@ -64,7 +96,7 @@ mod tests {
         assert!(flat.contains("does not sell personal information"));
         assert!(policy.contains("https://github.com/mashu/dust/issues"));
         // The policy says what Contest mode keeps, as the card does.
-        assert!(flat.contains(super::CONTEST_PRIVACY), "{flat}");
+        assert!(flat.contains(CONTEST_PRIVACY), "{flat}");
         assert!(
             flat.contains(
                 "Up to 500 sessions are kept; in a browser, as many of the newest as fit"

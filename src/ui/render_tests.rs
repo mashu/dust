@@ -606,8 +606,12 @@ fn settings_renders_every_card() {
         "Auto level",
         "Character sampling",
         "Band conditions",
-        "Privacy policy",
-        "https://mashu.github.io/dust/privacy/",
+        // The cards there is less call for, folded to their heads.
+        "disclosure-recognition",
+        "disclosure-character-sampling",
+        "disclosure-display",
+        "Practice stays on this device",
+        "disclosure-privacy",
         "Credits",
         "The people who make Dust",
         "disclosure-credits",
@@ -680,7 +684,6 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
         "Stored on this device only.",
         "Minutes per run",
         "Band activity",
-        crate::ui::privacy::CONTEST_PRIVACY,
     ] {
         assert!(html.contains(shown), "no {shown:?} in {html}");
     }

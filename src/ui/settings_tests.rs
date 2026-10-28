@@ -1411,3 +1411,55 @@ fn every_settings_card_says_what_its_options_do() {
         assert!(ui.has("What you send in a run: your call"));
     });
 }
+
+/// The cards there is least call for start folded to their heads, their
+/// tools hidden with what they hold, and each opens from its head and
+/// folds away again; the rest of the page stays as it was.
+#[test]
+fn the_cards_there_is_least_call_for_start_folded_and_open_from_their_heads() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app();
+        ui.click("nav-settings");
+        for (card, held) in [
+            ("recognition", "number-fast-under"),
+            ("character-sampling", "switch-thompson-sampling"),
+            ("display", "btn-check-display"),
+            ("privacy", "privacy-link"),
+            ("credits", "credit-link"),
+        ] {
+            let head = format!("disclosure-{card}");
+            assert!(ui.shows(&head), "{card} has no head to open it by");
+            assert!(!ui.has(held), "{card} starts open");
+            ui.click(&head);
+            assert!(ui.has(held), "{card} does not open: {}", ui.html());
+            ui.click(&head);
+            assert!(!ui.has(held), "{card} does not fold away again");
+        }
+        // The ⓘ opens the help and leaves the card as it was, folded or
+        // open.
+        let help = "How fast counts as what on Letter accuracy";
+        ui.click("help-recognition");
+        assert!(ui.has(help), "the help opens");
+        assert!(!ui.has("number-fast-under"), "the help opens the card");
+        ui.click("help-recognition");
+        // Anywhere else on the head opens it, as the chevron does, with its
+        // reset beside the chevron, the reset folding away with what it
+        // resets.
+        assert!(!ui.shows("reset-recognition"));
+        ui.click("head-recognition");
+        assert!(
+            ui.has("number-fast-under"),
+            "the head does not open the card"
+        );
+        assert!(ui.shows("reset-recognition"));
+        ui.click("help-recognition");
+        assert!(ui.has("number-fast-under"), "the help folds the card");
+        ui.click("head-recognition");
+        assert!(
+            !ui.has("number-fast-under"),
+            "the head does not fold the card"
+        );
+        // The cards in daily use are open as they were.
+        assert!(ui.shows("slider-agc-threshold"), "the band card is open");
+    });
+}
