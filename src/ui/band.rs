@@ -424,7 +424,7 @@ pub fn BandConditionsCard(
             }
             p { id: "agc-threshold-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
                 if b.agc_enabled {
-                    "How strong a signal has to be before the AGC turns it down; at its lowest, just over the quietest hiss, so every station you can copy is evened out. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss ducks less. The volume follows, so the strongest station stays as loud."
+                    "How strong a signal has to be before the AGC turns it down; at its lowest, about 10 dB over the band's own hiss in the filter, so every station clear of the noise is evened out and those down in it keep their own level. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss ducks less. The volume follows, so the strongest station stays as loud."
                 } else {
                     "With the AGC off there is no threshold to set."
                 }

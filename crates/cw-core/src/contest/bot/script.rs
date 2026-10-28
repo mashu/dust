@@ -107,6 +107,13 @@ impl<S: CallSource> Runtime<S> {
         while self.playing.is_some() && !self.over && self.step() {}
     }
 
+    /// The sound of turn `id` is to fail rather than end: the player never
+    /// says it ended, and says it failed instead, whenever the test does.
+    pub(crate) fn sound_fails(&mut self, id: u64) {
+        self.due
+            .retain(|(_, event)| *event != ContestEvent::TurnEnded { id });
+    }
+
     /// The last turn played.
     pub(crate) fn last_turn(&self) -> &Turn {
         self.turns.last().expect("a turn has been played")

@@ -23,7 +23,7 @@ use web_sys::{AudioContext, AudioContextState};
 
 use super::ToneRequest;
 use super::epoch::{Epoch, Ticket};
-use super::mixer::{BandVoice, Mixer, SendVoice};
+use super::mixer::{BandVoice, Mixer, SendVoice, fade_origin_sec};
 use super::shape::Gains;
 use super::wait::{heard_ms, send_timing};
 use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
@@ -44,6 +44,9 @@ pub struct MorsePlayer {
     /// over from.
     playing: Option<Playing>,
     sidetone: Sidetone,
+    /// Where on the band's fading the context's clock started
+    /// ([`fade_origin_sec`]).
+    fade_origin_sec: f64,
     /// Whether the page has taken the device's playback session, as it does
     /// the first time anything is about to be heard.
     claimed_session: bool,
@@ -163,6 +166,7 @@ impl MorsePlayer {
             gains: None,
             playing: None,
             sidetone: Sidetone::default(),
+            fade_origin_sec: fade_origin_sec(),
             claimed_session: false,
             on_visibility,
             asleep,
@@ -278,7 +282,7 @@ impl MorseBackend for MorsePlayer {
             &FilterDesign::from_settings(settings),
             Qsb::of(&settings.band),
             rate,
-            soonest + wait as f64 / sr,
+            self.fade_origin_sec + soonest + wait as f64 / sr,
         );
         let mut waits = 0;
         let made = self.stream.change_at(soonest, |mixer, swept| {

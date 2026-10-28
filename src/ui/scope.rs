@@ -17,8 +17,10 @@ use crate::time::sleep_ms;
 /// How much of the past the scope shows.
 const SHOWN: usize = (3.0 / METER_FRAME_SEC) as usize;
 
-/// How much of the past the readout under it is of: the last half second,
-/// so a dah or two of the station is always in it.
+/// How much of the past the readout under it is of: the last half second.
+/// At 10 WPM and over a dah or two of the station is always in it; in a
+/// long Farnsworth gap it reads the hiss, as a rig's S-meter falls back to
+/// the noise between a slow sender's characters.
 const READ_OVER: usize = (0.5 / METER_FRAME_SEC) as usize;
 
 /// How often the scope takes the frames the player has metered.

@@ -4698,6 +4698,7 @@ mod tests {
     use crate::contest::rules::RULES;
     use crate::contest::turn::{plan_turn, sending_sec};
     use crate::sampling::Sampler;
+    use crate::timing::ToneEvent;
 
     /// A run worked by hand, its callers sending `calls` in turn.
     fn runtime(calls: &[&str]) -> Runtime<ScriptCalls> {
@@ -8969,27 +8970,39 @@ mod tests {
 
     /// Each caller waits for you on a clock of its own, from the end of its
     /// own send: on a quiet frequency every one calls again in turn, not
-    /// only the quickest.
+    /// only the quickest, unless its patience is spent and it has gone.
     #[test]
     fn on_a_quiet_frequency_every_caller_calls_on_its_own_timeout() {
+        let (mut called, mut stations) = (0, 0);
         for seed in 0..20 {
             let mut runtime = pileup_seed(seed, &["K5XYZ", "W7ABC", "G4ABC"], 3, 3);
             runtime.finish_turn();
             let played = runtime.turns.len();
             runtime.run_to(runtime.now + 20_000);
-            let calls: Vec<usize> = (0..3)
+            // Each caller calls again, unless its patience ran out calling
+            // on in the first turn and it left, as MorseRunner's do.
+            let calls: Vec<(usize, bool)> = (0..3)
                 .map(|station| {
-                    runtime.turns[played..]
+                    let again = runtime.turns[played..]
                         .iter()
                         .filter(|turn| said_by(turn, station).is_some())
-                        .count()
+                        .count();
+                    let left = runtime.machine.stations[station as usize].caller.state
+                        == CallerState::Gone;
+                    (again, left)
                 })
                 .collect();
             assert!(
-                calls.iter().all(|count| *count > 0),
+                calls.iter().all(|(again, left)| *again > 0 || *left),
                 "seed {seed}: {calls:?}"
             );
+            called += calls.iter().filter(|(again, _)| *again > 0).count();
+            stations += calls.len();
         }
+        assert!(
+            called * 10 >= stations * 9,
+            "{called} of {stations} called again"
+        );
     }
 
     /// A pile-up caller you key over, done before you are, heard only your
@@ -10115,18 +10128,28 @@ mod tests {
             runtime.run_to(runtime.now + 40_000);
             for turn in &runtime.turns {
                 let planned = crate::contest::turn::plan_turn(turn, &settings);
-                let callers: Vec<&Segment> = turn
+                // Each caller from its segment's start to its last fall:
+                // sounding till then, past its last key-up.
+                let callers: Vec<(f64, f64)> = turn
                     .segments
                     .iter()
                     .filter(|s| s.who != Sender::You)
+                    .zip(&planned.others)
+                    .map(|(segment, plan)| {
+                        let fell = plan
+                            .events
+                            .last()
+                            .map_or(segment.end_sec, ToneEvent::end_sec);
+                        (segment.start_sec, fell.max(segment.end_sec))
+                    })
                     .collect();
                 // The most callers sounding at any moment of the turn.
                 let at_once = callers
                     .iter()
-                    .map(|a| {
+                    .map(|(start, _)| {
                         callers
                             .iter()
-                            .filter(|b| b.start_sec <= a.start_sec && a.start_sec < b.end_sec)
+                            .filter(|(from, to)| from <= start && start < to)
                             .count()
                     })
                     .max()
@@ -12061,6 +12084,7 @@ mod tests {
         let nr = serial(replies(&turn)[0]);
         let reply = sent_by(&turn, 0)[0].end_sec;
         let end = runtime.now + whole_ms(reply);
+        runtime.sound_fails(turn.id);
         runtime.run_to(end);
         assert_eq!(runtime.playing_id(), Some(turn.id), "still on the air");
         assert!(runtime.machine.stations[0].heard.exch_shown.is_some());

@@ -84,6 +84,24 @@ fn spacing_unit_sec(char_wpm: f64, effective_wpm: f64) -> f64 {
 mod tests {
     use super::*;
 
+    /// However short the word space is set, the gap between two groups is
+    /// longer than the gap between two letters inside one.
+    #[test]
+    fn the_shortest_word_space_is_longer_than_a_letter_gap() {
+        for (char_wpm, effective_wpm) in [(20.0, 20.0), (30.0, 12.0), (5.0, 5.0), (80.0, 80.0)] {
+            let gap = f64::from(compute_group_gap_for_wpm(
+                char_wpm,
+                effective_wpm,
+                EXTRA_WORD_SPACE_MIN,
+            )) / 1000.0;
+            let letter = 3.0 * spacing_unit_sec(char_wpm, effective_wpm);
+            assert!(
+                gap > letter,
+                "{char_wpm}/{effective_wpm}: {gap} against {letter}"
+            );
+        }
+    }
+
     #[test]
     fn the_word_space_between_groups_follows_the_slower_speed() {
         let fast = compute_group_gap_for_wpm(20.0, 20.0, 1.0);

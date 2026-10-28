@@ -43,8 +43,13 @@ const LISTEN_AT: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 
 /// How close to the limiter's knee full volume takes the loudest station:
 /// a little short of it, for a crest between two samples, a pitch between
-/// two listened to, and a fist that is not a keyer's.
-const CLEAN_MARGIN: f64 = 0.97;
+/// two listened to and a fist that is not a keyer's, which take 3%, and for
+/// a station slower than the fastest, which is the one listened to. Slower,
+/// its gaps run longer and the AGC has opened further by its next element,
+/// whose first crests come out up to 6% over the fastest station's: at 9 to
+/// 16 WPM with the fast decay, and at the slowest with the slow one
+/// (`a_slower_station_stays_clean_at_full_volume`).
+const CLEAN_MARGIN: f64 = 0.91;
 
 /// How far over its RMS the band's hiss is allowed to reach on top of the
 /// station: hiss through a filter is Gaussian, and a crest this high comes
@@ -148,6 +153,12 @@ pub fn full_volume_gain(settings: &TrainingSettings) -> f64 {
 }
 
 fn listen(ask: &LoudestAsk, settings: &TrainingSettings) -> f64 {
+    listen_at(ask, settings, ask.wpm.0)
+}
+
+/// The loudest a station at full strength comes out of the receiver `ask`
+/// describes, sent at `wpm`.
+fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
     let mut settings = settings.clone();
     settings.band.steepness = ask.steepness_ms.0;
     settings.band.envelope_smoothing = ask.smoothing.0;
@@ -161,8 +172,8 @@ fn listen(ask: &LoudestAsk, settings: &TrainingSettings) -> f64 {
         .map(|share| {
             let voice = StationVoice {
                 tone_hz: low + (high - low) * share,
-                char_wpm: ask.wpm.0,
-                effective_wpm: ask.wpm.0,
+                char_wpm: wpm,
+                effective_wpm: wpm,
                 volume: VOLUME_MAX,
                 weight: 1.0,
                 dash_ratio: 3.0,
@@ -306,6 +317,47 @@ mod tests {
         });
         assert!(sharp < soft, "{sharp} against {soft}");
         assert!(sharp > 1.5, "{sharp}");
+    }
+
+    /// Full volume is sized by the fastest station the settings send, and a
+    /// slower one meets the AGC wider open after each of its longer gaps:
+    /// at any speed down to the slowest, on the receivers where that opens
+    /// it most, it still comes out with the room a crest between samples, a
+    /// pitch between those listened to and a fist need.
+    #[test]
+    fn a_slower_station_stays_clean_at_full_volume() {
+        for (decay, shape, width, steepness) in [
+            (AgcDecay::Fast, FilterShape::Sharp, 100.0, 6.0),
+            (AgcDecay::Fast, FilterShape::Peaked, 100.0, 6.0),
+            (AgcDecay::Fast, FilterShape::Soft, 2_000.0, STEEPNESS_MIN_MS),
+            (AgcDecay::Slow, FilterShape::Sharp, 100.0, 6.0),
+            (
+                AgcDecay::Slow,
+                FilterShape::Sharp,
+                2_000.0,
+                STEEPNESS_MIN_MS,
+            ),
+            (AgcDecay::Slow, FilterShape::Soft, 2_000.0, STEEPNESS_MIN_MS),
+        ] {
+            let mut settings = TrainingSettings::default();
+            settings.band.agc_decay = decay;
+            settings.band.filter_shape = shape;
+            settings.band.filter_width_hz = width;
+            settings.band.steepness = steepness;
+            settings.band.side_tone_min = 300.0;
+            settings.band.side_tone_max = 600.0;
+            settings.playback.char_wpm_max = 30.0;
+            let settings = settings.clamp();
+            let ask = LoudestAsk::of(&settings);
+            let full = full_volume_gain(&settings);
+            for wpm in [WPM_MIN, 7.0, 9.0, 11.0, 14.0, 16.0, 20.0, 25.0] {
+                let heard = listen_at(&ask, &settings, wpm) * full;
+                assert!(
+                    heard < SOFT_LIMIT_KNEE * 0.97,
+                    "{decay:?} {shape:?} {width} Hz, {steepness} ms, at {wpm} WPM: {heard:.4}"
+                );
+            }
+        }
     }
 
     /// Asked again of the same receiver, the answer is the one remembered,

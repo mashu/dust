@@ -182,10 +182,13 @@ const DRIFT_SHARE: f64 = 0.1;
 const DRIFT_MAX_HZ_PER_SEC: f64 = 0.5;
 const DRIFT_MAX_HZ: f64 = 10.0;
 
-/// Each station fades on its own path: slowly (0.05-0.3 Hz) and by up to
-/// 10 dB.
+/// Each station fades on its own path: slowly (0.05-0.3 Hz), by a standard
+/// deviation of 1.5 to 5 dB, as the band's carriers do, so the stations
+/// around the one you copy rise and fall within an over as they do on the
+/// air. Half of 0-10 dB of swing, as they had, was a decibel: steady to the
+/// ear.
 const QSB_RATE_HZ: (f64, f64) = (0.05, 0.3);
-const QSB_DEPTH_MAX_DB: f64 = 10.0;
+const QSB_SD_DB: (f64, f64) = (1.5, 5.0);
 
 /// The callsign tier the band's callsigns are drawn from: every shape of call
 /// but portables, which are a small part of real traffic.
@@ -614,9 +617,9 @@ impl BandActivity {
         // The station's level is where it sits on average; its own fading
         // swings it either side, and the top of the swing is what the guard
         // and the ceiling hold down.
-        let depth = self.random.between(0.0, QSB_DEPTH_MAX_DB);
+        let sd = self.random.between(QSB_SD_DB.0, QSB_SD_DB.1);
         let qsb_rate = self.random.between(QSB_RATE_HZ.0, QSB_RATE_HZ.1);
-        let fade = Fade::new(&mut self.random, qsb_rate, depth / 2.0, 0.0);
+        let fade = Fade::new(&mut self.random, qsb_rate, sd / fade_rms(), 0.0);
         let reach = OVER_PITCH_JITTER_HZ + if drift == 0.0 { 0.0 } else { DRIFT_MAX_HZ };
         let cap = self
             .tuning

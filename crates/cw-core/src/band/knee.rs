@@ -23,8 +23,9 @@ pub const FLOOR_MEASURE_RATE: u32 = 16_000;
 ///
 /// `AGC_TRIGGER` times the band's own floor (`band_standing_level`), and
 /// never below that of the quietest floor the noise control sets, heard
-/// through the reference filter (`reference_width_hz`): just over the hiss,
-/// so everything you can copy stands over it and the AGC evens it all out.
+/// through the reference filter (`reference_width_hz`): about 10 dB over the
+/// hiss in the filter, so every station clear of the noise stands over it and
+/// the AGC evens them out, and those down in it keep their own level.
 /// Above that it follows the floor, the way an operator backs the RF gain
 /// off on a noisy band or a wide filter, so the hiss on its own never pumps
 /// the gain. Below it, it stays put, as a real receiver's AGC threshold
@@ -181,6 +182,27 @@ mod tests {
     use crate::settings::{FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ};
 
     const SR: u32 = 48_000;
+
+    /// At its lowest the knee stands about ten decibels over the band's own
+    /// hiss in the filter, as the threshold's words say: a steady tone at
+    /// it is 9-12 dB over the hiss through the default receiver, at any floor
+    /// loud enough for the knee to follow it, with the static off.
+    #[test]
+    fn the_lowest_knee_stands_about_ten_db_over_the_hiss() {
+        use super::super::calibration::{REFERENCE_BANDWIDTH_HZ, noise_floor_rms};
+        for level in [0.4, 0.6, 0.8] {
+            let mut settings = TrainingSettings::default();
+            settings.band.qrn_enabled = false;
+            settings.band.noise_level = level;
+            let settings = settings.clamp();
+            let receiver = FilterDesign::from_settings(&settings);
+            let knee = agc_knee(&settings.band, &receiver).expect("the AGC is on");
+            let hiss = noise_floor_rms(noise_level(&settings.band))
+                * (receiver.noise_bandwidth_hz() / REFERENCE_BANDWIDTH_HZ).sqrt();
+            let snr = 20.0 * (knee / std::f64::consts::SQRT_2 / hiss).log10();
+            assert!((9.0..12.0).contains(&snr), "{level}: {snr:.1} dB");
+        }
+    }
 
     /// Raising the threshold raises the knee the players set their AGC by
     /// as far as it is raised, from the band's own knee at the lowest; with

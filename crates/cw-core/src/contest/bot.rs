@@ -89,12 +89,21 @@ impl<S: CallSource> Runtime<S> {
         self.due.iter().map(|(at, _)| *at).min()
     }
 
-    /// Deliver the next thing owed, at its time.
+    /// Deliver the next thing owed, at its time. A turn ends after anything
+    /// else due the same moment, as a player has it: its sound is over only
+    /// once all it sends has been heard.
     pub(crate) fn step(&mut self) -> bool {
         let Some(next) = self.next_due() else {
             return false;
         };
-        let Some(position) = self.due.iter().position(|(at, _)| *at == next) else {
+        let Some(position) = self
+            .due
+            .iter()
+            .enumerate()
+            .filter(|(_, (at, _))| *at == next)
+            .min_by_key(|(_, (_, event))| matches!(event, ContestEvent::TurnEnded { .. }))
+            .map(|(position, _)| position)
+        else {
             return false;
         };
         let (_, event) = self.due.remove(position);

@@ -17,19 +17,18 @@ pub const FADE_OFFSET_MAX_SEC: f64 = 3_600.0;
 pub const FADE_STEP_SEC: f64 = 0.001;
 
 /// The weakest a fade leaves the signal, as a gain: as deep as the Band card
-/// goes ([`QSB_DEPTH_MAX_DB`]). The sum of paths is held there when it would
-/// go further, so the signal sits at the bottom a moment as a fade bottoms
-/// out; held any deeper, it would be out of hearing for letters at a time,
-/// where a real null of 30 dB is over in a moment.
+/// goes ([`QSB_DEPTH_MAX_DB`]). Any deeper and it would be out of hearing for
+/// letters at a time, where a real null of 30 dB is over in a moment.
 const QSB_MIN_GAIN: f64 = 0.1;
 
-/// Opens the multipath sum back out to the depth a single sine would have had.
-/// Four sines seldom line up, so their sum sits nearer the middle; this scales
-/// it back by the ratio of the two RMS values. Scaled that far, the sum runs
-/// past the ends of the range about a sixth of the time, and is held there:
-/// the signal sits at full strength, or at the bottom of a fade, for a moment
-/// before it moves on — which is how a fade bottoming out sounds.
-const QSB_SPREAD: f64 = 1.85;
+/// Opens the multipath sum back out to the depth a single sine would have had,
+/// and rounds it off at the ends of its range. Four sines seldom line up, so
+/// their sum sits nearer the middle; scaled up this far through a soft knee
+/// (a hyperbolic tangent), it reaches the bottom of a fade and the top often,
+/// and turns there smoothly, never parked at either. Held at its ends
+/// instead, a fade sat dead flat at its floor for a second and a half and
+/// turned on a corner, which no fade does: a real one rounds its minimum.
+const QSB_KNEE: f64 = 3.0;
 
 /// How many propagation paths the fading is made of.
 const QSB_PATHS: usize = 4;
@@ -118,7 +117,7 @@ impl Qsb {
     /// no schedule. That is a sum of sinusoids at close but unrelated rates:
     /// the classical multipath model.
     ///
-    /// `QSB_SPREAD` is there because a sum of four sines spends most of its
+    /// [`QSB_KNEE`] is there because a sum of four sines spends most of its
     /// time nearer the middle than one sine does; without it, turning
     /// multipath on would quietly halve the depth of every fade.
     pub fn gain_at(&self, t_sec: f64) -> f32 {
@@ -129,7 +128,7 @@ impl Qsb {
                 weight * (std::f64::consts::TAU * self.rate_hz * multiple * t_sec).sin()
             })
             .sum();
-        let swing = (swing * QSB_SPREAD).clamp(-1.0, 1.0);
+        let swing = (swing * QSB_KNEE).tanh() / QSB_KNEE.tanh();
         let half = (1.0 - self.floor) / 2.0;
         (1.0 - half + half * swing) as f32
     }
@@ -263,6 +262,41 @@ mod tests {
         assert_eq!(Qsb::flutter(2.0, 5.0).depth(), 1.0 - QSB_MIN_GAIN);
         assert_eq!(Qsb::flutter(f64::NAN, -1.0).depth(), 0.0);
         assert_eq!(Qsb::flutter(0.5, f64::NAN).rate_hz(), QSB_RATE_MIN_HZ);
+    }
+
+    /// A fade turns at its floor, as a real one does at its minimum, rather
+    /// than parking there: out of the box, no stretch near the floor holds
+    /// flat for a second, and every minute of fading still gets down near
+    /// it.
+    #[test]
+    fn a_fade_never_parks_at_its_floor() {
+        let fading = Qsb::of(&BandSettings::default()).expect("fading out of the box");
+        let floor_db = 20.0 * fading.floor.log10();
+        let step = 0.01;
+        let db: Vec<f64> = (0..400_000)
+            .map(|i| 20.0 * f64::from(fading.gain_at(f64::from(i) * step)).log10())
+            .collect();
+        let mut flat = 0usize;
+        for pair in db.windows(2) {
+            let near = pair[1] < floor_db + 0.5;
+            let still = (pair[1] - pair[0]).abs() / step < 0.2;
+            flat = if near && still { flat + 1 } else { 0 };
+            assert!(
+                (flat as f64) * step < 1.0,
+                "parked at the floor for a second"
+            );
+        }
+        for minute in db.chunks((60.0 / step) as usize) {
+            let deepest = minute.iter().copied().fold(f64::MAX, f64::min);
+            assert!(
+                deepest < floor_db + 0.5,
+                "a minute only got to {deepest:.1} dB"
+            );
+            assert!(
+                deepest >= floor_db - 1e-6,
+                "past the floor: {deepest:.2} dB"
+            );
+        }
     }
 
     /// The depth slider is heard over the whole of its travel, in equal

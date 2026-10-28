@@ -555,7 +555,7 @@ pub fn band() -> Element {
             dt { "AGC decay" }
             dd { "How fast the gain comes back once a signal has gone. Fast is back by the next word; Slow holds through an over and comes back over a second or so, so a weak station straight after a strong one starts quiet." }
             dt { "AGC threshold" }
-            dd { "How strong a signal has to be before the AGC acts. Lowest starts it just above the quietest hiss, so every station you can copy is evened out; raised, it acts only on stronger ones, and the weaker keep their own level. The volume follows, so the strongest station stays as loud." }
+            dd { "How strong a signal has to be before the AGC acts. Lowest starts it about 10 dB over the band's own hiss in the filter, so every station clear of the noise is evened out and those down in it keep their own level; raised, it acts only on stronger ones, and the weaker keep their own level. The volume follows, so the strongest station stays as loud." }
             dt { "Live preview" }
             dd { "Loops a CQ through the band as it is set, loud, medium and weak in turn, so you hear each change and what the AGC does with each of them." }
         }

@@ -26,8 +26,11 @@ pub const GROUP_REPEAT_MAX: u32 = 8;
 /// Speeds, in words a minute: character, effective and the paddles' own.
 pub const WPM_MIN: f64 = 5.0;
 pub const WPM_MAX: f64 = 80.0;
-/// How far the word space is stretched beyond seven units.
-pub const EXTRA_WORD_SPACE_MIN: f64 = 0.1;
+/// How far the word space is stretched beyond seven units. Never under half:
+/// three and a half units, still longer than the three between letters, or
+/// the gap between two groups would be shorter than one inside a group and
+/// the groups would run together.
+pub const EXTRA_WORD_SPACE_MIN: f64 = 0.5;
 pub const EXTRA_WORD_SPACE_MAX: f64 = 8.0;
 /// The longest the answer window stays open; zero leaves it open.
 pub const GROUP_TIMEOUT_MAX_SEC: f64 = 120.0;

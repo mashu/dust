@@ -237,14 +237,15 @@ pub(crate) fn plan_morse_playback_at(
 
     let dot_char = dot_seconds(resolved_char_wpm);
     let unit = spacing_unit_sec(resolved_char_wpm, resolved_effective_wpm);
-    // The operator's fist. Elements are stretched or clipped by their weight
-    // and the gap after them takes the difference back, so a heavy fist
-    // crowds its spaces rather than simply sending slower — which is what
-    // weight actually is, and why it does not quietly change the speed.
+    // The operator's fist. Every element is stretched or clipped by the
+    // same share of a dit, as a keyer's weight does, and the gap after it
+    // takes the difference back, so a heavy fist crowds its spaces rather
+    // than simply sending slower — which is what weight actually is, and
+    // why it does not quietly change the speed.
     let weight = voice.weight.clamp(0.7, 1.3);
     let dash_ratio = voice.dash_ratio.clamp(2.0, 4.5);
     let dot_duration = dot_char * weight;
-    let dash_duration = dot_char * dash_ratio * weight;
+    let dash_duration = dot_char * (dash_ratio + weight - 1.0);
     let symbol_space = dot_char * (2.0 - weight);
     let char_space = unit * 3.0;
     let word_space = unit * 7.0 * extra;
@@ -705,14 +706,18 @@ mod tests {
             weight: 0.82,
             ..keyer
         };
-        // "EEEEE" is all dits and gaps, where weight trades one against the
-        // other exactly.
-        let at = |voice: &StationVoice| plan_morse_playback_for("EEEEE", &s, voice).duration_sec;
-        let (base, long, short) = (at(&keyer), at(&heavy), at(&light));
-        assert!(
-            (long - base).abs() / base < 0.05 && (short - base).abs() / base < 0.05,
-            "weight moved the speed: {short:.3}s and {long:.3}s against {base:.3}s"
-        );
+        // Dits, dahs and both, where weight trades each element against the
+        // gap after it: only a send's last element, with no gap to give
+        // back, keeps the difference.
+        let last = 0.18 * dot_seconds(20.0) + 1e-9;
+        for text in ["EEEEE", "OOOOO", "00000", "PARIS PARIS"] {
+            let at = |voice: &StationVoice| plan_morse_playback_for(text, &s, voice).duration_sec;
+            let (base, long, short) = (at(&keyer), at(&heavy), at(&light));
+            assert!(
+                (long - base).abs() <= last && (short - base).abs() <= last,
+                "{text}: weight moved the speed: {short:.3}s and {long:.3}s against {base:.3}s"
+            );
+        }
         // But the key-down time really did change, which is the audible part.
         let down = |voice: &StationVoice| {
             plan_morse_playback_for("EEEEE", &s, voice)

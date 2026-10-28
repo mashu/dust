@@ -722,3 +722,25 @@ fn nothing_keyed_is_heard_near_the_station_you_want() {
         }
     }
 }
+
+/// The band's stations rise and fall on their paths as they do on the air,
+/// by several decibels within an over, not by the decibel the ear can barely
+/// tell: the typical keyed station fades by a standard deviation over 2.5 dB.
+#[test]
+fn the_bands_stations_fade_as_heard_on_the_air() {
+    let (_, seen) = census(4, 3_600.0, 41);
+    let mut fades: Vec<f64> = seen
+        .iter()
+        .filter(|e| e.kind == Kind::Keyed)
+        .map(|e| e.fade.swing_db * fade_rms())
+        .collect();
+    assert!(fades.len() > 200, "{} stations", fades.len());
+    fades.sort_by(f64::total_cmp);
+    let median = fades[fades.len() / 2];
+    assert!(median > 2.5, "a typical station fades by {median:.2} dB");
+    assert!(
+        fades
+            .iter()
+            .all(|sd| (QSB_SD_DB.0..=QSB_SD_DB.1).contains(sd))
+    );
+}

@@ -39,7 +39,7 @@ use meter::Metering;
 pub use output::Output;
 #[cfg(all(test, feature = "native-audio"))]
 use output::finish;
-pub use send::{SendSample, SendVoice};
+pub use send::{SendSample, SendVoice, fade_origin_sec};
 #[cfg(feature = "native-audio")]
 pub use sidetone::SidetoneControl;
 #[cfg(all(test, feature = "native-audio"))]

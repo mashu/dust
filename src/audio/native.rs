@@ -16,7 +16,9 @@ use cw_core::band::{BandChange, FilterDesign, Qsb, Receiver};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::ToneRequest;
-use super::mixer::{BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept};
+use super::mixer::{
+    BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept, fade_origin_sec,
+};
 use super::shape::Gains;
 use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming};
 use state::{PlayerState, ToneSignal, moved_off_default, went_silent};
@@ -47,9 +49,11 @@ pub struct MorsePlayer {
     /// mixed into it: three device streams on Pulse/PipeWire underrun, and
     /// the sidetone stutters, turns to noise, then drops.
     stream: Option<OpenStream>,
-    /// When the player opened. Fading is read off this clock so it keeps
-    /// running between groups instead of restarting with every send.
+    /// When the player opened, and where on the band's fading its clock
+    /// started ([`fade_origin_sec`]). Fading is read off this clock so it
+    /// keeps running between groups instead of restarting with every send.
     opened_at: Instant,
+    fade_origin_sec: f64,
     /// When the device last refused to open.
     refused_at: Option<Instant>,
     /// When the system's default output was last asked after.
@@ -169,6 +173,7 @@ impl MorsePlayer {
             sidetone: Arc::new(SidetoneControl::new()),
             stream: None,
             opened_at: Instant::now(),
+            fade_origin_sec: fade_origin_sec(),
             refused_at: None,
             default_asked: None,
             heard_at: None,
@@ -384,7 +389,7 @@ impl MorseBackend for MorsePlayer {
             &FilterDesign::from_settings(settings),
             Qsb::of(&settings.band),
             rate,
-            self.opened_at.elapsed().as_secs_f64() + wait_sec,
+            self.fade_origin_sec + self.opened_at.elapsed().as_secs_f64() + wait_sec,
         );
         let (finished, late) = (voice.finished_flag(), voice.late_flag());
         let armed = self.state.arm();

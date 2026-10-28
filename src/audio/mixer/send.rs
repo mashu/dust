@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "native-audio")]
 use std::time::Instant;
 
-use cw_core::band::{FADE_STEP_SEC, FilterDesign, Qsb, ReceiverFilter};
+use cw_core::band::{FADE_OFFSET_MAX_SEC, FADE_STEP_SEC, FilterDesign, Qsb, ReceiverFilter};
 use cw_core::{PlannedTransmission, PlaybackPlan, ToneEvent};
+use cw_core::{Rng, SplitMix64};
 
 use crate::audio::shape::{SEND_RELEASE_SEC, release_gain};
 #[cfg(feature = "native-audio")]
@@ -22,6 +23,14 @@ const TAIL_SEC: f64 = 0.05;
 /// ringing faintly when the tail runs out, and stopping a waveform where it
 /// stands is a step.
 const TAIL_FADE_SEC: f64 = 0.005;
+
+/// Where on the band's fading a player's clock starts: drawn once for each
+/// player, so that the station you copy fades along a path of its own from
+/// the first group on, rather than down the same stretch of fade every time
+/// the app is opened.
+pub fn fade_origin_sec() -> f64 {
+    SplitMix64::new(crate::time::seed_rng()).pick_in_range(0.0, FADE_OFFSET_MAX_SEC)
+}
 
 /// One station's elements, in order, where the send has got to in them, and
 /// the fading on the path it arrives over.
@@ -499,7 +508,10 @@ mod tests {
                     ..voice
                 },
                 delay_sec: 0.1 * (k + 1) as f64,
-                fade_from_sec: 500.0 * (k + 1) as f64,
+                // Far along the band's fading, and never a whole number of
+                // its slowest swings from yours or each other's: there a
+                // caller's strongest path would fade with yours.
+                fade_from_sec: 500.5 + 750.0 * k as f64,
             })
             .collect();
         plan_transmission(
@@ -831,6 +843,17 @@ mod tests {
         assert!(played.iter().all(|s| *s == 0.0));
         voice.settle(0);
         assert!(voice.is_finished());
+    }
+
+    /// Each player's band clock starts at a point of its own on the fading,
+    /// somewhere along it.
+    #[test]
+    fn every_player_starts_somewhere_of_its_own_on_the_fade() {
+        let (a, b) = (fade_origin_sec(), fade_origin_sec());
+        assert_ne!(a, b);
+        for origin in [a, b] {
+            assert!((0.0..FADE_OFFSET_MAX_SEC).contains(&origin), "{origin}");
+        }
     }
 
     #[test]
