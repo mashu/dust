@@ -4,7 +4,7 @@
 //! practice screen's history, and a key in a training answer does not
 //! rebuild the shell.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cw_core::band::{agc_knee, loudest_station, remembered_agc_knee};
@@ -44,6 +44,11 @@ pub(crate) const BAND_FOLLOW_MS: u32 = 80;
 /// and under a drag that moves through every measurement it only adds
 /// measurements of moves the drag has already left behind.
 pub(crate) const BAND_WARM_ROUNDS: usize = if cfg!(target_arch = "wasm32") { 1 } else { 3 };
+
+/// How long the settings screen's settings stay still, with no band playing,
+/// before what a band preview would be built from is measured ahead of it
+/// ([`use_band_warm`]): past a page drawn and a slider let go.
+pub(crate) const BAND_WARM_AFTER_MS: u32 = 400;
 
 /// The screen `screen` names.
 #[component]
@@ -115,6 +120,7 @@ fn SettingsRoute() -> Element {
     let on_play_sample = use_callback(move |text| playback::start_sample(ctx, text));
     let on_hear_qsos = use_callback(move |()| playback::start_qsos(ctx));
     use_band_follow(ctx);
+    use_band_warm(ctx);
     use_qsos_follow(ctx);
     use_qsos_stop_when_hidden(ctx, SETTINGS_HIDDEN);
     let preview = ctx.preview.read();
@@ -268,6 +274,32 @@ fn use_band_follow(ctx: AppCtx) {
                 // no second follow starts: measured in the next follow, and
                 // taken again, which rebuilds nothing.
                 *latest.borrow_mut() = Some(settings);
+            }
+        });
+    });
+}
+
+/// While the settings screen is open with no band playing, what pressing
+/// Preview would build the band from is measured once its settings have
+/// been still a moment ([`BAND_WARM_AFTER_MS`]): the AGC's knee and how loud
+/// the strongest station comes out ([`warm_agc_knee`]). Remembered, so the
+/// band starts the moment it is asked for rather than measuring them then;
+/// a preview playing has the band follow measure them instead.
+fn use_band_warm(ctx: AppCtx) {
+    let asked = use_hook(|| Rc::new(Cell::new(0u64)));
+    use_effect(move || {
+        let settings = ctx.settings.read().clone().clamp();
+        if ctx.preview.read().is_band() {
+            return;
+        }
+        let ask = asked.get().wrapping_add(1);
+        asked.set(ask);
+        let asked = asked.clone();
+        spawn(async move {
+            sleep_ms(BAND_WARM_AFTER_MS).await;
+            // Moved again, or the preview started: the newer ask measures.
+            if asked.get() == ask && !ctx.preview.peek().is_band() {
+                let _ = warm_agc_knee(&settings).await;
             }
         });
     });
