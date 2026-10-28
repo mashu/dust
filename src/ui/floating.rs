@@ -33,7 +33,7 @@ use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 
 use crate::playback::HeardGroup;
-use crate::state::AppCtx;
+use crate::state::{AppCtx, in_root};
 use crate::time::sleep_ms;
 
 /// How often the floating window looks for a new group.
@@ -116,16 +116,17 @@ fn settle<W>(opened: Option<W>, asked: u64, current: u64, open: bool) -> Settled
 }
 
 impl FloatingWindow {
-    /// Closed, with nothing to show yet. Its signals belong to the scope it
-    /// is made in, which has to outlive every screen that opens it.
+    /// Closed, with nothing to show yet. Its signals belong to the root
+    /// scope, which outlives every screen that opens it, and is where the
+    /// task that opens it runs.
     fn new() -> Self {
-        Self {
+        in_root(|| Self {
             feed: CopyValue::new(Rc::new(Feed::default())),
             window: CopyValue::new(None),
             open: Signal::new(false),
             locked: Signal::new(false),
             generation: CopyValue::new(0),
-        }
+        })
     }
 
     pub fn is_open(self) -> bool {
@@ -187,8 +188,7 @@ impl FloatingWindow {
         // Listen, and a task of that screen's is dropped when it is left:
         // leave Listen before the window has opened, and it would open all
         // the same, with nothing here to close or lock it. What this touches
-        // is the handle's own, made by the app's root component, which
-        // outlives every screen.
+        // is the handle's own, made in the root scope too.
         spawn_forever(async move {
             let opened = opening.await;
             // Each read in a statement of its own: a guard left alive in the

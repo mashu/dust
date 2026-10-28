@@ -28,7 +28,7 @@ use super::stats::{StatsView, StatsViewProps};
 use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView, focused_box_open};
 use crate::audio::fake::Recorder;
 use crate::session_runtime::{AnswerOutbox, TypedAnswer};
-use crate::state::{AppState, Screen};
+use crate::state::{AppState, Screen, in_root};
 use crate::testing::reads_as;
 
 std::thread_local! {
@@ -53,12 +53,13 @@ fn Keyed(
     #[props(default)] no_device: bool,
     children: Element,
 ) -> Element {
-    let settings = use_signal(|| {
+    // Owned by the root scope, as the shell's are.
+    let settings = use_hook(|| {
         let mut settings = crate::testing::test_settings();
         settings.playback.keyer_mode = keyer_mode;
-        settings
+        in_root(|| Signal::new(settings))
     });
-    let screen = use_signal(|| screen);
+    let screen = use_hook(|| in_root(|| Signal::new(screen)));
     let app = use_hook(|| {
         let factory: crate::player::BackendFactory = if no_device {
             Rc::new(|| {
