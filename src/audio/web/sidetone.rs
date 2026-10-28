@@ -124,10 +124,8 @@ fn clocks(ctx: &AudioContext, now: f64, current: f64) -> SidetoneClocks {
 fn play(param: &AudioParam, at: f64, steps: &[GateStep]) {
     let _ = param.cancel_scheduled_values(at);
     for step in steps {
-        let _ = match *step {
-            GateStep::Set(level, when) => param.set_value_at_time(level, when),
-            GateStep::Ramp(level, when) => param.linear_ramp_to_value_at_time(level, when),
-        };
+        let GateStep::Ramp(level, when) = *step;
+        let _ = param.linear_ramp_to_value_at_time(level, when);
     }
 }
 

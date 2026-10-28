@@ -49,127 +49,49 @@ impl Gains {
             volume: settings.master_volume(),
         }
     }
-
-    /// What the receiver's output plays at: its AF gain at the volume.
-    #[cfg(feature = "web")]
-    pub fn received(&self) -> f64 {
-        self.af * self.volume
-    }
-
-    /// What your own messages play at, past the receiver: the volume alone.
-    #[cfg(feature = "web")]
-    pub fn monitored(&self) -> f64 {
-        self.volume
-    }
 }
 
-/// One step of the receiver's gate as the browser plays it: held at a
-/// level from a moment, or moved there in a straight line ending then,
-/// from the step before.
+/// One step of a gate as the browser plays it: moved to a level in a
+/// straight line ending at a moment, from the step before.
 #[cfg(any(feature = "web", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GateStep {
-    Set(f32, f64),
     Ramp(f32, f64),
 }
 
-#[cfg(any(feature = "web", test))]
+#[cfg(test)]
 impl GateStep {
     /// When it is reached, on the gate's clock.
     pub fn at(&self) -> f64 {
         match *self {
-            Self::Set(_, at) | Self::Ramp(_, at) => at,
+            Self::Ramp(_, at) => at,
         }
     }
-}
-
-/// The receiver's gate for a send starting at `start` on a clock, muted
-/// until `muted_until` seconds into it, the gate standing at `from` then:
-/// a line to `from` at `start` first, which is the very line the steps the
-/// send replaces were drawing, so what played up to then plays on without
-/// a step; then shut over [`GATE_RAMP_SEC`], shut to the end of your
-/// message, and open again over the ramp after it. A send that takes over
-/// from one muted starts shut, and stays so; one muted for nothing opens
-/// from wherever the gate stood. The native mixer slews to the same shape a
-/// sample at a time.
-#[cfg(any(feature = "web", test))]
-pub fn gate_steps(muted_until: Option<f64>, start: f64, from: f64) -> Vec<GateStep> {
-    let from = from.clamp(0.0, 1.0);
-    let mut steps = vec![GateStep::Ramp(from as f32, start)];
-    match muted_until {
-        Some(until) => {
-            let shut = start + GATE_RAMP_SEC;
-            let open = (start + until).max(shut);
-            steps.push(GateStep::Ramp(0.0, shut));
-            steps.push(GateStep::Set(0.0, open));
-            steps.push(GateStep::Ramp(1.0, open + GATE_RAMP_SEC));
-        }
-        None if from < 1.0 => steps.push(GateStep::Ramp(1.0, start + GATE_RAMP_SEC)),
-        None => {}
-    }
-    steps
 }
 
 /// How open the gate is at `t` as `steps` play it, the way a browser plays
-/// a gain's automation: held at a step's level until the next step, or
-/// moved to the next along a straight line from the one before. Open
-/// before the first.
-#[cfg(any(feature = "web", test))]
+/// a gain's automation: moved to each step's level along a straight line
+/// from the one before, and held at the last. Open before the first.
+#[cfg(test)]
 pub fn gate_at(steps: &[GateStep], t: f64) -> f64 {
     let mut since: Option<(f64, f64)> = None;
     for step in steps {
-        match (*step, since) {
-            (GateStep::Set(level, at) | GateStep::Ramp(level, at), _) if at <= t => {
-                since = Some((at, f64::from(level)));
-            }
-            (GateStep::Ramp(level, at), Some((from_at, from))) => {
+        let GateStep::Ramp(level, at) = *step;
+        match since {
+            _ if at <= t => since = Some((at, f64::from(level))),
+            Some((from_at, from)) => {
                 let through = (t - from_at) / (at - from_at);
                 return from + (f64::from(level) - from) * through;
             }
-            _ => break,
+            None => break,
         }
     }
     since.map_or(1.0, |(_, level)| level)
 }
 
-/// The receiver's gate as the browser has been told to play it: the steps
-/// put on its gains and not yet played, and the last one played, so a send
-/// started on top goes on from exactly where the gate will stand, however
-/// many sends ago its steps were scheduled.
-#[cfg(any(feature = "web", test))]
-#[derive(Debug, Default)]
-pub struct GateSchedule(Vec<GateStep>);
-
-#[cfg(any(feature = "web", test))]
-impl GateSchedule {
-    /// The steps to put on the gate's gains, at `now` on their clock, for a
-    /// send starting at `start` and muted until `muted_until` seconds in, or
-    /// for the gate opening there with nothing muted: what they were to play
-    /// from `start` on is cancelled, and these go on from where that leaves
-    /// the gate ([`gate_steps`]).
-    pub fn schedule(&mut self, start: f64, muted_until: Option<f64>, now: f64) -> Vec<GateStep> {
-        let from = gate_at(&self.0, start);
-        self.0.retain(|step| step.at() < start);
-        // What has played is no more use, but for the step the gate stands on.
-        if let Some(standing) = self.0.iter().rposition(|step| step.at() <= now) {
-            self.0.drain(..standing);
-        }
-        let steps = gate_steps(muted_until, start, from);
-        self.0.extend_from_slice(&steps);
-        steps
-    }
-
-    /// How open the gate will be at `t`, as it stands scheduled.
-    #[cfg(test)]
-    fn at(&self, t: f64) -> f64 {
-        gate_at(&self.0, t)
-    }
-}
-
 /// The release shape — a raised cosine, the same family the keying envelope
 /// uses, so a cut send tails off like the end of a dit rather than a
 /// fade-out. Full at `progress` 0, silent at 1.
-#[cfg(any(feature = "native-audio", test))]
 pub fn release_gain(progress: f64) -> f64 {
     let p = progress.clamp(0.0, 1.0);
     0.5 * (1.0 + (std::f64::consts::PI * p).cos())
@@ -184,25 +106,6 @@ pub fn release_gain(progress: f64) -> f64 {
 /// the change; a straight-line crossfade sags 3 dB in the middle of it.
 pub fn fade_in_gain(progress: f64) -> f64 {
     (std::f64::consts::FRAC_PI_2 * progress.clamp(0.0, 1.0)).sin()
-}
-
-/// [`fade_in_gain`] as `points` values from start to end, for a browser gain
-/// to play as a curve: rising, or falling from `from` to silence.
-#[cfg(any(feature = "web", test))]
-pub fn fade_curve(points: usize, rising: bool, from: f64) -> Vec<f32> {
-    let points = points.max(2);
-    let last = (points - 1) as f64;
-    (0..points)
-        .map(|i| {
-            let progress = i as f64 / last;
-            let gain = if rising {
-                fade_in_gain(progress)
-            } else {
-                from * fade_in_gain(1.0 - progress)
-            };
-            gain as f32
-        })
-        .collect()
 }
 
 /// How many straight lines a browser draws a whole edge of the sidetone's
@@ -397,7 +300,7 @@ mod tests {
 
         /// The gain at `t`, shut before anything was scheduled.
         fn at(&self, t: f64) -> f64 {
-            let mut steps = vec![GateStep::Set(0.0, f64::MIN)];
+            let mut steps = vec![GateStep::Ramp(0.0, f64::MIN)];
             steps.extend_from_slice(&self.0);
             gate_at(&steps, t)
         }
@@ -505,7 +408,7 @@ mod tests {
         let levels: Vec<f32> = steps
             .iter()
             .map(|step| match step {
-                GateStep::Ramp(level, _) | GateStep::Set(level, _) => *level,
+                GateStep::Ramp(level, _) => *level,
             })
             .collect();
         assert!(levels.windows(2).all(|w| w[1] >= w[0]), "{levels:?}");
@@ -543,97 +446,5 @@ mod tests {
         assert_eq!(fade_in_gain(1.0), 1.0);
         assert_eq!(fade_in_gain(-1.0), 0.0);
         assert_eq!(fade_in_gain(2.0), 1.0);
-
-        let rising = fade_curve(5, true, 1.0);
-        let falling = fade_curve(5, false, 0.5);
-        assert_eq!(rising.first(), Some(&0.0));
-        assert_eq!(rising.last(), Some(&1.0));
-        assert_eq!(falling.first(), Some(&0.5));
-        assert_eq!(falling.last(), Some(&0.0));
-        assert!(rising.windows(2).all(|w| w[1] > w[0]));
-        assert!(falling.windows(2).all(|w| w[1] < w[0]));
-        assert_eq!(fade_curve(0, true, 1.0).len(), 2);
-    }
-
-    /// The receiver's gate shuts over the ramp from where your message
-    /// starts, stays shut to its end and opens over the ramp after it,
-    /// never stepping; a send taking over from one still shut starts shut
-    /// and stays so; with nothing to mute, it stays open, or opens.
-    #[test]
-    fn the_gate_shuts_while_you_send_and_never_steps() {
-        let steps = gate_steps(Some(2.0), 10.0, 1.0);
-        assert_eq!(gate_at(&steps, 9.9), 1.0);
-        assert_eq!(gate_at(&steps, 10.0), 1.0);
-        assert!((gate_at(&steps, 10.0 + GATE_RAMP_SEC / 2.0) - 0.5).abs() < 1e-9);
-        assert_eq!(gate_at(&steps, 10.0 + GATE_RAMP_SEC), 0.0);
-        assert_eq!(gate_at(&steps, 11.5), 0.0);
-        assert_eq!(gate_at(&steps, 12.0), 0.0);
-        assert!((gate_at(&steps, 12.0 + GATE_RAMP_SEC / 2.0) - 0.5).abs() < 1e-9);
-        assert_eq!(gate_at(&steps, 12.1), 1.0);
-        assert_eq!(worst_step(&steps, 9.0, 13.0), 0.2, "a fifth a millisecond");
-        // Taking over from a send still shut: shut from the first moment.
-        let over = gate_steps(Some(1.0), 20.0, 0.0);
-        assert_eq!(gate_at(&over, 20.0), 0.0);
-        assert_eq!(gate_at(&over, 20.0 + GATE_RAMP_SEC / 2.0), 0.0);
-        assert_eq!(gate_at(&over, 21.5), 1.0);
-        // Nothing to mute: open, or opening from where it stood.
-        assert_eq!(gate_steps(None, 5.0, 1.0), vec![GateStep::Ramp(1.0, 5.0)]);
-        let opening = gate_steps(None, 5.0, 0.0);
-        assert!((gate_at(&opening, 5.0 + GATE_RAMP_SEC / 2.0) - 0.5).abs() < 1e-9);
-        assert_eq!(gate_at(&opening, 5.1), 1.0);
-    }
-
-    /// The biggest move the gate makes in a millisecond between `from` and
-    /// `to`, to a thousandth.
-    fn worst_step(steps: &[GateStep], from: f64, to: f64) -> f64 {
-        let moves = |t: f64| (gate_at(steps, t + 0.001) - gate_at(steps, t)).abs();
-        let worst = (0..((to - from) * 10_000.0) as u32)
-            .map(|k| moves(from + f64::from(k) / 10_000.0))
-            .fold(0.0, f64::max);
-        (worst * 1_000.0).round() / 1_000.0
-    }
-
-    /// A send scheduled on top of another goes on from where the gate
-    /// stands as that one left it, never stepping: a continuation taking
-    /// over from your message keeps it shut; a second taking over from the
-    /// first at its own start, a moment either side of it, keeps it shut
-    /// too; and a stop opens it from wherever it stands, a ramp it cut into
-    /// included.
-    #[test]
-    fn a_send_on_top_goes_on_from_where_the_gate_stands() {
-        let mut gate = GateSchedule::default();
-        let first = gate.schedule(10.0, Some(2.0), 9.9);
-        assert_eq!(first, gate_steps(Some(2.0), 10.0, 1.0));
-        // A continuation half way through your message, shut from its start.
-        let taken = gate.schedule(11.0, Some(1.5), 10.9);
-        assert_eq!(taken[0], GateStep::Ramp(0.0, 11.0));
-        for t in [10.5, 11.0, 11.2, 12.4] {
-            assert_eq!(gate.at(t), 0.0, "at {t}");
-        }
-        assert_eq!(gate.at(12.6), 1.0);
-        // Taken over again at its own start, or a millisecond either side.
-        for again in [10.999, 11.0, 11.001] {
-            let mut gate = GateSchedule::default();
-            gate.schedule(10.0, Some(2.0), 9.9);
-            gate.schedule(11.0, Some(1.5), 10.9);
-            let steps = gate.schedule(again, Some(1.0), 10.95);
-            assert_eq!(steps[0], GateStep::Ramp(0.0, again), "at {again}");
-            assert_eq!(gate.at(again + 0.5), 0.0);
-            assert_eq!(gate.at(again + 1.01), 1.0);
-        }
-        // A stop just as the gate is shutting opens it from part way down.
-        let mut gate = GateSchedule::default();
-        gate.schedule(10.0, Some(2.0), 9.9);
-        let half = 10.0 + GATE_RAMP_SEC / 2.0;
-        let open = gate.schedule(half, None, half);
-        assert_eq!(open[0], GateStep::Ramp(0.5, half));
-        assert!((gate.at(half) - 0.5).abs() < 1e-9);
-        assert!((gate.at(half + GATE_RAMP_SEC / 2.0) - 0.75).abs() < 1e-9);
-        assert_eq!(gate.at(half + GATE_RAMP_SEC), 1.0);
-        assert!(worst_step(&gate.0, 9.0, 11.0) <= 0.2);
-        // What has played is let go, but for the step the gate stands on.
-        gate.schedule(20.0, Some(1.0), 19.9);
-        assert!(gate.0.len() <= 5, "{:?}", gate.0);
-        assert_eq!(gate.at(19.95), 1.0);
     }
 }

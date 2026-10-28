@@ -62,7 +62,8 @@ impl Meter {
 }
 
 /// The frame the callback is filling: its peaks so far, and how many samples
-/// it still has to take.
+/// it still has to take. A copy writes to the same meter.
+#[derive(Clone)]
 pub struct Metering {
     meter: Arc<Meter>,
     frame_len: usize,
@@ -92,7 +93,14 @@ impl Metering {
         Arc::clone(&self.meter)
     }
 
+    /// How many samples of the frame in hand have been taken.
+    #[cfg(any(feature = "web", test))]
+    pub fn taken(&self) -> usize {
+        self.frame_len - self.left
+    }
+
     /// Start again at `sample_rate`, the frame in hand dropped.
+    #[cfg(feature = "native-audio")]
     pub fn restart(&mut self, sample_rate: u32) {
         *self = Self::new(Arc::clone(&self.meter), sample_rate);
     }

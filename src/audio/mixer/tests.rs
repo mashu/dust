@@ -2,7 +2,8 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use cw_core::band::{BandMixer, FilterDesign, Qsb, SOFT_LIMIT_KNEE, agc_lookahead_samples};

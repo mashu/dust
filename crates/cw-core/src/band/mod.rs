@@ -86,6 +86,10 @@ use calibration::{noise_level, qrn_level};
 /// sample at a time, with the send it is riding over. QSB is applied to the
 /// Morse before it gets here — fading is a property of the path a station
 /// arrives on, not of the noise around it.
+///
+/// A copy plays on exactly as the original would: what lets a player that
+/// renders ahead of the clock go back to a moment and make the rest again.
+#[derive(Clone)]
 pub struct BandMixer {
     source: BandSource,
     receiver: ReceiverFilter,

@@ -83,6 +83,7 @@ impl Glide {
 /// receiver is played at: full volume's, for that receiver. A band fades
 /// out at its own, and the next fades in at its, so a change of receiver
 /// never plays one band at the other's.
+#[derive(Clone)]
 pub struct BandVoice {
     mixer: BandMixer,
     fade: Fade,

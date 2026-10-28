@@ -306,6 +306,7 @@ fn amplitude_to_db(amplitude: f64) -> f64 {
 /// milliseconds as well, which fall away as soon as a sound has gone however
 /// loud it was: the smoothed level takes longer to forget a loud stroke than
 /// a stroke lasts, and would otherwise let the loudest ones pass for signals.
+#[derive(Clone)]
 pub struct Agc {
     /// The knee, as the amplitude of a steady tone. Infinite when switched
     /// off.
@@ -489,8 +490,13 @@ impl Agc {
             self.held = closer_in_db(self.held, wanted, rate);
         } else if self.hang_left > 0 {
             self.hang_left -= 1;
-        } else {
+        } else if self.held < 1.0 {
+            // Back at one once within a millionth of it, a ten-thousandth of
+            // a decibel: in decibels it would only ever get closer.
             self.held = closer_in_db(self.held, 1.0, self.release);
+            if self.held > 1.0 - 1e-6 {
+                self.held = 1.0;
+            }
         }
 
         // The ceiling, on the crests still waiting to be played, at the gain
@@ -564,6 +570,9 @@ impl Agc {
 /// gets there as fast in decibels as one closing on 3 dB, where a step in
 /// amplitude would take the last twenty of the thirty at a crawl.
 fn closer_in_db(from: f64, to: f64, coefficient: f64) -> f64 {
+    if from == to {
+        return to;
+    }
     to * (from / to).powf(coefficient)
 }
 

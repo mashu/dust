@@ -132,24 +132,6 @@ pub fn stall_charge(flags: WaitFlags, elapsed_ms: u32) -> u32 {
 #[cfg(any(feature = "web", test))]
 const MAX_HEARD_LATENCY_SEC: f64 = 0.5;
 
-/// How far past the browser's clock a send is scheduled, given the delay the
-/// browser reports between rendering and handing over (`base_latency_sec`).
-///
-/// The clock the page reads is a render callback behind the one being
-/// rendered. A tone scheduled for a moment already under way starts late,
-/// part way through its rise — a click, and the start of the first element
-/// lost. The band's own buffers are scheduled ahead for the same reason.
-#[cfg(any(feature = "web", test))]
-pub fn schedule_lead_sec(base_latency_sec: f64) -> f64 {
-    const LEAD_SEC: f64 = 0.02;
-    let base = if base_latency_sec.is_finite() {
-        base_latency_sec.clamp(0.0, 0.1)
-    } else {
-        0.0
-    };
-    base + LEAD_SEC
-}
-
 /// How much of a send that starts at `started_at_sec` on the audio clock has
 /// been heard when the clock reads `now_sec`, `latency_sec` after it was
 /// rendered. A send is over when its last element has reached the ear, not
@@ -317,16 +299,10 @@ mod tests {
         WaitFlags::default()
     }
 
-    /// The browser schedules a send a little past its clock, and counts it
-    /// heard only once the latency to the ear has passed.
+    /// The browser counts a send heard only once the latency to the ear has
+    /// passed.
     #[test]
     fn the_browsers_clock_is_read_for_what_is_heard() {
-        assert_eq!(schedule_lead_sec(0.0), 0.02);
-        assert!((schedule_lead_sec(0.01) - 0.03).abs() < 1e-12);
-        assert_eq!(schedule_lead_sec(f64::NAN), 0.02);
-        assert_eq!(schedule_lead_sec(-1.0), 0.02);
-        assert!((schedule_lead_sec(9.0) - 0.12).abs() < 1e-12);
-
         // A second in, with a quarter second still on its way to the ear.
         assert_eq!(heard_ms(11.0, 10.0, 0.25), 750);
         assert_eq!(heard_ms(11.0, 10.0, 0.0), 1_000);

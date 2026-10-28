@@ -33,7 +33,6 @@ web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Document",
     "Element",
-    "AnalyserNode",
     "AudioContext",
     "AudioContextState",
     "AudioDestinationNode",
@@ -45,9 +44,6 @@ web-sys = { version = "0.3", optional = true, features = [
     "AudioBuffer",
     "AudioBufferSourceNode",
     "AudioScheduledSourceNode",
-    "ChannelSplitterNode",
-    "DynamicsCompressorNode",
-    "IirFilterNode",
     "Storage",
     # Backups: a file handed over as a download, and the ask to keep the store.
     "Blob",

@@ -4,12 +4,14 @@
 use std::ops::AddAssign;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "native-audio")]
 use std::time::Instant;
 
 use cw_core::band::{FilterDesign, Qsb, ReceiverFilter};
 use cw_core::{PlannedTransmission, PlaybackPlan, ToneEvent};
 
 use crate::audio::shape::{SEND_RELEASE_SEC, release_gain};
+#[cfg(feature = "native-audio")]
 use crate::audio::wait::LATE_MS;
 
 /// How long a send runs on after its last element ends: the receiver's
@@ -28,12 +30,14 @@ const TAIL_FADE_SEC: f64 = 0.005;
 const FADING_STEP_SEC: f64 = 0.001;
 
 /// One station's elements, in order, and where the send has got to in them.
+#[derive(Clone)]
 struct Station {
     elements: Vec<Element>,
     next: usize,
 }
 
 /// One tone, placed on the sample clock.
+#[derive(Clone)]
 struct Element {
     start: usize,
     len: usize,
@@ -109,6 +113,7 @@ impl Station {
 }
 
 /// The fading on a send, followed a step at a time.
+#[derive(Clone)]
 struct Fading {
     qsb: Qsb,
     /// Samples between the points it is worked out at.
@@ -147,6 +152,7 @@ impl AddAssign for SendSample {
 ///
 /// Built on the UI thread from the plan, which is all it allocates; the
 /// audio callback only reads it forward.
+#[derive(Clone)]
 pub struct SendVoice {
     /// The stations the receiver hears.
     stations: Vec<Station>,
@@ -184,12 +190,16 @@ pub struct SendVoice {
     /// The most other stations calling across this send at once.
     callers: usize,
     finished: Arc<AtomicBool>,
-    /// When its first sample was played, on the wall clock.
+    /// When its first sample was played, on the wall clock. The native
+    /// stream's alone: it renders as it plays, where the browser's renders
+    /// ahead of the clock and has the clock's word for where it has got to.
+    #[cfg(feature = "native-audio")]
     first_played: Option<Instant>,
     /// Set once what it has played falls behind the wall clock since its
     /// first sample by more than [`LATE_MS`]: the stream was held up while
     /// it played, so it went out later than planned. The stream has no
     /// audio clock to report, so the send watches for itself.
+    #[cfg(feature = "native-audio")]
     late: Arc<AtomicBool>,
 }
 
@@ -234,18 +244,22 @@ impl SendVoice {
             release_len: samples(SEND_RELEASE_SEC),
             callers: plan.others_at_once(),
             finished: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "native-audio")]
             first_played: None,
+            #[cfg(feature = "native-audio")]
             late: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Set once the send has been heard to its end, or its release has: what
     /// the waiter watches.
+    #[cfg(feature = "native-audio")]
     pub fn finished_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.finished)
     }
 
     /// Set once it is found to have played late ([`Self::settle`]).
+    #[cfg(feature = "native-audio")]
     pub fn late_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.late)
     }
@@ -339,6 +353,7 @@ impl SendVoice {
             return SendSample::default();
         }
         let pos = self.pos;
+        #[cfg(feature = "native-audio")]
         if pos == 0 {
             self.first_played = Some(Instant::now());
         }
@@ -408,6 +423,7 @@ impl SendVoice {
         if self.is_finished() {
             return;
         }
+        #[cfg(feature = "native-audio")]
         if let Some(first) = self.first_played {
             let played_ms = self.pos as f64 * 1_000.0 / self.sample_rate;
             let behind_ms = first.elapsed().as_secs_f64() * 1_000.0 - played_ms;

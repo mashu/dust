@@ -85,7 +85,21 @@ paddle squeeze opens it again. Settings keeps it open for the paddle's first
 squeeze, and a session, or a run while it is not paused, holds it open. The
 volume keys turn the media volume meanwhile, which Dust plays at: before
 Android 9 they would turn the ringer with no stream playing. The browser
-build suspends its audio a moment after it goes quiet.
+build suspends its audio the same way, once nothing is left to hear.
+
+The browser plays the native player's own mixer: the band, the stations,
+the receiver's filter and AGC, the mute while you send, the fades and the
+fading, all in Rust ([`src/audio/stream.rs`](../src/audio/stream.rs)). A
+browser plays only what it is handed ahead of time, so the mixer is run
+half a second ahead of its clock, a tenth of a second at a time, each
+stretch scheduled as a buffer, with a copy of the mixer kept from the start
+of each. A send, a stop, a new band or an RF gain moved is made 30 ms past
+the browser's clock and its base latency: the stretch that moment falls in
+is played again from its copy up to there, sample for sample as it was,
+and the rest made anew. The graph left is the volume, the soft limiter and
+the paddle's sidetone. On iPhone Safari the page takes the playback audio
+session the first time something is about to be heard, so the Ring/Silent
+switch does not mute it.
 
 If a toolchain bring-up ever blocks on oboe, `--features mobile-silent` builds
 the same app with a player that keeps a session's timing but makes no sound,

@@ -17,16 +17,17 @@
 
 mod band;
 mod meter;
+#[cfg(feature = "native-audio")]
+mod output;
 mod send;
+#[cfg(feature = "native-audio")]
 mod sidetone;
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::Arc;
 
 #[cfg(doc)]
 use cw_core::band::AGC_LOOKAHEAD_SEC;
-use cw_core::band::{agc_lookahead_samples, soft_limit};
+use cw_core::band::agc_lookahead_samples;
 
 use crate::audio::shape::{BAND_FADE_SEC, GATE_RAMP_SEC, Gains};
 
@@ -34,10 +35,15 @@ pub use band::BandVoice;
 use band::Glide;
 pub use meter::Meter;
 use meter::Metering;
+#[cfg(feature = "native-audio")]
+pub use output::Output;
+#[cfg(all(test, feature = "native-audio"))]
+use output::finish;
 pub use send::{SendSample, SendVoice};
-#[cfg(test)]
+#[cfg(feature = "native-audio")]
+pub use sidetone::SidetoneControl;
+#[cfg(all(test, feature = "native-audio"))]
 use sidetone::clock_sec;
-pub use sidetone::{Sidetone, SidetoneControl};
 
 /// How many bands may be fading out at once. One band hands over to the next
 /// in a few tens of milliseconds; a slider dragged across its range rebuilds
@@ -53,7 +59,10 @@ const RETIRING_SENDS: usize = 4;
 const HIGHEST_RATE: u32 = 384_000;
 
 /// The band and the Morse, mixed. The UI hands it bands and sends under its
-/// lock; the audio callback plays it out.
+/// lock; the audio callback plays it out. The browser renders it ahead of
+/// its clock, and a copy taken before a stretch plays that stretch again
+/// exactly, for it to be made again from any moment in it.
+#[derive(Clone)]
 pub struct Mixer {
     sample_rate: u32,
     band: Option<BandVoice>,
@@ -140,6 +149,23 @@ impl Mixer {
         self.metering.meter()
     }
 
+    /// How many samples into the meter's next frame it has played.
+    #[cfg(any(feature = "web", test))]
+    pub fn meter_phase(&self) -> usize {
+        self.metering.taken()
+    }
+
+    /// Whether it has nothing left to play: no band, none fading out, and
+    /// no send sounding or riding out its release. What it plays then is
+    /// silence, once the look-ahead has run out.
+    #[cfg(any(feature = "web", test))]
+    pub fn is_quiet(&self) -> bool {
+        self.band.is_none()
+            && self.fading.is_empty()
+            && self.retiring.is_empty()
+            && self.send.as_ref().is_none_or(|send| !send.is_sounding())
+    }
+
     /// How long after it starts a send goes to the output, in seconds: the
     /// receiver's look-ahead.
     pub fn lookahead_sec(&self) -> f64 {
@@ -148,6 +174,7 @@ impl Mixer {
 
     /// How far behind the output the last callback found the speaker, in
     /// seconds, as the device says.
+    #[cfg(feature = "native-audio")]
     pub fn output_latency_sec(&self) -> f64 {
         self.latency as f64 / f64::from(self.sample_rate)
     }
@@ -268,6 +295,7 @@ impl Mixer {
     }
 
     /// Everything out, for a stream at `sample_rate` to start again with.
+    #[cfg(feature = "native-audio")]
     pub fn clear(&mut self, sample_rate: u32, swept: &mut Swept) {
         self.sample_rate = sample_rate.max(1);
         self.gate = 1.0;
@@ -405,84 +433,5 @@ fn late_room(sample_rate: u32) -> usize {
     agc_lookahead_samples(sample_rate.max(HIGHEST_RATE))
 }
 
-/// The stream's side of the mixer: what each callback plays.
-pub struct Output {
-    mixer: Arc<Mutex<Mixer>>,
-    control: Arc<SidetoneControl>,
-    sidetone: Sidetone,
-    /// The stream's word to the player that something broke.
-    failed: Arc<AtomicBool>,
-    /// The mixer panicked once; it is not run again on this stream, where it
-    /// would only panic on every buffer that followed.
-    abandoned: bool,
-}
-
-impl Output {
-    pub fn new(
-        mixer: Arc<Mutex<Mixer>>,
-        control: Arc<SidetoneControl>,
-        failed: Arc<AtomicBool>,
-        sample_rate: u32,
-    ) -> Self {
-        Self {
-            mixer,
-            control,
-            sidetone: Sidetone::new(sample_rate),
-            failed,
-            abandoned: false,
-        }
-    }
-
-    /// One callback's worth of mono frames: the mixer, at its volume, the
-    /// paddle's sidetone, set at the level it is heard at, and the limiter
-    /// over the lot, `latency` frames ahead of the speaker.
-    ///
-    /// Never waits. A callback that finds the UI holding the mixer — it only
-    /// ever does to swap a band or a send in — goes without the mixer for
-    /// that one buffer; the sidetone needs no lock and plays regardless.
-    pub fn fill(&mut self, out: &mut [f32], latency: usize) {
-        self.fill_at(out, latency, sidetone::clock_sec());
-    }
-
-    /// [`Self::fill`], for a callback that came at `now` on the sidetone's
-    /// clock.
-    pub fn fill_at(&mut self, out: &mut [f32], latency: usize, now: f64) {
-        out.fill(0.0);
-        if !self.abandoned {
-            let guard = match self.mixer.try_lock() {
-                Ok(guard) => Some(guard),
-                // A panic on the UI side cannot leave the mixer half-written:
-                // every change to it is a move into a field.
-                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-                Err(TryLockError::WouldBlock) => None,
-            };
-            if let Some(mut mixer) = guard
-                && catch_unwind(AssertUnwindSafe(|| mixer.render(out, latency))).is_err()
-            {
-                // A send waiting on this stream fails, and the session
-                // rebuilds the player rather than sitting in silence.
-                self.abandoned = true;
-                self.failed.store(true, Ordering::Release);
-                out.fill(0.0);
-            }
-        }
-        self.sidetone.add_to(out, &self.control, now);
-        for sample in out {
-            *sample = finish(*sample);
-        }
-    }
-}
-
-/// The output stage: the receiver's soft limiter, once, on everything played
-/// together — band, Morse and sidetone — so a crash under a loud pile-up is
-/// caught rather than squared off. Anything that is not a number is silence.
-pub fn finish(sample: f32) -> f32 {
-    if sample.is_finite() {
-        (soft_limit(f64::from(sample)) as f32).clamp(-1.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "native-audio"))]
 mod tests;

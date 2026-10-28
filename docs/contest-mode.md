@@ -1371,8 +1371,8 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   clock the old one plays on, which plays on to there and is ridden down
   by then, your message silent there, so the two never sound together:
   natively the mixer starts it that many samples into the send playing
-  (`Mixer::start_at`), and the browser at that time on the context's
-  clock. A moment already past, a retry's, starts it as soon as it can.
+  (`Mixer::start_at`), and so does the browser, which renders the same
+  mixer ahead of its clock (`audio/stream.rs`). A moment already past, a retry's, starts it as soon as it can.
   Everything is decided when you key, so what the turn on the air plays up
   to the splice counts at the key, as planned. That is from the key to the
   splice: the rest of the character sounding then, any the player had
@@ -1585,16 +1585,9 @@ spacing and no fist variation.
   again from the takeover. A second key taking over from a continuation at
   its own start goes in its place exactly, a moment of clock rounding past
   it being no moment at all (`SendVoice::samples_until`), so neither
-  leaves the gate a sample in which nobody is sending. In the browser two
-  gains after the compressor, one on the receiver's output and one on the
-  band's floor, play the same shape (`gate_steps`). The player keeps the
-  gate's schedule as it scheduled it (`GateSchedule`, `audio/shape.rs`),
-  and each send's steps go on from where that leaves the gate at its
-  start, by a line to that level, which is the very line the steps it
-  replaces were drawing, so a continuation taking over part way through
-  your message keeps the gate shut, a second taking over from the first at
-  its own start too, and one taking over after your message finds it
-  open, as natively; one evaluator (`gate_at`) reads the schedule. The
+  leaves the gate a sample in which nobody is sending. The browser plays
+  the very same mixer, rendered ahead of its clock and made again from the
+  moment of any change (`audio/stream.rs`), so its gate is this one. The
   AGC runs on under the gate, so the band comes back as it would have
   been. A stop opens it from where it stands.
   - What callers sending across your message sound like with it shut:
@@ -1655,8 +1648,8 @@ again keeps its strength and is placed afresh.
 
 The envelope curves carry the gain: `build_envelope_curve` bakes
 `target_gain` in (`plan.rs:121-124`); the native player reads `target_gain`
-only for a curve with fewer than two points (`mixer/send.rs:64-67`), the
-web player only when the browser refuses a curve (`web/send.rs:164-173`).
+only for a curve with fewer than two points (`mixer/send.rs:64-67`), and
+the browser plays that same mixer.
 
 Each caller gets the band's `Qsb` model at its own time offset, following
 the Band card's QSB switch. `plan_turn` bakes the fade into each tone's
@@ -1692,9 +1685,8 @@ through continuations and a dupe calling again keeps it; `plan_turn` lays it
 into the tones' envelopes as it lays the fading, and your message never
 flutters, nor QRM. The envelopes are sampled at 1,200 points a second,
 sixteen to a cycle of the fastest path of the fastest flutter (2.3 × 33 Hz),
-and both players play them as they are, so no player changes for it. A
-flutter is never made the browser's fading curve (`Qsb::curve`, 200 points
-a second, for the band's fading only), which could not follow it.
+and both players play them as they are, so no player changes for it: the
+browser plays the native mixer, rendered ahead of its clock.
 
 ### 5.6 QRM and the background
 
@@ -1765,8 +1757,8 @@ clock parks and a send waits (`wait.rs:88-107`); the run pauses first.
 
 Phase 5 adds a receiver gate after the AGC while you send, as a non-QSK rig
 mutes (`Contest.pas:806-834`). Since 1b both players hold your message
-apart from what the receiver hears (`SendSample::dry` natively, its own
-gain into `floor_in` in the browser), so the gate keys off the dry plan and
+apart from what the receiver hears (`SendSample::dry`, in the mixer both
+play), so the gate keys off the dry plan and
 closes only the receiver's output; until then the band runs on under your
 message, as with full break-in. Phase 5 also adds per-station gain for
 flutter, and a player that starts a send at a given time, so a continuation
