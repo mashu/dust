@@ -101,12 +101,26 @@ pub fn reference_floor_rms() -> f64 {
 /// of any filter with exactly that many hertz' worth of power, and a soft or
 /// peaked filter lets in less of it than a sharp one the same width.
 pub fn heard_snr_db(level: f64, noise_bandwidth_hz: f64) -> f64 {
-    let bandwidth = if noise_bandwidth_hz.is_finite() && noise_bandwidth_hz > 0.0 {
+    noise_floor_snr_db(level)
+        + 10.0 * (REFERENCE_BANDWIDTH_HZ / heard_bandwidth(noise_bandwidth_hz)).log10()
+}
+
+/// RMS of the floor at `level` as heard through a receiver whose noise
+/// bandwidth is `noise_bandwidth_hz`: white at the antenna, so the filter
+/// lets in its noise bandwidth's worth of it. What [`heard_snr_db`] is the
+/// signal-to-noise against.
+pub fn heard_floor_rms(level: f64, noise_bandwidth_hz: f64) -> f64 {
+    noise_floor_rms(level) * (heard_bandwidth(noise_bandwidth_hz) / REFERENCE_BANDWIDTH_HZ).sqrt()
+}
+
+/// The noise bandwidth a floor is heard through: the receiver's, or the
+/// reference for one that has none to give.
+fn heard_bandwidth(noise_bandwidth_hz: f64) -> f64 {
+    if noise_bandwidth_hz.is_finite() && noise_bandwidth_hz > 0.0 {
         noise_bandwidth_hz
     } else {
         REFERENCE_BANDWIDTH_HZ
-    };
-    noise_floor_snr_db(level) + 10.0 * (REFERENCE_BANDWIDTH_HZ / bandwidth).log10()
+    }
 }
 
 #[cfg(test)]

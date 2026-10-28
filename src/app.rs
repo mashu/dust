@@ -1822,8 +1822,21 @@ mod ui_tests {
                 60,
             ));
             ui.advance(120).await;
+            let settings = with_receiver().clamp();
             assert!(
-                ui.has("Peaks 9 dB over the AGC · AGC takes 4 dB · 3 dB under the limiter"),
+                ui.has("takes 4 dB · 3 dB under the limiter"),
+                "{}",
+                ui.html()
+            );
+            assert!(ui.has("badge scope-lamp on"), "the lamp is lit");
+            assert!(
+                ui.has(&crate::ui::scope::rf_trace_step(&settings, 9.0)),
+                "drawn 9 dB over the line: {}",
+                ui.html()
+            );
+            let over = crate::ui::scope::over_hiss(&settings).expect("a band with hiss");
+            assert!(
+                ui.has(&format!("Threshold {over:.0} dB over the hiss")),
                 "{}",
                 ui.html()
             );
@@ -1835,6 +1848,43 @@ mod ui_tests {
             ui.click("btn-band-stop");
             assert!(!ui.shows("level-scope"));
             assert!(ui.shows("scope-hint"));
+        });
+    }
+
+    /// A playing scope redraws only what moves, twenty times a second: its
+    /// two traces, its readout, its lamp and what it says to a screen
+    /// reader, at most five changes a poll however the band comes and goes.
+    #[test]
+    fn a_playing_scope_costs_at_most_five_changes_a_poll() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
+            let line = crate::ui::scope::threshold(&with_receiver().clamp()) as f32;
+            let _ = ui.take_work();
+            let mut drawn = 0;
+            for poll in 0..40 {
+                // A station over the line and gone again, the AGC taking it
+                // down and letting go, a poll each way.
+                let (input, gain) = if poll % 4 < 2 {
+                    (line * 8.0, 0.25)
+                } else {
+                    (line * 0.1, 1.0)
+                };
+                recorder.meter.borrow_mut().extend(std::iter::repeat_n(
+                    crate::audio::MeterFrame {
+                        input,
+                        gain,
+                        output: 0.2 + poll as f32 * 0.01,
+                    },
+                    5,
+                ));
+                ui.advance(50).await;
+                let work = ui.take_work();
+                assert!(work <= 5, "{work} changes in poll {poll}");
+                drawn += work;
+            }
+            assert!(drawn >= 2 * 40, "the scope drew {drawn} changes in all");
         });
     }
 
@@ -1875,7 +1925,7 @@ mod ui_tests {
             ));
             ui.advance(120).await;
             assert!(
-                ui.has("Peaks 9 dB over the AGC"),
+                ui.has(&crate::ui::scope::rf_trace_step(&settings, 9.0)),
                 "the line is the new knee's: {}",
                 ui.html()
             );
@@ -2020,13 +2070,14 @@ mod ui_tests {
 
     /// The scope reads what the band hears at the AGC against the line of
     /// the band that plays: a tone `over` dB over it, metered once the
-    /// scope next looks, and what the scope says of it.
+    /// scope next looks, what the scope says of it, and whether it draws
+    /// the tone that far over its line.
     async fn scope_reads(
         ui: &mut Ui,
         recorder: &crate::audio::fake::Recorder,
         settings: &TrainingSettings,
         over: f64,
-    ) -> String {
+    ) -> (String, bool) {
         let db = |db: f64| 10f64.powf(db / 20.0) as f32;
         let line = crate::ui::scope::threshold(settings) as f32;
         recorder.meter.borrow_mut().extend(std::iter::repeat_n(
@@ -2038,13 +2089,16 @@ mod ui_tests {
             60,
         ));
         ui.advance(60).await;
-        ui.html()
+        let html = ui.html();
+        let said = html
             .split("id=\"scope-reading\"")
             .nth(1)
             .and_then(|rest| rest.split_once('>'))
             .and_then(|(_, text)| text.split('<').next())
             .unwrap_or_default()
-            .to_string()
+            .to_string();
+        let drawn = html.contains(&crate::ui::scope::rf_trace_step(settings, over));
+        (said, drawn)
     }
 
     /// A slider moved in every measurement has the follow take its newest
@@ -2080,8 +2134,9 @@ mod ui_tests {
                 * (crate::ui::scope::threshold(&wide) / crate::ui::scope::threshold(&taken))
                     .log10();
             assert!(apart > 1.5, "the two knees are {apart:.1} dB apart");
-            let said = scope_reads(&mut ui, &recorder, &taken, 9.0).await;
-            assert!(said.starts_with("Peaks 9 dB over the AGC"), "{said}");
+            let (said, drawn) = scope_reads(&mut ui, &recorder, &taken, 9.0).await;
+            assert_eq!(said, "off · 3 dB under the limiter");
+            assert!(drawn, "drawn by the knee of the move taken: {}", ui.html());
         });
     }
 
@@ -2096,8 +2151,9 @@ mod ui_tests {
             ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
                 .await;
             let first = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
-            let said = scope_reads(&mut ui, &recorder, &first, 9.0).await;
-            assert!(said.starts_with("Peaks 9 dB over the AGC"), "{said}");
+            let (said, drawn) = scope_reads(&mut ui, &recorder, &first, 9.0).await;
+            assert_eq!(said, "idle · 3 dB under the limiter");
+            assert!(drawn, "{}", ui.html());
             ui.click("btn-band-stop");
             ui.with_app(|ctx| {
                 let mut settings = ctx.settings;
@@ -2106,12 +2162,14 @@ mod ui_tests {
             ui.click("btn-band-preview");
             assert!(ui.shows("level-scope"));
             let settings = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
-            let said = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
+            let (said, drawn) = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
             assert_eq!(said, "Listening…", "read by the old knee");
+            assert!(!drawn, "drawn by the old knee");
             ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
                 .await;
-            let said = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
-            assert!(said.starts_with("Peaks 9 dB over the AGC"), "{said}");
+            let (said, drawn) = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
+            assert_eq!(said, "idle · 3 dB under the limiter");
+            assert!(drawn, "{}", ui.html());
         });
     }
 

@@ -5,10 +5,11 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use cw_core::band::agc_decay_sec;
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, MonoMs, Sampler,
-    Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX, VOLUME_MIN,
-    compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, MonoMs,
+    Sampler, Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX,
+    VOLUME_MIN, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
     generate_training_group, hear_qsos, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
@@ -83,9 +84,20 @@ pub struct DialogueLine {
     pub qso: u32,
 }
 
-/// What the band preview calls, and the pause between calls.
-const BAND_PREVIEW_CALL: &str = "CQ";
-const BAND_PREVIEW_GAP_MS: u32 = 280;
+/// What the band preview calls.
+pub(crate) const BAND_PREVIEW_CALL: &str = "CQ";
+
+/// The pause between the band preview's calls: long enough for the AGC at
+/// Fast to let the band back after the loudest of them. Its hang and five of
+/// its release's time constants bring a 26 dB duck within a fifth of a
+/// decibel, so the hiss is heard coming back and the scope's lamp goes out a
+/// quarter of a second or so before the next call, which then starts on a
+/// gain of its own. At Slow the band is still held down at the end of it,
+/// which is what Slow is.
+pub(crate) fn band_preview_gap_ms() -> u32 {
+    let (hang, release) = agc_decay_sec(AgcDecay::Fast);
+    ((hang + 5.0 * release) * 1_000.0).round() as u32
+}
 
 /// The strengths the band preview calls at, in turn: loud, medium and weak,
 /// the full strength and a station 10 and 20 dB down, so the AGC can be
@@ -226,7 +238,12 @@ pub fn start_sample(ctx: AppCtx, text: String) {
 /// The band-conditions preview, calling until it is stopped.
 pub fn start_band_preview(ctx: AppCtx) {
     start_preview(ctx, Preview::Band, |lease, _| {
-        loop_band_preview(lease, ctx.settings, BAND_PREVIEW_CALL, BAND_PREVIEW_GAP_MS)
+        loop_band_preview(
+            lease,
+            ctx.settings,
+            BAND_PREVIEW_CALL,
+            band_preview_gap_ms(),
+        )
     });
 }
 

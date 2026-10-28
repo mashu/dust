@@ -12,7 +12,7 @@
 //! sized by.
 
 use super::agc::{Agc, agc_lookahead_samples};
-use super::calibration::{REFERENCE_BANDWIDTH_HZ, noise_floor_rms, noise_level};
+use super::calibration::{heard_floor_rms, noise_level};
 use super::filter::{FilterDesign, ReceiverFilter};
 use super::knee::receiver_knee;
 use super::memo::{Exact, LastAnswer};
@@ -163,10 +163,7 @@ fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
     settings.band.steepness = ask.steepness_ms.0;
     settings.band.envelope_smoothing = ask.smoothing.0;
     let (low, high) = (ask.low_hz.0, ask.high_hz.0);
-    // The hiss as heard through this receiver: white at the antenna, so the
-    // filter lets in its noise bandwidth's worth of it.
-    let hiss = noise_floor_rms(ask.noise.0)
-        * (ask.receiver.noise_bandwidth_hz() / REFERENCE_BANDWIDTH_HZ).sqrt();
+    let hiss = heard_floor_rms(ask.noise.0, ask.receiver.noise_bandwidth_hz());
     LISTEN_AT
         .iter()
         .map(|share| {

@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::audio::{METER_FRAME_SEC, MeterFrame};
 
-/// How many frames are kept: five seconds of them, more than the scope ever
-/// shows, so a reader that falls behind for a moment loses nothing.
+/// How many frames are kept: five seconds of them, far longer than the
+/// scope waits between looks, so a reader that falls behind for a moment
+/// loses nothing; the scope keeps its own history.
 const KEPT: usize = 512;
 
 /// The last [`KEPT`] frames, written by the audio callback and read by the
@@ -82,16 +83,9 @@ impl Metering {
             meter,
             frame_len,
             left: frame_len,
-            frame: Self::EMPTY,
+            frame: MeterFrame::QUIET,
         }
     }
-
-    /// Nothing heard yet, and the AGC wide open.
-    const EMPTY: MeterFrame = MeterFrame {
-        input: 0.0,
-        gain: 1.0,
-        output: 0.0,
-    };
 
     pub fn meter(&self) -> Arc<Meter> {
         Arc::clone(&self.meter)
@@ -112,14 +106,15 @@ impl Metering {
     /// One sample: what reached the AGC, the gain it rode at, and what was
     /// played.
     pub fn add(&mut self, input: f64, gain: f64, output: f64) {
-        let frame = &mut self.frame;
-        frame.input = frame.input.max(input.abs() as f32);
-        frame.gain = frame.gain.min(gain as f32);
-        frame.output = frame.output.max(output.abs() as f32);
+        self.frame = self.frame.merge(MeterFrame {
+            input: input.abs() as f32,
+            gain: gain as f32,
+            output: output.abs() as f32,
+        });
         self.left -= 1;
         if self.left == 0 {
-            self.meter.write(*frame);
-            *frame = Self::EMPTY;
+            self.meter.write(self.frame);
+            self.frame = MeterFrame::QUIET;
             self.left = self.frame_len;
         }
     }

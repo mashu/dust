@@ -509,6 +509,57 @@ fn the_meter_reads_the_agcs_input_its_gain_and_what_was_played() {
     assert_eq!(output, loudest(&played));
 }
 
+/// The band preview's pause after its loudest call lets the band back at
+/// Fast, so the hiss is heard returning and the next call starts on a gain
+/// of its own, and at Slow it is still held down at the end of it, which is
+/// what Slow is: what the scope's lamp and the hiss in AF show between
+/// calls.
+#[test]
+fn the_preview_pause_lets_the_band_back_at_fast_and_holds_it_at_slow() {
+    use crate::playback::{BAND_PREVIEW_CALL, BAND_PREVIEW_STRENGTHS, band_preview_gap_ms};
+    // The gain through the pause after the loudest call, a frame at a time.
+    let pause = |decay: cw_core::AgcDecay| -> Vec<f32> {
+        let mut settings = hiss();
+        settings.band.agc_decay = decay;
+        let mut mixer = Mixer::new(SR);
+        let meter = mixer.meter();
+        let mut swept = Swept::new();
+        mixer.set_band(Some(band(&settings, 3)), &mut swept);
+        mixer.set_gains(Gains::of(&settings));
+        render(&mut mixer, SR as usize / 2);
+        let voice = keyer(settings.side_tone_center(), BAND_PREVIEW_STRENGTHS[0]);
+        let plan = plan_transmission(&Transmission::alone(BAND_PREVIEW_CALL, voice), &settings);
+        let receiver = FilterDesign::from_settings(&settings);
+        mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
+        let sent = late() + (plan.sound_end_sec() * f64::from(SR)) as usize;
+        render(&mut mixer, sent);
+        let (mut seen, mut frames) = (0, Vec::new());
+        meter.read_since(&mut seen, &mut frames);
+        frames.clear();
+        render(
+            &mut mixer,
+            band_preview_gap_ms() as usize * SR as usize / 1_000,
+        );
+        meter.read_since(&mut seen, &mut frames);
+        frames.iter().map(|frame| frame.gain).collect()
+    };
+    let fast = pause(cw_core::AgcDecay::Fast);
+    let back = 10f64.powf(-1.0 / 20.0) as f32;
+    let last = &fast[fast.len() - 20..];
+    assert!(
+        last.iter().all(|gain| *gain >= back),
+        "Fast still holds the band at the end of the pause: {last:?}"
+    );
+    assert!(fast[0] < 0.1, "the loud call was ridden: {}", fast[0]);
+    let slow = pause(cw_core::AgcDecay::Slow);
+    let held = 10f64.powf(-6.0 / 20.0) as f32;
+    assert!(
+        slow.last().is_some_and(|gain| *gain < held),
+        "Slow let the band back: {:?}",
+        slow.last()
+    );
+}
+
 /// Bands rebuilt faster than one can fade out each fade out in full: none is
 /// dropped part of the way down, which is a step in the waveform.
 #[test]

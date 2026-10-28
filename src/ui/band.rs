@@ -260,7 +260,7 @@ pub fn BandConditionsCard(
             }
             if previewing {
                 p { class: "muted", style: "margin: 0;",
-                    "Looping “CQ” loud, medium and weak in turn (0, \u{2212}10 and \u{2212}20 dB strength) through the current mix. Move a slider and you hear the change."
+                    "Looping “CQ” loud, medium and weak in turn (0, \u{2212}10 and \u{2212}20 dB strength), a second apart, through the current mix. Move a slider and you hear the change."
                 }
             }
             div { class: "field-grid",
@@ -442,7 +442,7 @@ pub fn BandConditionsCard(
             }
             Switch {
                 title: "AGC".to_string(),
-                description: "The receiver rides its gain: stations over its threshold come out nearly as loud as each other, and the hiss ducks under them and comes back between overs.".to_string(),
+                description: "The receiver rides its gain, only ever turning it down: a station over its threshold loses nine decibels of every ten it stands over it, and the volume lifts the band back up, so strong and weak stations come out nearly as loud as each other. The hiss ducks under them and comes back between overs.".to_string(),
                 checked: b.agc_enabled,
                 onchange: move |on| settings.write().band.agc_enabled = on,
             }
@@ -476,7 +476,7 @@ pub fn BandConditionsCard(
             }
             p { id: "agc-threshold-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
                 if b.agc_enabled {
-                    "How strong a signal has to be before the AGC turns it down; at its lowest, about 10 dB over the band's own hiss in the filter, so every station clear of the noise is evened out and those down in it keep their own level. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss ducks less. The volume follows, so the strongest station stays as loud."
+                    "How strong a signal has to be before the AGC turns it down: at its lowest, 10 dB or more over the band's own hiss in the filter, more with heavy static, which it is kept clear of too, as the scope gives it. Every station clear of the noise is evened out and those down in it keep their own level. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss between overs gets quieter. The volume follows, so the strongest station stays as loud."
                 } else {
                     "With the AGC off there is no threshold to set."
                 }
@@ -485,7 +485,7 @@ pub fn BandConditionsCard(
                 LevelScope { settings }
             } else {
                 p { id: "scope-hint", class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                    "Play the live preview to hear and watch it: CQ comes loud, medium and weak in turn. Peaks over the dashed line are evened out by the AGC; under it they keep their own level."
+                    "Play the live preview to hear and watch it: CQ comes loud, medium and weak in turn, into the AGC at the top of the scope and out to you below. Over the dashed line they come out nearly level; under it they keep their own level."
                 }
             }
         }

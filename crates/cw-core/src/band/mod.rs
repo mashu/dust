@@ -59,7 +59,7 @@ mod source;
 
 // What the players, the settings screen and the pile-up planner use. The rest
 // is the band's own business.
-pub use agc::{AGC_LOOKAHEAD_SEC, AGC_MAX_DUCK_DB, agc_decay_sec, agc_lookahead_samples};
+pub use agc::{AGC_LOOKAHEAD_SEC, agc_decay_sec, agc_lookahead_samples};
 pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
 pub use dsp::{db_to_gain, gain_to_db};
 pub(crate) use filter::mirror_hz;
@@ -67,7 +67,10 @@ pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
 };
 pub use key::{BandChange, BandKey};
-pub use knee::{agc_knee, receiver_knee, remembered_agc_knee, threshold_raise};
+pub use knee::{
+    agc_knee, band_hiss_rms, receiver_knee, remembered_agc_knee, threshold_over_hiss_db,
+    threshold_raise,
+};
 pub use loudness::{full_volume_gain, loudest_station};
 pub use noise::AudioFloor;
 pub use output::{

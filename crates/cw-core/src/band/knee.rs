@@ -3,7 +3,8 @@
 use std::sync::OnceLock;
 
 use super::agc::AGC_TRIGGER;
-use super::calibration::{NOISE_LEVEL_PER_DB, noise_level, qrn_level};
+use super::calibration::{NOISE_LEVEL_PER_DB, heard_floor_rms, noise_level, qrn_level};
+use super::dsp::gain_to_db;
 use super::filter::{FilterDesign, ReceiverFilter, reference_width_hz};
 use super::memo::{Exact, LastAnswer};
 use super::source::BandSource;
@@ -23,9 +24,11 @@ pub const FLOOR_MEASURE_RATE: u32 = 16_000;
 ///
 /// `AGC_TRIGGER` times the band's own floor (`band_standing_level`), and
 /// never below that of the quietest floor the noise control sets, heard
-/// through the reference filter (`reference_width_hz`): about 10 dB over the
-/// hiss in the filter, so every station clear of the noise stands over it and
-/// the AGC evens them out, and those down in it keep their own level.
+/// through the reference filter (`reference_width_hz`): 10 dB or more over
+/// the hiss in the filter, more with heavy static, which it is kept clear of
+/// too ([`threshold_over_hiss_db`]), so every station clear of the noise
+/// stands over it and the AGC evens them out, and those down in it keep
+/// their own level.
 /// Above that it follows the floor, the way an operator backs the RF gain
 /// off on a noisy band or a wide filter, so the hiss on its own never pumps
 /// the gain. Below it, it stays put, as a real receiver's AGC threshold
@@ -47,6 +50,23 @@ pub fn agc_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
             band_standing_level(FLOOR_MEASURE_RATE, band, receiver).max(quietest_floor_level());
         AGC_TRIGGER * floor
     }))
+}
+
+/// The band's own hiss as it comes out of the receiver's filter, before the
+/// RF gain, as an RMS; nothing with the noise off. What the AGC's threshold
+/// is read against ([`threshold_over_hiss_db`]).
+pub fn band_hiss_rms(band: &BandSettings, receiver: &FilterDesign) -> f64 {
+    heard_floor_rms(noise_level(band), receiver.noise_bandwidth_hz())
+}
+
+/// How far a steady tone at the AGC's threshold, of amplitude `knee`, stands
+/// over hiss of RMS `hiss`, both as the AGC hears them: RMS to RMS, as the
+/// band's S/N is read ([`super::heard_snr_db`]), so the AGC turns a station
+/// down while its S/N stands over this. None with no hiss to read it
+/// against.
+pub fn threshold_over_hiss_db(knee: f64, hiss: f64) -> Option<f64> {
+    let over = gain_to_db(knee / std::f64::consts::SQRT_2 / hiss);
+    (knee > 0.0 && hiss > 0.0 && over.is_finite()).then_some(over)
 }
 
 /// The knee [`agc_knee`] last measured, if it was for this band heard
@@ -183,25 +203,64 @@ mod tests {
 
     const SR: u32 = 48_000;
 
-    /// At its lowest the knee stands about ten decibels over the band's own
-    /// hiss in the filter, as the threshold's words say: a steady tone at
-    /// it is 9-12 dB over the hiss through the default receiver, at any floor
-    /// loud enough for the knee to follow it, with the static off.
+    /// How far the lowest knee stands over the band's own hiss, through
+    /// the default receiver.
+    fn lowest_over_hiss(edit: impl FnOnce(&mut TrainingSettings)) -> f64 {
+        let mut settings = TrainingSettings::default();
+        edit(&mut settings);
+        let settings = settings.clamp();
+        let receiver = FilterDesign::from_settings(&settings);
+        let knee = agc_knee(&settings.band, &receiver).expect("the AGC is on");
+        threshold_over_hiss_db(knee, band_hiss_rms(&settings.band, &receiver)).expect("hiss")
+    }
+
+    /// At its lowest the knee stands 10 dB or more over the band's own hiss
+    /// in the filter, as the threshold's words say: a steady tone at it is
+    /// 9-12 dB over the hiss through the default receiver at any floor loud
+    /// enough for the knee to follow it, with the static off, and 12-13 dB on
+    /// the default band, its light static or none. Heavy static it is kept
+    /// clear of too, so it stands further over the hiss.
     #[test]
-    fn the_lowest_knee_stands_about_ten_db_over_the_hiss() {
-        use super::super::calibration::{REFERENCE_BANDWIDTH_HZ, noise_floor_rms};
+    fn the_lowest_knee_stands_ten_db_or_more_over_the_hiss() {
         for level in [0.4, 0.6, 0.8] {
-            let mut settings = TrainingSettings::default();
-            settings.band.qrn_enabled = false;
-            settings.band.noise_level = level;
-            let settings = settings.clamp();
-            let receiver = FilterDesign::from_settings(&settings);
-            let knee = agc_knee(&settings.band, &receiver).expect("the AGC is on");
-            let hiss = noise_floor_rms(noise_level(&settings.band))
-                * (receiver.noise_bandwidth_hz() / REFERENCE_BANDWIDTH_HZ).sqrt();
-            let snr = 20.0 * (knee / std::f64::consts::SQRT_2 / hiss).log10();
-            assert!((9.0..12.0).contains(&snr), "{level}: {snr:.1} dB");
+            let over = lowest_over_hiss(|s| {
+                s.band.qrn_enabled = false;
+                s.band.noise_level = level;
+            });
+            assert!((9.0..12.0).contains(&over), "{level}: {over:.1} dB");
         }
+        let quiet = lowest_over_hiss(|s| s.band.qrn_enabled = false);
+        let light = lowest_over_hiss(|_| {});
+        for over in [quiet, light] {
+            assert!((12.0..13.0).contains(&over), "{over:.1} dB");
+        }
+        let stormy = lowest_over_hiss(|s| s.band.qrn_level = 0.5);
+        assert!(stormy > quiet + 5.0, "{stormy:.1} against {quiet:.1} dB");
+    }
+
+    /// The threshold over the hiss is read as a station's S/N is: a full
+    /// station's own level at the threshold reads its S/N, a threshold
+    /// raised 10 dB reads 10 more, and so does hiss 10 dB weaker, as backing
+    /// the RF gain off gives; with no hiss there is nothing to read.
+    #[test]
+    fn the_threshold_over_the_hiss_is_read_as_a_stations_s_n() {
+        use super::super::calibration::heard_snr_db;
+        use crate::timing::DEFAULT_TARGET_GAIN;
+        let settings = TrainingSettings::default().clamp();
+        let receiver = FilterDesign::from_settings(&settings);
+        let hiss = band_hiss_rms(&settings.band, &receiver);
+        let full = threshold_over_hiss_db(DEFAULT_TARGET_GAIN, hiss).expect("hiss");
+        let snr = heard_snr_db(noise_level(&settings.band), receiver.noise_bandwidth_hz());
+        assert!((full - snr).abs() < 1e-9, "{full} against {snr}");
+        let ten = 10f64.powf(0.5);
+        let raised = threshold_over_hiss_db(DEFAULT_TARGET_GAIN * ten, hiss).expect("hiss");
+        assert!((raised - full - 10.0).abs() < 1e-9);
+        let backed_off = threshold_over_hiss_db(DEFAULT_TARGET_GAIN, hiss / ten).expect("hiss");
+        assert!((backed_off - full - 10.0).abs() < 1e-9);
+        let mut silent = settings.band;
+        silent.noise_enabled = false;
+        assert_eq!(band_hiss_rms(&silent, &receiver), 0.0);
+        assert_eq!(threshold_over_hiss_db(DEFAULT_TARGET_GAIN, 0.0), None);
     }
 
     /// Raising the threshold raises the knee the players set their AGC by

@@ -7,7 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use cw_core::band::{agc_knee, loudest_station, remembered_agc_knee};
+use cw_core::band::{agc_knee, band_hiss_rms, loudest_station, remembered_agc_knee};
 use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
@@ -23,7 +23,7 @@ use crate::ui::contest_results::NothingKept;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
-use crate::ui::scope::{BandKnee, knee_asked};
+use crate::ui::scope::{BandKnee, KneeHeard, knee_asked};
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
@@ -185,8 +185,10 @@ fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
 /// to [`BAND_WARM_ROUNDS`] measurements in all, so a slider being dragged
 /// finds its knee remembered too.
 ///
-/// The level scope draws its line by the knee of the band that plays
-/// ([`BandKnee`]): each one measured, while the preview runs. Settings the
+/// The level scope draws its line, and reads the threshold against the
+/// band's hiss, by the knee of the band that plays and the hiss it was
+/// measured against ([`BandKnee`]): each one measured, while the preview
+/// runs. Settings the
 /// follow took unmeasured, moved in every measurement, have theirs from the
 /// band built for them, which measured it with the AGC on; with it off they
 /// wait to be measured in their turn, as a move does. A preview stopped
@@ -194,9 +196,9 @@ fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
 fn use_band_follow(ctx: AppCtx) {
     let latest = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
     let BandKnee(mut band_knee) = use_context_provider(|| BandKnee(Signal::new(None)));
-    let mut give_knee = move |knee: f64| {
-        if *band_knee.peek() != Some(knee) {
-            band_knee.set(Some(knee));
+    let mut give_knee = move |heard: KneeHeard| {
+        if *band_knee.peek() != Some(heard) {
+            band_knee.set(Some(heard));
         }
     };
     use_effect(move || {
@@ -235,8 +237,8 @@ fn use_band_follow(ctx: AppCtx) {
                     if !ctx.preview.peek().is_band() {
                         break;
                     }
-                    if let Some(knee) = knee {
-                        give_knee(knee);
+                    if let Some(heard) = knee {
+                        give_knee(heard);
                         measured = Some(waiting.band.clone());
                     }
                     // The knee is asked of the band settings alone, the
@@ -259,7 +261,7 @@ fn use_band_follow(ctx: AppCtx) {
                 }
                 let (on, receiver) = knee_asked(&settings);
                 if let Some(knee) = remembered_agc_knee(&on, &receiver) {
-                    give_knee(knee);
+                    give_knee(KneeHeard::of(&on, &receiver, knee));
                     return;
                 }
                 if measured.is_none() {
@@ -326,9 +328,13 @@ fn use_band_warm(ctx: AppCtx) {
 /// And with it how loud the strongest station comes out of that receiver
 /// ([`loudest_station`]), which full volume is sized by whatever is on the
 /// band: a few milliseconds more, and asked of the knee just measured. The
-/// knee, unless the worker measuring it failed.
-async fn warm_agc_knee(settings: &TrainingSettings) -> Option<f64> {
+/// knee, with the hiss it was measured against, unless the worker measuring
+/// it failed.
+async fn warm_agc_knee(settings: &TrainingSettings) -> Option<KneeHeard> {
     let (on, receiver) = knee_asked(settings);
+    // Worked out here, closed form, from the receiver already in hand.
+    let hiss = band_hiss_rms(&on, &receiver);
+    let heard = move |knee: Option<f64>| knee.map(|knee| KneeHeard { knee, hiss });
     let settings = settings.clone();
     let measure = move || {
         let knee = agc_knee(&on, &receiver);
@@ -339,7 +345,7 @@ async fn warm_agc_knee(settings: &TrainingSettings) -> Option<f64> {
     // that panicked has measured nothing, which leaves it to the band.
     #[cfg(all(not(target_arch = "wasm32"), not(test)))]
     {
-        tokio::task::spawn_blocking(measure).await.ok().flatten()
+        heard(tokio::task::spawn_blocking(measure).await.ok().flatten())
     }
     // The browser has the one thread. It measures here, then lets the page
     // draw and take input before the band is built: two short tasks rather
@@ -350,7 +356,7 @@ async fn warm_agc_knee(settings: &TrainingSettings) -> Option<f64> {
     {
         let knee = measure();
         sleep_ms(1).await;
-        knee
+        heard(knee)
     }
 }
 

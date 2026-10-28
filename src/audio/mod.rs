@@ -42,11 +42,31 @@ pub const METER_FRAME_SEC: f64 = 0.01;
 /// loudest of what reached its AGC, the band and the Morse together through
 /// the filter; the gain the AGC rode at, at its lowest; and the loudest of
 /// what it played, at the volume, before the limiter.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterFrame {
     pub input: f32,
     pub gain: f32,
     pub output: f32,
+}
+
+impl MeterFrame {
+    /// Nothing heard and the AGC wide open: a stretch before anything is
+    /// metered, and what merging starts from.
+    pub const QUIET: Self = Self {
+        input: 0.0,
+        gain: 1.0,
+        output: 0.0,
+    };
+
+    /// One frame for two stretches: the louder of their peaks, and the
+    /// lower of their gains.
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            input: self.input.max(other.input),
+            gain: self.gain.min(other.gain),
+            output: self.output.max(other.output),
+        }
+    }
 }
 
 /// What the session runtime needs from a player. Object-safe on purpose: the
