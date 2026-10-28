@@ -3314,17 +3314,25 @@ mod interactions {
         ui.click("less-slider-rf-gain");
         assert!(ui.has("<span class=\"slider-value\">\u{2212}1 dB</span>"));
 
-        // The AGC's threshold starts at its lowest and rises a decibel a
-        // step; with the AGC off there is none to set, while the RF gain
+        // The AGC's threshold starts where the band's own floor puts it and
+        // moves a decibel a step either way, down into the hiss as far as
+        // twenty; with the AGC off there is none to set, while the RF gain
         // still turns the band down.
         assert!(ui.has(r#"<span class="slider-name">AGC threshold</span>"#));
-        assert!(ui.has(r#"<span class="slider-value">Lowest</span>"#));
+        assert!(ui.has(r#"<span class="slider-value">0 dB</span>"#));
+        ui.click("more-slider-agc-threshold");
+        assert!(ui.has(r#"<span class="slider-value">+1 dB</span>"#));
+        // Three down from +1 is two under, where the RF gain is not.
+        for _ in 0..3 {
+            ui.click("less-slider-agc-threshold");
+        }
+        assert!(ui.has("<span class=\"slider-value\">\u{2212}2 dB</span>"));
+        ui.type_into("slider-agc-threshold", "-20");
+        assert!(ui.has("<span class=\"slider-value\">\u{2212}20 dB</span>"));
         assert!(
             ui.input_tag("less-slider-agc-threshold")
                 .contains("disabled")
         );
-        ui.click("more-slider-agc-threshold");
-        assert!(ui.has(r#"<span class="slider-value">+1 dB</span>"#));
 
         // The AGC's decay is Fast until you pick Slow, and is there only
         // while the AGC is on.

@@ -76,9 +76,4 @@ impl Chain {
         );
         self.volume = volume;
     }
-
-    /// The volume the receiver is played at.
-    pub fn volume(&self) -> f64 {
-        self.volume
-    }
 }

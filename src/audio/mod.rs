@@ -42,7 +42,8 @@ pub const METER_FRAME_SEC: f64 = 0.01;
 /// loudest of what reached its AGC, the band and the Morse together through
 /// the filter; the gain the AGC's hang held, at its lowest, which a signal
 /// over the threshold sets and a crash squashed for an instant does not;
-/// and the loudest of what it played, at the volume, before the limiter.
+/// and the loudest of what it put out, at full volume, before the volume
+/// you listen at and the limiter after it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterFrame {
     pub input: f32,

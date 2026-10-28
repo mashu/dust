@@ -9,8 +9,8 @@ use super::filter::{FilterDesign, ReceiverFilter, reference_width_hz};
 use super::memo::{Exact, LastAnswer};
 use super::source::BandSource;
 use crate::settings::{
-    AGC_THRESHOLD_MAX_DB, AGC_THRESHOLD_MIN_DB, BandSettings, FilterShape, STATIONS_MIN,
-    TrainingSettings,
+    AGC_THRESHOLD_DEFAULT_DB, AGC_THRESHOLD_MAX_DB, AGC_THRESHOLD_MIN_DB, BandSettings,
+    FilterShape, STATIONS_MIN, TrainingSettings,
 };
 
 /// The rate the floor is measured at for the AGC's knee. Both backends use
@@ -18,9 +18,10 @@ use crate::settings::{
 /// browser measures on its main thread every time a band setting moves.
 pub const FLOOR_MEASURE_RATE: u32 = 16_000;
 
-/// Where the receiver's AGC starts to turn the gain down, as the amplitude of
-/// a steady tone, for the band `band` describes heard through `receiver`;
-/// `None` with the AGC switched off.
+/// Where the receiver's AGC starts to turn the gain down with its threshold
+/// at 0 dB, as the amplitude of a steady tone, for the band `band` describes
+/// heard through `receiver`: the band's own knee, which the threshold moves
+/// the AGC's from ([`receiver_knee`]). `None` with the AGC switched off.
 ///
 /// `AGC_TRIGGER` times the band's own floor (`band_standing_level`), and
 /// never below that of the quietest floor the noise control sets, heard
@@ -82,23 +83,25 @@ static KNEE: LastAnswer<KneeAsk, f64> = LastAnswer::new();
 
 /// Where the receiver's AGC starts to turn the gain down for these band
 /// settings, heard through `receiver`, at the threshold they set: the band's
-/// own knee ([`agc_knee`]), the lowest it goes, raised by the threshold
-/// ([`threshold_raise`]). The volume after it makes up what the AGC no
-/// longer takes off. `None` with the AGC switched off.
+/// own knee ([`agc_knee`]), moved by the threshold ([`threshold_factor`]),
+/// down into the hiss or up over the weaker stations. The volume after it
+/// makes up what the AGC takes off. `None` with the AGC switched off.
 ///
 /// What both players set their AGC by.
 pub fn receiver_knee(band: &BandSettings, receiver: &FilterDesign) -> Option<f64> {
-    agc_knee(band, receiver).map(|knee| knee * threshold_raise(band))
+    agc_knee(band, receiver).map(|knee| knee * threshold_factor(band))
 }
 
-/// How many times over its lowest these settings put the AGC's threshold:
-/// one at the lowest, inside its range whatever is set.
-pub fn threshold_raise(band: &BandSettings) -> f64 {
+/// How many times the band's own knee these settings put the AGC's
+/// threshold at: one at 0 dB, under one taken down into the hiss, inside
+/// its range whatever is set, and at 0 dB for a threshold that is not a
+/// number, as the settings put it back.
+pub fn threshold_factor(band: &BandSettings) -> f64 {
     let db = if band.agc_threshold_db.is_finite() {
         band.agc_threshold_db
             .clamp(AGC_THRESHOLD_MIN_DB, AGC_THRESHOLD_MAX_DB)
     } else {
-        AGC_THRESHOLD_MIN_DB
+        AGC_THRESHOLD_DEFAULT_DB
     };
     10f64.powf(db / 20.0)
 }
@@ -203,9 +206,9 @@ mod tests {
 
     const SR: u32 = 48_000;
 
-    /// How far the lowest knee stands over the band's own hiss, through
-    /// the default receiver.
-    fn lowest_over_hiss(edit: impl FnOnce(&mut TrainingSettings)) -> f64 {
+    /// How far the band's own knee, the threshold at 0 dB, stands over the
+    /// band's own hiss, through the default receiver.
+    fn own_knee_over_hiss(edit: impl FnOnce(&mut TrainingSettings)) -> f64 {
         let mut settings = TrainingSettings::default();
         edit(&mut settings);
         let settings = settings.clamp();
@@ -214,27 +217,27 @@ mod tests {
         threshold_over_hiss_db(knee, band_hiss_rms(&settings.band, &receiver)).expect("hiss")
     }
 
-    /// At its lowest the knee stands 10 dB or more over the band's own hiss
-    /// in the filter, as the threshold's words say: a steady tone at it is
+    /// With the threshold at 0 dB the knee stands 10 dB or more over the
+    /// band's own hiss in the filter, as the threshold's words say: a steady tone at it is
     /// 10-11 dB over the hiss through the default receiver at any floor loud
     /// enough for the knee to follow it, with the static off, and 12-13 dB on
     /// the default band, its light static or none. Heavy static it is kept
     /// clear of too, so it stands further over the hiss.
     #[test]
-    fn the_lowest_knee_stands_ten_db_or_more_over_the_hiss() {
+    fn the_bands_own_knee_stands_ten_db_or_more_over_the_hiss() {
         for level in [0.4, 0.6, 0.8] {
-            let over = lowest_over_hiss(|s| {
+            let over = own_knee_over_hiss(|s| {
                 s.band.qrn_enabled = false;
                 s.band.noise_level = level;
             });
             assert!((10.0..11.0).contains(&over), "{level}: {over:.2} dB");
         }
-        let quiet = lowest_over_hiss(|s| s.band.qrn_enabled = false);
-        let light = lowest_over_hiss(|_| {});
+        let quiet = own_knee_over_hiss(|s| s.band.qrn_enabled = false);
+        let light = own_knee_over_hiss(|_| {});
         for over in [quiet, light] {
             assert!((12.0..13.0).contains(&over), "{over:.1} dB");
         }
-        let stormy = lowest_over_hiss(|s| s.band.qrn_level = 0.5);
+        let stormy = own_knee_over_hiss(|s| s.band.qrn_level = 0.5);
         assert!(stormy > quiet + 5.0, "{stormy:.1} against {quiet:.1} dB");
     }
 
@@ -263,30 +266,29 @@ mod tests {
         assert_eq!(threshold_over_hiss_db(DEFAULT_TARGET_GAIN, 0.0), None);
     }
 
-    /// Raising the threshold raises the knee the players set their AGC by
-    /// as far as it is raised, from the band's own knee at the lowest; with
-    /// the AGC off there is none, and a threshold no setting allows reads as
-    /// the nearest one that does.
+    /// The threshold moves the knee the players set their AGC by as far as
+    /// it is moved, up or down from the band's own knee at 0 dB; with the
+    /// AGC off there is none, a threshold past either end reads as that end
+    /// and one that is not a number as 0 dB.
     #[test]
-    fn the_threshold_raises_the_knee_as_far_as_it_is_raised() {
+    fn the_threshold_moves_the_knee_as_far_as_it_is_moved() {
         let mut settings = TrainingSettings::default();
         let receiver = FilterDesign::from_settings(&settings);
-        let lowest = agc_knee(&settings.band, &receiver).expect("the AGC is on");
-        assert_eq!(receiver_knee(&settings.band, &receiver), Some(lowest));
-        settings.band.agc_threshold_db = 10.0;
-        let raised = receiver_knee(&settings.band, &receiver).expect("still on");
-        assert!((20.0 * (raised / lowest).log10() - 10.0).abs() < 1e-9);
-        for wild in [f64::NAN, -40.0] {
-            settings.band.agc_threshold_db = wild;
-            assert_eq!(
-                receiver_knee(&settings.band, &receiver),
-                Some(lowest),
-                "{wild}"
-            );
+        let own = agc_knee(&settings.band, &receiver).expect("the AGC is on");
+        assert_eq!(receiver_knee(&settings.band, &receiver), Some(own));
+        let over = |settings: &TrainingSettings| {
+            gain_to_db(receiver_knee(&settings.band, &receiver).expect("still on") / own)
+        };
+        for (set, moved) in [
+            (10.0, 10.0),
+            (-12.0, -12.0),
+            (90.0, AGC_THRESHOLD_MAX_DB),
+            (-40.0, AGC_THRESHOLD_MIN_DB),
+            (f64::NAN, AGC_THRESHOLD_DEFAULT_DB),
+        ] {
+            settings.band.agc_threshold_db = set;
+            assert!((over(&settings) - moved).abs() < 1e-9, "{set}");
         }
-        settings.band.agc_threshold_db = 90.0;
-        let highest = receiver_knee(&settings.band, &receiver).expect("still on");
-        assert!((20.0 * (highest / lowest).log10() - AGC_THRESHOLD_MAX_DB).abs() < 1e-9);
         settings.band.agc_enabled = false;
         assert_eq!(receiver_knee(&settings.band, &receiver), None);
     }

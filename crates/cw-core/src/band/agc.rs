@@ -11,15 +11,19 @@
 //! - Everything over the knee comes out within a few decibels of everything
 //!   else: a station 20 dB down plays nearly as loud as the strongest, and
 //!   only those under the knee keep their own level. The knee is the AGC's
-//!   threshold, and raising it lets more of them keep it.
+//!   threshold, and raising it lets more of them keep it; taken down into
+//!   the hiss, the hiss is over it too and comes up with them.
 //! - Under a keyed station the band's hiss sits a steady way down, as far as
 //!   the station stands over the knee, from the first element of the over to
 //!   the last. No swell at the start, no pumping between elements: the hang
-//!   carries the gain across the gaps. Backing the RF gain off is what makes
+//!   carries the gain across the gaps. Fading too steep for it to carry lets
+//!   the gain come up between elements toward the faded station, as a rig's
+//!   hang AGC lets go of a fading peak. Backing the RF gain off is what makes
 //!   it duck less.
 //! - In a pause the hiss is back, as fast as the decay setting lets it.
-//! - A crash pulls the gain for a moment and lets go; it does not dig a hole
-//!   in the band for the next second.
+//! - A crash pulls the gain for a moment and lets go, or, louder than the
+//!   station, holds it for a hang as the strongest signal heard; either way
+//!   it does not dig a hole in the band for the next second.
 //! - The first element of an over is caught before it plays: the receiver
 //!   listens [`AGC_LOOKAHEAD_SEC`] ahead of what it plays, so nothing slips
 //!   past the gain wide open and comes out louder than the AGC holds it.
@@ -33,22 +37,26 @@
 use super::dsp::db_to_gain;
 use crate::settings::AgcDecay;
 
-/// How far above the floor's own peaks the knee sits: a level has to stand
-/// 2.2 times (about 7 dB) above the highest the hiss ordinarily reaches before
-/// the gain moves. The floor alone never gets there, so on an empty band the
-/// receiver leaves the noise exactly as the filter shaped it.
+/// How far above the floor's own peaks the knee sits with the threshold at
+/// 0 dB: a level has to stand 2.2 times (about 7 dB) above the highest the
+/// hiss ordinarily reaches before the gain moves. The floor alone never gets
+/// there, so on an empty band the receiver leaves the noise exactly as the
+/// filter shaped it, until the threshold is taken down into it.
 pub const AGC_TRIGGER: f64 = 2.2;
 /// Decibels of gain reduction per decibel above the knee: a 10:1
 /// compressor, one decibel out for every ten in, as a rig's AGC holds its
 /// audio within a few decibels from S3 to S9 and over.
 ///
-/// The strongest station the band sends stands about 28 dB over the lowest
-/// knee and comes out under 3 dB over it; one 20 dB weaker comes out a
-/// decibel over it. Under the strongest the band's hiss ducks 25 dB.
+/// The strongest station the band sends stands about 28 dB over the knee
+/// with the threshold at 0 dB and comes out under 3 dB over it; one 20 dB
+/// weaker comes out a decibel over it. Under the strongest the band's hiss
+/// ducks 25 dB. With the threshold all the way down it stands 48 over, and
+/// comes out under 5 over.
 pub const AGC_SLOPE: f64 = 0.9;
-/// The most the gain ever comes down, in decibels: more than the strongest
-/// station ever needs over the lowest knee, with room left for a crash.
-pub const AGC_MAX_DUCK_DB: f64 = 40.0;
+/// The most the gain ever comes down, in decibels: more than the 43 the
+/// strongest station needs with the threshold all the way down, with room
+/// left for a crash. A rig's AGC has a hundred or more.
+pub const AGC_MAX_DUCK_DB: f64 = 60.0;
 /// Seconds for the gain to close on a level it has to duck to, in decibels:
 /// a station 28 dB over the knee is within a decibel of its gain in under
 /// seven milliseconds, well inside the look-ahead. Fast, because a receiver
@@ -93,6 +101,34 @@ pub const AGC_DETECTOR_SEC: f64 = 0.0025;
 /// CW filter is a few milliseconds of ringing. Without this every crash would
 /// hold the band down for a quarter of a second after it had gone.
 pub const AGC_QUALIFY_SEC: f64 = 0.015;
+/// How much weaker than the signal holding the hang another has to be to be
+/// another signal, in decibels: more than a tone's ripple in the detector, a
+/// keying edge's overshoot and a station's own fading from one element to
+/// the next on the band's fading out of the box, less than the step from
+/// the strongest of the preview's calls to the next, or from a loud station
+/// to the hiss. The hang holds the stronger for its hang, as a rig's hang
+/// AGC holds the strongest signal, and recovers to the weaker once it has
+/// run out. A pile-up caller less than about 9 dB under the station is too
+/// close to it to tell from the station's own fading, and in the station's
+/// gaps lifts the gain toward its own, by up to 5 dB.
+pub const AGC_OTHER_SIGNAL_DB: f64 = 6.0;
+/// How quickly what the hang judges other signals against follows the
+/// signal holding it, as a time constant in decibels. It follows the
+/// holding station through its elements and stands still across a gap, so
+/// out of the box a station holds its own hang through the band's fading at
+/// either decay. Fading 12 dB deep at half a hertz or faster, 20 dB deep
+/// from a fifth of a hertz, or past the band's fading out of the box at Slow
+/// decay, whose hang spans word gaps, can take a station more than
+/// [`AGC_OTHER_SIGNAL_DB`] under where it held the hang before it keys
+/// again: the hang then runs out and the gain comes up toward the station's
+/// own, never past it, as a rig's hang AGC lets go of a fading peak.
+///
+/// Slowly enough that an element's falling edge, or a crash up to about
+/// 15 dB over the station for a few tens of milliseconds, leaves it with the
+/// station. A louder or longer crash becomes the signal holding the hang,
+/// and the station plays under it until the hang has run out. Any quicker,
+/// and even a crash 12 dB over carries it off.
+pub const AGC_HOLD_FOLLOW_SEC: f64 = 0.05;
 /// The stretch the qualifying peaks are taken over: longer than half a cycle
 /// of the lowest pitch a station can have (200 Hz), so a steady tone always
 /// has a crest in it, and short enough that a click is forgotten within
@@ -102,7 +138,9 @@ pub const AGC_PEAK_HOLD_SEC: f64 = 0.003;
 /// hang. MorseRunner's AGC is back 20-30 ms after a click; so is this one.
 pub const AGC_LIMIT_RELEASE_SEC: f64 = 0.02;
 /// The most the receiver lets through to its audio stage, in decibels over
-/// the knee: about three over where the law holds the strongest station. A
+/// the knee: about three over where the law holds the strongest station
+/// with the threshold at 0 dB, and one over it with the threshold all the
+/// way down. A
 /// crash comes and goes faster than the law rides it, and full volume lifts
 /// what the AGC plays as far as that station plays clean, so a crash let
 /// through as it came would drive the limiter flat.
@@ -141,8 +179,16 @@ const SETTLED_POWER: f64 = 1e-30;
 ///   signal, not a click. It sets the gain, and the gain then holds for the
 ///   decay's hang after the signal last stood there before recovering at its
 ///   release ([`agc_decay_sec`]). Under a keyed station that hold is unbroken
-///   from the first element to the last, so the band sits steadily down for
-///   the whole over and comes back in the pauses.
+///   from the first element to the last while the station fades less than
+///   [`AGC_OTHER_SIGNAL_DB`] from one element to the next, as it does on the
+///   band's fading out of the box, so the band sits steadily down for the
+///   whole over and comes back in the pauses. A signal more than
+///   [`AGC_OTHER_SIGNAL_DB`] weaker than the one holding it, and not that
+///   one's own fading tail, is another one: it neither holds the gain where
+///   it is nor lifts it, and once the hang has run out the gain recovers to
+///   where it wants it rather than to one. With the threshold down in the
+///   hiss, the hiss after a station does neither, and the band comes back
+///   to where the hiss holds it.
 /// - **Limiter.** Anything above the knee pulls the gain down within
 ///   [`AGC_ATTACK_SEC`], but if it never qualified for the hang it lets go
 ///   again within [`AGC_LIMIT_RELEASE_SEC`]. A lightning stroke is squashed
@@ -196,6 +242,24 @@ pub struct Agc {
     hang_left: u32,
     /// The gain the hang is holding.
     held: f64,
+    /// Where the signal holding the hang wants the gain, followed at
+    /// [`AGC_HOLD_FOLLOW_SEC`]: what another is judged against.
+    holder: f64,
+    holder_follow: f64,
+    /// Whether the detector's present stretch over the knee has held the
+    /// hang: what is weaker in it is that signal's own tail, not another.
+    holding_run: bool,
+    /// Where the strongest weaker signal heard in this stretch of a hang
+    /// and in the one before wants the gain, one with none, and how long
+    /// this stretch has left: what the gain recovers to once the hang has
+    /// run out.
+    weaker: f64,
+    last_weaker: f64,
+    weaker_left: u32,
+    /// How much higher than the holding signal's gain a signal's own gain
+    /// has to be for it to be another, weaker signal
+    /// ([`AGC_OTHER_SIGNAL_DB`]).
+    other: f64,
     /// The gain the limiter wants.
     limited: f64,
     /// The gain that keeps the loudest crest coming under the ceiling.
@@ -239,6 +303,13 @@ impl Agc {
             hang: samples(hang),
             hang_left: 0,
             held: 1.0,
+            holder: 1.0,
+            holder_follow: coefficient(AGC_HOLD_FOLLOW_SEC),
+            holding_run: false,
+            weaker: 1.0,
+            last_weaker: 1.0,
+            weaker_left: samples(hang),
+            other: db_to_gain(AGC_OTHER_SIGNAL_DB),
             limited: 1.0,
             ceiling: 1.0,
             gain: 1.0,
@@ -332,31 +403,61 @@ impl Agc {
         }
 
         // The hang: only a level that has stood above the knee long enough to
-        // be a signal sets it or keeps it.
+        // be a signal sets it or keeps it, and only the signal holding it, or
+        // a stronger one; a weaker one is kept for when the hang runs out.
         self.above = if level > self.knee && recent > self.knee {
             self.above.saturating_add(1)
         } else {
             0
         };
-        if self.above >= self.qualify {
+        if self.above == 0 {
+            self.holding_run = false;
+        }
+        let signal = self.above >= self.qualify;
+        // Judged against the signal holding the hang while it does, rather
+        // than against the gain, which follows a fading one up only slowly.
+        let holding = if self.hang_left > 0 {
+            self.holder
+        } else {
+            self.held
+        };
+        if signal && wanted < holding * self.other {
+            self.holder = if self.hang_left == 0 {
+                wanted
+            } else {
+                closer_in_db(self.holder, wanted, self.holder_follow)
+            };
             self.hang_left = self.hang;
-            // Both ways in decibels: down at the attack, and up, to a weaker
-            // signal still standing over the knee, at the release.
+            self.holding_run = true;
+            // Both ways in decibels: down at the attack, and up, to the same
+            // signal a little weaker, at the release.
             let rate = if wanted < self.held {
                 self.attack
             } else {
                 self.release
             };
             self.held = closer_in_db(self.held, wanted, rate);
-        } else if self.hang_left > 0 {
-            self.hang_left -= 1;
-        } else if self.held < 1.0 {
-            // Back at one once within a millionth of it, a ten-thousandth of
-            // a decibel: in decibels it would only ever get closer.
-            self.held = closer_in_db(self.held, 1.0, self.release);
-            if self.held > 1.0 - 1e-6 {
-                self.held = 1.0;
+        } else {
+            if signal && !self.holding_run {
+                self.weaker = self.weaker.min(wanted);
             }
+            let weaker = self.weaker.min(self.last_weaker);
+            if self.hang_left > 0 {
+                self.hang_left -= 1;
+            } else if self.held < weaker {
+                // Back at one once within a millionth of it, a ten-thousandth
+                // of a decibel: in decibels it would only ever get closer.
+                self.held = closer_in_db(self.held, weaker, self.release);
+                if weaker >= 1.0 && self.held > 1.0 - 1e-6 {
+                    self.held = 1.0;
+                }
+            }
+        }
+        self.weaker_left -= 1;
+        if self.weaker_left == 0 {
+            self.last_weaker = self.weaker;
+            self.weaker = 1.0;
+            self.weaker_left = self.hang;
         }
 
         // The ceiling, on the crests still waiting to be played, at the gain
@@ -401,6 +502,13 @@ impl Agc {
     /// every rebuild, and a flutter while a slider moves. From here it rides
     /// to its own knee at its own attack and release. Whether it could: one
     /// switched off, on either side, has nothing to carry.
+    ///
+    /// The gain the hang holds, and what it remembers of where the signals
+    /// it has heard want it, move with the knee as the law does: the
+    /// station holding it is held where the new knee holds it, so with the
+    /// volume following the knee it plays as loud across the move, and it
+    /// is still the signal holding the hang rather than one taken for a
+    /// weaker station and left under itself for a hang.
     pub fn carry_on_from(&mut self, previous: &Agc) -> bool {
         if self.is_off() || previous.is_off() {
             return false;
@@ -414,7 +522,21 @@ impl Agc {
         self.crest_left = previous.crest_left.clamp(1, self.crest_hold);
         self.above = previous.above;
         self.hang_left = previous.hang_left.min(self.hang);
-        self.held = previous.held;
+        let moved = (self.knee / previous.knee).powf(AGC_SLOPE);
+        let deepest = self.deepest;
+        let rewanted = |gain: f64| {
+            if gain < 1.0 {
+                (gain * moved).clamp(deepest, 1.0)
+            } else {
+                1.0
+            }
+        };
+        self.held = rewanted(previous.held);
+        self.holder = rewanted(previous.holder);
+        self.holding_run = previous.holding_run;
+        self.weaker = rewanted(previous.weaker);
+        self.last_weaker = rewanted(previous.last_weaker);
+        self.weaker_left = previous.weaker_left.clamp(1, self.hang);
         self.limited = previous.limited;
         self.ceiling = previous.ceiling;
         self.gain = previous.gain;
@@ -423,7 +545,7 @@ impl Agc {
 
     /// The static law as a gain, for a detector reading of `level`: nothing
     /// at or below the knee, [`AGC_SLOPE`] decibels down for every decibel
-    /// above it, never more than [`AGC_MAX_DUCK_DB`].
+    /// above it, never more than [`AGC_MAX_DUCK_DB`]; one, switched off.
     fn law(&self, level: f64) -> f64 {
         let over = level / self.knee;
         if over > 1.0 {
@@ -462,13 +584,13 @@ mod tests {
     use super::*;
     use std::f64::consts::TAU;
 
-    use crate::band::BandMixer;
     use crate::band::calibration::{
         NOISE_LEVEL_PER_DB, REFERENCE_NOISE_LEVEL, reference_floor_rms,
     };
     use crate::band::knee::{FLOOR_MEASURE_RATE, band_standing_level, quietest_floor_level};
     use crate::band::noise::NoiseFloor;
     use crate::band::test_support::{knee_for, receiver_for, rms};
+    use crate::band::{BandMixer, Qsb};
     use crate::settings::{FILTER_WIDTH_MAX, FilterShape, TrainingSettings};
     use crate::timing::{StationVoice, plan_morse_playback_for};
 
@@ -508,10 +630,21 @@ mod tests {
     /// `pause` seconds between them, starting `start` seconds in: rendered as
     /// the native player renders a send, through the receiver's filter.
     fn station(settings: &TrainingSettings, texts: &[&str], start: f64, pause: f64) -> Keyed {
+        station_at(settings, texts, start, pause, (600.0, WPM))
+    }
+
+    /// The same, at `(tone_hz, wpm)`.
+    fn station_at(
+        settings: &TrainingSettings,
+        texts: &[&str],
+        start: f64,
+        pause: f64,
+        (tone_hz, wpm): (f64, f64),
+    ) -> Keyed {
         let voice = StationVoice {
-            tone_hz: 600.0,
-            char_wpm: WPM,
-            effective_wpm: WPM,
+            tone_hz,
+            char_wpm: wpm,
+            effective_wpm: wpm,
             volume: 1.0,
             weight: 1.0,
             dash_ratio: 3.0,
@@ -548,8 +681,18 @@ mod tests {
     /// hears the two together, sample by sample. Returns the background and
     /// the gain, sample by sample.
     fn ride(settings: &TrainingSettings, send: &[f32], seconds: f64) -> (Vec<f32>, Vec<f64>) {
+        ride_on(settings, send, seconds, 0xA11CE)
+    }
+
+    /// The same, on the band `seed` makes.
+    fn ride_on(
+        settings: &TrainingSettings,
+        send: &[f32],
+        seconds: f64,
+        seed: u64,
+    ) -> (Vec<f32>, Vec<f64>) {
         let n = (seconds * f64::from(SR)) as usize;
-        let mut mixer = BandMixer::new(SR, settings, 0xA11CE);
+        let mut mixer = BandMixer::new(SR, settings, seed);
         let (mut band, mut gain) = (vec![0.0f32; n], vec![0.0f64; n]);
         for i in 0..n {
             let received = mixer.next(send.get(i).copied().map_or(0.0, f64::from));
@@ -582,23 +725,25 @@ mod tests {
     }
 
     /// The law the two backends share: nothing at the knee, nine decibels
-    /// for every ten above it, never more than forty.
+    /// for every ten above it, never more than sixty.
     #[test]
-    fn the_static_law_is_ten_to_one_above_the_knee_and_stops_at_forty() {
+    fn the_static_law_is_ten_to_one_above_the_knee_and_stops_at_sixty() {
         assert_eq!(agc_law_db(-5.0), 0.0);
         assert_eq!(agc_law_db(0.0), 0.0);
         assert_eq!(agc_law_db(f64::NAN), 0.0);
         assert!((agc_law_db(10.0) + 9.0).abs() < 1e-12);
-        assert!((agc_law_db(40.0) + 36.0).abs() < 1e-12);
-        assert!((agc_law_db(60.0) + 40.0).abs() < 1e-12);
+        assert!((agc_law_db(48.0) + 43.2).abs() < 1e-12);
+        assert!((agc_law_db(80.0) + 60.0).abs() < 1e-12);
         // The gain the native AGC settles at under a steady tone is that law,
         // whether the tone is in the band or is the send, and at either decay.
         let knee = 0.01;
+        // The strongest station with the threshold all the way down, too.
         for (over_db, decay) in [
             (3.0, AgcDecay::Fast),
             (10.0, AgcDecay::Slow),
             (20.0, AgcDecay::Fast),
             (30.0, AgcDecay::Slow),
+            (48.0, AgcDecay::Fast),
         ] {
             let amplitude = knee * 10f64.powf(over_db / 20.0);
             let (mut heard, mut sent) = (Agc::new(SR, knee, decay), Agc::new(SR, knee, decay));
@@ -818,6 +963,350 @@ mod tests {
                 db(after) >= -1.0,
                 "{name}: 150 ms on the band was still {:.2} dB down",
                 db(after)
+            );
+        }
+    }
+
+    /// The gain over `keyed`, played `fade(t)` as loud at each moment, over
+    /// the reference floor's hiss through the receiver; and every moment the
+    /// hang had run out inside a gap shorter than a hang.
+    fn ride_faded(
+        settings: &TrainingSettings,
+        keyed: &Keyed,
+        fade: impl Fn(f64) -> f64,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let knee = knee_for(settings).unwrap();
+        let sr = f64::from(SR);
+        let short: Vec<(f64, f64)> = keyed
+            .downs
+            .windows(2)
+            .map(|w| (w[0].1, w[1].0))
+            .filter(|(a, b)| b - a < AGC_HANG_SEC - 0.02)
+            .collect();
+        let in_short_gap = mask(keyed.samples.len(), &short);
+        let mut agc = Agc::new(SR, knee, AgcDecay::Fast);
+        let mut floor = NoiseFloor::new(SR, reference_floor_rms(), 5);
+        let mut receiver = receiver_for(SR, settings);
+        let mut gains = Vec::with_capacity(keyed.samples.len());
+        let mut lapses = Vec::new();
+        for (i, sample) in keyed.samples.iter().enumerate() {
+            let t = i as f64 / sr;
+            let hiss = receiver.process(floor.next_sample());
+            gains.push(agc.next_gain(f64::from(*sample) * fade(t) + hiss));
+            if in_short_gap[i] && agc.hang_left == 0 {
+                lapses.push(t);
+            }
+        }
+        (gains, lapses)
+    }
+
+    /// How much louder than the helper's station the strongest the band
+    /// sends plays: 28 dB over the knee, so even its fades stand well clear
+    /// of it.
+    const LOUDEST_DB: f64 = 15.0;
+
+    /// A station fading as the band fades it holds its own hang from its
+    /// first element to its last: the hang carries the gain across every gap
+    /// inside and between its characters rather than taking its weaker
+    /// elements for another, weaker station. On the band's own fading out of
+    /// the box, and 12 dB deep at 0.3 Hz, two and a half times as fast, along
+    /// several stretches of each; steeper fading than that may let it go
+    /// between elements, as a rig's hang AGC lets go of a fading peak
+    /// ([`AGC_HOLD_FOLLOW_SEC`]).
+    #[test]
+    fn a_fading_station_holds_its_own_hang_through_the_over() {
+        let settings = floor_only();
+        let keyed = station(&settings, &["CQ CQ DE W1AW W1AW K"; 3], 0.3, 0.0);
+        let loud = db_to_gain(LOUDEST_DB);
+        let out_of_the_box = TrainingSettings::default().band;
+        for rate_hz in [out_of_the_box.qsb_rate_hz, 0.3] {
+            let mut band = out_of_the_box.clone();
+            band.qsb_rate_hz = rate_hz;
+            let qsb = Qsb::of(&band).unwrap();
+            for offset in [0.0, 7.0, 19.0, 31.0] {
+                let (_, lapses) = ride_faded(&settings, &keyed, |t| {
+                    loud * f64::from(qsb.gain_at(offset + t))
+                });
+                assert!(
+                    lapses.is_empty(),
+                    "{rate_hz} Hz from {offset} s: the hang ran out at {:.2?} s",
+                    &lapses[..lapses.len().min(5)]
+                );
+            }
+        }
+    }
+
+    /// A station fading faster than its hang can follow it, 12 dB deep at a
+    /// hertz, lets the hang go now and then between its elements: the gain
+    /// then comes up toward its own weaker elements, never toward the
+    /// open band.
+    #[test]
+    fn fading_faster_than_the_hang_follows_lets_the_gain_up_only_toward_the_station() {
+        let settings = floor_only();
+        let keyed = station(&settings, &["CQ CQ DE W1AW W1AW K"; 3], 0.3, 0.0);
+        let loud = db_to_gain(LOUDEST_DB);
+        let la = agc_lookahead_samples(SR);
+        let (gains, _) = ride_faded(&settings, &keyed, |t| {
+            loud * db_to_gain(-6.0 + 6.0 * (TAU * t).sin())
+        });
+        for w in keyed.downs.windows(2) {
+            let (a, b) = (w[0].1, w[1].0);
+            if b - a < AGC_HANG_SEC - 0.02 {
+                let (a, b) = (seconds(a) + la, (seconds(b) + la).min(gains.len()));
+                let swell = gains[a..b]
+                    .iter()
+                    .map(|g| db(g / gains[a]))
+                    .fold(f64::MIN, f64::max);
+                assert!(
+                    swell < 4.0,
+                    "the gap at {:.2} s came up {swell:.1} dB",
+                    w[0].1
+                );
+            }
+        }
+    }
+
+    /// A pile-up: a caller 9 dB under the station being copied, 120 Hz off,
+    /// calling across it from wherever it happens to start. The hang holds
+    /// the stronger: the caller does not lift the gain in the station's
+    /// gaps, and once the station has finished and its hang has run out, the
+    /// gain comes back to the caller's own and no further, its gaps playing
+    /// no louder than with the caller alone.
+    #[test]
+    fn a_weaker_caller_neither_lifts_the_stations_hang_nor_comes_up_past_its_own() {
+        let settings = floor_only();
+        let knee = knee_for(&settings).unwrap();
+        let la = agc_lookahead_samples(SR);
+        let wanted = station_at(&settings, &["K1ABC"], 0.0, 0.0, (600.0, 24.0));
+        let caller = station_at(&settings, &["W2XYZ W2XYZ W2XYZ"], 0.0, 0.0, (720.0, 24.0));
+        let (loud, under) = (db_to_gain(LOUDEST_DB), db_to_gain(LOUDEST_DB - 9.0));
+        let short = |w: &&[(f64, f64)]| w[1].0 - w[0].1 < AGC_HANG_SEC - 0.02;
+        let span = |w: &[(f64, f64)]| (seconds(w[0].1) + la, seconds(w[1].0) + la);
+        let end = wanted.downs.last().unwrap().1;
+        for start in (0..8).map(|k| 0.07 * f64::from(k)) {
+            let n = seconds(start) + caller.samples.len() + seconds(0.3);
+            let play = |with_wanted: bool| -> Vec<f64> {
+                let mut agc = Agc::new(SR, knee, AgcDecay::Fast);
+                (0..n)
+                    .map(|i| {
+                        let station = wanted.samples.get(i).filter(|_| with_wanted);
+                        let calling = i
+                            .checked_sub(seconds(start))
+                            .and_then(|j| caller.samples.get(j));
+                        agc.next_gain(
+                            station.map_or(0.0, |x| f64::from(*x) * loud)
+                                + calling.map_or(0.0, |x| f64::from(*x) * under),
+                        )
+                    })
+                    .collect()
+            };
+            let (pile, alone) = (play(true), play(false));
+            for w in wanted.downs.windows(2).filter(short) {
+                let (a, b) = span(w);
+                let lift = pile[a..b]
+                    .iter()
+                    .map(|g| db(g / pile[a]))
+                    .fold(f64::MIN, f64::max);
+                assert!(
+                    lift < 2.0,
+                    "calling from {start:.2} s: the station's gap at {:.2} s came up {lift:.1} dB",
+                    w[0].1
+                );
+            }
+            let calls: Vec<(f64, f64)> = caller
+                .downs
+                .iter()
+                .map(|(a, b)| (a + start, b + start))
+                .collect();
+            for w in calls.windows(2).filter(|w| w[0].1 > end).filter(short) {
+                let (a, b) = span(w);
+                let over = (a..b)
+                    .map(|i| db(pile[i] / alone[i]))
+                    .fold(f64::MIN, f64::max);
+                assert!(
+                    over < 2.0,
+                    "calling from {start:.2} s: its gap at {:.2} s came up {over:.1} dB past its own",
+                    w[0].1
+                );
+            }
+        }
+    }
+
+    /// An element's falling edge, the station dying away under the hang it
+    /// holds, leaves what the hang judges by where the station had it:
+    /// judged by its own tail, the station would hand the hang to the next
+    /// weaker signal.
+    #[test]
+    fn a_stations_falling_edge_does_not_carry_off_its_hold() {
+        let settings = floor_only();
+        let knee = knee_for(&settings).unwrap();
+        let keyed = station(&settings, &["CQ"], 0.3, 0.0);
+        let end = keyed.downs.last().unwrap().1;
+        let mut agc = Agc::new(SR, knee, AgcDecay::Fast);
+        let mut floor = NoiseFloor::new(SR, reference_floor_rms(), 5);
+        let mut receiver = receiver_for(SR, &settings);
+        let mut holds = Vec::new();
+        for i in 0..seconds(end + 0.05) {
+            let sample = keyed.samples.get(i).copied().map_or(0.0, f64::from);
+            agc.next_gain(sample + receiver.process(floor.next_sample()));
+            if i >= seconds(end) {
+                holds.push(db(agc.holder));
+            }
+        }
+        let moved = holds
+            .iter()
+            .map(|h| (h - holds[0]).abs())
+            .fold(0.0, f64::max);
+        assert!(moved < 1.0, "the falling edge moved the hold {moved:.1} dB");
+    }
+
+    /// A crash that qualifies, a burst of static 12 dB over the station for
+    /// 30 ms, takes the gain down while it lasts, but is too short to become
+    /// the signal the hang holds: the station's next element starts bringing
+    /// the gain back to its own at the release rather than waiting out a
+    /// hang under it.
+    #[test]
+    fn after_a_crash_the_station_comes_back_to_its_own_gain() {
+        let settings = floor_only();
+        let knee = knee_for(&settings).unwrap();
+        let keyed = station(&settings, &["TTTTTTTT"], 0.3, 0.0);
+        let sr = f64::from(SR);
+        // A burst 12 dB over the station, 30 ms long, in the gap after its
+        // third dah, at the station's own pitch.
+        let gap = (keyed.downs[2].1, keyed.downs[3].0);
+        let burst = (gap.0 + 0.01, gap.0 + 0.04);
+        let level =
+            rms(&keyed.samples[seconds(keyed.downs[1].0)..seconds(keyed.downs[1].1)]) * 2f64.sqrt();
+        let mut agc = Agc::new(SR, knee, AgcDecay::Fast);
+        let mut gains = Vec::with_capacity(keyed.samples.len());
+        for (i, sample) in keyed.samples.iter().enumerate() {
+            let t = i as f64 / sr;
+            let crash = if (burst.0..burst.1).contains(&t) {
+                4.0 * level * (TAU * 600.0 * t).sin()
+            } else {
+                0.0
+            };
+            gains.push(agc.next_gain(f64::from(*sample) + crash));
+        }
+        let crashed = gains[seconds(burst.1)];
+        let before = mean_db(&gains, |i| {
+            (seconds(keyed.downs[2].0)..seconds(keyed.downs[2].1)).contains(&i)
+        });
+        assert!(
+            db(crashed) < before - 6.0,
+            "the crash was not taken down: {:.1} dB",
+            db(crashed)
+        );
+        // The next element lifts it, at the release, rather than wait out a
+        // hang under it; by the third after, it is the station's own again.
+        let next = keyed.downs[3];
+        let lifted = db(gains[seconds(next.1)]) - db(gains[seconds(next.0)]);
+        assert!(
+            lifted > 4.0,
+            "the next element lifted the gain {lifted:.1} dB"
+        );
+        let third = keyed.downs[5];
+        let back = mean_db(&gains, |i| {
+            (seconds(third.0)..seconds(third.1)).contains(&i)
+        });
+        assert!(
+            (back - before).abs() < 1.0,
+            "the station came back at {back:.1} dB against its own {before:.1} dB"
+        );
+    }
+
+    /// A crash louder than the station, 25 dB over it for 30 ms just after
+    /// an element, is a stronger signal than the one the hang was holding,
+    /// and the hang holds it, as a rig's hang AGC holds the strongest signal
+    /// it has heard: the station's next element plays under it, the gain
+    /// not coming up, until the hang has run out, and then the gain comes
+    /// back to the station's own.
+    #[test]
+    fn a_crash_louder_than_the_station_holds_the_hang_for_its_hang() {
+        let settings = floor_only();
+        let knee = knee_for(&settings).unwrap();
+        let keyed = station(&settings, &["TTTTTTTT"], 0.3, 0.0);
+        let sr = f64::from(SR);
+        let la = agc_lookahead_samples(SR);
+        let gap = (keyed.downs[2].1, keyed.downs[3].0);
+        let burst = (gap.0 + 0.005, gap.0 + 0.035);
+        let level =
+            rms(&keyed.samples[seconds(keyed.downs[1].0)..seconds(keyed.downs[1].1)]) * 2f64.sqrt();
+        let mut agc = Agc::new(SR, knee, AgcDecay::Fast);
+        let (mut gains, mut held, mut hang) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, sample) in keyed.samples.iter().enumerate() {
+            let t = i as f64 / sr;
+            let crash = if (burst.0..burst.1).contains(&t) {
+                db_to_gain(25.0) * level * (TAU * 600.0 * t).sin()
+            } else {
+                0.0
+            };
+            gains.push(agc.next_gain(f64::from(*sample) + crash));
+            held.push(agc.held);
+            hang.push(agc.hang_left);
+        }
+        let before = mean_db(&gains, |i| {
+            (seconds(keyed.downs[2].0)..seconds(keyed.downs[2].1)).contains(&i)
+        });
+        let next = seconds(keyed.downs[3].0) + la;
+        let out = (next..hang.len())
+            .find(|&i| hang[i] == 0)
+            .unwrap_or(hang.len());
+        assert!(
+            out < seconds(burst.1 + AGC_HANG_SEC + 0.03),
+            "the crash held the hang to {:.2} s",
+            out as f64 / sr
+        );
+        let rise = held[next..out]
+            .iter()
+            .map(|h| db(h / held[next]))
+            .fold(f64::MIN, f64::max);
+        assert!(
+            db(gains[next]) < before - 6.0 && rise < 0.5,
+            "the next element played {:.1} dB against its own {before:.1} dB, and lifted it {rise:.1} dB inside the hang",
+            db(gains[next])
+        );
+        let third = keyed.downs[5];
+        let back = mean_db(&gains, |i| {
+            (seconds(third.0)..seconds(third.1)).contains(&i)
+        });
+        assert!(
+            (back - before).abs() < 1.0,
+            "the station came back at {back:.1} dB against its own {before:.1} dB"
+        );
+    }
+
+    /// With the threshold down at the hiss, the hiss after a loud station is
+    /// a far weaker signal than the one the hang was holding: it neither
+    /// keeps re-arming the hang nor holds the band where the station put it,
+    /// so by the end of the band preview's pause the band plays within a few
+    /// decibels of the same band with nobody on it. On eight bands, hiss for
+    /// hiss, none of them more than 6 dB down.
+    #[test]
+    fn after_a_loud_station_the_hiss_does_not_hold_the_band_down() {
+        for threshold in [-13.0, -14.0, -15.0, -16.0] {
+            let mut settings = TrainingSettings::default();
+            settings.band.side_tone_min = 600.0;
+            settings.band.side_tone_max = 600.0;
+            settings.band.qrn_enabled = false;
+            settings.band.qsb_enabled = false;
+            settings.band.agc_threshold_db = threshold;
+            let settings = settings.clamp();
+            let over = station(&settings, &["CQ CQ"], 1.0, 0.0);
+            let end = over.downs.last().unwrap().1;
+            let pause = |x: &[f32]| rms(&x[seconds(end + 0.65)..seconds(end + 0.95)]);
+            // The same band, hiss for hiss, with the station and without.
+            let mut backs: Vec<f64> = (1..=8)
+                .map(|seed| {
+                    let (heard, _) = ride_on(&settings, &over.samples, end + 1.0, seed);
+                    let (empty, _) = ride_on(&settings, &[], end + 1.0, seed);
+                    db(pause(&heard) / pause(&empty))
+                })
+                .collect();
+            backs.sort_by(f64::total_cmp);
+            assert!(
+                backs[backs.len() / 2] > -3.0 && backs[0] > -6.0,
+                "{threshold} dB: the band {backs:.1?} dB down at the end of the pause"
             );
         }
     }

@@ -436,14 +436,17 @@ pub const PILEUP_SPREAD_MAX: f64 = 800.0;
 /// close in pitch, is simply masked rather than quiet.
 pub const PILEUP_LEVEL_MIN_DB: f64 = 3.0;
 pub const PILEUP_LEVEL_MAX_DB: f64 = 20.0;
-/// How far over its lowest the AGC's threshold can be raised, in decibels.
-/// The lowest is just above the band's own hiss; thirty over it, the default
-/// station never reaches it.
-pub const AGC_THRESHOLD_MIN_DB: f64 = 0.0;
+/// How far the AGC's threshold can be moved from where the band's own floor
+/// puts it, in decibels. At 0, out of the box, it is well clear of the
+/// band's own hiss; twenty under, the hiss works the AGC and comes up with
+/// the stations, as a rig's does with its threshold set into the noise;
+/// thirty over, the default station never reaches it.
+pub const AGC_THRESHOLD_MIN_DB: f64 = -20.0;
+pub const AGC_THRESHOLD_DEFAULT_DB: f64 = 0.0;
 pub const AGC_THRESHOLD_MAX_DB: f64 = 30.0;
 /// How far the receiver's RF gain backs off from full, in decibels. Thirty
-/// down, the default station reaches the AGC twenty under its lowest
-/// threshold and the band's hiss is all but gone.
+/// down, the default station reaches the AGC twenty under its threshold at
+/// 0 dB and the band's hiss is all but gone.
 pub const RF_GAIN_MIN_DB: f64 = -30.0;
 pub const RF_GAIN_MAX_DB: f64 = 0.0;
 
@@ -509,12 +512,12 @@ pub struct BandSettings {
     /// How fast the AGC lets the gain back up once a signal has gone. Older
     /// saves have no field and load at Fast, which is how the AGC ran.
     pub agc_decay: AgcDecay,
-    /// Where the AGC starts to turn signals down, in decibels over the lowest
-    /// it goes: how much stronger a signal has to be before the AGC acts
-    /// ([`crate::band::receiver_knee`]). The lowest, out of the box, starts
-    /// the AGC just above the band's own hiss; older saves have no field and
-    /// load at it. The volume follows it, so raising it changes how hard the
-    /// AGC works, not how loud the band plays.
+    /// Where the AGC starts to turn signals down, in decibels from where the
+    /// band's own floor puts it ([`crate::band::receiver_knee`]): out of the
+    /// box 0, well clear of the band's own hiss, where older saves, which
+    /// have no field, load too; down into the hiss, or up over the weaker
+    /// stations. The volume follows it, so moving it changes how hard the
+    /// AGC works, not how loud the strongest station plays.
     pub agc_threshold_db: f64,
     /// The receiver's selectivity: its width in hertz between its 6 dB
     /// points, the way a rig quotes a CW filter. Everything you hear goes
@@ -568,7 +571,7 @@ impl Default for BandSettings {
             rf_gain_db: RF_GAIN_MAX_DB,
             agc_enabled: true,
             agc_decay: AgcDecay::Fast,
-            agc_threshold_db: AGC_THRESHOLD_MIN_DB,
+            agc_threshold_db: AGC_THRESHOLD_DEFAULT_DB,
             filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
             filter_shape: FilterShape::default(),
             stations_min: STATIONS_MIN,
@@ -1151,6 +1154,25 @@ mod tests {
             }
             assert_eq!(s.clone().clamp(), s, "and it still settles in one pass");
         }
+    }
+
+    /// The AGC's threshold goes down into the hiss as far as its range
+    /// does, and no further, and a drag rounded to "-0" is kept as 0, the
+    /// same threshold, not a move of it.
+    #[test]
+    fn the_agc_threshold_goes_down_into_the_hiss_and_no_further() {
+        let mut s = TrainingSettings::default();
+        assert_eq!(s.band.agc_threshold_db, AGC_THRESHOLD_DEFAULT_DB);
+        s.band.agc_threshold_db = -12.0;
+        assert_eq!(s.clone().clamp().band.agc_threshold_db, -12.0);
+        s.band.agc_threshold_db = -900.0;
+        assert_eq!(
+            s.clone().clamp().band.agc_threshold_db,
+            AGC_THRESHOLD_MIN_DB
+        );
+        s.band.agc_threshold_db = -0.0;
+        let kept = s.clamp().band.agc_threshold_db;
+        assert!(kept == 0.0 && kept.is_sign_positive(), "{kept}");
     }
 
     #[test]

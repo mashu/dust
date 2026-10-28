@@ -338,14 +338,10 @@ impl MorseBackend for MorsePlayer {
     }
 
     /// The mixer's own frames, each given up once the context has played
-    /// it, what was played at the volume the graph plays it at.
+    /// it: what the receiver put out, before the volume the graph plays it
+    /// at, as the native player meters it.
     fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
-        let from = into.len();
         self.stream.take_meter(into);
-        let volume = self.chain.volume() as f32;
-        for frame in &mut into[from..] {
-            frame.output *= volume;
-        }
     }
 }
 
