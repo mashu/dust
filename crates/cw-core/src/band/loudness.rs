@@ -68,14 +68,26 @@ const HISS_CREST: f64 = 3.5;
 /// long enough for it to settle there.
 const HISS_RUN_IN_SEC: f64 = 0.5;
 
-/// The hiss the station is listened to over: any will do, the station
-/// riding it deciding how loud it plays, and the same every time, so the
-/// same settings are always sized alike.
+/// The hiss the station is listened to over, the same every time, so the
+/// same settings are always sized alike. Where its crests stay under the
+/// knee it is not listened to at all, and at the default noise any hiss
+/// sizes full volume within about 0.1 dB. On a noisy band with the
+/// threshold down in the hiss, the hiss holds the AGC as much as the
+/// station does, and which hiss it is moves full volume: by about a decibel
+/// at the noise control's middle and a few at its hardest.
 const HISS_SEED: u64 = 0x4855_5353;
 
 /// How long the filter rings on after the last element listened to, and the
 /// look-ahead holds the last of it back.
 const RING_SEC: f64 = 0.05;
+
+/// How far out of the filter the station has to have come, as a share of
+/// the hiss's crest, before what plays counts as the station. Before that it
+/// is the hiss alone, at whatever gain the run-in happened to leave, which
+/// on a loud-hiss band would decide full volume by one moment of it; any
+/// less and the first rise of the onset still does, any more and the first
+/// of the station's own crests on the noisiest bands go uncounted.
+const STATION_OUT_OF_THE_HISS: f64 = 0.25;
 
 /// What the loudest station is remembered by: everything the receiver and
 /// the keying are made of, and nothing else. Not the RF gain: the station
@@ -185,9 +197,15 @@ fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
     // The AGC run in on the hiss alone, and the hiss it hears under the
     // station after that, the same at every pitch: where the hiss can work
     // it, its crests reaching the knee. Under it, the hiss never qualifies
-    // nor moves the law, and listening over it would change the answer by
-    // nothing measurable; switched off, or with no hiss, there is nothing
-    // for the AGC to hear but the station.
+    // on its own, and riding under the station it moves the onset's gain
+    // only by its own luck, either way and by nothing on average: over other
+    // hisses the answer lands within 0.1 dB of none at the median, scattered
+    // by up to 0.3 dB on noisy bands. The one listened to above the knee
+    // sits at the top of that scatter, so crossing the knee steps full
+    // volume up by about 0.1 dB at noise 0.3, 0.25 dB at 0.5 and 0.35 dB at
+    // 0.8, and by up to 0.8 dB on the widest sharp and peaked filters; on the
+    // default band, by nothing. Switched off, or with no hiss, there is
+    // nothing for the AGC to hear but the station.
     let heard = match ask.knee {
         Some(knee) if crest > knee.0 => heard_hiss(ask),
         _ => Arc::from(Vec::new()),
@@ -200,12 +218,11 @@ fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
     for sample in before {
         agc.next_gain(*sample);
     }
-    // The hiss on its own, between overs, its crests at the gain the AGC's
-    // law holds it at: at full with the threshold clear of it, and taken
-    // down with the rest with the threshold in it. Worked out rather than
-    // read off a moment of the run-in, which would size the band by
-    // whichever way that moment's hiss happened to fall.
-    let alone = crest * agc.law(crest);
+    // The hiss heard alone between overs is not part of it: the station's
+    // own run, the hiss's crests riding on it at the AGC's gain, always
+    // comes out louder. Its crests in the pauses are what
+    // `down_in_the_hiss_its_crests_go_no_further_than_the_soft_knee` holds
+    // to the soft knee's first 2 dB.
     LISTEN_AT
         .iter()
         .map(|share| {
@@ -220,7 +237,7 @@ fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
             let plan = plan_morse_playback_for(LISTEN_TEXT, &settings, &voice);
             loudest_through(&plan.events, &ask.receiver, agc.clone(), under, crest)
         })
-        .fold(alone, f64::max)
+        .fold(0.0, f64::max)
 }
 
 /// How many samples the AGC hears the hiss alone for before the station.
@@ -248,10 +265,10 @@ fn heard_hiss(ask: &LoudestAsk) -> Arc<[f64]> {
 /// The loudest sample of `tones` through `receiver` and `agc`, played the
 /// look-ahead late at the gain the AGC rides at, as the native mixer plays
 /// the send, with the crests of the hiss, `crest` high, on top of it at the
-/// same gain, as the band rides with the station: from the station's first
-/// sample played on, through its gaps and the ringing after it. The AGC
-/// hears the station over `hiss`, the band's hiss through the receiver,
-/// sample by sample.
+/// same gain, as the band rides with the station: from where the station
+/// first plays [`STATION_OUT_OF_THE_HISS`] of a crest high on, through its
+/// gaps and the ringing after it. The AGC hears the station over `hiss`, the
+/// band's hiss through the receiver, sample by sample.
 fn loudest_through(
     tones: &[ToneEvent],
     receiver: &FilterDesign,
@@ -273,7 +290,7 @@ fn loudest_through(
         let gain = agc.next_gain(heard + hiss.next().unwrap_or(0.0));
         let due = std::mem::replace(&mut waiting[next], heard);
         next = (next + 1) % waiting.len();
-        playing |= due != 0.0;
+        playing |= due.abs() > STATION_OUT_OF_THE_HISS * crest;
         if playing {
             loudest = loudest.max((due.abs() + crest) * gain);
         }
@@ -405,6 +422,40 @@ mod tests {
         let hardest = gain(|s| s.band.noise_level = 1.0);
         assert!(quiet > wide && quiet > loud, "{quiet} {wide} {loud}");
         assert_eq!(hardest, 1.0);
+    }
+
+    /// On a band loud with hiss, three quarters of the way up the noise
+    /// control, full volume follows the threshold down into the hiss a step
+    /// at a time, nine tenths of a decibel for each, as the law takes the
+    /// station down: the station decides it, not the hiss the AGC happened
+    /// to be riding as the station's first faint sample came out of the
+    /// filter.
+    #[test]
+    fn on_a_loud_hiss_band_full_volume_follows_the_threshold_step_by_step() {
+        let noise = 27.0 * crate::band::calibration::NOISE_LEVEL_PER_DB;
+        for receiver in [None, Some((FilterShape::Peaked, 300.0))] {
+            let at = |db: f64| {
+                20.0 * gain(|s| {
+                    s.band.noise_level = noise;
+                    if let Some((shape, width)) = receiver {
+                        s.band.filter_shape = shape;
+                        s.band.filter_width_hz = width;
+                    }
+                    s.band.agc_threshold_db = db;
+                })
+                .log10()
+            };
+            let mut last = at(-4.0);
+            for db in (5..=16).map(|d| -f64::from(d)) {
+                let full = at(db);
+                assert!(
+                    (0.7..1.15).contains(&(full - last)),
+                    "{receiver:?}, {db} dB: full volume moved {:.2} dB",
+                    full - last
+                );
+                last = full;
+            }
+        }
     }
 
     /// The sharp filter at its narrowest, keyed at its hardest, overshoots

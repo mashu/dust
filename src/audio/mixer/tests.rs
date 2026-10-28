@@ -387,13 +387,14 @@ fn moving_the_threshold_into_the_hiss_under_a_station_keeps_it_as_loud() {
     );
     let receiver = FilterDesign::from_settings(&own);
     mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
-    // How loud the station plays: the middle of its 10 ms stretches at
-    // their loudest, its dahs filling three quarters of them, so a dip
-    // through any one of them shows.
+    // How loud the station plays: its 10 ms stretches at their loudest,
+    // three fifths of the way up. Its dahs fill about half of them, so this
+    // is one of the quieter of the dahs' own wherever the window falls
+    // across a dah and its space, and a dip through a few of them shows.
     let level = |samples: &[f32]| {
         let mut peaks: Vec<f32> = samples.chunks(SR as usize / 100).map(loudest).collect();
         peaks.sort_by(f32::total_cmp);
-        f64::from(peaks[peaks.len() / 2])
+        f64::from(peaks[peaks.len() * 3 / 5])
     };
     let before = level(&render(&mut mixer, SR as usize * 6 / 10));
     for (to, moved) in [(&into, "into the hiss"), (&own, "back")] {

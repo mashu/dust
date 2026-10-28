@@ -476,7 +476,7 @@ pub fn BandConditionsCard(
             }
             p { id: "agc-threshold-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
                 if b.agc_enabled {
-                    "How strong a signal has to be before the AGC turns it down. At 0 dB it is well clear of the band's own hiss in the filter, 10 dB or more over it, more with heavy static, as the scope gives it: every station clear of the noise is evened out and those down in it keep their own level. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss between overs gets quieter. Take it down into the hiss and the hiss works the AGC too, coming up between overs to within about 5 dB of the weakest station. The volume follows, so the strongest station stays as loud."
+                    "How strong a signal has to be before the AGC turns it down. At 0 dB it is well clear of the band's own hiss in the filter, 10 dB or more over it, more with heavy static, as the scope gives it: every station clear of the noise is evened out and those down in it keep their own level. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss between overs gets quieter. Take it down into the hiss and the hiss works the AGC too, coming up between overs to within about 5 dB of the weakest station, or about 10 with the static on, whose crashes hold it down. The volume follows, so the strongest station stays as loud."
                 } else {
                     "With the AGC off there is no threshold to set."
                 }
