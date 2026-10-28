@@ -9,8 +9,8 @@ use cw_core::{
     CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ContestSettings,
     ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC,
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    KeyerMode, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB,
-    NUM_GROUPS_MAX, NUM_GROUPS_MIN, RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RangeSetting,
+    KeyerMode, MASTER_VOLUME_MIN, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, NUM_GROUPS_MAX,
+    NUM_GROUPS_MIN, RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RangeSetting,
     RecognitionBands, RecognitionEdge, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection,
     SpeedPath, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on,
     adapts_group_size, adapts_speed, aim_section,
@@ -21,13 +21,12 @@ use crate::playback::Dialogue;
 use crate::ui::band::BandConditionsCard;
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::help;
-use crate::ui::home::range_label;
 use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
     CardHead, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange, SliderField, Switch,
-    control_id, html_bool,
+    control_id, db_share, html_bool, range_label, share_db,
 };
 
 /// What an aim is called on screen.
@@ -705,43 +704,27 @@ fn YourSpeed(settings: Signal<TrainingSettings>) -> Element {
 /// How loud everything plays, the band, the stations, your sending and the
 /// paddle's sidetone together, as a share of full: the one control for
 /// that, the station strength below being how strong a station is against
-/// the band. It reads its own value, so the card around it never redraws
-/// for it.
+/// the band. In whole decibels down from full, as a rig's AF gain turns
+/// ([`share_db`]). It reads its own value, so the card around it never
+/// redraws for it.
 #[component]
 fn MasterVolume(settings: Signal<TrainingSettings>) -> Element {
     let volume = use_memo(move || settings.read().band.master_volume)();
-    let db = volume_db(volume);
+    let db = share_db(volume, MASTER_VOLUME_MIN);
     rsx! {
         SliderField {
             label: "Volume",
             value_label: volume_label(db),
             value: db,
-            min: volume_db(MASTER_VOLUME_MIN),
+            min: share_db(MASTER_VOLUME_MIN, MASTER_VOLUME_MIN),
             max: 0.0,
             step: 1.0,
             disabled: false,
-            onchange: move |v: f64| settings.write().band.master_volume = volume_share(v),
+            onchange: move |v: f64| {
+                settings.write().band.master_volume = db_share(v, MASTER_VOLUME_MIN);
+            },
         }
     }
-}
-
-/// The volume, a share of full, as its slider stands: in whole decibels
-/// down from full, each step as much louder as the last, as a rig's
-/// audio-taper AF gain turns. The share is what is kept, so older saves load
-/// as they were; the bottom is the decibel nearest the quietest share.
-pub(super) fn volume_db(share: f64) -> f64 {
-    (20.0 * share.clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX).log10())
-        .round()
-        .max((20.0 * MASTER_VOLUME_MIN.log10()).ceil())
-}
-
-/// The share of full volume a slider at `db` keeps: held to the range, and to
-/// a ten-thousandth, which tells every decibel step of it apart.
-pub(super) fn volume_share(db: f64) -> f64 {
-    let share = 10f64
-        .powf(db / 20.0)
-        .clamp(MASTER_VOLUME_MIN, MASTER_VOLUME_MAX);
-    (share * 10_000.0).round() / 10_000.0
 }
 
 /// What the volume reads as: "Full", or "−6 dB" turned down.
@@ -850,12 +833,12 @@ fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
                 settings,
                 which: RangeSetting::Volume,
                 label: "Station strength",
-                unit: "%",
+                unit: "dB",
                 min_bound: VOLUME_MIN,
                 max_bound: VOLUME_MAX,
-                step: 0.05,
-                percent: true,
-                hint: "How far the station stands over the band's noise, not how loud it plays. A range draws a fresh strength per group.",
+                step: 1.0,
+                decibels: true,
+                hint: "How far the station stands over the band's noise, not how loud it plays: 0 dB is the strongest. A range draws a fresh strength per group.",
             }
             SendingLevel { settings }
             FullBreakIn { settings }

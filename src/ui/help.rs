@@ -457,7 +457,7 @@ pub fn tone() -> Element {
             dt { "Side tone" }
             dd { "The pitch you hear the Morse at. A range picks a fresh pitch for each group, as different stations sound." }
             dt { "Station strength" }
-            dd { "How strong the station you copy comes in, against the band's noise and static: lower is harder to copy, not quieter overall. A range varies it from group to group." }
+            dd { "How strong the station you copy comes in, against the band's noise and static, in decibels down from the strongest: lower is harder to copy, not quieter overall. A range varies it from group to group, evenly in decibels." }
             dt { "Your sending" }
             dd { "In a contest, how loud you hear your own messages." }
             dt { "Full break-in (QSK)" }

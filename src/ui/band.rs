@@ -13,6 +13,7 @@ use crate::ui::help;
 use crate::ui::scope::LevelScope;
 use crate::ui::widgets::{
     CardHead, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch, control_id,
+    range_label,
 };
 
 /// The AGC's decays, in the order the control offers them.
@@ -59,10 +60,56 @@ fn habits_line(rules: &ContestRules, side: Side) -> String {
     )
 }
 
+/// The QSB rate control's steps, from a fade every half minute to one every
+/// two thirds of a second ([`QSB_RATE_MIN_HZ`] to [`QSB_RATE_MAX_HZ`]):
+/// each about an eighth quicker than the last, as a fade's pace is heard, in
+/// its period, where steps of a hundredth of a hertz were a third of the
+/// period apart at the slow end and gave the flutter most of the travel.
+const QSB_RATE_STEPS: f64 = 34.0;
+
+/// `rate_hz` as the fading takes it: inside the range, and the slowest for
+/// no number at all.
+fn held_qsb_rate(rate_hz: f64) -> f64 {
+    if rate_hz.is_finite() {
+        rate_hz.clamp(QSB_RATE_MIN_HZ, QSB_RATE_MAX_HZ)
+    } else {
+        QSB_RATE_MIN_HZ
+    }
+}
+
+/// The step of the QSB rate control that `rate_hz` stands at.
+fn qsb_rate_step(rate_hz: f64) -> f64 {
+    let rate_hz = held_qsb_rate(rate_hz);
+    let along = (rate_hz / QSB_RATE_MIN_HZ).ln() / (QSB_RATE_MAX_HZ / QSB_RATE_MIN_HZ).ln();
+    (along * QSB_RATE_STEPS).round().clamp(0.0, QSB_RATE_STEPS)
+}
+
+/// The rate the QSB rate control keeps at `step`: to a ten-thousandth of a
+/// hertz, which tells every step apart.
+fn qsb_step_rate(step: f64) -> f64 {
+    let along = step.clamp(0.0, QSB_RATE_STEPS) / QSB_RATE_STEPS;
+    let rate = QSB_RATE_MIN_HZ * (QSB_RATE_MAX_HZ / QSB_RATE_MIN_HZ).powf(along);
+    ((rate * 10_000.0).round() / 10_000.0).clamp(QSB_RATE_MIN_HZ, QSB_RATE_MAX_HZ)
+}
+
+/// What the QSB rate reads as: how often a fade comes round, as an
+/// operator says it, "every ~8 s".
+fn qsb_rate_label(rate_hz: f64) -> String {
+    let period = 1.0 / held_qsb_rate(rate_hz);
+    if period >= 2.0 {
+        format!("every ~{period:.0} s")
+    } else {
+        format!("every ~{period:.1} s")
+    }
+}
+
 /// What the band card shows: the band settings, and the receiver they build.
 #[derive(Clone, PartialEq)]
 struct Band {
     band: BandSettings,
+    /// The station strength range, in decibels down from full: the S/N
+    /// read is the copied station's, across it.
+    strength_db: (f64, f64),
     /// The receiver as it is really built: the side-tone range can widen it
     /// past the slider, and its shape decides how much noise it lets in.
     receiver_width_hz: f64,
@@ -86,8 +133,10 @@ impl Band {
     fn of(settings: &TrainingSettings) -> Self {
         let receiver = FilterDesign::from_settings(settings);
         let contest = settings.curriculum.char_set_mode == CharSetMode::Contest;
+        let strength = settings.volume_range_db();
         Self {
             band: settings.band.clone(),
+            strength_db: (*strength.start(), *strength.end()),
             receiver_width_hz: receiver.width_hz(),
             noise_bandwidth_hz: receiver.noise_bandwidth_hz(),
             run: contest.then_some(settings.contest.contest_style),
@@ -112,13 +161,16 @@ pub fn BandConditionsCard(
     let view = use_memo(move || Band::of(&settings.read()));
     let view = view.read();
     let b = &view.band;
-    // As heard through the filter you have set, so narrowing it visibly buys
+    // The copied station's, across the strengths it is drawn at, as heard
+    // through the filter you have set, so narrowing it visibly buys
     // signal-to-noise — which is the whole reason to reach for it.
     let noise_reading = if b.noise_enabled && b.noise_level > 0.0 {
-        format!(
-            "S/N {:.0} dB",
-            heard_snr_db(b.noise_level, view.noise_bandwidth_hz)
-        )
+        let strongest = heard_snr_db(b.noise_level, view.noise_bandwidth_hz);
+        let (weakest, strongest) = (
+            (strongest + view.strength_db.0).round(),
+            (strongest + view.strength_db.1).round(),
+        );
+        format!("S/N {} dB", range_label(weakest, strongest))
     } else {
         "Off".to_string()
     };
@@ -208,7 +260,7 @@ pub fn BandConditionsCard(
             }
             if previewing {
                 p { class: "muted", style: "margin: 0;",
-                    "Looping “CQ” loud, medium and weak in turn (100%, 30% and 10% strength) through the current mix. Move a slider and you hear the change."
+                    "Looping “CQ” loud, medium and weak in turn (0, \u{2212}10 and \u{2212}20 dB strength) through the current mix. Move a slider and you hear the change."
                 }
             }
             div { class: "field-grid",
@@ -324,13 +376,13 @@ pub fn BandConditionsCard(
                 }
                 SliderField {
                     label: "Rate".to_string(),
-                    value_label: format!("{:.2} Hz", b.qsb_rate_hz),
-                    value: b.qsb_rate_hz,
-                    min: QSB_RATE_MIN_HZ,
-                    max: QSB_RATE_MAX_HZ,
-                    step: 0.01,
+                    value_label: qsb_rate_label(b.qsb_rate_hz),
+                    value: qsb_rate_step(b.qsb_rate_hz),
+                    min: 0.0,
+                    max: QSB_RATE_STEPS,
+                    step: 1.0,
                     disabled: !b.qsb_enabled,
-                    onchange: move |v| settings.write().band.qsb_rate_hz = v,
+                    onchange: move |v| settings.write().band.qsb_rate_hz = qsb_step_rate(v),
                 }
             }
             if let Some(flutter) = view.flutter {
@@ -455,5 +507,36 @@ fn threshold_label(db: f64) -> String {
         "Lowest".to_string()
     } else {
         format!("+{db:.0} dB")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rate control runs from the slowest fade to the quickest, each
+    /// step a like share quicker than the last, and every rate it keeps
+    /// reads back at the step it was set at; a rate saved before reads at
+    /// the step nearest it.
+    #[test]
+    fn every_step_of_the_qsb_rate_is_as_much_quicker_as_the_last() {
+        assert_eq!(qsb_step_rate(0.0), QSB_RATE_MIN_HZ);
+        assert_eq!(qsb_step_rate(QSB_RATE_STEPS), QSB_RATE_MAX_HZ);
+        let mut slower = qsb_step_rate(0.0);
+        for step in 1..=QSB_RATE_STEPS as u32 {
+            let rate = qsb_step_rate(f64::from(step));
+            assert_eq!(qsb_rate_step(rate), f64::from(step), "{rate} Hz");
+            let quicker = rate / slower;
+            assert!(
+                (quicker - 1.122).abs() < 0.01,
+                "{quicker:.4} at step {step}"
+            );
+            slower = rate;
+        }
+        assert_eq!(qsb_rate_label(0.12), "every ~8 s");
+        assert_eq!(qsb_rate_label(QSB_RATE_MIN_HZ), "every ~33 s");
+        assert_eq!(qsb_rate_label(QSB_RATE_MAX_HZ), "every ~0.7 s");
+        assert_eq!(qsb_rate_step(f64::NAN), 0.0);
+        assert_eq!(qsb_rate_label(f64::NAN), "every ~33 s");
     }
 }

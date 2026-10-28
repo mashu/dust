@@ -5,7 +5,7 @@ use super::{
     RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
     STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
-use crate::band::full_volume_gain;
+use crate::band::{db_to_gain, full_volume_gain, gain_to_db};
 
 /// How far apart the side tone bounds are pushed when a fixed pitch is opened
 /// back up into a range.
@@ -171,6 +171,21 @@ impl TrainingSettings {
             finite_within(self.band.volume_max, min, VOLUME_MAX)
         };
         min..=max
+    }
+
+    /// The station strength range in decibels down from full, as it is
+    /// shown. A strength is drawn evenly in these ([`Self::volume_at_db`]),
+    /// so a station is as likely to come in 3 dB under the top of the range
+    /// as 3 dB over its bottom.
+    pub fn volume_range_db(&self) -> RangeInclusive<f64> {
+        let range = self.volume_range();
+        gain_to_db(*range.start())..=gain_to_db(*range.end())
+    }
+
+    /// The strength `db` decibels down from full, inside the range.
+    pub fn volume_at_db(&self, db: f64) -> f64 {
+        let range = self.volume_range();
+        db_to_gain(db).clamp(*range.start(), *range.end())
     }
 
     /// How loud everything plays, as a share of full volume, inside the

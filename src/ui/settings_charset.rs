@@ -12,9 +12,8 @@ use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
-use crate::ui::home::range_label;
 use crate::ui::widgets::{
-    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id,
+    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id, range_label,
 };
 
 /// The largest file read as a word list. The longest list kept is a few

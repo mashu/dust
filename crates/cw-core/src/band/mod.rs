@@ -61,6 +61,7 @@ mod source;
 // is the band's own business.
 pub use agc::{AGC_LOOKAHEAD_SEC, AGC_MAX_DUCK_DB, agc_decay_sec, agc_lookahead_samples};
 pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
+pub use dsp::{db_to_gain, gain_to_db};
 pub(crate) use filter::mirror_hz;
 pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,

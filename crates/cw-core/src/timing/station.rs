@@ -95,9 +95,10 @@ pub(crate) fn station_speed_grid(
         })
 }
 
+/// Evenly in decibels across the range, as it is shown.
 fn resolve_volume(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
-    let range = settings.volume_range();
-    rng.pick_in_range(*range.start(), *range.end())
+    let range = settings.volume_range_db();
+    settings.volume_at_db(rng.pick_in_range(*range.start(), *range.end()))
 }
 
 fn resolve_tone_hz(settings: &TrainingSettings, rng: &mut impl Rng) -> f64 {
@@ -145,6 +146,33 @@ mod tests {
             assert!((voice.weight - 1.0).abs() < 1e-9);
             assert!((voice.dash_ratio - 3.0).abs() < 1e-9);
         }
+    }
+
+    /// A strength range is drawn evenly in decibels, as it is shown: from
+    /// the strongest down to 20 dB under it, half the stations come in
+    /// under 10 down, where evenly in amplitude half came in within 5 of
+    /// the top. Fixed, it is the one strength, drawn from nothing.
+    #[test]
+    fn a_strength_is_drawn_evenly_in_decibels() {
+        use crate::band::gain_to_db;
+        use crate::settings::{VOLUME_MAX, VOLUME_MIN};
+        let mut s = TrainingSettings::default();
+        s.band.link_volume = false;
+        s.band.volume_min = VOLUME_MIN;
+        s.band.volume_max = VOLUME_MAX;
+        let mut rng = SplitMix64::new(3);
+        let mut heard: Vec<f64> = (0..2_000)
+            .map(|_| gain_to_db(resolve_volume(&s, &mut rng)))
+            .collect();
+        heard.sort_by(f64::total_cmp);
+        let median = heard[heard.len() / 2];
+        assert!((median + 10.0).abs() < 1.0, "the middle at {median:.2} dB");
+        assert!(heard[0] >= -20.0 - 1e-9 && heard[heard.len() - 1] <= 1e-9);
+        s.band.link_volume = true;
+        s.band.volume_min = 0.7;
+        let mut rng = SplitMix64::new(3);
+        assert_eq!(resolve_volume(&s, &mut rng), 0.7);
+        assert_eq!(rng.f64(), SplitMix64::new(3).f64(), "nothing drawn");
     }
 
     /// Turned up, they are people: no two send quite alike.

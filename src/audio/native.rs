@@ -642,10 +642,20 @@ mod device_tests {
     use super::*;
 
     /// Opens the machine's default output. On a runner with no sound card, an
-    /// ALSA null device is enough; where there is nothing at all the test says
-    /// so and stops rather than failing.
+    /// ALSA null device is enough, and CI gives it one, so there a player
+    /// that will not open fails the test rather than passing it untried;
+    /// on a machine with nothing at all the test says so and stops.
     fn player() -> Option<MorsePlayer> {
-        MorsePlayer::new().ok()
+        match MorsePlayer::new() {
+            Ok(player) => Some(player),
+            Err(error) if std::env::var_os("CI").is_some() => {
+                panic!("CI gives ALSA a null output, yet the player would not open: {error}")
+            }
+            Err(error) => {
+                eprintln!("no audio output on this machine ({error}); skipping");
+                None
+            }
+        }
     }
 
     fn settings() -> TrainingSettings {
@@ -665,7 +675,6 @@ mod device_tests {
     #[test]
     fn a_send_runs_through_the_real_output() {
         let Some(mut player) = player() else {
-            eprintln!("no audio device on this machine; skipping");
             return;
         };
         let voice = cw_core::resolve_station(&settings(), &mut cw_core::SplitMix64::new(7));
@@ -692,13 +701,19 @@ mod device_tests {
         };
         let mut settings = settings();
         player.apply_band(&settings);
+        assert!(player.stream.is_some(), "the band opened the output");
+        assert_eq!(player.state.band_change(&settings), BandChange::None);
         player.apply_band(&settings);
+        assert_eq!(player.state.band_change(&settings), BandChange::None);
         settings.band.qrn_level = 0.9;
+        assert_eq!(player.state.band_change(&settings), BandChange::Rebuild);
         player.apply_band(&settings);
+        assert_eq!(player.state.band_change(&settings), BandChange::None);
         // A silent band takes the band out without complaining.
         settings.band.qrn_enabled = false;
         settings.band.noise_enabled = false;
         player.apply_band(&settings);
+        assert_eq!(player.state.band_change(&settings), BandChange::None);
         player.shutdown();
     }
 
@@ -733,9 +748,11 @@ mod device_tests {
         let Some(mut player) = player() else {
             return;
         };
+        assert!(player.stream.is_some(), "opened with the player");
         player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
         player.set_live_tone(ToneRequest::new(true, 600.0, 0.2));
         player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
+        assert!(player.stream.is_some(), "and kept through the squeeze");
         player.shutdown();
     }
 }

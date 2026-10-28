@@ -26,12 +26,13 @@ const READ_OVER: usize = (0.5 / METER_FRAME_SEC) as usize;
 /// How often the scope takes the frames the player has metered.
 const POLL_MS: u32 = 50;
 
-/// The levels the scope spans, in decibels over the AGC's threshold: the
-/// strongest station stands about 28 over its lowest and the quietest hiss
-/// about 7 under it, and with the threshold raised all the way the hiss is
-/// still on it, 37 under. A decibel to a unit of the pane's height.
-const TOP_DB: f64 = 30.0;
-const BOTTOM_DB: f64 = -42.0;
+/// The levels the scope spans, in decibels over the AGC's lowest
+/// threshold: the strongest station stands about 28 over it and the
+/// quietest hiss about 7 under it; with the RF gain backed off all the way
+/// the hiss is still on it, 37 under, and with the threshold raised all the
+/// way the line is too, 30 over. A decibel to a unit of the pane's height.
+const TOP_DB: f64 = 32.0;
+const BOTTOM_DB: f64 = -40.0;
 
 /// The most the AGC ever takes off, which its lane spans.
 const AGC_LANE_DB: f64 = AGC_MAX_DUCK_DB;
@@ -83,10 +84,73 @@ fn db(ratio: f64) -> f64 {
     }
 }
 
-/// How far down the level pane `level_db` over the threshold sits.
+/// How far down the level pane `level_db` over the lowest threshold sits.
 fn level_y(level_db: f64) -> f64 {
     let share = ((TOP_DB - level_db) / (TOP_DB - BOTTOM_DB)).clamp(0.0, 1.0);
     share * LEVEL_HEIGHT
+}
+
+/// The scope's drawing: the level at the AGC against its lowest threshold,
+/// `knee`, the AGC's lane, and the dashed line where the AGC starts, as far
+/// over the lowest as the threshold control raises it, `raise`. The RF gain
+/// moves the level and the threshold the line, as a panadapter's AGC line
+/// moves with its knob: on one axis the two would look alike.
+#[derive(Debug, PartialEq)]
+struct Drawing {
+    level: String,
+    agc: String,
+    line: f64,
+}
+
+impl Drawing {
+    fn of(frames: &VecDeque<MeterFrame>, knee: f64, raise: f64) -> Self {
+        // The newest frame at the right-hand edge, the rest running back
+        // from it.
+        let start = SHOWN.saturating_sub(frames.len());
+        let level = frames
+            .iter()
+            .map(|frame| level_y(db(f64::from(frame.input) / knee)));
+        let agc = frames.iter().map(|frame| {
+            let taken = (-db(f64::from(frame.gain))).clamp(0.0, AGC_LANE_DB);
+            LANE_TOP + taken / AGC_LANE_DB * LANE_HEIGHT
+        });
+        Self {
+            level: lane_path(start, LEVEL_HEIGHT, level),
+            agc: lane_path(start, LANE_TOP, agc),
+            line: level_y(db(raise)),
+        }
+    }
+}
+
+/// One lane as an SVG path in tenths of the drawing's units, drawn at
+/// `scale(0.1)`, so it is written in whole numbers: along `base` to where
+/// the frames start, a step a frame at the height each is given, a run of
+/// equal steps one stretch, and back to `base` at the right-hand edge. Five
+/// times a second, a point a frame formatted as two decimals was three
+/// times the text, and a hung AGC lane, one height, is a few bytes.
+fn lane_path(start: usize, base: f64, heights: impl Iterator<Item = f64>) -> String {
+    use std::fmt::Write;
+    let tenths = |units: f64| (units * 10.0).round() as i64;
+    let frame = tenths(WIDTH / SHOWN as f64);
+    let base = tenths(base);
+    let mut path = String::with_capacity(32 + 12 * SHOWN);
+    let _ = write!(path, "M0 {base}H{}", start as i64 * frame);
+    let (mut at, mut run) = (None, 0);
+    for y in heights.map(tenths) {
+        if at != Some(y) {
+            if run > 0 {
+                let _ = write!(path, "h{run}");
+            }
+            let _ = write!(path, "V{y}");
+            (at, run) = (Some(y), 0);
+        }
+        run += frame;
+    }
+    if run > 0 {
+        let _ = write!(path, "h{run}");
+    }
+    let _ = write!(path, "V{base}Z");
+    path
 }
 
 /// The scope's three readings over its last stretch: the loudest at the AGC
@@ -165,10 +229,11 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
             });
         }
     });
-    // The line follows a move as the band does, once the follow has
-    // measured its knee; the threshold, which only raises it, at once.
+    // The level follows a move as the band does, once the follow has
+    // measured its knee; the line follows the threshold, which only raises
+    // it, at once.
     let band_knee = try_use_context::<BandKnee>();
-    let (threshold, agc_on) = use_memo(move || {
+    let (knee, raise, agc_on) = use_memo(move || {
         let settings = settings.read();
         let knee = match band_knee {
             Some(BandKnee(knee)) => knee(),
@@ -180,34 +245,20 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
             }
         };
         (
-            knee.map(|knee| knee * threshold_raise(&settings.band)),
+            knee,
+            threshold_raise(&settings.band),
             settings.band.agc_enabled,
         )
     })();
     // Nothing is placed against a line not yet known.
     let frames = frames.read();
-    let frames = match threshold {
+    let frames = match knee {
         Some(_) => &*frames,
         None => &VecDeque::new(),
     };
-    let threshold = threshold.unwrap_or(1.0);
-    let step = WIDTH / SHOWN as f64;
-    // The newest frame at the right-hand edge, the rest running back from it.
-    let start = SHOWN.saturating_sub(frames.len());
-    let x = |i: usize| (start + i) as f64 * step;
-    let mut level = format!("0,{LEVEL_HEIGHT:.1}");
-    let mut agc = format!("0,{LANE_TOP:.1}");
-    for (i, frame) in frames.iter().enumerate() {
-        let y = level_y(db(f64::from(frame.input) / threshold));
-        let taken = (-db(f64::from(frame.gain))).clamp(0.0, AGC_LANE_DB);
-        let lane = LANE_TOP + taken / AGC_LANE_DB * LANE_HEIGHT;
-        level += &format!(" {:.1},{y:.1} {:.1},{y:.1}", x(i), x(i) + step);
-        agc += &format!(" {:.1},{lane:.1} {:.1},{lane:.1}", x(i), x(i) + step);
-    }
-    level += &format!(" {WIDTH:.1},{LEVEL_HEIGHT:.1}");
-    agc += &format!(" {WIDTH:.1},{LANE_TOP:.1}");
-    let line = level_y(0.0);
-    let reading = Reading::of(frames, threshold);
+    let knee = knee.unwrap_or(1.0);
+    let Drawing { level, agc, line } = Drawing::of(frames, knee, raise);
+    let reading = Reading::of(frames, knee * raise);
     let says = reading.map_or_else(|| "Listening…".to_string(), |reading| reading.says(agc_on));
     let view_box = format!("0 0 {WIDTH} {}", LANE_TOP + LANE_HEIGHT);
     rsx! {
@@ -225,7 +276,7 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
                     width: "{WIDTH}",
                     height: "{LEVEL_HEIGHT}",
                 }
-                polygon { class: "scope-level", points: "{level}" }
+                path { class: "scope-level", transform: "scale(0.1)", d: "{level}" }
                 line {
                     class: if agc_on { "scope-threshold" } else { "scope-threshold off" },
                     x1: "0",
@@ -240,7 +291,7 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
                     width: "{WIDTH}",
                     height: "{LANE_HEIGHT}",
                 }
-                polygon { class: "scope-agc", points: "{agc}" }
+                path { class: "scope-agc", transform: "scale(0.1)", d: "{agc}" }
             }
             p { class: "muted scope-legend",
                 "The band at the AGC over the last three seconds; dashed, where the AGC starts; underneath, how much it takes off, up to 40 dB."
@@ -298,6 +349,45 @@ mod tests {
             headroom_db: -0.3,
         };
         assert!(grazing.says(true).ends_with("0 dB under the limiter"));
+    }
+
+    /// The threshold moves the line and leaves the level where it was; the
+    /// RF gain moves the level and leaves the line.
+    #[test]
+    fn the_threshold_moves_the_line_and_the_rf_gain_the_level() {
+        let heard = frames(&[(0.1, 1.0, 0.1); 4]);
+        let lowest = Drawing::of(&heard, 0.1, 1.0);
+        let raised = Drawing::of(&heard, 0.1, 10f64.powf(0.5));
+        assert_eq!(lowest.level, raised.level);
+        let per_db = LEVEL_HEIGHT / (TOP_DB - BOTTOM_DB);
+        assert!((lowest.line - raised.line - 10.0 * per_db).abs() < 1e-9);
+        let backed_off = Drawing::of(&frames(&[(0.01, 1.0, 0.01); 4]), 0.1, 1.0);
+        assert_eq!(backed_off.line, lowest.line);
+        assert_ne!(backed_off.level, lowest.level);
+        // Raised all the way, the line is still on the pane.
+        let top = Drawing::of(
+            &heard,
+            0.1,
+            10f64.powf(cw_core::AGC_THRESHOLD_MAX_DB / 20.0),
+        );
+        assert!(top.line > 0.0, "{}", top.line);
+    }
+
+    /// A lane is drawn in whole tenths, along its base to its first frame, a
+    /// step a frame, a run of equal frames one stretch, and closed on its
+    /// base at the right-hand edge.
+    #[test]
+    fn a_lane_is_drawn_in_whole_steps() {
+        assert_eq!(
+            lane_path(SHOWN - 3, LEVEL_HEIGHT, [10.0, 10.0, 20.56].into_iter()),
+            format!("M0 720H{}V100h20V206h10V720Z", (SHOWN - 3) * 10)
+        );
+        let hung = lane_path(0, LANE_TOP, std::iter::repeat_n(LANE_TOP, SHOWN));
+        assert_eq!(hung, format!("M0 780H0V780h{}V780Z", SHOWN * 10));
+        assert_eq!(
+            lane_path(SHOWN, LANE_TOP, std::iter::empty()),
+            format!("M0 780H{}V780Z", SHOWN * 10)
+        );
     }
 
     /// The line sits where the AGC starts, as far over its lowest as the

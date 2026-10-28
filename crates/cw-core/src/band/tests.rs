@@ -692,6 +692,9 @@ fn a_silent_band_needs_no_background_stream_and_mixes_to_silence() {
     assert!(out.iter().all(|s| *s == 0.0));
 }
 
+/// Every band stays inside full scale before the limiter, which could not
+/// leave it, and makes a sound: the AGC holds the hardest noise and static
+/// together under it.
 #[test]
 fn every_band_stays_in_range_and_makes_a_sound() {
     for shape in IF_SHAPES {
@@ -703,8 +706,7 @@ fn every_band_stays_in_range_and_makes_a_sound() {
             s.band.qrn_level = qrn;
             s.band.filter_shape = shape;
             let mut mixer = BandMixer::new(8_000, &s, 7);
-            let mut out = [0.0f32; 16_000];
-            mixer.fill_background(&mut out);
+            let out: Vec<f64> = (0..16_000).map(|_| mixer.next(0.0).band).collect();
             assert!(
                 out.iter().all(|s| (-1.0..=1.0).contains(s)),
                 "{shape:?} {noise}/{qrn} left the unit range"

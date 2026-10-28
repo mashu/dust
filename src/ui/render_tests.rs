@@ -3277,7 +3277,13 @@ mod interactions {
     fn the_band_card_out_of_the_box() {
         let mut ui = Ui::new(DefaultBandHarness, ());
         assert!(ui.shows("fixed-stations-calling"), "{}", ui.html());
-        assert!(ui.has("class=\"slider-value\">S/N 41 dB<"), "{}", ui.html());
+        // The copied station's, across the strengths it is drawn at: 0 down to
+        // 3 dB under the strongest out of the box.
+        assert!(
+            ui.has("class=\"slider-value\">S/N 38–41 dB<"),
+            "{}",
+            ui.html()
+        );
         assert!(ui.has("300 Hz — widened to 353 Hz to pass your pitch range"));
         // The 6 dB is where the width is read, not a loss, and the label
         // does not make it look like one.
@@ -3293,7 +3299,7 @@ mod interactions {
             ("less-slider-noise-level", 41),
         ] {
             ui.click(button);
-            let says = format!("class=\"slider-value\">S/N {reading} dB<");
+            let says = format!("class=\"slider-value\">S/N {}–{reading} dB<", reading - 3);
             assert!(ui.has(&says), "{button}: {}", ui.html());
         }
         // A step under the quietest hiss there is, it is off.
@@ -3382,18 +3388,18 @@ mod interactions {
         assert!(ui.has("class=\"slider-value\">Off<"), "switched off");
         ui.commit("switch-band-noise", "true");
         assert!(
-            ui.has("class=\"slider-value\">S/N 23 dB<"),
+            ui.has("class=\"slider-value\">S/N 20–23 dB<"),
             "sharp, 300 Hz, at half level"
         );
         ui.type_into("slider-filter-width", "600");
         assert!(
-            ui.has("class=\"slider-value\">S/N 20 dB<"),
+            ui.has("class=\"slider-value\">S/N 17–20 dB<"),
             "doubling the filter should cost 3 dB"
         );
         ui.type_into("slider-filter-width", "300");
         ui.click("seg-filter-peaked");
         assert!(
-            ui.has("class=\"slider-value\">S/N 26 dB<"),
+            ui.has("class=\"slider-value\">S/N 23–26 dB<"),
             "the peak filter lets in less noise than its width says"
         );
         // Narrower than the side-tone range allows, it says what it is

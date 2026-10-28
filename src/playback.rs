@@ -90,7 +90,7 @@ const BAND_PREVIEW_GAP_MS: u32 = 280;
 /// The strengths the band preview calls at, in turn: loud, medium and weak,
 /// the full strength and a station 10 and 20 dB down, so the AGC can be
 /// heard evening them out and its threshold heard deciding which it does.
-pub const BAND_PREVIEW_STRENGTHS: [f64; 3] = [VOLUME_MAX, 0.3, VOLUME_MIN];
+pub const BAND_PREVIEW_STRENGTHS: [f64; 3] = [VOLUME_MAX, 0.316_227_766_016_838, VOLUME_MIN];
 
 /// What the app is playing when no session is running.
 ///
