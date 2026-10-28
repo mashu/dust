@@ -10,7 +10,7 @@ use std::rc::Rc;
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::epoch::{Epoch, Ticket};
-use super::{MorseBackend, PlaybackSignal, WaitFlags};
+use super::{MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
 use crate::time::mono_ms;
 
 pub struct MorsePlayer {
@@ -27,8 +27,12 @@ struct SilentSignal {
 }
 
 impl PlaybackSignal for SilentSignal {
-    fn heard_after_sec(&self) -> f64 {
-        self.wait_ms as f64 / 1_000.0
+    fn timing(&self) -> SendTiming {
+        // Nothing sounds, so nothing is late to the ear.
+        SendTiming {
+            lead_sec: self.wait_ms as f64 / 1_000.0,
+            latency_sec: 0.0,
+        }
     }
 
     fn poll(&self) -> WaitFlags {
@@ -42,6 +46,7 @@ impl PlaybackSignal for SilentSignal {
             // Nothing is playing, so the app's own clock is the only clock
             // there is.
             played_ms: Some(u32::try_from(elapsed).unwrap_or(u32::MAX)),
+            late: false,
         }
     }
 }
@@ -86,6 +91,7 @@ impl MorseBackend for MorsePlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::wait::Waited;
     use crate::audio::{PlaybackOutcome, start_planned};
     use crate::testing::{run, test_settings};
     use cw_core::{Segment, Sender, Turn, plan_morse_playback_for, plan_turn, resolve_station};
@@ -136,8 +142,14 @@ mod tests {
             let started = mono_ms();
             let wait =
                 start_planned(&mut player, &plan, &transcript, &settings, None).expect("sent");
-            assert_eq!(wait.heard_after_sec, 0.0);
-            assert_eq!(wait.wait().await, PlaybackOutcome::Completed);
+            assert_eq!(wait.start().latency_ms, 0);
+            assert_eq!(
+                wait.wait().await,
+                Waited {
+                    outcome: PlaybackOutcome::Completed,
+                    held_up: false,
+                }
+            );
             let took = mono_ms() - started;
             assert!(
                 (planned_ms..planned_ms + 100).contains(&took),
@@ -153,7 +165,7 @@ mod tests {
             assert!(first.is_pending());
             crate::time::sleep_ms(200).await;
             player.stop();
-            assert_eq!(waiting.await, PlaybackOutcome::Cancelled);
+            assert_eq!(waiting.await.outcome, PlaybackOutcome::Cancelled);
         });
     }
 }

@@ -1,87 +1,66 @@
-//! The browser's player: Web Audio nodes, playing the same models the native
-//! player runs.
+//! The browser's player: the native player's own mixer, rendered here ahead
+//! of the browser's clock and streamed into a graph of a few nodes.
 //!
-//! - [`chain`]: the output stage — where everything is mixed, the receiver's
-//!   AGC as a compressor, and the soft limiter.
-//! - [`receiver`]: the receiver's filter as IIR nodes, crossfaded on a retune.
-//! - [`stream`]: the band, generated here and streamed in.
-//! - [`send`]: one send's tones, scheduled, your own in a contest around the
-//!   receiver.
-//! - [`sidetone`]: the paddle's sidetone.
-//! - [`param`]: the fades and the letting go every part of it needs.
+//! - [`stream`]: the receiver — the band, the sends, the filter, the AGC, the
+//!   mute while you send — rendered and streamed in ([`crate::audio::stream`]).
+//! - [`chain`]: the output stage — the volume and the soft limiter.
+//! - [`sidetone`]: the paddle's sidetone, played live.
+//! - [`param`]: moving a gain smoothly from wherever it is.
 
 mod chain;
 mod param;
-mod receiver;
-mod send;
 mod sidetone;
 mod stream;
 
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::band::{BandKey, Qsb, SOFT_LIMIT_HEADROOM};
+use cw_core::band::{BandChange, BandKey, FilterDesign, Qsb, Receiver};
 use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
-use gloo_timers::callback::Timeout;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
-use web_sys::{AudioContext, AudioContextState, GainNode};
+use web_sys::{AudioContext, AudioContextState};
 
-use super::band_queue::Reservation;
+use super::ToneRequest;
 use super::epoch::{Epoch, Ticket};
-use super::shape::{Gains, GateSchedule, GateStep, SEND_RELEASE_SEC, ToneRequest};
-use super::wait::{heard_after_sec, heard_ms, schedule_lead_sec};
-use super::{METER_FRAME_SEC, MeterFrame, MorseBackend, PlaybackSignal, WaitFlags};
+use super::mixer::{BandVoice, Mixer, SendVoice, fade_origin_sec};
+use super::shape::Gains;
+use super::wait::{heard_ms, send_timing};
+use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
 use crate::time::mono_ms;
 use chain::Chain;
-use param::{Retiring, ramp_to};
-use receiver::Receiver;
-use send::ScheduledSend;
 use sidetone::Sidetone;
-use stream::BandStream;
-
-/// How long after everything has gone quiet the context is suspended: long
-/// enough for the last fades to play out.
-const SLEEP_AFTER_MS: u32 = 250;
+use stream::MixerStream;
 
 pub struct MorsePlayer {
     ctx: AudioContext,
     epoch: Epoch,
     chain: Chain,
-    /// The receiver's own filter — the same resonators the native player
-    /// runs — built for the current pitch, width and shape.
-    receiver: Receiver,
-    band: Option<BandStream>,
-    /// What the band, and the AGC set for it, were built from.
+    stream: MixerStream,
+    /// What the band, and the receiver's gains, were last built from.
     band_key: Option<BandKey>,
-    send: Option<ScheduledSend>,
-    /// When the send playing is heard from, on the app's clock, as this
-    /// player said it would be, and where it starts on the context's: what
-    /// a send asked to start at a given time takes over from it against.
-    heard: Option<(f64, f64)>,
-    /// Gains fading out: a stopped send's, or a band that was replaced.
-    released: Retiring<GainNode>,
-    /// The gains of a send a continuation takes over from, playing on to
-    /// where it does: a stop cuts them short with the rest.
-    taken_over: Retiring<GainNode>,
-    /// The receiver's gate as its gains have been told to play it, for each
-    /// send to go on from where it stands.
-    gate: GateSchedule,
+    gains: Option<Gains>,
+    /// The send playing, for one asked to start at a given time to take
+    /// over from.
+    playing: Option<Playing>,
     sidetone: Sidetone,
+    /// Where on the band's fading the context's clock started
+    /// ([`fade_origin_sec`]).
+    fade_origin_sec: f64,
+    /// Whether the page has taken the device's playback session, as it does
+    /// the first time anything is about to be heard.
+    claimed_session: bool,
     /// Kept so the listener can be taken off again when this player goes.
     on_visibility: Option<Closure<dyn FnMut()>>,
-    /// Suspends the context once everything has gone quiet, unless something
-    /// is played first. A running context keeps the audio thread awake and
-    /// the device from sleeping, with nothing to play.
-    sleep: Option<Timeout>,
     /// Set while the context is suspended because nothing is playing, so
     /// the page coming back into view does not wake it for nothing.
     asleep: Rc<Cell<bool>>,
-    /// When the meter was last read, on the context's clock, and the
-    /// analysers' samples read into.
-    metered_at: Option<f64>,
-    meter_input: Vec<f32>,
-    meter_output: Vec<f32>,
+}
+
+/// A send playing: when it was to be heard, on the app's clock.
+#[derive(Clone, Copy, Debug)]
+struct Playing {
+    heard: f64,
 }
 
 /// What a scheduled send looks like to a waiter.
@@ -95,14 +74,14 @@ struct WebSignal {
     ctx: AudioContext,
     ticket: Ticket,
     started_at: f64,
-    /// How long after it was started the send reaches the ear: its lead on
-    /// the clock, and the latency the browser reports, read as it started.
-    heard_after_sec: f64,
+    /// Its lead on the clock, and the latency the browser reports, read as
+    /// it started.
+    timing: SendTiming,
 }
 
 impl PlaybackSignal for WebSignal {
-    fn heard_after_sec(&self) -> f64 {
-        self.heard_after_sec
+    fn timing(&self) -> SendTiming {
+        self.timing
     }
 
     fn poll(&self) -> WaitFlags {
@@ -111,14 +90,18 @@ impl PlaybackSignal for WebSignal {
             finished: false,
             failed: self.ctx.state() == AudioContextState::Closed,
             // A hidden page is the one case where a frozen clock is not a
-            // fault. The tones stay scheduled at their own context times, so
-            // coming back resumes the group where it stopped.
+            // fault. The receiver stays rendered at its own context times,
+            // so coming back resumes the group where it stopped.
             suspended: page_is_hidden(),
+            // Against the latency read as it started, as its timing is:
+            // the browser refining it as the send plays is no hold-up.
             played_ms: Some(heard_ms(
                 self.ctx.current_time(),
                 self.started_at,
-                heard_latency(&self.ctx),
+                self.timing.latency_sec,
             )),
+            // Its clock says that, against the app's.
+            late: false,
         }
     }
 }
@@ -148,113 +131,89 @@ fn page_is_hidden() -> bool {
         .is_some_and(|doc| doc.hidden())
 }
 
+/// Take the device's playback session, where the browser has one to take
+/// (Safari, since iOS 16.4). Left to itself, a page that plays only Web
+/// Audio is given an ambient one, which the Ring/Silent switch mutes: the
+/// context runs, every send completes, and nothing is heard. Playback is
+/// not muted by the switch — and stops other audio while it plays, which is
+/// why it is taken only once something is about to be heard, not as soon as
+/// a screen builds the player.
+fn claim_playback_session() {
+    let Some(navigator) = web_sys::window().map(|window| window.navigator()) else {
+        return;
+    };
+    if let Ok(session) = js_sys::Reflect::get(&navigator, &"audioSession".into())
+        && session.is_object()
+    {
+        let _ = js_sys::Reflect::set(&session, &"type".into(), &"playback".into());
+    }
+}
+
 impl MorsePlayer {
     pub fn new() -> Result<Self, String> {
         let ctx = AudioContext::new().map_err(|e| format!("AudioContext: {e:?}"))?;
         let chain = Chain::build(&ctx)?;
+        let mixer = Mixer::new(ctx.sample_rate() as u32);
+        let stream = MixerStream::start(&ctx, &chain.stream_in, mixer);
         let asleep = Rc::new(Cell::new(false));
         let on_visibility = install_resume_on_foreground(&ctx, Rc::clone(&asleep));
         Ok(Self {
             ctx,
             epoch: Epoch::default(),
             chain,
-            receiver: Receiver::new(),
-            band: None,
+            stream,
             band_key: None,
-            send: None,
-            heard: None,
-            released: Retiring::new(),
-            taken_over: Retiring::new(),
-            gate: GateSchedule::default(),
+            gains: None,
+            playing: None,
             sidetone: Sidetone::default(),
+            fade_origin_sec: fade_origin_sec(),
+            claimed_session: false,
             on_visibility,
-            sleep: None,
             asleep,
-            metered_at: None,
-            meter_input: vec![0.0; chain::METER_WINDOW as usize],
-            meter_output: vec![0.0; chain::METER_WINDOW as usize],
         })
     }
 
-    fn apply_band_now(&mut self, settings: &TrainingSettings) -> Result<(), String> {
-        self.chain.set_gains(&self.ctx, Gains::of(settings));
-        self.receiver.tune(&self.ctx, &self.chain, settings)?;
-        let key = BandKey::of(&settings.band);
-        if self.band_key == Some(key) {
-            return Ok(());
-        }
-        // A send in flight keeps its pile-up when the band under it changes.
-        let pileup = self.band.as_ref().and_then(BandStream::pileup);
-        self.retire_band();
+    /// The receiver brought in line with `settings`: a band built afresh for
+    /// what changes one, or the gains alone moved; and the volume, which the
+    /// graph sets, at once.
+    fn apply_band_now(&mut self, settings: &TrainingSettings) {
         if self.ctx.state() == AudioContextState::Closed {
-            return Ok(());
+            return;
         }
-        if settings.band.has_background() {
-            // Its floor is the receiver's, muted with it while you send.
-            self.band = Some(BandStream::start(
-                &self.ctx,
-                &self.chain.mix,
-                &self.chain.band_floor,
-                settings,
-                pileup,
-            )?);
-        }
-        self.chain.tune_agc(&self.ctx, settings);
-        self.band_key = Some(key);
-        Ok(())
-    }
-
-    /// Take the band down. It fades rather than stopping dead, and its
-    /// output gains are let go of once the fade has run.
-    fn retire_band(&mut self) {
-        self.released.collect(self.ctx.current_time());
-        self.band_key = None;
-        if let Some(stream) = self.band.take() {
-            let (gains, done) = stream.fade_out();
-            for gain in gains {
-                self.released.retire(gain, done);
-            }
-        }
-    }
-
-    /// Ramp the send down instead of cutting it: now, or, for one a
-    /// continuation takes over from, ahead at `at` on the context's clock,
-    /// where it does.
-    fn release_send(&mut self, at: Option<f64>) {
-        let now = self.ctx.current_time();
-        self.released.collect(now);
-        self.taken_over.collect(now);
-        self.heard = None;
-        if let Some(send) = self.send.take() {
-            let (gains, done) = send.release_at(&self.ctx, at.unwrap_or(now));
-            let into = if at.is_some() {
-                &mut self.taken_over
+        let gains = Gains::of(settings);
+        self.chain.set_volume(&self.ctx, gains.volume);
+        let receiver = Gains {
+            volume: 1.0,
+            ..gains
+        };
+        let key = BandKey::of(&settings.band);
+        let rate = self.ctx.sample_rate() as u32;
+        let mut change = key.change_from(self.band_key.as_ref());
+        if change == BandChange::Retune {
+            // The band on the air carries on through the new receiver.
+            let tuned = Receiver::new(rate, settings);
+            let mut retuned = false;
+            self.stream.change(|mixer, swept| {
+                retuned = mixer.retune_band(tuned, receiver, swept);
+            });
+            change = if retuned {
+                BandChange::None
             } else {
-                &mut self.released
+                BandChange::Rebuild
             };
-            for gain in gains {
-                into.retire(gain, done);
-            }
+        } else if change == BandChange::None && self.gains != Some(receiver) {
+            self.stream.change(|mixer, _| mixer.set_gains(receiver));
         }
-    }
-
-    /// Mute the receiver from `start` on the context's clock until
-    /// `muted_until` seconds in, while you send without full break-in, or
-    /// open it there with nothing muted: from wherever its gate stands then
-    /// as scheduled, so it never steps.
-    fn schedule_gate(&mut self, start: f64, muted_until: Option<f64>) {
-        let steps = self
-            .gate
-            .schedule(start, muted_until, self.ctx.current_time());
-        for param in self.chain.gates() {
-            let _ = param.cancel_scheduled_values(start);
-            for step in &steps {
-                let _ = match *step {
-                    GateStep::Set(level, at) => param.set_value_at_time(level, at),
-                    GateStep::Ramp(level, at) => param.linear_ramp_to_value_at_time(level, at),
-                };
-            }
+        if change == BandChange::Rebuild {
+            // A fresh band every time, as the native player's is: with
+            // stations on it, a fixed seed would replay the same callsigns at
+            // the same moments on every visit.
+            let band = BandVoice::for_settings(settings, rate, crate::time::seed_rng());
+            self.stream
+                .change(|mixer, swept| mixer.set_band_at(band, receiver, swept));
         }
+        self.band_key = Some(key);
+        self.gains = Some(receiver);
     }
 }
 
@@ -265,9 +224,10 @@ impl MorseBackend for MorsePlayer {
     /// the listener — rather than leaving the session parked on a promise
     /// that may never settle.
     fn resume_from_gesture(&mut self) {
-        // Something is about to play: whatever was going to put the context
-        // to sleep is called off.
-        self.sleep = None;
+        if !self.claimed_session {
+            claim_playback_session();
+            self.claimed_session = true;
+        }
         self.asleep.set(false);
         if self.ctx.state() == AudioContextState::Suspended {
             let _ = self.ctx.resume();
@@ -278,9 +238,7 @@ impl MorseBackend for MorsePlayer {
         if settings.band.has_background() {
             self.resume_from_gesture();
         }
-        // A node the browser will not make leaves the band as it was; the
-        // send that follows reports anything worse.
-        let _ = self.apply_band_now(settings);
+        self.apply_band_now(settings);
     }
 
     fn start(
@@ -291,143 +249,102 @@ impl MorseBackend for MorsePlayer {
         heard_in: Option<f64>,
     ) -> Result<Rc<dyn PlaybackSignal>, String> {
         self.resume_from_gesture();
+        if self.ctx.state() == AudioContextState::Closed {
+            return Err("Audio is unavailable.".into());
+        }
         let ticket = self.epoch.arm();
-        // One reading of the clock, for the tones, the fading, the pile-up
-        // and the waiter alike.
+        // One reading of each clock, for where the send goes and what its
+        // waiter is told.
         let now = self.ctx.current_time();
-        let lead = schedule_lead_sec(reported_latency(&self.ctx, "baseLatency"));
-        let latency = heard_latency(&self.ctx);
-        let soonest = now + lead;
         let now_heard = mono_ms() as f64 / 1_000.0;
+        let latency = heard_latency(&self.ctx);
+        let soonest = self.stream.soonest();
+        let (rate, lookahead) = self
+            .stream
+            .read(|mixer| (mixer.sample_rate(), mixer.lookahead_sec()));
+        let sr = f64::from(rate);
+        let samples = |seconds: f64| (seconds.max(0.0) * sr).round() as usize;
         // A send asked to start at a given time takes over from the one
-        // playing where that one is then, on the clock it plays on, which
-        // runs on to there; with nothing playing, it waits out the time
-        // from now. Never sooner than a send can start.
-        let start = match (heard_in, self.heard) {
-            (Some(heard_in), Some((playing_heard, playing_start))) if self.send.is_some() => {
-                playing_start + (now_heard + heard_in - playing_heard)
-            }
-            (Some(heard_in), _) => now + heard_in - latency,
-            (None, _) => soonest,
-        }
-        .max(soonest);
-        let takes_over = heard_in.is_some() && self.send.is_some();
-        // The send taken over from is ridden down by the moment the new one
-        // starts, your message in it silent then, so the two never sound
-        // together.
-        self.release_send(takes_over.then_some(start - SEND_RELEASE_SEC));
-        // Your own message in a contest goes around the receiver, whose
-        // filter, AGC and AF gain are for what you copy, as the paddle's
-        // sidetone does; at the volume alone, as the native mixer monitors
-        // it, and through the limiter.
-        let send = ScheduledSend::schedule(
-            &self.ctx,
-            &self.chain.mix,
-            &self.chain.monitor_in,
+        // playing where that one is then, sample for sample; with nothing
+        // playing, it waits out the time from now. It is played the
+        // receiver's look-ahead after it goes in, as natively, and never
+        // sooner than a change can be.
+        let (into, wait) = match heard_in {
+            None => (None, 0),
+            Some(heard_in) => (
+                self.playing
+                    .map(|playing| samples(now_heard + heard_in - playing.heard)),
+                samples(now + heard_in - latency - lookahead - soonest),
+            ),
+        };
+        let voice = SendVoice::new(
             plan,
+            &FilterDesign::from_settings(settings),
             Qsb::of(&settings.band),
-            start,
-        )?;
-        // The receiver muted while you send, without full break-in, from
-        // where the gate stands as the send starts: shut still, when it
-        // takes over from your message going on.
-        self.schedule_gate(start, plan.muted_until);
-        self.send = Some(send);
-        if let Some(stream) = &self.band {
-            stream.reserve(Reservation::new(
-                plan.others_at_once(),
-                start + plan.wanted.duration_sec,
-            ));
-        }
-        let heard_after_sec = heard_after_sec(start - now, latency);
-        self.heard = Some((now_heard + heard_after_sec, start));
+            rate,
+            self.fade_origin_sec + soonest + wait as f64 / sr,
+        );
+        let mut waits = 0;
+        let made = self.stream.change_at(soonest, |mixer, swept| {
+            waits = mixer.start_at(voice, into, wait, swept);
+        });
+        let starts = made + waits as f64 / sr + lookahead;
+        let timing = send_timing(starts - now, latency);
+        self.playing = Some(Playing {
+            heard: now_heard + timing.heard_after_sec(),
+        });
         Ok(Rc::new(WebSignal {
             ctx: self.ctx.clone(),
             ticket,
-            started_at: start,
-            heard_after_sec,
+            started_at: starts,
+            timing,
         }))
     }
 
     fn stop(&mut self) {
         self.epoch.bump();
-        self.release_send(None);
-        // A send a continuation was to take over from later stops now too,
-        // as natively, and the receiver comes back from where it stands.
-        let now = self.ctx.current_time();
-        self.taken_over
-            .hasten(now, now + SEND_RELEASE_SEC, |gain, from, until| {
-                ramp_to(&gain.gain(), 0.0, from, until);
-            });
-        self.schedule_gate(now, None);
-        if let Some(stream) = &self.band {
-            stream.reserve(None);
-        }
+        self.playing = None;
+        // The send rides its own release down to silence; the receiver
+        // comes back from where its mute stands.
+        self.stream.change(|mixer, _| mixer.stop());
     }
 
     fn shutdown(&mut self) {
         MorseBackend::stop(self);
-        // Faded rather than disconnected on the spot: the fades are let go of
-        // on the next send, or when the player itself goes.
-        self.retire_band();
+        // Faded rather than cut, as natively.
+        self.stream
+            .change(|mixer, swept| mixer.set_band(None, swept));
+        self.band_key = None;
         self.sidetone.silence(&self.ctx);
-        // Once the fades have played out there is nothing left to hear, and
-        // a running context keeps the audio thread and the device awake for
-        // the life of the page. Anything played before then calls it off.
-        let (ctx, asleep) = (self.ctx.clone(), Rc::clone(&self.asleep));
-        self.sleep = Some(Timeout::new(SLEEP_AFTER_MS, move || {
-            if ctx.state() == AudioContextState::Running {
-                asleep.set(true);
-                let _ = ctx.suspend();
-            }
-        }));
+    }
+
+    /// Suspended, once there is nothing left to hear: a running context
+    /// keeps the audio thread awake and the device from sleeping, with
+    /// nothing to play. The next band, send or sidetone resumes it.
+    fn sleep(&mut self) {
+        if self.stream.is_idle() && self.ctx.state() == AudioContextState::Running {
+            self.asleep.set(true);
+            let _ = self.ctx.suspend();
+        }
     }
 
     /// Around the receiver — its filter and AGC are for what you copy, not
     /// for the sidetone of the key in your hand — and around the volume, as
     /// it comes at the level it is heard at, but through the limiter: added
     /// after it, a squeeze on top of a crash squared off.
-    fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
+    fn set_live_tone(&mut self, tone: ToneRequest) {
         self.resume_from_gesture();
-        let tone = ToneRequest::new(on, frequency_hz, gain);
         let _ = self.sidetone.set(&self.ctx, &self.chain.sidetone_in, tone);
     }
 
-    /// The analysers hold the latest stretch of samples, not a queue of
-    /// frames: as many frames as the context's clock has moved since the
-    /// last look are cut from the end of what they hold, the AGC's gain
-    /// read once for all of them. What is played is read on its way into
-    /// the limiter, where everything is [`SOFT_LIMIT_HEADROOM`] times
-    /// quieter than it is played, and put back up by as much: read as it
-    /// stood, the scope had the browser twelve decibels under the limiter
-    /// that it was not.
+    /// The mixer's own frames, each given up once the context has played
+    /// it, what was played at the volume the graph plays it at.
     fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
-        let now = self.ctx.current_time();
-        let Some(last) = self.metered_at.replace(now) else {
-            return;
-        };
-        let frame_len = ((METER_FRAME_SEC * f64::from(self.ctx.sample_rate())) as usize).max(1);
-        let held = self.meter_input.len() / frame_len;
-        let frames = (((now - last) / METER_FRAME_SEC).round().max(0.0) as usize).min(held);
-        if frames == 0 {
-            return;
-        }
-        self.chain
-            .meter_input
-            .get_float_time_domain_data(&mut self.meter_input);
-        self.chain
-            .meter_output
-            .get_float_time_domain_data(&mut self.meter_output);
-        let gain = self.chain.agc_gain() as f32;
-        let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        let end = self.meter_input.len();
-        for k in (0..frames).rev() {
-            let span = end - (k + 1) * frame_len..end - k * frame_len;
-            into.push(MeterFrame {
-                input: peak(&self.meter_input[span.clone()]),
-                gain,
-                output: peak(&self.meter_output[span]) * SOFT_LIMIT_HEADROOM as f32,
-            });
+        let from = into.len();
+        self.stream.take_meter(into);
+        let volume = self.chain.volume() as f32;
+        for frame in &mut into[from..] {
+            frame.output *= volume;
         }
     }
 }
@@ -437,9 +354,6 @@ impl Drop for MorsePlayer {
     /// left its whole audio context running, and its visibility listener
     /// resuming it, for the life of the page.
     fn drop(&mut self) {
-        if let Some(stream) = self.band.take() {
-            drop(stream.fade_out());
-        }
         if let (Some(listener), Some(doc)) = (
             self.on_visibility.take(),
             web_sys::window().and_then(|window| window.document()),

@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::audio::{METER_FRAME_SEC, MeterFrame};
 
-/// How many frames are kept: five seconds of them, more than the scope ever
-/// shows, so a reader that falls behind for a moment loses nothing.
+/// How many frames are kept: five seconds of them, far longer than the
+/// scope waits between looks, so a reader that falls behind for a moment
+/// loses nothing; the scope keeps its own history.
 const KEPT: usize = 512;
 
 /// The last [`KEPT`] frames, written by the audio callback and read by the
@@ -16,18 +17,22 @@ const KEPT: usize = 512;
 /// is overwritten is only ever one five seconds old being replaced.
 pub struct Meter {
     input: [AtomicU32; KEPT],
-    gain: [AtomicU32; KEPT],
+    held: [AtomicU32; KEPT],
     output: [AtomicU32; KEPT],
     /// How many frames have ever been written.
     written: AtomicUsize,
 }
 
 impl Meter {
+    /// How many of its last frames it keeps for a reader ([`KEPT`]).
+    #[cfg(any(feature = "web", test))]
+    pub const KEPT: usize = KEPT;
+
     pub fn new() -> Self {
         let zeros = || std::array::from_fn(|_| AtomicU32::new(0));
         Self {
             input: zeros(),
-            gain: zeros(),
+            held: zeros(),
             output: zeros(),
             written: AtomicUsize::new(0),
         }
@@ -37,7 +42,7 @@ impl Meter {
         let n = self.written.load(Ordering::Relaxed);
         let at = n % KEPT;
         self.input[at].store(frame.input.to_bits(), Ordering::Relaxed);
-        self.gain[at].store(frame.gain.to_bits(), Ordering::Relaxed);
+        self.held[at].store(frame.held.to_bits(), Ordering::Relaxed);
         self.output[at].store(frame.output.to_bits(), Ordering::Relaxed);
         self.written.store(n + 1, Ordering::Release);
     }
@@ -53,7 +58,7 @@ impl Meter {
             let read = |slot: &[AtomicU32; KEPT]| f32::from_bits(slot[at].load(Ordering::Relaxed));
             into.push(MeterFrame {
                 input: read(&self.input),
-                gain: read(&self.gain),
+                held: read(&self.held),
                 output: read(&self.output),
             });
         }
@@ -62,7 +67,8 @@ impl Meter {
 }
 
 /// The frame the callback is filling: its peaks so far, and how many samples
-/// it still has to take.
+/// it still has to take. A copy writes to the same meter.
+#[derive(Clone)]
 pub struct Metering {
     meter: Arc<Meter>,
     frame_len: usize,
@@ -77,37 +83,38 @@ impl Metering {
             meter,
             frame_len,
             left: frame_len,
-            frame: Self::EMPTY,
+            frame: MeterFrame::QUIET,
         }
     }
-
-    /// Nothing heard yet, and the AGC wide open.
-    const EMPTY: MeterFrame = MeterFrame {
-        input: 0.0,
-        gain: 1.0,
-        output: 0.0,
-    };
 
     pub fn meter(&self) -> Arc<Meter> {
         Arc::clone(&self.meter)
     }
 
+    /// How many samples of the frame in hand have been taken.
+    #[cfg(any(feature = "web", test))]
+    pub fn taken(&self) -> usize {
+        self.frame_len - self.left
+    }
+
     /// Start again at `sample_rate`, the frame in hand dropped.
+    #[cfg(feature = "native-audio")]
     pub fn restart(&mut self, sample_rate: u32) {
         *self = Self::new(Arc::clone(&self.meter), sample_rate);
     }
 
-    /// One sample: what reached the AGC, the gain it rode at, and what was
-    /// played.
-    pub fn add(&mut self, input: f64, gain: f64, output: f64) {
-        let frame = &mut self.frame;
-        frame.input = frame.input.max(input.abs() as f32);
-        frame.gain = frame.gain.min(gain as f32);
-        frame.output = frame.output.max(output.abs() as f32);
+    /// One sample: what reached the AGC, the gain its hang held, and what
+    /// was played.
+    pub fn add(&mut self, input: f64, held: f64, output: f64) {
+        self.frame = self.frame.merge(MeterFrame {
+            input: input.abs() as f32,
+            held: held as f32,
+            output: output.abs() as f32,
+        });
         self.left -= 1;
         if self.left == 0 {
-            self.meter.write(*frame);
-            *frame = Self::EMPTY;
+            self.meter.write(self.frame);
+            self.frame = MeterFrame::QUIET;
             self.left = self.frame_len;
         }
     }
@@ -127,7 +134,7 @@ mod tests {
         for i in 0..3 {
             meter.write(MeterFrame {
                 input: i as f32,
-                gain: 1.0,
+                held: 1.0,
                 output: 0.0,
             });
         }
@@ -143,7 +150,7 @@ mod tests {
         for i in 0..(KEPT + 10) {
             meter.write(MeterFrame {
                 input: i as f32,
-                gain: 1.0,
+                held: 1.0,
                 output: 0.0,
             });
         }
@@ -153,14 +160,14 @@ mod tests {
         assert_eq!(read.last().map(|f| f.input), Some((KEPT + 9) as f32));
     }
 
-    /// A frame is a stretch's peaks and its lowest gain, sign aside.
+    /// A frame is a stretch's peaks and its lowest held gain, sign aside.
     #[test]
-    fn a_frame_holds_the_peaks_and_the_lowest_gain_of_its_stretch() {
+    fn a_frame_holds_the_peaks_and_the_lowest_held_gain_of_its_stretch() {
         let meter = Arc::new(Meter::new());
         let mut metering = Metering::new(Arc::clone(&meter), 400);
         // Four samples a frame at 400 Hz.
-        for (input, gain, output) in [(0.1, 1.0, 0.2), (-0.5, 0.6, -0.9), (0.2, 0.8, 0.1)] {
-            metering.add(input, gain, output);
+        for (input, held, output) in [(0.1, 1.0, 0.2), (-0.5, 0.6, -0.9), (0.2, 0.8, 0.1)] {
+            metering.add(input, held, output);
         }
         let (mut seen, mut read) = (0, Vec::new());
         meter.read_since(&mut seen, &mut read);
@@ -171,7 +178,7 @@ mod tests {
             read,
             [MeterFrame {
                 input: 0.5,
-                gain: 0.6,
+                held: 0.6,
                 output: 0.9
             }]
         );

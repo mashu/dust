@@ -909,6 +909,7 @@ mod tests {
                     char_wpm: Some(wpm),
                     effective_wpm: Some(wpm),
                     sends: 1 + u32::from(assisted),
+                    ..SessionTiming::default()
                 })
                 .collect(),
             groups,

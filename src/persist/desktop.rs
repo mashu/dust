@@ -1,6 +1,6 @@
 //! Files under one directory: the desktop and mobile store.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
-use super::{BackupSaving, HistorySaved, Store, newest, parse_sessions, read_settings_from};
+use super::{
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, parse_sessions,
+    read_settings_from,
+};
 
 const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
@@ -16,6 +19,12 @@ const SETTINGS: &str = "settings.json";
 const SESSIONS: &str = "sessions.json";
 const COUNTERS: &str = "auto_adjust.json";
 const LAST_BACKUP: &str = "last_backup.txt";
+/// The sessions and runs marked open ([`Store::mark_open`]): each copy of
+/// the app's as `<id>.json`, beside `<id>.lock`, which that copy holds
+/// locked for as long as its session runs. A copy that stops, however it
+/// stops, lets go of its lock, so a mark nobody holds was cut off, and one
+/// held belongs to a window still running it.
+const OPEN: &str = "open";
 
 /// Files under one directory. The directory is a field rather than a global
 /// so a test can point one at a scratch folder.
@@ -26,6 +35,14 @@ pub struct DesktopStore {
     /// The stored history could not be read, nor moved out of the way, so it
     /// is not to be written over.
     history_held: Cell<bool>,
+    /// This copy's mark, while its session is marked open.
+    open_held: RefCell<Option<HeldMark>>,
+}
+
+/// A copy's mark ([`OPEN`]): its id, and the lock it holds on it.
+struct HeldMark {
+    id: String,
+    lock: fs::File,
 }
 
 impl DesktopStore {
@@ -42,6 +59,7 @@ impl DesktopStore {
             root: root.into(),
             backup_folder: None,
             history_held: Cell::new(false),
+            open_held: RefCell::new(None),
         }
     }
 
@@ -268,6 +286,87 @@ impl Store for DesktopStore {
         #[cfg(not(all(target_os = "android", not(test))))]
         super::saved_now(self.save_in_folder(name, contents))
     }
+
+    /// Written unsynced: it is only a mark, and the first group waits on
+    /// nothing. One a power cut leaves empty still tells of a session cut
+    /// off ([`CutOff::Unread`]).
+    fn mark_open(&self, open: Option<OpenSession>) {
+        let mut held = self.open_held.borrow_mut();
+        match open {
+            Some(open) => {
+                let Some(mark) = held.take().or_else(|| self.new_mark()) else {
+                    return;
+                };
+                if let Ok(raw) = serde_json::to_vec(&open)
+                    && fs::write(self.mark_path(&mark.id, "json"), raw).is_ok()
+                {
+                    *held = Some(mark);
+                } else {
+                    self.unmark(mark);
+                }
+            }
+            None => {
+                if let Some(mark) = held.take() {
+                    self.unmark(mark);
+                }
+            }
+        }
+    }
+
+    fn take_cut_off(&self) -> CutOffTaking {
+        Box::pin(std::future::ready(self.cut_off()))
+    }
+}
+
+impl DesktopStore {
+    fn mark_path(&self, id: &str, extension: &str) -> PathBuf {
+        self.root.join(OPEN).join(format!("{id}.{extension}"))
+    }
+
+    /// A mark of this copy's own, its lock held.
+    fn new_mark(&self) -> Option<HeldMark> {
+        fs::create_dir_all(self.root.join(OPEN)).ok()?;
+        let id = format!("{:016x}", crate::time::seed_rng());
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.mark_path(&id, "lock"))
+            .ok()?;
+        lock.try_lock().ok()?;
+        Some(HeldMark { id, lock })
+    }
+
+    /// The mark gone, and its lock let go once it is.
+    fn unmark(&self, mark: HeldMark) {
+        let _ = fs::remove_file(self.mark_path(&mark.id, "json"));
+        let _ = fs::remove_file(self.mark_path(&mark.id, "lock"));
+        drop(mark.lock);
+    }
+
+    /// Every mark no copy holds, taken: what each tells of is read under its
+    /// lock, so a copy that has just marked its session is never taken for
+    /// one cut off.
+    fn cut_off(&self) -> Option<CutOff> {
+        let mine = self.open_held.borrow().as_ref().map(|mark| mark.id.clone());
+        let cut = fs::read_dir(self.root.join(OPEN))
+            .ok()?
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let id = path.file_stem()?.to_str()?.to_string();
+                if path.extension()? != "lock" || mine.as_ref() == Some(&id) {
+                    return None;
+                }
+                let lock = fs::OpenOptions::new().write(true).open(&path).ok()?;
+                // Held: another copy is running it.
+                lock.try_lock().ok()?;
+                let mark = HeldMark { id, lock };
+                let read = fs::read(self.mark_path(&mark.id, "json"));
+                self.unmark(mark);
+                read.ok().map(|raw| CutOff::read(&raw))
+            });
+        CutOff::newest(cut)
+    }
 }
 
 impl DesktopStore {
@@ -376,6 +475,51 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    fn open_at(started_at: u64) -> OpenSession {
+        OpenSession {
+            started_at,
+            run: false,
+        }
+    }
+
+    /// Each copy of the app marks its own session. One a copy is still
+    /// running is left to it, one whose copy stopped is told of once, and
+    /// one that ended is never told of.
+    #[test]
+    fn a_session_is_told_of_once_and_only_when_its_copy_stopped_under_it() {
+        let (dir, first) = store("open");
+        let second = DesktopStore::at(dir.0.clone());
+        first.mark_open(Some(open_at(1)));
+        second.mark_open(Some(open_at(2)));
+        assert_eq!(first.cut_off(), None, "the other is still running");
+        assert_eq!(second.cut_off(), None);
+
+        // The first ends its own, and leaves the second's be.
+        first.mark_open(None);
+        assert_eq!(first.cut_off(), None);
+
+        // The second stops under its session: a copy open all along is told,
+        // once, and so would the next to open have been.
+        drop(second);
+        let third = DesktopStore::at(dir.0.clone());
+        assert_eq!(first.cut_off(), Some(CutOff::Marked(open_at(2))));
+        assert_eq!(third.cut_off(), None, "told of once");
+        let left = fs::read_dir(dir.0.join(OPEN)).unwrap().count();
+        assert_eq!(left, 0, "nothing left behind");
+    }
+
+    /// A mark a power cut left empty still says a session was cut off.
+    #[test]
+    fn an_unreadable_mark_still_tells_of_a_session_cut_off() {
+        let (dir, cut) = store("open-unread");
+        cut.mark_open(Some(open_at(1)));
+        let id = cut.open_held.borrow().as_ref().map(|mark| mark.id.clone());
+        fs::write(cut.mark_path(&id.expect("marked"), "json"), b"").unwrap();
+        drop(cut);
+        let next = DesktopStore::at(dir.0.clone());
+        assert_eq!(next.cut_off(), Some(CutOff::Unread));
     }
 
     #[test]

@@ -20,9 +20,9 @@ use crate::session_runtime::{abort_run, finish_run};
 use crate::state::AppCtx;
 use crate::time::{mono_ms, sleep_ms};
 use crate::ui::contest_keys::{SPEED_STEP_WPM, use_run_keys};
+use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::format::{counted, minutes_seconds};
 use crate::ui::paddle::PaddleKeys;
-use crate::ui::tour::bring_into_sight;
 use crate::ui::training::{ANSWER_INPUT_MODE, Keypad, PadKey, PadRow, TOUCH_BUILD};
 use crate::ui::widgets::{
     Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool, keep_focus,
@@ -52,7 +52,7 @@ pub fn ContestRunView() -> Element {
     // paddles land in their own fields.
     keys.use_fields(
         running,
-        move |letter| entry.push(letter),
+        move |letter, keyed| entry.push(letter, keyed),
         move || field_space(ctx),
     );
     entry.use_letters(move || keys.finish_letter());
@@ -502,7 +502,9 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
             inputmode: ANSWER_INPUT_MODE,
             lang: "zxx",
             oninput: move |e| {
-                entry.edit(field, e.value());
+                // The key's moment, before anything else is done with it.
+                let keyed = MonoMs(mono_ms());
+                entry.edit(field, e.value(), Some(keyed));
                 // Typing ends the paddles' word: their word space is not to
                 // move the cursor from what is being typed. A letter keyed
                 // in full lands after it, as the page has it already.
@@ -544,7 +546,7 @@ fn EntryInput(field: EntryField, disabled: bool) -> Element {
                         // here instead, after the letter.
                         None if landed => {
                             e.prevent_default();
-                            entry.push(' ');
+                            entry.push_space();
                         }
                         None => {}
                     }
@@ -576,7 +578,7 @@ fn space_goes_to(ctx: AppCtx, field: EntryField) -> Option<EntryField> {
 fn field_space(ctx: AppCtx) {
     match space_goes_to(ctx, ctx.entry.focus()) {
         Some(to) => focus_field(ctx, to),
-        None => ctx.entry.push(' '),
+        None => ctx.entry.push_space(),
     }
 }
 
@@ -771,7 +773,7 @@ fn SpaceKey(qso: QsoState, live: bool) -> Element {
                 ctx.entry.finish_letter();
                 match space_goes_to(ctx, ctx.entry.focus()) {
                     Some(to) => focus_field(ctx, to),
-                    None => from_button(ctx, || ctx.entry.push(' ')),
+                    None => from_button(ctx, || ctx.entry.push_space()),
                 }
             },
             kbd { "Space" }
@@ -791,11 +793,12 @@ fn RunKeypad(qso: QsoState, open: bool) -> Element {
         .map(|enter| enter.label)
         .unwrap_or_default();
     let on_key = use_callback(move |pressed: PadKey| {
+        let keyed = MonoMs(mono_ms());
         // A letter keyed in full on the paddles lands before the key's own,
         // and their word is over, so no word space follows the key.
         entry.finish_letter();
         match pressed {
-            PadKey::Char(ch) => entry.push(ch),
+            PadKey::Char(ch) => entry.push(ch, Some(keyed)),
             PadKey::Back => entry.pop(),
             PadKey::Field => field_space(ctx),
             PadKey::Send(_) | PadKey::Next => press_key(ctx, OpKey::Esm),
@@ -867,10 +870,9 @@ fn paused_why(why: PauseWhy) -> Option<&'static str> {
     }
 }
 
-/// Pause, End run and Discard, which asks once more first: the QSOs it
-/// throws away are not kept anywhere. Asking, Keep it stands where Discard
-/// stood, so the second tap of a double tap keeps the run. Discard and Keep
-/// it leave the cursor in the field, so the run goes on as it was.
+/// Pause, End run and Discard, which asks once more first
+/// ([`crate::ui::discard`]). Discard and Keep it leave the cursor in the
+/// field, so the run goes on as it was.
 ///
 /// Paused, Pause keeps its place, inert, and says so: the paused page is
 /// shorter, so the row may come to rest under the finger that paused, and
@@ -879,34 +881,16 @@ fn paused_why(why: PauseWhy) -> Option<&'static str> {
 #[component]
 fn RunActions(paused: bool) -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut asking = use_signal(|| false);
-    // The question takes more room than the row it replaces, and its Discard
-    // can land below the window, or under the guide: it is brought into
-    // sight once the page has it.
-    use_effect(move || {
-        if asking() {
-            bring_into_sight(&[control_id("btn", "discard run")]);
-        }
-    });
-    if asking() {
+    let asking = use_discard_ask(Discarded::Run);
+    if asking.is_open() {
         return rsx! {
             div {
                 id: control_id("run", "actions"),
                 class: "train-actions run-actions asking",
-                p { class: "run-ask", role: "alert", "Discard this run? Its QSOs are not kept" }
-                button {
-                    id: control_id("btn", "discard run"),
-                    class: "btn btn-danger",
-                    onclick: move |_| abort_run(ctx),
-                    Icon { name: IconName::X }
-                    "Discard"
-                }
-                button {
-                    id: control_id("btn", "keep run"),
-                    class: "btn btn-secondary",
-                    onmousedown: keep_focus,
-                    onclick: move |_| from_button(ctx, || asking.set(false)),
-                    "Keep it"
+                DiscardAsk {
+                    what: Discarded::Run,
+                    on_discard: move |()| abort_run(ctx),
+                    on_keep: move |()| from_button(ctx, || asking.close()),
                 }
             }
         };
@@ -929,14 +913,7 @@ fn RunActions(paused: bool) -> Element {
                 Icon { name: IconName::Flag }
                 "End run"
             }
-            button {
-                id: control_id("btn", "discard"),
-                class: "btn btn-danger",
-                onmousedown: keep_focus,
-                onclick: move |_| asking.set(true),
-                Icon { name: IconName::X }
-                "Discard"
-            }
+            DiscardButton { asking }
         }
     }
 }
@@ -2312,22 +2289,23 @@ mod tests {
     }
 
     /// Key `letter` on the paddles from the field `on`, then quiet until its
-    /// letter space has ended it, three dits after its last element.
+    /// letter space has ended it, two dits after its last element.
     async fn key_letter(ui: &mut Ui, on: &str, letter: char) {
+        // The elements end with a dit of space keyed after the last.
         key_elements(ui, on, letter).await;
-        ui.advance(2 * DIT_MS + 8).await;
+        ui.advance(DIT_MS + 8).await;
     }
 
     /// From the letter space that ended a letter on to the end of its word
-    /// space, seven dits after the letter's last element, and a step more.
+    /// space, six dits after the letter's last element, and a step more.
     const TO_WORD_SPACE_MS: u64 = 4 * DIT_MS + 8;
 
     /// The paddles key into the field with the cursor, and quiet for a word
-    /// space after a letter, seven dits at the keyer's speed, they press
+    /// space after a letter, six dits at the keyer's speed, they press
     /// Space: on from Call to Exchange, back to Call from a WPX
     /// exchange, the cursor at the end of the field each time and nothing
     /// typed, and in a Sprint's exchange the space before its next item, as
-    /// the Space key does. A hesitation of six dits between two letters
+    /// the Space key does. A hesitation of five dits between two letters
     /// keeps them in one field, quiet after the word presses Space once, and
     /// a key pressed in the word space ends the word with no Space after it.
     #[test]

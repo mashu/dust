@@ -58,6 +58,49 @@ The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
 Android devices will not open two at once.
 
+The paddle's sidetone keeps the keyer's time, not the audio callback's. An
+output renders a whole buffer at once, 10 ms on Windows and in most browsers
+and about 23 ms on iOS unless asked, so a gate it only read would open at the
+start of whichever buffer came next, and a 40 ms dit would play as 30 or 50.
+Instead the keyer stamps each edge with the instant it meant it for, and the
+player sounds every edge a constant lead later: the longest buffer the device
+has lately asked for, and 2 ms for the keyer's own timer to be late. Natively
+the callback places each edge on the frame it falls on
+([`src/audio/mixer/sidetone.rs`](../src/audio/mixer/sidetone.rs)); the browser
+is told each edge ahead of time on its own clock
+([`SidetoneGate`](../src/audio/shape.rs)). Every element and space then sounds
+as long as it was keyed, on every platform, at the cost of about half a buffer
+of lag on average. A burst of keying that reaches the output late — the
+squeeze that wakes a sleeping stream — keeps its own time, that much later,
+until the next quiet spell. iOS is asked for a 5 ms buffer: cpal cannot set
+one there, and the session's default would leave the sidetone some 25 ms
+behind the paddle. The sidetone opens and closes along the keying
+envelope's edge, as a rig shapes its sidetone with its transmitter's, at a
+level of its own, half the limiter's knee.
+
+That stream is closed once nothing has sounded for a second, away from
+Settings, so the phone (or a desktop's sound card and sound server) can rest
+with the app open on a screen or in the background. The next send, band or
+paddle squeeze opens it again. Settings keeps it open for the paddle's first
+squeeze, and a session, or a run while it is not paused, holds it open. The
+volume keys turn the media volume meanwhile, which Dust plays at: before
+Android 9 they would turn the ringer with no stream playing. The browser
+build suspends its audio the same way, once nothing is left to hear.
+
+The browser plays the native player's own mixer: the band, the stations,
+the receiver's filter and AGC, the mute while you send, the fades and the
+fading, all in Rust ([`src/audio/stream.rs`](../src/audio/stream.rs)). A
+browser plays only what it is handed ahead of time, so the mixer is run
+half a second ahead of its clock, a tenth of a second at a time, each
+stretch scheduled as a buffer, with a copy of the mixer kept from the start
+of each. A send, a stop, a new band or an RF gain moved is made 30 ms past
+the browser's clock and its base latency: the stretch that moment falls in
+is played again from its copy up to there, sample for sample as it was,
+and the rest made anew. The graph left is the volume, the soft limiter and
+the paddle's sidetone. On iPhone Safari the page takes the playback audio
+session the first time something is about to be heard, so the Ring/Silent
+switch does not mute it.
+
 If a toolchain bring-up ever blocks on oboe, `--features mobile-silent` builds
 the same app with a player that keeps a session's timing but makes no sound,
 and the practice screen says so.
@@ -182,6 +225,33 @@ into those sizes under [`assets/linux/`](../assets/linux) by
 to `dust.desktop`. Regenerate them after changing the master. The same master
 is the window icon.
 
+### Drawn on the graphics card
+
+On Linux, WebKitGTK draws the page with the graphics card through its DMA-BUF
+renderer. Left to itself, Dioxus turns that renderer off on every Wayland
+session with a GPU (`WEBKIT_DISABLE_DMABUF_RENDERER`), a workaround for
+NVIDIA's driver. A recent WebKitGTK (2.52 among them) then sets its hardware
+acceleration to never and paints every page by the processor, so scrolling
+lags. Dust keeps it on ([`src/linux_webview.rs`](../src/linux_webview.rs)).
+The one exception is NVIDIA's own driver on a Wayland session, whose windows
+can come up blank with it on. The app still runs under XWayland, as Dioxus
+has it, for the window manager's title bar.
+
+Settings → Display → Check says what draws the page: the graphics card by
+name, or the processor ("llvmpipe" and the like), and why compositing is off
+if it is. On Linux that comes from WebKitGTK's own `webkit://gpu` page, which
+GNOME Web shows as well. A page's WebGL is only told a made-up name there.
+That page also says when the card draws but the processor copies each frame
+to the window (under X11 or XWayland, or with
+`WEBKIT_DMABUF_RENDERER_FORCE_SHM`), and when Skia paints on the processor
+(`WEBKIT_SKIA_ENABLE_CPU_RENDERING`). The check says both, with the cause.
+
+To try the graphics card under NVIDIA, start Dust with
+`WEBKIT_DISABLE_DMABUF_RENDERER=0`. Set to `1`, it paints by the processor
+anywhere, should the graphics driver misbehave. `GDK_BACKEND=wayland` runs
+it as a native Wayland window. Any of these set before Dust starts is left
+as it is.
+
 ### Copying while you work in other programs
 
 Listen → **Stream groups** keeps sending groups with the window minimised or
@@ -217,9 +287,23 @@ gives it:
 `DUST_DATA_DIR` overrides the directory on every desktop and mobile build,
 which is what a portable install uses.
 
+A session or contest run is marked open while it runs, and the mark goes
+once it ends, stored or discarded. Each copy of the app marks its own, a
+window or a tab of its own, and holds a lock on it for as long as it runs. A
+copy that stops lets go of its lock, however it stops: closed, crashed,
+killed, reloaded, or rebuilt under `dx serve`. So a mark nobody holds was cut
+off, and the app says so, once, on the screen it opens on, or once the
+session it starts next is over, if the window that was running it stopped
+meanwhile. A mark another window still holds is left to it. On desktop and
+mobile the marks are `open/<id>.json`, each beside the `open/<id>.lock` its
+copy holds; one a power cut left empty still says a session was cut off. In
+a browser they are `dust_open_session_<id>` in `localStorage`, each held by
+a Web Lock of the same name. A browser without Web Locks marks nothing,
+rather than take a tab still running for one cut off.
+
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
-`dust_last_backup`) and
+`dust_last_backup`, `dust_open_session_*`) and
 file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
 that field. A history that

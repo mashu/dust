@@ -18,12 +18,11 @@
 
 use std::sync::Arc;
 
-use crate::band::{Qsb, SOFT_LIMIT_KNEE};
-use crate::morse::morse_for;
+use crate::band::{FADE_STEP_SEC, Qsb, SOFT_LIMIT_KNEE};
 use crate::session::MonoMs;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
 use crate::timing::{
-    Interferer, PlannedTransmission, PlaybackPlan, StationVoice, ToneEvent, Transmission,
+    CharSpan, Interferer, PlannedTransmission, PlaybackPlan, StationVoice, ToneEvent, Transmission,
     plan_from, plan_morse_playback_at, plan_morse_playback_for,
 };
 
@@ -35,9 +34,8 @@ use crate::timing::{
 /// so no band setting moves its level or takes any of it away.
 ///
 /// Where the output stage's limiter starts to bend: at its loudest your
-/// message peaks right there and never past it, as loud as the strongest
-/// station a receiver plays at full volume and as the paddle's sidetone at
-/// the default strength floor (0.7).
+/// message peaks right there and never past it, about as loud as the
+/// strongest station a receiver plays at full volume.
 ///
 /// On the worst band, the widest filter at the hardest noise and static,
 /// the limiter takes the band's crests on top of it some of the time, as it
@@ -207,6 +205,8 @@ impl Turn {
                     text: segment.text.clone(),
                     voice: segment.voice,
                     delay_sec: segment.start_sec,
+                    // Its fading is in its tones (`plan_turn`).
+                    fade_from_sec: 0.0,
                 })
                 .collect(),
         })
@@ -238,45 +238,31 @@ pub(super) fn sending_sec(text: &str, settings: &TrainingSettings, voice: &Stati
 /// first of the next: where a message sent after one that has just ended
 /// would start, as the two were one text.
 pub(super) fn word_gap_sec(settings: &TrainingSettings, voice: &StationVoice) -> f64 {
-    let spans = char_spans("E E", settings, voice);
-    match spans[..] {
-        [(_, _, first_end), (_, second_start, _)] => second_start - first_end,
+    match char_spans("E E", settings, voice)[..] {
+        [first, second] => second.start_sec - first.end_sec,
         _ => 0.0,
     }
 }
 
 /// Where each character of `text` that sounds starts and ends, in seconds
-/// from the start of the text: its byte index, start and end.
+/// from the start of the text, as `voice` sends it.
 pub(super) fn char_spans(
     text: &str,
     settings: &TrainingSettings,
     voice: &StationVoice,
-) -> Vec<(usize, f64, f64)> {
-    let plan = plan_morse_playback_for(text, settings, voice);
-    let mut tones = plan.events.iter();
-    text.char_indices()
-        .filter(|(_, c)| *c != ' ')
-        .filter_map(|(at, c)| {
-            let elements = morse_for(c)?.len();
-            let first = tones.next()?;
-            let mut end = first.start_sec + first.duration_sec;
-            for tone in tones.by_ref().take(elements - 1) {
-                end = tone.start_sec + tone.duration_sec;
-            }
-            Some((at, first.start_sec, end))
-        })
-        .collect()
+) -> Vec<CharSpan> {
+    plan_morse_playback_for(text, settings, voice).chars
 }
 
 /// The byte index of the character sounding `at_sec` into a text with
 /// `spans`, or of the next one when `at_sec` falls between two: where the
 /// rest of it starts, that character sent again whole. None once all of it
 /// has been sent.
-pub(super) fn sounding_at(spans: &[(usize, f64, f64)], at_sec: f64) -> Option<usize> {
+pub(super) fn sounding_at(spans: &[CharSpan], at_sec: f64) -> Option<usize> {
     spans
         .iter()
-        .find(|(_, _, end)| *end > at_sec)
-        .map(|(at, _, _)| *at)
+        .find(|span| span.end_sec > at_sec)
+        .map(|span| span.at)
 }
 
 /// The sound of `turn`. `wanted` is your message, stretched to end with the
@@ -329,10 +315,15 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
         for tone in &mut plan.events {
             tone.start_sec += segment.start_sec;
         }
+        for span in &mut plan.chars {
+            span.start_sec += segment.start_sec;
+            span.end_sec += segment.start_sec;
+        }
         plan.duration_sec += segment.start_sec;
         match (segment.who, wanted.as_mut()) {
             (Sender::You, Some(yours)) => {
                 yours.events.extend(plan.events);
+                yours.chars.extend(plan.chars);
                 yours.duration_sec = yours.duration_sec.max(plan.duration_sec);
             }
             (Sender::You, None) => wanted = Some(plan),
@@ -351,9 +342,11 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
         });
         PlaybackPlan {
             events: Vec::new(),
+            chars: Vec::new(),
             duration_sec: 0.0,
             resolved_char_wpm: char_wpm,
             resolved_effective_wpm: effective_wpm,
+            fade_from_sec: 0.0,
         }
     });
     wanted.duration_sec = wanted.duration_sec.max(ends);
@@ -366,14 +359,19 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
 }
 
 /// Lay `fade` into each of `tones`, timed from the start of their segment:
-/// every point of a tone's envelope, which is sampled at the envelope's
-/// rate (`ENVELOPE_SAMPLE_RATE`), is scaled by the fade at the moment it
-/// plays, so a fade a few times a second still moves smoothly through a long
-/// dah. Each tone has an envelope of its own then, no longer one shared by
-/// every dit, and its level, which a player reads only where it cannot play
-/// the envelope, is scaled by the fade at its middle.
+/// every point of a tone's envelope is scaled by the fade at the moment it
+/// plays, read a step apart along the tone ([`FADE_STEP_SEC`]) with straight
+/// lines between, as a player reads a send's fading, so a fade a few times a
+/// second still moves smoothly through a long dah. Each tone has an envelope
+/// of its own then, no longer one shared by every dit, and its level, which
+/// a player reads only where it cannot play the envelope, is scaled by the
+/// fade at its middle.
 fn fade_tones(tones: &mut [ToneEvent], fade: Fade) {
     for tone in tones {
+        let steps = ((tone.duration_sec / FADE_STEP_SEC).ceil() as usize).max(1);
+        let marks: Vec<f32> = (0..=steps)
+            .map(|k| fade.gain_at(tone.start_sec + tone.duration_sec * k as f64 / steps as f64))
+            .collect();
         let points = tone.envelope.len();
         let at = |point: usize| {
             let through = if points > 1 {
@@ -381,7 +379,10 @@ fn fade_tones(tones: &mut [ToneEvent], fade: Fade) {
             } else {
                 0.5
             };
-            fade.gain_at(tone.start_sec + tone.duration_sec * through)
+            let along = through * steps as f64;
+            let k = (along.floor() as usize).min(steps - 1);
+            let frac = (along - k as f64) as f32;
+            marks[k] + (marks[k + 1] - marks[k]) * frac
         };
         let faded: Vec<f32> = tone
             .envelope
@@ -561,6 +562,7 @@ mod tests {
                         text: "W7ABC".to_string(),
                         voice,
                         delay_sec: 0.1 * f64::from(k),
+                        fade_from_sec: 0.0,
                     })
                     .collect(),
             },
@@ -583,7 +585,7 @@ mod tests {
             "it waits its delay"
         );
         for tone in &planned.others[0].events {
-            assert!(tone.start_sec + tone.duration_sec <= planned.wanted.duration_sec + 1e-9);
+            assert!(tone.start_sec + tone.keyed_sec <= planned.wanted.duration_sec + 1e-9);
         }
     }
 
@@ -609,7 +611,7 @@ mod tests {
             .wanted
             .events
             .iter()
-            .map(|tone| tone.duration_sec)
+            .map(|tone| tone.keyed_sec)
             .fold(f64::MAX, f64::min);
         assert!((shortest - 1.2 / 30.0).abs() < 1e-9);
     }
@@ -636,10 +638,11 @@ mod tests {
         turn
     }
 
-    /// A caller's fade is laid into each of its tones, point by point at the
-    /// moment each point plays, every tone with an envelope of its own and
-    /// its level scaled to match; it moves smoothly from point to point, and
-    /// two callers read from their own points in it rise and fall apart.
+    /// A caller's fade is laid into each of its tones, every point at the
+    /// moment it plays, as a player reads a fade; every tone with an
+    /// envelope of its own and its level scaled to match. It moves smoothly
+    /// from point to point, and two callers read from their own points in it
+    /// rise and fall apart.
     #[test]
     fn callers_fade_independently_and_smoothly() {
         let settings = settings();
@@ -661,8 +664,13 @@ mod tests {
                     tone.envelope.iter().zip(base.envelope.iter()).enumerate()
                 {
                     let t = from_sec + start + tone.duration_sec * point as f64 / points as f64;
+                    // Read a millisecond apart: to a few hundredths of a
+                    // decibel.
                     let expected = level_then * qsb.gain_at(t);
-                    assert!((level - expected).abs() < 1e-6, "tone {at}, point {point}");
+                    assert!(
+                        (level - expected).abs() <= 0.005 * level_then,
+                        "tone {at}, point {point}"
+                    );
                 }
                 let middle = qsb.gain_at(from_sec + start + tone.duration_sec / 2.0);
                 assert!((tone.target_gain - base.target_gain * f64::from(middle)).abs() < 1e-9);
@@ -908,7 +916,9 @@ mod tests {
                     let t = start + tone.duration_sec * point as f64 / points as f64;
                     let both =
                         qsb.map_or(1.0, |qsb| qsb.gain_at(11.0 + t)) * flutter.gain_at(11.0 + t);
-                    assert!((level - level_then * both).abs() < 1e-6);
+                    // A millisecond apart, a flutter's corners are cut by a
+                    // fifth of a decibel at most.
+                    assert!((level - level_then * both).abs() <= 0.025 * level_then);
                     assert!((fade.gain_at(t) - both).abs() < 1e-6);
                 }
                 heard.push(fade.gain_at(start + tone.duration_sec / 2.0));
@@ -961,21 +971,25 @@ mod tests {
         let spans = char_spans(text, &settings, &voice);
         assert_eq!(spans.len(), text.chars().filter(|c| *c != ' ').count());
         let length = sending_sec(text, &settings, &voice);
-        assert!((spans.last().map_or(0.0, |span| span.2) - length).abs() < 1e-9);
+        assert!((spans.last().map_or(0.0, |span| span.end_sec) - length).abs() < 1e-9);
         for step in 0..=200 {
             let at_sec = length * f64::from(step) / 200.0 - 0.05;
             let sent: String = spans
                 .iter()
-                .filter(|(_, _, end)| *end <= at_sec)
-                .map(|(at, _, _)| &text[*at..=*at])
+                .filter(|span| span.end_sec <= at_sec)
+                .map(|span| &text[span.at..=span.at])
                 .collect();
             let rest = sounding_at(&spans, at_sec).map_or("", |from| &text[from..]);
             let whole: String = text.chars().filter(|c| *c != ' ').collect();
             let rest: String = rest.chars().filter(|c| *c != ' ').collect();
             assert_eq!(format!("{sent}{rest}"), whole, "cut at {at_sec:.3} s");
             // A character sounding at the cut goes again, from its start.
-            if let Some((at, ..)) = spans.iter().find(|(_, s, e)| *s <= at_sec && at_sec < *e) {
-                assert_eq!(sounding_at(&spans, at_sec), Some(*at));
+            if let Some(at) = spans
+                .iter()
+                .find(|span| span.start_sec <= at_sec && at_sec < span.end_sec)
+                .map(|span| span.at)
+            {
+                assert_eq!(sounding_at(&spans, at_sec), Some(at));
             }
         }
         assert_eq!(sounding_at(&spans, length + 1.0), None);

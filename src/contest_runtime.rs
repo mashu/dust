@@ -18,7 +18,7 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::playback::Preview;
-use crate::player::{AudioError, Lease};
+use crate::player::{AudioError, Lease, SendNews};
 use crate::session_runtime::{Live, keep_and_show};
 use crate::state::{AppCtx, Finished, Said, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
@@ -106,14 +106,21 @@ impl ContestEntry {
         }
     }
 
-    /// A character the paddles or the keypad typed into the field with the
-    /// cursor. The page has not seen it, so that input is drawn again.
-    pub fn push(mut self, letter: char) {
+    /// A character the paddles or the keypad keyed into the field with the
+    /// cursor at `keyed`. The page has not seen it, so that input is drawn
+    /// again.
+    pub fn push(mut self, letter: char, keyed: Option<MonoMs>) {
         let field = *self.focus.peek();
         let mut text = self.text(field);
         text.push(letter);
-        self.edit(field, text);
+        self.edit(field, text, keyed);
         *self.repaint.write() += 1;
+    }
+
+    /// A space typed into the field with the cursor: it parts the
+    /// exchange's items, and is no character of one.
+    pub fn push_space(self) {
+        self.push(' ', None);
     }
 
     /// The keypad's ⌫ took the last character out of the field with the
@@ -122,7 +129,7 @@ impl ContestEntry {
         let field = *self.focus.peek();
         let mut text = self.text(field);
         if text.pop().is_some() {
-            self.edit(field, text);
+            self.edit(field, text, None);
             *self.repaint.write() += 1;
         }
     }
@@ -135,8 +142,9 @@ impl ContestEntry {
     }
 
     /// `field` now holds `text`, as its input does already, so nothing is
-    /// drawn for it.
-    pub fn edit(mut self, field: EntryField, text: String) {
+    /// drawn for it: what is new in it keyed at `keyed`, or untimed at
+    /// `None`.
+    pub fn edit(mut self, field: EntryField, text: String, keyed: Option<MonoMs>) {
         // Only a run has fields to type in, and it reads them from the
         // start.
         let Some((rules, side)) = *self.reads.peek() else {
@@ -144,7 +152,7 @@ impl ContestEntry {
         };
         self.fields
             .write()
-            .edit(field, text, MonoMs(mono_ms()), rules, side);
+            .edit(field, text, MonoMs(mono_ms()), keyed, rules, side);
         *self.typed.write() += 1;
     }
 
@@ -304,6 +312,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
         last_tick: None,
         unsaid: Vec::new(),
     })));
+    ctx.mark_running(true);
     run_effects(ctx, &lease, effects);
 }
 
@@ -323,7 +332,13 @@ pub fn press_key(ctx: AppCtx, key: OpKey) {
     };
     lease.wake();
     let fields = ctx.entry.snapshot();
-    apply(ctx, Some(ContestEvent::Key { key, fields }));
+    apply(
+        ctx,
+        Some(ContestEvent::Key {
+            key,
+            fields: Box::new(fields),
+        }),
+    );
 }
 
 /// − / +: your speed, moved by `delta` WPM from your next message on, and
@@ -569,14 +584,23 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
     let asked = lease.ask_to_send();
     spawn_forever(async move {
         let heard = lease.clone();
-        // Each attempt, retries too: its sound reaches the ear the player's
-        // lead, any wait for its moment and latency after it starts.
-        let started = move |heard_after_sec: f64| {
-            let heard_from = MonoMs(mono_ms()).plus_sec(heard_after_sec);
-            dispatch(ctx, &heard, ContestEvent::TurnStarted { id, heard_from });
+        // Each attempt, retries too: when its sound goes to the output, and
+        // when it reaches the ear, the player's lead, any wait for its
+        // moment and latency after it starts; and whether it was held up on
+        // its way, however it ended.
+        let news = move |news: SendNews<'_>| {
+            let event = match news {
+                SendNews::Started(start) => ContestEvent::TurnStarted {
+                    id,
+                    heard_from: start.heard_at(),
+                    output_from: start.output_at,
+                },
+                SendNews::HeldUp => ContestEvent::TurnHeldUp { id },
+            };
+            dispatch(ctx, &heard, event);
         };
         let event = match lease
-            .send_planned(asked, &plan, &transcript, &settings, starts_at, started)
+            .send_planned(asked, &plan, &transcript, &settings, starts_at, news)
             .await
         {
             Ok(_) => ContestEvent::TurnEnded { id },
@@ -616,8 +640,9 @@ pub fn refocus_run(ctx: AppCtx) {
     }
 }
 
-/// The run, taken out of the app, with the audio given back. Its sound has
-/// stopped, so what it held for a screen reader is said now.
+/// The run, taken out of the app, with the audio given back: marked over
+/// once it is stored or let go. Its sound has stopped, so what it held for a
+/// screen reader is said now.
 fn end_run(ctx: AppCtx) -> Option<LiveContest> {
     let taken = ctx
         .app()
@@ -659,7 +684,10 @@ fn keep_nothing(ctx: AppCtx) {
         mut auto_message,
         ..
     } = ctx;
-    end_run(ctx);
+    if end_run(ctx).is_none() {
+        return;
+    }
+    ctx.mark_ended();
     view.set(None);
     result.set(Some(Finished::NothingKept));
     auto_message.set(None);
@@ -673,7 +701,10 @@ fn abandon_run(ctx: AppCtx) {
         contest: mut view,
         ..
     } = ctx;
-    end_run(ctx);
+    if end_run(ctx).is_none() {
+        return;
+    }
+    ctx.mark_ended();
     view.set(None);
     screen.set(Screen::Home);
 }
@@ -720,7 +751,7 @@ mod tests {
 
     fn type_into(h: &mut Harness, field: EntryField, text: &str) {
         let entry = h.ctx.entry;
-        h.in_app(|| entry.edit(field, text.to_string()));
+        h.in_app(|| entry.edit(field, text.to_string(), Some(MonoMs(mono_ms()))));
     }
 
     /// What the callers sent in the last turn, as the player was told it.
@@ -971,6 +1002,30 @@ mod tests {
                 matches!(&row.status, cw_core::RowStatus::Checked(check) if check.is_clean())
             };
             assert!(h.run_until(15_000, clean).await, "logged and checked clean");
+        });
+    }
+
+    /// A run is marked open from its start until it ends, kept or not: one
+    /// the app stops under is told of when it next opens.
+    #[test]
+    fn a_run_is_marked_open_while_it_runs() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.start_training();
+            let open = h.store.open.get().expect("marked open");
+            assert!(open.run);
+            let ctx = h.ctx;
+            h.in_app(|| crate::session_runtime::abort_run(ctx));
+            h.pump();
+            assert_eq!(h.screen(), Screen::Home);
+            assert_eq!(h.store.open.get(), None, "discarded");
+
+            h.start_training();
+            assert!(h.store.open.get().is_some());
+            h.in_app(|| crate::session_runtime::finish_run(ctx));
+            h.pump();
+            assert_ne!(h.screen(), Screen::Training);
+            assert_eq!(h.store.open.get(), None, "ended");
         });
     }
 
@@ -1395,7 +1450,7 @@ mod tests {
             assert_eq!(repaints(&h), drawn, "typing drew the fields");
 
             h.in_app(|| entry.set_focus(EntryField::Exchange));
-            h.in_app(|| entry.push('5'));
+            h.in_app(|| entry.push('5', Some(MonoMs(mono_ms()))));
             assert_eq!(entry.snapshot().exch, "2145");
             assert_eq!(repaints(&h), drawn + 1, "a paddle letter is drawn");
 

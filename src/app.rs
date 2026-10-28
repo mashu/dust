@@ -15,6 +15,7 @@ use crate::state::{AppCtx, AppState, Screen, ToastAction};
 use crate::theme::Theme;
 use crate::time::sleep_ms;
 use crate::ui::contest::RunAnnouncer;
+use crate::ui::notice::NoticeBanner;
 use crate::ui::paddle::use_paddle_keys;
 use crate::ui::tour::{TourButton, TourDock};
 use crate::ui::widgets::{Icon, IconName, control_id, keep_focus};
@@ -112,6 +113,9 @@ pub fn App() -> Element {
         toasts,
         ..
     } = ctx;
+    // A session or run the last copy of the app stopped under is told of
+    // as this one opens.
+    use_hook(move || ctx.tell_of_cut_off());
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
@@ -210,6 +214,11 @@ pub fn App() -> Element {
                     }
                 }
                 div { class: "screen", id: "screen-{screen_key}",
+                    // Off the training screen: whatever the session or run
+                    // before ended with, other than by your hand.
+                    if show_nav {
+                        NoticeBanner {}
+                    }
                     Route { screen: screen_now }
                 }
             }
@@ -385,7 +394,8 @@ mod tests {
 
 #[cfg(test)]
 mod ui_tests {
-    use crate::persist::Store;
+    use crate::persist::memory::MemoryStore;
+    use crate::persist::{OpenSession, Store};
     use crate::testing::{Ui, run, stored_session, test_settings};
     use cw_core::{CharSetMode, PracticeWindow, TrainingSettings};
     use dioxus::prelude::{Code, Key, ReadableExt, WritableExt};
@@ -704,16 +714,276 @@ mod ui_tests {
     #[test]
     fn every_way_out_of_a_session_is_honoured() {
         run(|| async {
-            for button in ["btn-exit", "btn-end-session", "btn-discard"] {
+            for presses in [
+                &["btn-exit"][..],
+                &["btn-end-session"],
+                &["btn-discard", "btn-discard-session"],
+            ] {
+                let button = presses.join(" then ");
                 let (mut ui, _recorder) = Ui::app_with_settings(short_session());
                 ui.click("btn-start-training");
-                ui.click(button);
+                for press in presses {
+                    ui.click(press);
+                }
                 assert!(
                     ui.run_until(2_000, |ui| ui.screen() == "home").await,
                     "{button} should have left the session"
                 );
                 assert!(ui.store.load_sessions().is_empty());
             }
+        });
+    }
+
+    /// Discard asks once more: what it throws away is kept nowhere. Keep it
+    /// carries the session on as it was; only the second Discard leaves it,
+    /// answered groups and all.
+    #[test]
+    fn discarding_a_session_asks_once_more() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let (mut ui, recorder) = awaiting_answer(settings).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+
+            ui.click("btn-discard");
+            assert_eq!(ui.screen(), "training", "the first press only asks");
+            assert!(ui.has("Discard this session? Its answers are not kept"));
+            assert!(!ui.shows("btn-end-session"), "the question takes the row");
+            ui.click("btn-keep-session");
+            assert!(ui.shows("btn-end-session") && ui.shows("btn-discard"));
+            assert!(!ui.shows("btn-discard-session"));
+            assert_eq!(ui.screen(), "training");
+
+            ui.click("btn-discard");
+            ui.click("btn-discard-session");
+            assert_eq!(ui.screen(), "home");
+            assert!(ui.store.load_sessions().is_empty());
+        });
+    }
+
+    /// A session or run the last copy of the app stopped under is told of
+    /// as the app opens, once, until it is put away. One another copy is
+    /// still running is left to it, and told of if that copy stops under it
+    /// before this one starts a session of its own.
+    #[test]
+    fn a_session_the_app_stopped_under_is_told_of() {
+        run(|| async {
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.mark_tutorial_done();
+            store.save_settings(&short_session());
+            let started_at = crate::time::now_ms();
+            store.mark_open(Some(OpenSession {
+                started_at,
+                run: false,
+            }));
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(
+                ui.has("was cut off: Dust closed while it ran"),
+                "{}",
+                ui.html()
+            );
+            assert_eq!(store.open.get(), None, "told of once");
+            ui.click("btn-dismiss-notice");
+            assert!(!ui.has("was cut off"));
+
+            // Another window is running one as this copy opens.
+            store.mark_open(Some(OpenSession {
+                started_at,
+                run: true,
+            }));
+            store.open_elsewhere.set(true);
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
+            assert!(!ui.has("was cut off"), "another copy is running it");
+            // It stops under that run; this copy starts a session.
+            store.open_elsewhere.set(false);
+            ui.click("btn-start-training");
+            ui.click("btn-discard");
+            ui.click("btn-discard-session");
+            ui.advance(20).await;
+            assert_eq!(ui.screen(), "home");
+            assert!(
+                ui.has("Your contest run started at"),
+                "the other window's run, once this session is over: {}",
+                ui.html()
+            );
+        });
+    }
+
+    /// Pressed from the keyboard, Discard hands the cursor to Keep it, so a
+    /// second Enter keeps the session; pressed with the mouse, the cursor
+    /// stays where it was.
+    #[test]
+    fn discard_pressed_from_the_keyboard_leaves_the_cursor_on_keep_it() {
+        run(|| async {
+            let (mut ui, _recorder) = awaiting_answer(short_session()).await;
+            ui.take_focused();
+            ui.press_enter("btn-discard");
+            ui.click("btn-discard");
+            assert_eq!(ui.take_focused(), ["btn-keep-session"]);
+            ui.click("btn-keep-session");
+            assert_eq!(ui.screen(), "training");
+
+            ui.take_focused();
+            assert!(!ui.mouse_down("btn-discard"), "the cursor stays put");
+            ui.click("btn-discard");
+            assert!(ui.shows("btn-keep-session"));
+            assert!(
+                !ui.take_focused().iter().any(|id| id == "btn-keep-session"),
+                "a click leaves the cursor in the box"
+            );
+        });
+    }
+
+    /// A screen at rest changes nothing on the page, so the webview has
+    /// nothing to lay out or paint again: none on Settings or Stats, and on
+    /// Home only the tip, every few seconds. On the desktop every change
+    /// crosses to the webview, on the thread it scrolls on.
+    #[test]
+    fn screens_at_rest_change_nothing() {
+        run(|| async {
+            let history: Vec<_> = (1..=28)
+                .map(|day| {
+                    stored_session(
+                        &format!("2026-09-{day:02}"),
+                        &[("KMRS", "KMRS"), ("UAPT", "UAPX")],
+                    )
+                })
+                .collect();
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &history);
+            for (nav, most) in [("nav-settings", 0), ("nav-stats", 0), ("nav-practice", 6)] {
+                ui.click(nav);
+                ui.advance(1_000).await;
+                ui.take_work();
+                ui.advance(20_000).await;
+                let work = ui.take_work();
+                assert!(work <= most, "{nav}: {work} changes in 20 s at rest");
+            }
+            // The Scores tab reads every stored run's log to draw: at rest
+            // it is not drawn again, even with nothing changing on the page.
+            let mut history: Vec<_> = (1..=6)
+                .map(|day| stored_session(&format!("2026-09-{day:02}"), &[("KM", "KM"); 10]))
+                .collect();
+            history.extend((7..=9).map(|day| {
+                crate::testing::stored_run(
+                    &format!("2026-09-{day:02}"),
+                    &[("K5XYZ", "214", "K5XYZ", "214"); 6],
+                )
+            }));
+            let (mut ui, _recorder) = Ui::app_with_history(test_settings(), &history);
+            ui.click("nav-stats");
+            ui.click("seg-scores");
+            ui.advance(1_000).await;
+            assert!(ui.has("Best sessions"), "{}", ui.html());
+            ui.take_renders("ScoresTab");
+            ui.advance(20_000).await;
+            assert_eq!(ui.take_renders("ScoresTab"), 0, "Scores redrawn at rest");
+        });
+    }
+
+    /// Left alone, a session sending its groups, and a run with its clock
+    /// running, change the page little: what moves on, and the clock.
+    #[test]
+    fn a_session_and_a_run_left_alone_change_the_page_little() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 20;
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            ui.advance(200).await;
+            ui.take_work();
+            ui.advance(5_000).await;
+            let work = ui.take_work();
+            assert!(work <= 150, "a session: {work} changes in 5 s");
+
+            let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+            ui.click("btn-start-training");
+            ui.advance(6_000).await;
+            ui.take_work();
+            ui.advance(10_000).await;
+            let work = ui.take_work();
+            assert!(work <= 100, "a run: {work} changes in 10 s");
+        });
+    }
+
+    /// Left quiet away from Settings, the output sleeps a second on, and
+    /// whatever sounds next wakes it: a stream left running with nothing to
+    /// play keeps the audio thread and the sound device from ever resting.
+    /// Settings keeps it awake for the paddle's first squeeze; a session, or
+    /// the sidetone while it sounds, holds it awake too.
+    #[test]
+    fn the_output_sleeps_once_quiet_but_on_settings() {
+        run(|| async {
+            // A straight key, whose tone lasts as long as it is held down.
+            let mut settings = test_settings();
+            settings.playback.keyer_mode = cw_core::KeyerMode::Straight;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.advance(3_000).await;
+            assert!(!recorder.asleep.get(), "Settings keeps it ready");
+
+            ui.click("nav-practice");
+            ui.advance(600).await;
+            assert!(
+                !recorder.asleep.get(),
+                "not before it has been quiet a while"
+            );
+            ui.advance(600).await;
+            assert!(recorder.asleep.get(), "asleep on Home");
+
+            // A squeeze wakes it, and it sleeps again once the paddle rests.
+            let dit = || Key::Character("[".into());
+            ui.press_key("btn-guided-setup", dit(), Code::BracketLeft);
+            ui.advance(20).await;
+            assert!(!recorder.asleep.get(), "the squeeze woke it");
+            ui.advance(1_500).await;
+            assert!(!recorder.asleep.get(), "not while the sidetone sounds");
+            ui.release_key("btn-guided-setup", dit(), Code::BracketLeft);
+            ui.advance(1_500).await;
+            assert!(recorder.asleep.get(), "asleep once the paddle rests");
+
+            // Each from a moment after a screen let the audio go, so that it
+            // is about to sleep: a key held down past then, and a session.
+            let sleeps = recorder.sleeps.get();
+            ui.click("nav-stats");
+            ui.click("nav-practice");
+            ui.advance(500).await;
+            ui.press_key("btn-guided-setup", dit(), Code::BracketLeft);
+            ui.advance(1_500).await;
+            assert_eq!(recorder.sleeps.get(), sleeps, "asleep under a held key");
+            ui.release_key("btn-guided-setup", dit(), Code::BracketLeft);
+            ui.advance(500).await;
+            ui.click("btn-start-training");
+            ui.advance(4_000).await;
+            assert!(!recorder.texts().is_empty(), "the session sends");
+            assert!(!recorder.asleep.get());
+            assert_eq!(recorder.sleeps.get(), sleeps, "asleep under a session");
+        });
+    }
+
+    /// Starting the next session puts away what the last one left to say.
+    #[test]
+    fn starting_a_session_puts_the_notice_away() {
+        run(|| async {
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.mark_tutorial_done();
+            store.save_settings(&short_session());
+            store.mark_open(Some(OpenSession {
+                started_at: crate::time::now_ms(),
+                run: false,
+            }));
+            let (mut ui, _recorder) = Ui::launch(store);
+            ui.advance(20).await;
+            assert!(ui.has("was cut off"));
+            ui.click("btn-start-training");
+            ui.click("btn-discard");
+            ui.click("btn-discard-session");
+            assert_eq!(ui.screen(), "home");
+            assert!(!ui.has("was cut off"), "{}", ui.html());
         });
     }
 
@@ -1431,6 +1701,38 @@ mod ui_tests {
         });
     }
 
+    /// With the AGC off the band measures no knee of its own, so a follow
+    /// that took a move unmeasured puts it back to be measured: that follow
+    /// waits its turn as any other does, and a slider dragged without a
+    /// pause still has the band follow it at most every BAND_FOLLOW_MS.
+    #[test]
+    fn a_slider_dragged_with_the_agc_off_is_followed_at_most_so_often() {
+        run(|| async {
+            let mut settings = with_receiver();
+            settings.band.agc_enabled = false;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            // Each send brings its band in line too: counted apart.
+            let follows = || bands(&recorder).len() - recorder.texts().len();
+            let (before, from) = (follows(), crate::time::mono_ms());
+            // A move at every step of the clock, so in every measurement.
+            for step in 0..400 {
+                let width = if step % 2 == 0 { "1910" } else { "1920" };
+                ui.type_into("slider-filter-width", width);
+                ui.advance(1).await;
+            }
+            let dragged_ms = crate::time::mono_ms() - from;
+            let followed = follows() - before;
+            let most = (dragged_ms / u64::from(crate::routes::BAND_FOLLOW_MS) + 1) as usize;
+            assert!(
+                (1..=most).contains(&followed),
+                "{followed} follows in {dragged_ms} ms of dragging, at most {most}"
+            );
+        });
+    }
+
     /// Dragging a band slider during the preview moves the band a few times
     /// a second, not on every frame: each move rebuilds the band and
     /// measures its AGC, on the thread the slider is drawn on.
@@ -1514,17 +1816,38 @@ mod ui_tests {
             recorder.meter.borrow_mut().extend(std::iter::repeat_n(
                 crate::audio::MeterFrame {
                     input: line * db(9.0),
-                    gain: db(-4.0),
+                    held: db(-4.0),
                     output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
                 },
                 60,
             ));
             ui.advance(120).await;
+            let settings = with_receiver().clamp();
             assert!(
-                ui.has("Peaks 9 dB over the AGC · AGC takes 4 dB · 3 dB under the limiter"),
+                ui.has("takes 4 dB · 3 dB under the limiter"),
                 "{}",
                 ui.html()
             );
+            assert!(ui.has("badge scope-lamp on"), "the lamp is lit");
+            assert!(
+                ui.has(&crate::ui::scope::rf_trace_step(&settings, 9.0)),
+                "drawn 9 dB over the line: {}",
+                ui.html()
+            );
+            let over = crate::ui::scope::over_hiss(&settings).expect("a band with hiss");
+            assert!(
+                ui.has(&format!("Threshold {over:.0} dB over the hiss")),
+                "{}",
+                ui.html()
+            );
+            let mark = crate::ui::scope::hiss_mark_at(&settings).expect("a band with hiss");
+            let html = ui.html();
+            let hiss_line = html
+                .split("class=\"scope-hiss\"")
+                .nth(1)
+                .and_then(|rest| rest.split('>').next())
+                .unwrap_or_default();
+            assert!(hiss_line.contains(&mark), "{mark} in {hiss_line:?}");
             assert!(
                 recorder.meter.borrow().is_empty(),
                 "the scope took the frames"
@@ -1533,6 +1856,87 @@ mod ui_tests {
             ui.click("btn-band-stop");
             assert!(!ui.shows("level-scope"));
             assert!(ui.shows("scope-hint"));
+        });
+    }
+
+    /// A playing scope redraws only what moves, twenty times a second: its
+    /// two traces, its readout, its lamp and what it says to a screen
+    /// reader, at most five changes a poll however the band comes and goes.
+    #[test]
+    fn a_playing_scope_costs_at_most_five_changes_a_poll() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
+            let line = crate::ui::scope::threshold(&with_receiver().clamp()) as f32;
+            let _ = ui.take_work();
+            let mut drawn = 0;
+            for poll in 0..40 {
+                // A station over the line and gone again, the AGC taking it
+                // down and letting go, a poll each way.
+                let (input, held) = if poll % 4 < 2 {
+                    (line * 8.0, 0.25)
+                } else {
+                    (line * 0.1, 1.0)
+                };
+                recorder.meter.borrow_mut().extend(std::iter::repeat_n(
+                    crate::audio::MeterFrame {
+                        input,
+                        held,
+                        output: 0.2 + poll as f32 * 0.01,
+                    },
+                    5,
+                ));
+                ui.advance(50).await;
+                let work = ui.take_work();
+                assert!(work <= 5, "{work} changes in poll {poll}");
+                drawn += work;
+            }
+            assert!(drawn >= 2 * 40, "the scope drew {drawn} changes in all");
+        });
+    }
+
+    /// Dragging a control the AGC's knee hangs on measures no knee on the
+    /// thread that draws, which would be three seconds of band at every
+    /// step: the follow measures it once the drag pauses, and the scope's
+    /// line is that knee's from then on.
+    #[test]
+    fn dragging_the_filter_measures_no_knee_on_the_page() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            // Widths no other test asks the knee of: the memo it is kept in
+            // is the whole app's.
+            for width in (1_310..=1_400).step_by(10) {
+                ui.with_app(|ctx| {
+                    let mut settings = ctx.settings;
+                    settings.write().band.filter_width_hz = f64::from(width);
+                });
+            }
+            let settings = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
+            let receiver = cw_core::band::FilterDesign::from_settings(&settings);
+            assert_eq!(
+                cw_core::band::remembered_agc_knee(&settings.band, &receiver),
+                None,
+                "a knee was measured as the filter moved"
+            );
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
+            let db = |db: f64| 10f64.powf(db / 20.0) as f32;
+            let line = crate::ui::scope::threshold(&settings) as f32;
+            recorder.meter.borrow_mut().extend(std::iter::repeat_n(
+                crate::audio::MeterFrame {
+                    input: line * db(9.0),
+                    held: db(-4.0),
+                    output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
+                },
+                60,
+            ));
+            ui.advance(120).await;
+            assert!(
+                ui.has(&crate::ui::scope::rf_trace_step(&settings, 9.0)),
+                "the line is the new knee's: {}",
+                ui.html()
+            );
         });
     }
 
@@ -1669,6 +2073,115 @@ mod ui_tests {
                 [band_with_width(width_hz)],
                 "the follow should have taken the newest move after its last measurement"
             );
+        });
+    }
+
+    /// The scope reads what the band hears at the AGC against the line of
+    /// the band that plays: a tone `over` dB over it, metered once the
+    /// scope next looks, what the scope says of it, and whether it draws
+    /// the tone that far over its line.
+    async fn scope_reads(
+        ui: &mut Ui,
+        recorder: &crate::audio::fake::Recorder,
+        settings: &TrainingSettings,
+        over: f64,
+    ) -> (String, bool) {
+        let db = |db: f64| 10f64.powf(db / 20.0) as f32;
+        let line = crate::ui::scope::threshold(settings) as f32;
+        recorder.meter.borrow_mut().extend(std::iter::repeat_n(
+            crate::audio::MeterFrame {
+                input: line * db(over),
+                held: 1.0,
+                output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
+            },
+            60,
+        ));
+        ui.advance(60).await;
+        let html = ui.html();
+        let said = html
+            .split("id=\"scope-reading\"")
+            .nth(1)
+            .and_then(|rest| rest.split_once('>'))
+            .and_then(|(_, text)| text.split('<').next())
+            .unwrap_or_default()
+            .to_string();
+        let drawn = html.contains(&crate::ui::scope::rf_trace_step(settings, over));
+        (said, drawn)
+    }
+
+    /// A slider moved in every measurement has the follow take its newest
+    /// move unmeasured. With the AGC off nothing else measures that move's
+    /// knee, and the scope must not draw on by the last one measured, a
+    /// filter several times wider: it is measured in its turn.
+    #[test]
+    fn the_scope_takes_the_knee_of_the_move_the_band_took() {
+        run(|| async {
+            let mut settings = with_receiver();
+            settings.band.agc_enabled = false;
+            settings.band.noise_level = 0.9;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            // Widths no other test asks the knee of: the memo it is kept in
+            // is the whole app's.
+            ui.type_into("slider-filter-width", "1710");
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
+            for width_hz in [1_720, 1_730, 610]
+                .iter()
+                .take(crate::routes::BAND_WARM_ROUNDS)
+            {
+                ui.type_into("slider-filter-width", &format!("{width_hz}"));
+                ui.advance(1).await;
+            }
+            ui.advance(200).await;
+            let taken = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
+            let mut wide = taken.clone();
+            wide.band.filter_width_hz = 1_720.0;
+            let apart = 20.0
+                * (crate::ui::scope::threshold(&wide) / crate::ui::scope::threshold(&taken))
+                    .log10();
+            assert!(apart > 1.5, "the two knees are {apart:.1} dB apart");
+            let (said, drawn) = scope_reads(&mut ui, &recorder, &taken, 9.0).await;
+            assert_eq!(said, "off · 3 dB under the limiter");
+            assert!(drawn, "drawn by the knee of the move taken: {}", ui.html());
+            assert!(
+                !ui.shows("scope-over-hiss"),
+                "a threshold figure with the AGC off"
+            );
+        });
+    }
+
+    /// A preview stopped takes its scope's knee with it: started again on
+    /// settings moved meanwhile, the scope waits for the knee of the band
+    /// now playing rather than reading by the old one.
+    #[test]
+    fn a_restarted_preview_waits_for_its_own_knee() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            // The first preview's scope has its knee.
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
+            let first = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
+            let (said, drawn) = scope_reads(&mut ui, &recorder, &first, 9.0).await;
+            assert_eq!(said, "idle · 3 dB under the limiter");
+            assert!(drawn, "{}", ui.html());
+            ui.click("btn-band-stop");
+            ui.with_app(|ctx| {
+                let mut settings = ctx.settings;
+                settings.write().band.filter_width_hz = 1_810.0;
+            });
+            ui.click("btn-band-preview");
+            assert!(ui.shows("level-scope"));
+            let settings = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
+            let (said, drawn) = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
+            assert_eq!(said, "Listening…", "read by the old knee");
+            assert!(!drawn, "drawn by the old knee");
+            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
+                .await;
+            let (said, drawn) = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
+            assert_eq!(said, "idle · 3 dB under the limiter");
+            assert!(drawn, "{}", ui.html());
         });
     }
 

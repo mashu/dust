@@ -79,6 +79,12 @@ fn rating_said(ranking: Ranking, rating: f64) -> String {
     }
 }
 
+/// When the session marked on the timeline was set: the row pointed at or
+/// tapped, else the best's, set at `best_at`.
+fn focus(marked: Memo<Option<u64>>, best_at: u64) -> u64 {
+    marked().unwrap_or(best_at)
+}
+
 /// What a row of the board was, in figures: "500 points over 20 groups", or
 /// for a run whose log reads, "42 of 45 QSOs clean · 10-minute run".
 fn what_it_was(entry: &BoardEntry) -> String {
@@ -168,11 +174,17 @@ fn contest_rankings(sessions: &[SessionResult], kind: ContestKind) -> Vec<(Ranki
 /// place, as History opens them.
 #[component]
 pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
+    #[cfg(test)]
+    crate::testing::rendered("ScoresTab");
     let mode = use_signal(|| None::<CharSetMode>);
     let kind = use_signal(|| None::<ContestKind>);
     let rank = use_signal(|| None::<Ranking>);
     let hovered = use_signal(|| None::<u64>);
     let pinned = use_signal(|| None::<u64>);
+    // The row marked, read by what draws the mark alone: the tab reads
+    // every stored run's log to build the board, and must not again for
+    // each row a mouse crosses.
+    let marked = use_memo(move || hovered().or(pinned()));
     // The run whose results are open, from the Runs card.
     let mut opened = use_opened_run();
     // The Contest pill is always there; a chip for each contest the
@@ -237,7 +249,8 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                     BoardList {
                         board: Vec::new(),
                         assisted,
-                        focus: 0,
+                        best_at: 0,
+                        marked,
                         hovered,
                         pinned,
                         show_mode: current.is_none(),
@@ -250,8 +263,7 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
             }
         };
     };
-    let focus = hovered().or(pinned()).unwrap_or(best.timestamp);
-    let focused = board.iter().find(|entry| entry.timestamp == focus).cloned();
+    let best_at = best.timestamp;
     let date_of = |point: Option<&TimelinePoint>| {
         point
             .and_then(|point| sessions.get(point.index))
@@ -278,8 +290,9 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
             }
             ScoreTimeline {
                 timeline,
-                focus,
-                focused,
+                board: board.clone(),
+                best_at,
+                marked,
                 total,
                 first_date,
                 last_date,
@@ -288,7 +301,8 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
             BoardList {
                 board,
                 assisted,
-                focus,
+                best_at,
+                marked,
                 hovered,
                 pinned,
                 show_mode,

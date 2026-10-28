@@ -1,3 +1,4 @@
+use cw_core::band::{db_to_gain, gain_to_db};
 use cw_core::{GroupResult, RangeSetting, TrainingSettings, align_group};
 use dioxus::prelude::*;
 
@@ -102,14 +103,48 @@ pub fn html_bool(on: bool) -> Option<bool> {
     on.then_some(true)
 }
 
-/// Trim trailing zeros so 18.0 reads as "18" and 0.75 stays "0.75".
+/// Trim trailing zeros so 18.0 reads as "18" and 0.75 stays "0.75", and
+/// set a negative one with a minus sign, as every readout's own.
 pub fn pretty_number(value: f64) -> String {
     let rounded = (value * 1000.0).round() / 1000.0;
-    if (rounded - rounded.round()).abs() < 1e-9 {
+    let digits = if (rounded - rounded.round()).abs() < 1e-9 {
         format!("{}", rounded.round() as i64)
     } else {
         format!("{rounded}")
+    };
+    digits.replacen('-', "\u{2212}", 1)
+}
+
+/// A range as it reads: one number when its ends meet, an en dash between
+/// them, or "to" where a minus sign would make the dash read as a third.
+pub fn range_label(min: f64, max: f64) -> String {
+    let (low, high) = (pretty_number(min), pretty_number(max));
+    if low == high {
+        low
+    } else if min < 0.0 || max < 0.0 {
+        format!("{low} to {high}")
+    } else {
+        format!("{low}–{high}")
     }
+}
+
+/// A share of full, from `floor` up, as a decibel control stands: in whole
+/// decibels down from full, each step as much louder as the last, as a
+/// rig's audio-taper gain turns. The bottom is the decibel nearest the
+/// floor that is still inside it.
+pub fn share_db(share: f64, floor: f64) -> f64 {
+    gain_to_db(share.clamp(floor, 1.0))
+        .round()
+        .max(gain_to_db(floor).ceil())
+}
+
+/// The share of full a decibel control at `db` keeps, from `floor` up: to
+/// a ten-thousandth, which tells every decibel step of it apart. The share
+/// is what is kept, so saves from before the control was in decibels load
+/// as they were.
+pub fn db_share(db: f64, floor: f64) -> f64 {
+    let share = db_to_gain(db).clamp(floor, 1.0);
+    (share * 10_000.0).round() / 10_000.0
 }
 
 /// The app's icons. A name that is not one of these does not compile, which
@@ -752,11 +787,7 @@ pub fn LinkedRange(
     let summary = if linked {
         format!("{} {unit}", pretty_number(min_value))
     } else {
-        format!(
-            "{}–{} {unit}",
-            pretty_number(min_value),
-            pretty_number(max_value)
-        )
+        format!("{} {unit}", range_label(min_value, max_value))
     };
     rsx! {
         div { class: "range-field",
@@ -829,25 +860,40 @@ pub fn SettingsRange(
     max_bound: f64,
     step: f64,
     hint: Option<&'static str>,
-    /// A share from 0 to 1, shown and typed as a percentage of it.
+    /// A share of full from `min_bound` up, shown and typed in whole
+    /// decibels down from full, `step` of them a step ([`share_db`]).
     #[props(default)]
-    percent: bool,
+    decibels: bool,
 ) -> Element {
     let range = use_memo(move || settings.read().range(which))();
-    let scale = if percent { 100.0 } else { 1.0 };
+    // What is kept, as it is shown, and back.
+    let shown = move |value: f64| {
+        if decibels {
+            share_db(value, min_bound)
+        } else {
+            value
+        }
+    };
+    let kept = move |value: f64| {
+        if decibels {
+            db_share(value, min_bound)
+        } else {
+            value
+        }
+    };
     rsx! {
         LinkedRange {
             label,
             unit,
-            min_value: range.min * scale,
-            max_value: range.max * scale,
+            min_value: shown(range.min),
+            max_value: shown(range.max),
             linked: range.linked,
-            min_bound: min_bound * scale,
-            max_bound: max_bound * scale,
-            step: step * scale,
+            min_bound: shown(min_bound),
+            max_bound: shown(max_bound),
+            step,
             hint: hint.map(str::to_string),
-            on_min: move |v: f64| settings.write().set_range_min(which, v / scale),
-            on_max: move |v: f64| settings.write().set_range_max(which, v / scale),
+            on_min: move |v: f64| settings.write().set_range_min(which, kept(v)),
+            on_max: move |v: f64| settings.write().set_range_max(which, kept(v)),
             on_link: move |on| settings.write().set_range_linked(which, on),
         }
     }
@@ -1103,6 +1149,8 @@ mod tests {
         assert_eq!(pretty_number(18.0), "18");
         assert_eq!(pretty_number(0.75), "0.75");
         assert_eq!(pretty_number(0.1 + 0.2), "0.3");
+        assert_eq!(pretty_number(-20.0), "\u{2212}20");
+        assert_eq!(pretty_number(-0.0001), "0");
     }
 
     #[test]

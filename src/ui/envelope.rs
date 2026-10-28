@@ -81,6 +81,21 @@ fn envelope_path(shape: &EnvelopeShape) -> String {
     format!("{top}{bottom} Z")
 }
 
+/// How the edges sound. An edge under about 3 ms clicks whatever its shape,
+/// its spectrum a few hundred hertz either side of the note at the least;
+/// from about 4 ms a rounded one is clean, as a rig's 4-8 ms shaping is.
+fn sharpness(rise_ms: f64, smoothing: f64) -> &'static str {
+    if rise_ms < 3.0 {
+        "Fast edges — key clicks whatever the shape"
+    } else if smoothing >= 0.75 && rise_ms >= 4.0 {
+        "Soft — rounded edges, no key clicks"
+    } else if smoothing >= 0.35 {
+        "Balanced — some snap, little click"
+    } else {
+        "Hard — crisp edges, clicks on fast keying"
+    }
+}
+
 /// What the envelope card shows: the shape, and the two settings that make it.
 #[derive(Clone, PartialEq)]
 struct Envelope {
@@ -111,13 +126,7 @@ pub fn EnvelopeCard(
     let rise_w = (x_at(shape.rise_sec.min(shape.dot_sec), span) - PAD_X).max(0.0);
     let dit_share = (shape.dot_sec * 2.0 / span * 100.0).round();
     let dot_ms = (shape.dot_sec * 1000.0).round();
-    let sharpness = if shape.smoothing >= 0.75 {
-        "Soft — rounded edges, no key clicks"
-    } else if shape.smoothing >= 0.35 {
-        "Balanced — some snap, little click"
-    } else {
-        "Hard — crisp edges, clicks on fast keying"
-    };
+    let sharpness = sharpness(envelope.rise_ms, shape.smoothing);
     let rise_warning = shape.rise_share_of_dit > 0.45;
     let playing = sample_playing;
     rsx! {
@@ -255,7 +264,7 @@ pub fn EnvelopeCard(
 
 #[cfg(test)]
 mod tests {
-    use super::{PAD_X, VIEW_W, envelope_path, x_at};
+    use super::{PAD_X, VIEW_W, envelope_path, sharpness, x_at};
     use cw_core::{EnvelopePoint, EnvelopeShape, TrainingSettings, envelope_shape};
 
     fn shape() -> EnvelopeShape {
@@ -285,6 +294,20 @@ mod tests {
         // Every sample appears twice: once above the centre line, once below.
         let commands = path.matches(" L").count() + 1;
         assert_eq!(commands, shape.points.len() * 2);
+    }
+
+    /// Only an edge long enough not to click is called clean, however
+    /// round its shape.
+    #[test]
+    fn only_a_long_enough_edge_is_called_clean() {
+        let clean = "Soft — rounded edges, no key clicks";
+        assert_eq!(sharpness(6.0, 0.75), clean);
+        assert_eq!(sharpness(4.0, 1.0), clean);
+        for rise_ms in [1.0, 2.0, 2.9] {
+            assert!(sharpness(rise_ms, 1.0).contains("key clicks whatever"));
+        }
+        assert!(sharpness(3.5, 1.0).starts_with("Balanced"));
+        assert!(sharpness(6.0, 0.0).starts_with("Hard"));
     }
 
     #[test]

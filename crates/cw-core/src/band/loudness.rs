@@ -12,7 +12,7 @@
 //! sized by.
 
 use super::agc::{Agc, agc_lookahead_samples};
-use super::calibration::{REFERENCE_BANDWIDTH_HZ, noise_floor_rms, noise_level};
+use super::calibration::{heard_floor_rms, noise_level};
 use super::filter::{FilterDesign, ReceiverFilter};
 use super::knee::receiver_knee;
 use super::memo::{Exact, LastAnswer};
@@ -43,8 +43,13 @@ const LISTEN_AT: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 
 /// How close to the limiter's knee full volume takes the loudest station:
 /// a little short of it, for a crest between two samples, a pitch between
-/// two listened to, and a fist that is not a keyer's.
-const CLEAN_MARGIN: f64 = 0.97;
+/// two listened to and a fist that is not a keyer's, which take 3%, and for
+/// a station slower than the fastest, which is the one listened to. Slower,
+/// its gaps run longer and the AGC has opened further by its next element,
+/// whose first crests come out up to 6% over the fastest station's: at 9 to
+/// 16 WPM with the fast decay, and at the slowest with the slow one
+/// (`a_slower_station_stays_clean_at_full_volume`).
+const CLEAN_MARGIN: f64 = 0.91;
 
 /// How far over its RMS the band's hiss is allowed to reach on top of the
 /// station: hiss through a filter is Gaussian, and a crest this high comes
@@ -78,12 +83,9 @@ struct LoudestAsk {
 impl LoudestAsk {
     fn of(settings: &TrainingSettings) -> Self {
         let receiver = FilterDesign::from_settings(settings);
-        // The AGC the players run: none when there is no band to run it on.
-        let knee = if settings.band.has_background() {
-            receiver_knee(&settings.band, &receiver)
-        } else {
-            None
-        };
+        // The AGC the players run, whatever is on the band: none only with
+        // it switched off.
+        let knee = receiver_knee(&settings.band, &receiver);
         let range = settings.side_tone_range();
         let held = |value: f64, low: f64, high: f64, fallback: f64| {
             if value.is_finite() {
@@ -151,21 +153,24 @@ pub fn full_volume_gain(settings: &TrainingSettings) -> f64 {
 }
 
 fn listen(ask: &LoudestAsk, settings: &TrainingSettings) -> f64 {
+    listen_at(ask, settings, ask.wpm.0)
+}
+
+/// The loudest a station at full strength comes out of the receiver `ask`
+/// describes, sent at `wpm`.
+fn listen_at(ask: &LoudestAsk, settings: &TrainingSettings, wpm: f64) -> f64 {
     let mut settings = settings.clone();
     settings.band.steepness = ask.steepness_ms.0;
     settings.band.envelope_smoothing = ask.smoothing.0;
     let (low, high) = (ask.low_hz.0, ask.high_hz.0);
-    // The hiss as heard through this receiver: white at the antenna, so the
-    // filter lets in its noise bandwidth's worth of it.
-    let hiss = noise_floor_rms(ask.noise.0)
-        * (ask.receiver.noise_bandwidth_hz() / REFERENCE_BANDWIDTH_HZ).sqrt();
+    let hiss = heard_floor_rms(ask.noise.0, ask.receiver.noise_bandwidth_hz());
     LISTEN_AT
         .iter()
         .map(|share| {
             let voice = StationVoice {
                 tone_hz: low + (high - low) * share,
-                char_wpm: ask.wpm.0,
-                effective_wpm: ask.wpm.0,
+                char_wpm: wpm,
+                effective_wpm: wpm,
                 volume: VOLUME_MAX,
                 weight: 1.0,
                 dash_ratio: 3.0,
@@ -214,7 +219,7 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, c
         let angular = std::f64::consts::TAU * tone.frequency_hz;
         for i in 0..len.min(end - start) {
             let t = i as f64 / sr;
-            listen((angular * t).sin() * envelope_at(tone, t));
+            listen((angular * t).sin() * tone.envelope_at(t));
         }
         at = start + len;
     }
@@ -224,21 +229,6 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, c
         listen(0.0);
     }
     loudest
-}
-
-/// The keying envelope `t` seconds into `tone`, read off its curve as the
-/// players read it.
-fn envelope_at(tone: &ToneEvent, t: f64) -> f64 {
-    let curve = &tone.envelope;
-    if curve.len() < 2 || tone.duration_sec <= 0.0 {
-        return tone.target_gain;
-    }
-    let pos = (t / tone.duration_sec).clamp(0.0, 1.0) * (curve.len() - 1) as f64;
-    let i = pos.floor() as usize;
-    let frac = pos - i as f64;
-    let a = f64::from(curve.get(i).copied().unwrap_or(0.0));
-    let b = curve.get(i + 1).map_or(a, |b| f64::from(*b));
-    a + (b - a) * frac
 }
 
 #[cfg(test)]
@@ -324,6 +314,47 @@ mod tests {
         });
         assert!(sharp < soft, "{sharp} against {soft}");
         assert!(sharp > 1.5, "{sharp}");
+    }
+
+    /// Full volume is sized by the fastest station the settings send, and a
+    /// slower one meets the AGC wider open after each of its longer gaps:
+    /// at any speed down to the slowest, on the receivers where that opens
+    /// it most, it still comes out with the room a crest between samples, a
+    /// pitch between those listened to and a fist need.
+    #[test]
+    fn a_slower_station_stays_clean_at_full_volume() {
+        for (decay, shape, width, steepness) in [
+            (AgcDecay::Fast, FilterShape::Sharp, 100.0, 6.0),
+            (AgcDecay::Fast, FilterShape::Peaked, 100.0, 6.0),
+            (AgcDecay::Fast, FilterShape::Soft, 2_000.0, STEEPNESS_MIN_MS),
+            (AgcDecay::Slow, FilterShape::Sharp, 100.0, 6.0),
+            (
+                AgcDecay::Slow,
+                FilterShape::Sharp,
+                2_000.0,
+                STEEPNESS_MIN_MS,
+            ),
+            (AgcDecay::Slow, FilterShape::Soft, 2_000.0, STEEPNESS_MIN_MS),
+        ] {
+            let mut settings = TrainingSettings::default();
+            settings.band.agc_decay = decay;
+            settings.band.filter_shape = shape;
+            settings.band.filter_width_hz = width;
+            settings.band.steepness = steepness;
+            settings.band.side_tone_min = 300.0;
+            settings.band.side_tone_max = 600.0;
+            settings.playback.char_wpm_max = 30.0;
+            let settings = settings.clamp();
+            let ask = LoudestAsk::of(&settings);
+            let full = full_volume_gain(&settings);
+            for wpm in [WPM_MIN, 7.0, 9.0, 11.0, 14.0, 16.0, 20.0, 25.0] {
+                let heard = listen_at(&ask, &settings, wpm) * full;
+                assert!(
+                    heard < SOFT_LIMIT_KNEE * 0.97,
+                    "{decay:?} {shape:?} {width} Hz, {steepness} ms, at {wpm} WPM: {heard:.4}"
+                );
+            }
+        }
     }
 
     /// Asked again of the same receiver, the answer is the one remembered,

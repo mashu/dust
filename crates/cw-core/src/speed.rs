@@ -836,6 +836,7 @@ mod tests {
                 char_wpm: Some(speed),
                 effective_wpm: Some(speed),
                 sends: 1,
+                ..SessionTiming::default()
             }],
             ..SessionResult::empty_for_test()
         }
@@ -906,6 +907,7 @@ mod tests {
                     char_wpm: Some(30.0),
                     effective_wpm: Some(30.0),
                     sends: 1,
+                    ..SessionTiming::default()
                 })
                 .collect(),
             groups,

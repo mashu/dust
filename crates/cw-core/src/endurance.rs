@@ -241,6 +241,7 @@ mod tests {
                 char_wpm: Some(20.0),
                 effective_wpm: None,
                 sends: 1,
+                ..SessionTiming::default()
             })
             .collect();
         out

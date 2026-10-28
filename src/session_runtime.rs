@@ -12,17 +12,18 @@
 //! whichever is live.
 
 use cw_core::{
-    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate, MonoMs,
-    Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult, SplitMix64,
-    Transmission, apply_auto_level, complete_session, generate_training_group, resolve_station,
+    AnswerClose, CharSamplingState, CharSetMode, ContestEvent, CountersKey, CountersUpdate, KeyLog,
+    Keys, MonoMs, Sampler, SessionEffect, SessionEvent, SessionId, SessionMachine, SessionResult,
+    SplitMix64, Transmission, answer_chars, apply_auto_level, complete_session,
+    generate_training_group, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{LiveContest, send_run_event, start_run};
 use crate::playback::Preview;
-use crate::player::{AudioError, Lease};
-use crate::state::{AppCtx, Finished, Screen};
+use crate::player::{AudioError, Lease, SendNews};
+use crate::state::{AppCtx, Finished, Notice, Screen};
 use crate::time::{local_date_string, mono_ms, now_ms, seed_rng};
 
 /// What has the training screen: a session of groups, or a contest run.
@@ -106,6 +107,10 @@ impl LiveSession {
 /// nothing that moves the session on can overtake a keystroke, however close
 /// the two land.
 ///
+/// It keeps when each character went in, key by key, as the box is typed
+/// into: the text waits out the pause, but recognition is timed to the keys,
+/// and the moments travel with the text.
+///
 /// The box also has a say in what is still being entered and not in it yet:
 /// a letter the paddles are keying. At a deadline it finishes what is keyed
 /// in full; auto-confirm waits until nothing is under way.
@@ -116,7 +121,30 @@ pub struct AnswerOutbox(CopyValue<Outbox>);
 struct Outbox {
     /// Typed into the box for this group, and not handed over yet.
     waiting: Option<(usize, String)>,
+    /// The group the box was last typed into, and when each of its
+    /// characters went in.
+    typing: Option<usize>,
+    keys: KeyLog,
     entry: Option<Entry>,
+}
+
+/// What the box held when it was handed over: group `index`'s answer so far,
+/// and its keys.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedAnswer {
+    pub index: usize,
+    pub text: String,
+    pub keys: Keys<MonoMs>,
+}
+
+impl From<TypedAnswer> for SessionEvent {
+    fn from(typed: TypedAnswer) -> Self {
+        SessionEvent::Input {
+            index: typed.index,
+            text: typed.text,
+            keys: typed.keys,
+        }
+    }
 }
 
 /// What the box says about an entry still under way.
@@ -133,14 +161,24 @@ impl AnswerOutbox {
         Self(CopyValue::new(Outbox::default()))
     }
 
-    /// Group `index`'s box now holds `text`, not handed over yet.
-    pub fn hold(mut self, index: usize, text: String) {
-        self.0.write().waiting = Some((index, text));
+    /// Group `index`'s box now holds `text`, not handed over yet: what is
+    /// new in it was keyed at `at`, or typed for you, untimed, at `None`.
+    pub fn hold(mut self, index: usize, text: String, at: Option<MonoMs>) {
+        let mut outbox = self.0.write();
+        if outbox.typing != Some(index) {
+            outbox.typing = Some(index);
+            outbox.keys.clear();
+        }
+        outbox.keys.typed(answer_chars(&text), at);
+        outbox.waiting = Some((index, text));
     }
 
     /// Whatever is waiting, now handed over.
-    pub fn take(mut self) -> Option<(usize, String)> {
-        self.0.write().waiting.take()
+    pub fn take(mut self) -> Option<TypedAnswer> {
+        let mut outbox = self.0.write();
+        let (index, text) = outbox.waiting.take()?;
+        let keys = outbox.keys.keys();
+        Some(TypedAnswer { index, text, keys })
     }
 
     /// While the calling component is mounted, `finish` puts into the box
@@ -185,7 +223,10 @@ impl AnswerOutbox {
 
     /// A new session: nothing typed for the last one carries over.
     fn clear(mut self) {
-        self.0.write().waiting = None;
+        let mut outbox = self.0.write();
+        outbox.waiting = None;
+        outbox.typing = None;
+        outbox.keys.clear();
     }
 }
 
@@ -264,6 +305,7 @@ pub fn start_session(ctx: AppCtx) {
         stations: SplitMix64::new(seed_rng()),
         lease: lease.clone(),
     })));
+    ctx.mark_running(false);
     run_effects(ctx, &lease, effects);
 }
 
@@ -307,12 +349,20 @@ pub fn abort_run(ctx: AppCtx) {
     }
 }
 
-/// Let the machine decide what `event` means, then do what it says.
+/// How a session ended: kept and shown, or let go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+    Kept,
+    LetGo,
+}
+
+/// Let the machine decide what `event` means, then do what it says, and say
+/// whether that ended the session.
 ///
 /// `lease` is the session the event belongs to: an event from a session
 /// that has ended, or from one before the session now running, is dropped
 /// rather than handed to a machine it means nothing to.
-fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
+fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) -> Option<Ended> {
     let mut runtime = ctx.runtime;
     let app = ctx.app();
     let closes = app
@@ -343,7 +393,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
                     dispatch(ctx, &lease, event);
                 }
             });
-            return;
+            return None;
         }
         // A letter keyed in full and not in the box yet begins the answer
         // too, once it is in.
@@ -352,19 +402,17 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
     }
     let effects = {
         let mut slot = app.session.borrow_mut();
-        let Some(live) = slot
+        let live = slot
             .as_mut()
             .and_then(Live::groups_mut)
-            .filter(|live| live.lease.is(lease) && lease.is_current())
-        else {
-            return;
-        };
+            .filter(|live| live.lease.is(lease) && lease.is_current())?;
         let now = MonoMs(mono_ms());
         // Typing still waiting out the box's pause came before this event,
         // so the machine hears it first.
-        let mut effects = ctx.answer.take().map_or_else(Vec::new, |(index, text)| {
-            live.machine.apply(SessionEvent::Input { index, text }, now)
-        });
+        let mut effects = ctx
+            .answer
+            .take()
+            .map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), now));
         effects.extend(live.machine.apply(event, now));
         // Much of what arrives changes nothing — a key while the box is
         // locked, a timer the machine has forgotten — and publishing it
@@ -375,10 +423,12 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) {
         }
         effects
     };
-    run_effects(ctx, lease, effects);
+    run_effects(ctx, lease, effects)
 }
 
-fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
+/// Do what the machine said, and say whether it ended the session.
+fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) -> Option<Ended> {
+    let mut ended = None;
     for effect in effects {
         match effect {
             SessionEffect::StopAudio => lease.stop_sending(),
@@ -393,10 +443,19 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) {
                     }
                 });
             }
-            SessionEffect::PersistAndShowResults => finish_session(ctx),
-            SessionEffect::AbortToHome => abandon_session(ctx),
+            SessionEffect::PersistAndShowResults => {
+                if finish_session(ctx) {
+                    ended = Some(Ended::Kept);
+                }
+            }
+            SessionEffect::AbortToHome => {
+                if abandon_session(ctx) {
+                    ended = Some(Ended::LetGo);
+                }
+            }
         }
     }
+    ended
 }
 
 /// Send group `index`, and tell the machine how it went.
@@ -419,24 +478,51 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     };
     let lease = lease.clone();
     spawn_forever(async move {
-        let event = match lease.send(&transmission, &settings).await {
-            Ok(sent) => SessionEvent::PlaybackEnded {
-                index,
-                duration_sec: sent.duration_sec,
-                char_wpm: sent.char_wpm,
-                effective_wpm: sent.effective_wpm,
-            },
-            Err(AudioError::Cancelled) => SessionEvent::PlaybackStopped { index },
-            Err(failure) => {
-                ctx.toasts.show(failure.to_string());
-                SessionEvent::PlaybackStopped { index }
-            }
+        // The send's timeline, the moment its first sample goes out: what
+        // its characters are timed from, and the speed it went at, however
+        // soon the group is answered; and whether it was held up on its
+        // way, however it ended.
+        let news = |news: SendNews<'_>| {
+            let event = match news {
+                SendNews::Started(start) => SessionEvent::PlaybackStarted {
+                    index,
+                    start: start.clone(),
+                },
+                SendNews::HeldUp => SessionEvent::PlaybackHeldUp { index },
+            };
+            dispatch(ctx, &lease, event);
         };
-        dispatch(ctx, &lease, event);
+        let (event, stopped) = match lease.send(&transmission, &settings, news).await {
+            Ok(sent) => (
+                SessionEvent::PlaybackEnded {
+                    index,
+                    duration_sec: sent.duration_sec,
+                },
+                None,
+            ),
+            Err(stopped) => (SessionEvent::PlaybackStopped { index }, Some(stopped)),
+        };
+        match (stopped, dispatch(ctx, &lease, event)) {
+            // The sound ended the session: why stays up on the screen it
+            // left, until it is read.
+            (Some(why), Some(ended)) => {
+                let mut notices = ctx.notices;
+                notices.write().push(Notice::SoundStopped {
+                    why: why.to_string(),
+                    answered: ended == Ended::Kept,
+                });
+            }
+            // The session had moved on from it.
+            (Some(failure), None) if failure != AudioError::Cancelled => {
+                ctx.toasts.show(failure.to_string());
+            }
+            _ => {}
+        }
     });
 }
 
-/// The session, taken out of the app, with the audio given back.
+/// The session, taken out of the app, with the audio given back. It is
+/// marked over once it is stored or let go.
 fn end_session(ctx: AppCtx) -> Option<LiveSession> {
     let taken = ctx
         .app()
@@ -450,21 +536,25 @@ fn end_session(ctx: AppCtx) -> Option<LiveSession> {
     Some(*live)
 }
 
-/// End the session without keeping it.
-fn abandon_session(ctx: AppCtx) {
+/// End the session without keeping it. Whether there was one.
+fn abandon_session(ctx: AppCtx) -> bool {
     let AppCtx {
         mut screen,
         mut runtime,
         ..
     } = ctx;
-    end_session(ctx);
+    if end_session(ctx).is_none() {
+        return false;
+    }
+    ctx.mark_ended();
     runtime.set(None);
     screen.set(Screen::Home);
+    true
 }
 
 /// Score the session, move the level if it earned it, store it, and show
-/// the results.
-fn finish_session(ctx: AppCtx) {
+/// the results. Whether there was one.
+fn finish_session(ctx: AppCtx) -> bool {
     let AppCtx {
         mut runtime,
         mut auto_message,
@@ -473,7 +563,7 @@ fn finish_session(ctx: AppCtx) {
         ..
     } = ctx;
     let Some(live) = end_session(ctx) else {
-        return;
+        return false;
     };
     let store = ctx.app().store;
     let session = live.machine.session();
@@ -500,26 +590,30 @@ fn finish_session(ctx: AppCtx) {
     auto_message.set(message);
     runtime.set(None);
     keep_and_show(ctx, done.result);
+    true
 }
 
 /// Add `finished` to the history, store it, and show it on the results
-/// screen: a session of groups and a contest run alike.
+/// screen: a session of groups and a contest run alike. It is marked over
+/// once it is stored, so the app stopping before then still tells of it.
 pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     let AppCtx {
         mut screen,
         mut result,
         mut sessions,
-        toasts,
+        mut notices,
         ..
     } = ctx;
     // The history grows by one where it is, and is stored from there.
     sessions.write().push(finished.clone());
     let saved = ctx.store_history();
+    ctx.mark_ended();
     // A browser may clear its store to make room; there is now something in
     // it worth asking it to keep.
     ctx.app().store.ask_to_keep();
+    // Up until it is read: a session not stored is a session lost.
     if let Some(problem) = saved.problem() {
-        toasts.show(problem);
+        notices.write().push(Notice::History(problem));
     }
     result.set(Some(Finished::Kept(Box::new(finished))));
     screen.set(Screen::Results);
@@ -653,7 +747,7 @@ mod tests {
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
             // Typed, and not yet handed over — nothing will hand it over but
             // the runtime.
-            h.ctx.answer.hold(0, "K".into());
+            h.ctx.answer.hold(0, "K".into(), Some(MonoMs(mono_ms())));
             h.advance(3_000).await;
             assert_eq!(input_of(&h, 0).as_deref(), Some("K"));
             assert_eq!(
@@ -667,6 +761,105 @@ mod tests {
             let confirmed = h.ctx.runtime.peek().as_ref().map(|s| s.view().confirmed);
             assert_eq!(confirmed, Some(vec![true, false]));
         });
+    }
+
+    /// One-character group 0, a box shut while sending, its sound reaching
+    /// the ear `latency_ms` after it goes out, keyed 300 ms after the box
+    /// is seen open: its recognition time, and what was sent.
+    fn keyed_after_the_box_opens(latency_ms: u32) -> (u32, String) {
+        let mut took = (0, String::new());
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.min_group_size = 1;
+            settings.curriculum.max_group_size = 1;
+            let mut h = Harness::with_settings(settings);
+            h.recorder.latency_sec.set(f64::from(latency_ms) / 1_000.0);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            h.advance(300).await;
+            let sent = h.sent(0);
+            h.ctx.answer.hold(0, sent.clone(), Some(MonoMs(mono_ms())));
+            h.send(SessionEvent::Confirm);
+            let session = h.ctx.runtime.peek().clone().expect("the session");
+            let result = session.result(0, "2026-10-24".into());
+            let (group, timing) = (&result.groups[0], &result.group_timings[0]);
+            let times = timing.char_times.as_ref().expect("its sound kept");
+            let timed = cw_core::recognise(&group.sent, &group.received, times)[0].expect("timed");
+            took = (timed, sent);
+        });
+        took
+    }
+
+    /// Typed along with the box open, each character of a group is timed
+    /// from where it finished sounding, gone to the output, to its key.
+    #[test]
+    fn typing_along_times_each_character_from_its_end() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.lock_input_during_group_playback = false;
+            settings.curriculum.min_group_size = 3;
+            settings.curriculum.max_group_size = 3;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(
+                h.run_until(4_000, |h| !h.recorder.starts().is_empty())
+                    .await
+            );
+            let started = h.recorder.starts()[0].clone();
+            let ends: Vec<u64> = started
+                .plan
+                .wanted
+                .chars
+                .iter()
+                .map(|span| started.at.0 + (span.end_sec * 1_000.0).round() as u64)
+                .collect();
+            let sent = h.sent(0);
+            assert_eq!(ends.len(), sent.chars().count());
+            for (typed, end) in ends.iter().enumerate() {
+                let key = end + 250;
+                h.advance(key.saturating_sub(mono_ms())).await;
+                let text: String = sent.chars().take(typed + 1).collect();
+                h.ctx.answer.hold(0, text, Some(MonoMs(mono_ms())));
+            }
+            h.send(SessionEvent::Confirm);
+            let session = h.ctx.runtime.peek().clone().expect("the session");
+            let result = session.result(0, "2026-10-27".into());
+            let (group, timing) = (&result.groups[0], &result.group_timings[0]);
+            let times = timing.char_times.as_ref().expect("its sound kept");
+            assert!(times.box_open);
+            // The harness's clock moves in steps, so a key may land a few
+            // milliseconds after the moment it was due.
+            let took = cw_core::recognise(&group.sent, &group.received, times);
+            assert_eq!(took.len(), 3, "{times:?}");
+            for took in took {
+                assert!(
+                    took.is_some_and(|took| (250..=255).contains(&took)),
+                    "{times:?}"
+                );
+            }
+        });
+    }
+
+    /// A character typed as soon as it is heard is timed from where it
+    /// finished sounding, as the audio plan has it, gone to the output, to
+    /// its key in the box: one-character groups, which a box shut while
+    /// sending can time. A device that says its sound reaches the ear later
+    /// opens the box that much later, and the time is that much longer, as
+    /// the delay is in every time alike.
+    #[test]
+    fn a_key_is_timed_from_the_end_of_its_character() {
+        // Keyed 300 ms after the box was seen open, which is up to a poll
+        // of the send's wait, and one of this harness's, after the sound
+        // ended.
+        let seen_late = 2 * crate::time::POLL_MS;
+        for latency in [0, 200] {
+            let (took, sent) = keyed_after_the_box_opens(latency);
+            let from = 300 + latency;
+            assert!(
+                (from..=from + seen_late).contains(&took),
+                "{took} ms for {sent}, {latency} ms to the ear"
+            );
+        }
     }
 
     /// Nothing typed: the answer window moves the session on by itself.
@@ -713,7 +906,7 @@ mod tests {
                 let mut h = Harness::new();
                 h.start_training();
                 assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
-                h.ctx.answer.hold(0, "K".into());
+                h.ctx.answer.hold(0, "K".into(), Some(MonoMs(mono_ms())));
                 h.send(event.clone());
                 if event == SessionEvent::FinishNow {
                     let result = h
@@ -787,7 +980,7 @@ mod tests {
             h.send(SessionEvent::Abort);
             assert_eq!(h.screen(), Screen::Home);
             // The closing box takes one more key.
-            h.ctx.answer.hold(0, "K".into());
+            h.ctx.answer.hold(0, "K".into(), Some(MonoMs(mono_ms())));
             h.start_training();
             assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
             assert_eq!(input_of(&h, 0).as_deref(), Some(""));
@@ -815,7 +1008,7 @@ mod tests {
                 Entry {
                     finish: Callback::new(move |()| {
                         asked.set(asked.get() + 1);
-                        answer.hold(0, "T".into());
+                        answer.hold(0, "T".into(), Some(MonoMs(mono_ms())));
                     }),
                     open: Callback::new(|()| false),
                 }
@@ -1053,8 +1246,76 @@ mod tests {
                 "a stalled player should end the session, not hang"
             );
             assert!(h.recorder.players_built.get() > 1, "the player is rebuilt");
-            assert_eq!(h.toast().as_deref(), Some("Audio playback stalled."));
+            assert_eq!(h.notices(), [stopped("Audio playback stalled.", false)]);
             assert!(h.ctx.sessions.peek().is_empty());
+        });
+    }
+
+    /// The sound ended the session, for `why`, with groups `answered` or
+    /// none.
+    fn stopped(why: &str, answered: bool) -> Notice {
+        Notice::SoundStopped {
+            why: why.to_string(),
+            answered,
+        }
+    }
+
+    /// A session its sound ends after a group was answered is kept, and the
+    /// results say why it ended early for as long as it takes to read them:
+    /// no toast that is gone in a moment.
+    #[test]
+    fn a_session_its_sound_ends_keeps_what_was_answered_and_says_why() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 3;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            h.type_answer(0, &sent);
+            h.set_behaviour(Behaviour::Stall);
+            assert!(h.run_until(60_000, |h| h.screen() == Screen::Results).await);
+            assert_eq!(h.ctx.sessions.peek().len(), 1, "the answer was kept");
+            assert_eq!(h.notices(), [stopped("Audio playback stalled.", true)]);
+            h.advance(u64::from(crate::state::ACTION_TOAST_MS) * 2)
+                .await;
+            assert_eq!(h.notices(), [stopped("Audio playback stalled.", true)]);
+        });
+    }
+
+    /// A session is marked open from its start until it ends, however it
+    /// ends: one the app stops under is told of when it next opens.
+    #[test]
+    fn a_session_is_marked_open_while_it_runs() {
+        run(|| async {
+            let mut h = Harness::new();
+            assert_eq!(h.store.open.get(), None);
+            h.start_training();
+            let open = h.store.open.get().expect("marked open");
+            assert!(!open.run);
+            h.send(SessionEvent::Abort);
+            assert_eq!(h.store.open.get(), None, "discarded");
+
+            h.start_training();
+            assert!(h.store.open.get().is_some());
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.store.open.get(), None, "kept");
+        });
+    }
+
+    /// Leaving a session that has already gone leaves the screen as it is.
+    #[test]
+    fn leaving_a_session_that_has_gone_changes_nothing() {
+        run(|| async {
+            let mut h = Harness::new();
+            h.start_training();
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            let ctx = h.ctx;
+            assert!(!h.in_app(|| abandon_session(ctx)));
+            assert!(!h.in_app(|| finish_session(ctx)));
+            assert_eq!(h.screen(), Screen::Results);
         });
     }
 
@@ -1378,7 +1639,13 @@ mod tests {
             // Three attempts, each on a freshly built player.
             assert_eq!(h.texts().len(), 3);
             assert!(h.recorder.players_built.get() >= 3);
-            assert!(h.toast().is_some());
+            assert!(matches!(
+                h.notices().as_slice(),
+                [Notice::SoundStopped {
+                    answered: false,
+                    ..
+                }]
+            ));
         });
     }
 
@@ -1389,7 +1656,10 @@ mod tests {
             h.set_behaviour(Behaviour::RefuseToStart);
             h.start_training();
             assert!(h.run_until(30_000, |h| h.screen() == Screen::Home).await);
-            assert_eq!(h.toast().as_deref(), Some("Audio stream: device is gone"));
+            assert_eq!(
+                h.notices(),
+                [stopped("Audio stream: device is gone", false)]
+            );
         });
     }
 
@@ -1537,8 +1807,6 @@ mod tests {
                     SessionEvent::PlaybackEnded {
                         index: 0,
                         duration_sec: 1.0,
-                        char_wpm: 20.0,
-                        effective_wpm: 20.0,
                     },
                 )
             });
@@ -1817,12 +2085,20 @@ mod tests {
             assert_eq!(shown[0], "2026-09-02", "the oldest is the one let go");
             assert_eq!(h.store.load_sessions().len(), 2);
             assert!(
-                h.toast()
+                history_said(&h)
                     .is_some_and(|text| text.contains("newest 2") && !text.contains("contest")),
                 "{:?}",
-                h.toast()
+                h.notices()
             );
         });
+    }
+
+    /// What the history said of the session just kept, up until it is read.
+    fn history_said(h: &Harness) -> Option<String> {
+        h.notices().into_iter().find_map(|notice| match notice {
+            Notice::History(said) => Some(said),
+            _ => None,
+        })
     }
 
     /// A history that held a contest run says why it ran short of room: a
@@ -1841,16 +2117,17 @@ mod tests {
             h.play_through(60_000).await;
             assert_eq!(h.store.load_sessions().len(), 2);
             assert!(
-                h.toast().is_some_and(|text| text.contains("newest 2")
+                history_said(&h).is_some_and(|text| text.contains("newest 2")
                     && text.ends_with("Long contest runs take more room.")),
                 "{:?}",
-                h.toast()
+                h.notices()
             );
         });
     }
 
     /// A history the store could not read is not written over, and the user
-    /// is told the session was not kept.
+    /// is told the session was not kept, until they have read it: a session
+    /// not stored is a session lost.
     #[test]
     fn a_session_is_not_stored_over_a_history_that_could_not_be_read() {
         run(|| async {
@@ -1860,12 +2137,14 @@ mod tests {
             h.play_through(60_000).await;
             assert_eq!(h.screen(), Screen::Results, "the results are still shown");
             assert!(h.store.load_sessions().is_empty());
+            h.advance(u64::from(crate::state::ACTION_TOAST_MS) * 2)
+                .await;
             assert!(
-                h.toast()
-                    .is_some_and(|text| text.contains("could not be read")),
+                history_said(&h).is_some_and(|text| text.contains("could not be read")),
                 "{:?}",
-                h.toast()
+                h.notices()
             );
+            assert_eq!(h.store.open.get(), None, "told of, so no longer open");
         });
     }
 }

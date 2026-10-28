@@ -89,12 +89,21 @@ impl<S: CallSource> Runtime<S> {
         self.due.iter().map(|(at, _)| *at).min()
     }
 
-    /// Deliver the next thing owed, at its time.
+    /// Deliver the next thing owed, at its time. A turn ends after anything
+    /// else due the same moment, as a player has it: its sound is over only
+    /// once all it sends has been heard.
     pub(crate) fn step(&mut self) -> bool {
         let Some(next) = self.next_due() else {
             return false;
         };
-        let Some(position) = self.due.iter().position(|(at, _)| *at == next) else {
+        let Some(position) = self
+            .due
+            .iter()
+            .enumerate()
+            .filter(|(_, (at, _))| *at == next)
+            .min_by_key(|(_, (_, event))| matches!(event, ContestEvent::TurnEnded { .. }))
+            .map(|(position, _)| position)
+        else {
             return false;
         };
         let (_, event) = self.due.remove(position);
@@ -137,6 +146,7 @@ impl<S: CallSource> Runtime<S> {
                         ContestEvent::TurnStarted {
                             id,
                             heard_from: MonoMs(starts),
+                            output_from: MonoMs(starts),
                         },
                     ));
                     self.due.push((starts + ms, ContestEvent::TurnEnded { id }));
@@ -373,7 +383,7 @@ impl Operator {
             exch: self.exch.clone(),
             call_edited: MonoMs(typed_at),
             exch_complete: (!self.exch.is_empty()).then_some(MonoMs(typed_at)),
-            earlier: Vec::new(),
+            ..Fields::default()
         };
         (typed_at + per_key, key, fields)
     }
@@ -447,7 +457,10 @@ pub(crate) fn work_until<S: CallSource>(
         } else if key_at == Some(next) && runtime.next_due().is_none_or(|due| due >= next) {
             runtime.run_to(next);
             if let Some((_, key, fields)) = pending.take() {
-                runtime.apply(ContestEvent::Key { key, fields });
+                runtime.apply(ContestEvent::Key {
+                    key,
+                    fields: Box::new(fields),
+                });
             }
         } else {
             runtime.step();

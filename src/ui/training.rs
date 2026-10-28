@@ -1,9 +1,10 @@
-use cw_core::{ChosenSpeed, answer_length_matches};
+use cw_core::{ChosenSpeed, MonoMs, answer_length_matches};
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
-use crate::session_runtime::AnswerOutbox;
-use crate::time::sleep_ms;
+use crate::session_runtime::{AnswerOutbox, TypedAnswer};
+use crate::time::{mono_ms, sleep_ms};
+use crate::ui::discard::{DiscardAsk, DiscardButton, Discarded, use_discard_ask};
 use crate::ui::paddle::PaddleKeys;
 use crate::ui::widgets::{
     CharacterComparison, Icon, IconName, ProgressHeader, StatusDot, control_id, html_bool,
@@ -108,7 +109,7 @@ struct AnswerDraft {
     /// The view the debounce belongs to, so one still waiting ends with it,
     /// whoever started it — a key in the box, the keypad, or the paddles.
     owner: ScopeId,
-    on_change: EventHandler<(usize, String)>,
+    on_change: EventHandler<TypedAnswer>,
 }
 
 impl AnswerDraft {
@@ -116,7 +117,7 @@ impl AnswerDraft {
     /// on, if it opens on anything.
     fn use_new(
         outbox: AnswerOutbox,
-        on_change: EventHandler<(usize, String)>,
+        on_change: EventHandler<TypedAnswer>,
         held: impl FnOnce() -> Option<(usize, String)>,
     ) -> Self {
         use_hook(|| {
@@ -145,15 +146,16 @@ impl AnswerDraft {
         (*self.at.peek() == Some(idx)).then(|| self.text.peek().clone())
     }
 
-    /// The box for `idx` now holds `text`, so nothing is drawn for it. The
-    /// session is handed it at once when its length matches the group's —
-    /// auto-confirm starts from there — and otherwise once typing has paused,
-    /// or sooner if anything happens to the session first.
-    fn edit(mut self, idx: usize, text: String, sent: &str) {
+    /// The box for `idx` now holds `text`, so nothing is drawn for it: what
+    /// is new in it keyed at `keyed`, or typed for you, untimed, at `None`.
+    /// The session is handed it at once when its length matches the group's
+    /// — auto-confirm starts from there — and otherwise once typing has
+    /// paused, or sooner if anything happens to the session first.
+    fn edit(mut self, idx: usize, text: String, sent: &str, keyed: Option<MonoMs>) {
         let full = answer_length_matches(sent, &text);
         self.at.set(Some(idx));
         self.text.set(text.clone());
-        self.outbox.hold(idx, text);
+        self.outbox.hold(idx, text, keyed);
         let epoch = self.cancel_pending();
         if full {
             self.hand_over();
@@ -173,12 +175,13 @@ impl AnswerDraft {
         });
     }
 
-    /// The keypad or a paddle keyed `letter` into the box for `idx`. The page
-    /// has not seen it, so the box is drawn again to show it.
-    fn push(self, idx: usize, letter: char, sent: &str) {
+    /// The keypad or a paddle keyed `letter` into the box for `idx` at
+    /// `keyed`. The page has not seen it, so the box is drawn again to show
+    /// it.
+    fn push(self, idx: usize, letter: char, sent: &str, keyed: Option<MonoMs>) {
         let mut text = self.peek_for(idx).unwrap_or_default();
         text.push(letter);
-        self.edit(idx, text, sent);
+        self.edit(idx, text, sent, keyed);
         self.redraw();
     }
 
@@ -186,7 +189,7 @@ impl AnswerDraft {
     fn pop(self, idx: usize, sent: &str) {
         let mut text = self.peek_for(idx).unwrap_or_default();
         if text.pop().is_some() {
-            self.edit(idx, text, sent);
+            self.edit(idx, text, sent, None);
             self.redraw();
         }
     }
@@ -236,6 +239,19 @@ impl AnswerDraft {
 /// types into the box: `none` asks only that no keyboard be drawn on screen.
 pub(crate) const ANSWER_INPUT_MODE: &str = "none";
 
+/// Put the cursor in group `idx`'s box, so a keyboard types straight into
+/// it.
+fn focus_box(idx: usize) {
+    // Tests have no page to run it on.
+    #[cfg(not(test))]
+    spawn(async move {
+        let script = crate::ui::widgets::focus_script(&format!("group-input-{idx}"));
+        let _ = document::eval(&script).await;
+    });
+    #[cfg(test)]
+    let _ = idx;
+}
+
 /// The open group: its number, how many times it has been sent, and the box
 /// it is answered in.
 ///
@@ -256,16 +272,9 @@ fn OpenCard(
     // A box that opens takes the focus, so a keyboard types straight into
     // it. One that has it already keeps it, and nothing moves.
     use_effect(use_reactive!(|idx, live| {
-        // Tests have no page to run it on.
-        #[cfg(not(test))]
         if live {
-            spawn(async move {
-                let script = crate::ui::widgets::focus_script(&format!("group-input-{idx}"));
-                let _ = document::eval(&script).await;
-            });
+            focus_box(idx);
         }
-        #[cfg(test)]
-        let _ = (idx, live);
     }));
     rsx! {
         div { id: "group-card-{idx}", class: "group focused",
@@ -352,8 +361,10 @@ fn AnswerBox(
             inputmode: ANSWER_INPUT_MODE,
             lang: "zxx",
             oninput: move |e| {
+                // The key's moment, before anything else is done with it.
+                let keyed = MonoMs(mono_ms());
                 if live {
-                    draft.edit(idx, e.value(), &sent);
+                    draft.edit(idx, e.value(), &sent, Some(keyed));
                 } else {
                     draft.redraw();
                 }
@@ -600,12 +611,13 @@ pub fn TrainingView(
     speed: Option<ChosenSpeed>,
     /// Where the box's text waits on its way to the session.
     answer: AnswerOutbox,
-    on_change: EventHandler<(usize, String)>,
+    on_change: EventHandler<TypedAnswer>,
     on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
+    let asking = use_discard_ask(Discarded::Session);
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     // The open box is never drawn from the session, so a view drawn afresh
     // on a session under way — after a hot reload, say — starts its draft
@@ -614,14 +626,24 @@ pub fn TrainingView(
         let held = inputs.get(current).filter(|_| !current_done)?;
         (!held.is_empty()).then(|| (current, held.clone()))
     });
-    let can_paddle = !playing && !locked && !current_done;
+    // The open slot shows the group in focus: the one being sent or
+    // answered, or, between two groups, the one about to be sent.
+    let open = focused;
+    let open_done = confirmed.get(open).copied().unwrap_or(false);
+    let is_active = focused_box_open(current, focused, &confirmed);
+    let awaiting_play = !is_active && !open_done;
+    let input_locked = (locked && is_active) || awaiting_play;
+    let live = is_active && !input_locked;
     let sent_now = groups.get(current).cloned().unwrap_or_default();
-    // The paddles key into the box that is open, and only while it is.
+    // The paddles key into the box while the keyboard can, along with the
+    // send when typing is not locked while it plays: a letter timed from its
+    // first contact, though it goes in only once its letter space has run
+    // out.
     let keys = use_context::<PaddleKeys>();
     {
         let sent_now = sent_now.clone();
-        keys.use_answer_box(can_paddle, move |letter: char| {
-            draft.push(current, letter, &sent_now);
+        keys.use_answer_box(live, move |letter, keyed| {
+            draft.push(current, letter, &sent_now, keyed);
         });
     }
     // A letter keyed in full is in the answer when it closes, even with its
@@ -635,14 +657,6 @@ pub fn TrainingView(
         keys.stop();
     }));
 
-    // The open slot shows the group in focus: the one being sent or
-    // answered, or, between two groups, the one about to be sent.
-    let open = focused;
-    let open_done = confirmed.get(open).copied().unwrap_or(false);
-    let is_active = focused_box_open(current, focused, &confirmed);
-    let awaiting_play = !is_active && !open_done;
-    let input_locked = (locked && is_active) || awaiting_play;
-    let live = is_active && !input_locked;
     let placeholder = if countdown.is_some() {
         "Get ready…"
     } else if awaiting_play {
@@ -658,11 +672,12 @@ pub fn TrainingView(
         .checked_sub(1)
         .filter(|&idx| confirmed.get(idx).copied().unwrap_or(false));
     let on_key = use_callback(move |pressed: PadKey| {
+        let keyed = MonoMs(mono_ms());
         if !live {
             return;
         }
         match pressed {
-            PadKey::Char(ch) => draft.push(current, ch, &sent_now),
+            PadKey::Char(ch) => draft.push(current, ch, &sent_now, Some(keyed)),
             PadKey::Back => draft.pop(current, &sent_now),
             PadKey::Next => on_confirm.call(()),
             // A run's keys: the keys a group is answered with have neither.
@@ -741,20 +756,30 @@ pub fn TrainingView(
                 }
             }
             Keypad { open: live, rows: group_rows(), on_key }
-            div { class: "train-actions",
-                button {
-                    id: control_id("btn", "end session"),
-                    class: "btn btn-primary",
-                    onclick: move |_| on_submit.call(()),
-                    Icon { name: IconName::Flag }
-                    "End session"
-                }
-                button {
-                    id: control_id("btn", "discard"),
-                    class: "btn btn-danger",
-                    onclick: move |_| on_stop.call(()),
-                    Icon { name: IconName::X }
-                    "Discard"
+            // End session, and Discard, which asks once more first
+            // ([`crate::ui::discard`]). Keep it puts the cursor back in the
+            // open box.
+            div { class: if asking.is_open() { "train-actions asking" } else { "train-actions" },
+                if asking.is_open() {
+                    DiscardAsk {
+                        what: Discarded::Session,
+                        on_discard: move |()| on_stop.call(()),
+                        on_keep: move |()| {
+                            asking.close();
+                            if live {
+                                focus_box(open);
+                            }
+                        },
+                    }
+                } else {
+                    button {
+                        id: control_id("btn", "end session"),
+                        class: "btn btn-primary",
+                        onclick: move |_| on_submit.call(()),
+                        Icon { name: IconName::Flag }
+                        "End session"
+                    }
+                    DiscardButton { asking }
                 }
             }
         }

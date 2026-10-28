@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use cw_core::PlaybackPlan;
+use cw_core::{MonoMs, PlannedTransmission, SendStart};
 
 use crate::time::{POLL_MS, mono_ms, sleep_ms};
 
@@ -21,14 +21,29 @@ pub const STALL_GRACE_MS: u32 = 2_000;
 /// symbol. This tail keeps the answer window from opening on top of the tone.
 pub const PLAYBACK_TAIL_MS: u32 = 24;
 
+/// How far behind the app's clock a send's audio clock may fall over the
+/// send, and its characters still be timed from when it was scheduled: past
+/// the steps either clock takes. Further, it was held up on its way.
+pub(crate) const LATE_MS: u64 = 100;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackOutcome {
+    /// It played to its end.
     Completed,
     /// Something else took the audio over: a new session, a stop, a new send.
     Cancelled,
     /// The send never reached its end — a dead stream, or an audio clock that
     /// stopped moving. The caller rebuilds the player and tries again.
     Failed,
+}
+
+/// How waiting on a send ended, and whether its audio was held up on its
+/// way: parked, or its clock fallen behind this one while it played. Its
+/// characters then went out later than planned, however it ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Waited {
+    pub outcome: PlaybackOutcome,
+    pub held_up: bool,
 }
 
 /// What a backend knows about the send in flight.
@@ -47,6 +62,10 @@ pub struct WaitFlags {
     /// Audio-clock progress, for backends that have one. `None` means the
     /// backend can only report `finished`.
     pub played_ms: Option<u32>,
+    /// The backend found the sound fall behind the wall clock as it played,
+    /// by more than [`LATE_MS`]: held up on its way. A backend with no
+    /// audio clock to report watches for that itself.
+    pub late: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,24 +132,6 @@ pub fn stall_charge(flags: WaitFlags, elapsed_ms: u32) -> u32 {
 #[cfg(any(feature = "web", test))]
 const MAX_HEARD_LATENCY_SEC: f64 = 0.5;
 
-/// How far past the browser's clock a send is scheduled, given the delay the
-/// browser reports between rendering and handing over (`base_latency_sec`).
-///
-/// The clock the page reads is a render callback behind the one being
-/// rendered. A tone scheduled for a moment already under way starts late,
-/// part way through its rise — a click, and the start of the first element
-/// lost. The band's own buffers are scheduled ahead for the same reason.
-#[cfg(any(feature = "web", test))]
-pub fn schedule_lead_sec(base_latency_sec: f64) -> f64 {
-    const LEAD_SEC: f64 = 0.02;
-    let base = if base_latency_sec.is_finite() {
-        base_latency_sec.clamp(0.0, 0.1)
-    } else {
-        0.0
-    };
-    base + LEAD_SEC
-}
-
 /// How much of a send that starts at `started_at_sec` on the audio clock has
 /// been heard when the clock reads `now_sec`, `latency_sec` after it was
 /// rendered. A send is over when its last element has reached the ear, not
@@ -143,17 +144,18 @@ pub fn heard_ms(now_sec: f64, started_at_sec: f64, latency_sec: f64) -> u32 {
     ms.min(f64::from(u32::MAX / 4)) as u32
 }
 
-/// How long after a send is started its first sound reaches the ear, in
-/// seconds: scheduled `lead_sec` past the browser's clock, then `latency_sec`
-/// from rendering to the ear, as much of it as is believed.
+/// A send scheduled `lead_sec` past the browser's clock, `latency_sec` from
+/// rendering to the ear, as much of it as is believed.
 #[cfg(any(feature = "web", test))]
-pub fn heard_after_sec(lead_sec: f64, latency_sec: f64) -> f64 {
-    let lead = if lead_sec.is_finite() {
-        lead_sec.max(0.0)
-    } else {
-        0.0
-    };
-    lead + believed_latency(latency_sec)
+pub fn send_timing(lead_sec: f64, latency_sec: f64) -> SendTiming {
+    SendTiming {
+        lead_sec: if lead_sec.is_finite() {
+            lead_sec.max(0.0)
+        } else {
+            0.0
+        },
+        latency_sec: believed_latency(latency_sec),
+    }
 }
 
 /// As much of a latency the browser reports as is worth believing.
@@ -177,59 +179,116 @@ fn whole_ms(seconds: f64) -> u32 {
     }
 }
 
+/// Where a send's sound is against the moment it was started.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SendTiming {
+    /// How long after it was started its first sample goes to the output:
+    /// how far ahead it was scheduled, any wait for a moment asked for.
+    pub lead_sec: f64,
+    /// How long after that it reaches the ear, as far as the device says.
+    pub latency_sec: f64,
+}
+
+impl SendTiming {
+    /// How long after it was started it reaches the ear.
+    pub fn heard_after_sec(self) -> f64 {
+        self.lead_sec + self.latency_sec
+    }
+}
+
 /// A send in flight, as the backend sees it.
 pub trait PlaybackSignal {
     fn poll(&self) -> WaitFlags;
 
-    /// How long after it was started the send's first sound reaches the ear,
-    /// in seconds, as the player reckons it: how far ahead it was scheduled,
-    /// and the delay from the player's output to the ear. Nothing, for a
-    /// player with no sound to be late.
-    fn heard_after_sec(&self) -> f64 {
-        0.0
-    }
+    /// Where its sound is against the moment it was started, as the player
+    /// reckons it.
+    fn timing(&self) -> SendTiming;
 }
 
 /// Morse already scheduled; wait without holding the player borrow.
 pub struct PlaybackWait {
+    /// To the copied station's last key-up, as its plan has it.
     pub duration_sec: f64,
-    pub char_wpm: f64,
-    pub effective_wpm: f64,
-    /// How long after it was started the send reaches the ear
-    /// ([`PlaybackSignal::heard_after_sec`]).
-    pub heard_after_sec: f64,
+    /// To the end of the send's sound: its last element's fall, any
+    /// station's, which is what is waited for.
+    sound_sec: f64,
+    char_wpm: f64,
+    effective_wpm: f64,
+    /// When the send was started, on the app's clock: the moment its
+    /// [`SendTiming`] is reckoned from.
+    started: MonoMs,
+    timing: SendTiming,
+    /// Where each of its characters' last element ends, and where its first
+    /// starts, in seconds from its start, as its plan has it.
+    char_ends_sec: Vec<f64>,
+    first_char_sec: f64,
     signal: Rc<dyn PlaybackSignal>,
 }
 
 impl PlaybackWait {
-    /// Wait on `signal` for a send that plays as `plan` says: its length,
-    /// and the speeds it resolved to, are the plan's, whoever plays it.
-    pub fn new(plan: &PlaybackPlan, signal: Rc<dyn PlaybackSignal>) -> Self {
+    /// Wait on `signal` for a send that plays as `plan` says, started at
+    /// `started`: its length, its sound, the copied station's characters
+    /// and the speeds it resolved to are the plan's, whoever plays it.
+    pub fn new(
+        plan: &PlannedTransmission,
+        signal: Rc<dyn PlaybackSignal>,
+        started: MonoMs,
+    ) -> Self {
+        let wanted = &plan.wanted;
         Self {
-            duration_sec: plan.duration_sec,
-            char_wpm: plan.resolved_char_wpm,
-            effective_wpm: plan.resolved_effective_wpm,
-            heard_after_sec: signal.heard_after_sec(),
+            duration_sec: wanted.duration_sec,
+            sound_sec: plan.sound_end_sec(),
+            char_wpm: wanted.resolved_char_wpm,
+            effective_wpm: wanted.resolved_effective_wpm,
+            started,
+            timing: signal.timing(),
+            char_ends_sec: wanted.chars.iter().map(|span| span.end_sec).collect(),
+            first_char_sec: wanted.chars.first().map_or(0.0, |span| span.start_sec),
             signal,
         }
     }
 
-    fn duration_ms(&self) -> u32 {
-        whole_ms(self.duration_sec)
+    /// The send as it starts: its speeds, when its first sample goes to
+    /// the output, where its characters end after that, and the delay the
+    /// device reports on to the ear.
+    pub fn start(&self) -> SendStart {
+        let ms = |sec: f64| (sec.max(0.0) * 1_000.0).round().min(f64::from(u32::MAX)) as u32;
+        SendStart {
+            char_wpm: self.char_wpm,
+            effective_wpm: self.effective_wpm,
+            output_at: self.started.plus_sec(self.timing.lead_sec),
+            char_ends_ms: self.char_ends_sec.iter().map(|end| ms(*end)).collect(),
+            first_char_ms: ms(self.first_char_sec),
+            latency_ms: ms(self.timing.latency_sec),
+        }
     }
 
-    pub async fn wait(self) -> PlaybackOutcome {
-        let duration_ms = self.duration_ms();
+    pub async fn wait(self) -> Waited {
+        // Over once the last element has fallen silent, not at its key-up:
+        // a soft edge sounds on for its rise time after it, and the answer
+        // window opening then would open on the tone.
+        let duration_ms = whole_ms(self.sound_sec);
+        let heard_after_ms = whole_ms(self.timing.heard_after_sec());
         // A send waiting for the moment it was asked to start at, a
         // contest's continuation, is not stalling meanwhile.
-        let grace_ms = STALL_GRACE_MS.saturating_add(whole_ms(self.heard_after_sec));
+        let grace_ms = STALL_GRACE_MS.saturating_add(heard_after_ms);
         let mut waited = 0u32;
         let mut polled_at = mono_ms();
+        // Parked, or found late by the backend, at any poll.
+        let mut held = false;
         loop {
             let flags = self.signal.poll();
-            match next_wait_step(flags, waited, duration_ms, grace_ms) {
-                WaitStep::Done(outcome) => return outcome,
-                WaitStep::KeepWaiting => {}
+            held |= flags.suspended || flags.late;
+            if let WaitStep::Done(outcome) = next_wait_step(flags, waited, duration_ms, grace_ms) {
+                // How far its audio clock fell behind this one: nothing,
+                // however late this poll came, unless it was held up.
+                let behind = flags.played_ms.map(|played| {
+                    MonoMs(mono_ms())
+                        .since(self.started)
+                        .saturating_sub(u64::from(heard_after_ms) + u64::from(played))
+                });
+                let held_up = held || behind.is_some_and(|behind| behind > LATE_MS);
+                return Waited { outcome, held_up };
             }
             sleep_ms(POLL_MS).await;
             // The time that really passed, not the time asked for: a timer
@@ -252,16 +311,10 @@ mod tests {
         WaitFlags::default()
     }
 
-    /// The browser schedules a send a little past its clock, and counts it
-    /// heard only once the latency to the ear has passed.
+    /// The browser counts a send heard only once the latency to the ear has
+    /// passed.
     #[test]
     fn the_browsers_clock_is_read_for_what_is_heard() {
-        assert_eq!(schedule_lead_sec(0.0), 0.02);
-        assert!((schedule_lead_sec(0.01) - 0.03).abs() < 1e-12);
-        assert_eq!(schedule_lead_sec(f64::NAN), 0.02);
-        assert_eq!(schedule_lead_sec(-1.0), 0.02);
-        assert!((schedule_lead_sec(9.0) - 0.12).abs() < 1e-12);
-
         // A second in, with a quarter second still on its way to the ear.
         assert_eq!(heard_ms(11.0, 10.0, 0.25), 750);
         assert_eq!(heard_ms(11.0, 10.0, 0.0), 1_000);
@@ -274,10 +327,10 @@ mod tests {
 
         // A send reaches the ear its lead and the believed latency after it
         // was started.
-        assert!((heard_after_sec(0.02, 0.25) - 0.27).abs() < 1e-12);
-        assert_eq!(heard_after_sec(0.02, f64::NAN), 0.02);
-        assert_eq!(heard_after_sec(0.02, 30.0), 0.52);
-        assert_eq!(heard_after_sec(f64::NAN, -1.0), 0.0);
+        assert!((send_timing(0.02, 0.25).heard_after_sec() - 0.27).abs() < 1e-12);
+        assert_eq!(send_timing(0.02, f64::NAN).heard_after_sec(), 0.02);
+        assert_eq!(send_timing(0.02, 30.0).latency_sec, 0.5);
+        assert_eq!(send_timing(f64::NAN, -1.0), SendTiming::default());
     }
 
     #[test]
@@ -377,9 +430,21 @@ mod tests {
                 steps.first().copied().unwrap_or_default()
             }
         }
+
+        fn timing(&self) -> SendTiming {
+            SendTiming::default()
+        }
     }
 
-    fn run(future: impl std::future::Future<Output = PlaybackOutcome>) -> PlaybackOutcome {
+    /// Ended as `outcome`, never held up.
+    fn on_time(outcome: PlaybackOutcome) -> Waited {
+        Waited {
+            outcome,
+            held_up: false,
+        }
+    }
+
+    fn run(future: impl std::future::Future<Output = Waited>) -> Waited {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .start_paused(true)
@@ -388,19 +453,58 @@ mod tests {
             .block_on(future)
     }
 
+    /// A send keyed up at `duration_sec`, of `events`.
+    fn transmission(duration_sec: f64, events: Vec<cw_core::ToneEvent>) -> PlannedTransmission {
+        PlannedTransmission {
+            wanted: cw_core::PlaybackPlan {
+                events,
+                chars: Vec::new(),
+                duration_sec,
+                resolved_char_wpm: 20.0,
+                resolved_effective_wpm: 18.0,
+                fade_from_sec: 0.0,
+            },
+            others: Vec::new(),
+            dry_wanted: false,
+            muted_until: None,
+        }
+    }
+
     fn scripted(duration_sec: f64, steps: Vec<WaitFlags>) -> PlaybackWait {
-        let plan = PlaybackPlan {
-            events: Vec::new(),
-            duration_sec,
-            resolved_char_wpm: 20.0,
-            resolved_effective_wpm: 18.0,
-        };
         PlaybackWait::new(
-            &plan,
+            &transmission(duration_sec, Vec::new()),
             Rc::new(Scripted {
                 steps: RefCell::new(steps),
             }),
+            MonoMs(mono_ms()),
         )
+    }
+
+    /// A send is over once its last element has fallen silent, not at its
+    /// key-up: on a soft edge, the audio clock past the key-up and the tail
+    /// but not yet past the fall is still playing it.
+    #[test]
+    fn a_send_is_waited_for_to_its_last_fall() {
+        let fall = cw_core::ToneEvent {
+            start_sec: 0.0,
+            duration_sec: 0.15,
+            keyed_sec: 0.1,
+            frequency_hz: 600.0,
+            target_gain: 1.0,
+            envelope: std::sync::Arc::from(Vec::<f32>::new()),
+        };
+        let at = |ms: u32| WaitFlags {
+            played_ms: Some(ms + PLAYBACK_TAIL_MS),
+            ..flags()
+        };
+        let signal = Rc::new(Scripted {
+            steps: RefCell::new(vec![at(100), at(100), at(150), flags()]),
+        });
+        let plan = transmission(0.1, vec![fall]);
+        let wait = PlaybackWait::new(&plan, Rc::clone(&signal) as _, MonoMs(mono_ms()));
+        assert_eq!(wait.duration_sec, 0.1, "the key-up, as the plan has it");
+        assert_eq!(run(wait.wait()), on_time(PlaybackOutcome::Completed));
+        assert_eq!(signal.steps.borrow().len(), 1, "waited on to the fall");
     }
 
     #[test]
@@ -409,8 +513,8 @@ mod tests {
         playing.played_ms = Some(0);
         let mut done = flags();
         done.finished = true;
-        let outcome = run(scripted(0.1, vec![playing, playing, done]).wait());
-        assert_eq!(outcome, PlaybackOutcome::Completed);
+        let waited = run(scripted(0.1, vec![playing, playing, done]).wait());
+        assert_eq!(waited, on_time(PlaybackOutcome::Completed));
     }
 
     #[test]
@@ -451,9 +555,14 @@ mod tests {
         // Hidden for far longer than the grace period, then back and finishing.
         let mut steps = vec![hidden; 500];
         steps.push(done);
+        // Heard out, but parked on its way: its characters cannot be timed
+        // from when it was scheduled.
         assert_eq!(
             run(scripted(1.0, steps).wait()),
-            PlaybackOutcome::Completed,
+            Waited {
+                outcome: PlaybackOutcome::Completed,
+                held_up: true,
+            },
             "a backgrounded tab must not cost the listener the group"
         );
     }
@@ -490,18 +599,57 @@ mod tests {
         };
         assert_eq!(
             after_a_gap(vec![playing, done]),
-            PlaybackOutcome::Completed,
+            on_time(PlaybackOutcome::Completed),
             "finished by the time the waiter woke"
         );
         assert_eq!(
-            after_a_gap(vec![playing, playing, done]),
+            after_a_gap(vec![playing, playing, done]).outcome,
             PlaybackOutcome::Failed,
             "still playing when the waiter woke, and finished a poll later"
         );
         // Polled as often as asked, the same send is heard out.
         assert_eq!(
             run(scripted(1.0, vec![playing, playing, done]).wait()),
-            PlaybackOutcome::Completed
+            on_time(PlaybackOutcome::Completed)
+        );
+    }
+
+    /// A send whose audio clock falls behind this one while it plays was
+    /// held up on its way; one polled late, its clock running on, was not.
+    #[test]
+    fn a_send_whose_clock_falls_behind_played_late() {
+        let at = |played: u32| WaitFlags {
+            played_ms: Some(played),
+            ..Default::default()
+        };
+        // Stuck at its start for twenty polls, then over: 300 ms behind.
+        let mut held = vec![at(0); 20];
+        held.push(at(100 + PLAYBACK_TAIL_MS));
+        assert_eq!(
+            run(scripted(0.1, held).wait()),
+            Waited {
+                outcome: PlaybackOutcome::Completed,
+                held_up: true,
+            }
+        );
+        // Stuck as long, then stopped: held up all the same.
+        let mut stopped = vec![at(0); 20];
+        stopped.push(WaitFlags {
+            cancelled: true,
+            ..at(0)
+        });
+        assert_eq!(
+            run(scripted(0.1, stopped).wait()),
+            Waited {
+                outcome: PlaybackOutcome::Cancelled,
+                held_up: true,
+            }
+        );
+        // Each poll's worth played as it came: on time.
+        let steady: Vec<WaitFlags> = (0..10).map(|poll| at(poll * POLL_MS)).collect();
+        assert_eq!(
+            run(scripted(0.1, steady).wait()),
+            on_time(PlaybackOutcome::Completed)
         );
     }
 
@@ -512,7 +660,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            run(scripted(0.05, vec![stalled]).wait()),
+            run(scripted(0.05, vec![stalled]).wait()).outcome,
             PlaybackOutcome::Failed
         );
     }
@@ -525,7 +673,7 @@ mod tests {
         };
         assert_eq!(
             run(scripted(0.0, vec![done]).wait()),
-            PlaybackOutcome::Completed
+            on_time(PlaybackOutcome::Completed)
         );
         // A silly duration cannot overflow the countdown.
         assert_eq!(
@@ -536,7 +684,8 @@ mod tests {
                     ..Default::default()
                 }]
             )
-            .wait()),
+            .wait())
+            .outcome,
             PlaybackOutcome::Cancelled
         );
         assert_eq!(
@@ -548,7 +697,7 @@ mod tests {
                 }]
             )
             .wait()),
-            PlaybackOutcome::Completed
+            on_time(PlaybackOutcome::Completed)
         );
     }
 }

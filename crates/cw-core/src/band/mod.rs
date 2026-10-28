@@ -59,26 +59,29 @@ mod source;
 
 // What the players, the settings screen and the pile-up planner use. The rest
 // is the band's own business.
-pub use agc::{
-    AGC_ATTACK_SEC, AGC_COMPRESSOR_KNEE_DB, AGC_LOOKAHEAD_SEC, AGC_MAX_DUCK_DB, CompressorSetting,
-    agc_compressor, agc_decay_sec, agc_lookahead_samples,
-};
+pub use agc::{AGC_LOOKAHEAD_SEC, agc_decay_sec, agc_lookahead_samples};
 pub use calibration::{NOISE_LEVEL_PER_DB, heard_snr_db, whole_db_noise_level};
+pub use dsp::{db_to_gain, gain_to_db};
 pub(crate) use filter::mirror_hz;
 pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
 };
-pub use key::BandKey;
-pub use knee::{agc_knee, receiver_knee, threshold_raise};
+pub use key::{BandChange, BandKey};
+pub use knee::{
+    agc_knee, band_hiss_rms, receiver_knee, remembered_agc_knee, threshold_over_hiss_db,
+    threshold_raise,
+};
 pub use loudness::{full_volume_gain, loudest_station};
 pub use noise::AudioFloor;
 pub use output::{
-    LimiterFeed, SOFT_LIMIT_HEADROOM, SOFT_LIMIT_KNEE, limiter_feed, soft_limit, soft_limit_curve,
+    AUDIO_HIGH_PASS_HZ, AudioHighPass, SOFT_LIMIT_HEADROOM, SOFT_LIMIT_KNEE, soft_limit,
+    soft_limit_curve,
 };
-pub use qsb::Qsb;
+pub use qsb::{FADE_OFFSET_MAX_SEC, FADE_STEP_SEC, Qsb};
 pub use source::BandSource;
 
 use crate::settings::{BandSettings, STATIONS_MIN, TrainingSettings};
+use activity::Tuning;
 use agc::Agc;
 use calibration::{noise_level, qrn_level};
 
@@ -86,6 +89,10 @@ use calibration::{noise_level, qrn_level};
 /// sample at a time, with the send it is riding over. QSB is applied to the
 /// Morse before it gets here — fading is a property of the path a station
 /// arrives on, not of the noise around it.
+///
+/// A copy plays on exactly as the original would: what lets a player that
+/// renders ahead of the clock go back to a moment and make the rest again.
+#[derive(Clone)]
 pub struct BandMixer {
     source: BandSource,
     receiver: ReceiverFilter,
@@ -109,10 +116,46 @@ pub struct Received {
     /// gain for everything it hears, so a crash ducks the station you are
     /// copying with the noise.
     pub gain: f64,
+    /// The part of that gain the AGC's hang holds: what a signal that stood
+    /// over the threshold has set, which a crash it only squashes for an
+    /// instant leaves alone. What an AGC lamp lights by.
+    pub held: f64,
     /// What reached the AGC: the band and the send together, through the
     /// filter and the RF gain, before the AGC's, as it arrived rather than
     /// the look-ahead late. What a level meter on the receiver reads.
     pub input: f64,
+}
+
+/// A receiver for a band already on the air: its filter and AGC, and where
+/// the band's stations are to keep clear of through it. Built where building
+/// may allocate and take its time — the AGC's look-ahead, its knee's
+/// measurement — and handed to the band whole ([`BandMixer::retuned`]).
+#[derive(Clone)]
+pub struct Receiver {
+    filter: ReceiverFilter,
+    agc: Agc,
+    tuning: Tuning,
+}
+
+impl Receiver {
+    /// The receiver `settings` describe, at `sample_rate`.
+    pub fn new(sample_rate: u32, settings: &TrainingSettings) -> Self {
+        let settings = settings.clone().clamp();
+        let design = FilterDesign::from_settings(&settings);
+        Self::through(sample_rate.max(1), &settings.band, &design)
+    }
+
+    /// The receiver `design` is, set for `band`.
+    fn through(sample_rate: u32, band: &BandSettings, design: &FilterDesign) -> Self {
+        Self {
+            filter: ReceiverFilter::new(sample_rate, design),
+            agc: match receiver_knee(band, design) {
+                Some(knee) => Agc::new(sample_rate, knee, band.agc_decay),
+                None => Agc::off(sample_rate),
+            },
+            tuning: Tuning::new(band, design),
+        }
+    }
 }
 
 impl BandMixer {
@@ -122,16 +165,40 @@ impl BandMixer {
         let sample_rate = sample_rate.max(1);
         let settings = settings.clone().clamp();
         let band = &settings.band;
-        let receiver = FilterDesign::from_settings(&settings);
+        let design = FilterDesign::from_settings(&settings);
+        let Receiver { filter, agc, .. } = Receiver::through(sample_rate, band, &design);
         Self {
-            source: BandSource::new(sample_rate, band, &receiver, seed),
-            receiver: ReceiverFilter::new(sample_rate, &receiver),
+            source: BandSource::new(sample_rate, band, &design, seed),
+            receiver: filter,
             rf: settings.rf_gain(),
-            agc: match receiver_knee(band, &receiver) {
-                Some(knee) => Agc::new(sample_rate, knee, band.agc_decay),
-                None => Agc::off(sample_rate),
-            },
+            agc,
             audio_floor: AudioFloor::for_band(sample_rate, band, seed),
+        }
+    }
+
+    /// This band carried on through `receiver`: the same noise, static and
+    /// stations, from where they are, heard through another filter and AGC,
+    /// the AGC taking the gain over as it was. A rig's filter and AGC act on
+    /// whatever is on the air; turning them never changes who is on it.
+    ///
+    /// Nothing is allocated, the source copied whole and its traffic
+    /// shared, so the audio thread may make it.
+    pub fn retuned(&self, receiver: Receiver) -> Self {
+        let Receiver {
+            mut filter,
+            mut agc,
+            tuning,
+        } = receiver;
+        filter.align_to(&self.receiver);
+        let mut source = self.source.clone();
+        source.retune(tuning);
+        agc.carry_on_from(&self.agc);
+        Self {
+            source,
+            receiver: filter,
+            rf: self.rf,
+            agc,
+            audio_floor: self.audio_floor.clone(),
         }
     }
 
@@ -160,6 +227,7 @@ impl BandMixer {
         Received {
             band: ridden + self.audio_floor.next_sample(),
             gain: self.agc.gain(),
+            held: self.agc.held(),
             input,
         }
     }
@@ -182,9 +250,21 @@ impl BandMixer {
     }
 
     /// Take the receiver's gain over from the band this one replaces, so a
-    /// station being copied across the change is not ducked afresh.
-    pub fn carry_gain_from(&mut self, previous: &BandMixer) {
-        self.agc.carry_on_from(&previous.agc);
+    /// station being copied across the change is not ducked afresh. Whether
+    /// there was a gain to take: an AGC switched off has none.
+    pub fn carry_gain_from(&mut self, previous: &BandMixer) -> bool {
+        self.agc.carry_on_from(&previous.agc)
+    }
+
+    /// Let the AGC hear `send`, a sample of the send still waiting out the
+    /// look-ahead, through the RF gain already, without the band moving on:
+    /// a band put in under a station its AGC never heard, the AGC switched
+    /// on or the receiver new, has the station's gain by the time the send
+    /// it never heard is played at it.
+    pub fn hear_ahead(&mut self, send: f64) {
+        if send.is_finite() {
+            let _ = self.agc.next_gain(send);
+        }
     }
 
     /// The band alone, as the player would play it with nothing sent over
@@ -202,6 +282,14 @@ impl BandSettings {
     /// not, there is no background stream to run.
     pub fn has_background(&self) -> bool {
         qrn_level(self) > 0.0 || noise_level(self) > 0.0 || self.stations_max > STATIONS_MIN
+    }
+
+    /// Whether the receiver has anything to do but filter the station: a
+    /// band to play, or an AGC to ride the station with. A rig's AGC rides
+    /// whatever reaches it, on a dead band as much as a busy one, and on a
+    /// quiet one is where its evening out is plainest to hear.
+    pub fn runs_receiver(&self) -> bool {
+        self.has_background() || self.agc_enabled
     }
 }
 

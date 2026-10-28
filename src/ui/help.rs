@@ -4,8 +4,9 @@
 
 use cw_core::{
     BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
-    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, MASTERED_MIN_ACCURACY,
-    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, RECENT_TRIES, Ranking, SLOW_AVG_MS,
+    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS, MASTERED_MIN_ACCURACY,
+    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS,
+    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -61,8 +62,14 @@ pub fn next_up(limit: f64) -> Element {
     }
 }
 
-/// Letter accuracy: where each character stands, its trend and its time.
-pub fn letters() -> Element {
+/// Letter accuracy: where each character stands, its trend, and its
+/// recognition time in the bands `bands` set.
+pub fn letters(bands: RecognitionBands) -> Element {
+    let RecognitionBands {
+        fast_ms: fast,
+        icr_ms: icr,
+        slow_ms: slow,
+    } = bands;
     let mastered = pct(MASTERED_MIN_ACCURACY);
     let building = pct(BUILDING_MIN_ACCURACY);
     rsx! {
@@ -83,9 +90,19 @@ pub fn letters() -> Element {
             dd {
                 "Your last {RECENT_TRIES} tries of it against the ones before, in points: up in green, down in copper, shown from 5 points either way."
             }
-            dt { "ms to answer" }
+            dt { "Recognised in" }
             dd {
-                "How long you took to answer, a character: each group's time from the end of its send to your answer, shared evenly over its characters, so it cannot tell which character of a group held you up. Copper from {SLOW_AVG_MS:.0} ms on a character you copy well."
+                "How soon you key a character once it has sounded: from when its last sample goes out to your speaker or headphones to your key, the median of its latest {RECOGNITION_WINDOW} timed tries. The key is the keyboard's or the keypad's, or for the paddles the first contact of the letter. A try is timed when you key it right, in its place, at least {REACTION_MIN_MS} ms after it sounded, while keeping up: the one before it keyed by {KEEPING_UP_MS} ms after this one reached you. A character put right after a slip is not timed, but costs the ones around it nothing. A group of more than one character is timed only when you key along, starting before it ends; keys after a group is sent again are not. A gap past {RECOGNITION_MAX_MS} ms counts as {RECOGNITION_MAX_MS} ms. Key each character the moment you hear it."
+            }
+            dt { "The bands" }
+            dd {
+                "Green under {fast} ms, fast; yellow under {icr} ms, instant character recognition (ICR): you know it as a sound rather than working it out; orange under {slow} ms; red from {slow} ms. Green and yellow count as ICR once a character is building or mastered: a weak one's time is only that of the tries it got right. Set them under Settings → Recognition."
+            }
+            dt { "About, so far" }
+            dd { "Fewer than {RECOGNITION_MIN_TRIES} tries timed: the time so far, too few to put in a band." }
+            dt { "Not timed yet" }
+            dd {
+                "With Lock typing while sending on, only groups of one character sent once (Sends per group 1×) are timed: turn it off (group training, Settings → Session shape) to key along, on the keyboard, the keypad or the paddles. In a contest run, a call or an exchange is timed when it was heard once and alone, with Show copy off. A send the audio held up is not timed, nor is what the guided setup types for you. Nothing stands in for a time: a character never timed says so."
             }
         }
     }
@@ -400,7 +417,9 @@ pub fn session_shape() -> Element {
             dt { "Sends per group" }
             dd { "How many times each group is sent before the answer box opens, a word space apart." }
             dt { "Lock typing while sending" }
-            dd { "Keeps you copying by ear rather than typing along." }
+            dd {
+                "Keeps you copying by ear rather than typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters cannot be timed (Stats → Letters)."
+            }
             dt { "Key · Key speed" }
             dd { "How your [ and ] paddles key, and how fast: straight, iambic A or B, or Ultimatic." }
         }
@@ -434,11 +453,11 @@ pub fn tone() -> Element {
     rsx! {
         dl { class: "help-terms",
             dt { "Volume" }
-            dd { "How loud Dust plays everything: the band, the stations, your sending and the paddle's sidetone. For the band it is the receiver's AF gain, after the AGC. 100% is as loud as the strongest station plays without distorting at full RF gain; your device's volume does the rest." }
+            dd { "How loud Dust plays everything: the band, the stations, your sending and the paddle's sidetone. For the band it is the receiver's AF gain, after the AGC. Full is as loud as the strongest station plays without distorting at full RF gain, and each step down is a decibel quieter, as a rig's AF gain turns; your device's volume does the rest." }
             dt { "Side tone" }
             dd { "The pitch you hear the Morse at. A range picks a fresh pitch for each group, as different stations sound." }
             dt { "Station strength" }
-            dd { "How strong the station you copy comes in, against the band's noise and static: lower is harder to copy, not quieter overall. A range varies it from group to group." }
+            dd { "How strong the station you copy comes in, against the band's noise and static, in decibels down from the strongest: lower is harder to copy, not quieter overall. A range varies it from group to group, evenly in decibels." }
             dt { "Your sending" }
             dd { "In a contest, how loud you hear your own messages." }
             dt { "Full break-in (QSK)" }
@@ -455,11 +474,28 @@ pub fn envelope() -> Element {
         }
         dl { class: "help-terms",
             dt { "Rise time" }
-            dd { "How long an element takes to reach full volume and to fade. Short is crisp but clicks at speed; long is soft but blurs fast dits." }
+            dd { "How long an element takes to reach full volume and to fade. It rises as the key goes down and fades as it comes up, as a transmitter does, so each element is heard as long as it is keyed. Short is crisp but clicks; long is soft but blurs fast dits into one another." }
             dt { "Edge smoothing" }
-            dd { "The shape of that ramp: harder edges snap, smoother ones are gentler on the ear." }
+            dd { "The shape of that ramp: harder edges snap, smoother ones are gentler on the ear. Your paddle's sidetone opens and closes the same way, as a rig's follows its transmitter." }
             dt { "Dit · Dah · CQ" }
             dd { "Hear the envelope as it is now." }
+        }
+    }
+}
+
+/// Recognition: the bands of Letter accuracy's recognition times.
+pub fn recognition() -> Element {
+    rsx! {
+        p {
+            "How fast counts as what on Letter accuracy, where each character's recognition time is the median gap between its sound going out to your speaker or headphones and your key."
+        }
+        dl { class: "help-terms",
+            dt { "Fast under" }
+            dd { "Green: quicker than this." }
+            dt { "ICR under" }
+            dd { "Yellow: instant character recognition, the sound known at once rather than worked out." }
+            dt { "Slow under" }
+            dd { "Orange: slower than ICR, under this. Red from it on." }
         }
     }
 }
@@ -503,25 +539,29 @@ pub fn band() -> Element {
         }
         dl { class: "help-terms",
             dt { "Filter width · shape" }
-            dd { "The width is read between the points 6 dB down, as rigs quote CW filters. Narrow it and less noise gets in while a station on your pitch stays as strong, so its S/N rises; it rings longer, and a station off your pitch fades. Sharp is a modern DSP filter, Soft an older crystal one, Peaked adds a rig's audio peak at your pitch." }
+            dd { "The width is read between the points 6 dB down, as rigs quote CW filters. Narrow it and less noise gets in while a station on your pitch stays as strong, so its S/N rises; it rings longer, and a station off your pitch fades. Sharp is a modern DSP filter, Soft a rounded DSP shape that barely rings, Peaked adds a rig's audio peak at your pitch." }
             dt { "Stations" }
             dd { "How many call at once. More than one is a pile-up, spread either side of your pitch." }
             dt { "Band noise" }
             dd { "The steady hiss of the band; its S/N is as heard through your filter." }
             dt { "QSB fading" }
-            dd { "Slow swells and dips of the signal." }
+            dd { "Slow swells and dips of each station, every one on a path of its own, down as far as the depth says. With the AGC on a strong station holds nearly steady as it fades, and the hiss rises around it, as on the air." }
             dt { "QRN static" }
             dd { "Lightning: the crackle of distant storms and the crash of a near one." }
             dt { "RF gain" }
             dd { "Turns down everything reaching the receiver, ahead of the AGC: the noise, the static and every station alike. With the AGC on, the strong stations it was riding stay nearly as loud while the noise and the weak ones drop; with it off, the whole band gets quieter. The volume does not make it up, as on a rig." }
             dt { "AGC" }
-            dd { "The receiver rides its gain, as a rig's AGC does: every station over the threshold comes out within a few dB of the others, a weak one nearly as loud as a strong one, and the hiss ducks under a strong station and comes back between overs. Off, every station keeps its own level." }
+            dd { "The receiver rides its gain, as a rig's AGC does, and only ever turns it down: a signal over the threshold loses nine decibels of every ten it stands over it, and one under it loses nothing. The volume after it lifts everything back up together, as far as the strongest station needs to play just under the limiter, so every station over the threshold comes out within a few dB of the others, a weak one nearly as loud as a strong one: that is the sense in which an AGC brings weak stations up. It never lifts a station out of its noise: the hiss under a weak station comes up with it, so it evens out how loud stations are, not how readable. The hiss ducks under a strong station and comes back between overs. Off, every station keeps its own level." }
             dt { "AGC decay" }
-            dd { "How fast the gain comes back once a signal has gone. Fast is back by the next word; Slow holds through an over and comes back over a second or so, so a weak station straight after a strong one starts quiet." }
+            dd { "How fast the gain comes back once a signal has gone. Fast is back by the next word; Slow holds through an over and comes back over a second or so, so a weak station straight after a strong one starts quiet. In the live preview, Fast lets the hiss climb back and the AGC lamp go out in the pause after each call; Slow keeps the hiss down and the lamp lit. Set the threshold at Fast." }
             dt { "AGC threshold" }
-            dd { "How strong a signal has to be before the AGC acts. Lowest starts it just above the quietest hiss, so every station you can copy is evened out; raised, it acts only on stronger ones, and the weaker keep their own level. The volume follows, so the strongest station stays as loud." }
+            dd { "How strong a signal has to be before the AGC acts: the dashed line on the scope. Lowest puts it 10 dB or more over the band's own hiss in the filter, more with heavy static, which it is kept clear of too: just clear of the noise, as an operator sets a rig's, so the hiss alone never works the AGC, every station clear of the noise is evened out and those down in it keep their own level. Raised, it acts only on stronger ones, and the weaker keep their own level; the volume follows, so the strongest station stays as loud while the weaker ones and the hiss between overs get quieter. Over the strongest station it does nothing at all. Raising it here is lowering AGC-T on a Flex, raising THR on an Elecraft, or dragging the -G line up in Thetis." }
+            dt { "Setting the threshold" }
+            dd { "As on a rig: against the band's hiss, and the stations you want held level. Set the decay to Fast and play the live preview; QSB fading dips a weak call under the line in its fades, which is the AGC doing its job, so switch it off to see the calls level while you set it. At Lowest the scope puts the threshold 10 dB or more over the hiss, as close as Dust lets it go: in AF the three calls come out level just under the limiter's line, the lamp is lit through each, and the hiss climbs back loud in every pause, the evenest band and the noisiest. Raise it and the dashed line climbs the RF trace a decibel a step, away from the dotted hiss mark, and the figure under the readout with it. A station is held level while its S/N, as the Band noise reading gives it, stands over that figure; the preview calls at full strength and 10 and 20 dB under it, whatever the Station strength range, so its loud call stands at the top of that reading only while the range reaches 0 dB. Each call the line passes drops back in AF to its own level, with the lamp dark through it, and the hiss in the pauses sinks about a decibel a step while the loudest call stays put. Stop just under the weakest station you want held level. Once the line is over every call and the lamp stays dark through them, raising it further changes nothing, and the receiver plays as with the AGC off. To take the hiss and the weak stations down while the strong stay, back the RF gain off with the threshold low enough that the strong are still over the line. At Slow the lamp stays lit through the pauses, which is the decay holding the band, not the threshold; with more stations calling, they fill the pauses and keep it lit too." }
             dt { "Live preview" }
-            dd { "Loops a CQ through the band as it is set, loud, medium and weak in turn, so you hear each change and what the AGC does with each of them." }
+            dd { "Loops a CQ through the band as it is set, loud, medium and weak in turn, a second apart so the AGC can let the band back between them, and shows it on the level scope: you hear each change and see what the AGC does with each call." }
+            dt { "Level scope" }
+            dd { "Shown while the live preview plays: the last seven seconds, the newest at the right, a decibel to a pixel. On top, RF: the band and the CQ as they reach the AGC, through the filter and the RF gain, as a panadapter or an SDR's S-meter sees them, with the AGC's threshold dashed across, as Thetis draws its -G line, and the band's own hiss dotted under it; the RF gain moves the trace and the hiss mark, the threshold the line, and nothing the AGC does moves either. Below, AF: what comes out to you at the volume, as a rig's audio scope shows it, with the line where the limiter starts to bend near the top; it runs a hundredth of a second behind RF, the time the AGC listens ahead. The AGC lamp is lit while the AGC's hang has held the gain a decibel or more down for the last twentieth of a second: a station over the threshold lights it, and the hang and the decay keep it lit after. The crackle of static, which the AGC squashes for an instant and lets go of, never lights it; the odd long crash, which it takes for a signal, does, as it catches a rig's hang AGC. The AGC acts on what stays over the line for a Morse element, so a crest of hiss can poke over it with the lamp dark: the hiss's crests, and a station with noise riding on it, reach a few decibels over their steady level, which is where the dotted mark sits. Beside the lamp, what the AGC takes off and the room left under the limiter; under them, how far the threshold stands over the hiss, as the band's S/N is read. There is no S-meter: Dust's RF gain sits ahead of its AGC, as an attenuator does, so a meter reading the AGC would fall as you back it off, where a superhet's rises." }
         }
     }
 }

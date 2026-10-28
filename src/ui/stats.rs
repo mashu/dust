@@ -1,7 +1,7 @@
 use cw_core::{
-    AccuracyPoint, CharSetMode, Estimate, EstimatePoint, MasteryStatus, SessionResult,
-    TrainingSettings, accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed,
-    character_diagnostics, practised_modes, span_history, speed_history,
+    AccuracyPoint, CharSetMode, Estimate, EstimatePoint, SessionResult, TrainingSettings,
+    accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, mastered_count,
+    practised_modes, span_history, speed_history,
 };
 use dioxus::prelude::*;
 
@@ -359,7 +359,7 @@ pub fn StatsView(
                     OverviewTab { settings, sessions }
                 },
                 StatsTab::Scores => rsx! { ScoresTab { sessions } },
-                StatsTab::Letters => rsx! { LettersTab { sessions } },
+                StatsTab::Letters => rsx! { LettersTab { settings, sessions } },
                 StatsTab::Mistakes => rsx! { MistakesTab { sessions } },
                 StatsTab::Sampling => rsx! { SamplingTab { settings, sessions } },
                 StatsTab::History => rsx! { HistoryTab { sessions, on_delete, backups } },
@@ -372,7 +372,6 @@ pub fn StatsView(
 fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
     let threshold = settings.auto_level.auto_adjust_threshold;
     let chart = accuracy_chart(&sessions);
-    let letters = character_diagnostics(&sessions);
     let avg = if sessions.is_empty() {
         0.0
     } else {
@@ -382,10 +381,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
         .iter()
         .map(|s| s.accuracy * 100.0)
         .fold(0.0_f64, f64::max);
-    let mastered = letters
-        .iter()
-        .filter(|d| d.status == MasteryStatus::Mastered)
-        .count();
+    let mastered = mastered_count(&sessions);
     let geometry = chart_geometry(&chart, threshold);
     let latest = chart.last().map(|p| p.accuracy_pct).unwrap_or(0.0);
     rsx! {

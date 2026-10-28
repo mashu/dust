@@ -1206,15 +1206,15 @@ fn your_sending_is_on_the_tone_card_in_contest_mode() {
 }
 
 /// Volume is the first thing on the Tone and volume card, in every mode:
-/// at 100% until you set it, down in steps of 5% to 5%, stored, and put
-/// back by the card's reset. The range under it is the station's strength,
-/// in percent, and says it is not how loud anything plays.
+/// at full until you set it, down a decibel a step to 26 down, stored, and
+/// put back by the card's reset. The range under it is the station's strength,
+/// in decibels, and says it is not how loud anything plays.
 #[test]
 fn the_volume_heads_the_tone_card_and_the_range_is_station_strength() {
     run(|| async {
         let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
         ui.click("nav-settings");
-        assert!(ui.has(r#"<span class="slider-value">100%</span>"#));
+        assert!(ui.has(r#"<span class="slider-value">Full</span>"#));
         assert!(ui.input_tag("more-slider-volume").contains("disabled"));
         let html = ui.html();
         let volume = html.find(r#"id="slider-volume""#).expect("the volume");
@@ -1223,29 +1223,64 @@ fn the_volume_heads_the_tone_card_and_the_range_is_station_strength() {
             .find(r#"id="link-station-strength""#)
             .expect("the station strength");
         assert!(volume < tone && tone < strength);
-        assert!(ui.has("noise, not how loud it plays. A range draws a fresh strength per group."));
+        assert!(ui.has(
+            "noise, not how loud it plays: 0 dB is the strongest. A range draws a fresh strength per group."
+        ));
         assert!(
             !ui.has(r#"<span class="field-label">Volume</span>"#),
             "no range is called volume"
         );
 
+        // A decibel a step, the share kept.
         ui.click("less-slider-volume");
-        assert_eq!(ui.stored_settings().await.band.master_volume, 0.95);
-        assert!(ui.has(r#"<span class="slider-value">95%</span>"#));
-        ui.type_into("slider-volume", "0.05");
-        assert_eq!(ui.stored_settings().await.band.master_volume, 0.05);
-        assert!(ui.has(r#"<span class="slider-value">5%</span>"#));
+        assert_eq!(ui.stored_settings().await.band.master_volume, 0.8913);
+        assert!(ui.has(r#"<span class="slider-value">−1 dB</span>"#));
+        ui.type_into("slider-volume", "-6");
+        assert_eq!(ui.stored_settings().await.band.master_volume, 0.5012);
+        assert!(ui.has(r#"<span class="slider-value">−6 dB</span>"#));
+        ui.type_into("slider-volume", "-26");
+        assert_eq!(ui.stored_settings().await.band.master_volume, 0.0501);
+        assert!(ui.has(r#"<span class="slider-value">−26 dB</span>"#));
         assert!(ui.input_tag("less-slider-volume").contains("disabled"));
         ui.click("reset-tone-volume");
         assert_eq!(ui.stored_settings().await.band.master_volume, 1.0);
-        assert!(ui.has(r#"<span class="slider-value">100%</span>"#));
+        assert!(ui.has(r#"<span class="slider-value">Full</span>"#));
     });
 }
 
-/// The station strength is shown and typed as a percentage of the
-/// strongest, and stored as the share it always was.
+/// Every step of the volume slider is a decibel, from full to the bottom,
+/// the share it keeps reading back to the step it was set at; a share saved
+/// before it was in decibels reads at the step nearest it.
 #[test]
-fn the_station_strength_is_typed_in_percent() {
+fn every_step_of_the_volume_is_a_decibel() {
+    use super::widgets::{db_share, share_db};
+    let floor = cw_core::MASTER_VOLUME_MIN;
+    let volume_db = |share: f64| share_db(share, floor);
+    let volume_share = |db: f64| db_share(db, floor);
+    let bottom = volume_db(floor);
+    assert_eq!(bottom, -26.0);
+    let mut step = 0.0;
+    let mut louder = volume_share(0.0);
+    assert_eq!(louder, 1.0);
+    while step > bottom {
+        step -= 1.0;
+        let share = volume_share(step);
+        assert_eq!(volume_db(share), step, "{share} at {step} dB");
+        let apart = 20.0 * (louder / share).log10();
+        assert!((apart - 1.0).abs() < 0.01, "{apart:.3} dB below {step} dB");
+        louder = share;
+    }
+    assert!(louder >= cw_core::MASTER_VOLUME_MIN);
+    assert_eq!(volume_db(0.5), -6.0);
+    assert_eq!(volume_db(0.05), bottom);
+}
+
+/// The station strength is shown and typed in decibels down from the
+/// strongest, and stored as the share it always was: a share saved before
+/// reads at the decibel nearest it, and the bottom of the range is the
+/// weakest share.
+#[test]
+fn the_station_strength_is_typed_in_decibels() {
     run(|| async {
         let mut settings = test_settings();
         settings.band.link_volume = false;
@@ -1253,12 +1288,20 @@ fn the_station_strength_is_typed_in_percent() {
         settings.band.volume_max = 1.0;
         let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
-        assert!(ui.has("70–100 %"), "{}", ui.html());
-        ui.type_into("from-station-strength", "40");
-        ui.commit("from-station-strength", "40");
+        assert!(ui.has("\u{2212}3 to 0 dB"), "{}", ui.html());
+        ui.type_into("from-station-strength", "-12");
+        ui.commit("from-station-strength", "-12");
         ui.advance(50).await;
-        assert_eq!(ui.stored_settings().await.band.volume_min, 0.4);
-        assert!(ui.has("40–100 %"));
+        assert_eq!(ui.stored_settings().await.band.volume_min, 0.2512);
+        assert!(ui.has("\u{2212}12 to 0 dB"));
+        ui.type_into("from-station-strength", "-40");
+        ui.commit("from-station-strength", "-40");
+        ui.advance(50).await;
+        assert_eq!(
+            ui.stored_settings().await.band.volume_min,
+            cw_core::VOLUME_MIN
+        );
+        assert!(ui.has("\u{2212}20 to 0 dB"));
     });
 }
 
@@ -1346,7 +1389,11 @@ fn every_settings_card_says_what_its_options_do() {
                 "character-sampling",
                 "How much more often the characters you miss are sent",
             ),
-            ("band-conditions", "Slow swells and dips of the signal."),
+            ("recognition", "How fast counts as what on Letter accuracy"),
+            (
+                "band-conditions",
+                "Slow swells and dips of each station, every one on a path of its own",
+            ),
         ] {
             let help = format!("help-{card}");
             assert!(!ui.has(says), "{card} keeps its help closed");

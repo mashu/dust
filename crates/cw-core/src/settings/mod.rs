@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::keyer::KeyerMode;
 use crate::level::LEVEL_MIN;
+use crate::recognition::RecognitionBands;
 
 // The range each setting is kept in, declared once: `clamp` holds the
 // settings to them and the settings screen draws its controls from them.
@@ -25,8 +26,11 @@ pub const GROUP_REPEAT_MAX: u32 = 8;
 /// Speeds, in words a minute: character, effective and the paddles' own.
 pub const WPM_MIN: f64 = 5.0;
 pub const WPM_MAX: f64 = 80.0;
-/// How far the word space is stretched beyond seven units.
-pub const EXTRA_WORD_SPACE_MIN: f64 = 0.1;
+/// How far the word space is stretched beyond seven units. Never under half:
+/// three and a half units, still longer than the three between letters, or
+/// the gap between two groups would be shorter than one inside a group and
+/// the groups would run together.
+pub const EXTRA_WORD_SPACE_MIN: f64 = 0.5;
 pub const EXTRA_WORD_SPACE_MAX: f64 = 8.0;
 /// The longest the answer window stays open; zero leaves it open.
 pub const GROUP_TIMEOUT_MAX_SEC: f64 = 120.0;
@@ -51,6 +55,10 @@ pub const STEEPNESS_MAX_MS: f64 = 50.0;
 /// How fast the band fades, in fades a second.
 pub const QSB_RATE_MIN_HZ: f64 = 0.03;
 pub const QSB_RATE_MAX_HZ: f64 = 1.5;
+/// How deep the Band card's fading goes at full depth, in decibels: the
+/// fades of an HF path, which take a signal two or three S-units down and
+/// now and then further.
+pub const QSB_DEPTH_MAX_DB: f64 = 20.0;
 /// Sessions above or below the threshold before the level moves.
 pub const ADJUST_COUNT_MAX: u32 = 20;
 /// The session accuracy, in percent, that counts as above the threshold.
@@ -384,7 +392,10 @@ impl Default for PlaybackSettings {
             group_timeout: 10.0,
             group_pause_sec: 0.0,
             countdown_sec: 3,
-            lock_input_during_group_playback: true,
+            // Typed along, a group's characters are each timed from their
+            // sound (docs/recognition.md); locked, none longer than one can
+            // be. Who chose either keeps it: only a new install starts here.
+            lock_input_during_group_playback: false,
             paddle_swap: false,
             keyer_mode: KeyerMode::IambicB,
             keyer_wpm: 20.0,
@@ -459,6 +470,15 @@ pub struct BandSettings {
     pub steepness: f64,
     pub envelope_smoothing: f64,
     pub qsb_enabled: bool,
+    /// How deep the fades go, as a share of [`QSB_DEPTH_MAX_DB`]: every bit
+    /// of the slider's travel is heard, in decibels, as an ear hears a fade.
+    /// Out of the box a 12 dB fade, which under the AGC is the hiss swelling
+    /// up beneath a station that holds roughly steady, as on the air. Kept
+    /// under a key of its own: saves from before kept a share of the
+    /// signal's amplitude under `qsbDepth`, nearly all of them at that
+    /// default's 3.7 dB, which under the AGC sounded as no fading at all,
+    /// and they load at today's default.
+    #[serde(rename = "qsbDepthShare")]
     pub qsb_depth: f64,
     pub qsb_rate_hz: f64,
     pub qrn_enabled: bool,
@@ -539,7 +559,7 @@ impl Default for BandSettings {
             steepness: 6.0,
             envelope_smoothing: 0.75,
             qsb_enabled: true,
-            qsb_depth: 0.35,
+            qsb_depth: 0.6,
             qsb_rate_hz: 0.12,
             qrn_enabled: true,
             qrn_level: 0.25,
@@ -623,6 +643,9 @@ pub enum SettingsSection {
     AutoLevel,
     /// How the next group is drawn from the characters you know.
     CharacterSampling,
+    /// Where recognising a character counts as fast, instant (ICR), slow
+    /// and too slow.
+    Recognition,
     /// Your callsign, and the exchange you send in a contest.
     Station,
 }
@@ -630,7 +653,7 @@ pub enum SettingsSection {
 impl SettingsSection {
     /// Every section, for the tests that sweep them.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::SessionShape,
         Self::Speed,
         Self::KeyingEnvelope,
@@ -639,6 +662,7 @@ impl SettingsSection {
         Self::BandConditions,
         Self::AutoLevel,
         Self::CharacterSampling,
+        Self::Recognition,
         Self::Station,
     ];
 }
@@ -674,6 +698,9 @@ pub struct TrainingSettings {
     pub playback: PlaybackSettings,
     pub band: BandSettings,
     pub auto_level: AutoLevelSettings,
+    /// Where recognising a character counts as fast, instant, slow and too
+    /// slow, on Letter accuracy.
+    pub recognition: RecognitionBands,
     pub contest: ContestSettings,
 }
 
@@ -962,7 +989,7 @@ mod tests {
     fn missing_json_fields_use_training_defaults() {
         let s: TrainingSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(s.curriculum.mixed_letters_percent, 70);
-        assert!(s.playback.lock_input_during_group_playback);
+        assert!(!s.playback.lock_input_during_group_playback);
         assert!(s.playback.link_char_to_effective);
         assert_eq!(s.playback.group_timeout, 10.0);
         assert_eq!(s.playback.group_pause_sec, 0.0);
@@ -979,7 +1006,7 @@ mod tests {
         let koch: TrainingSettings = serde_json::from_str(r#"{"charSetMode":"koch"}"#).unwrap();
         assert_eq!(koch.curriculum.char_set_mode, CharSetMode::Koch);
         assert_eq!(koch.curriculum.mixed_letters_percent, 70);
-        assert!(koch.playback.lock_input_during_group_playback);
+        assert!(!koch.playback.lock_input_during_group_playback);
     }
 
     #[test]
@@ -1334,6 +1361,22 @@ mod tests {
         assert_eq!(s.side_tone_center(), 400.0);
     }
 
+    /// The sidetone rises as the keying envelope does, but never over more
+    /// than a quarter of a dit at the paddles' speed, and never in less
+    /// than the envelope's shortest rise, whatever is set.
+    #[test]
+    fn the_sidetone_rises_with_the_envelope_within_a_quarter_dit() {
+        let mut s = TrainingSettings::default();
+        assert_eq!(s.sidetone_rise_sec(), 0.006);
+        s.band.steepness = 50.0;
+        s.playback.keyer_wpm = 20.0;
+        assert_eq!(s.sidetone_rise_sec(), 0.015, "a quarter of a 60 ms dit");
+        s.playback.keyer_wpm = WPM_MAX;
+        assert_eq!(s.sidetone_rise_sec(), 1.2 / WPM_MAX / 4.0);
+        s.band.steepness = f64::NAN;
+        assert_eq!(s.sidetone_rise_sec(), STEEPNESS_MIN_MS / 1_000.0);
+    }
+
     #[test]
     fn opening_a_fixed_side_tone_spreads_it_without_leaving_the_dial() {
         let mut s = TrainingSettings::default();
@@ -1540,6 +1583,48 @@ mod tests {
         }
     }
 
+    /// The recognition bands are kept under their own keys, read back in
+    /// order, and an older save with none loads them as they ship.
+    #[test]
+    fn the_recognition_bands_are_saved_and_read_in_order() {
+        let s = TrainingSettings {
+            recognition: RecognitionBands {
+                fast_ms: 900,
+                icr_ms: 500,
+                slow_ms: 10,
+            },
+            ..TrainingSettings::default()
+        };
+        let json = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(json["recognitionFastMs"], 900);
+        assert_eq!(json["recognitionIcrMs"], 500);
+        assert_eq!(json["recognitionSlowMs"], 10);
+        let read: TrainingSettings = serde_json::from_value(json).expect("a save loads");
+        let read = read.clamp().recognition;
+        assert_eq!((read.fast_ms, read.icr_ms, read.slow_ms), (900, 900, 900));
+        let old: TrainingSettings = serde_json::from_str("{}").expect("an empty save");
+        assert_eq!(old.recognition, RecognitionBands::default());
+    }
+
+    /// The fade's depth is kept under its own key: a save from when
+    /// `qsbDepth` was a share of the signal's amplitude loads at today's
+    /// default, and one saved now reads back as it was.
+    #[test]
+    fn a_fade_depth_saved_before_it_was_in_decibels_loads_at_the_default() {
+        let mut json = serde_json::to_value(TrainingSettings::default()).expect("serialize");
+        let keys = json.as_object_mut().expect("an object");
+        assert!(keys.remove("qsbDepthShare").is_some());
+        keys.insert("qsbDepth".into(), 0.35.into());
+        let old: TrainingSettings = serde_json::from_value(json).expect("an old save loads");
+        assert_eq!(old.band.qsb_depth, BandSettings::default().qsb_depth);
+        let mut s = TrainingSettings::default();
+        s.band.qsb_depth = 0.25;
+        let json = serde_json::to_value(&s).expect("serialize");
+        assert_eq!(json["qsbDepthShare"], 0.25);
+        let read: TrainingSettings = serde_json::from_value(json).expect("a save loads");
+        assert_eq!(read.band.qsb_depth, 0.25);
+    }
+
     /// The reset buttons have to cover everything between them, or one card
     /// keeps a setting nobody can put back.
     ///
@@ -1696,6 +1781,11 @@ mod tests {
         s.auto_level.error_weight_strength = 0.9;
         s.auto_level.char_sampling_coverage_strength = 0.9;
         s.auto_level.char_sampling_thompson = false;
+        s.recognition = RecognitionBands {
+            fast_ms: 300,
+            icr_ms: 500,
+            slow_ms: 1_000,
+        };
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
         s.contest.contest_habits = crate::contest::CallerHabits::Real;

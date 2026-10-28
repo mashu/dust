@@ -110,6 +110,7 @@ impl TrainingSettings {
                     d.auto_level.char_sampling_coverage_strength;
                 self.auto_level.char_sampling_thompson = d.auto_level.char_sampling_thompson;
             }
+            SettingsSection::Recognition => self.recognition = d.recognition,
             SettingsSection::Station => {
                 self.contest.my_call = d.contest.my_call;
                 self.contest.my_name = d.contest.my_name;

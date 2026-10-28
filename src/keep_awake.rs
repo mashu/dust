@@ -174,6 +174,7 @@ pub(crate) mod tests {
             ui.click("btn-start-training");
             assert_eq!(asked(), vec![true]);
             ui.click("btn-discard");
+            ui.click("btn-discard-session");
             assert_eq!(ui.screen(), "home");
             assert_eq!(asked(), vec![true, false]);
         });

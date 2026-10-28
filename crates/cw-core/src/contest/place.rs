@@ -94,11 +94,12 @@ pub(super) fn place_contest_caller(
         }
         RunStyle::Pileup => pileup_pitch(settings, taken, rng)?,
     };
-    let range = settings.volume_range();
+    let range = settings.volume_range_db();
     let (floor, top) = (*range.start(), *range.end());
-    // MorseRunner's `RndUShaped`, `sin(π(u − ½))`, from −1 to 1.
+    // MorseRunner's `RndUShaped`, `sin(π(u − ½))`, from −1 to 1, across
+    // the range in decibels, as it is shown.
     let swing = (std::f64::consts::PI * (rng.f64() - 0.5)).sin();
-    let volume = (floor + (top - floor) * (1.0 + swing) / 2.0).clamp(floor, top);
+    let volume = settings.volume_at_db(floor + (top - floor) * (1.0 + swing) / 2.0);
     Some(Placement { tone_hz, volume })
 }
 
@@ -122,8 +123,8 @@ pub(super) fn place_qrm(settings: &TrainingSettings, rng: &mut impl Rng) -> Plac
     let tone_hz = rng
         .normal_within(centre, reach)
         .clamp(SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ);
-    let range = settings.volume_range();
-    let volume = rng.pick_in_range(*range.start(), *range.end());
+    let range = settings.volume_range_db();
+    let volume = settings.volume_at_db(rng.pick_in_range(*range.start(), *range.end()));
     Placement { tone_hz, volume }
 }
 
@@ -265,9 +266,9 @@ mod tests {
         }
     }
 
-    /// Strength is U-shaped across the volume range, as MorseRunner draws
-    /// it: two thirds of callers in its outer quarters, and none below its
-    /// floor or above its top.
+    /// Strength is U-shaped across the volume range in decibels, as it is
+    /// shown, the way MorseRunner draws it: two thirds of callers in its
+    /// outer quarters, and none below its floor or above its top.
     #[test]
     fn strength_is_u_shaped_and_never_below_the_floor() {
         let mut s = settings(DEFAULT_FILTER_WIDTH_HZ);
@@ -280,7 +281,13 @@ mod tests {
             .map(|placed| placed.volume)
             .collect();
         assert!(volumes.iter().all(|v| (0.2..=1.0).contains(v)));
-        let outer = volumes.iter().filter(|v| **v < 0.4 || **v > 0.8).count();
+        let floor = crate::band::gain_to_db(0.2);
+        let quarter = -floor / 4.0;
+        let outer = volumes
+            .iter()
+            .map(|v| crate::band::gain_to_db(*v))
+            .filter(|db| *db < floor + quarter || *db > -quarter)
+            .count();
         let share = outer as f64 / volumes.len() as f64;
         assert!(
             (share - 2.0 / 3.0).abs() < 0.02,

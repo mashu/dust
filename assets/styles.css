@@ -781,7 +781,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-size: 0.84rem;
   font-weight: 600;
   color: var(--ink-soft);
-  transition: all 0.15s var(--ease);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease), border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
 }
 .pill:hover { border-color: var(--line-strong); color: var(--ink); }
 .pill.active {
@@ -842,7 +842,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 700;
   color: var(--ink-dim);
   white-space: nowrap;
-  transition: all 0.16s var(--ease);
+  transition: color 0.16s var(--ease), background 0.16s var(--ease), box-shadow 0.16s var(--ease);
 }
 .segmented .seg:hover { color: var(--ink); }
 .segmented .seg.active {
@@ -987,7 +987,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-size: 0.72rem;
   font-weight: 700;
   color: var(--ink-dim);
-  transition: all 0.15s var(--ease);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 .link-toggle .icon { width: 0.82rem; height: 0.82rem; }
 .link-toggle:hover { color: var(--ink); border-color: var(--line-strong); }
@@ -1009,10 +1009,12 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   background: linear-gradient(90deg, var(--copper), var(--copper-lift));
 }
 
-/* Level scope — what reaches the receiver's AGC, against where the AGC
-   starts, with how far the AGC takes it down in the lane under it. */
+/* Level scope — the band as it reaches the receiver's AGC, against where
+   the AGC starts and the band's hiss, over what comes out to the speaker,
+   against the limiter; and the AGC lamp. A pixel to a decibel down both. */
 .scope { display: flex; flex-direction: column; gap: 0.3rem; }
-.scope-plot { display: block; width: 100%; height: 96px; border-radius: 8px; }
+.scope-screen { position: relative; }
+.scope-plot { display: block; width: 100%; border-radius: 8px; }
 .scope-pane { fill: var(--surface-sunken); }
 .scope-level {
   fill: var(--copper-soft);
@@ -1027,17 +1029,59 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   vector-effect: non-scaling-stroke;
 }
 .scope-threshold.off { stroke: var(--ink-dim); }
-.scope-agc {
-  fill: var(--info-soft);
-  stroke: var(--info);
+.scope-hiss,
+.scope-limit {
+  stroke: var(--ink-dim);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+}
+.scope-hiss { stroke-dasharray: 1 3; }
+/* The pane's tag, outlined in the pane's colour rather than boxed: the
+   traces and the lines run on under it and stop a pixel short of each
+   letter, so none of them merges into it. */
+.scope-tag {
+  position: absolute;
+  left: 8px;
+  color: var(--ink-dim);
+  text-shadow:
+    1px 0 var(--surface-sunken), -1px 0 var(--surface-sunken),
+    0 1px var(--surface-sunken), 0 -1px var(--surface-sunken),
+    1px 1px var(--surface-sunken), -1px -1px var(--surface-sunken),
+    1px -1px var(--surface-sunken), -1px 1px var(--surface-sunken);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.3;
+  pointer-events: none;
+}
+.scope-meter { display: flex; align-items: center; gap: 0.45rem; }
+.scope-lamp {
+  flex: 0 0 auto;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  transition: background 0.12s, color 0.12s, box-shadow 0.12s;
+}
+.scope-lamp.on {
+  background: var(--info);
+  color: var(--surface);
+  box-shadow: 0 0 0 3px var(--info-soft);
+}
+.scope-lamp.off {
+  background: transparent;
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
 }
 .scope-legend { margin: 0; font-size: 0.75rem; }
 .scope-reading {
   margin: 0;
+  min-width: 0;
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.78rem;
+}
+/* On a phone the readout can wrap: it keeps two lines' room, so the
+   legend under it does not jump as it changes twenty times a second. */
+@media (max-width: 480px) {
+  .scope-reading { line-height: 1.35; min-height: 2.7em; }
 }
 
 /* Slider — paint the track/knob ourselves so the control is visible even
@@ -1223,7 +1267,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-weight: 700;
   color: var(--ink-soft);
   box-shadow: var(--shadow-sm);
-  transition: all 0.15s var(--ease);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 .test-chip:hover { color: var(--copper-deep); border-color: var(--copper); }
 .test-chip.playing {
@@ -1785,7 +1829,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 @media (any-pointer: coarse) {
   .run:not(.paused) .run-actions { order: 0; }
 }
-.run-ask { flex-basis: 100%; margin: 0; font-weight: 600; }
+.discard-ask { flex-basis: 100%; margin: 0; font-weight: 600; }
 
 .run-paused-line { display: flex; align-items: center; gap: 0.45rem; margin: 0; font-weight: 700; }
 .run-paused-why { margin: 0.3rem 0 0; }
@@ -2100,7 +2144,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   font-size: 1.02rem;
   color: var(--ink);
   box-shadow: var(--shadow-sm);
-  transition: all 0.15s var(--ease);
+  transition: color 0.15s var(--ease), background 0.15s var(--ease), border-color 0.15s var(--ease), box-shadow 0.15s var(--ease), transform 0.15s var(--ease);
 }
 .letter-chip:hover { border-color: var(--copper); transform: translateY(-1px); }
 .letter-chip.newest { border-color: var(--copper); box-shadow: 0 0 0 2px var(--copper-soft); }
@@ -2281,7 +2325,18 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .acc-trend { font-weight: 700; }
 .acc-trend.up { color: var(--good); }
 .acc-trend.down { color: var(--copper-deep); }
-.acc-time.slow { color: var(--copper-deep); font-weight: 700; }
+/* How fast a character is recognised, by its band: green fast, yellow
+   ICR, orange slow, red too slow — its time on Letter accuracy, its chip
+   in the summary, and the key. */
+.rec-chip { padding: 0 0.3rem; border-radius: 5px; font-weight: 800; }
+.rec-chip.rec-fast, .err-chip.rec-fast { background: var(--good-soft); color: var(--good); }
+.rec-chip.rec-icr, .err-chip.rec-icr { background: var(--warn-soft); color: var(--warn); }
+.rec-chip.rec-slow { background: var(--copper-soft); color: var(--copper-deep); }
+.rec-chip.rec-too-slow { background: var(--bad-soft); color: var(--bad); }
+.err-swatch.rec-fast { background: var(--good); }
+.err-swatch.rec-icr { background: var(--warn); }
+.err-swatch.rec-slow { background: var(--copper); }
+.err-swatch.rec-too-slow { background: var(--bad); }
 /* Common confusions and hardest pairs: the characters as tiles, the one
    taken for or the one after in copper, each in small Morse with the
    elements that differ picked out, and a bar of how often, of every one
@@ -2462,8 +2517,6 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .bigram-grid { display: grid; gap: 2px; min-width: min-content; }
 .bigram-head { font-size: 0.65rem; text-align: center; color: var(--ink-dim); font-weight: 700; border-radius: 4px; }
 .bigram-head.row-head { position: sticky; left: 0; z-index: 2; background: var(--surface); }
-.bigram-head.in-line { color: var(--ink); background: var(--info-soft); }
-.bigram-head.row-head.in-line { background: linear-gradient(var(--info-soft), var(--info-soft)), var(--surface); }
 .bigram-cell {
   display: block;
   width: 100%;
@@ -2474,9 +2527,9 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   background-color: var(--surface-sunken);
 }
 .bigram-cell.empty { background: none; box-shadow: inset 0 0 0 1px var(--line); cursor: default; }
-.bigram-cell.in-line { box-shadow: inset 0 0 0 1.5px var(--info); }
-.bigram-cell.shown { position: relative; z-index: 1; outline: 2px solid var(--info); outline-offset: 1px; }
-.bigram-cell.selected { position: relative; z-index: 1; outline: 2px solid var(--ink); outline-offset: 1px; }
+/* The pair shown, its row and column, and the pair pinned are lit by a rule
+   the grid writes for them (line_css in src/ui/bigram.rs), so that pointing
+   at a pair draws none of the squares again. */
 .pair-dock {
   position: fixed;
   left: 0;
@@ -2635,6 +2688,12 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   padding: 0.8rem 0.95rem;
 }
 .notice .icon { color: var(--warn); width: 1.15rem; height: 1.15rem; margin-top: 0.1rem; }
+/* What became of the sessions before, over the screen they left you on. */
+.notice-up { margin-bottom: 1rem; font-weight: 600; font-size: 0.92rem; }
+.notice-lines { flex: 1; }
+.notice-lines p { margin: 0; }
+.notice-lines p + p { margin-top: 0.4rem; }
+.notice-close { width: 1.9rem; height: 1.9rem; flex: none; box-shadow: none; }
 
 /* Tips */
 .tips {
@@ -2805,7 +2864,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
   .run-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .run-actions.asking { grid-template-columns: 1fr 1fr; }
   .run-actions .btn { padding-left: 0.5rem; padding-right: 0.5rem; }
-  .run-ask { grid-column: 1 / -1; }
+  .discard-ask { grid-column: 1 / -1; }
   .grid-4 { grid-template-columns: 1fr 1fr; gap: 0.5rem; }
   /* A log row takes two lines: who and what, then speed and how it checked. */
   .run-log { --log-row: 2.9rem; }

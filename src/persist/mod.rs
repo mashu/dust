@@ -66,7 +66,57 @@ pub trait Store {
     /// needs room. Only a browser clears a store on its own, and it may ask
     /// the user first.
     fn ask_to_keep(&self) {}
+    /// Mark this copy of the app's session or run open while it runs
+    /// (`Some`), or over (`None`): it ended, kept or let go. Each copy marks
+    /// its own and holds it, a tab or a window of its own; one whose copy
+    /// stopped while it was marked was cut off ([`Store::take_cut_off`]).
+    fn mark_open(&self, open: Option<OpenSession>);
+    /// The sessions or runs copies of the app left marked open, and stopped
+    /// under: closed, crashed, killed, reloaded. Taken, so each is told of
+    /// once; one a copy is still running is left to it.
+    fn take_cut_off(&self) -> CutOffTaking;
 }
+
+/// A session of groups or a contest run, as it is marked open while it runs
+/// ([`Store::mark_open`]): so that one the app stops under is never lost
+/// without a word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSession {
+    /// When it started, in milliseconds since the epoch.
+    pub started_at: u64,
+    /// A contest run, rather than a session of groups.
+    pub run: bool,
+}
+
+/// A session or run the app stopped under, as its mark tells of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CutOff {
+    Marked(OpenSession),
+    /// The mark is there and cannot be read: cut short itself, by a power
+    /// cut, say. A session was running all the same.
+    Unread,
+}
+
+impl CutOff {
+    /// The one to tell of, of all those cut off: the newest that can be
+    /// read, or failing that, one that cannot.
+    fn newest(cut: impl IntoIterator<Item = Self>) -> Option<Self> {
+        cut.into_iter().max_by_key(|cut| match cut {
+            Self::Marked(open) => Some(open.started_at),
+            Self::Unread => None,
+        })
+    }
+
+    /// A mark as it was read.
+    fn read(raw: &[u8]) -> Self {
+        serde_json::from_slice(raw).map_or(Self::Unread, Self::Marked)
+    }
+}
+
+/// The sessions cut off, being looked for: already, or still, where only the
+/// platform can tell which copies are running, as in a browser.
+pub type CutOffTaking = Pin<Box<dyn Future<Output = Option<CutOff>>>>;
 
 /// A backup file on its way: saved already, or still being saved where only
 /// the platform's own thread can save it, as on Android.
@@ -348,7 +398,7 @@ pub(crate) mod tests {
         p.group_timeout = 30.0;
         p.group_pause_sec = 6.0;
         p.countdown_sec = 7;
-        p.lock_input_during_group_playback = false;
+        p.lock_input_during_group_playback = true;
         p.paddle_swap = true;
         p.keyer_mode = cw_core::KeyerMode::Ultimatic;
         p.keyer_wpm = 32.0;
@@ -391,6 +441,11 @@ pub(crate) mod tests {
         a.error_weight_strength = 0.9;
         a.char_sampling_coverage_strength = 0.9;
         a.char_sampling_thompson = true;
+        s.recognition = cw_core::RecognitionBands {
+            fast_ms: 350,
+            icr_ms: 550,
+            slow_ms: 900,
+        };
         let k = &mut s.contest;
         k.contest_kind = cw_core::ContestKind::Sprint;
         k.contest_style = cw_core::RunStyle::Pileup;
@@ -578,6 +633,7 @@ pub(crate) mod tests {
             char_wpm: Some(35.0),
             effective_wpm: None,
             sends: 1,
+            ..cw_core::SessionTiming::default()
         }];
         stored.char_wpm = 35.0;
         stored.effective_wpm = 35.0;

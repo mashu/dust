@@ -33,7 +33,6 @@ web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Document",
     "Element",
-    "AnalyserNode",
     "AudioContext",
     "AudioContextState",
     "AudioDestinationNode",
@@ -45,9 +44,6 @@ web-sys = { version = "0.3", optional = true, features = [
     "AudioBuffer",
     "AudioBufferSourceNode",
     "AudioScheduledSourceNode",
-    "ChannelSplitterNode",
-    "DynamicsCompressorNode",
-    "IirFilterNode",
     "Storage",
     # Backups: a file handed over as a download, and the ask to keep the store.
     "Blob",
@@ -77,6 +73,9 @@ tokio = { version = "1", optional = true, default-features = false, features = [
 # runs on already.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
+# The webview, asked whether it draws on the graphics card
+# (src/ui/display.rs): the version, and the API, wry uses.
+webkit2gtk = { version = "=2.0.1", features = ["v2_40"], optional = true }
 
 # iOS: claiming an audio session is what makes the app audible at all, and cpal
 # does not do it for us.
@@ -132,7 +131,7 @@ web = [
 ]
 # Desktop is the system webview (wry). `dx serve --platform desktop` and the
 # shipped installers use this.
-desktop = ["dioxus/desktop", "native-runtime", "native-audio", "dep:gtk"]
+desktop = ["dioxus/desktop", "native-runtime", "native-audio", "dep:gtk", "dep:webkit2gtk"]
 # Android/iOS still use a system webview. `dx` enables this feature
 # automatically for `--platform android`.
 mobile = ["dioxus/mobile", "native-runtime", "native-audio"]

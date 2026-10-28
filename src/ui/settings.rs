@@ -9,10 +9,11 @@ use cw_core::{
     CONTEST_MINUTES_MAX, COUNTDOWN_MAX_SEC, COVERAGE_STRENGTH_MAX, CharSetMode, ContestSettings,
     ERROR_WEIGHT_MAX, EXTRA_WORD_SPACE_MAX, EXTRA_WORD_SPACE_MIN, Experience, GROUP_PAUSE_MAX_SEC,
     GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, GROUP_TIMEOUT_MAX_SEC,
-    KeyerMode, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB,
-    NUM_GROUPS_MAX, NUM_GROUPS_MIN, RangeSetting, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ,
-    SettingsSection, SpeedPath, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
-    adaptive_speed_on, adapts_group_size, adapts_speed, aim_section,
+    KeyerMode, MASTER_VOLUME_MIN, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, NUM_GROUPS_MAX,
+    NUM_GROUPS_MIN, RECOGNITION_BAND_MAX_MS, RECOGNITION_BAND_MIN_MS, RangeSetting,
+    RecognitionBands, RecognitionEdge, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, SettingsSection,
+    SpeedPath, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, adaptive_speed_on,
+    adapts_group_size, adapts_speed, aim_section,
 };
 use dioxus::prelude::*;
 
@@ -20,13 +21,12 @@ use crate::playback::Dialogue;
 use crate::ui::band::BandConditionsCard;
 use crate::ui::envelope::EnvelopeCard;
 use crate::ui::help;
-use crate::ui::home::range_label;
 use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
     CardHead, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange, SliderField, Switch,
-    control_id, html_bool,
+    control_id, db_share, html_bool, range_label, share_db,
 };
 
 /// What an aim is called on screen.
@@ -50,7 +50,7 @@ const KEYER_MODES: [(KeyerMode, &str); 4] = [
 fn keyer_description(mode: KeyerMode) -> &'static str {
     match mode {
         KeyerMode::Straight => {
-            "One contact. Hold [ or ] — a short press is a dit, a long one a dah. You time the elements."
+            "One contact. Hold [ or ] — a short press is a dit, a long one a dah. You time the elements: set the key speed to the speed you send at, as it decides where a dit becomes a dah and how long a pause ends a letter."
         }
         KeyerMode::IambicA => {
             "Hold a paddle and it repeats at the key speed you set. Squeeze both to alternate. Let go and the element you were on finishes, then it stops."
@@ -136,6 +136,9 @@ pub fn SettingsView(
             if !contest {
                 AutoLevelSettingsCard { settings }
             }
+            // The bands colour Letter accuracy, which keeps every mode's
+            // times, contest runs' among them, whatever mode is on.
+            RecognitionCard { settings }
             SamplingCard { settings }
             BandConditionsCard {
                 settings,
@@ -143,6 +146,7 @@ pub fn SettingsView(
                 on_preview: on_preview_band,
                 on_stop: on_stop_band,
             }
+            crate::ui::display::DisplayCard {}
             crate::ui::privacy::PrivacyCard {}
             crate::ui::credits::CreditsCard {}
         }
@@ -449,7 +453,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                 }
                 Switch {
                     title: "Lock typing while sending",
-                    description: "Keeps you copying by ear instead of typing along.",
+                    description: "Keeps you copying by ear instead of typing along. While it is on, a group longer than one character is typed only once it has been heard whole, so its characters cannot be timed: turn it off and key each one as you hear it to time how fast you recognise it.",
                     checked: s.lock_input,
                     onchange: move |on| settings.write().playback.lock_input_during_group_playback = on,
                 }
@@ -700,22 +704,35 @@ fn YourSpeed(settings: Signal<TrainingSettings>) -> Element {
 /// How loud everything plays, the band, the stations, your sending and the
 /// paddle's sidetone together, as a share of full: the one control for
 /// that, the station strength below being how strong a station is against
-/// the band. It reads its own value, so the card around it never redraws
-/// for it.
+/// the band. In whole decibels down from full, as a rig's AF gain turns
+/// ([`share_db`]). It reads its own value, so the card around it never
+/// redraws for it.
 #[component]
 fn MasterVolume(settings: Signal<TrainingSettings>) -> Element {
     let volume = use_memo(move || settings.read().band.master_volume)();
+    let db = share_db(volume, MASTER_VOLUME_MIN);
     rsx! {
         SliderField {
             label: "Volume",
-            value_label: format!("{:.0}%", volume * 100.0),
-            value: volume,
-            min: MASTER_VOLUME_MIN,
-            max: MASTER_VOLUME_MAX,
-            step: 0.05,
+            value_label: volume_label(db),
+            value: db,
+            min: share_db(MASTER_VOLUME_MIN, MASTER_VOLUME_MIN),
+            max: 0.0,
+            step: 1.0,
             disabled: false,
-            onchange: move |v: f64| settings.write().band.master_volume = (v * 100.0).round() / 100.0,
+            onchange: move |v: f64| {
+                settings.write().band.master_volume = db_share(v, MASTER_VOLUME_MIN);
+            },
         }
+    }
+}
+
+/// What the volume reads as: "Full", or "−6 dB" turned down.
+fn volume_label(db: f64) -> String {
+    if db >= 0.0 {
+        "Full".to_string()
+    } else {
+        format!("\u{2212}{:.0} dB", -db)
     }
 }
 
@@ -816,12 +833,12 @@ fn ToneCard(settings: Signal<TrainingSettings>) -> Element {
                 settings,
                 which: RangeSetting::Volume,
                 label: "Station strength",
-                unit: "%",
+                unit: "dB",
                 min_bound: VOLUME_MIN,
                 max_bound: VOLUME_MAX,
-                step: 0.05,
-                percent: true,
-                hint: "How far the station stands over the band's noise, not how loud it plays. A range draws a fresh strength per group.",
+                step: 1.0,
+                decibels: true,
+                hint: "How far the station stands over the band's noise, not how loud it plays: 0 dB is the strongest. A range draws a fresh strength per group.",
             }
             SendingLevel { settings }
             FullBreakIn { settings }
@@ -880,6 +897,73 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
                     step: 1.0,
                     onchange: move |v| settings.write().auto_level.auto_adjust_below_threshold_count = v as u32,
                 }
+            }
+        }
+    }
+}
+
+/// Where recognising a character counts as fast, instant (ICR), slow and
+/// too slow, on Letter accuracy: three edges, each kept in order with the
+/// others as it moves.
+#[component]
+fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
+    let bands = use_memo(move || settings.read().recognition);
+    let RecognitionBands {
+        fast_ms: fast,
+        icr_ms: icr,
+        slow_ms: slow,
+    } = bands();
+    let edge = move |which: RecognitionEdge| {
+        move |ms: f64| {
+            let mut settings = settings.write();
+            settings.recognition = settings.recognition.with(which, ms.round() as u32);
+        }
+    };
+    let (low, high) = (
+        f64::from(RECOGNITION_BAND_MIN_MS),
+        f64::from(RECOGNITION_BAND_MAX_MS),
+    );
+    rsx! {
+        div { class: "card stack-sm",
+            SectionHead {
+                icon: IconName::Timer,
+                title: "Recognition",
+                note: "How fast counts as ICR on Letter accuracy",
+                settings,
+                section: SettingsSection::Recognition,
+                help: help::recognition(),
+            }
+            div { class: "field-grid",
+                NumberField {
+                    label: "Fast under",
+                    value: f64::from(fast),
+                    min: low,
+                    max: high,
+                    step: 50.0,
+                    unit: "ms",
+                    onchange: edge(RecognitionEdge::Fast),
+                }
+                NumberField {
+                    label: "ICR under",
+                    value: f64::from(icr),
+                    min: low,
+                    max: high,
+                    step: 50.0,
+                    unit: "ms",
+                    onchange: edge(RecognitionEdge::Icr),
+                }
+                NumberField {
+                    label: "Slow under",
+                    value: f64::from(slow),
+                    min: low,
+                    max: high,
+                    step: 50.0,
+                    unit: "ms",
+                    onchange: edge(RecognitionEdge::Slow),
+                }
+            }
+            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                "Green under {fast} ms, yellow (ICR) under {icr} ms, orange under {slow} ms, red from {slow} ms: the time from a character's sound going out to your speaker or headphones to your key."
             }
         }
     }

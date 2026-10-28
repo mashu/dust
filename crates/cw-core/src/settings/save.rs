@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use super::{
     AutoLevelSettings, BandSettings, CharSetMode, ContestSettings, CurriculumSettings,
-    PlaybackSettings, PracticeWindow, TrainingSettings,
+    PlaybackSettings, PracticeWindow, RecognitionBands, TrainingSettings,
 };
 
 /// Settings as they are written: every section flattened into one object,
@@ -26,6 +26,8 @@ struct SettingsOnDisk<'a> {
     #[serde(flatten)]
     auto_level: &'a AutoLevelSettings,
     #[serde(flatten)]
+    recognition: &'a RecognitionBands,
+    #[serde(flatten)]
     contest: &'a ContestSettings,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     contest_active: bool,
@@ -38,6 +40,7 @@ impl Serialize for TrainingSettings {
             playback: &self.playback,
             band: &self.band,
             auto_level: &self.auto_level,
+            recognition: &self.recognition,
             contest: &self.contest,
             contest_active: self.curriculum.char_set_mode == CharSetMode::Contest,
         }
@@ -66,6 +69,8 @@ struct SettingsSave {
     band: BandSettings,
     #[serde(flatten)]
     auto_level: AutoLevelSettings,
+    #[serde(flatten)]
+    recognition: RecognitionBands,
     #[serde(flatten)]
     contest: ContestSettings,
 }
@@ -107,6 +112,7 @@ impl From<SettingsSave> for TrainingSettings {
             playback: save.playback,
             band: save.band,
             auto_level: save.auto_level,
+            recognition: save.recognition,
             contest: save.contest,
         };
         match save.char_set.char_set_mode {

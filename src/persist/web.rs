@@ -1,14 +1,14 @@
 //! `localStorage`: the browser store.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    BackupSaving, HistorySaved, Store, newest, newest_that_fit, parse_sessions, read_settings_from,
-    saved_now,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, newest_that_fit,
+    parse_sessions, read_settings_from, saved_now,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -18,6 +18,12 @@ const SESSIONS_KEY: &str = "dust_sessions";
 const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
 const LAST_BACKUP_KEY: &str = "dust_last_backup";
+/// The sessions and runs marked open ([`Store::mark_open`]): each page's
+/// under its own key, while the page holds a Web Lock of the same name. A
+/// page that goes, closed, reloaded or crashed, lets go of its lock, so a
+/// mark whose lock nobody holds was cut off, and one held belongs to a tab
+/// still running it.
+const OPEN_PREFIX: &str = "dust_open_session_";
 
 /// How much of the site's storage the history may take, in characters.
 /// Browsers give a site about five million; the rest is left for the
@@ -31,10 +37,65 @@ pub struct WebStore {
     history_held: Cell<bool>,
     /// The browser has been asked to keep the store, this visit.
     asked_to_keep: Cell<bool>,
+    /// This page's mark, while its session is marked open: its name, and
+    /// what lets go of its lock.
+    open_held: RefCell<Option<(String, js_sys::Function)>>,
 }
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// Hold the Web Lock `name` until the function handed back is called; none
+/// in a browser without Web Locks, where nothing is marked, so no running
+/// tab is ever taken for one cut off. Asked for at once, as the call
+/// returns: a lock asked for is as good as held to a page looking for marks.
+fn hold_lock(name: &str) -> Option<js_sys::Function> {
+    let hold = js_sys::Function::new_with_args(
+        "name",
+        "if (!navigator.locks) return null;
+        let release;
+        const held = new Promise((done) => { release = done; });
+        navigator.locks.request(name, () => held);
+        return release;",
+    );
+    hold.call1(&JsValue::NULL, &JsValue::from_str(name))
+        .ok()?
+        .dyn_into()
+        .ok()
+}
+
+/// Take every mark whose page has gone, and hand back what each said: one
+/// look at a time across tabs, so two opening at once tell of it once.
+async fn take_marks() -> Vec<String> {
+    let take = js_sys::Function::new_with_args(
+        "prefix",
+        "if (!navigator.locks) return Promise.resolve([]);
+        return navigator.locks.request(prefix + 'look', async () => {
+            const state = await navigator.locks.query();
+            const live = new Set([...state.held, ...state.pending].map((lock) => lock.name));
+            const keys = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith(prefix) && !live.has(key)) keys.push(key);
+            }
+            return keys.map((key) => {
+                const mark = localStorage.getItem(key) ?? '';
+                localStorage.removeItem(key);
+                return mark;
+            });
+        }).catch(() => []);",
+    );
+    let Ok(promise) = take.call1(&JsValue::NULL, &JsValue::from_str(OPEN_PREFIX)) else {
+        return Vec::new();
+    };
+    let Ok(marks) = JsFuture::from(js_sys::Promise::from(promise)).await else {
+        return Vec::new();
+    };
+    js_sys::Array::from(&marks)
+        .iter()
+        .map(|mark| mark.as_string().unwrap_or_default())
+        .collect()
 }
 
 fn counters_key(key: &CountersKey) -> String {
@@ -232,5 +293,42 @@ impl Store for WebStore {
         if !self.asked_to_keep.replace(true) {
             wasm_bindgen_futures::spawn_local(ask_for_persistence());
         }
+    }
+
+    fn mark_open(&self, open: Option<OpenSession>) {
+        let Some(store) = storage() else {
+            return;
+        };
+        let mut held = self.open_held.borrow_mut();
+        match open {
+            Some(open) => {
+                // The lock first: a page looking for marks then never finds
+                // this one without it.
+                let mark = held.take().or_else(|| {
+                    let name = format!("{OPEN_PREFIX}{:016x}", crate::time::seed_rng());
+                    hold_lock(&name).map(|release| (name, release))
+                });
+                let Some((name, release)) = mark else {
+                    return;
+                };
+                if let Ok(raw) = serde_json::to_string(&open) {
+                    let _ = store.set_item(&name, &raw);
+                }
+                *held = Some((name, release));
+            }
+            None => {
+                if let Some((name, release)) = held.take() {
+                    let _ = store.remove_item(&name);
+                    let _ = release.call0(&JsValue::NULL);
+                }
+            }
+        }
+    }
+
+    fn take_cut_off(&self) -> CutOffTaking {
+        Box::pin(async {
+            let marks = take_marks().await;
+            CutOff::newest(marks.iter().map(|mark| CutOff::read(mark.as_bytes())))
+        })
     }
 }

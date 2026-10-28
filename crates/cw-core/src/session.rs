@@ -10,21 +10,12 @@ use serde::{Deserialize, Serialize};
 use crate::alignment::{CopyTally, LetterAccuracy};
 use crate::contest::{CONTEST_MARK, ContestLog};
 use crate::level::LEVEL_MIN;
+use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
 use crate::score::{
-    GroupCopy, calculate_effective_alphabet_size, calculate_total_chars,
+    GroupCopy, MIN_RESPONSE_MS_PER_CHAR, calculate_effective_alphabet_size, calculate_total_chars,
     compute_average_response_ms, copy_speed, session_points,
 };
 use crate::settings::{CharSetMode, LevelAxis, TrainingSettings, mode_on_disk};
-
-/// The quickest a listener can be said to answer, per character.
-///
-/// An answer finished while the group was still being sent — with the input
-/// left open during the send, real-time copying always is — has no response
-/// time worth the name. Scored as the 1 ms it measured, the speed term ran
-/// away with the score: ten to twenty times an answer given a second after
-/// the send. A tenth of a second a character is about as fast as anyone
-/// types one.
-pub const MIN_RESPONSE_MS_PER_CHAR: f64 = 100.0;
 
 /// The longest an answer is kept, against the group it answers: twice its
 /// length, or this many characters for a short one. Room for every honest
@@ -80,6 +71,46 @@ pub(crate) fn whole_ms(seconds: f64) -> u64 {
     (seconds.max(0.0) * 1_000.0).round() as u64
 }
 
+/// A send as it starts: the speeds it goes at, and when its characters go to
+/// the audio output, by the player's own reckoning.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SendStart {
+    pub char_wpm: f64,
+    pub effective_wpm: f64,
+    /// When its first sample goes to the output.
+    pub output_at: MonoMs,
+    /// Where each of its characters' last element ends, in milliseconds
+    /// after `output_at`.
+    pub char_ends_ms: Vec<u32>,
+    /// Where its first character starts, in milliseconds after `output_at`:
+    /// later than its first sample when callers in a pile-up start before
+    /// the station copied.
+    pub first_char_ms: u32,
+    /// The delay the device reports from its output to the ear.
+    pub latency_ms: u32,
+}
+
+impl SendStart {
+    /// When its sound reaches the ear, as far as the device says.
+    pub fn heard_at(&self) -> MonoMs {
+        self.output_at.plus(u64::from(self.latency_ms))
+    }
+}
+
+/// How a group's first send went to the output: what its characters are
+/// timed from.
+#[derive(Clone, Debug, PartialEq)]
+struct Sounding {
+    origin: MonoMs,
+    char_ends_ms: Vec<u32>,
+    latency_ms: u32,
+    /// It can be timed from: it played on time, and was not tried again.
+    trusted: bool,
+    /// When a later send of the group began to go out: a key from then on
+    /// came after hearing it twice.
+    resent: Option<MonoMs>,
+}
+
 /// Where a session is. Every phase that is about a group names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionPhase {
@@ -129,8 +160,14 @@ pub struct Group {
     /// When the answer was complete: the moment its length first matched,
     /// or the confirm.
     answer_at: Option<MonoMs>,
-    /// The character and effective speed it was sent at, once measured.
+    /// The character and effective speed it was sent at, once its first
+    /// send starts.
     played_wpm: Option<(f64, f64)>,
+    /// How its first send went to the output, once it starts.
+    sounding: Option<Sounding>,
+    /// When each position of the answer was first keyed, as the box keyed
+    /// it, and which hold a correction. As long as the answer.
+    keys: Keys<MonoMs>,
     /// The character and effective speed the source chose for it, when it
     /// chooses one: adaptive speed does.
     planned_wpm: Option<(f64, f64)>,
@@ -150,6 +187,8 @@ impl Group {
             end_at: None,
             answer_at: None,
             played_wpm: None,
+            sounding: None,
+            keys: Keys::default(),
             planned_wpm: None,
             repeats: 1,
             plays_done: 0,
@@ -179,8 +218,10 @@ impl Group {
     }
 
     /// How long the answer took, from the end of the send — never quicker
-    /// than a person types.
-    fn timing(&self) -> SessionTiming {
+    /// than a person types — and what its characters' recognition is read
+    /// from ([`CharTimes`]), where its first send can be timed. `box_open`
+    /// is whether the box took keys while the group was sent.
+    fn timing(&self, box_open: bool) -> SessionTiming {
         let chars = self.sent.chars().count().max(1) as f64;
         let measured = match (self.end_at, self.answer_at) {
             (Some(end), Some(answer)) => answer.since(end) as f64,
@@ -194,6 +235,21 @@ impl Group {
             // A group answered before its last send was heard was heard
             // fewer times than planned, and is scored for what it was.
             sends: self.plays_done.clamp(1, self.repeats.max(1)),
+            char_times: self
+                .sounding
+                .as_ref()
+                .filter(|sounding| sounding.trusted)
+                .map(|sounding| {
+                    CharTimes::of(
+                        sounding.origin.0,
+                        &sounding.char_ends_ms,
+                        &self.keys.map(|key| key.0),
+                        sounding.resent.map(|resent| resent.0),
+                        sounding.latency_ms,
+                        box_open,
+                    )
+                })
+                .filter(CharTimes::can_be_timed),
         }
     }
 }
@@ -358,8 +414,23 @@ impl GroupSession {
         self.groups.get(index).map_or(1, |g| g.repeats.max(1))
     }
 
-    pub(crate) fn played_wpm(&self, index: usize) -> Option<(f64, f64)> {
-        self.groups.get(index)?.played_wpm
+    /// The character and effective speeds `index` was sent at, as its
+    /// sends said; before any did, the settings' slowest.
+    pub(crate) fn sent_wpm(&self, index: usize) -> (f64, f64) {
+        self.groups
+            .get(index)
+            .and_then(|group| group.played_wpm)
+            .unwrap_or_else(|| self.slowest_wpm())
+    }
+
+    /// The slowest the settings send at, the spacing no faster than the
+    /// characters.
+    fn slowest_wpm(&self) -> (f64, f64) {
+        let playback = &self.settings.playback;
+        (
+            playback.char_wpm_min,
+            playback.effective_wpm_min.min(playback.char_wpm_min),
+        )
     }
 
     pub(crate) fn group_start(&self, index: usize) -> Option<MonoMs> {
@@ -402,6 +473,38 @@ impl GroupSession {
         self.focused_group = index;
     }
 
+    /// A send of `index` started, as `start` says: its speeds, and for its
+    /// first send, what its characters are timed from. The first send tried
+    /// again cannot be timed: it was heard in part already. A later send
+    /// marks where keys stop being timed.
+    pub(crate) fn start_playback(&mut self, index: usize, start: &SendStart) {
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        if start.char_wpm > 0.0 && start.effective_wpm > 0.0 {
+            group.played_wpm = Some((start.char_wpm, start.effective_wpm));
+        }
+        match (&mut group.sounding, group.plays_done) {
+            (None, 0) => {
+                group.sounding = Some(Sounding {
+                    origin: start.output_at,
+                    char_ends_ms: start.char_ends_ms.clone(),
+                    latency_ms: start.latency_ms,
+                    trusted: true,
+                    resent: None,
+                });
+            }
+            (Some(sounding), 0) => sounding.trusted = false,
+            (Some(sounding), _) => {
+                // Sent again from where the station copied is heard again,
+                // not from the callers starting ahead of it.
+                let again = start.output_at.plus(u64::from(start.first_char_ms));
+                sounding.resent.get_or_insert(again);
+            }
+            (None, _) => {}
+        }
+    }
+
     /// Count one finished send of `index`.
     pub(crate) fn note_play_finished(&mut self, index: usize) {
         if let Some(group) = self.groups.get_mut(index) {
@@ -409,23 +512,29 @@ impl GroupSession {
         }
     }
 
-    pub(crate) fn end_playback(
-        &mut self,
-        index: usize,
-        now: MonoMs,
-        char_wpm: f64,
-        effective_wpm: f64,
-    ) {
-        if let Some(group) = self.groups.get_mut(index) {
-            group.end_at = Some(now);
-            group.played_wpm =
-                (char_wpm > 0.0 && effective_wpm > 0.0).then_some((char_wpm, effective_wpm));
+    /// A send of `index` was held up on its way, as it ended or was
+    /// stopped: the first, which is said before it is counted finished,
+    /// cannot be timed from. A later one marks nothing its keys are not
+    /// already cut at.
+    pub(crate) fn note_held_up(&mut self, index: usize) {
+        if let Some(group) = self.groups.get_mut(index)
+            && group.plays_done == 0
+            && let Some(sounding) = &mut group.sounding
+        {
+            sounding.trusted = false;
         }
     }
 
-    /// Take what is typed into the current group, tidied: see
-    /// [`normalize_answer`].
-    pub(crate) fn set_input(&mut self, index: usize, typed: &str) {
+    /// The last send of `index` was seen to end at `now`.
+    pub(crate) fn end_playback(&mut self, index: usize, now: MonoMs) {
+        if let Some(group) = self.groups.get_mut(index) {
+            group.end_at = Some(now);
+        }
+    }
+
+    /// Take what is typed into the current group, tidied ([`normalize_answer`]),
+    /// with when each of its characters went in.
+    pub(crate) fn set_input(&mut self, index: usize, typed: &str, keys: &Keys<MonoMs>) {
         if index != self.current_group {
             return;
         }
@@ -433,6 +542,8 @@ impl GroupSession {
             && !group.confirmed()
         {
             group.input = normalize_answer(&group.sent, typed);
+            let length = group.input.chars().count();
+            group.keys = keys.fitted(length);
         }
     }
 
@@ -481,21 +592,21 @@ impl GroupSession {
         }
         let accuracy = tally.accuracy();
         let sent: Vec<&str> = scored.iter().map(|g| g.sent.as_str()).collect();
-        let timings: Vec<SessionTiming> = scored.iter().map(|g| g.timing()).collect();
-        let per_char: Vec<f64> = scored
+        let box_open = !self.settings.playback.lock_input_during_group_playback;
+        let timings: Vec<SessionTiming> = scored.iter().map(|g| g.timing(box_open)).collect();
+        let groups: Vec<GroupResult> = scored
             .iter()
-            .zip(&timings)
-            .map(|(group, timing)| timing.time_to_complete_ms / group.sent.chars().count() as f64)
+            .map(|group| GroupResult {
+                sent: group.sent.clone(),
+                received: group.input.clone(),
+                correct: group.sent == group.input,
+            })
             .collect();
-        let avg_response_ms = compute_average_response_ms(&per_char);
+        let avg_response_ms = compute_average_response_ms(&groups, &timings);
         let total_chars = calculate_total_chars(&sent);
         let played: Vec<(f64, f64)> = scored.iter().filter_map(|g| g.played_wpm).collect();
-        let playback = &self.settings.playback;
         let (char_wpm, effective_wpm) = if played.is_empty() {
-            (
-                playback.char_wpm_min,
-                playback.effective_wpm_min.min(playback.char_wpm_min),
-            )
+            self.slowest_wpm()
         } else {
             let n = played.len() as f64;
             (
@@ -515,14 +626,7 @@ impl GroupSession {
         let mut result = SessionResult {
             date,
             timestamp: finished_at,
-            groups: scored
-                .iter()
-                .map(|group| GroupResult {
-                    sent: group.sent.clone(),
-                    received: group.input.clone(),
-                    correct: group.sent == group.input,
-                })
-                .collect(),
+            groups,
             group_timings: timings,
             accuracy,
             tally,
@@ -559,19 +663,13 @@ fn recorded_mode(mode: CharSetMode) -> CharSetMode {
 /// does not match — and no longer than [`LONGEST_ANSWER`] allows.
 fn normalize_answer(sent: &str, typed: &str) -> String {
     let longest = (2 * sent.chars().count()).max(LONGEST_ANSWER);
-    typed
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .map(|c| c.to_ascii_uppercase())
-        .take(longest)
-        .collect()
+    answer_chars(typed).take(longest).collect()
 }
 
 /// Whether `received` is as long as `sent`, not counting whitespace: when an
 /// answer is complete enough to confirm by itself.
 pub fn answer_length_matches(sent: &str, received: &str) -> bool {
-    !sent.is_empty()
-        && received.chars().filter(|c| !c.is_whitespace()).count() == sent.chars().count()
+    !sent.is_empty() && answer_chars(received).count() == sent.chars().count()
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -598,6 +696,37 @@ pub struct SessionTiming {
     /// sent each group once.
     #[serde(default = "one_send")]
     pub sends: u32,
+    /// What its characters' recognition times are read from
+    /// ([`crate::recognise`]): when each ended and when each was keyed.
+    /// None for older saves, and where its sending cannot be timed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_char_times"
+    )]
+    pub char_times: Option<CharTimes>,
+}
+
+impl Default for SessionTiming {
+    /// No answer time, no speed recorded, sent once, untimed: a timing that
+    /// sets only what it is about.
+    fn default() -> Self {
+        Self {
+            time_to_complete_ms: 0.0,
+            char_wpm: None,
+            effective_wpm: None,
+            sends: 1,
+            char_times: None,
+        }
+    }
+}
+
+impl SessionTiming {
+    /// The answer's time a character of `sent`: what the score charges and
+    /// older builds show as the average time.
+    pub fn ms_per_char(&self, sent: &str) -> f64 {
+        self.time_to_complete_ms / sent.chars().count().max(1) as f64
+    }
 }
 
 fn one_send() -> u32 {
@@ -737,12 +866,11 @@ impl SessionResult {
                         self.effective_wpm
                     }
                 });
-                let chars = group.sent.chars().count().max(1) as f64;
                 GroupCopy::of(
                     &group.sent,
                     &group.received,
                     copy_speed(char_wpm, effective_wpm),
-                    timing.time_to_complete_ms / chars,
+                    timing.ms_per_char(&group.sent),
                     timing.sends,
                 )
             })
@@ -801,8 +929,9 @@ mod tests {
             session.set_group(index, (*sent).into(), 1);
             session.begin_group(index, now);
             now = now.plus(500);
-            session.end_playback(index, now, 18.0, 18.0);
-            session.set_input(index, typed);
+            session.start_playback(index, &speeds(18.0, 18.0));
+            session.end_playback(index, now);
+            session.set_input(index, typed, &Keys::default());
             now = now.plus(*ms);
             session.confirm(index, now);
         }
@@ -875,12 +1004,13 @@ mod tests {
         for (index, (sent, typed)) in copies.iter().enumerate() {
             session.set_group(index, (*sent).into(), sends);
             session.begin_group(index, now);
+            session.start_playback(index, &speeds(wpm, wpm));
             for _ in 0..sends {
                 session.note_play_finished(index);
             }
             now = now.plus(2_000);
-            session.end_playback(index, now, wpm, wpm);
-            session.set_input(index, typed);
+            session.end_playback(index, now);
+            session.set_input(index, typed, &Keys::default());
             now = now.plus(600);
             session.confirm(index, now);
         }
@@ -955,7 +1085,7 @@ mod tests {
         let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         session.set_group(0, "KMURE".into(), 1);
         session.begin_group(0, MonoMs(1_000));
-        session.set_input(0, "KMURE");
+        session.set_input(0, "KMURE", &Keys::default());
         session.confirm(0, MonoMs(1_400));
         let early = result(&session);
         assert_eq!(
@@ -981,7 +1111,8 @@ mod tests {
         let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         session.set_group(0, "KMURE".into(), 1);
         session.begin_group(0, MonoMs(1_000));
-        session.end_playback(0, MonoMs(2_000), 20.0, 18.0);
+        session.start_playback(0, &speeds(20.0, 18.0));
+        session.end_playback(0, MonoMs(2_000));
         session.mark_answer_complete(0, true, MonoMs(3_000));
         session.mark_answer_complete(0, true, MonoMs(3_500));
         session.confirm(0, MonoMs(4_000));
@@ -993,7 +1124,8 @@ mod tests {
         // A stamp withdrawn by a backspace is gone; the confirm is the answer.
         let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         session.set_group(0, "KMURE".into(), 1);
-        session.end_playback(0, MonoMs(2_000), 20.0, 18.0);
+        session.start_playback(0, &speeds(20.0, 18.0));
+        session.end_playback(0, MonoMs(2_000));
         session.mark_answer_complete(0, true, MonoMs(2_500));
         session.mark_answer_complete(0, false, MonoMs(2_600));
         session.confirm(0, MonoMs(4_000));
@@ -1002,22 +1134,190 @@ mod tests {
         assert_eq!(timing.char_wpm, Some(20.0));
     }
 
+    /// A send at these speeds, with no character ends to time from.
+    fn speeds(char_wpm: f64, effective_wpm: f64) -> SendStart {
+        SendStart {
+            char_wpm,
+            effective_wpm,
+            output_at: MonoMs(0),
+            char_ends_ms: Vec::new(),
+            first_char_ms: 0,
+            latency_ms: 0,
+        }
+    }
+
+    /// A send of `index` starting at `output_at`, at `wpm`, its characters
+    /// ending `ends` ms after it, through a device reporting 40 ms.
+    fn send_start(output_at: u64, wpm: f64, ends: &[u32]) -> SendStart {
+        SendStart {
+            char_wpm: wpm,
+            effective_wpm: wpm,
+            output_at: MonoMs(output_at),
+            char_ends_ms: ends.to_vec(),
+            first_char_ms: 0,
+            latency_ms: 40,
+        }
+    }
+
+    /// Keys at `at`, in milliseconds, nothing corrected.
+    fn keyed(at: &[Option<u64>]) -> Keys<MonoMs> {
+        Keys {
+            at: at.iter().map(|at| at.map(MonoMs)).collect(),
+            corrected: Vec::new(),
+        }
+    }
+
+    /// "KMR" sent once from 1000 ms, its characters ending 300, 700 and 1000
+    /// ms into it, typed at `keys` with the box `open` or not: what its
+    /// timing keeps.
+    fn kept(keys: &[Option<u64>], open: bool) -> Option<CharTimes> {
+        let mut settings = TrainingSettings::default();
+        settings.playback.lock_input_during_group_playback = !open;
+        let mut session = GroupSession::new(SessionId::new(1), 1, settings);
+        session.set_group(0, "KMR".into(), 1);
+        session.begin_group(0, MonoMs(980));
+        session.start_playback(0, &send_start(1_000, 20.0, &[300, 700, 1_000]));
+        session.set_input(0, "KMR", &keyed(keys));
+        session.note_play_finished(0);
+        session.end_playback(0, MonoMs(2_050));
+        session.confirm(0, MonoMs(3_000));
+        result(&session).group_timings[0].char_times.clone()
+    }
+
+    /// A group keeps the raw facts its characters are timed from: when each
+    /// ended after its first sample went out, when each was keyed on the
+    /// same clock, the reported delay, and whether the box was open.
+    #[test]
+    fn a_group_keeps_when_its_characters_ended_and_were_keyed() {
+        assert_eq!(
+            kept(&[Some(1_550), Some(1_900), None], true),
+            Some(CharTimes {
+                ends: vec![300, 700, 1_000],
+                keys: vec![Some(550), Some(900), None],
+                corrected: Vec::new(),
+                latency_ms: 40,
+                box_open: true,
+            })
+        );
+        // With the box shut, a group of more than one character keeps
+        // nothing: the rule could time none of it. Nor does one with no key.
+        assert_eq!(kept(&[Some(2_300)], false), None);
+        assert_eq!(kept(&[None, None, None], true), None);
+        // Keys for more than was typed are no character of it.
+        assert_eq!(
+            kept(&[Some(1_550), Some(1_900), Some(2_250), Some(2_400)], true)
+                .map(|times| times.keys.len()),
+            Some(3)
+        );
+    }
+
+    /// A first send tried again was heard in part already, and one held up
+    /// on its way would time every character from the wrong moment: neither
+    /// is timed. A key after a later send began came after hearing it twice.
+    #[test]
+    fn only_a_first_send_on_time_and_once_is_timed() {
+        let session = |retried: bool, on_time: bool| {
+            let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+            session.set_group(0, "K".into(), 1);
+            session.begin_group(0, MonoMs(980));
+            session.start_playback(0, &send_start(1_000, 20.0, &[300]));
+            if retried {
+                session.start_playback(0, &send_start(1_500, 20.0, &[300]));
+            }
+            if !on_time {
+                session.note_held_up(0);
+            }
+            session.note_play_finished(0);
+            session.end_playback(0, MonoMs(1_350));
+            session.set_input(0, "K", &keyed(&[Some(1_700)]));
+            session.confirm(0, MonoMs(2_000));
+            result(&session).group_timings[0].char_times.is_some()
+        };
+        assert!(session(false, true));
+        assert!(!session(true, true));
+        assert!(!session(false, false));
+
+        let mut open = TrainingSettings::default();
+        open.playback.lock_input_during_group_playback = false;
+        let mut twice = GroupSession::new(SessionId::new(1), 1, open);
+        twice.set_group(0, "KM".into(), 2);
+        twice.begin_group(0, MonoMs(980));
+        twice.start_playback(0, &send_start(1_000, 20.0, &[300, 700]));
+        twice.note_play_finished(0);
+        twice.start_playback(0, &send_start(2_500, 20.0, &[300, 700]));
+        twice.set_input(0, "KM", &keyed(&[Some(1_500), Some(2_600)]));
+        twice.note_play_finished(0);
+        twice.end_playback(0, MonoMs(3_200));
+        twice.confirm(0, MonoMs(3_500));
+        let timing = &result(&twice).group_timings[0];
+        assert_eq!(
+            timing.char_times.as_ref().map(|times| times.keys.clone()),
+            Some(vec![Some(500), None])
+        );
+        assert_eq!(timing.sends, 2);
+    }
+
+    /// In a pile-up the callers can start before the station copied: a key
+    /// made as the group is sent again, before that station is heard again,
+    /// came of hearing it once and keeps its time; one after, not.
+    #[test]
+    fn a_key_before_the_station_is_heard_again_keeps_its_time() {
+        let mut open = TrainingSettings::default();
+        open.playback.lock_input_during_group_playback = false;
+        let mut twice = GroupSession::new(SessionId::new(1), 1, open);
+        twice.set_group(0, "KMR".into(), 2);
+        twice.begin_group(0, MonoMs(980));
+        twice.start_playback(0, &send_start(1_000, 20.0, &[300, 700, 1_000]));
+        twice.note_play_finished(0);
+        let callers_first = SendStart {
+            first_char_ms: 400,
+            ..send_start(2_500, 20.0, &[700, 1_100, 1_400])
+        };
+        twice.start_playback(0, &callers_first);
+        twice.set_input(0, "KMR", &keyed(&[Some(1_500), Some(2_700), Some(3_000)]));
+        twice.note_play_finished(0);
+        twice.end_playback(0, MonoMs(4_000));
+        twice.confirm(0, MonoMs(4_200));
+        let timing = &result(&twice).group_timings[0];
+        assert_eq!(
+            timing.char_times.as_ref().map(|times| times.keys.clone()),
+            Some(vec![Some(500), Some(1_700), None])
+        );
+    }
+
+    /// A send's speeds are kept as it starts, so a group answered before its
+    /// send was seen to end is scored at the speed it was sent at.
+    #[test]
+    fn a_group_answered_before_its_send_ends_keeps_its_speed() {
+        let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
+        session.set_group(0, "KM".into(), 1);
+        session.begin_group(0, MonoMs(1_000));
+        session.start_playback(0, &send_start(1_020, 27.0, &[200, 500]));
+        session.set_input(0, "KM", &Keys::default());
+        session.confirm(0, MonoMs(1_600));
+        let timing = &result(&session).group_timings[0];
+        assert_eq!(
+            (timing.char_wpm, timing.effective_wpm),
+            (Some(27.0), Some(27.0))
+        );
+    }
+
     /// Typing is kept the way a group is written: no spaces, upper case, and
     /// not without end.
     #[test]
     fn an_answer_is_tidied_and_capped_on_the_way_in() {
         let mut session = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         session.set_group(0, "KM".into(), 1);
-        session.set_input(0, " k m\t");
+        session.set_input(0, " k m\t", &Keys::default());
         assert_eq!(session.group(0).map(Group::input), Some("KM"));
-        session.set_input(0, &"E".repeat(100_000));
+        session.set_input(0, &"E".repeat(100_000), &Keys::default());
         assert_eq!(
             session.group(0).map(|g| g.input().len()),
             Some(LONGEST_ANSWER)
         );
         let mut long = GroupSession::new(SessionId::new(1), 1, TrainingSettings::default());
         long.set_group(0, "KMUREKMUREKMUREKMURE".into(), 1);
-        long.set_input(0, &"E".repeat(100));
+        long.set_input(0, &"E".repeat(100), &Keys::default());
         assert_eq!(long.group(0).map(|g| g.input().len()), Some(40));
     }
 
@@ -1026,13 +1326,13 @@ mod tests {
         let mut session = GroupSession::new(SessionId::new(1), 2, TrainingSettings::default());
         session.set_group(0, "KM".into(), 1);
         session.set_group(1, "UR".into(), 1);
-        session.set_input(1, "nope");
+        session.set_input(1, "nope", &Keys::default());
         assert_eq!(session.group(1).map(Group::input), Some(""));
-        session.set_input(0, "km");
+        session.set_input(0, "km", &Keys::default());
         assert_eq!(session.group(0).map(Group::input), Some("KM"));
         assert!(session.confirm(0, MonoMs(1_200)).is_some());
         assert!(session.confirm(0, MonoMs(1_300)).is_none(), "only once");
-        session.set_input(0, "later");
+        session.set_input(0, "later", &Keys::default());
         assert_eq!(session.group(0).map(Group::input), Some("KM"));
         // A confirmed group keeps its text too.
         session.set_group(0, "XX".into(), 1);
@@ -1110,7 +1410,8 @@ mod tests {
         settings.playback.effective_wpm_min = 18.0;
         let mut session = GroupSession::new(SessionId::new(1), 1, settings.clone());
         session.set_group(0, "KM".into(), 1);
-        session.end_playback(0, MonoMs(500), 25.0, 12.0);
+        session.start_playback(0, &speeds(25.0, 12.0));
+        session.end_playback(0, MonoMs(500));
         session.confirm(0, MonoMs(1_000));
         let played = result(&session);
         assert!((played.char_wpm - 25.0).abs() < 1e-9);
@@ -1249,6 +1550,7 @@ mod tests {
             char_wpm: Some(26.0),
             effective_wpm: Some(26.0),
             sends: 1,
+            ..SessionTiming::default()
         };
         SessionResult {
             groups: vec![

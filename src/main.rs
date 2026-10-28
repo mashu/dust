@@ -19,6 +19,8 @@ mod app;
 mod audio;
 mod contest_runtime;
 mod keep_awake;
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+mod linux_webview;
 mod page_hidden;
 mod persist;
 mod playback;
@@ -118,19 +120,18 @@ pub(crate) fn window_icon() -> dioxus::desktop::tao::window::Icon {
 
 #[cfg(feature = "desktop")]
 fn launch_desktop() {
+    // Safety: process start, before other threads exist.
     #[cfg(target_os = "linux")]
-    {
-        // GTK client-side decorations draw a thick header with the window title.
-        // Prefer the window manager's normal title bar instead.
-        // Safety: process start, before other threads exist.
-        unsafe {
-            std::env::set_var("GTK_CSD", "0");
-        }
+    unsafe {
+        linux_webview::prepare();
     }
     use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             Config::new()
+                // Its own way would turn the graphics card off for every
+                // Wayland session (src/linux_webview.rs).
+                .with_disable_dma_buf_on_wayland(false)
                 .with_menu(None)
                 .with_background_color((243, 234, 217, 255))
                 .with_custom_head(themed_document_head())

@@ -118,6 +118,7 @@ impl TrainingSettings {
         a.char_sampling_coverage_strength = a
             .char_sampling_coverage_strength
             .clamp(0.0, COVERAGE_STRENGTH_MAX);
+        self.recognition = self.recognition.ordered();
 
         // The contest, its run style, its callers' habits and how often
         // your TU signs need nothing: each can hold only what it names, and

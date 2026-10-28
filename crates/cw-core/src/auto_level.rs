@@ -764,15 +764,23 @@ mod tests {
         let mut now = MonoMs(0);
         for index in 0..groups {
             now = now.plus(1_000);
+            let start = crate::SendStart {
+                char_wpm: 20.0,
+                effective_wpm: 20.0,
+                output_at: now,
+                char_ends_ms: Vec::new(),
+                first_char_ms: 0,
+                latency_ms: 0,
+            };
+            let _ = machine.apply(SessionEvent::PlaybackStarted { index, start }, now);
             let ended = SessionEvent::PlaybackEnded {
                 index,
                 duration_sec: 0.5,
-                char_wpm: 20.0,
-                effective_wpm: 20.0,
             };
             let _ = machine.apply(ended, now);
             let text = answer.to_string();
-            let _ = machine.apply(SessionEvent::Input { index, text }, now);
+            let keys = crate::recognition::Keys::default();
+            let _ = machine.apply(SessionEvent::Input { index, text, keys }, now);
             for effect in machine.apply(SessionEvent::Confirm, now) {
                 if let SessionEffect::StartTimer { id, .. } = effect {
                     let _ = machine.apply(SessionEvent::TimerFired { id }, now);

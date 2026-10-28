@@ -4,10 +4,8 @@
 //! and reports the same [`WaitFlags`], so the session runtime never has to know
 //! which one it is talking to.
 
-#[cfg(any(feature = "web", test))]
-mod band_queue;
 mod epoch;
-#[cfg(feature = "native-audio")]
+#[cfg(any(feature = "native-audio", feature = "web"))]
 mod mixer;
 #[cfg(feature = "native-audio")]
 mod native;
@@ -15,11 +13,15 @@ mod native;
 mod shape;
 #[cfg(feature = "silent-audio")]
 mod silent;
+#[cfg(any(feature = "web", all(test, feature = "native-audio")))]
+mod stream;
+mod tone;
 mod wait;
 #[cfg(feature = "web")]
 mod web;
 
-pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, WaitFlags};
+pub use tone::ToneRequest;
+pub use wait::{PlaybackOutcome, PlaybackSignal, PlaybackWait, SendTiming, WaitFlags};
 
 use std::rc::Rc;
 
@@ -38,13 +40,34 @@ pub const METER_FRAME_SEC: f64 = 0.01;
 
 /// What the receiver did over one short stretch, for the level scope: the
 /// loudest of what reached its AGC, the band and the Morse together through
-/// the filter; the gain the AGC rode at, at its lowest; and the loudest of
-/// what it played, at the volume, before the limiter.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// the filter; the gain the AGC's hang held, at its lowest, which a signal
+/// over the threshold sets and a crash squashed for an instant does not;
+/// and the loudest of what it played, at the volume, before the limiter.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterFrame {
     pub input: f32,
-    pub gain: f32,
+    pub held: f32,
     pub output: f32,
+}
+
+impl MeterFrame {
+    /// Nothing heard and the AGC wide open: a stretch before anything is
+    /// metered, and what merging starts from.
+    pub const QUIET: Self = Self {
+        input: 0.0,
+        held: 1.0,
+        output: 0.0,
+    };
+
+    /// One frame for two stretches: the louder of their peaks, and the
+    /// lower of their gains.
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            input: self.input.max(other.input),
+            held: self.held.min(other.held),
+            output: self.output.max(other.output),
+        }
+    }
 }
 
 /// What the session runtime needs from a player. Object-safe on purpose: the
@@ -93,10 +116,19 @@ pub trait MorseBackend {
     /// Silence everything, background included.
     fn shutdown(&mut self);
 
-    /// Gate a live sidetone for paddle practice. Kept as a running stream so a
-    /// squeeze is one buffer of latency, not a stream start.
-    fn set_live_tone(&mut self, on: bool, frequency_hz: f64, gain: f64) {
-        let _ = (on, frequency_hz, gain);
+    /// Let the output sleep, silenced already: nothing sounds until the next
+    /// band, send or sidetone, which wakes it. A stream left running with
+    /// nothing to play wakes the audio thread hundreds of times a second,
+    /// and keeps the sound device, and the sound server's graph, from ever
+    /// resting. The browser's player sleeps by its own clock.
+    fn sleep(&mut self) {}
+
+    /// Gate a live sidetone for paddle practice: on or off, its edge sounded
+    /// a constant lead after the instant the keyer meant it for, so each
+    /// element and space is as long as it was keyed. Kept as a running
+    /// stream so a squeeze is that lead late, not a stream start.
+    fn set_live_tone(&mut self, tone: ToneRequest) {
+        let _ = tone;
     }
 
     /// The receiver's meter frames since the last were taken, oldest first,
@@ -140,9 +172,14 @@ pub fn start_planned(
     starts_at: Option<MonoMs>,
 ) -> Result<PlaybackWait, String> {
     player.apply_band(settings);
-    let heard_in = starts_at.map(|at| (at.0 as f64 - mono_ms() as f64) / 1_000.0);
+    // Read once the band is in line, a device reopened or a band rebuilt,
+    // and before the player schedules: the moment it reckons its lead from.
+    // Earlier, and that work would be counted as the sound's delay; later,
+    // and the scheduling would be taken off it.
+    let started = MonoMs(mono_ms());
+    let heard_in = starts_at.map(|at| (at.0 as f64 - started.0 as f64) / 1_000.0);
     let signal = player.start(transcript, plan, settings, heard_in)?;
-    Ok(PlaybackWait::new(&plan.wanted, signal))
+    Ok(PlaybackWait::new(plan, signal, started))
 }
 
 /// The player this build ships with.
@@ -207,6 +244,9 @@ pub mod fake {
         /// For a send that was to start at a given time, how long after it
         /// was started its sound was to reach the ear.
         pub heard_in: Option<f64>,
+        /// When it was handed over, on the app's clock: with no wait, when
+        /// its first sample goes out.
+        pub at: MonoMs,
     }
 
     #[derive(Default)]
@@ -234,6 +274,11 @@ pub mod fake {
         pub latency_sec: Cell<f64>,
         /// Meter frames for the level scope to take, as a test puts them.
         pub meter: RefCell<Vec<MeterFrame>>,
+        /// The output is asleep, as the native player's stream sleeps: until
+        /// a band, a send or the sidetone wakes it.
+        pub asleep: Cell<bool>,
+        /// How many times it was put to sleep.
+        pub sleeps: Cell<u32>,
     }
 
     impl Recorder {
@@ -335,8 +380,11 @@ pub mod fake {
     }
 
     impl PlaybackSignal for FakeSignal {
-        fn heard_after_sec(&self) -> f64 {
-            self.latency_sec + f64::from(self.wait_ms) / 1_000.0
+        fn timing(&self) -> SendTiming {
+            SendTiming {
+                lead_sec: f64::from(self.wait_ms) / 1_000.0,
+                latency_sec: self.latency_sec,
+            }
         }
 
         fn poll(&self) -> WaitFlags {
@@ -376,15 +424,18 @@ pub mod fake {
                 _ => {
                     // Each poll advances the "audio clock" by one tick, so a
                     // send takes as long as its plan says it does, from when
-                    // it was to start.
+                    // it was to start, and is heard its latency after, as a
+                    // real player counts it.
+                    let latency_ms = (self.latency_sec * 1_000.0).round() as u32;
+                    let held = self.wait_ms.saturating_add(latency_ms);
                     let played = self.played.get().saturating_add(crate::time::POLL_MS).min(
                         self.duration_ms
                             .saturating_add(wait::PLAYBACK_TAIL_MS)
-                            .saturating_add(self.wait_ms),
+                            .saturating_add(held),
                     );
                     self.played.set(played);
                     WaitFlags {
-                        played_ms: Some(played.saturating_sub(self.wait_ms)),
+                        played_ms: Some(played.saturating_sub(held)),
                         ..Default::default()
                     }
                 }
@@ -394,6 +445,7 @@ pub mod fake {
 
     impl MorseBackend for FakePlayer {
         fn apply_band(&mut self, settings: &TrainingSettings) {
+            self.recorder.asleep.set(false);
             self.recorder
                 .calls
                 .borrow_mut()
@@ -410,6 +462,7 @@ pub mod fake {
             settings: &TrainingSettings,
             heard_in: Option<f64>,
         ) -> Result<Rc<dyn PlaybackSignal>, String> {
+            self.recorder.asleep.set(false);
             self.recorder
                 .calls
                 .borrow_mut()
@@ -419,12 +472,14 @@ pub mod fake {
                 qsb: Qsb::of(&settings.band),
                 transcript: transmission.clone(),
                 heard_in,
+                at: MonoMs(mono_ms()),
             });
             if self.recorder.behaviour() == Behaviour::RefuseToStart {
                 return Err("Audio stream: device is gone".to_string());
             }
-            // The wanted station sets the length; the others are laid over it.
-            let duration_ms = (plan.wanted.duration_sec * 1000.0).ceil().max(0.0) as u32;
+            // As long as it sounds, the last fall of any station's, as a
+            // real player plays it.
+            let duration_ms = (plan.sound_end_sec() * 1000.0).ceil().max(0.0) as u32;
             // Started at its time, as a real player starts a continuation,
             // or at once once that is past.
             let latency_sec = self.recorder.latency_sec.get();
@@ -450,8 +505,17 @@ pub mod fake {
             self.epoch.bump();
         }
 
-        fn set_live_tone(&mut self, on: bool, _frequency_hz: f64, _gain: f64) {
-            self.recorder.calls.borrow_mut().push(Call::LiveTone(on));
+        fn sleep(&mut self) {
+            self.recorder.asleep.set(true);
+            self.recorder.sleeps.set(self.recorder.sleeps.get() + 1);
+        }
+
+        fn set_live_tone(&mut self, tone: ToneRequest) {
+            self.recorder.asleep.set(false);
+            self.recorder
+                .calls
+                .borrow_mut()
+                .push(Call::LiveTone(tone.on));
         }
 
         fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
@@ -491,7 +555,8 @@ mod tests {
 
         let plan = plan_transmission(&transmission, &settings).wanted;
         assert_eq!(wait.duration_sec, plan.duration_sec);
-        assert_eq!(wait.char_wpm, plan.resolved_char_wpm);
-        assert_eq!(wait.effective_wpm, plan.resolved_effective_wpm);
+        let start = wait.start();
+        assert_eq!(start.char_wpm, plan.resolved_char_wpm);
+        assert_eq!(start.effective_wpm, plan.resolved_effective_wpm);
     }
 }

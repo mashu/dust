@@ -14,13 +14,13 @@ mod pileup;
 mod plan;
 mod station;
 
-pub use envelope::{EnvelopePoint, EnvelopeShape, envelope_shape};
+pub use envelope::{EnvelopePoint, EnvelopeShape, edge_gain, envelope_shape};
 #[cfg(test)]
 pub(crate) use pileup::resolve_pileup;
 pub use pileup::{Interferer, Transmission};
 pub(crate) use pileup::{PILEUP_CALLER_SEPARATION_HZ, PILEUP_SKIRT_DB, free_room, pick_in_room};
 pub use plan::{
-    DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC, ToneEvent,
+    CharSpan, DEFAULT_TARGET_GAIN, PlannedTransmission, PlaybackPlan, SEND_RELEASE_SEC, ToneEvent,
     plan_morse_playback_for, plan_transmission,
 };
 pub(crate) use plan::{plan_from, plan_morse_playback_at};
@@ -83,6 +83,24 @@ fn spacing_unit_sec(char_wpm: f64, effective_wpm: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// However short the word space is set, the gap between two groups is
+    /// longer than the gap between two letters inside one.
+    #[test]
+    fn the_shortest_word_space_is_longer_than_a_letter_gap() {
+        for (char_wpm, effective_wpm) in [(20.0, 20.0), (30.0, 12.0), (5.0, 5.0), (80.0, 80.0)] {
+            let gap = f64::from(compute_group_gap_for_wpm(
+                char_wpm,
+                effective_wpm,
+                EXTRA_WORD_SPACE_MIN,
+            )) / 1000.0;
+            let letter = 3.0 * spacing_unit_sec(char_wpm, effective_wpm);
+            assert!(
+                gap > letter,
+                "{char_wpm}/{effective_wpm}: {gap} against {letter}"
+            );
+        }
+    }
 
     #[test]
     fn the_word_space_between_groups_follows_the_slower_speed() {

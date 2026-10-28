@@ -13,11 +13,10 @@ use std::cell::{Cell, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
-use cw_core::band::SOFT_LIMIT_KNEE;
-use cw_core::{MonoMs, PlannedTransmission, TrainingSettings, Transmission};
+use cw_core::{MonoMs, PlannedTransmission, SendStart, ToneEdge, TrainingSettings, Transmission};
 
-use crate::audio::{MeterFrame, MorseBackend, PlaybackOutcome, PlaybackWait};
-use crate::time::{POLL_MS, sleep_ms};
+use crate::audio::{MeterFrame, MorseBackend, PlaybackOutcome, PlaybackWait, ToneRequest};
+use crate::time::{POLL_MS, mono_ms, mono_secs_since, sleep_ms};
 
 /// A factory for the audio backend. Injectable so the app can be driven
 /// without a sound card.
@@ -28,9 +27,10 @@ pub type BackendFactory = Rc<dyn Fn() -> Result<Box<dyn MorseBackend>, String>>;
 /// was swapped, unplugged or suspended mid-send.
 const SEND_ATTEMPTS: u32 = 3;
 
-/// The quietest the live sidetone is played at full volume, whatever the
-/// floor of the station strength range: a paddle you cannot hear is no use.
-const SIDETONE_FLOOR: f64 = 0.15;
+/// How long the audio is quiet before the output is let sleep: long after
+/// the last fade has played out, and long enough that a screen left and
+/// come back to, or the next squeeze of a paddle, does not wake it.
+const SLEEP_AFTER_MS: u64 = 1_000;
 
 /// Why audio did not happen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,12 +55,24 @@ impl fmt::Display for AudioError {
     }
 }
 
-/// A send that played to its end: how long it was, and the speeds it went at.
+/// A send that played to its end: how long it was, and the speeds it went
+/// at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sent {
     pub duration_sec: f64,
     pub char_wpm: f64,
     pub effective_wpm: f64,
+}
+
+/// What a send says of itself as it goes, to whoever sent it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SendNews<'a> {
+    /// An attempt at it started ([`SendStart`]): each attempt says so.
+    Started(&'a SendStart),
+    /// Its audio was held up on its way, parked or its clock fallen behind:
+    /// it went out later than planned, and none of it can be timed. Said
+    /// once known, as it ends or is stopped.
+    HeldUp,
 }
 
 /// The one audio player the app has. Cheap to clone; every clone is the same
@@ -78,6 +90,17 @@ struct Shared {
     /// for, so a send that has not started yet — one waiting out a retry —
     /// can tell it is no longer wanted.
     sends: Cell<u64>,
+    /// When the audio was last claimed, given back or keyed: it has been
+    /// quiet since.
+    stirred_at: Cell<u64>,
+    /// A lease is out, and has not been given back.
+    held: Cell<bool>,
+    /// The paddle's sidetone is sounding.
+    keyed: Cell<bool>,
+    /// A screen has the output kept awake for the first squeeze.
+    kept_ready: Cell<bool>,
+    /// A wait to let the output sleep is under way.
+    sleep_waiting: Cell<bool>,
 }
 
 impl Player {
@@ -87,6 +110,11 @@ impl Player {
             make,
             turn: Cell::new(0),
             sends: Cell::new(0),
+            stirred_at: Cell::new(0),
+            held: Cell::new(false),
+            keyed: Cell::new(false),
+            kept_ready: Cell::new(false),
+            sleep_waiting: Cell::new(false),
         }))
     }
 
@@ -98,6 +126,7 @@ impl Player {
     pub fn claim(&self, settings: &TrainingSettings) -> Result<Lease, AudioError> {
         self.stop_sending();
         let turn = self.next_turn();
+        self.stir(true);
         match self.open(settings) {
             Ok(()) => Ok(Lease {
                 player: self.clone(),
@@ -105,6 +134,7 @@ impl Player {
             }),
             Err(err) => {
                 self.with_backend(|backend| backend.shutdown());
+                self.stir(false);
                 Err(err)
             }
         }
@@ -112,10 +142,67 @@ impl Player {
 
     /// Give the audio back: every lease ends, and nothing sounds, the
     /// receiver included. What "stop" means when the user pressed it, or
-    /// walked away from the screen that was making the sound.
+    /// walked away from the screen that was making the sound. Once it has
+    /// been quiet a while, the output sleeps.
     pub fn release(&self) {
         self.next_turn();
         self.with_backend(|backend| backend.shutdown());
+        self.stir(false);
+    }
+
+    /// Keep the output awake for the paddle's first squeeze, `ready`, as
+    /// the screen the paddles are tried on does; or let it sleep once
+    /// quiet, as everywhere else.
+    pub fn keep_ready(&self, ready: bool) {
+        self.0.kept_ready.set(ready);
+        if !ready {
+            self.sleep_once_quiet();
+        }
+    }
+
+    /// Something claimed the audio, `held`, or gave it back or keyed it: it
+    /// is quiet from now, and the output sleeps once it has been a while.
+    fn stir(&self, held: bool) {
+        self.0.held.set(held);
+        self.0.stirred_at.set(mono_ms());
+        self.sleep_once_quiet();
+    }
+
+    /// Let the output sleep once nothing has claimed, given back or keyed
+    /// the audio for [`SLEEP_AFTER_MS`], unless a lease holds it, the
+    /// sidetone sounds, or a screen keeps it ready. One wait at a time,
+    /// which reads the latest stir. Without the app's runtime, as in a test
+    /// of the player alone, there is nothing to wait with, and it never
+    /// sleeps.
+    fn sleep_once_quiet(&self) {
+        let shared = &self.0;
+        if shared.held.get()
+            || shared.keyed.get()
+            || shared.kept_ready.get()
+            || shared.sleep_waiting.get()
+            || dioxus::core::Runtime::try_current().is_none()
+        {
+            return;
+        }
+        shared.sleep_waiting.set(true);
+        let player = self.clone();
+        dioxus::core::spawn_forever(async move {
+            let shared = &player.0;
+            loop {
+                let due = shared.stirred_at.get() + SLEEP_AFTER_MS;
+                let now = mono_ms();
+                if now >= due {
+                    break;
+                }
+                sleep_ms(u32::try_from(due - now).unwrap_or(u32::MAX)).await;
+            }
+            shared.sleep_waiting.set(false);
+            // Whatever has woken it meanwhile waits on in turn when it is
+            // done.
+            if !(shared.held.get() || shared.keyed.get() || shared.kept_ready.get()) {
+                player.with_backend(|backend| backend.sleep());
+            }
+        });
     }
 
     /// Bring the band in line with settings that have just changed, while a
@@ -132,26 +219,31 @@ impl Player {
         self.with_backend(|backend| backend.take_meter(into));
     }
 
-    /// Gate the live sidetone for paddle practice. Opens the player if there
-    /// is none, so a squeeze outside training still has somewhere to go.
-    pub fn set_live_tone(&self, on: bool, settings: &TrainingSettings) {
+    /// Gate the live sidetone for paddle practice, at the edge the keyer
+    /// timed it for. Opens the player if there is none, so a squeeze
+    /// outside training still has somewhere to go.
+    pub fn set_live_tone(&self, edge: ToneEdge, settings: &TrainingSettings) {
         // A key that cannot sound has nowhere to report it mid-squeeze;
         // `ensure_live_sidetone` is where the reason is surfaced.
-        let _ = self.gate_live_tone(on, settings);
+        let tone = ToneRequest::keyed(edge.on, settings, mono_secs_since(edge.at));
+        let _ = self.gate_live_tone(tone);
     }
 
     /// Open the silent sidetone stream, so the first paddle squeeze is one
     /// audio buffer of lag rather than a stream start. Says why when it
     /// cannot.
     pub fn ensure_live_sidetone(&self, settings: &TrainingSettings) -> Result<(), AudioError> {
-        self.gate_live_tone(false, settings)
+        self.gate_live_tone(ToneRequest::keyed(false, settings, 0.0))
     }
 
-    fn gate_live_tone(&self, on: bool, settings: &TrainingSettings) -> Result<(), AudioError> {
-        let (hz, gain) = live_tone(settings);
-        let mut backend = self.opened()?;
-        backend.resume_from_gesture();
-        backend.set_live_tone(on, hz, gain);
+    fn gate_live_tone(&self, tone: ToneRequest) -> Result<(), AudioError> {
+        {
+            let mut backend = self.opened()?;
+            backend.resume_from_gesture();
+            backend.set_live_tone(tone);
+        }
+        self.0.keyed.set(tone.on);
+        self.stir(self.0.held.get());
         Ok(())
     }
 
@@ -179,13 +271,14 @@ impl Player {
         RefMut::filter_map(slot, Option::as_mut).map_err(|_| unavailable())
     }
 
-    /// Open the player if there is none, and set it up for `settings`.
+    /// Open the player if there is none, and set it up for `settings`, the
+    /// sidetone silent.
     fn open(&self, settings: &TrainingSettings) -> Result<(), AudioError> {
-        let (hz, gain) = live_tone(settings);
         let mut backend = self.opened()?;
         backend.resume_from_gesture();
         backend.apply_band(settings);
-        backend.set_live_tone(false, hz, gain);
+        backend.set_live_tone(ToneRequest::keyed(false, settings, 0.0));
+        self.0.keyed.set(false);
         Ok(())
     }
 
@@ -229,22 +322,6 @@ type Begin<'a> = dyn Fn(&mut dyn MorseBackend) -> Result<PlaybackWait, String> +
 
 fn unavailable() -> AudioError {
     AudioError::Device("Audio is unavailable.".into())
-}
-
-/// The live sidetone's pitch and level for `settings`: at full volume the
-/// floor of the station strength range, never below [`SIDETONE_FLOOR`] and
-/// never past where the limiter starts to bend, and turned down with the
-/// volume. The players add it after their volume, so this is the level it
-/// is heard at.
-fn live_tone(settings: &TrainingSettings) -> (f64, f64) {
-    let level = settings
-        .band
-        .volume_min
-        .clamp(SIDETONE_FLOOR, SOFT_LIMIT_KNEE);
-    (
-        settings.side_tone_center(),
-        level * settings.master_volume(),
-    )
 }
 
 /// The audio, held: a claim nothing has superseded yet.
@@ -337,11 +414,13 @@ impl Lease {
     /// [`SEND_ATTEMPTS`] in all, and the last failure is the one reported.
     /// A send that is stopped — the lease ending, or [`Lease::stop_sending`]
     /// — comes back [`AudioError::Cancelled`] from wherever it had got to,
-    /// a retry included.
+    /// a retry included. What it says of itself as it goes is told to
+    /// `on_news`, as for [`Lease::send_planned`].
     pub async fn send(
         &self,
         transmission: &Transmission,
         settings: &TrainingSettings,
+        mut on_news: impl FnMut(SendNews<'_>),
     ) -> Result<Sent, AudioError> {
         let begin = |backend: &mut dyn MorseBackend| {
             crate::audio::start_send(backend, transmission, settings)
@@ -349,7 +428,7 @@ impl Lease {
         // A session sends a group only once the one before is over or
         // stopped, so this is the send from when it starts.
         let asked = Asked(self.player.0.sends.get());
-        self.send_with(asked, &begin, settings, &mut |_| {}).await
+        self.send_with(asked, &begin, settings, &mut on_news).await
     }
 
     /// Send a contest's turn, planned already, and wait for it to be heard:
@@ -359,10 +438,11 @@ impl Lease {
     /// sound is to reach the ear: each attempt asks the player for it, and
     /// one after it has passed, a retry, starts as soon as it can.
     ///
-    /// Each attempt, once started, calls `on_start` with how long after now
-    /// its sound reaches the ear, in seconds: the player's lead in starting
-    /// it, any wait for the moment asked, and its latency to the ear. No
-    /// borrow of the player is held then, so `on_start` may use it.
+    /// Each attempt, once started, tells `on_news` so, with the send as it
+    /// starts ([`SendStart`]): when it goes to the output and reaches the
+    /// ear, and where its characters end; and a send held up on its way
+    /// says that too ([`SendNews`]). No borrow of the player is held then,
+    /// so `on_news` may use it.
     pub async fn send_planned(
         &self,
         asked: Asked,
@@ -370,12 +450,12 @@ impl Lease {
         transcript: &Transmission,
         settings: &TrainingSettings,
         starts_at: Option<MonoMs>,
-        mut on_start: impl FnMut(f64),
+        mut on_news: impl FnMut(SendNews<'_>),
     ) -> Result<Sent, AudioError> {
         let begin = |backend: &mut dyn MorseBackend| {
             crate::audio::start_planned(backend, plan, transcript, settings, starts_at)
         };
-        self.send_with(asked, &begin, settings, &mut on_start).await
+        self.send_with(asked, &begin, settings, &mut on_news).await
     }
 
     /// A send, each attempt started by `begin`: tried again on a freshly
@@ -388,13 +468,13 @@ impl Lease {
         asked: Asked,
         begin: &Begin<'_>,
         settings: &TrainingSettings,
-        on_start: &mut dyn FnMut(f64),
+        on_news: &mut dyn FnMut(SendNews<'_>),
     ) -> Result<Sent, AudioError> {
         let ticket = Ticket {
             lease: self,
             sends: asked.0,
         };
-        let mut outcome = ticket.attempt(begin, on_start).await;
+        let mut outcome = ticket.attempt(begin, on_news).await;
         for _ in 1..SEND_ATTEMPTS {
             if matches!(outcome, Ok(_) | Err(AudioError::Cancelled)) {
                 break;
@@ -406,7 +486,7 @@ impl Lease {
             sleep_ms(POLL_MS).await;
             ticket.check()?;
             outcome = match rebuilt {
-                Ok(()) => ticket.attempt(begin, on_start).await,
+                Ok(()) => ticket.attempt(begin, on_news).await,
                 // There is no player to send through, and the reason it could
                 // not be opened is the one worth showing.
                 Err(err) => Err(err),
@@ -448,21 +528,28 @@ impl Ticket<'_> {
     async fn attempt(
         &self,
         begin: &Begin<'_>,
-        on_start: &mut dyn FnMut(f64),
+        on_news: &mut dyn FnMut(SendNews<'_>),
     ) -> Result<Sent, AudioError> {
         let player = &self.lease.player;
         self.check()?;
         // In a statement of its own: the player is borrowed only while the
-        // send starts, never while `on_start` runs.
+        // send starts, never while `on_news` runs.
         let wait = player.start(begin)?;
-        on_start(wait.heard_after_sec);
-        let sent = Sent {
-            duration_sec: wait.duration_sec,
-            char_wpm: wait.char_wpm,
-            effective_wpm: wait.effective_wpm,
-        };
-        match wait.wait().await {
-            PlaybackOutcome::Completed => self.check().map(|()| sent),
+        let start = wait.start();
+        on_news(SendNews::Started(&start));
+        let duration_sec = wait.duration_sec;
+        let waited = wait.wait().await;
+        // Heard out or stopped, a send held up on its way says so: what of
+        // it was heard went out late. One that failed is sent again.
+        if waited.held_up && waited.outcome != PlaybackOutcome::Failed {
+            on_news(SendNews::HeldUp);
+        }
+        match waited.outcome {
+            PlaybackOutcome::Completed => self.check().map(|()| Sent {
+                duration_sec,
+                char_wpm: start.char_wpm,
+                effective_wpm: start.effective_wpm,
+            }),
             PlaybackOutcome::Cancelled => Err(AudioError::Cancelled),
             // The send never reached its end: rebuilding the player on the
             // next attempt is what recovers it.
@@ -533,22 +620,6 @@ mod tests {
         });
     }
 
-    /// The volume turns the paddle's sidetone down with everything else:
-    /// at full volume it is the strength range's floor, as it always was,
-    /// though never past where the limiter starts to bend, and at half
-    /// volume half that, its own floor turned down too.
-    #[test]
-    fn the_volume_turns_the_sidetone_down_with_the_rest() {
-        let mut settings = TrainingSettings::default();
-        assert_eq!(live_tone(&settings).1, 0.7);
-        settings.band.volume_min = 1.0;
-        assert_eq!(live_tone(&settings).1, SOFT_LIMIT_KNEE);
-        settings.band.master_volume = 0.5;
-        assert_eq!(live_tone(&settings).1, SOFT_LIMIT_KNEE * 0.5);
-        settings.band.volume_min = 0.1;
-        assert_eq!(live_tone(&settings).1, SIDETONE_FLOOR * 0.5);
-    }
-
     #[test]
     fn nothing_to_stop_is_no_trouble() {
         let (player, recorder) = player();
@@ -579,7 +650,10 @@ mod tests {
         run(|| async {
             let (player, recorder) = player();
             let lease = player.claim(&test_settings()).expect("a player");
-            let sent = lease.send(&cq(), &test_settings()).await.expect("sent");
+            let sent = lease
+                .send(&cq(), &test_settings(), |_| {})
+                .await
+                .expect("sent");
             assert!(sent.duration_sec > 0.0);
             assert_eq!(sent.char_wpm, 40.0);
             assert_eq!(recorder.texts(), vec!["CQ".to_string()]);
@@ -593,7 +667,7 @@ mod tests {
             let lease = player.claim(&test_settings()).expect("a player");
             player.release();
             assert_eq!(
-                lease.send(&cq(), &test_settings()).await,
+                lease.send(&cq(), &test_settings(), |_| {}).await,
                 Err(AudioError::Cancelled)
             );
             assert!(recorder.texts().is_empty());
@@ -610,7 +684,7 @@ mod tests {
             let lease = player.claim(&test_settings()).expect("a player");
             recorder.set(Behaviour::FailMidSend);
             assert_eq!(
-                lease.send(&cq(), &test_settings()).await,
+                lease.send(&cq(), &test_settings(), |_| {}).await,
                 Err(AudioError::Stalled)
             );
             assert_eq!(recorder.texts().len(), SEND_ATTEMPTS as usize);
@@ -618,7 +692,7 @@ mod tests {
 
             recorder.set(Behaviour::RefuseToStart);
             assert_eq!(
-                lease.send(&cq(), &test_settings()).await,
+                lease.send(&cq(), &test_settings(), |_| {}).await,
                 Err(AudioError::Device("Audio stream: device is gone".into()))
             );
         });
@@ -631,7 +705,7 @@ mod tests {
             let lease = player.claim(&test_settings()).expect("a player");
             // The player is gone, the way a failed rebuild leaves it.
             player.0.backend.borrow_mut().take();
-            assert!(lease.send(&cq(), &test_settings()).await.is_ok());
+            assert!(lease.send(&cq(), &test_settings(), |_| {}).await.is_ok());
             assert_eq!(recorder.players_built.get(), 2);
         });
     }
@@ -658,8 +732,10 @@ mod tests {
                     &transmission,
                     &settings,
                     None,
-                    |heard_after| {
-                        starts.push(heard_after);
+                    |news: SendNews<'_>| {
+                        if let SendNews::Started(start) = news {
+                            starts.push(start.latency_ms);
+                        }
                     },
                 )
                 .await;
@@ -667,7 +743,7 @@ mod tests {
                 sent.map(|sent| sent.duration_sec),
                 Ok(plan.wanted.duration_sec)
             );
-            assert_eq!(starts, [0.25, 0.25], "one call for each attempt");
+            assert_eq!(starts, [250, 250], "one call for each attempt");
             let kept = recorder.starts();
             assert_eq!(kept.len(), 2);
             assert_eq!(kept[0].transcript, transmission);
@@ -698,19 +774,22 @@ mod tests {
                     &transmission,
                     &settings,
                     Some(at),
-                    |heard_after| {
-                        starts.push(heard_after);
+                    |news: SendNews<'_>| {
+                        if let SendNews::Started(start) = news {
+                            starts.push(start.heard_at());
+                        }
                     },
                 )
                 .await;
             assert!(sent.is_ok());
-            assert_eq!(starts, [0.4]);
+            assert_eq!(starts, [at]);
             assert_eq!(recorder.starts()[0].heard_in, Some(0.4));
             let took = crate::time::mono_ms() - began;
             let planned = (plan.wanted.duration_sec * 1_000.0) as u64;
             assert!(took >= 400 + planned, "done {took} ms in, of {planned}");
 
-            let past = MonoMs(crate::time::mono_ms() - 200);
+            let now = MonoMs(crate::time::mono_ms());
+            let past = MonoMs(now.0 - 200);
             let mut starts = Vec::new();
             let asked = lease.ask_to_send();
             let sent = lease
@@ -720,18 +799,89 @@ mod tests {
                     &transmission,
                     &settings,
                     Some(past),
-                    |heard_after| {
-                        starts.push(heard_after);
+                    |news: SendNews<'_>| {
+                        if let SendNews::Started(start) = news {
+                            starts.push(start.heard_at());
+                        }
                     },
                 )
                 .await;
             assert!(sent.is_ok());
-            assert_eq!(starts, [0.0], "at once");
+            assert_eq!(starts, [now], "at once");
             assert_eq!(recorder.starts()[1].heard_in, Some(-0.2));
         });
     }
 
-    /// `on_start` may stop the send it is told about: nothing of the player
+    /// A send says as it starts when it goes to the output and where its
+    /// characters end after that, the delay the device says follows apart;
+    /// and, heard out or stopped, whether it was held up on its way, its
+    /// clock parked.
+    #[test]
+    fn a_send_says_its_timeline_as_it_starts_and_whether_it_was_held_up() {
+        run(|| async {
+            let (player, recorder) = player();
+            let settings = test_settings();
+            let lease = player.claim(&settings).expect("a player");
+            recorder.latency_sec.set(0.25);
+            let began = MonoMs(crate::time::mono_ms());
+            let mut starts = Vec::new();
+            let mut held_up = false;
+            let sent = lease
+                .send(&cq(), &settings, |news| match news {
+                    SendNews::Started(start) => starts.push(start.clone()),
+                    SendNews::HeldUp => held_up = true,
+                })
+                .await
+                .expect("sent");
+            let [start] = starts.as_slice() else {
+                panic!("one start: {starts:?}");
+            };
+            assert_eq!(start.output_at, began);
+            assert_eq!(start.latency_ms, 250);
+            assert_eq!(start.heard_at(), began.plus(250));
+            // The last character ends the send.
+            assert_eq!(start.char_ends_ms.len(), 2, "{start:?}");
+            assert_eq!(
+                start.char_ends_ms.last().copied(),
+                Some((sent.duration_sec * 1_000.0).round() as u32)
+            );
+            assert!(!held_up);
+
+            // Parked on its way, heard out: held up.
+            let parked = async {
+                sleep_ms(100).await;
+                recorder.set_page_hidden(true);
+                sleep_ms(500).await;
+                recorder.set_page_hidden(false);
+            };
+            let cq = cq();
+            let mut news = Vec::new();
+            let send = lease.send(&cq, &settings, |said| {
+                news.push(matches!(said, SendNews::HeldUp));
+            });
+            let (sent, ()) = tokio::join!(send, parked);
+            assert!(sent.is_ok());
+            assert_eq!(news, [false, true], "started, then held up");
+
+            // Parked on its way, and stopped there: held up all the same.
+            let parked_then_stopped = async {
+                sleep_ms(100).await;
+                recorder.set_page_hidden(true);
+                sleep_ms(300).await;
+                lease.stop_sending();
+            };
+            let mut news = Vec::new();
+            let send = lease.send(&cq, &settings, |said| {
+                news.push(matches!(said, SendNews::HeldUp));
+            });
+            let (sent, ()) = tokio::join!(send, parked_then_stopped);
+            recorder.set_page_hidden(false);
+            assert_eq!(sent, Err(AudioError::Cancelled));
+            assert_eq!(news, [false, true]);
+        });
+    }
+
+    /// `on_news` may stop the send it is told about: nothing of the player
     /// is borrowed while it runs, and the send comes back cancelled.
     #[test]
     fn a_planned_send_can_be_stopped_as_it_starts() {
@@ -807,7 +957,7 @@ mod tests {
             let lease = player.claim(&test_settings()).expect("a player");
             recorder.set(Behaviour::FailMidSend);
             assert_eq!(
-                lease.send(&cq(), &test_settings()).await,
+                lease.send(&cq(), &test_settings(), |_| {}).await,
                 Err(AudioError::Stalled)
             );
             assert!(player.0.backend.borrow().is_none());
@@ -815,7 +965,7 @@ mod tests {
             let built = recorder.players_built.get();
             let lease = player.claim(&test_settings()).expect("a player");
             assert_eq!(recorder.players_built.get(), built + 1);
-            assert!(lease.send(&cq(), &test_settings()).await.is_ok());
+            assert!(lease.send(&cq(), &test_settings(), |_| {}).await.is_ok());
         });
     }
 

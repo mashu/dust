@@ -1,8 +1,47 @@
-//! The receiver's output stage: the soft limiter everything it plays passes
-//! through last, and how the browser builds the same one out of nodes.
+//! The receiver's output stage: its audio stage's roll-off below the note,
+//! the soft limiter everything it plays passes through last, and how the
+//! browser builds the same limiter out of a node.
 
-use super::agc::CompressorSetting;
-use super::dsp::db_to_gain;
+use std::f64::consts::FRAC_1_SQRT_2;
+
+use super::dsp::Biquad;
+
+/// Where the receiver's audio stage starts: a second-order roll-off below
+/// this, as a rig's audio is coupled and filtered, so a filter wide enough to
+/// fold the opposite sideband down to zero beat brings no rumble with it. A
+/// side tone at 200 Hz, the lowest the dial goes, loses a quarter of a
+/// decibel to it.
+pub const AUDIO_HIGH_PASS_HZ: f64 = 100.0;
+
+/// The receiver's audio stage, after its AGC: a Butterworth high-pass at
+/// [`AUDIO_HIGH_PASS_HZ`]. After the AGC, as in a rig, whose AGC works from
+/// the IF and hears what is near zero beat; the hiss and the stations that
+/// reach the speaker have it taken out.
+#[derive(Clone, Copy, Debug)]
+pub struct AudioHighPass(Biquad);
+
+impl AudioHighPass {
+    pub fn new(sample_rate: u32) -> Self {
+        let rate = f64::from(sample_rate.max(1));
+        Self(Biquad::high_pass(rate, AUDIO_HIGH_PASS_HZ, FRAC_1_SQRT_2))
+    }
+
+    pub fn process(&mut self, sample: f64) -> f64 {
+        self.0.process(sample)
+    }
+
+    /// Brought to rest once what it holds has died away to nothing, rather
+    /// than left to sink into the subnormal range.
+    pub fn settle(&mut self) {
+        self.0.settle();
+    }
+
+    /// Its gain for a steady tone at `hz`.
+    #[cfg(test)]
+    fn gain_at(&self, sample_rate: f64, hz: f64) -> f64 {
+        self.0.gain_at(sample_rate, hz)
+    }
+}
 
 /// Where [`soft_limit`] starts to bend, as a share of full scale: below it
 /// whatever is played comes out exactly as it went in.
@@ -27,7 +66,7 @@ pub fn soft_limit(x: f64) -> f64 {
 /// How far past full scale [`soft_limit_curve`] reaches before it simply holds
 /// at its last value. Far beyond anything the band and the Morse add up to.
 /// Everything on its way into the browser's limiter is this many times
-/// quieter than it is played ([`limiter_feed`]).
+/// quieter than it is played.
 pub const SOFT_LIMIT_HEADROOM: f64 = 4.0;
 
 /// `soft_limit` as a lookup table, for a Web Audio `WaveShaperNode`.
@@ -47,40 +86,13 @@ pub fn soft_limit_curve(points: usize) -> Vec<f32> {
         .collect()
 }
 
-/// The gains the browser feeds its soft limiter through, for a compressor
-/// set as `setting`.
-///
-/// The browser's limiter is a shaper whose input is scaled down by
-/// `SOFT_LIMIT_HEADROOM`, so whatever reaches it has to be too. What has
-/// come through the compressor also carries the make-up gain the compressor
-/// adds of its own accord, which a receiver's AGC never would, so the
-/// receiver's feed takes that back off. The audio-stage floor joins after the
-/// compressor, as it does after the native AGC, and has nothing to take back:
-/// sent through the receiver's feed it would come out quieter by the make-up
-/// gain whenever the AGC is on. Either way, both reach the limiter at the
-/// gain the native player gives them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LimiterFeed {
-    /// For the receiver's output, after the compressor.
-    pub receiver: f64,
-    /// For the [`super::AudioFloor`], which bypasses the compressor.
-    pub audio_floor: f64,
-}
-
-/// The [`LimiterFeed`] for the browser's compressor set as `setting`.
-pub fn limiter_feed(setting: &CompressorSetting) -> LimiterFeed {
-    LimiterFeed {
-        receiver: db_to_gain(-setting.makeup_db) / SOFT_LIMIT_HEADROOM,
-        audio_floor: 1.0 / SOFT_LIMIT_HEADROOM,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::band::agc::agc_compressor;
-    use crate::band::test_support::knee_for;
-    use crate::settings::TrainingSettings;
+    use crate::band::random::Gaussian;
+    use crate::band::test_support::ALL_SHAPES;
+    use crate::band::{FilterDesign, ReceiverFilter};
+    use crate::settings::{FILTER_WIDTH_MAX, FilterShape};
 
     /// However loud it gets, it is caught rather than squared off — which is
     /// what a receiver does with a crash, and the difference between loud
@@ -125,34 +137,65 @@ mod tests {
         assert_eq!(soft_limit_curve(0).len(), 2);
     }
 
-    /// The browser's floor comes into the graph after the compressor and goes
-    /// straight to the limiter, so it has none of the compressor's make-up
-    /// gain to take back, and arrives at unity — as the native player adds
-    /// it — whether the AGC is on or off. The receiver's output, which does
-    /// carry the make-up gain, has it taken back off, and arrives at unity
-    /// below the knee.
+    /// The audio stage takes out what a wide filter folds down to zero beat
+    /// and leaves the note alone: through any receiver, 20 Hz comes out at
+    /// least 20 dB under the pitch and 50 Hz 6 dB under; and the lowest side
+    /// tone the dial has loses no more than 0.3 dB to it.
     #[test]
-    fn the_browser_feeds_its_limiter_at_the_native_gains() {
-        let on = knee_for(&TrainingSettings::default());
-        assert!(on.is_some(), "the AGC is on by default");
-        for knee in [None, on, Some(1e-4), Some(0.5)] {
-            let setting = agc_compressor(knee);
-            let feed = limiter_feed(&setting);
-            // The shaper maps its input back up by the headroom before
-            // limiting.
-            let floor = feed.audio_floor * SOFT_LIMIT_HEADROOM;
-            let receiver = db_to_gain(setting.makeup_db) * feed.receiver * SOFT_LIMIT_HEADROOM;
-            assert!((floor - 1.0).abs() < 1e-12, "{knee:?}: floor at {floor}");
+    fn the_audio_stage_rolls_off_below_the_note() {
+        let rate = 48_000.0;
+        let stage = AudioHighPass::new(48_000);
+        let note = 20.0 * stage.gain_at(rate, 200.0).log10();
+        assert!(note > -0.3, "200 Hz at {note:.2} dB");
+        for shape in ALL_SHAPES {
+            for centre in [200.0, 300.0, 450.0, 700.0, 1_200.0] {
+                for width in [150.0, 600.0, 1_000.0, 2_000.0, FILTER_WIDTH_MAX] {
+                    let design = FilterDesign::new(centre, width, shape);
+                    let heard = |hz: f64| {
+                        design.response_at(hz) * stage.gain_at(rate, hz)
+                            / stage.gain_at(rate, centre)
+                    };
+                    let at = |hz: f64| 20.0 * heard(hz).log10();
+                    let here = format!("{shape:?} {centre}/{width}");
+                    assert!(at(20.0) <= -20.0, "{here}: 20 Hz at {:.1} dB", at(20.0));
+                    assert!(at(50.0) <= -6.0, "{here}: 50 Hz at {:.1} dB", at(50.0));
+                }
+            }
+        }
+    }
+
+    /// White noise through the widest receivers at the lowest pitches, the
+    /// ones that fold most of the opposite sideband down to zero beat, comes
+    /// out of the audio stage with under 2% of its power below 60 Hz, where
+    /// without it up to a third was.
+    #[test]
+    fn the_audio_stage_leaves_no_rumble() {
+        const SR: u32 = 16_000;
+        let rate = f64::from(SR);
+        for (centre, width) in [(200.0, 590.0), (300.0, 800.0), (450.0, 1_220.0)] {
+            let design = FilterDesign::new(centre, width, FilterShape::Sharp);
+            let mut receiver = ReceiverFilter::new(SR, &design);
+            let mut stage = AudioHighPass::new(SR);
+            // Below 60 Hz, as an eighth-order low-pass there measures it.
+            let mut below = [Biquad::low_pass(rate, 60.0, FRAC_1_SQRT_2); 4];
+            let mut noise = Gaussian::new(7);
+            let (mut all, mut low) = (0.0, 0.0);
+            for i in 0..(SR as usize * 20) {
+                let heard = stage.process(receiver.process(noise.sample()));
+                let under = below
+                    .iter_mut()
+                    .fold(heard, |x, section| section.process(x));
+                if i > SR as usize {
+                    all += heard * heard;
+                    low += under * under;
+                }
+            }
+            let share = low / all;
             assert!(
-                (receiver - 1.0).abs() < 1e-12,
-                "{knee:?}: receiver at {receiver}"
+                share < 0.02,
+                "{centre}/{width}: {:.1}% below 60 Hz",
+                share * 100.0
             );
         }
-        // With the AGC on there is a make-up gain to keep the floor clear of:
-        // through the receiver's feed it would have come out that much
-        // quieter.
-        let setting = agc_compressor(on);
-        assert!(setting.makeup_db > 1.0, "{} dB make-up", setting.makeup_db);
-        assert!(limiter_feed(&setting).receiver < limiter_feed(&setting).audio_floor);
     }
 }

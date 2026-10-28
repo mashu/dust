@@ -27,7 +27,7 @@ use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
 use super::training::{INPUT_COMMIT_DEBOUNCE_MS, TrainingProgress, TrainingView, focused_box_open};
 use crate::audio::fake::Recorder;
-use crate::session_runtime::AnswerOutbox;
+use crate::session_runtime::{AnswerOutbox, TypedAnswer};
 use crate::state::{AppState, Screen};
 use crate::testing::reads_as;
 
@@ -37,6 +37,9 @@ std::thread_local! {
     /// What the session behind a `ManyGroupsHarness` has been handed, kept
     /// off the page so that its hearing an answer draws nothing of its own.
     static HEARD: std::cell::RefCell<Vec<(usize, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Every answer a `KeyMomentsHarness` handed over, with its keys.
+    static HANDED: std::cell::RefCell<Vec<TypedAnswer>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -77,6 +80,11 @@ fn Keyed(
             onkeydown: move |e| keys.keydown(e),
             onkeyup: move |e| keys.keyup(e),
             {children}
+            // What the window losing the focus, or the page going, does.
+            button {
+                id: crate::ui::widgets::control_id("btn", "lose focus"),
+                onclick: move |_| keys.release_all(),
+            }
         }
     }
 }
@@ -95,7 +103,7 @@ fn TrainingScreen(
     locked: bool,
     repeat_total: u32,
     repeat_done: u32,
-    on_change: EventHandler<(usize, String)>,
+    on_change: EventHandler<TypedAnswer>,
     on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
@@ -175,6 +183,7 @@ fn session(date: &str, accuracy: f64) -> SessionResult {
             char_wpm: Some(20.0),
             effective_wpm: None,
             sends: 1,
+            ..SessionTiming::default()
         }],
         accuracy,
         avg_response_ms: 450.0,
@@ -410,28 +419,6 @@ fn home_without_history_invites_a_first_session() {
     });
     assert!(html.contains("First session"));
     assert!(!html.contains("Last accuracy"));
-}
-
-/// Once the history holds a contest run, the Letters tab says its times
-/// are left out of the letters' times.
-#[test]
-fn the_letters_tab_says_when_contest_times_are_left_out() {
-    let says = |sessions: Vec<SessionResult>| {
-        let props = StatsViewProps {
-            settings: TrainingSettings::default(),
-            sessions,
-            on_delete: None,
-            backups: None,
-        };
-        let mut ui = crate::testing::Ui::new(StatsView, props);
-        ui.click("seg-letters");
-        assert!(ui.has("Letter accuracy"));
-        ui.has(cw_core::CONTEST_TIMES_NOTE)
-    };
-    assert!(!says(vec![session("2026-09-01", 0.9)]));
-    let mut contest = session("2026-09-02", 0.9);
-    contest.char_set_mode = CharSetMode::Contest;
-    assert!(says(vec![session("2026-09-01", 0.9), contest]));
 }
 
 #[test]
@@ -1230,6 +1217,43 @@ fn home_asks_for_your_section_before_field_day() {
     }
 }
 
+/// A session with nothing timed says why, and what would have it timed:
+/// the lock, when it was on and the groups were longer than a character.
+#[test]
+fn results_with_nothing_timed_say_why() {
+    let locked = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_session("2026-10-22", &[("KM", "KM"), ("RS", "RS")]),
+                auto_message: None,
+                typing_locked: true,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(locked.contains("none timed"), "{locked}");
+    assert!(
+        locked.contains("Lock typing while sending is on"),
+        "{locked}"
+    );
+    let unlocked = render(|| {
+        rsx! {
+            ResultsView {
+                result: crate::testing::stored_session("2026-10-22", &[("KM", "KM")]),
+                auto_message: None,
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    });
+    assert!(
+        unlocked.contains("key each character as you hear it"),
+        "{unlocked}"
+    );
+    assert!(!unlocked.contains("Lock typing"), "{unlocked}");
+}
+
 /// A Field Day run's results: two points a QSO and nothing to multiply
 /// them, so the multipliers read a dash and the score is the points; raw
 /// as logged, verified as sent, with what the checks found.
@@ -1816,7 +1840,7 @@ fn training_shows_the_send_counter_while_repeating() {
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1844,7 +1868,7 @@ fn training_without_repeats_omits_the_counter() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1879,7 +1903,7 @@ fn a_count_down_shows_where_the_last_group_will() {
                 repeat_total: 1,
                 repeat_done: 0,
                 countdown: Some(3),
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1932,7 +1956,7 @@ fn an_unlocked_answer_box_does_not_look_disabled() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -1966,7 +1990,7 @@ fn a_locked_answer_box_is_neither_readonly_nor_disabled() {
                 locked: true,
                 repeat_total: 1,
                 repeat_done: 0,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -2005,7 +2029,7 @@ fn a_confirmed_group_moves_up_and_leaves_no_box() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -2044,7 +2068,7 @@ fn between_groups_the_header_says_the_next_group_is_coming() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -2087,7 +2111,7 @@ fn an_open_box_is_your_turn() {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |_: (usize, String)| {},
+                on_change: move |_: TypedAnswer| {},
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -2499,7 +2523,7 @@ mod interactions {
         })
         .collect();
         rsx! {
-            crate::ui::letters::LettersTab { sessions }
+            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions }
         }
     }
 
@@ -2529,6 +2553,99 @@ mod interactions {
         // The weakest first: K, building, before M, too few tries to tell.
         let html = ui.html();
         assert!(html.find("id=\"letter-k\"") < html.find("id=\"letter-m\""));
+    }
+
+    /// K timed eight times at 320 ms, M at 520, R at 700 and S at 900, U
+    /// three times, and E never: a band each, a provisional time, and none.
+    /// Its characters a second apart, each keyed while the next one sounds,
+    /// as keeping up is. E is also sent alone, answered after its send.
+    fn timed_history() -> Vec<SessionResult> {
+        let mut session = stored_session("2026-09-01", &[("KMRSUE", "KMRSUE"); 8]);
+        for (n, timing) in session.group_timings.iter_mut().enumerate() {
+            let u = (n < 3).then_some(410);
+            let ends: Vec<u32> = (1..=6).map(|at| at * 1_000).collect();
+            let took = [Some(320), Some(520), Some(700), Some(900), u, None];
+            let keys = ends
+                .iter()
+                .zip(took)
+                .map(|(end, took)| took.map(|took| end + took))
+                .collect();
+            timing.char_times = Some(cw_core::CharTimes {
+                ends,
+                keys,
+                corrected: Vec::new(),
+                latency_ms: 0,
+                box_open: true,
+            });
+        }
+        vec![session, stored_session("2026-09-02", &[("E", "E"); 8])]
+    }
+
+    #[component]
+    fn TimedLettersHarness() -> Element {
+        rsx! {
+            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions: timed_history() }
+        }
+    }
+
+    /// Each character's recognition time is in the colour of its band, the
+    /// ICR ones named in the summary; one timed too few times says so, and
+    /// one never timed says that.
+    #[test]
+    fn recognition_times_are_shown_in_their_bands() {
+        let ui = Ui::new(TimedLettersHarness, ());
+        let line = |id: &str| {
+            let html = ui.html();
+            let at = html.find(&format!("id=\"{id}\"")).expect("the row");
+            let row = &html[at..];
+            row[..row.find("</div><div").unwrap_or(row.len())].to_string()
+        };
+        assert!(
+            line("letter-k").contains(r#"class="rec-chip rec-fast">ICR 320 ms<"#),
+            "{}",
+            line("letter-k")
+        );
+        assert!(line("letter-m").contains(r#"class="rec-chip rec-icr">ICR 520 ms<"#));
+        assert!(line("letter-r").contains(r#"class="rec-chip rec-slow">700 ms<"#));
+        assert!(line("letter-s").contains(r#"class="rec-chip rec-too-slow">900 ms<"#));
+        // What the row shows, not its label: " · " starts only the
+        // visible text, where the label has ", ".
+        assert!(line("letter-u").contains(" · about 410 ms so far, 3 of 8 tries timed"));
+        assert!(line("letter-e").contains(" · not timed yet"));
+        let e = cw_core::character_diagnostics(&timed_history())
+            .into_iter()
+            .find(|letter| letter.letter == 'E')
+            .expect("E");
+        assert_eq!((e.recognition_tries, e.recognition_ms), (0, None));
+        assert!(ui.has(">Instant (ICR) · 2<"), "{}", ui.html());
+        assert!(ui.has(r#"class="err-chip rec-fast group-text">K<"#));
+        assert!(ui.has(r#"class="err-chip rec-icr group-text">M<"#));
+        assert!(ui.has("ICR, under 600"));
+    }
+
+    /// KM answered after each send, nothing keyed along, as it ships.
+    #[component]
+    fn UntimedLettersHarness() -> Element {
+        let session = stored_session("2026-09-01", &[("KM", "KM"); 8]);
+        rsx! {
+            crate::ui::letters::LettersTab { settings: crate::testing::test_settings(), sessions: vec![session] }
+        }
+    }
+
+    /// Nothing timed yet: the card says once how a character is timed, and
+    /// no row says more. Nothing stands in for a time.
+    #[test]
+    fn untimed_letters_say_how_to_be_timed_and_show_no_time() {
+        let ui = Ui::new(UntimedLettersHarness, ());
+        assert!(ui.has("as you key along"), "{}", ui.html());
+        assert!(!ui.has("not timed yet"));
+        assert!(!ui.has(" ms"), "a time with nothing timed: {}", ui.html());
+        assert!(
+            !ui.has("Recognised in"),
+            "no bands' legend with nothing in them"
+        );
+        let k = ui.input_tag("letter-k");
+        assert!(!k.contains("recognised"), "{k}");
     }
 
     /// Koch at level 3, K and M heard, M often missed.
@@ -2798,7 +2915,12 @@ mod interactions {
         ui.click("seg-taught-order");
         assert!(ui.input_tag("seg-taught-order").contains("active"));
         assert_eq!(first_square(&ui), "pair-start-k");
-        assert!(ui.input_tag("pair-k-m").contains("selected"));
+        assert!(
+            line_rule(&ui).contains(
+                "#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--ink)"
+            ),
+            "still pinned"
+        );
         ui.click("seg-most-errors");
         assert_eq!(first_square(&ui), "pair-k-m");
     }
@@ -2878,11 +3000,13 @@ mod interactions {
             assert!(ui.has(text), "no {text} on the card: {}", ui.html());
         }
         assert!(ui.has("class=\"pair-dock\""));
-        let square = ui.input_tag("pair-k-m");
-        assert!(
-            square.contains("selected") && square.contains("shown"),
-            "{square}"
-        );
+        // Shown, ringed in ink for being pinned.
+        let css = line_rule(&ui);
+        let ring =
+            css.find("#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--info)");
+        let ink =
+            css.find("#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--ink)");
+        assert!(ring < ink && ring.is_some(), "{css}");
         // Its row, K before, and its column, M after, light up; nothing else.
         for (id, lit) in [
             ("pair-k-k", true),
@@ -2892,20 +3016,15 @@ mod interactions {
             ("pair-u-k", false),
             ("pair-start-u", false),
         ] {
-            assert_eq!(ui.input_tag(id).contains("in-line"), lit, "{id}");
+            assert_eq!(lights(&ui, id), lit, "{id}");
         }
-        assert!(ui.has("class=\"bigram-head row-head group-text in-line\">K<"));
-        assert!(ui.has("class=\"bigram-head group-text in-line\">M<"));
-        assert_eq!(
-            ui.html().matches("in-line\">").count(),
-            2,
-            "one row, one column"
-        );
+        assert!(css.contains(r#".bigram-head[data-r="K"], .bigram-head[data-c="M"]"#));
+        assert!(ui.has(r#"class="bigram-head row-head group-text" data-r="K">K<"#));
+        assert!(ui.has(r#"class="bigram-head group-text" data-c="M">M<"#));
 
         ui.click("pair-k-m");
         assert!(!ui.has("pair-card"));
-        assert!(!ui.input_tag("pair-k-m").contains("selected"));
-        assert!(!ui.input_tag("pair-k-k").contains("in-line"));
+        assert!(line_rule(&ui).is_empty(), "nothing lit");
 
         ui.click("pair-k-m");
         ui.click("pair-u-m");
@@ -2915,7 +3034,33 @@ mod interactions {
         assert!(!ui.has(">Taken for<"), "nothing was taken for anything");
         ui.click_elsewhere();
         assert!(!ui.has("pair-card"));
-        assert!(!ui.input_tag("pair-u-m").contains("selected"));
+        assert!(line_rule(&ui).is_empty(), "nothing lit");
+    }
+
+    /// The rule that lights the bigram grid's pair, as drawn: nothing when
+    /// no pair is shown.
+    fn line_rule(ui: &Ui) -> String {
+        let html = ui.html();
+        html.split("<style>")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("</style>"))
+            .map(|(css, _)| css)
+            .find(|css| css.contains("bigram"))
+            .unwrap_or_default()
+            .replace("&quot;", "\"")
+    }
+
+    /// Whether the square with this id is lit as in the line of the pair
+    /// shown: by its row or by its column.
+    fn lights(ui: &Ui, id: &str) -> bool {
+        let tag = ui.input_tag(id);
+        let data = |name: &str| {
+            let at = tag.find(&format!("{name}=\"")).expect("tagged") + name.len() + 2;
+            tag[at..].split('"').next().unwrap_or_default().to_string()
+        };
+        let css = line_rule(ui);
+        css.contains(&format!(".bigram-cell[data-r=\"{}\"]", data("data-r")))
+            || css.contains(&format!(".bigram-cell[data-c=\"{}\"]", data("data-c")))
     }
 
     /// A mouse shows a pair's card for as long as it points at the square,
@@ -2926,18 +3071,24 @@ mod interactions {
         let mut ui = Ui::new(MistakesHarness, ());
         ui.point_at("pair-start-k", "mouse", (40.0, 300.0), (5.0, 5.0));
         assert!(ui.has("class=\"tip-date\">K at the start of a group<"));
-        assert!(ui.input_tag("pair-start-u").contains("in-line"));
+        assert!(lights(&ui, "pair-start-u"));
+        // Leaving the square for the next keeps the card up; leaving the
+        // grid takes it down.
         ui.point_away("pair-start-k");
+        assert!(ui.has("class=\"tip-date\">K at the start of a group<"));
+        ui.point_away("bigram-grid");
         assert!(!ui.has("pair-card"));
 
         ui.click("pair-k-m");
         ui.point_at("pair-u-m", "mouse", (40.0, 300.0), (5.0, 5.0));
         assert!(ui.has("class=\"tip-date\">M after U<"));
         assert!(
-            ui.input_tag("pair-k-m").contains("selected"),
+            line_rule(&ui).contains(
+                "#pair-k-m { position: relative; z-index: 1; outline: 2px solid var(--ink)"
+            ),
             "still pinned"
         );
-        ui.point_away("pair-u-m");
+        ui.point_away("bigram-grid");
         assert!(ui.has("class=\"tip-date\">M after K<"));
         ui.click("pair-k-m");
 
@@ -2945,6 +3096,35 @@ mod interactions {
         assert!(!ui.has("pair-card"));
         ui.point_at("pair-k-k", "mouse", (40.0, 300.0), (5.0, 5.0));
         assert!(!ui.has("pair-card"));
+    }
+
+    /// Pointing from pair to pair draws no square again, and keeps the card
+    /// up between them: what changes is the rule that lights the pair, and
+    /// what its card says. A grid of forty characters holds 1,640 squares.
+    #[test]
+    fn pointing_from_pair_to_pair_draws_no_square_again() {
+        let mut ui = Ui::new(MistakesHarness, ());
+        ui.take_renders("PairGrid");
+        ui.take_renders("BigramCard");
+        ui.take_work();
+        for (id, title) in [
+            ("pair-k-m", "M after K"),
+            ("pair-u-m", "M after U"),
+            ("pair-start-k", "K at the start of a group"),
+            ("pair-start-u", "U at the start of a group"),
+        ] {
+            ui.point_at(id, "mouse", (40.0, 300.0), (5.0, 5.0));
+            assert!(ui.has(&format!("class=\"tip-date\">{title}<")), "{id}");
+            ui.point_away(id);
+        }
+        ui.point_away("bigram-grid");
+        assert!(!ui.has("pair-card"));
+        assert_eq!(ui.take_renders("PairGrid"), 0, "no square drawn again");
+        assert_eq!(ui.take_renders("BigramCard"), 0);
+        // The card put up and taken down once, and each pair's rule and
+        // words in between.
+        let work = ui.take_work();
+        assert!(work <= 60, "{work} mutations for four pairs");
     }
 
     /// A mouse opens a day's card by pointing at the square and closes it by
@@ -3097,7 +3277,13 @@ mod interactions {
     fn the_band_card_out_of_the_box() {
         let mut ui = Ui::new(DefaultBandHarness, ());
         assert!(ui.shows("fixed-stations-calling"), "{}", ui.html());
-        assert!(ui.has("class=\"slider-value\">S/N 41 dB<"), "{}", ui.html());
+        // The copied station's, across the strengths it is drawn at: 0 down to
+        // 3 dB under the strongest out of the box.
+        assert!(
+            ui.has("class=\"slider-value\">S/N 38–41 dB<"),
+            "{}",
+            ui.html()
+        );
         assert!(ui.has("300 Hz — widened to 353 Hz to pass your pitch range"));
         // The 6 dB is where the width is read, not a loss, and the label
         // does not make it look like one.
@@ -3113,7 +3299,7 @@ mod interactions {
             ("less-slider-noise-level", 41),
         ] {
             ui.click(button);
-            let says = format!("class=\"slider-value\">S/N {reading} dB<");
+            let says = format!("class=\"slider-value\">S/N {}–{reading} dB<", reading - 3);
             assert!(ui.has(&says), "{button}: {}", ui.html());
         }
         // A step under the quietest hiss there is, it is off.
@@ -3174,15 +3360,15 @@ mod interactions {
             assert!(!ui.has(gone), "{gone} should no longer be on the card");
         }
 
-        assert!(!ui.has("Slow swells and dips of the signal."));
+        assert!(!ui.has("Slow swells and dips of each station, every one on a path of its own"));
         ui.click("help-band-conditions");
         assert!(
-            ui.has("Slow swells and dips of the signal."),
+            ui.has("Slow swells and dips of each station, every one on a path of its own"),
             "the help should have opened"
         );
         ui.click("help-band-conditions");
         assert!(
-            !ui.has("Slow swells and dips of the signal."),
+            !ui.has("Slow swells and dips of each station, every one on a path of its own"),
             "and closes again"
         );
 
@@ -3202,18 +3388,18 @@ mod interactions {
         assert!(ui.has("class=\"slider-value\">Off<"), "switched off");
         ui.commit("switch-band-noise", "true");
         assert!(
-            ui.has("class=\"slider-value\">S/N 23 dB<"),
+            ui.has("class=\"slider-value\">S/N 20–23 dB<"),
             "sharp, 300 Hz, at half level"
         );
         ui.type_into("slider-filter-width", "600");
         assert!(
-            ui.has("class=\"slider-value\">S/N 20 dB<"),
+            ui.has("class=\"slider-value\">S/N 17–20 dB<"),
             "doubling the filter should cost 3 dB"
         );
         ui.type_into("slider-filter-width", "300");
         ui.click("seg-filter-peaked");
         assert!(
-            ui.has("class=\"slider-value\">S/N 26 dB<"),
+            ui.has("class=\"slider-value\">S/N 23–26 dB<"),
             "the peak filter lets in less noise than its width says"
         );
         // Narrower than the side-tone range allows, it says what it is
@@ -3362,6 +3548,42 @@ mod interactions {
         }
     }
 
+    /// A paddle let go with Ctrl, Alt or Meta down still opens: the release
+    /// is the paddle's, though the press would have been a shortcut. The
+    /// dah stops, and the pad hears a T rather than dahs on and on.
+    #[test]
+    fn a_paddle_let_go_with_a_modifier_down_still_opens() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let key = Key::Character("]".into());
+            ui.press_key("keyed-root", key.clone(), Code::BracketRight);
+            ui.advance(100).await;
+            ui.release_key_held(
+                "keyed-root",
+                key,
+                Code::BracketRight,
+                dioxus::prelude::Modifiers::CONTROL,
+            );
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    /// The window losing the focus, or the page going, takes the key
+    /// releases with it: the paddles open, the element sounding finishes,
+    /// and the letter it ends is heard.
+    #[test]
+    fn losing_the_focus_opens_the_paddles() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            ui.press_key("keyed-root", Key::Character("]".into()), Code::BracketRight);
+            ui.advance(100).await;
+            ui.click("btn-lose-focus");
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
     #[test]
     fn the_pad_keeps_only_the_last_line_it_heard() {
         crate::testing::run(|| async {
@@ -3433,7 +3655,7 @@ mod interactions {
                         repeat_total: 1,
                         repeat_done: 1,
                         answer,
-                        on_change: move |(_, value): (usize, String)| typed.set(value),
+                        on_change: move |answer: TypedAnswer| typed.set(answer.text),
                         on_confirm: move |()| {},
                         on_submit: move |_| {},
                         on_stop: move |_| {},
@@ -3485,7 +3707,7 @@ mod interactions {
                 locked: true,
                 repeat_total: 2,
                 repeat_done: 0,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| typed.set("confirmed".into()),
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3522,7 +3744,7 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3531,6 +3753,68 @@ mod interactions {
                 p { id: "committed-answer", "committed:{typed()}" }
             }
         }
+    }
+
+    /// An open box whose every hand-over is kept, keys and all.
+    #[component]
+    fn KeyMomentsHarness() -> Element {
+        rsx! {
+            TrainingScreen {
+                current: 0,
+                total: 1,
+                groups: vec!["KE".to_string()],
+                inputs: vec![String::new()],
+                confirmed: vec![false],
+                focused: 0,
+                playing: false,
+                locked: false,
+                repeat_total: 1,
+                repeat_done: 1,
+                on_change: move |answer: TypedAnswer| HANDED.with(|handed| handed.borrow_mut().push(answer)),
+                on_confirm: move |()| {},
+                on_submit: move |_| {},
+                on_stop: move |_| {},
+            }
+        }
+    }
+
+    /// Each character goes to the session with when it was keyed: a key
+    /// typed at its keystroke, a paddle letter at the contact that began
+    /// it, though it goes in only once its letter space has run out.
+    #[test]
+    fn each_character_goes_to_the_session_with_when_it_was_keyed() {
+        crate::testing::run(|| async {
+            HANDED.with(|handed| handed.borrow_mut().clear());
+            let mut ui = Ui::new(KeyMomentsHarness, ());
+            let typed_at = cw_core::MonoMs(crate::time::mono_ms());
+            ui.type_into("group-input-0", "K");
+            ui.advance(200).await;
+            let pressed_at = cw_core::MonoMs(crate::time::mono_ms());
+            tap_dits(&mut ui, "group-input-0", 1).await;
+            let handed = |text: &str| {
+                HANDED.with(|handed| {
+                    handed
+                        .borrow()
+                        .iter()
+                        .rev()
+                        .find(|answer| answer.text == text)
+                        .cloned()
+                })
+            };
+            assert!(
+                ui.run_until(2_000, |_| handed("KE").is_some()).await,
+                "{}",
+                ui.html()
+            );
+            let answer = handed("KE").expect("handed over");
+            assert_eq!(answer.index, 0);
+            assert_eq!(answer.keys.at, [Some(typed_at), Some(pressed_at)]);
+            assert!(answer.keys.corrected.is_empty());
+            assert!(
+                crate::time::mono_ms() > pressed_at.0 + 200,
+                "the letter went in after its letter space"
+            );
+        });
     }
 
     #[component]
@@ -3549,7 +3833,7 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| confirms += 1,
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3651,7 +3935,7 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3680,9 +3964,9 @@ mod interactions {
                 locked: false,
                 repeat_total: 1,
                 repeat_done: 1,
-                on_change: move |(index, value): (usize, String)| {
-                    HEARD.with(|heard| heard.borrow_mut().push((index, value.clone())));
-                    typed.set(value);
+                on_change: move |answer: TypedAnswer| {
+                    HEARD.with(|heard| heard.borrow_mut().push((answer.index, answer.text.clone())));
+                    typed.set(answer.text);
                 },
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
@@ -3887,6 +4171,31 @@ mod interactions {
         });
     }
 
+    /// The paddles key as the keyboard types: along with the send when
+    /// typing is not locked while it plays.
+    #[test]
+    fn the_paddles_key_along_with_a_send_left_unlocked() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(RepeatingHarness, ());
+            tap_dits(&mut ui, "group-input-0", 1).await;
+            assert!(box_shows(&ui, "E"), "{}", ui.input_tag("group-input-0"));
+            ui.advance(u64::from(INPUT_COMMIT_DEBOUNCE_MS)).await;
+            assert!(ui.has("committed:E"), "{}", ui.html());
+        });
+    }
+
+    /// And not into a box locked while its group is sent, as the keyboard
+    /// does not.
+    #[test]
+    fn the_paddles_key_nothing_into_a_box_locked_while_it_is_sent() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(TrainingHarness, ());
+            tap_dits(&mut ui, "group-input-0", 2).await;
+            ui.advance(500).await;
+            assert!(box_shows(&ui, ""), "{}", ui.input_tag("group-input-0"));
+        });
+    }
+
     #[component]
     fn RepeatingHarness() -> Element {
         let mut sends_done = use_signal(|| 0u32);
@@ -3903,7 +4212,7 @@ mod interactions {
                 locked: false,
                 repeat_total: 2,
                 repeat_done: sends_done(),
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -3964,7 +4273,7 @@ mod interactions {
                         repeat_total: 1,
                         repeat_done: 1,
                         answer,
-                        on_change: move |(_, value): (usize, String)| typed.set(value),
+                        on_change: move |answer: TypedAnswer| typed.set(answer.text),
                         on_confirm: move |()| {},
                         on_submit: move |_| {},
                         on_stop: move |_| {},
@@ -4023,7 +4332,7 @@ mod interactions {
                 repeat_total: 1,
                 repeat_done: 1,
                 keyer_mode: KeyerMode::Straight,
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},
@@ -4066,7 +4375,7 @@ mod interactions {
                 locked: locked(),
                 repeat_total: 1,
                 repeat_done: if playing() { 0 } else { 1 },
-                on_change: move |(_, value): (usize, String)| typed.set(value),
+                on_change: move |answer: TypedAnswer| typed.set(answer.text),
                 on_confirm: move |()| {},
                 on_submit: move |_| {},
                 on_stop: move |_| {},

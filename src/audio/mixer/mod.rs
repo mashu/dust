@@ -9,32 +9,39 @@
 //! you send. The RF gain turns down all the receiver hears before its AGC
 //! does, and the AGC hears it all [`AGC_LOOKAHEAD_SEC`] before it is
 //! played. Your own message in a contest joins after all of it, as a rig's
-//! sidetone does, at the volume, and the receiver's AF gain sets how loud
-//! the rest is played. The
+//! sidetone does, at the volume, and the receiver's AF gain, each band's
+//! its own, sets how loud the rest is played. The
 //! output stage — the paddle's sidetone, and the limiter on everything — is
 //! added by the stream, which runs it even when the UI holds the mixer for a
 //! moment.
 
 mod band;
 mod meter;
+#[cfg(feature = "native-audio")]
+mod output;
 mod send;
+#[cfg(feature = "native-audio")]
 mod sidetone;
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::Arc;
 
 #[cfg(doc)]
 use cw_core::band::AGC_LOOKAHEAD_SEC;
-use cw_core::band::{agc_lookahead_samples, soft_limit};
+use cw_core::band::{AudioHighPass, Receiver, agc_lookahead_samples};
 
-use crate::audio::shape::{GATE_RAMP_SEC, Gains};
+use crate::audio::shape::{BAND_FADE_SEC, GATE_RAMP_SEC, Gains};
 
 pub use band::BandVoice;
+use band::Glide;
 pub use meter::Meter;
 use meter::Metering;
-pub use send::{SendSample, SendVoice};
-pub use sidetone::{Sidetone, SidetoneControl};
+#[cfg(feature = "native-audio")]
+pub use output::Output;
+#[cfg(all(test, feature = "native-audio"))]
+use output::finish;
+pub use send::{SendSample, SendVoice, fade_origin_sec};
+#[cfg(feature = "native-audio")]
+pub use sidetone::{SidetoneControl, clock_sec};
 
 /// How many bands may be fading out at once. One band hands over to the next
 /// in a few tens of milliseconds; a slider dragged across its range rebuilds
@@ -45,17 +52,24 @@ const FADING_BANDS: usize = 8;
 /// release is a few milliseconds; sends are seconds apart.
 const RETIRING_SENDS: usize = 4;
 
-/// The highest rate a stream is ever opened at, which the room for the
-/// look-ahead is made for once.
+/// The highest rate the room for the look-ahead is made for up front. A
+/// stream opened higher has it grown before it starts.
 const HIGHEST_RATE: u32 = 384_000;
 
 /// The band and the Morse, mixed. The UI hands it bands and sends under its
-/// lock; the audio callback plays it out.
+/// lock; the audio callback plays it out. The browser renders it ahead of
+/// its clock, and a copy taken before a stretch plays that stretch again
+/// exactly, for it to be made again from any moment in it.
+#[derive(Clone)]
 pub struct Mixer {
     sample_rate: u32,
     band: Option<BandVoice>,
     /// Bands that were replaced, fading out: the newest last.
     fading: Vec<BandVoice>,
+    /// A receiver the band playing is to be retuned to, once it is steady:
+    /// one handover at a time, so a slider dragged across its range retunes
+    /// to where it has got to each time the last has finished.
+    retune: Option<Receiver>,
     send: Option<SendVoice>,
     /// Sends a newer one replaced, riding out their release.
     retiring: Vec<SendVoice>,
@@ -66,21 +80,32 @@ pub struct Mixer {
     /// break-in, moving between the two a straight line at a time, over
     /// [`GATE_RAMP_SEC`], so it never clicks.
     gate: f64,
-    /// The gains it plays at, the RF gain ahead of the AGC and the two after
-    /// it, and what it was last asked to: each moving between the two at the
-    /// gate's pace, a whole unit of gain over [`GATE_RAMP_SEC`], so a slider
-    /// moved under a tone never clicks.
+    /// The gains it plays at, the RF gain ahead of the AGC and the volume
+    /// after it, and what it was last asked to: each moving between the two
+    /// at the gate's pace, a whole unit of gain over [`GATE_RAMP_SEC`], so a
+    /// slider moved under a tone never clicks. The AF gain is each band's
+    /// own; this one is the receiver's with no band, which the send rides
+    /// alone.
     gains: Gains,
     gains_asked: Gains,
+    af: Glide,
+    /// The receiver's audio stage, after its AGC: the roll-off below the
+    /// note, on the band and the stations, not on your own message.
+    audio: AudioHighPass,
     /// What the receiver did, a frame at a time, for the level scope.
     metering: Metering,
     /// What the sends played, waiting out the receiver's look-ahead: its AGC
-    /// hears every sample as it comes, and everything is played that much
-    /// later at the gain it has by then, as the band is. Room for the
-    /// highest rate, made once, of which the rate in use takes `late_len`.
+    /// hears every sample as it comes, through the RF gain as it stands
+    /// then, and everything is played that much later at the gain it has by
+    /// then, as the band is. Room for the highest rate, made once, of which
+    /// the rate in use takes `late_len`.
     late: Vec<SendSample>,
     late_len: usize,
     late_at: usize,
+    /// What the send rode on the band going out, last it was on the air,
+    /// while the band coming in has still to come in all the way: the send
+    /// eases on from there, not from no band at all.
+    handed_over: Option<f64>,
 }
 
 /// What the mixer has finished with. A band or a send owns allocations, and
@@ -92,6 +117,7 @@ pub struct Mixer {
 pub struct Swept {
     bands: Vec<BandVoice>,
     sends: Vec<SendVoice>,
+    receivers: Vec<Receiver>,
 }
 
 impl Swept {
@@ -100,6 +126,7 @@ impl Swept {
         Self {
             bands: Vec::with_capacity(FADING_BANDS + 2),
             sends: Vec::with_capacity(RETIRING_SENDS + 2),
+            receivers: Vec::with_capacity(1),
         }
     }
 }
@@ -107,19 +134,23 @@ impl Swept {
 impl Mixer {
     pub fn new(sample_rate: u32) -> Self {
         Self {
+            audio: AudioHighPass::new(sample_rate),
             metering: Metering::new(Arc::new(Meter::new()), sample_rate),
             sample_rate: sample_rate.max(1),
             band: None,
             fading: Vec::with_capacity(FADING_BANDS + 1),
+            retune: None,
             send: None,
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
             latency: 0,
             gate: 1.0,
             gains: Gains::UNITY,
             gains_asked: Gains::UNITY,
-            late: vec![SendSample::default(); agc_lookahead_samples(HIGHEST_RATE)],
-            late_len: agc_lookahead_samples(sample_rate.min(HIGHEST_RATE)),
+            af: Glide::at(1.0),
+            late: vec![SendSample::default(); late_room(sample_rate)],
+            late_len: agc_lookahead_samples(sample_rate),
             late_at: 0,
+            handed_over: None,
         }
     }
 
@@ -132,29 +163,141 @@ impl Mixer {
         self.metering.meter()
     }
 
-    /// How long after it starts a send is heard, in seconds: the receiver's
-    /// look-ahead, and how far behind the last callback found the speaker.
-    pub fn latency_sec(&self) -> f64 {
-        (self.latency + self.late_len) as f64 / f64::from(self.sample_rate)
+    /// How many samples into the meter's next frame it has played.
+    #[cfg(any(feature = "web", test))]
+    pub fn meter_phase(&self) -> usize {
+        self.metering.taken()
     }
 
-    /// Play at `gains` from here on.
+    /// Whether it has nothing left to play: no band, none still fading out,
+    /// and no send sounding or riding out its release. What it plays then is
+    /// silence, once the look-ahead has run out. Those gone are counted
+    /// gone, swept or not: a change sweeps them, and after the last change
+    /// nothing comes to.
+    #[cfg(any(feature = "web", test))]
+    pub fn is_quiet(&self) -> bool {
+        self.band.is_none()
+            && self.fading.iter().all(BandVoice::is_gone)
+            && self.retiring.iter().all(|send| !send.is_sounding())
+            && self.send.as_ref().is_none_or(|send| !send.is_sounding())
+    }
+
+    /// Whether a send is still to be heard, or riding out its release: what
+    /// a stream moved to another device would cut off.
+    #[cfg(feature = "native-audio")]
+    pub fn is_sending(&self) -> bool {
+        self.send
+            .iter()
+            .chain(&self.retiring)
+            .any(SendVoice::is_sounding)
+    }
+
+    /// How long after it starts a send goes to the output, in seconds: the
+    /// receiver's look-ahead.
+    pub fn lookahead_sec(&self) -> f64 {
+        self.late_len as f64 / f64::from(self.sample_rate)
+    }
+
+    /// How far behind the output the last callback found the speaker, in
+    /// seconds, as the device says.
+    #[cfg(feature = "native-audio")]
+    pub fn output_latency_sec(&self) -> f64 {
+        self.latency as f64 / f64::from(self.sample_rate)
+    }
+
+    /// Play at `gains` from here on, the band as it is: the AF gain it is
+    /// played at glides there over a band's fade, a decibel at a time, or,
+    /// with none, the receiver's own.
     pub fn set_gains(&mut self, gains: Gains) {
+        self.ask(gains);
+        let (af, samples) = (self.gains_asked.af, self.fade_len());
+        match self.band.as_mut() {
+            Some(band) => band.glide_to(af),
+            None => self.af.to(af, samples),
+        }
+    }
+
+    /// Put a new band in, or take the band away, and play at `gains` from
+    /// here on: the band going out keeps the AF gain its receiver was played
+    /// at, and the one coming in, or the receiver with none, has the new one
+    /// from the start. The send eases from the one to the other with the
+    /// fade, so a change of receiver plays neither band at the other's.
+    pub fn set_band_at(&mut self, band: Option<BandVoice>, gains: Gains, swept: &mut Swept) {
+        self.ask(gains);
+        if band.is_none() {
+            self.af = Glide::at(self.gains_asked.af);
+        }
+        self.set_band(band, swept);
+    }
+
+    fn ask(&mut self, gains: Gains) {
         let held = |gain: f64| if gain.is_finite() { gain.max(0.0) } else { 1.0 };
         self.gains_asked = Gains {
             rf: held(gains.rf),
-            received: held(gains.received),
-            monitored: held(gains.monitored),
+            af: held(gains.af),
+            volume: held(gains.volume),
         };
+    }
+
+    /// How long a band's fade is, in samples.
+    fn fade_len(&self) -> usize {
+        ((BAND_FADE_SEC * f64::from(self.sample_rate)).round() as usize).max(1)
+    }
+
+    /// Retune the band playing to `receiver`, at `gains`, keeping it on the
+    /// air: the same noise, static and stations, carried on from where they
+    /// are, through the new filter and AGC — as a rig's controls act on what
+    /// is on the band, never change who is on it. The new receiver warms in
+    /// step with the old, unheard, and the two then cross over a band's
+    /// fade. Whether there was a band to retune.
+    pub fn retune_band(&mut self, receiver: Receiver, gains: Gains, swept: &mut Swept) -> bool {
+        if self.band.is_none() {
+            swept.receivers.push(receiver);
+            return false;
+        }
+        self.ask(gains);
+        swept.receivers.extend(self.retune.replace(receiver));
+        self.sweep(swept);
+        true
+    }
+
+    /// Start the retune asked for, if the band playing is steady and there
+    /// is room for it to go: on the audio thread, at the top of a buffer.
+    /// Nothing is allocated: the new band is the old one copied, the room
+    /// for the old one made long since.
+    fn start_retune(&mut self) {
+        let ready = self.band.as_ref().is_some_and(BandVoice::is_steady)
+            && self.fading.len() < FADING_BANDS;
+        let (Some(current), Some(receiver)) = (self.band.as_mut(), self.retune.take_if(|_| ready))
+        else {
+            return;
+        };
+        let mut old = std::mem::replace(current, current.retuned(receiver, self.gains_asked.af));
+        old.give_way();
+        self.fading.push(old);
     }
 
     /// Put a new band in, or take the band away. The one going out is not
     /// cut off: it fades out while the new one fades in, and the receiver's
-    /// gain carries across, so a station being copied rides straight on.
+    /// gain carries across, so a station being copied rides straight on. A
+    /// retune asked of the old band is for a band that has gone.
     pub fn set_band(&mut self, band: Option<BandVoice>, swept: &mut Swept) {
+        swept.receivers.extend(self.retune.take());
         let mut band = band;
-        if let (Some(new), Some(old)) = (band.as_mut(), self.band.as_ref()) {
-            new.take_over_from(old);
+        if let Some(new) = band.as_mut() {
+            new.start_at(self.gains_asked.af);
+            let carried = self
+                .band
+                .as_ref()
+                .is_some_and(|old| new.take_over_from(old));
+            if !carried {
+                // Nothing to carry over: the AGC hears what is still to be
+                // played, oldest first, so the send waiting out the
+                // look-ahead is played at the gain it has for it.
+                for k in 0..self.late_len {
+                    new.hear_ahead(self.late[(self.late_at + k) % self.late_len].heard);
+                }
+            }
         }
         if let Some(mut old) = std::mem::replace(&mut self.band, band) {
             old.fade_out();
@@ -213,16 +356,24 @@ impl Mixer {
     }
 
     /// Everything out, for a stream at `sample_rate` to start again with.
+    #[cfg(feature = "native-audio")]
     pub fn clear(&mut self, sample_rate: u32, swept: &mut Swept) {
         self.sample_rate = sample_rate.max(1);
         self.gate = 1.0;
         self.gains = self.gains_asked;
+        self.af = Glide::at(self.gains_asked.af);
+        self.audio = AudioHighPass::new(self.sample_rate);
         self.metering.restart(self.sample_rate);
-        self.late_len = agc_lookahead_samples(self.sample_rate.min(HIGHEST_RATE));
+        self.late_len = agc_lookahead_samples(self.sample_rate);
+        // On the UI thread, before the stream at the new rate starts.
+        self.late
+            .resize(late_room(self.sample_rate), SendSample::default());
         self.late.fill(SendSample::default());
         self.late_at = 0;
+        self.handed_over = None;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
+        swept.receivers.extend(self.retune.take());
         swept.sends.append(&mut self.retiring);
         swept.sends.extend(self.send.take());
     }
@@ -254,6 +405,7 @@ impl Mixer {
     /// sample has been heard, not when it was played.
     pub fn render(&mut self, out: &mut [f32], latency: usize) {
         self.latency = latency;
+        self.start_retune();
         // The band's own traffic makes room for a pile-up while it calls.
         let callers = self.send.as_ref().map_or(0, SendVoice::callers_now);
         if let Some(band) = self.band.as_mut() {
@@ -263,53 +415,98 @@ impl Mixer {
         for slot in out.iter_mut() {
             let (asked, now) = (self.gains_asked, &mut self.gains);
             now.rf += (asked.rf - now.rf).clamp(-gate_step, gate_step);
-            now.received += (asked.received - now.received).clamp(-gate_step, gate_step);
-            now.monitored += (asked.monitored - now.monitored).clamp(-gate_step, gate_step);
+            now.volume += (asked.volume - now.volume).clamp(-gate_step, gate_step);
             let now = *now;
+            // The receiver's AF gain with no band on, which the send rides
+            // alone.
+            let alone = self.af.next();
             let mut coming = self.send.as_mut().map(SendVoice::next).unwrap_or_default();
             for old in &mut self.retiring {
                 coming += old.next();
             }
-            // The AGC hears the send as it comes; it, your message and the
-            // mute are played the look-ahead late, with the band.
-            let send = std::mem::replace(&mut self.late[self.late_at], coming);
+            // The AGC hears the send as it comes, through the RF gain as it
+            // stands now, as it hears the band; the send, your message and
+            // the mute are played the look-ahead late, with the band, at the
+            // gain the AGC has by then for what it heard.
+            let heard_now = SendSample {
+                heard: coming.heard * now.rf,
+                ..coming
+            };
+            let send = std::mem::replace(&mut self.late[self.late_at], heard_now);
             self.late_at = (self.late_at + 1) % self.late_len;
             let mut background = 0.0;
-            // The gain the send rides: the band's, or, with none on, the
-            // last one's as it goes, easing back to nothing at all to duck
-            // behind.
-            let mut gain = None;
             // What reached the AGC, for the meter: the send alone, through
             // the RF gain, with no band to meet it.
             let mut input = coming.heard * now.rf;
+            // The gain the AGC's hang holds, for the meter, and what the send
+            // rides: the AGC's gain at the AF gain of the band riding it.
+            // While one band hands over to the next, or to none, the send
+            // eases from the one to the other with the fade, the two sized
+            // alike for the strongest station, so it never steps.
+            let mut current = None;
             if let Some(band) = self.band.as_mut() {
                 let played = band.next(coming.heard, now.rf);
                 background += played.band;
-                gain = Some(played.gain);
-                input = played.input;
+                current = Some(played);
+                input = current.as_ref().map_or(input, |played| played.input);
             }
+            // What the send rides going out is the newest band still on the
+            // air: one gone has no gain of its own to give, and one replaced
+            // as it came in goes before the band it was replacing.
+            let mut outgoing = None;
             for band in self.fading.iter_mut().rev() {
+                let on_air = !band.is_gone();
                 let played = band.next(coming.heard, now.rf);
                 background += played.band;
-                gain.get_or_insert(1.0 + (played.gain - 1.0) * played.weight);
+                if on_air {
+                    outgoing.get_or_insert(played);
+                }
             }
-            // The send the receiver hears comes through its RF gain, as the
-            // band did, and rides the AGC's gain with it. Your own message
-            // comes in after the AGC: the receiver never hears it, so it
-            // neither ducks the reply that follows nor is shaped by the
-            // filter, and it is monitored at the volume alone, set at the
-            // level it is heard at, not at the RF or the AF gain.
-            let heard = send.heard * now.rf * gain.unwrap_or(1.0);
+            let (held, riding) = match (current, outgoing) {
+                (Some(new), old) => {
+                    let from = match &old {
+                        Some(old) => old.gain * old.af,
+                        // Gone before this one came in all the way: from
+                        // what it last gave, or with no band before, none.
+                        None => self.handed_over.unwrap_or(alone),
+                    };
+                    if old.is_some() {
+                        self.handed_over = Some(from);
+                    } else if new.weight >= 1.0 {
+                        self.handed_over = None;
+                    }
+                    let to = new.gain * new.af;
+                    (new.held, from + (to - from) * new.weight)
+                }
+                (None, Some(old)) => {
+                    self.handed_over = None;
+                    (
+                        1.0 + (old.held - 1.0) * old.weight,
+                        alone + (old.gain * old.af - alone) * old.weight,
+                    )
+                }
+                (None, None) => {
+                    self.handed_over = None;
+                    (1.0, alone)
+                }
+            };
+            // Your own message comes in after the AGC: the receiver never
+            // hears it, so it neither ducks the reply that follows nor is
+            // shaped by the filter, and it is monitored at the volume alone,
+            // set at the level it is heard at, not at the RF or the AF gain.
+            let heard = send.heard * riding;
             // Without full break-in the receiver's output, the band and the
             // stations alike, goes quiet while you send, as a rig that is
             // not QSK mutes it; the AGC runs on under it, and your message
             // is never muted.
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
-            let played = (background + heard) * self.gate * now.received + send.dry * now.monitored;
+            let received = self.audio.process(background + heard);
+            let played = (received * self.gate + send.dry) * now.volume;
             *slot += played as f32;
-            self.metering.add(input, gain.unwrap_or(1.0), played);
+            self.metering.add(input, held, played);
         }
+        self.audio.settle();
         // A send is heard the look-ahead after it was played, as well as the
         // speaker's own latency.
         for send in self.send.iter().chain(&self.retiring) {
@@ -318,78 +515,12 @@ impl Mixer {
     }
 }
 
-/// The stream's side of the mixer: what each callback plays.
-pub struct Output {
-    mixer: Arc<Mutex<Mixer>>,
-    control: Arc<SidetoneControl>,
-    sidetone: Sidetone,
-    /// The stream's word to the player that something broke.
-    failed: Arc<AtomicBool>,
-    /// The mixer panicked once; it is not run again on this stream, where it
-    /// would only panic on every buffer that followed.
-    abandoned: bool,
+/// How much room the send's look-ahead is given at `sample_rate`: enough
+/// for the highest rate up front, so a stream reopened at another needs
+/// none made, and more for a higher one.
+fn late_room(sample_rate: u32) -> usize {
+    agc_lookahead_samples(sample_rate.max(HIGHEST_RATE))
 }
 
-impl Output {
-    pub fn new(
-        mixer: Arc<Mutex<Mixer>>,
-        control: Arc<SidetoneControl>,
-        failed: Arc<AtomicBool>,
-        sample_rate: u32,
-    ) -> Self {
-        Self {
-            mixer,
-            control,
-            sidetone: Sidetone::new(sample_rate),
-            failed,
-            abandoned: false,
-        }
-    }
-
-    /// One callback's worth of mono frames: the mixer, at its volume, the
-    /// paddle's sidetone, set at the level it is heard at, and the limiter
-    /// over the lot, `latency` frames ahead of the speaker.
-    ///
-    /// Never waits. A callback that finds the UI holding the mixer — it only
-    /// ever does to swap a band or a send in — goes without the mixer for
-    /// that one buffer; the sidetone needs no lock and plays regardless.
-    pub fn fill(&mut self, out: &mut [f32], latency: usize) {
-        out.fill(0.0);
-        if !self.abandoned {
-            let guard = match self.mixer.try_lock() {
-                Ok(guard) => Some(guard),
-                // A panic on the UI side cannot leave the mixer half-written:
-                // every change to it is a move into a field.
-                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-                Err(TryLockError::WouldBlock) => None,
-            };
-            if let Some(mut mixer) = guard
-                && catch_unwind(AssertUnwindSafe(|| mixer.render(out, latency))).is_err()
-            {
-                // A send waiting on this stream fails, and the session
-                // rebuilds the player rather than sitting in silence.
-                self.abandoned = true;
-                self.failed.store(true, Ordering::Release);
-                out.fill(0.0);
-            }
-        }
-        self.sidetone.add_to(out, &self.control);
-        for sample in out {
-            *sample = finish(*sample);
-        }
-    }
-}
-
-/// The output stage: the receiver's soft limiter, once, on everything played
-/// together — band, Morse and sidetone — so a crash under a loud pile-up is
-/// caught rather than squared off. Anything that is not a number is silence.
-pub fn finish(sample: f32) -> f32 {
-    if sample.is_finite() {
-        (soft_limit(f64::from(sample)) as f32).clamp(-1.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "native-audio"))]
 mod tests;

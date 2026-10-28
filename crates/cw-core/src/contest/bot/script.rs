@@ -94,14 +94,24 @@ impl<S: CallSource> Runtime<S> {
             exch: exch.to_string(),
             call_edited: MonoMs(self.now),
             exch_complete: (!exch.is_empty()).then_some(MonoMs(self.now)),
-            earlier: Vec::new(),
+            ..Fields::default()
         };
-        self.apply(ContestEvent::Key { key, fields })
+        self.apply(ContestEvent::Key {
+            key,
+            fields: Box::new(fields),
+        })
     }
 
     /// Deliver everything owed until the turn on the air has ended.
     pub(crate) fn finish_turn(&mut self) {
         while self.playing.is_some() && !self.over && self.step() {}
+    }
+
+    /// The sound of turn `id` is to fail rather than end: the player never
+    /// says it ended, and says it failed instead, whenever the test does.
+    pub(crate) fn sound_fails(&mut self, id: u64) {
+        self.due
+            .retain(|(_, event)| *event != ContestEvent::TurnEnded { id });
     }
 
     /// The last turn played.

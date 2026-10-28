@@ -1,4 +1,4 @@
-use cw_core::{BOARD_MIN_GROUPS, CharSetMode, SessionResult};
+use cw_core::{BOARD_MIN_GROUPS, CharSetMode, REACTION_MIN_MS, SessionResult};
 use dioxus::prelude::*;
 
 use crate::ui::contest_results::ContestResults;
@@ -109,6 +109,25 @@ mod tests {
     }
 }
 
+/// Why nothing of the session was timed, when nothing was, and what would
+/// have it timed (docs/recognition.md).
+fn untimed_hint(result: &SessionResult, typing_locked: bool) -> Option<String> {
+    if result.groups.is_empty() || cw_core::session_recognition(result).is_some() {
+        return None;
+    }
+    let longer = result
+        .groups
+        .iter()
+        .any(|group| group.sent.chars().count() > 1);
+    Some(if typing_locked && longer {
+        "Nothing was timed: Lock typing while sending is on, so each group was typed only after it had been sent, which shows how well you remember it rather than how fast you recognise it. To time each character, turn it off under Settings → Session shape and key each one as you hear it.".to_string()
+    } else {
+        format!(
+            "Nothing was timed: key each character as you hear it. A character is timed when its key comes at least {REACTION_MIN_MS} ms after its sound, and a group only when you start keying it before it ends."
+        )
+    })
+}
+
 #[component]
 pub fn ResultsView(
     result: SessionResult,
@@ -116,6 +135,9 @@ pub fn ResultsView(
     #[props(default)]
     place: Option<(usize, usize)>,
     auto_message: Option<String>,
+    /// Typing is locked while a group is sent, as the settings stand.
+    #[props(default)]
+    typing_locked: bool,
     on_again: EventHandler<()>,
     on_home: EventHandler<()>,
 ) -> Element {
@@ -133,11 +155,16 @@ pub fn ResultsView(
     }
     let acc_pct = (result.accuracy * 100.0).round();
     let correct = result.groups.iter().filter(|g| g.correct).count();
-    let avg = if result.avg_response_ms > 0.0 {
-        format!("{}ms", result.avg_response_ms.round())
-    } else {
-        "—".into()
+    // How fast its characters were recognised, from their sound to their
+    // key, as far as any was timed (docs/recognition.md).
+    let (recognised, timed) = match cw_core::session_recognition(&result) {
+        Some(recognition) => (
+            format!("{:.0} ms", recognition.median_ms),
+            format!("{} timed", recognition.timed),
+        ),
+        None => ("—".to_string(), "none timed".to_string()),
     };
+    let untimed = untimed_hint(&result, typing_locked);
     // About the copy, not the level: whether the level moves is the
     // learner's own rule, and the banner below says so when it does.
     let verdict = if result.accuracy >= 0.95 {
@@ -185,12 +212,18 @@ pub fn ResultsView(
                     div { class: "value", "{correct}/{result.groups.len()}" }
                 }
                 div { class: "kpi purple",
-                    div { class: "tiny", "Avg time" }
-                    div { class: "value", "{avg}" }
+                    div { class: "tiny", "Recognised in" }
+                    div { class: "value", "{recognised}" }
+                    div { class: "tiny", "{timed}" }
                 }
                 div { class: "kpi indigo",
                     div { class: "tiny", "Points" }
                     div { class: "value", "{result.score.round()}" }
+                }
+            }
+            if let Some(hint) = untimed {
+                p { id: "untimed-hint", class: "muted", style: "margin: 0; font-size: 0.85rem;",
+                    "{hint}"
                 }
             }
             div { class: "card",

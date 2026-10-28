@@ -2,10 +2,10 @@ use std::ops::RangeInclusive;
 
 use super::{
     MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting,
-    RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, TrainingSettings,
-    VOLUME_MAX, VOLUME_MIN,
+    RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
+    STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
-use crate::band::full_volume_gain;
+use crate::band::{db_to_gain, full_volume_gain, gain_to_db};
 
 /// How far apart the side tone bounds are pushed when a fixed pitch is opened
 /// back up into a range.
@@ -173,6 +173,21 @@ impl TrainingSettings {
         min..=max
     }
 
+    /// The station strength range in decibels down from full, as it is
+    /// shown. A strength is drawn evenly in these ([`Self::volume_at_db`]),
+    /// so a station is as likely to come in 3 dB under the top of the range
+    /// as 3 dB over its bottom.
+    pub fn volume_range_db(&self) -> RangeInclusive<f64> {
+        let range = self.volume_range();
+        gain_to_db(*range.start())..=gain_to_db(*range.end())
+    }
+
+    /// The strength `db` decibels down from full, inside the range.
+    pub fn volume_at_db(&self, db: f64) -> f64 {
+        let range = self.volume_range();
+        db_to_gain(db).clamp(*range.start(), *range.end())
+    }
+
     /// How loud everything plays, as a share of full volume, inside the
     /// control's range whatever is set.
     pub fn master_volume(&self) -> f64 {
@@ -211,6 +226,19 @@ impl TrainingSettings {
     pub fn side_tone_center(&self) -> f64 {
         let range = self.side_tone_range();
         range.start() + (range.end() - range.start()) / 2.0
+    }
+
+    /// How long the paddle's sidetone takes to open and to close, in
+    /// seconds: the keying envelope's rise time, as a rig shapes its
+    /// sidetone with its transmitter's, but never more than a quarter of a
+    /// dit at the paddles' speed, so a fast fist's elements stay apart.
+    pub fn sidetone_rise_sec(&self) -> f64 {
+        let rise = finite_within(self.band.steepness, STEEPNESS_MIN_MS, STEEPNESS_MAX_MS);
+        let wpm = finite_within(self.playback.keyer_wpm, WPM_MIN, WPM_MAX);
+        let quarter_dit = crate::timing::dot_seconds(wpm) / 4.0;
+        (rise / 1_000.0)
+            .min(quarter_dit)
+            .max(STEEPNESS_MIN_MS / 1_000.0)
     }
 }
 

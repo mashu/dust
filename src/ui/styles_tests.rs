@@ -849,3 +849,50 @@ fn a_session_fits_a_small_phone_down_to_the_keypads_last_row() {
         );
     }
 }
+
+/// Easing a box's size or place lays the page out again on every frame it
+/// eases. The progress bars and the Auto level meters ease their width,
+/// and the switch's knob slides with left (above); nothing else does.
+/// `all` would ease whatever a state changes, so every rule names what it
+/// eases.
+#[test]
+fn only_a_few_boxes_ease_their_size_or_place() {
+    let css = without_comments(CSS);
+    let rules = rules(&css);
+    let lays_out = |property: &str| {
+        matches!(
+            property,
+            "all" | "width" | "height" | "top" | "left" | "right" | "bottom" | "inset"
+        ) || ["margin", "padding", "min-", "max-"]
+            .iter()
+            .any(|start| property.starts_with(start))
+    };
+    let mut eased = Vec::new();
+    for (selector, declarations) in &rules {
+        for (property, value) in declarations {
+            let properties: Vec<&str> = match *property {
+                "transition" => selector_list(value)
+                    .iter()
+                    .filter_map(|one| one.split_whitespace().next())
+                    .collect(),
+                "transition-property" => selector_list(value),
+                _ => continue,
+            };
+            eased.extend(
+                properties
+                    .into_iter()
+                    .filter(|property| lays_out(property))
+                    .map(|property| format!("{selector}: {property}")),
+            );
+        }
+    }
+    eased.sort_unstable();
+    assert_eq!(
+        eased,
+        [
+            ".meter-track > span: width",
+            ".progress-bar > span: width",
+            ".switch i: left",
+        ]
+    );
+}

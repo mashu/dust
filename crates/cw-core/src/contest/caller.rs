@@ -19,7 +19,7 @@ use super::rules::{ContestRules, Side};
 use super::serial::SerialModel;
 use super::{CallerHabits, RunStyle};
 use crate::alignment::edit_distance;
-use crate::band::Qsb;
+use crate::band::{FADE_OFFSET_MAX_SEC, Qsb};
 use crate::callsign::{GeneratedCall, parse_callsign};
 use crate::rng::{Rng, SplitMix64};
 use crate::settings::{TrainingSettings, WPM_MIN};
@@ -269,10 +269,6 @@ const CALLS_TWICE: f64 = 0.1;
 /// How often a pile-up caller misses your exchange and asks for it again,
 /// as MorseRunner's callers take it nine times in ten (`DxOper.pas:762-770`).
 const MISSES_EXCHANGE: f64 = 0.1;
-
-/// How far into its fading a caller starts, at most, in seconds: each is on
-/// a path of its own, so no two fade together.
-pub(super) const FADE_OFFSET_MAX_SEC: f64 = 3_600.0;
 
 /// Under the Band card's flutter, how many callers' signals flutter, and
 /// how fast, in hertz: three in ten, at 3 to 33, as MorseRunner's flutter
@@ -1106,6 +1102,11 @@ impl Caller {
             CallerState::Done | CallerState::Gone => return None,
         };
         Some(said)
+    }
+
+    /// Its exchange's tokens, once it has drawn them ([`Self::exchange`]).
+    pub(super) fn sent_exchange(&self) -> Option<&[(Field, String)]> {
+        self.exchange.as_deref()
     }
 
     /// Its exchange, each copied field with the token it sends for it,

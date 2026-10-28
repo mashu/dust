@@ -5,18 +5,19 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use cw_core::band::agc_decay_sec;
 use cw_core::{
-    CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, Sampler, Sender,
-    SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX, VOLUME_MIN,
-    compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
+    AgcDecay, CALLSIGN_TIER_MAX, CharSamplingState, ContestKind, GroupSource, HeardTurn, MonoMs,
+    Sampler, Sender, SplitMix64, StationVoice, TrainingSettings, Transmission, VOLUME_MAX,
+    VOLUME_MIN, compute_after_group_gap_ms, compute_group_gap_for_wpm, generate_callsign,
     generate_training_group, hear_qsos, plan_turn, resolve_station,
 };
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
-use crate::player::{AudioError, Lease};
+use crate::player::{AudioError, Lease, SendNews};
 use crate::state::AppCtx;
-use crate::time::seed_rng;
+use crate::time::{mono_ms, seed_rng};
 
 /// How many sent groups the stream keeps on screen for a glance-back.
 const STREAM_HEARD_KEEP: usize = 12;
@@ -83,14 +84,25 @@ pub struct DialogueLine {
     pub qso: u32,
 }
 
-/// What the band preview calls, and the pause between calls.
-const BAND_PREVIEW_CALL: &str = "CQ";
-const BAND_PREVIEW_GAP_MS: u32 = 280;
+/// What the band preview calls.
+pub(crate) const BAND_PREVIEW_CALL: &str = "CQ";
+
+/// The pause between the band preview's calls: long enough for the AGC at
+/// Fast to let the band back after the loudest of them. Its hang and five of
+/// its release's time constants bring a 26 dB duck within a fifth of a
+/// decibel, so the hiss is heard coming back and the scope's lamp goes out a
+/// quarter of a second or so before the next call, which then starts on a
+/// gain of its own. At Slow the band is still held down at the end of it,
+/// which is what Slow is.
+pub(crate) fn band_preview_gap_ms() -> u32 {
+    let (hang, release) = agc_decay_sec(AgcDecay::Fast);
+    ((hang + 5.0 * release) * 1_000.0).round() as u32
+}
 
 /// The strengths the band preview calls at, in turn: loud, medium and weak,
 /// the full strength and a station 10 and 20 dB down, so the AGC can be
 /// heard evening them out and its threshold heard deciding which it does.
-pub const BAND_PREVIEW_STRENGTHS: [f64; 3] = [VOLUME_MAX, 0.3, VOLUME_MIN];
+pub const BAND_PREVIEW_STRENGTHS: [f64; 3] = [VOLUME_MAX, 0.316_227_766_016_838, VOLUME_MIN];
 
 /// What the app is playing when no session is running.
 ///
@@ -226,7 +238,12 @@ pub fn start_sample(ctx: AppCtx, text: String) {
 /// The band-conditions preview, calling until it is stopped.
 pub fn start_band_preview(ctx: AppCtx) {
     start_preview(ctx, Preview::Band, |lease, _| {
-        loop_band_preview(lease, ctx.settings, BAND_PREVIEW_CALL, BAND_PREVIEW_GAP_MS)
+        loop_band_preview(
+            lease,
+            ctx.settings,
+            BAND_PREVIEW_CALL,
+            band_preview_gap_ms(),
+        )
     });
 }
 
@@ -293,7 +310,11 @@ async fn play_qsos(
         let asked = lease.ask_to_send();
         let started = {
             let (lease, showing, sends) = (lease.clone(), showing.clone(), sends.clone());
-            move |heard_after_sec: f64| {
+            move |news: SendNews<'_>| {
+                let SendNews::Started(start) = news else {
+                    return;
+                };
+                let heard_after_sec = start.heard_at().since(MonoMs(mono_ms())) as f64 / 1_000.0;
                 showing.set(showing.get() + 1);
                 let shows = (showing.clone(), showing.get());
                 spawn_forever(show_sends(
@@ -449,7 +470,11 @@ async fn play_chars(
             lease.sleep(gap_ms).await?;
         }
         lease
-            .send(&Transmission::alone(ch.to_string(), voice), &settings)
+            .send(
+                &Transmission::alone(ch.to_string(), voice),
+                &settings,
+                |_| {},
+            )
             .await?;
     }
     Ok(())
@@ -463,7 +488,7 @@ async fn play_sample(
 ) -> Result<(), AudioError> {
     let (voice, _) = new_station(&settings);
     lease
-        .send(&Transmission::alone(text, voice), &settings)
+        .send(&Transmission::alone(text, voice), &settings, |_| {})
         .await
         .map(|_| ())
 }
@@ -496,7 +521,7 @@ async fn loop_band_preview(
         let call = Transmission::calling(&settings_now, text, voice, &mut rng, |rng| {
             generate_callsign(CALLSIGN_TIER_MAX, rng)
         });
-        lease.send(&call, &settings_now).await?;
+        lease.send(&call, &settings_now, |_| {}).await?;
         lease.sleep(gap_ms).await?;
     }
 }
@@ -534,7 +559,7 @@ async fn loop_stream(
             generate_training_group(&settings_now, &mut CharSamplingState::default(), rng)
         });
         // Sent as often as a session would send it, a word space apart.
-        let mut sent = lease.send(&call, &settings_now).await?;
+        let mut sent = lease.send(&call, &settings_now, |_| {}).await?;
         for _ in 1..repeats.max(1) {
             lease
                 .sleep(compute_group_gap_for_wpm(
@@ -543,7 +568,7 @@ async fn loop_stream(
                     settings_now.playback.extra_word_space_multiplier,
                 ))
                 .await?;
-            sent = lease.send(&call, &settings_now).await?;
+            sent = lease.send(&call, &settings_now, |_| {}).await?;
         }
         heard.with_mut(|list| {
             list.push(HeardGroup {

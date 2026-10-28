@@ -4,6 +4,7 @@
 //! can sit is decided by the filter you are listening through.
 
 use super::station::{StationVoice, resolve_station};
+use crate::band::FADE_OFFSET_MAX_SEC;
 use crate::rng::Rng;
 use crate::settings::TrainingSettings;
 
@@ -12,9 +13,16 @@ use crate::settings::TrainingSettings;
 pub struct Interferer {
     pub text: String,
     pub voice: StationVoice,
-    /// How late this station starts. Nobody in a pile-up is synchronised, and
-    /// a stagger is most of what makes one hard to pick apart.
+    /// How late this station starts after the one you copy, in seconds;
+    /// before it, when less than nothing. Nobody in a pile-up is
+    /// synchronised, and a stagger is most of what makes one hard to pick
+    /// apart: the one you want is no likelier than any other to be first.
     pub delay_sec: f64,
+    /// Where its path is in the band's fading, in seconds of the fade past
+    /// the station you copy's: each caller arrives over a path of its own,
+    /// so they rise and fall apart, and which of them stands out changes as
+    /// they do.
+    pub fade_from_sec: f64,
 }
 
 /// Everything the receiver hears during one send: the station you are copying,
@@ -87,8 +95,10 @@ pub const PILEUP_CALLER_SEPARATION_HZ: f64 = 60.0;
 /// for the filter worth it. Fifteen decibels down a caller is plainly
 /// audible over a 300 Hz filter's hiss; any further and it is gone.
 pub const PILEUP_SKIRT_DB: f64 = -15.0;
-/// The longest another station can wait before joining in.
-const PILEUP_MAX_DELAY_SEC: f64 = 0.6;
+/// The longest anyone in a pile-up waits before joining in, the station you
+/// copy among them: when one stands by, the callers come back within a
+/// moment of each other, in no order.
+pub(crate) const PILEUP_MAX_DELAY_SEC: f64 = 0.6;
 
 /// Tune in whoever else is calling.
 ///
@@ -173,6 +183,8 @@ pub(crate) fn resolve_pileup(
         (wanted.tone_hz + reach).min(reach_high),
     );
 
+    // When the one you copy comes back, in the same stagger as the rest.
+    let wanted_start = rng.pick_in_range(0.0, PILEUP_MAX_DELAY_SEC);
     let mut others: Vec<Interferer> = Vec::new();
     for text in texts.iter().take(calling.saturating_sub(1)) {
         // Two stations with the same call is not a pile-up, it is a mistake —
@@ -211,7 +223,8 @@ pub(crate) fn resolve_pileup(
         others.push(Interferer {
             text: text.clone(),
             voice,
-            delay_sec: rng.pick_in_range(0.0, PILEUP_MAX_DELAY_SEC),
+            delay_sec: rng.pick_in_range(0.0, PILEUP_MAX_DELAY_SEC) - wanted_start,
+            fade_from_sec: rng.pick_in_range(0.0, FADE_OFFSET_MAX_SEC),
         });
     }
     others
@@ -276,7 +289,7 @@ mod tests {
         FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX,
         PILEUP_SPREAD_MIN, STATIONS_MAX, STATIONS_MIN, TrainingSettings,
     };
-    use crate::timing::plan_transmission;
+    use crate::timing::{PlaybackPlan, plan_morse_playback_for, plan_transmission};
 
     fn settings(max: u32) -> TrainingSettings {
         let mut s = TrainingSettings::default();
@@ -419,17 +432,71 @@ mod tests {
             "through the default receiver, one to three"
         );
 
-        // And the stagger is real: they do not all start together.
+        // And the stagger is real: they do not all start together, and the
+        // one you copy is as often after the others as before them.
         let delays: Vec<f64> = (0..200)
             .flat_map(|seed| pileup(STATIONS_MAX, seed).1)
             .map(|other| other.delay_sec)
             .collect();
         assert!(delays.iter().any(|d| *d > 0.05), "nobody was late");
+        assert!(delays.iter().any(|d| *d < -0.05), "nobody was early");
         assert!(
             delays
                 .iter()
-                .all(|d| (0.0..=PILEUP_MAX_DELAY_SEC).contains(d)),
-            "a station waited longer than the send"
+                .all(|d| (-PILEUP_MAX_DELAY_SEC..=PILEUP_MAX_DELAY_SEC).contains(d)),
+            "a station waited longer than the stagger"
+        );
+    }
+
+    /// Whoever calls first starts the send, and the one you copy is no
+    /// likelier than another to be first: in a pile-up of four through the
+    /// widest receiver, a caller is on before it most of the time. The send
+    /// starts at its first tone, and the one you copy keeps its characters
+    /// with its tones, however far it is put back.
+    #[test]
+    fn the_one_you_copy_is_not_always_first() {
+        let mut s = settings(STATIONS_MAX);
+        s.band.filter_width_hz = FILTER_WIDTH_MAX;
+        let s = s.clamp();
+        let (mut piled, mut beaten) = (0, 0);
+        for seed in 0..400u64 {
+            let mut rng = SplitMix64::new(seed * 131 + 17);
+            let wanted = resolve_station(&s, &mut rng);
+            let others = resolve_pileup(&s, &wanted, "W1AW", &texts(4), &mut rng);
+            let sent = Transmission {
+                text: "W1AW".into(),
+                voice: wanted,
+                others,
+            };
+            let planned = plan_transmission(&sent, &s);
+            let alone = plan_morse_playback_for("W1AW", &s, &wanted);
+            let first = |plan: &PlaybackPlan| plan.events.first().map(|e| e.start_sec);
+            let yours = first(&planned.wanted).expect("your tones");
+            let theirs = planned
+                .others
+                .iter()
+                .filter_map(first)
+                .fold(f64::MAX, f64::min);
+            assert!(
+                yours.min(theirs).abs() < 1e-9,
+                "seed {seed}: the send started on nothing"
+            );
+            for (span, was) in planned.wanted.chars.iter().zip(&alone.chars) {
+                assert!((span.start_sec - was.start_sec - yours).abs() < 1e-9);
+                assert!((span.end_sec - was.end_sec - yours).abs() < 1e-9);
+            }
+            assert!((planned.wanted.duration_sec - alone.duration_sec - yours).abs() < 1e-9);
+            if planned.others.iter().any(|plan| !plan.events.is_empty()) {
+                piled += 1;
+                if theirs < yours {
+                    beaten += 1;
+                }
+            }
+        }
+        assert!(piled > 100, "only {piled} pile-ups");
+        assert!(
+            beaten * 10 >= piled * 4,
+            "a caller was first in {beaten} of {piled}"
         );
     }
 
@@ -473,14 +540,16 @@ mod tests {
             let planned = plan_transmission(&sent, &s);
             let ends_at = planned.wanted.duration_sec;
             assert!(ends_at > 0.0);
+            // The one you copy starts as far in as anyone called before it.
+            let lead = others.iter().map(|o| -o.delay_sec).fold(0.0, f64::max);
             for (plan, other) in planned.others.iter().zip(&others) {
                 for event in &plan.events {
                     assert!(
-                        event.start_sec >= other.delay_sec - 1e-9,
+                        event.start_sec >= other.delay_sec + lead - 1e-9,
                         "seed {seed}: a station started before it was due"
                     );
                     assert!(
-                        event.start_sec + event.duration_sec <= ends_at + 1e-9,
+                        event.start_sec + event.keyed_sec <= ends_at + 1e-9,
                         "seed {seed}: a station ran past the send it was over"
                     );
                 }

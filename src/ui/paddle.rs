@@ -9,9 +9,13 @@
 
 use std::rc::Rc;
 
-use cw_core::{Keyer, KeyerMode, KeyerOutput, Paddle, TrainingSettings, paddle_from_bracket};
+use cw_core::{
+    KeyedLetter, Keyer, KeyerMode, KeyerOutput, MonoMs, Paddle, ToneEdge, TrainingSettings,
+    paddle_from_bracket,
+};
 use dioxus::prelude::*;
 
+use crate::page_hidden::{PADDLES_HIDDEN, use_page_hidden};
 use crate::state::{AppState, Screen};
 use crate::time::mono_ms;
 #[cfg(not(all(feature = "desktop", not(test))))]
@@ -24,69 +28,48 @@ const HEARD_KEEP: usize = 32;
 /// Whether the key events that reach the page's root are what key the
 /// paddles. The desktop build hears them from its window instead, so a USB
 /// keyer works without the webview's focus and without waiting on its IPC,
-/// and the web build from the whole document, so they work with nothing
-/// focused at all. Tests, and the mobile builds, drive the root.
-const ROOT_KEYS_THE_PADDLES: bool =
-    cfg!(test) || !(cfg!(feature = "desktop") || cfg!(feature = "web"));
+/// and the web and mobile builds from the whole document, so they work with
+/// nothing focused at all: a HID paddle on a phone keys with nothing tapped
+/// first. Tests drive the root.
+const ROOT_KEYS_THE_PADDLES: bool = cfg!(test);
 
-/// X11 key auto-repeat is a fake release+press pair. tao on Linux never marks
-/// those as `repeat`, so a leftover press after you let go keeps the keyer
-/// running. Wait this long for the fake press; a real re-squeeze is slower.
-#[cfg(all(feature = "desktop", not(test)))]
-const REPEAT_RELEASE_MS: u64 = 16;
-
-/// Held-paddle contacts after X11 auto-repeat has been stripped. Only the
+/// Which paddle contacts are closed, as the desktop build's raw key events
+/// leave them. tao on Linux never marks a held key's repeated presses as
+/// repeats, so a press of a contact already closed is dropped; GTK asks X11
+/// for detectable auto-repeat, and Wayland repeats in the client, so a held
+/// key sends one release, at its real key-up, which is taken at once. Only the
 /// desktop build listens to raw key events, so only it — and the tests — need
 /// one.
 #[cfg(any(feature = "desktop", test))]
 #[derive(Clone, Copy, Debug, Default)]
-struct RepeatFilter {
+struct Contacts {
     dit: bool,
     dah: bool,
-    dit_release: u64,
-    dah_release: u64,
 }
 
 #[cfg(any(feature = "desktop", test))]
-impl RepeatFilter {
-    fn slot(&mut self, paddle: Paddle) -> (&mut bool, &mut u64) {
+impl Contacts {
+    fn slot(&mut self, paddle: Paddle) -> &mut bool {
         match paddle {
-            Paddle::Dit => (&mut self.dit, &mut self.dit_release),
-            Paddle::Dah => (&mut self.dah, &mut self.dah_release),
+            Paddle::Dit => &mut self.dit,
+            Paddle::Dah => &mut self.dah,
         }
     }
 
-    /// A press that is not the matching half of a fake release. `true` means
-    /// the paddle just closed.
+    /// Whether a press closed the contact, rather than repeated one held.
     fn press(&mut self, paddle: Paddle) -> bool {
-        let (down, generation) = self.slot(paddle);
-        *generation = generation.wrapping_add(1);
-        if *down {
-            false
-        } else {
-            *down = true;
-            true
-        }
+        !std::mem::replace(self.slot(paddle), true)
     }
 
-    /// Start a delayed release. The generation is what [`confirm_release`]
-    /// needs so a following fake press can cancel it.
-    fn release(&mut self, paddle: Paddle) -> Option<u64> {
-        let (down, generation) = self.slot(paddle);
-        if !*down {
-            return None;
-        }
-        *generation = generation.wrapping_add(1);
-        Some(*generation)
+    /// Whether a release opened the contact, rather than one already open.
+    fn release(&mut self, paddle: Paddle) -> bool {
+        std::mem::replace(self.slot(paddle), false)
     }
 
-    fn confirm_release(&mut self, paddle: Paddle, generation: u64) -> bool {
-        let (down, current) = self.slot(paddle);
-        if *current != generation {
-            return false;
-        }
-        *down = false;
-        true
+    /// Every contact open, as when the window lost the focus and the key
+    /// releases with it.
+    fn open_all(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -133,9 +116,14 @@ fn paddle_for_key(key: &str, code: &str, shortcut: bool, swap: bool) -> Option<P
 #[derive(Clone, Copy)]
 struct AnswerBox {
     open: CopyValue<bool>,
-    letter: Callback<char>,
+    letter: Callback<BoxLetter>,
     space: Option<Callback>,
 }
+
+/// A letter for a box, and when it was keyed: the first contact of its
+/// letter, on the app's clock. None when it was typed for you, which is
+/// never timed.
+type BoxLetter = (char, Option<MonoMs>);
 
 /// The app's paddle keyer, as the shell and the screens reach it.
 ///
@@ -178,7 +166,7 @@ pub fn use_paddle_keys(
 
     let mode = use_memo(move || settings.read().playback.keyer_mode);
     use_effect(move || {
-        let out = keys.keyer.write().set_mode(mode());
+        let out = keys.keyer.write().set_mode(mode(), mono_ms());
         keys.act(out);
     });
 
@@ -186,7 +174,9 @@ pub fn use_paddle_keys(
     // is not the next one's. Settings is where the paddles are tried, so
     // arriving there opens the sidetone ahead of the first squeeze — the
     // first element is then one audio buffer late, not a stream start — and
-    // finds out whether it can sound at all.
+    // finds out whether it can sound at all, and the output is kept awake
+    // there. Anywhere else it sleeps once quiet, and the first squeeze
+    // wakes it.
     use_effect(move || {
         let on_settings = screen() == Screen::Settings;
         keys.stop();
@@ -194,13 +184,18 @@ pub fn use_paddle_keys(
         if !heard.peek().is_empty() {
             heard.set(String::new());
         }
+        keys.app.read().keep_output_ready(on_settings);
         if on_settings {
             keys.open_sidetone();
         }
     });
 
+    // The key releases go with the page: open the paddles, so none stays
+    // keyed, its sidetone sounding, until it is touched again.
+    use_page_hidden(PADDLES_HIDDEN, move || keys.release_all());
     listen_native_paddles(keys);
     listen_document_paddles(keys);
+    listen_page_paddles(keys);
     keys
 }
 
@@ -208,7 +203,7 @@ impl PaddleKeys {
     /// The page root's keydown. `[` and `]` are paddles, never text — on the
     /// desktop the window keys them, but the answer box must not type them.
     pub fn keydown(self, e: Event<KeyboardData>) {
-        let Some(paddle) = self.paddle_for(&e) else {
+        let Some(paddle) = self.paddle_for(&e, true) else {
             return;
         };
         e.prevent_default();
@@ -219,7 +214,7 @@ impl PaddleKeys {
 
     /// The page root's keyup.
     pub fn keyup(self, e: Event<KeyboardData>) {
-        let Some(paddle) = self.paddle_for(&e) else {
+        let Some(paddle) = self.paddle_for(&e, false) else {
             return;
         };
         e.prevent_default();
@@ -228,13 +223,16 @@ impl PaddleKeys {
         }
     }
 
-    fn paddle_for(self, e: &Event<KeyboardData>) -> Option<Paddle> {
+    /// The paddle a key is, if it is one, pressed or else released. Ctrl,
+    /// Alt or Meta held make a press a shortcut, but never a release: a
+    /// paddle held when one of them went down still has to open.
+    fn paddle_for(self, e: &Event<KeyboardData>, press: bool) -> Option<Paddle> {
         let key = match e.key() {
             Key::Character(text) => text,
             _ => String::new(),
         };
         let mods = e.modifiers();
-        let shortcut = mods.ctrl() || mods.alt() || mods.meta();
+        let shortcut = press && (mods.ctrl() || mods.alt() || mods.meta());
         let swap = self.settings.peek().playback.paddle_swap;
         paddle_for_key(&key, &e.code().to_string(), shortcut, swap)
     }
@@ -262,9 +260,25 @@ impl PaddleKeys {
 
     /// A paddle opened. Always heard, whatever is taking paddles now: a
     /// release lost is a paddle stuck down.
-    fn release(mut self, paddle: Paddle) {
-        let out = self.keyer.write().release(paddle, mono_ms());
+    fn release(self, paddle: Paddle) {
+        self.release_at(paddle, mono_ms());
+    }
+
+    /// A paddle opened at `at`: both of them at the one moment, when every
+    /// contact opens together.
+    fn release_at(mut self, paddle: Paddle, at: u64) {
+        let out = self.keyer.write().release(paddle, at);
         self.act(out);
+    }
+
+    /// Open both paddles: the window lost the focus, or the page went out
+    /// of sight, and the key releases with it. The element sounding
+    /// finishes, so the letter it ends is still heard.
+    pub fn release_all(self) {
+        let now = mono_ms();
+        for paddle in [Paddle::Dit, Paddle::Dah] {
+            self.release_at(paddle, now);
+        }
     }
 
     /// Whether a letter is being keyed and has not ended yet.
@@ -281,34 +295,38 @@ impl PaddleKeys {
 
     /// Drop whatever is half keyed and fall silent: a new group, a new screen.
     pub fn stop(mut self) {
-        let out = self.keyer.write().stop();
+        let out = self.keyer.write().stop(mono_ms());
         self.act(out);
     }
 
     /// Key into an answer box rather than the practice pad, for as long as
     /// the calling component is mounted, and only while `open`. A group has
     /// no spaces, so a word space keyed there does nothing.
-    pub fn use_answer_box(self, open: bool, letter: impl FnMut(char) + 'static) {
-        let letter = use_callback(letter);
+    pub fn use_answer_box(
+        self,
+        open: bool,
+        mut letter: impl FnMut(char, Option<MonoMs>) + 'static,
+    ) {
+        let letter = use_callback(move |(ch, at): BoxLetter| letter(ch, at));
         self.use_lent(open, letter, None);
     }
 
     /// The same for a screen of fields, the run's Call and Exchange, where a
-    /// word space keyed — the paddles quiet for seven dits after a letter —
-    /// does what Space does: `space`.
+    /// word space keyed — the paddles quiet for six dits after a letter's
+    /// last element — does what Space does: `space`.
     pub fn use_fields(
         self,
         open: bool,
-        letter: impl FnMut(char) + 'static,
+        mut letter: impl FnMut(char, Option<MonoMs>) + 'static,
         mut space: impl FnMut() + 'static,
     ) {
-        let letter = use_callback(letter);
+        let letter = use_callback(move |(ch, at): BoxLetter| letter(ch, at));
         let space = use_callback(move |()| space());
         self.use_lent(open, letter, Some(space));
     }
 
     /// Lend the keyer the calling screen's box, while it is mounted.
-    fn use_lent(self, open: bool, letter: Callback<char>, space: Option<Callback>) {
+    fn use_lent(self, open: bool, letter: Callback<BoxLetter>, space: Option<Callback>) {
         let mut gate = use_hook(|| CopyValue::new(open));
         gate.set(open);
         let mut answer = self.answer;
@@ -328,8 +346,9 @@ impl PaddleKeys {
         });
     }
 
-    /// Put `letter` in the open answer box, the way a keyed letter goes in:
-    /// how the guided setup's Show me copies a group. Whether a box took it.
+    /// Put `letter` in the open answer box, the way a keyed letter goes in,
+    /// but untimed: how the guided setup's Show me copies a group. Whether a
+    /// box took it.
     pub fn type_letter(self, letter: char) -> bool {
         let Some(answer) = *self.answer.peek() else {
             return false;
@@ -337,7 +356,7 @@ impl PaddleKeys {
         if !*answer.open.peek() {
             return false;
         }
-        answer.letter.call(letter);
+        answer.letter.call((letter, None));
         true
     }
 
@@ -364,11 +383,11 @@ impl PaddleKeys {
     }
 
     fn act(self, out: KeyerOutput) {
-        if let Some(on) = out.tone {
-            self.sound(on);
+        if let Some(edge) = out.tone {
+            self.sound(edge);
         }
-        if let Some(letter) = out.letter {
-            self.deliver(letter);
+        if let Some(keyed) = out.letter {
+            self.deliver(keyed);
         }
         if out.space {
             self.deliver_space();
@@ -376,7 +395,7 @@ impl PaddleKeys {
         self.arm(out.wake_at);
     }
 
-    fn sound(self, on: bool) {
+    fn sound(self, edge: ToneEdge) {
         // Only when the sidetone was there at the start of the squeeze. The
         // player opens itself on demand, so asking a missing device for every
         // element of it would be a device search twice an element. Nothing
@@ -384,13 +403,15 @@ impl PaddleKeys {
         if self.sidetone_error.peek().is_some() {
             return;
         }
-        self.app.read().set_live_tone(on, &self.settings.peek());
+        self.app.read().set_live_tone(edge, &self.settings.peek());
     }
 
-    fn deliver(mut self, letter: char) {
+    fn deliver(mut self, keyed: KeyedLetter) {
         if let Some(answer) = *self.answer.peek() {
             if *answer.open.peek() {
-                answer.letter.call(letter);
+                answer
+                    .letter
+                    .call((keyed.letter, Some(MonoMs(keyed.began))));
             }
             return;
         }
@@ -398,7 +419,7 @@ impl PaddleKeys {
             return;
         }
         let mut heard = self.heard.write();
-        heard.push(letter);
+        heard.push(keyed.letter);
         let excess = heard.chars().count().saturating_sub(HEARD_KEEP);
         if let Some((cut, _)) = heard.char_indices().nth(excess) {
             heard.drain(..cut);
@@ -446,28 +467,31 @@ impl PaddleKeys {
 fn listen_native_paddles(keys: PaddleKeys) {
     use std::cell::RefCell;
 
-    let contacts = use_hook(|| Rc::new(RefCell::new(RepeatFilter::default())));
+    let contacts = use_hook(|| Rc::new(RefCell::new(Contacts::default())));
+    let unfocused = Rc::clone(&contacts);
     let dispatch = use_callback(move |(paddle, pressed): (Paddle, bool)| {
         if pressed {
             if contacts.borrow_mut().press(paddle) {
                 keys.press(paddle);
             }
-            return;
+        } else if contacts.borrow_mut().release(paddle) {
+            keys.release(paddle);
         }
-        let Some(generation) = contacts.borrow_mut().release(paddle) else {
-            return;
-        };
-        let contacts = Rc::clone(&contacts);
-        dioxus::core::spawn_forever(async move {
-            sleep_keyer(REPEAT_RELEASE_MS).await;
-            if contacts.borrow_mut().confirm_release(paddle, generation) {
-                keys.release(paddle);
-            }
-        });
     });
     dioxus::desktop::use_wry_event_handler(move |event, _| {
         use dioxus::desktop::tao::event::{ElementState, Event, WindowEvent};
         use dioxus::desktop::tao::keyboard::{Key, KeyCode};
+        // Linux and macOS send no key release once the window has lost the
+        // focus, so the paddles open with it.
+        if let Event::WindowEvent {
+            event: WindowEvent::Focused(false),
+            ..
+        } = event
+        {
+            unfocused.borrow_mut().open_all();
+            keys.release_all();
+            return;
+        }
         let Event::WindowEvent {
             event: WindowEvent::KeyboardInput { event: key, .. },
             ..
@@ -513,14 +537,16 @@ fn listen_document_paddles(keys: PaddleKeys) {
 
     type Listener = Closure<dyn FnMut(KeyboardEvent)>;
     let listeners = use_hook(|| {
-        let document = web_sys::window()?.document()?;
-        let paddle_for = move |e: &KeyboardEvent| {
-            let shortcut = e.ctrl_key() || e.alt_key() || e.meta_key();
+        let window = web_sys::window()?;
+        let document = window.document()?;
+        // Ctrl, Alt or Meta make a press a shortcut, never a release.
+        let paddle_for = move |e: &KeyboardEvent, press: bool| {
+            let shortcut = press && (e.ctrl_key() || e.alt_key() || e.meta_key());
             let swap = keys.settings.peek().playback.paddle_swap;
             paddle_for_key(&e.key(), &e.code(), shortcut, swap)
         };
         let down: Listener = Closure::new(move |e: KeyboardEvent| {
-            if let Some(paddle) = paddle_for(&e) {
+            if let Some(paddle) = paddle_for(&e, true) {
                 e.prevent_default();
                 if !e.repeat() {
                     keys.press(paddle);
@@ -528,26 +554,36 @@ fn listen_document_paddles(keys: PaddleKeys) {
             }
         });
         let up: Listener = Closure::new(move |e: KeyboardEvent| {
-            if let Some(paddle) = paddle_for(&e) {
+            if let Some(paddle) = paddle_for(&e, false) {
                 e.prevent_default();
                 keys.release(paddle);
+            } else if e.key() == "Meta" {
+                // A Mac's browser sends no key release for a key let go
+                // while Command was down.
+                keys.release_all();
             }
         });
+        // Nor does any browser once the window has lost the focus.
+        let blur: Closure<dyn FnMut(web_sys::Event)> =
+            Closure::new(move |_: web_sys::Event| keys.release_all());
         let listen = |name: &str, listener: &Listener| {
             let _ =
                 document.add_event_listener_with_callback(name, listener.as_ref().unchecked_ref());
         };
         listen("keydown", &down);
         listen("keyup", &up);
-        Some(Rc::new((document, down, up)))
+        let _ = window.add_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
+        Some(Rc::new((window, document, down, up, blur)))
     });
     use_drop(move || {
         if let Some(held) = listeners.as_deref() {
-            let (document, down, up) = held;
+            let (window, document, down, up, blur) = held;
             let _ = document
                 .remove_event_listener_with_callback("keydown", down.as_ref().unchecked_ref());
             let _ =
                 document.remove_event_listener_with_callback("keyup", up.as_ref().unchecked_ref());
+            let _ =
+                window.remove_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
         }
     });
 }
@@ -555,12 +591,106 @@ fn listen_document_paddles(keys: PaddleKeys) {
 #[cfg(not(feature = "web"))]
 fn listen_document_paddles(_keys: PaddleKeys) {}
 
+/// The mobile builds' webview delivers keys as a browser does, to whatever
+/// has focus, and a tapped button takes none on iOS. So, as the web build's
+/// ([`listen_document_paddles`]), they hear the paddles from the whole
+/// document: the page's script keeps a bracket from the page and hands it
+/// over, a press with Ctrl, Alt or Meta down being a shortcut, a repeat being
+/// nothing, and a release always heard; and the window losing the focus, or
+/// Command let go, opens both.
+#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+const PAGE_PADDLES_SCRIPT: &str = r#"if (window.__dustPaddleKeys) {
+    window.__dustPaddleKeys();
+}
+const bracket = (e) => e.key === "[" || e.key === "]" || e.code === "BracketLeft" || e.code === "BracketRight";
+const shortcut = (e) => e.ctrlKey || e.altKey || e.metaKey;
+const down = (e) => {
+    if (bracket(e) && !shortcut(e)) {
+        e.preventDefault();
+        if (!e.repeat) {
+            dioxus.send(["down", e.key, e.code]);
+        }
+    }
+};
+const up = (e) => {
+    if (bracket(e)) {
+        e.preventDefault();
+        dioxus.send(["up", e.key, e.code]);
+    } else if (e.key === "Meta") {
+        dioxus.send(["open", "", ""]);
+    }
+};
+const blur = () => dioxus.send(["open", "", ""]);
+document.addEventListener("keydown", down);
+document.addEventListener("keyup", up);
+window.addEventListener("blur", blur);
+window.__dustPaddleKeys = () => {
+    document.removeEventListener("keydown", down);
+    document.removeEventListener("keyup", up);
+    window.removeEventListener("blur", blur);
+    window.__dustPaddleKeys = null;
+};"#;
+
+/// The script that takes the page's paddle listener off again.
+#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+const STOP_PAGE_PADDLES: &str = r#"if (window.__dustPaddleKeys) {
+    window.__dustPaddleKeys();
+}"#;
+
+/// What the page's word about a key does to the paddles: one closes or
+/// opens, or both open.
+#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageKey {
+    Press(Paddle),
+    Release(Paddle),
+    OpenBoth,
+}
+
+/// The page's word, `kind` of a key `key` at `code`, as the paddles take it:
+/// none for a key that is no paddle.
+#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+fn page_key(kind: &str, key: &str, code: &str, swap: bool) -> Option<PageKey> {
+    match (kind, paddle_for_key(key, code, false, swap)) {
+        ("down", Some(paddle)) => Some(PageKey::Press(paddle)),
+        ("up", Some(paddle)) => Some(PageKey::Release(paddle)),
+        ("open", _) => Some(PageKey::OpenBoth),
+        _ => None,
+    }
+}
+
+#[cfg(all(not(feature = "desktop"), not(feature = "web"), not(test)))]
+fn listen_page_paddles(keys: PaddleKeys) {
+    use_hook(move || {
+        spawn(async move {
+            let mut page = document::eval(PAGE_PADDLES_SCRIPT);
+            while let Ok((kind, key, code)) = page.recv::<(String, String, String)>().await {
+                let swap = keys.settings.peek().playback.paddle_swap;
+                match page_key(&kind, &key, &code, swap) {
+                    Some(PageKey::Press(paddle)) => keys.press(paddle),
+                    Some(PageKey::Release(paddle)) => keys.release(paddle),
+                    Some(PageKey::OpenBoth) => keys.release_all(),
+                    None => {}
+                }
+            }
+        })
+    });
+    use_drop(|| {
+        dioxus::core::spawn_forever(async {
+            let _ = document::eval(STOP_PAGE_PADDLES).await;
+        });
+    });
+}
+
+#[cfg(not(all(not(feature = "desktop"), not(feature = "web"), not(test))))]
+fn listen_page_paddles(_keys: PaddleKeys) {}
+
 /// How to key with the paddles in `mode`: what the practice pad and the
 /// training screen both tell you.
 pub fn paddle_hint(mode: KeyerMode) -> &'static str {
     match mode {
         KeyerMode::Straight => {
-            "Hold [ or ] as a straight key — a short press is a dit, a long one a dah."
+            "Hold [ or ] as a straight key — a short press is a dit, a long one a dah, as long as the key speed says."
         }
         KeyerMode::Ultimatic => {
             "Hold [ for dits and ] for dahs. The last paddle you close repeats — squeeze for the middle of X or P."
@@ -611,26 +741,73 @@ pub fn PaddlePad(mode: KeyerMode) -> Element {
 mod tests {
     use super::*;
 
+    /// The mobile builds' page listener keeps the brackets from the page and
+    /// hands them over, a shortcut press and a repeat aside, every release
+    /// heard, the focus lost opening both; and it comes off again, one left
+    /// before taken off first.
     #[test]
-    fn a_fake_press_after_release_cancels_the_up() {
-        let mut contacts = RepeatFilter::default();
-        assert!(contacts.press(Paddle::Dah));
-        assert!(!contacts.press(Paddle::Dah));
-        let generation = contacts.release(Paddle::Dah).expect("was down");
-        assert!(!contacts.press(Paddle::Dah));
-        assert!(!contacts.confirm_release(Paddle::Dah, generation));
-        let later = contacts.release(Paddle::Dah).expect("still down");
-        assert!(contacts.confirm_release(Paddle::Dah, later));
-        assert!(contacts.release(Paddle::Dah).is_none());
+    fn the_page_hands_over_the_paddles() {
+        let script = PAGE_PADDLES_SCRIPT;
+        assert!(script.starts_with(STOP_PAGE_PADDLES), "{script}");
+        for listened in [
+            r#"document.addEventListener("keydown", down)"#,
+            r#"document.addEventListener("keyup", up)"#,
+            r#"window.addEventListener("blur", blur)"#,
+            r#"document.removeEventListener("keydown", down)"#,
+            r#"document.removeEventListener("keyup", up)"#,
+            r#"window.removeEventListener("blur", blur)"#,
+            "if (bracket(e) && !shortcut(e))",
+            "if (!e.repeat)",
+            // Every release heard, a modifier held or not, and the Command
+            // key's own, after which a browser sends no other, opening both.
+            "const up = (e) => {\n    if (bracket(e)) {",
+            r#"} else if (e.key === "Meta") {"#,
+        ] {
+            assert!(script.contains(listened), "{listened}");
+        }
+        assert_eq!(paddle_for_key("[", "", false, false), Some(Paddle::Dit));
+        assert_eq!(
+            paddle_for_key("", "BracketRight", false, false),
+            Some(Paddle::Dah)
+        );
+        assert_eq!(
+            page_key("down", "[", "BracketLeft", false),
+            Some(PageKey::Press(Paddle::Dit))
+        );
+        assert_eq!(
+            page_key("up", "]", "BracketRight", false),
+            Some(PageKey::Release(Paddle::Dah))
+        );
+        assert_eq!(page_key("open", "", "", false), Some(PageKey::OpenBoth));
+        assert_eq!(page_key("up", "a", "KeyA", false), None);
     }
 
     #[test]
-    fn a_real_release_is_confirmed_when_no_press_follows() {
-        let mut contacts = RepeatFilter::default();
-        assert!(contacts.press(Paddle::Dit));
-        let generation = contacts.release(Paddle::Dit).expect("was down");
-        assert!(contacts.confirm_release(Paddle::Dit, generation));
-        assert!(contacts.press(Paddle::Dit));
+    fn the_straight_key_says_the_key_speed_times_it() {
+        assert!(paddle_hint(KeyerMode::Straight).contains("key speed"));
+    }
+
+    /// A held key's repeated presses close its contact once, and its one
+    /// release opens it at once.
+    #[test]
+    fn a_held_key_closes_its_contact_once_and_its_release_opens_it() {
+        let mut contacts = Contacts::default();
+        assert!(contacts.press(Paddle::Dah));
+        assert!(!contacts.press(Paddle::Dah), "repeated");
+        assert!(contacts.release(Paddle::Dah));
+        assert!(!contacts.release(Paddle::Dah), "already open");
+        assert!(contacts.press(Paddle::Dah));
+    }
+
+    /// The window losing the focus opens every contact: the next press is a
+    /// press.
+    #[test]
+    fn losing_the_focus_opens_every_contact() {
+        let mut contacts = Contacts::default();
+        assert!(contacts.press(Paddle::Dah));
+        contacts.open_all();
+        assert!(contacts.press(Paddle::Dah), "open, so a press closes it");
+        assert!(!contacts.release(Paddle::Dit), "never closed");
     }
 
     #[test]

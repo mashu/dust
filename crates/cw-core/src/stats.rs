@@ -6,7 +6,11 @@ use crate::alignment::align_group;
 use crate::belief::EstimatePoint;
 use crate::contest::{ContestKind, StoredLog};
 use crate::morse::LCWO_SEQUENCE;
+use crate::numeric::median;
 use crate::pool::compute_char_pool;
+use crate::recognition::{
+    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Recognition, RecognitionBands, recognise,
+};
 use crate::sampling::{
     CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
     adaptive_bounds, adapts_speed, belief_for, beta_posterior_mean_error,
@@ -21,13 +25,7 @@ use crate::speed::{SpeedBelief, SpeedForecast, SpeedPath, forecast_speeds, stati
 pub const MASTERED_MIN_ATTEMPTS: u32 = 5;
 pub const MASTERED_MIN_ACCURACY: f64 = 0.9;
 pub const BUILDING_MIN_ACCURACY: f64 = 0.7;
-pub const SLOW_AVG_MS: f64 = 800.0;
 
-/// What the Letters card says once the history holds a contest run: its
-/// letters count, but not its times.
-pub const CONTEST_TIMES_NOTE: &str = "Contest runs count towards accuracy here, but their times \
-     are left out of the average time that marks a letter slow: they include waiting and typing, \
-     not only copying.";
 pub const GROUP_START_BIGRAM_TOKEN: char = '▸';
 
 /// How often a pair has to have been heard, and missed, before it can be
@@ -56,24 +54,54 @@ pub enum MasteryStatus {
 pub const RECENT_TRIES: u32 = 20;
 /// The fewest tries before them for there to be an earlier to compare with.
 const EARLIER_MIN_TRIES: u32 = 10;
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct CharacterDiagnostic {
     pub letter: char,
     pub accuracy_pct: f64,
-    pub avg_ms: f64,
     pub total: u32,
     pub correct: u32,
     pub status: MasteryStatus,
-    pub is_slow: bool,
     /// Accuracy over the latest sessions that hold [`RECENT_TRIES`] tries of
     /// it, and over the tries before them, in percent: which way it is going.
     /// None until there are enough of both.
     pub recent_pct: Option<f64>,
     pub earlier_pct: Option<f64>,
+    /// How soon you type it after its sound went out, in milliseconds: the
+    /// median of its latest [`RECOGNITION_WINDOW`] timed tries, once any is
+    /// ([`crate::recognise`] says which are).
+    pub recognition_ms: Option<f64>,
+    /// How many tries of it have been timed.
+    pub recognition_tries: u32,
 }
 
 impl CharacterDiagnostic {
+    /// How fast it is recognised under `bands`: in a band once
+    /// [`RECOGNITION_MIN_TRIES`] tries are timed, as fewer let one slow key
+    /// move the median too far; and instant (ICR) only once it is copied
+    /// right often enough to be building or mastered, a weak one's time
+    /// being only that of the tries it got right.
+    pub fn recognition(&self, bands: RecognitionBands) -> Recognition {
+        match self.recognition_ms {
+            Some(ms) if self.recognition_tries >= RECOGNITION_MIN_TRIES => {
+                let band = bands.band_of(ms);
+                Recognition::Banded {
+                    ms,
+                    band,
+                    instant: band.counts_as_icr()
+                        && matches!(
+                            self.status,
+                            MasteryStatus::Mastered | MasteryStatus::Building
+                        ),
+                }
+            }
+            Some(ms) => Recognition::Provisional {
+                ms,
+                tries: self.recognition_tries,
+            },
+            None => Recognition::Untimed,
+        }
+    }
+
     /// The range its accuracy is likely in ([`rate_interval`]).
     pub fn accuracy_interval(&self, mass: f64) -> (f64, f64) {
         let wrong = self.total.saturating_sub(self.correct);
@@ -302,67 +330,124 @@ pub fn accuracy_chart(sessions: &[SessionResult]) -> Vec<AccuracyPoint> {
         .collect()
 }
 
-pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnostic> {
-    let mut totals: BTreeMap<char, (u32, u32)> = BTreeMap::new();
-    let mut timings: BTreeMap<char, Vec<f64>> = BTreeMap::new();
-    // Each character's tallies by session, newest first, for its trend.
-    let mut by_session: BTreeMap<char, Vec<(u64, u32, u32)>> = BTreeMap::new();
-    for session in sessions {
-        for (letter, stats) in session.letter_accuracy().iter() {
-            let entry = totals.entry(*letter).or_insert((0, 0));
-            entry.0 += stats.correct;
-            entry.1 += stats.total;
-            by_session.entry(*letter).or_default().push((
-                session.timestamp,
-                stats.correct,
-                stats.total,
-            ));
-        }
-        // A contest's times run from a station's send to an edit, waiting
-        // and typing included: not answers after a send (§10 of the design).
-        if session.char_set_mode == CharSetMode::Contest {
-            continue;
-        }
-        for (group, timing) in session.groups.iter().zip(session.group_timings.iter()) {
-            if timing.time_to_complete_ms <= 0.0 {
-                continue;
-            }
-            let sent: Vec<char> = group.sent.to_ascii_uppercase().chars().collect();
-            if sent.is_empty() {
-                continue;
-            }
-            let per = timing.time_to_complete_ms / sent.len() as f64;
-            for ch in sent {
-                timings.entry(ch).or_default().push(per);
-            }
+/// Each character of `session` the rule times (docs/recognition.md), with
+/// its time in milliseconds: its latest group first.
+fn timed_chars(session: &SessionResult) -> impl Iterator<Item = (char, u32)> + '_ {
+    session
+        .groups
+        .iter()
+        .zip(&session.group_timings)
+        .rev()
+        .filter_map(|(group, timing)| Some((group, timing.char_times.as_ref()?)))
+        .flat_map(|(group, times)| {
+            let recognised = recognise(&group.sent, &group.received, times);
+            group
+                .sent
+                .chars()
+                .zip(recognised)
+                .filter_map(|(ch, took)| Some((ch.to_ascii_uppercase(), took?)))
+        })
+}
+
+/// Each character's timed tries in `sessions`, every mode's: how many there
+/// are, and the latest [`RECOGNITION_WINDOW`] of them, in milliseconds,
+/// read newest session first.
+fn recognition_times(sessions: &[SessionResult]) -> BTreeMap<char, (u32, Vec<f64>)> {
+    let mut newest_first: Vec<&SessionResult> = sessions.iter().collect();
+    newest_first.sort_by_key(|session| std::cmp::Reverse(session.timestamp));
+    let mut times: BTreeMap<char, (u32, Vec<f64>)> = BTreeMap::new();
+    for (ch, took) in newest_first.into_iter().flat_map(timed_chars) {
+        let (tries, latest) = times.entry(ch).or_default();
+        *tries += 1;
+        if latest.len() < RECOGNITION_WINDOW {
+            latest.push(f64::from(took));
         }
     }
-    let mut out: Vec<CharacterDiagnostic> = totals
+    times
+}
+
+/// How fast a session's characters were recognised: the median of those
+/// timed, and how many were.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SessionRecognition {
+    pub median_ms: f64,
+    pub timed: usize,
+}
+
+/// `session`'s recognition, if any of its characters was timed.
+pub fn session_recognition(session: &SessionResult) -> Option<SessionRecognition> {
+    let times: Vec<f64> = timed_chars(session)
+        .map(|(_, took)| f64::from(took))
+        .collect();
+    Some(SessionRecognition {
+        median_ms: median(&times)?,
+        timed: times.len(),
+    })
+}
+
+/// How many characters of `sessions` are mastered: [`character_diagnostics`]
+/// without the times, which only the Letters card shows.
+pub fn mastered_count(sessions: &[SessionResult]) -> usize {
+    letter_tallies(sessions)
         .into_iter()
-        .map(|(letter, (correct, total))| {
-            let accuracy01 = if total == 0 {
-                0.0
-            } else {
-                f64::from(correct) / f64::from(total)
-            };
-            let samples = timings.get(&letter);
-            let avg_ms = samples
-                .map(|s| s.iter().sum::<f64>() / s.len() as f64)
-                .unwrap_or(0.0);
+        .filter(|(_, (correct, total), _)| {
+            classify_mastery(rate(*correct, *total), *total) == MasteryStatus::Mastered
+        })
+        .count()
+}
+
+/// A character's tries: right, and in all.
+type Tally = (u32, u32);
+
+/// A character's tries in one session: when, right, and in all.
+type SessionTally = (u64, u32, u32);
+
+/// Each character's tallies in `sessions`: in all, and by session, for its
+/// trend.
+fn letter_tallies(sessions: &[SessionResult]) -> Vec<(char, Tally, Vec<SessionTally>)> {
+    let mut totals: BTreeMap<char, (Tally, Vec<SessionTally>)> = BTreeMap::new();
+    for session in sessions {
+        for (letter, stats) in session.letter_accuracy().iter() {
+            let (total, by_session) = totals.entry(*letter).or_default();
+            total.0 += stats.correct;
+            total.1 += stats.total;
+            by_session.push((session.timestamp, stats.correct, stats.total));
+        }
+    }
+    totals
+        .into_iter()
+        .map(|(letter, (total, by_session))| (letter, total, by_session))
+        .collect()
+}
+
+fn rate(correct: u32, total: u32) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        f64::from(correct) / f64::from(total)
+    }
+}
+
+pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnostic> {
+    let mut recognised = recognition_times(sessions);
+    let mut out: Vec<CharacterDiagnostic> = letter_tallies(sessions)
+        .into_iter()
+        .map(|(letter, (correct, total), by_session)| {
+            let accuracy01 = rate(correct, total);
             let status = classify_mastery(accuracy01, total);
-            let is_slow = matches!(status, MasteryStatus::Mastered | MasteryStatus::Building)
-                && avg_ms >= SLOW_AVG_MS;
-            let (recent_pct, earlier_pct) = trend(by_session.remove(&letter).unwrap_or_default());
+            let (recent_pct, earlier_pct) = trend(by_session);
+            let (recognition_tries, latest) = recognised.remove(&letter).unwrap_or_default();
+            let recognition_ms = median(&latest);
             CharacterDiagnostic {
                 letter,
                 accuracy_pct: accuracy01 * 100.0,
-                avg_ms,
                 total,
                 correct,
                 status,
-                is_slow,
                 recent_pct,
                 earlier_pct,
+                recognition_ms,
+                recognition_tries,
             }
         })
         .collect();
@@ -770,6 +855,7 @@ pub fn speed_forecast(
 mod tests {
     use super::*;
     use crate::alignment::{CopyTally, LetterAccuracy};
+    use crate::recognition::CharTimes;
     use crate::session::{GroupResult, SessionTiming};
     use crate::settings::CharSetMode;
 
@@ -786,6 +872,7 @@ mod tests {
                 char_wpm: None,
                 effective_wpm: None,
                 sends: 1,
+                ..SessionTiming::default()
             }],
             accuracy: 0.5,
             tally: CopyTally::of("KM", "K?"),
@@ -796,58 +883,39 @@ mod tests {
         }
     }
 
-    /// A contest run's letters count for accuracy, but its times, which
-    /// include waiting and typing, leave the average time alone.
-    #[test]
-    fn contest_times_stay_out_of_the_letters_times() {
-        use crate::contest::bot::script::{Habit, run_settings, work};
-        use crate::contest::bot::{Operator, Runtime};
-        let mut calls = SessionResult::empty_for_test();
-        calls.char_set_mode = CharSetMode::Callsign;
-        for _ in 0..10 {
-            calls.groups.push(GroupResult {
-                sent: "K5XYZ".into(),
-                received: "K5XYZ".into(),
-                correct: true,
-            });
-            calls.group_timings.push(SessionTiming {
-                time_to_complete_ms: 1_500.0,
-                char_wpm: Some(25.0),
-                effective_wpm: Some(25.0),
-                sends: 1,
-            });
-            calls.tally.add("K5XYZ", "K5XYZ");
+    /// A group of one character, its sound ending 300 ms into its sending,
+    /// keyed `took` ms after that: one timed try.
+    fn keyed_after(took: u32) -> CharTimes {
+        CharTimes {
+            ends: vec![300],
+            keys: vec![Some(300 + took)],
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: false,
         }
-        let mut settings = run_settings(25.0);
-        settings.contest.contest_minutes = 2;
-        let sampler = crate::Sampler::new(&[], &settings, 4);
-        let mut runtime = Runtime::start(4, settings, sampler);
-        work(&mut runtime, &mut Operator::new(Habit::HumanPaced), &[]);
-        let run = runtime.machine.result(2, "2026-10-20".into());
-        assert!(
-            run.group_timings
-                .iter()
-                .any(|t| t.time_to_complete_ms > 1_500.0)
-        );
-        let letter = |history: &[SessionResult], ch: char| {
+    }
+
+    /// Every mode's timed characters count, a contest run's among them; a
+    /// run's letters count for accuracy whether timed or not.
+    #[test]
+    fn every_mode_counts_towards_the_times() {
+        let mut calls = plain("2026-09-01", 1, &[("K", "K"); 3]);
+        calls.char_set_mode = CharSetMode::Callsign;
+        for timing in &mut calls.group_timings {
+            timing.char_times = Some(keyed_after(300));
+        }
+        let mut run = plain("2026-09-02", 2, &[("K", "K"), ("K", "K")]);
+        run.char_set_mode = CharSetMode::Contest;
+        run.group_timings[0].char_times = Some(keyed_after(500));
+        let k = |history: &[SessionResult]| {
             character_diagnostics(history)
                 .into_iter()
-                .find(|diag| diag.letter == ch)
+                .find(|diag| diag.letter == 'K')
+                .expect("K")
         };
-        let alone = letter(std::slice::from_ref(&calls), 'K').expect("K");
-        let both = [calls.clone(), run.clone()];
-        let with_run = letter(&both, 'K').expect("K");
-        assert_eq!(with_run.avg_ms, alone.avg_ms);
-        let counted = run.letter_accuracy().get(&'K').map_or(0, |k| k.total);
-        assert_eq!(with_run.total, alone.total + counted);
-        // A letter only the run has shows no time at all.
-        let only = run
-            .groups
-            .iter()
-            .flat_map(|group| group.sent.chars())
-            .find(|ch| !"K5XYZ".contains(*ch))
-            .expect("a letter K5XYZ lacks");
-        assert_eq!(letter(&both, only).map(|diag| diag.avg_ms), Some(0.0));
+        let both = k(&[calls.clone(), run]);
+        assert_eq!(both.recognition_tries, 4);
+        assert_eq!(both.total, k(std::slice::from_ref(&calls)).total + 2);
     }
 
     /// A run with Show copy on is assisted, and counts in every stat all
@@ -914,6 +982,7 @@ mod tests {
                 char_wpm: Some(20.0),
                 effective_wpm: None,
                 sends: 1,
+                ..SessionTiming::default()
             })
             .collect();
         out
@@ -945,29 +1014,112 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_rank_weak_letters_first_and_flag_slow_ones() {
-        // Ten sends of each letter: K always right and slow, M always wrong.
+    fn diagnostics_rank_weak_letters_first() {
+        // Ten sends of each letter: K always right, M always wrong.
         let groups: Vec<(&str, &str)> = vec![("KM", "KX"); 10];
         let session = plain("2026-09-01", 1, &groups);
         let diag = character_diagnostics(&[session]);
         assert_eq!(diag.first().map(|d| d.letter), Some('M'));
         let k = diag.iter().find(|d| d.letter == 'K').expect("K row");
         assert_eq!(k.status, MasteryStatus::Mastered);
-        // 2000 ms over two characters is 1000 ms each, past the slow mark.
-        assert!(k.is_slow);
-        assert!(k.avg_ms >= SLOW_AVG_MS);
         let m = diag.iter().find(|d| d.letter == 'M').expect("M row");
         assert_eq!(m.status, MasteryStatus::Weak);
-        // A weak letter is never called slow on top of it.
-        assert!(!m.is_slow);
     }
 
+    /// A character's recognition time is the median of its latest timed
+    /// tries, put in a band once there are enough of them, and instant only
+    /// once it is copied right often enough. Untimed groups, older saves',
+    /// count for nothing.
     #[test]
-    fn zero_length_timings_are_not_averaged_in() {
-        let mut session = plain("2026-09-01", 1, &[("KM", "KM")]);
-        session.group_timings[0].time_to_complete_ms = 0.0;
-        let diag = character_diagnostics(&[session]);
-        assert!(diag.iter().all(|d| d.avg_ms == 0.0));
+    fn recognition_is_the_median_of_the_latest_timed_tries() {
+        let timed = |date: &str, timestamp: u64, took: &[Option<u32>]| {
+            let groups: Vec<(&str, &str)> = vec![("K", "K"); took.len()];
+            let mut session = plain(date, timestamp, &groups);
+            for (timing, took) in session.group_timings.iter_mut().zip(took) {
+                timing.char_times = took.map(keyed_after);
+            }
+            session
+        };
+        let few = timed("2026-09-01", 1, &[Some(300); 7]);
+        let k = |history: &[SessionResult]| {
+            character_diagnostics(history)
+                .into_iter()
+                .find(|d| d.letter == 'K')
+                .expect("K")
+        };
+        let bands = RecognitionBands::default();
+        let early = k(std::slice::from_ref(&few));
+        assert_eq!(
+            early.recognition(bands),
+            Recognition::Provisional {
+                ms: 300.0,
+                tries: 7
+            },
+            "seven is too few to say for sure"
+        );
+        let slow = timed(
+            "2026-09-02",
+            2,
+            &[Some(900), Some(800), None, Some(700), Some(1_000)],
+        );
+        let both = k(&[few, slow]);
+        // 300 seven times and 700, 800, 900, 1000: the middle is 300.
+        assert_eq!(
+            both.recognition(bands),
+            Recognition::Banded {
+                ms: 300.0,
+                band: crate::RecognitionBand::Fast,
+                instant: true,
+            }
+        );
+        // Copied wrong more often than right: fast, but not instant.
+        let weak = CharacterDiagnostic {
+            status: MasteryStatus::Weak,
+            ..both
+        };
+        assert!(matches!(
+            weak.recognition(bands),
+            Recognition::Banded { instant: false, .. }
+        ));
+        let untimed = plain("2026-09-03", 3, &[("M", "M")]);
+        let m = character_diagnostics(&[untimed])
+            .into_iter()
+            .find(|d| d.letter == 'M')
+            .expect("M");
+        assert_eq!(m.recognition(bands), Recognition::Untimed);
+    }
+
+    /// The latest tries are the latest groups of the latest session: a
+    /// session is read from its end.
+    #[test]
+    fn recognition_reads_a_session_from_its_latest_group() {
+        let groups: Vec<(&str, &str)> = vec![("K", "K"); 41];
+        let mut session = plain("2026-09-01", 1, &groups);
+        for (at, timing) in session.group_timings.iter_mut().enumerate() {
+            timing.char_times = Some(keyed_after(if at < 20 { 900 } else { 300 }));
+        }
+        let k = character_diagnostics(&[session])
+            .into_iter()
+            .find(|d| d.letter == 'K')
+            .expect("K");
+        assert_eq!(k.recognition_tries, 41);
+        // The latest forty: 300 twenty-one times, 900 nineteen.
+        assert_eq!(k.recognition_ms, Some(300.0));
+    }
+
+    /// Overview's count of mastered characters is the Letters card's.
+    #[test]
+    fn the_mastered_count_is_the_letters_cards() {
+        let history = [
+            plain("2026-09-01", 1, &[("KM", "KM"); 6]),
+            plain("2026-09-02", 2, &[("KM", "KX"); 6]),
+        ];
+        let mastered = character_diagnostics(&history)
+            .into_iter()
+            .filter(|d| d.status == MasteryStatus::Mastered)
+            .count();
+        assert_eq!(mastered_count(&history), mastered);
+        assert_eq!(mastered, 1);
     }
 
     #[test]

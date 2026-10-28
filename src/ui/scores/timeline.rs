@@ -1,7 +1,7 @@
 use cw_core::{BoardEntry, FORM_SESSIONS, Ranking, TimelinePoint};
 use dioxus::prelude::*;
 
-use super::{rating_said, what_it_was};
+use super::{focus, rating_said, what_it_was};
 use crate::ui::chart::path;
 use crate::ui::format::{clock, counted, ordinal, short_date};
 use crate::ui::help;
@@ -88,15 +88,18 @@ fn record_path(points: &[TimelinePoint], xy: &[(f64, f64)]) -> String {
 
 /// What the board ranks by over time: a dot a session, larger where it set
 /// the record, the record as it stood and the form through them, with the
-/// session in `focus` marked and said in full beneath.
+/// session marked said in full beneath. Marking another redraws the mark
+/// and what is said of it, not the dots.
 #[component]
 pub(super) fn ScoreTimeline(
     /// Every session on the board, oldest first.
     timeline: Vec<TimelinePoint>,
-    /// When the session marked was set.
-    focus: u64,
-    /// The board's row for it.
-    focused: Option<BoardEntry>,
+    /// The board's rows, best first.
+    board: Vec<BoardEntry>,
+    /// When the best was set, marked while no row is.
+    best_at: u64,
+    /// The row pointed at, else the row tapped.
+    marked: Memo<Option<u64>>,
     /// How many sessions are on the board.
     total: usize,
     /// The dates of the first session and the last, under either end.
@@ -105,14 +108,16 @@ pub(super) fn ScoreTimeline(
     /// What the board ranks by.
     ranking: Ranking,
 ) -> Element {
+    #[cfg(test)]
+    crate::testing::rendered("ScoreTimeline");
     let xy = timeline_xy(&timeline);
     let record = record_path(&timeline, &xy);
     let form_line = form_path(&timeline, &xy);
-    let marker = timeline
+    let spots: Vec<(u64, f64, f64)> = timeline
         .iter()
         .zip(&xy)
-        .find(|(point, _)| point.timestamp == focus)
-        .map(|(_, at)| *at);
+        .map(|(point, (x, y))| (point.timestamp, *x, *y))
+        .collect();
     let records = timeline.iter().filter(|point| point.set_record).count();
     let (title, noun) = match ranking {
         Ranking::PerGroup => ("Points a group over time", "session"),
@@ -140,14 +145,11 @@ pub(super) fn ScoreTimeline(
                 if !record.is_empty() {
                     path { class: "record-line", d: "{record}" }
                 }
-                if let Some((x, _)) = marker {
-                    line {
-                        class: "timeline-guide",
-                        x1: "{x:.1}",
-                        y1: "0",
-                        x2: "{x:.1}",
-                        y2: "120",
-                    }
+                TimelineMark {
+                    spots: spots.clone(),
+                    best_at,
+                    marked,
+                    ring: false,
                 }
                 for (point, (x, y)) in timeline.iter().zip(xy.iter()) {
                     circle {
@@ -157,18 +159,18 @@ pub(super) fn ScoreTimeline(
                         r: if point.set_record { "3.4" } else { "2.6" },
                     }
                 }
-                if let Some((x, y)) = marker {
-                    circle { class: "timeline-mark", cx: "{x:.1}", cy: "{y:.1}", r: "6.5" }
+                TimelineMark {
+                    spots,
+                    best_at,
+                    marked,
+                    ring: true,
                 }
             }
-            if let Some(entry) = focused.as_ref() {
-                p { class: "timeline-focus",
-                    span { class: "timeline-focus-place", "{ordinal(entry.place)}" }
-                    " · {rating_said(ranking, entry.rating)} · {what_it_was(entry)} · {short_date(&entry.date)}"
-                    if let Some(time) = clock(entry.timestamp) {
-                        " {time}"
-                    }
-                }
+            TimelineFocus {
+                board,
+                best_at,
+                marked,
+                ranking,
             }
             div { class: "timeline-legend",
                 span { class: "legend-record", "Record" }
@@ -181,6 +183,61 @@ pub(super) fn ScoreTimeline(
                 span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
                     "{last_date}"
                 }
+            }
+        }
+    }
+}
+
+/// The session marked, on the timeline: the guide down to it, under the
+/// dots, or the ring around its dot, over them.
+#[component]
+fn TimelineMark(
+    /// When each session was set, and where its dot sits.
+    spots: Vec<(u64, f64, f64)>,
+    best_at: u64,
+    marked: Memo<Option<u64>>,
+    /// The ring, else the guide.
+    ring: bool,
+) -> Element {
+    let focus = focus(marked, best_at);
+    let Some(&(_, x, y)) = spots.iter().find(|(at, ..)| *at == focus) else {
+        return rsx! {};
+    };
+    if ring {
+        rsx! {
+            circle { class: "timeline-mark", cx: "{x:.1}", cy: "{y:.1}", r: "6.5" }
+        }
+    } else {
+        rsx! {
+            line {
+                class: "timeline-guide",
+                x1: "{x:.1}",
+                y1: "0",
+                x2: "{x:.1}",
+                y2: "120",
+            }
+        }
+    }
+}
+
+/// The session marked, said in full under the timeline.
+#[component]
+fn TimelineFocus(
+    board: Vec<BoardEntry>,
+    best_at: u64,
+    marked: Memo<Option<u64>>,
+    ranking: Ranking,
+) -> Element {
+    let focus = focus(marked, best_at);
+    let Some(entry) = board.iter().find(|entry| entry.timestamp == focus) else {
+        return rsx! {};
+    };
+    rsx! {
+        p { class: "timeline-focus",
+            span { class: "timeline-focus-place", "{ordinal(entry.place)}" }
+            " · {rating_said(ranking, entry.rating)} · {what_it_was(entry)} · {short_date(&entry.date)}"
+            if let Some(time) = clock(entry.timestamp) {
+                " {time}"
             }
         }
     }

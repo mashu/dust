@@ -14,7 +14,7 @@ use crate::ui::settings_station::{
     section_rejected, state_rejected,
 };
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
-use crate::ui::widgets::{CardHead, Icon, IconName, control_id, keep_focus, pretty_number};
+use crate::ui::widgets::{CardHead, Icon, IconName, control_id, keep_focus, range_label};
 
 /// Where the learner is, as Home says it: in the hero, and on the tile.
 #[derive(Debug, PartialEq)]
@@ -226,15 +226,6 @@ impl ContestHero {
             call_flagged: asks == Some(StationAsk::Call) && !contest.my_call.is_empty(),
             missing: contest.missing(),
         }
-    }
-}
-
-/// A range as it reads: one number when its ends meet.
-pub(crate) fn range_label(min: f64, max: f64) -> String {
-    if (min - max).abs() < f64::EPSILON {
-        pretty_number(min)
-    } else {
-        format!("{}–{}", pretty_number(min), pretty_number(max))
     }
 }
 
@@ -601,7 +592,8 @@ pub fn Home(
 
 #[cfg(test)]
 mod tests {
-    use super::{ContestHero, LevelReading, StationAsk, level_reading, range_label};
+    use super::{ContestHero, LevelReading, StationAsk, level_reading};
+    use crate::ui::widgets::range_label;
     use cw_core::{CharSetMode, RunStyle, TrainingSettings};
 
     #[test]
@@ -829,5 +821,7 @@ mod tests {
         assert_eq!(range_label(18.0, 18.0), "18");
         assert_eq!(range_label(18.0, 25.0), "18–25");
         assert_eq!(range_label(0.7, 1.0), "0.7–1");
+        assert_eq!(range_label(-20.0, 0.0), "\u{2212}20 to 0");
+        assert_eq!(range_label(-20.0, -20.0004), "\u{2212}20");
     }
 }

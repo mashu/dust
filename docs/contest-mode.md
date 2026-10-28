@@ -658,9 +658,12 @@ so a seed and an event list give one run. Its state:
 
 ```rust
 pub enum ContestEvent {
-    Key { key: OpKey, fields: Fields }, // after a paddle letter finishes
-    TurnStarted { id: u64, heard_from: MonoMs }, // each attempt, retries too
+    Key { key: OpKey, fields: Box<Fields> }, // after a paddle letter finishes
+    // each attempt, retries too: when its sound goes to the output, and
+    // when it reaches the ear
+    TurnStarted { id: u64, heard_from: MonoMs, output_from: MonoMs },
     TurnEnded { id: u64 },
+    TurnHeldUp { id: u64 },     // its audio was held up: nothing in it is timed
     TurnCancelled { id: u64 },  // a stop or a newer send: always ignored
     TurnFailed { id: u64 },     // the sound failed after every retry
     TimerFired { id: u64 },
@@ -690,9 +693,10 @@ The machine needs the fields only at a key press. The runtime maps
 | Running, Turn | Key but StopTx | what of the turn has reached you counts first, so Enter decides on what you have heard; a continuation (5.2) → `PlayTurn` (new id); a key that sends nothing (Wipe, Shift+Enter, Enter on a bad exchange) leaves the turn playing |
 | Running, Turn | TimerFired (heard) | what of the turn has reached you counts, a look at the clock (6.3): Enter's QSO and the screen follow the audio, a correction is said, and the checks whose TU is out show; the timer runs on to the next end of a send of the station you work, or to those checks → Turn |
 | Running, Turn | StopTx (Esc) | `StopAudio`; C and N reset for a call or exchange of the message keyed last not fully sent (`Main.pas:884-891`), not for one carried from an earlier key, heard then; the callers hear only what of the message keyed last went out whole, and a QSO it lost or a caller it brought goes with it; your message cut short, the callers listening answer what they heard of it as garbage (5.2) → a turn of their replies, or Silent |
-| Turn(id) | TurnStarted{id} | `heard_from` re-stamped; no effects, no limit check |
+| Turn(id) | TurnStarted{id} | `heard_from` and `output_from` re-stamped; a second start, a retry, marks the turn untimed (docs/recognition.md); no effects, no limit check |
 | Turn(id) | TurnEnded{id} | all segments count; each caller waits as the turn planned it (4.3); the patience timer starts if anyone waits → Silent |
 | Turn(id) | TurnFailed{id} | time since the turn first started is credited as paused, but not time the clock was read at since (6.3), so the run bar steps back by the retries; every caller in the turn sends again after Resume, as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout that never began, which waits afresh; timers forgotten; `ReleaseAudio` → Paused{Sound} |
+| any | TurnHeldUp{id} | the turn is marked untimed, on the air or not; no effects |
 | any | TurnCancelled, or another id | ignored |
 | Silent | TimerFired (patience) | waiting callers call again (4.3); if the station you work has left, "K5XYZ has gone" is announced, by the call it put yours right with, or else the call you had for it, or "The station", and Enter starts afresh, as after a CQ, calling CQ in place of its call (4.4) → a turn of replies |
 | Running | Pause{why, at} | `StopAudio`, `ReleaseAudio`; segments heard by `at` count. A send it cut before it began goes again after Resume as it was keyed, so a repeat you asked for is charged once heard, but for a call on its timeout, which waits afresh; one it cut after it began goes again, as no send you asked for, after a hidden page, but after a pause you chose it is owed on the caller's timeout, as one heard whole. A pause with nothing on the air keeps who an earlier pause or failure cut short. Timers forgotten; clock paused from `at` → Paused |
@@ -1116,12 +1120,12 @@ key that sends nothing reads no other caller's call into it (9.1).
   is no Enter in the fields; the listener hears it as log without sending.
   With the Command key, which the listener passes by, it is Enter still.
 - Paddles key into the focused field (`paddle.rs:287-299`) and never
-  transmit; phase 5 adds a field space after a 7-dit gap. As built (5b),
-  the keyer ends a word once seven dits of quiet follow a letter's last
-  element, as it ends the letter once three have (`Keyer`, its word gap in
-  `keyer/clock.rs`; a straight key, which keys no space after an element,
-  ends the letter a dit sooner but is held to the same seven dits for the
-  word, as its timing is the least even), and the run takes the word's end
+  transmit; phase 5 adds a field space after a word gap. As built, the
+  keyer ends a word once six dits of quiet follow a letter's last element,
+  a dit short of a word space so one sent on time always ends it, as it
+  ends the letter once two have, the split between a letter's one and the
+  three between letters (`Keyer`, its gaps in `keyer/clock.rs`; the same
+  for a straight key and the paddles), and the run takes the word's end
   as Space, by the Space key's rule (`space_goes_to`): on from Call to
   Exchange, and from Exchange back to Call where the exchange has one item
   to type or the items typed read whole, else the space before the next
@@ -1367,8 +1371,8 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   clock the old one plays on, which plays on to there and is ridden down
   by then, your message silent there, so the two never sound together:
   natively the mixer starts it that many samples into the send playing
-  (`Mixer::start_at`), and the browser at that time on the context's
-  clock. A moment already past, a retry's, starts it as soon as it can.
+  (`Mixer::start_at`), and so does the browser, which renders the same
+  mixer ahead of its clock (`audio/stream.rs`). A moment already past, a retry's, starts it as soon as it can.
   Everything is decided when you key, so what the turn on the air plays up
   to the splice counts at the key, as planned. That is from the key to the
   splice: the rest of the character sounding then, any the player had
@@ -1452,9 +1456,11 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   a key or End run still end it, its failure pauses it with the retries
   given back, and the run end waits till its last attempt would have
   failed.
-- **Heard time.** `send_planned` calls `on_start` after each attempt starts,
-  with no `Player` borrow held (`player.rs:194-212`). The runtime dispatches
-  `TurnStarted{id, heard_from}`: the start plus the player's lead and
+- **Heard time.** `send_planned` tells `on_news` after each attempt starts,
+  with no `Player` borrow held, and when a send was held up on its way
+  (`SendNews`, `player.rs`). The runtime dispatches
+  `TurnStarted{id, heard_from, output_from}` (`TurnHeldUp{id}` for the
+  latter): the start plus the player's lead and
   latency estimate (web `schedule_lead_sec` and `heard_latency`,
   `wait.rs:124-132`, `web/mod.rs:122`; native `latency_frames`,
   `audio/native.rs:272-280`), and, as built (5a), for a continuation the
@@ -1538,23 +1544,23 @@ spacing and no fist variation.
   7 dB before the AGC). Hear a QSO plays your message at it too.
 - **The paddles' sidetone** does not follow it. In a run the paddles key
   letters into the fields and never transmit (§4.5), so their sidetone is
-  the sound of typing into the log, not your sending; it plays at the
-  Tone and volume card's volume floor in every mode, never under 0.15
-  (`live_tone`, `player.rs`), and a setting of Contest mode's would make
+  the sound of typing into the log, not your sending; it plays at a level
+  of its own in every mode, as a rig's sidetone does, half the limiter's
+  knee (0.35 of full scale, `SIDETONE_LEVEL`, `audio/tone.rs`), turned
+  down with the volume alone, and a setting of Contest mode's would make
   the same paddle sound different in another mode. Following it would
   also cost keying its sidetone: with your sending off the paddles would
-  key in silence, and few can send without hearing it. The cost of
-  leaving it is a level gap: at the default volume floor (0.7) the
-  paddles sound about 12 dB over your messages at -9 dB (0.18 of full
-  scale) and about 9 dB over an average caller before the AGC (0.25), and
-  the only way to turn them down is the volume floor, which moves the
-  callers' strengths too. A contester who keys the log with paddles hears
-  that gap; one who types, as at 235 QSOs an hour, does not. Left as it
-  is, it is a question for the user (§15.1): the choice would be to cap
-  the paddles' sidetone in a run at your sending's level, with a floor
-  that keeps it heard. Should keying with the paddles transmit one day
-  (§14, later), their sidetone in a run would be your sending, and should
-  follow it then.
+  key in silence, and few can send without hearing it. It once followed
+  the station strength floor, which set how far the stations stand over
+  the noise, not how loud anything plays; at the default floor (0.7) the
+  paddles sounded about 12 dB over your messages. At its own level, 0.35
+  of full scale at full volume, they sound about 3 dB under your messages
+  at the default -3 dB (0.50), some 4 dB under an average caller as heard
+  (0.57) and 5 dB under the loudest station the receiver plays. A contester who keys the log with
+  paddles hears that gap; one who types, as at 235 QSOs an hour, does
+  not. Should keying with the paddles transmit one day (§14, later),
+  their sidetone in a run would be your sending, and should follow it
+  then.
 - **The receiver gate** (as built, 5a). A rig without full break-in mutes
   its receiver while it transmits, as MorseRunner's does unless its QSK is
   on (`Contest.pas:806-834`; `Qsk`, `Ini.pas:251`, off as it ships).
@@ -1579,16 +1585,9 @@ spacing and no fist variation.
   again from the takeover. A second key taking over from a continuation at
   its own start goes in its place exactly, a moment of clock rounding past
   it being no moment at all (`SendVoice::samples_until`), so neither
-  leaves the gate a sample in which nobody is sending. In the browser two
-  gains after the compressor, one on the receiver's output and one on the
-  band's floor, play the same shape (`gate_steps`). The player keeps the
-  gate's schedule as it scheduled it (`GateSchedule`, `audio/shape.rs`),
-  and each send's steps go on from where that leaves the gate at its
-  start, by a line to that level, which is the very line the steps it
-  replaces were drawing, so a continuation taking over part way through
-  your message keeps the gate shut, a second taking over from the first at
-  its own start too, and one taking over after your message finds it
-  open, as natively; one evaluator (`gate_at`) reads the schedule. The
+  leaves the gate a sample in which nobody is sending. The browser plays
+  the very same mixer, rendered ahead of its clock and made again from the
+  moment of any change (`audio/stream.rs`), so its gate is this one. The
   AGC runs on under the gate, so the band comes back as it would have
   been. A stop opens it from where it stands.
   - What callers sending across your message sound like with it shut:
@@ -1649,13 +1648,15 @@ again keeps its strength and is placed afresh.
 
 The envelope curves carry the gain: `build_envelope_curve` bakes
 `target_gain` in (`plan.rs:121-124`); the native player reads `target_gain`
-only for a curve with fewer than two points (`mixer/send.rs:64-67`), the
-web player only when the browser refuses a curve (`web/send.rs:164-173`).
+only for a curve with fewer than two points (`mixer/send.rs:64-67`), and
+the browser plays that same mixer.
 
 Each caller gets the band's `Qsb` model at its own time offset, following
 the Band card's QSB switch. `plan_turn` bakes the fade into each tone's
-curve point by point at `ENVELOPE_SAMPLE_RATE` (`envelope.rs:9`), one `Arc`
-per tone, and scales `target_gain` to match. As built (2a), single callers
+curve point by point (`ENVELOPE_SAMPLE_RATE`, 4,800 a second), reading the
+fade a millisecond apart along the tone (`FADE_STEP_SEC`) with straight
+lines between, as the player reads a send's fading; one `Arc` per tone, and
+`target_gain` scaled to match. As built (2a), single callers
 fade too. The machine holds `Qsb::of` the run's band settings, none with
 the switch off, and each caller draws a start point of its own up to an
 hour into the fade; a segment carries `Fade { qsb, from_sec }`, the
@@ -1664,16 +1665,15 @@ key time, plus the segment's start), and `plan_turn` reads only that, as
 the runtime plays from settings with the switch off. A segment of yours
 is never faded, whatever it carries. The QSB control runs
 0.03–1.5 Hz (`settings/mod.rs:47-48`) with components up to 2.3× that
-(`band/qsb.rs:26`), so a fade held per tone would step audibly. The web
-curve cache (`web/send.rs:128-143`) then holds a few hundred entries per
-turn. No player changes.
+(`band/qsb.rs`), so a fade held per tone would step audibly. No player
+changes: training's pile-ups fade the same way in the player, each station
+on a path of its own (`fade_from_sec`, drawn as a caller's is).
 
 As built (5a), flutter: under the Band card's flutter (`contestFlutter`,
 §8, in Contest mode), three callers in ten flutter, as MorseRunner's
 flutter has them (`DxStn.pas:97-99`): a caller's signal rises and falls at
 a rate drawn for it from 3 to 33 Hz, from half to three quarters of the way
-down, as deep as the band's fading ever goes, so a fluttering caller is
-rough but never lost. MorseRunner's flutter only quickens a station's
+down (6 to 12 dB), so a fluttering caller is rough but never lost. MorseRunner's flutter only quickens a station's
 fading, full depth, and acts only with its QSB on; here it is a flutter of
 its own, the band's wandering multipath fading at the flutter's rate
 (`Qsb::flutter`), over the band's fading where that is on and alone where it
@@ -1684,11 +1684,11 @@ flutter off draws as it always has. A segment's fade carries it (`Fade {
 qsb, flutter, from_sec }`), read along the caller's own path, so it carries
 through continuations and a dupe calling again keeps it; `plan_turn` lays it
 into the tones' envelopes as it lays the fading, and your message never
-flutters, nor QRM. The envelopes are sampled at 1,200 points a second,
-sixteen to a cycle of the fastest path of the fastest flutter (2.3 × 33 Hz),
-and both players play them as they are, so no player changes for it. A
-flutter is never made the browser's fading curve (`Qsb::curve`, 200 points
-a second, for the band's fading only), which could not follow it.
+flutters, nor QRM. The fade is read a millisecond apart, thirteen readings
+to a cycle of the fastest path of the fastest flutter (2.3 × 33 Hz), which
+cuts its corners by a fifth of a decibel at most, and both players play the
+envelopes as they are, so no player changes for it: the browser plays the
+native mixer, rendered ahead of its clock.
 
 ### 5.6 QRM and the background
 
@@ -1759,8 +1759,8 @@ clock parks and a send waits (`wait.rs:88-107`); the run pauses first.
 
 Phase 5 adds a receiver gate after the AGC while you send, as a non-QSK rig
 mutes (`Contest.pas:806-834`). Since 1b both players hold your message
-apart from what the receiver hears (`SendSample::dry` natively, its own
-gain into `floor_in` in the browser), so the gate keys off the dry plan and
+apart from what the receiver hears (`SendSample::dry`, in the mixer both
+play), so the gate keys off the dry plan and
 closes only the receiver's output; until then the band runs on under your
 message, as with full break-in. Phase 5 also adds per-station gain for
 flutter, and a player that starts a send at a given time, so a continuation
@@ -2898,7 +2898,7 @@ out of the Callsign series (`belief.rs:134-145`, `stats.rs:420-429`,
 | Stat | Contest runs |
 |---|---|
 | Calendar, streak, accuracy | Count; character accuracy covers calls and fields, lost copies included. A day's best reads "Best points" (`heatmap.rs:231`). |
-| Letters (`stats.rs:136-198`) | Accuracy counts every keyed character. Contest timings stay out of `avg_ms` and the slow flag, which measure answers after a send; the note says so ("left out of the average time that marks a letter slow"). |
+| Letters (`stats.rs`, `character_diagnostics`) | Accuracy counts every keyed character. Recognition times count a run's calls and exchange tokens by the rule every mode has (docs/recognition.md): each character from its sound going to the output to its key in the field, for a call or token heard once, whole and alone in a turn that played on time, typed as sent, with Show copy off. Nothing stands in for an untimed one. |
 | Mistakes, sampler beliefs | Count, on keyed tokens: K5XYC for K5XYZ is Z→C, `1T5` for `1N5` is N→T. |
 | Sampling snapshot (`stats.rs:317-397`) | A Contest arm draws as the contest's `CallSource` does, the sampler's wanted call with the contest's `CallSpec` (`generate_contest_call`), for calls only, and says "the next caller's call"; the speed card says how callers' speeds come. As built with adaptive callers' speed, its chances are the next caller's as the run would draw it (`speed_forecast`, by `adaptive_speed_path`, which reads the callers' switch in Contest): leaning on your copy speed while they adapt, and even across the range while not. Adapting, its line reads "Chance of each speed for the first callers of your next run, and the share of characters you copy right at it. Within the run they come faster as you copy calls and numbers clean, slower as you miss them. The run screen's − and + move only your own speed.", as the chances are the belief the run starts from (`SpeedBelief::from_history`), and it adds "Your copy speed is above this range, so most come at its top: a wider range on the Speed card lets them go faster." when more than half the chance sits on the range's top speed, or the same of its bottom ("…below this range, so most come at its bottom: … lets them go slower."). With the switch on and one speed set it reads "One speed is set, so every caller comes at it. The run screen's − and + move only your own speed."; off, "Callers' speeds are drawn evenly from your range. The run screen's − and + move only your own speed."; either then "Right is the share of characters you copy at that speed." |
 | Copy span, group-length forecast | Not contest measures, as for Callsigns (`ui/stats.rs:211-245`). |
@@ -3831,7 +3831,7 @@ plus a mark); `scripts/callsign-prefixes.py` (zones and continents).
   faded, and no continuation set to start sooner than a release after its
   key.
 
-- from 5b: the keyer ends a word seven dits of quiet after a letter's last
+- from 5b: the keyer ends a word six dits of quiet after a letter's last
   element, a straight key's too, though its letter ends a dit sooner; a
   paddle closed before then carries the word on, and a key pressed in it
   ends the word with no space, as does a pattern that spells no letter;
@@ -4204,7 +4204,7 @@ copy-speed series; the paddles' field space.
   guide in Contest mode, its button shown there, Start contest, the run
   screen's parts one at a time on desktop and touch, and Discard through
   `abort_run`, its Next never starting a run (§2); and a word space keyed
-  on the paddles after a letter, seven dits of quiet, pressing Space by
+  on the paddles after a letter, six dits of quiet, pressing Space by
   the Space key's rule, the keyer's word gap a cw-core change (§4.5).
 
 **Later, not planned:** Search & Pounce with the Sprint QSY rule, RIT,
@@ -4257,7 +4257,7 @@ keying with the paddles, a contest level, and more contests.
 | The Runs card (4b) | under the Contest pill on Scores, which shows once a run is kept | a tab or a card of its own | the board's contest and its runs side by side, and no new place to look |
 | Space in Exchange (operator feedback) | back to Call where the exchange has one item to type, or what is typed reads whole, is nothing or ends in a space; else the space before the next item | a space, always | MorseRunner's and N1MM's space bar toggles the fields, so a call is put right with one key; a longer exchange still needs its spaces, and none is typed only to be dropped |
 | Your sending (operator feedback) | a level of its own, off to the loudest in dB, -9 dB to start | a fixed monitor level | painfully loud against weak callers; -9 dB is level with an average caller as heard through the AGC |
-| The paddles' sidetone (operator feedback; for the user to confirm) | the volume floor, in every mode | your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The cost: at the defaults the paddles sound about 12 dB over your messages and 9 dB over an average caller, turned down only with the volume floor, which moves the callers too (§5.3) |
+| The paddles' sidetone (operator feedback; audit 2026-10-27) | a level of its own, half the limiter's knee, in every mode, turned down with the volume | the volume floor; your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The volume floor set how far the stations stand over the noise, so it moved the paddles 7 to 13 dB with it; a rig's sidetone level is its own. At the defaults the paddles sound about 3 dB under your messages and 4 dB under an average caller (§5.3) |
 | Your call in TU (operator feedback) | every QSO, every third or never, in a pile-up, where the contest's TU leaves it; the callers call after every TU | every third, always | MorseRunner's station ID rate is a setting; its callers come on every TU, signed or not, so none waits for your call |
 | Callers' speed (2026-10-22) | each newcomer's drawn from the copy-speed belief within the Speed card's ranges, on as it ships, a switch of the contest's own; aiming at the Aim's share of characters right; QRS slowing from that speed | MorseRunner's keys alone; RufzXP's step up on a right call and down on a miss; group training's switch; a fixed contest target | the user asked for callers that speed up as calls are copied clean; Dust's speeds come from a posterior, so they move smoothly and as surely as the copies say; group training's switch stays off and its own; one aim for every adaptive feature, shown where it steers |
 | Presets and the callers' speed (2026-10-22) | leave the switch alone | each set it | a preset says how fast callers may come; how they are drawn within that is yours, and toggling it keeps the preset |
@@ -4275,7 +4275,7 @@ keying with the paddles, a contest level, and more contests.
 | How soon a continuation can take over (5a) | the player's lead, as the last turn started at once found it, and a send's release, after the key | the moment your message is at as it reaches the ear | a player plays ahead of the ear, so a character starting inside its lead has begun already, and taking over there sent its start twice; a lead measured on every turn keeps up with the device |
 | What the turn on the air plays up to the splice (5a) | counted at the key, as planned | counted as it plays | everything is decided when you key; the turn on the air would otherwise stay beside the next for every count and timer. The cost: an Esc, a pause or the run's end before the splice, up to about a second after the key at 25 WPM, leaves counted a caller's send there that never sounded: with full break-in, any; without, only a reply starting in the word space before a splice after your message's last character |
 | The contest guide's Next (5b) | moves on, never starting a run; Show me starts one when asked; away from the run screen its steps point the way to it | Next starting the run, as the first session's Next starts the session | a run's callers are sound nobody asked for, and a run is ten minutes of it, where a session's first group is a few seconds |
-| The paddles' field space (5b) | seven dits of quiet after a letter's last element, a whole word space, then Space by its rule | the split between a letter space and a word space, five dits | a Space moves the cursor out of the call, so a hesitation mid-call must never make one |
+| The paddles' field space (5b) | six dits of quiet after a letter's last element, a dit short of a word space so one sent on time always ends it, then Space by its rule | the split between a letter space and a word space, five dits | a Space moves the cursor out of the call, so a hesitation mid-call must never make one |
 | The guide when the mode changes (5b) | that mode's guide, from its first step | the step it was on | the two guides' steps differ, and a step of one is nothing to point at in the other |
 
 ### 15.2 Decisions taken with the user

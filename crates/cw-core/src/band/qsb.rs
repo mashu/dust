@@ -1,18 +1,34 @@
 //! Fading: how much of the signal the path is letting through.
 
-use crate::settings::{BandSettings, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ};
+use super::dsp::db_to_gain;
+use crate::settings::{BandSettings, QSB_DEPTH_MAX_DB, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ};
 
-/// The weakest a fade leaves the signal. Below this a group would simply be
-/// lost rather than hard to copy.
-const QSB_MIN_GAIN: f64 = 0.25;
+/// How far into the band's fading a station's path is, at most, in seconds
+/// of it: every station arrives on a path of its own, so no two fade
+/// together. The fade never repeats, so any two points this far apart
+/// wander apart.
+pub const FADE_OFFSET_MAX_SEC: f64 = 3_600.0;
 
-/// Opens the multipath sum back out to the depth a single sine would have had.
-/// Four sines seldom line up, so their sum sits nearer the middle; this scales
-/// it back by the ratio of the two RMS values. Scaled that far, the sum runs
-/// past the ends of the range about a sixth of the time, and is held there:
-/// the signal sits at full strength, or at the bottom of a fade, for a moment
-/// before it moves on — which is how a fade bottoming out sounds.
-const QSB_SPREAD: f64 = 1.85;
+/// How far apart a fade is read along a send, with straight lines between.
+/// The fastest path of the Band card's fading moves at under 3.5 Hz, and of
+/// the fastest flutter at under 80, so four sines a sample to follow it
+/// would be waste: a millisecond apart, the line is the fade to a few
+/// hundredths of a decibel.
+pub const FADE_STEP_SEC: f64 = 0.001;
+
+/// The weakest a fade leaves the signal, as a gain: as deep as the Band card
+/// goes ([`QSB_DEPTH_MAX_DB`]). Any deeper and it would be out of hearing for
+/// letters at a time, where a real null of 30 dB is over in a moment.
+const QSB_MIN_GAIN: f64 = 0.1;
+
+/// Opens the multipath sum back out to the depth a single sine would have had,
+/// and rounds it off at the ends of its range. Four sines seldom line up, so
+/// their sum sits nearer the middle; scaled up this far through a soft knee
+/// (a hyperbolic tangent), it reaches the bottom of a fade and the top often,
+/// and turns there smoothly, never parked at either. Held at its ends
+/// instead, a fade sat dead flat at its floor for a second and a half and
+/// turned on a corner, which no fade does: a real one rounds its minimum.
+const QSB_KNEE: f64 = 3.0;
 
 /// How many propagation paths the fading is made of.
 const QSB_PATHS: usize = 4;
@@ -30,15 +46,6 @@ pub(super) const MULTIPATH_RATES: [f64; QSB_PATHS] = [1.000, 0.633, 1.471, 2.309
 /// meant.
 const PATH_WEIGHTS: [f64; QSB_PATHS] = [0.40, 0.28, 0.20, 0.12];
 
-/// Points per second in a [`Qsb::curve`]. The fastest path at the fastest
-/// rate the Band card's fading goes to is under 3.5 Hz, so straight lines
-/// between points this close follow the fade to a fraction of a decibel,
-/// even at the bottom of the deepest fade, where it turns sharply as it
-/// reaches the end of its range. A flutter's paths run some twenty times
-/// faster, which this would not follow: a flutter is laid into its tones'
-/// envelopes instead, and never made a curve.
-const CURVE_POINTS_PER_SEC: f64 = 200.0;
-
 /// The fading on the Morse, as the settings ask for it: how deep and how
 /// fast. A value both players hold for the length of a send, so moving a
 /// slider while a group plays changes the next group, never one mid-element.
@@ -50,10 +57,16 @@ pub struct Qsb {
 }
 
 impl Qsb {
-    /// The fading `band` asks for, or None when it asks for none.
+    /// The fading `band` asks for, or None when it asks for none: its depth
+    /// a share of [`QSB_DEPTH_MAX_DB`], so the slider moves the fade by
+    /// equal steps of loudness from one end to the other.
     pub fn of(band: &BandSettings) -> Option<Self> {
-        let depth = held_depth(band.qsb_depth);
-        if !band.qsb_enabled || depth <= 0.0 {
+        let share = if band.qsb_depth.is_finite() {
+            band.qsb_depth.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if !band.qsb_enabled || share <= 0.0 {
             return None;
         }
         let rate_hz = if band.qsb_rate_hz.is_finite() {
@@ -62,7 +75,7 @@ impl Qsb {
             QSB_RATE_MIN_HZ
         };
         Some(Self {
-            floor: 1.0 - depth,
+            floor: db_to_gain(-share * QSB_DEPTH_MAX_DB).max(QSB_MIN_GAIN),
             rate_hz,
         })
     }
@@ -70,8 +83,7 @@ impl Qsb {
     /// A flutter: the same wandering sum of paths, `depth` deep, at a rate
     /// far past the Band card's fading, as a signal over a polar path
     /// flutters, several times a second. Held to the depth a fade keeps
-    /// ([`QSB_MIN_GAIN`]) and to a positive, finite rate. Laid into tones'
-    /// envelopes only: too fast for a [`Self::curve`].
+    /// ([`QSB_MIN_GAIN`]) and to a positive, finite rate.
     pub fn flutter(depth: f64, rate_hz: f64) -> Self {
         let depth = held_depth(depth);
         let rate_hz = if rate_hz.is_finite() && rate_hz > 0.0 {
@@ -105,7 +117,7 @@ impl Qsb {
     /// no schedule. That is a sum of sinusoids at close but unrelated rates:
     /// the classical multipath model.
     ///
-    /// `QSB_SPREAD` is there because a sum of four sines spends most of its
+    /// [`QSB_KNEE`] is there because a sum of four sines spends most of its
     /// time nearer the middle than one sine does; without it, turning
     /// multipath on would quietly halve the depth of every fade.
     pub fn gain_at(&self, t_sec: f64) -> f32 {
@@ -116,31 +128,9 @@ impl Qsb {
                 weight * (std::f64::consts::TAU * self.rate_hz * multiple * t_sec).sin()
             })
             .sum();
-        let swing = (swing * QSB_SPREAD).clamp(-1.0, 1.0);
+        let swing = (swing * QSB_KNEE).tanh() / QSB_KNEE.tanh();
         let half = (1.0 - self.floor) / 2.0;
         (1.0 - half + half * swing) as f32
-    }
-
-    /// The fade over `duration_sec` from `start_sec` on the band's clock, as
-    /// evenly spaced values of [`Qsb::gain_at`] from the first instant to the
-    /// last.
-    ///
-    /// This is how the browser fades a send: it schedules the curve on the
-    /// send's gain, which plays it as straight lines between the points. A
-    /// graph of oscillators cannot hold their sum inside the range the way
-    /// `gain_at` does, so it is the one function, sampled, rather than a copy
-    /// of it built from nodes. For the band's fading only: its points are
-    /// too far apart for a flutter ([`CURVE_POINTS_PER_SEC`]).
-    pub fn curve(&self, start_sec: f64, duration_sec: f64) -> Vec<f32> {
-        let duration = if duration_sec.is_finite() {
-            duration_sec.max(0.0)
-        } else {
-            0.0
-        };
-        let intervals = (duration * CURVE_POINTS_PER_SEC).ceil().max(1.0) as usize;
-        (0..=intervals)
-            .map(|k| self.gain_at(start_sec + duration * k as f64 / intervals as f64))
-            .collect()
     }
 }
 
@@ -194,8 +184,9 @@ mod tests {
         assert_eq!(Qsb::of(&band(true, 0.0)), None);
         assert_eq!(Qsb::of(&band(true, f64::NAN)), None);
         assert!(Qsb::of(&band(true, 0.5)).is_some());
+        // Well down a full-depth fade three quarters of a second in.
         let trough = qsb(1.0, 1.0).gain_at(0.75);
-        assert!(trough > 0.2 && trough < 0.4);
+        assert!(trough >= QSB_MIN_GAIN as f32 && trough < 0.3, "{trough}");
         // Out-of-range rates are held to the settings' own range.
         assert_eq!(qsb(0.5, 99.0), qsb(0.5, QSB_RATE_MAX_HZ));
         assert_eq!(qsb(0.5, f64::NAN), qsb(0.5, QSB_RATE_MIN_HZ));
@@ -222,28 +213,26 @@ mod tests {
         }
     }
 
-    /// And it still spans the depth it is asked for: down to the floor that keeps
-    /// a group answerable, back up to full signal, and never outside that.
+    /// And it still spans the depth it is asked for: down to its floor,
+    /// back up to full signal, and never outside that.
     #[test]
     fn fading_spans_its_depth_and_stays_inside_it() {
         let deep = qsb(0.8, 0.2);
+        let floor = db_to_gain(-0.8 * QSB_DEPTH_MAX_DB);
         let env: Vec<f64> = (0..20_000)
             .map(|i| f64::from(deep.gain_at(f64::from(i) * 0.01)))
             .collect();
         let min = env.iter().copied().fold(f64::MAX, f64::min);
         let max = env.iter().copied().fold(f64::MIN, f64::max);
-        assert!(
-            min <= QSB_MIN_GAIN + 0.02,
-            "deep fades never arrived: {min:.3}"
-        );
+        assert!(min <= floor + 0.02, "deep fades never arrived: {min:.3}");
         assert!(max >= 0.97, "the signal never came back up: {max:.3}");
-        assert!(min >= QSB_MIN_GAIN - 1e-6, "faded past the floor: {min:.3}");
+        assert!(min >= floor - 1e-6, "faded past the floor: {min:.3}");
 
-        let depth: f64 = 0.5;
-        let half = qsb(depth, 0.5);
+        let half = qsb(0.5, 0.5);
+        let floor = db_to_gain(-0.5 * QSB_DEPTH_MAX_DB);
         for step in 0..200 {
             let gain = f64::from(half.gain_at(f64::from(step) * 0.05));
-            assert!(gain >= 1.0 - depth - 1e-6 && gain <= 1.0 + 1e-6, "{gain}");
+            assert!(gain >= floor - 1e-6 && gain <= 1.0 + 1e-6, "{gain}");
         }
         for t in [0.0, -1.0, 1e9] {
             assert!(qsb(0.6, 1.0).gain_at(t).is_finite());
@@ -275,46 +264,59 @@ mod tests {
         assert_eq!(Qsb::flutter(0.5, f64::NAN).rate_hz(), QSB_RATE_MIN_HZ);
     }
 
-    /// The browser fades a send by playing a curve of the shared fade, as
-    /// straight lines between its points. Between them it has to be the fade
-    /// the desktop plays, and it must never leave the range the desktop's
-    /// stays in: an oscillator graph summed straight onto a gain did, going
-    /// above full strength and, at full depth, through zero.
+    /// A fade turns at its floor, as a real one does at its minimum, rather
+    /// than parking there: out of the box, no stretch near the floor holds
+    /// flat for a second, and every minute of fading still gets down near
+    /// it.
     #[test]
-    fn the_browsers_curve_is_the_shared_fade() {
-        for (depth, rate) in [(0.35, 0.12), (0.75, 1.5), (1.0, 1.5), (1.0, 0.03)] {
-            let fading = qsb(depth, rate);
-            let floor = 1.0 - depth.min(1.0 - QSB_MIN_GAIN);
-            let (start, duration) = (123.4, 9.85);
-            let curve = fading.curve(start, duration);
-            assert!(curve.len() >= (duration * CURVE_POINTS_PER_SEC) as usize);
-            let step = duration / (curve.len() - 1) as f64;
-            for (k, point) in curve.iter().enumerate() {
-                let t = start + step * k as f64;
-                assert_eq!(*point, fading.gain_at(t), "point {k}");
-                assert!(
-                    f64::from(*point) >= floor - 1e-6 && *point <= 1.0,
-                    "{depth}/{rate}: {point} outside {floor}..=1"
-                );
-            }
-            // What the browser plays between the points.
-            let worst = (0..curve.len() - 1)
-                .flat_map(|k| (1..10).map(move |j| (k, f64::from(j) / 10.0)))
-                .map(|(k, frac)| {
-                    let line = f64::from(curve[k]) * (1.0 - frac) + f64::from(curve[k + 1]) * frac;
-                    let t = start + step * (k as f64 + frac);
-                    (line - f64::from(fading.gain_at(t))).abs()
-                })
-                .fold(0.0_f64, f64::max);
-            let worst_db = 20.0 * (1.0 + worst / floor).log10();
+    fn a_fade_never_parks_at_its_floor() {
+        let fading = Qsb::of(&BandSettings::default()).expect("fading out of the box");
+        let floor_db = 20.0 * fading.floor.log10();
+        let step = 0.01;
+        let db: Vec<f64> = (0..400_000)
+            .map(|i| 20.0 * f64::from(fading.gain_at(f64::from(i) * step)).log10())
+            .collect();
+        let mut flat = 0usize;
+        for pair in db.windows(2) {
+            let near = pair[1] < floor_db + 0.5;
+            let still = (pair[1] - pair[0]).abs() / step < 0.2;
+            flat = if near && still { flat + 1 } else { 0 };
             assert!(
-                worst_db < 0.3,
-                "{depth}/{rate}: off the fade by {worst_db:.3} dB"
+                (flat as f64) * step < 1.0,
+                "parked at the floor for a second"
             );
         }
-        // A send with no length still gets a curve the browser accepts:
-        // two points at least.
-        assert_eq!(qsb(0.5, 0.5).curve(0.0, 0.0).len(), 2);
-        assert_eq!(qsb(0.5, 0.5).curve(0.0, f64::NAN).len(), 2);
+        for minute in db.chunks((60.0 / step) as usize) {
+            let deepest = minute.iter().copied().fold(f64::MAX, f64::min);
+            assert!(
+                deepest < floor_db + 0.5,
+                "a minute only got to {deepest:.1} dB"
+            );
+            assert!(
+                deepest >= floor_db - 1e-6,
+                "past the floor: {deepest:.2} dB"
+            );
+        }
+    }
+
+    /// The depth slider is heard over the whole of its travel, in equal
+    /// steps of loudness: each of its steps takes the bottom of the fade a
+    /// decibel further down, to 20 dB at the end; out of the box, 12.
+    #[test]
+    fn every_step_of_the_depth_is_heard() {
+        let floor_db = |share: f64| 20.0 * qsb(share, 0.2).floor.log10();
+        for step in 1..=20 {
+            let share = f64::from(step) * 0.05;
+            assert!(
+                (floor_db(share) + share * QSB_DEPTH_MAX_DB).abs() < 1e-9,
+                "{share}: {:.2} dB",
+                floor_db(share)
+            );
+        }
+        assert!((floor_db(1.0) + 20.0).abs() < 1e-9);
+        assert!(floor_db(0.95) > floor_db(1.0));
+        let default = Qsb::of(&BandSettings::default()).expect("fading out of the box");
+        let trough_db = 20.0 * default.floor.log10();
+        assert!(trough_db <= -10.0, "out of the box only {trough_db:.1} dB");
     }
 }

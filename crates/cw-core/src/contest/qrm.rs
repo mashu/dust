@@ -11,11 +11,10 @@
 //! Its draws come from a generator of its own, so a run under easier habits
 //! draws as it always has.
 
-use super::caller::FADE_OFFSET_MAX_SEC;
 use super::place::place_qrm;
 use super::rules::{ContestRules, Side};
 use super::turn::{Fade, Segment, Sender, sending_sec};
-use crate::band::Qsb;
+use crate::band::{FADE_OFFSET_MAX_SEC, Qsb};
 use crate::callsign::generate_call;
 use crate::rng::{Rng, SplitMix64};
 use crate::session::whole_ms;
