@@ -33,22 +33,26 @@
 use super::dsp::db_to_gain;
 use crate::settings::AgcDecay;
 
-/// How far above the floor's own peaks the knee sits: a level has to stand
-/// 2.2 times (about 7 dB) above the highest the hiss ordinarily reaches before
-/// the gain moves. The floor alone never gets there, so on an empty band the
-/// receiver leaves the noise exactly as the filter shaped it.
+/// How far above the floor's own peaks the knee sits with the threshold at
+/// 0 dB: a level has to stand 2.2 times (about 7 dB) above the highest the
+/// hiss ordinarily reaches before the gain moves. The floor alone never gets
+/// there, so on an empty band the receiver leaves the noise exactly as the
+/// filter shaped it, until the threshold is taken down into it.
 pub const AGC_TRIGGER: f64 = 2.2;
 /// Decibels of gain reduction per decibel above the knee: a 10:1
 /// compressor, one decibel out for every ten in, as a rig's AGC holds its
 /// audio within a few decibels from S3 to S9 and over.
 ///
-/// The strongest station the band sends stands about 28 dB over the lowest
-/// knee and comes out under 3 dB over it; one 20 dB weaker comes out a
-/// decibel over it. Under the strongest the band's hiss ducks 25 dB.
+/// The strongest station the band sends stands about 28 dB over the knee
+/// with the threshold at 0 dB and comes out under 3 dB over it; one 20 dB
+/// weaker comes out a decibel over it. Under the strongest the band's hiss
+/// ducks 25 dB. With the threshold all the way down it stands 48 over, and
+/// comes out under 5 over.
 pub const AGC_SLOPE: f64 = 0.9;
-/// The most the gain ever comes down, in decibels: more than the strongest
-/// station ever needs over the lowest knee, with room left for a crash.
-pub const AGC_MAX_DUCK_DB: f64 = 40.0;
+/// The most the gain ever comes down, in decibels: more than the 43 the
+/// strongest station needs with the threshold all the way down, with room
+/// left for a crash. A rig's AGC has a hundred or more.
+pub const AGC_MAX_DUCK_DB: f64 = 60.0;
 /// Seconds for the gain to close on a level it has to duck to, in decibels:
 /// a station 28 dB over the knee is within a decibel of its gain in under
 /// seven milliseconds, well inside the look-ahead. Fast, because a receiver
@@ -93,6 +97,13 @@ pub const AGC_DETECTOR_SEC: f64 = 0.0025;
 /// CW filter is a few milliseconds of ringing. Without this every crash would
 /// hold the band down for a quarter of a second after it had gone.
 pub const AGC_QUALIFY_SEC: f64 = 0.015;
+/// How much weaker than the signal holding the gain another has to be to be
+/// another signal, in decibels: more than a tone's ripple in the detector,
+/// a station's own fading from one element to the next and a keying edge's
+/// overshoot, less than the step from one station to the next. The hang
+/// holds the stronger, and recovers to the weaker once it has run out, as a
+/// rig's hang AGC holds the strongest signal for its hang.
+pub const AGC_OTHER_SIGNAL_DB: f64 = 3.0;
 /// The stretch the qualifying peaks are taken over: longer than half a cycle
 /// of the lowest pitch a station can have (200 Hz), so a steady tone always
 /// has a crest in it, and short enough that a click is forgotten within
@@ -102,7 +113,9 @@ pub const AGC_PEAK_HOLD_SEC: f64 = 0.003;
 /// hang. MorseRunner's AGC is back 20-30 ms after a click; so is this one.
 pub const AGC_LIMIT_RELEASE_SEC: f64 = 0.02;
 /// The most the receiver lets through to its audio stage, in decibels over
-/// the knee: about three over where the law holds the strongest station. A
+/// the knee: about three over where the law holds the strongest station
+/// with the threshold at 0 dB, and one over it with the threshold all the
+/// way down. A
 /// crash comes and goes faster than the law rides it, and full volume lifts
 /// what the AGC plays as far as that station plays clean, so a crash let
 /// through as it came would drive the limiter flat.
@@ -142,7 +155,12 @@ const SETTLED_POWER: f64 = 1e-30;
 ///   decay's hang after the signal last stood there before recovering at its
 ///   release ([`agc_decay_sec`]). Under a keyed station that hold is unbroken
 ///   from the first element to the last, so the band sits steadily down for
-///   the whole over and comes back in the pauses.
+///   the whole over and comes back in the pauses. A signal more than
+///   [`AGC_OTHER_SIGNAL_DB`] weaker than the one holding it is another one:
+///   it neither holds the gain where it is nor lifts it, and once the hang
+///   has run out the gain recovers to where it wants it rather than to one.
+///   With the threshold down in the hiss, the hiss is such a signal after a
+///   station, and the band comes back to where the hiss holds it.
 /// - **Limiter.** Anything above the knee pulls the gain down within
 ///   [`AGC_ATTACK_SEC`], but if it never qualified for the hang it lets go
 ///   again within [`AGC_LIMIT_RELEASE_SEC`]. A lightning stroke is squashed
@@ -196,6 +214,14 @@ pub struct Agc {
     hang_left: u32,
     /// The gain the hang is holding.
     held: f64,
+    /// Where the strongest weaker signal heard over the last hang wants the
+    /// gain, one with none, and how long it has left: what the gain
+    /// recovers to once the hang has run out.
+    weaker: f64,
+    weaker_left: u32,
+    /// How much higher than the held gain a signal's own gain has to be for
+    /// it to be another, weaker signal ([`AGC_OTHER_SIGNAL_DB`]).
+    other: f64,
     /// The gain the limiter wants.
     limited: f64,
     /// The gain that keeps the loudest crest coming under the ceiling.
@@ -239,6 +265,9 @@ impl Agc {
             hang: samples(hang),
             hang_left: 0,
             held: 1.0,
+            weaker: 1.0,
+            weaker_left: 0,
+            other: db_to_gain(AGC_OTHER_SIGNAL_DB),
             limited: 1.0,
             ceiling: 1.0,
             gain: 1.0,
@@ -332,31 +361,44 @@ impl Agc {
         }
 
         // The hang: only a level that has stood above the knee long enough to
-        // be a signal sets it or keeps it.
+        // be a signal sets it or keeps it, and only the signal holding it, or
+        // a stronger one; a weaker one is kept for when the hang runs out.
         self.above = if level > self.knee && recent > self.knee {
             self.above.saturating_add(1)
         } else {
             0
         };
-        if self.above >= self.qualify {
+        let signal = self.above >= self.qualify;
+        if signal && wanted < self.held * self.other {
             self.hang_left = self.hang;
-            // Both ways in decibels: down at the attack, and up, to a weaker
-            // signal still standing over the knee, at the release.
+            // Both ways in decibels: down at the attack, and up, to the same
+            // signal a little weaker, at the release.
             let rate = if wanted < self.held {
                 self.attack
             } else {
                 self.release
             };
             self.held = closer_in_db(self.held, wanted, rate);
-        } else if self.hang_left > 0 {
-            self.hang_left -= 1;
-        } else if self.held < 1.0 {
-            // Back at one once within a millionth of it, a ten-thousandth of
-            // a decibel: in decibels it would only ever get closer.
-            self.held = closer_in_db(self.held, 1.0, self.release);
-            if self.held > 1.0 - 1e-6 {
-                self.held = 1.0;
+        } else {
+            if signal && wanted <= self.weaker {
+                self.weaker = wanted;
+                self.weaker_left = self.hang;
             }
+            if self.hang_left > 0 {
+                self.hang_left -= 1;
+            } else if self.held < self.weaker {
+                // Back at one once within a millionth of it, a ten-thousandth
+                // of a decibel: in decibels it would only ever get closer.
+                self.held = closer_in_db(self.held, self.weaker, self.release);
+                if self.weaker >= 1.0 && self.held > 1.0 - 1e-6 {
+                    self.held = 1.0;
+                }
+            }
+        }
+        if self.weaker_left > 0 {
+            self.weaker_left -= 1;
+        } else {
+            self.weaker = 1.0;
         }
 
         // The ceiling, on the crests still waiting to be played, at the gain
@@ -415,6 +457,8 @@ impl Agc {
         self.above = previous.above;
         self.hang_left = previous.hang_left.min(self.hang);
         self.held = previous.held;
+        self.weaker = previous.weaker;
+        self.weaker_left = previous.weaker_left.min(self.hang);
         self.limited = previous.limited;
         self.ceiling = previous.ceiling;
         self.gain = previous.gain;
@@ -582,23 +626,25 @@ mod tests {
     }
 
     /// The law the two backends share: nothing at the knee, nine decibels
-    /// for every ten above it, never more than forty.
+    /// for every ten above it, never more than sixty.
     #[test]
-    fn the_static_law_is_ten_to_one_above_the_knee_and_stops_at_forty() {
+    fn the_static_law_is_ten_to_one_above_the_knee_and_stops_at_sixty() {
         assert_eq!(agc_law_db(-5.0), 0.0);
         assert_eq!(agc_law_db(0.0), 0.0);
         assert_eq!(agc_law_db(f64::NAN), 0.0);
         assert!((agc_law_db(10.0) + 9.0).abs() < 1e-12);
-        assert!((agc_law_db(40.0) + 36.0).abs() < 1e-12);
-        assert!((agc_law_db(60.0) + 40.0).abs() < 1e-12);
+        assert!((agc_law_db(48.0) + 43.2).abs() < 1e-12);
+        assert!((agc_law_db(80.0) + 60.0).abs() < 1e-12);
         // The gain the native AGC settles at under a steady tone is that law,
         // whether the tone is in the band or is the send, and at either decay.
         let knee = 0.01;
+        // The strongest station with the threshold all the way down, too.
         for (over_db, decay) in [
             (3.0, AgcDecay::Fast),
             (10.0, AgcDecay::Slow),
             (20.0, AgcDecay::Fast),
             (30.0, AgcDecay::Slow),
+            (48.0, AgcDecay::Fast),
         ] {
             let amplitude = knee * 10f64.powf(over_db / 20.0);
             let (mut heard, mut sent) = (Agc::new(SR, knee, decay), Agc::new(SR, knee, decay));

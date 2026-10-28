@@ -104,7 +104,7 @@ impl Metering {
     }
 
     /// One sample: what reached the AGC, the gain its hang held, and what
-    /// was played.
+    /// the receiver put out, before the volume.
     pub fn add(&mut self, input: f64, held: f64, output: f64) {
         self.frame = self.frame.merge(MeterFrame {
             input: input.abs() as f32,

@@ -502,9 +502,12 @@ impl Mixer {
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
             let received = self.audio.process(background + heard);
-            let played = (received * self.gate + send.dry) * now.volume;
-            *slot += played as f32;
-            self.metering.add(input, held, played);
+            // What the receiver puts out, for the meter, as a rig's audio
+            // scope reads it: before the volume, which only sets how loud
+            // you listen to it.
+            let out = received * self.gate + send.dry;
+            *slot += (out * now.volume) as f32;
+            self.metering.add(input, held, out);
         }
         self.audio.settle();
         // A send is heard the look-ahead after it was played, as well as the

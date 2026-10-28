@@ -476,7 +476,7 @@ pub fn BandConditionsCard(
             }
             p { id: "agc-threshold-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
                 if b.agc_enabled {
-                    "How strong a signal has to be before the AGC turns it down: at its lowest, 10 dB or more over the band's own hiss in the filter, more with heavy static, which it is kept clear of too, as the scope gives it. Every station clear of the noise is evened out and those down in it keep their own level. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss between overs gets quieter. The volume follows, so the strongest station stays as loud."
+                    "How strong a signal has to be before the AGC turns it down. At 0 dB it is just clear of the band's own hiss in the filter, 10 dB or more over it, more with heavy static, as the scope gives it: every station clear of the noise is evened out and those down in it keep their own level. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss between overs gets quieter. Take it down into the hiss and the hiss works the AGC too, coming up between overs to within a few decibels of the weakest station. The volume follows, so the strongest station stays as loud."
                 } else {
                     "With the AGC off there is no threshold to set."
                 }
@@ -501,12 +501,16 @@ fn rf_gain_label(db: f64) -> String {
     }
 }
 
-/// What the AGC's threshold reads as: "Lowest", or "+12 dB" raised.
+/// What the AGC's threshold reads as: "0 dB" where the band's own floor
+/// puts it, "+12 dB" raised over it, or "−12 dB" taken down into the hiss.
 fn threshold_label(db: f64) -> String {
-    if db <= AGC_THRESHOLD_MIN_DB {
-        "Lowest".to_string()
-    } else {
+    let db = db.round();
+    if db > 0.0 {
         format!("+{db:.0} dB")
+    } else if db < 0.0 {
+        format!("\u{2212}{:.0} dB", -db)
+    } else {
+        "0 dB".to_string()
     }
 }
 
@@ -538,5 +542,16 @@ mod tests {
         assert_eq!(qsb_rate_label(QSB_RATE_MAX_HZ), "every ~0.7 s");
         assert_eq!(qsb_rate_step(f64::NAN), 0.0);
         assert_eq!(qsb_rate_label(f64::NAN), "every ~33 s");
+    }
+
+    /// The threshold reads in decibels from where the band's own floor puts
+    /// it, either way, with a true minus and never a "-0".
+    #[test]
+    fn the_threshold_reads_either_way_from_0_db() {
+        assert_eq!(threshold_label(0.0), "0 dB");
+        assert_eq!(threshold_label(-0.0), "0 dB");
+        assert_eq!(threshold_label(-0.4), "0 dB");
+        assert_eq!(threshold_label(12.0), "+12 dB");
+        assert_eq!(threshold_label(AGC_THRESHOLD_MIN_DB), "\u{2212}20 dB");
     }
 }

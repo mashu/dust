@@ -268,6 +268,15 @@ fn the_agc_evens_out_the_previews_three_strengths() {
         raised[1] > -4.0 && raised[2] < -10.0,
         "threshold +20 dB: {raised:.2?} dB"
     );
+    // Down in the hiss, they are evened out as much, the hiss riding the
+    // AGC between them.
+    let mut into = hiss();
+    into.band.agc_threshold_db = cw_core::AGC_THRESHOLD_MIN_DB;
+    let into = spread(&into);
+    assert!(
+        into.iter().all(|db| *db > -3.5),
+        "into the hiss: {into:.2?} dB"
+    );
 }
 
 /// A band with nothing on it but the station still has its receiver's AGC:
@@ -353,6 +362,53 @@ fn switching_the_agc_off_under_a_station_never_drives_it_into_the_limiter() {
     }
 }
 
+/// Taking the threshold down into the hiss under a station, and back, as a
+/// drag along its slider does, never drives the station into the limiter
+/// and leaves it about as loud: the AGC takes more off it, and full volume
+/// makes that up.
+#[test]
+fn moving_the_threshold_into_the_hiss_under_a_station_keeps_it_as_loud() {
+    let at = |db: f64| {
+        let mut settings = hiss();
+        settings.band.agc_threshold_db = db;
+        settings.clamp()
+    };
+    let (own, into) = (at(0.0), at(cw_core::AGC_THRESHOLD_MIN_DB));
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.set_gains(Gains::of(&own));
+    mixer.set_band(Some(band(&own, 3)), &mut swept);
+    render(&mut mixer, SR as usize / 2);
+    let voice = keyer(own.side_tone_center(), VOLUME_MAX);
+    let plan = plan_transmission(&Transmission::alone("TTTTTTTTTTTTTTTT", voice), &own);
+    assert!(
+        plan.wanted.duration_sec > 2.5,
+        "a station through both moves"
+    );
+    let receiver = FilterDesign::from_settings(&own);
+    mixer.start(SendVoice::new(&plan, &receiver, None, SR, 0.0), &mut swept);
+    // How loud the station plays: the loudest of its 10 ms stretches but
+    // the very loudest few.
+    let level = |samples: &[f32]| {
+        let mut peaks: Vec<f32> = samples.chunks(SR as usize / 100).map(loudest).collect();
+        peaks.sort_by(f32::total_cmp);
+        f64::from(peaks[peaks.len() * 9 / 10])
+    };
+    let before = level(&render(&mut mixer, SR as usize * 6 / 10));
+    for (to, moved) in [(&into, "into the hiss"), (&own, "back")] {
+        assert!(mixer.retune_band(Receiver::new(SR, to), Gains::of(to), &mut swept));
+        let after = render(&mut mixer, SR as usize * 6 / 10);
+        let peak = f64::from(loudest(&after));
+        assert!(
+            peak < SOFT_LIMIT_KNEE * 1.05,
+            "{moved}: {peak:.3} into the limiter"
+        );
+        let settled = level(&after[SR as usize * 3 / 10..]);
+        let change = db((settled / before).powi(2));
+        assert!(change.abs() < 2.0, "{moved}: {change:.2} dB");
+    }
+}
+
 /// The RF gain turned up under a strong station, as a tap at the end of its
 /// slider does, plays the station no louder than the AGC holds it: the send
 /// waits out the look-ahead through the RF gain the AGC heard it at, as
@@ -419,11 +475,21 @@ fn the_look_ahead_is_the_agcs_at_any_rate() {
 /// receiver is set: a station at full strength, on its own, never reaches
 /// where the limiter starts to bend, whatever the AGC and its threshold, the
 /// filter's shape and width, the keying's edges or the pitch, and through
-/// every one of them it comes close, full volume sized to that receiver.
+/// every one of them it comes close, full volume sized to that receiver;
+/// with the threshold down in the hiss too, the hiss riding the AGC. There,
+/// on a wide filter, full volume leaves room for the hiss's crests at the
+/// highest the AGC lets it back up to between its holds on it, which a
+/// crest seldom meets, and the station comes within 4 dB rather than 2.
 #[test]
 fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
     use cw_core::FilterShape;
-    for (agc, threshold_db) in [(true, 0.0), (true, 6.0), (false, 0.0)] {
+    for (agc, threshold_db) in [
+        (true, 0.0),
+        (true, 6.0),
+        (true, -10.0),
+        (true, cw_core::AGC_THRESHOLD_MIN_DB),
+        (false, 0.0),
+    ] {
         for shape in [FilterShape::Peaked, FilterShape::Sharp, FilterShape::Soft] {
             for width in [FILTER_WIDTH_MIN, 2_000.0] {
                 for (low, high) in [(300.0, 600.0), (200.0, 200.0), (1_200.0, 1_200.0)] {
@@ -454,14 +520,15 @@ fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
                         let frames = ((plan.wanted.duration_sec + 0.2) * f64::from(SR)) as usize;
                         let peak = f64::from(loudest(&render(&mut mixer, frames)));
                         let at = format!(
-                            "the AGC {agc} at +{threshold_db} dB, {shape:?} {width} Hz, {low}-{high} Hz"
+                            "the AGC {agc} at {threshold_db:+} dB, {shape:?} {width} Hz, {low}-{high} Hz"
                         );
                         assert!(peak < SOFT_LIMIT_KNEE, "{peak:.3} with {at}, seed {seed}");
                         loudest_here = loudest_here.max(peak);
                     }
+                    let close = if threshold_db < 0.0 { 0.63 } else { 0.8 };
                     assert!(
-                        loudest_here > 0.8 * SOFT_LIMIT_KNEE,
-                        "only {loudest_here:.3} with the AGC {agc} at +{threshold_db} dB, {shape:?} {width} Hz, {low}-{high} Hz"
+                        loudest_here > close * SOFT_LIMIT_KNEE,
+                        "only {loudest_here:.3} with the AGC {agc} at {threshold_db:+} dB, {shape:?} {width} Hz, {low}-{high} Hz"
                     );
                 }
             }
@@ -471,16 +538,20 @@ fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
 
 /// The meter reads a frame every ten milliseconds of what the mixer
 /// plays: the station at its strength where it reaches the AGC, the gain
-/// the AGC's hang holds it at, and the loudest of what was played, to the
-/// sample.
+/// the AGC's hang holds it at, and the loudest of what the receiver put
+/// out, to the sample, before the volume it is listened to at.
 #[test]
-fn the_meter_reads_the_agcs_input_its_held_gain_and_what_was_played() {
+fn the_meter_reads_the_agcs_input_its_held_gain_and_what_was_put_out() {
     let settings = hiss();
     let mut mixer = Mixer::new(SR);
     let meter = mixer.meter();
     let mut swept = Swept::new();
     mixer.set_band(Some(band(&settings, 4)), &mut swept);
-    mixer.set_gains(Gains::of(&settings));
+    let volume = 0.5;
+    mixer.set_gains(Gains {
+        volume,
+        ..Gains::of(&settings)
+    });
     let (mut seen, mut frames) = (0, Vec::new());
     render(&mut mixer, SR as usize / 2);
     meter.read_since(&mut seen, &mut frames);
@@ -507,7 +578,11 @@ fn the_meter_reads_the_agcs_input_its_held_gain_and_what_was_played() {
         "{input} at the AGC, against {at_strength}"
     );
     assert!(held < 0.8, "the AGC held the station at {held}");
-    assert_eq!(output, loudest(&played));
+    let heard = loudest(&played) / volume as f32;
+    assert!(
+        (output / heard - 1.0).abs() < 1e-5,
+        "{output} against {heard}"
+    );
 }
 
 /// The meter reads the gain the AGC's hang holds, not the instants its

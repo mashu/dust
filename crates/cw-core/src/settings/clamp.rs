@@ -101,9 +101,12 @@ impl TrainingSettings {
         b.qsb_rate_hz = b.qsb_rate_hz.clamp(QSB_RATE_MIN_HZ, QSB_RATE_MAX_HZ);
         b.qrn_level = b.qrn_level.clamp(0.0, 1.0);
         b.noise_level = crate::band::whole_db_noise_level(b.noise_level.clamp(0.0, 1.0));
+        // A slider rounding a drag just under 0 gives -0, which reads as a
+        // change of threshold where there is none.
         b.agc_threshold_db = b
             .agc_threshold_db
-            .clamp(AGC_THRESHOLD_MIN_DB, AGC_THRESHOLD_MAX_DB);
+            .clamp(AGC_THRESHOLD_MIN_DB, AGC_THRESHOLD_MAX_DB)
+            + 0.0;
         b.rf_gain_db = b.rf_gain_db.clamp(RF_GAIN_MIN_DB, RF_GAIN_MAX_DB);
 
         let a = &mut self.auto_level;
