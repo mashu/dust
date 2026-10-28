@@ -308,7 +308,7 @@ button { cursor: pointer; touch-action: manipulation; background: none; border: 
 code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
 .group-text { font-family: "Dust Zero", "IBM Plex Mono", ui-monospace, monospace; }
 
-h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title {
+h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
   font-family: Fraunces, Georgia, serif;
   font-optical-sizing: auto;
 }
@@ -533,19 +533,37 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .credits-toggle .card-title
 .card-note { margin: 0.1rem 0 0; font-size: 0.78rem; color: var(--ink-dim); }
 .legal .muted { margin: 0; }
 .privacy-link, .credit-link { color: var(--copper-deep); font-weight: 600; }
-/* Credits: a group per role, a line per person, the callsign beside them.
-   The card folds to its head, which is the button that opens it. */
-.credits-toggle { width: 100%; padding: 0; text-align: left; }
-.credits-toggle:not(.open) { margin-bottom: 0; }
-.credits-toggle .card-title, .credits-toggle .card-note { display: block; }
-.credits-toggle .icon {
+/* A card that folds to its head. Privacy and Credits have nothing of their
+   own to set, and their head is the button that opens them; a settings card
+   opens by its icon, title or note, or the chevron at the right of its head,
+   and shows its tools beside the chevron only while it is open. */
+.fold-title { margin: 0; font: inherit; }
+.fold-head { width: 100%; padding: 0; text-align: left; }
+.fold-head:not(.open), .card-head.folded { margin-bottom: 0; }
+.card-head.folded + .help-note { margin-top: 0.85rem; }
+.fold-head .card-title, .fold-head .card-note { display: block; }
+.card-head.folds .card-head-main { cursor: pointer; }
+/* Wrapped under the title on the narrowest screens, the tools keep to the
+   right, the chevron where it was before the card opened. */
+.card-head.folds .card-tools { margin-left: auto; }
+/* As big as the head's other buttons, its chevron in line with the head
+   buttons' chevrons at the card's right edge. */
+.fold-btn { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; margin-right: -0.575rem; padding: 0; }
+.fold-head .icon, .fold-btn .icon {
   width: 1.1rem;
   height: 1.1rem;
   color: var(--ink-dim);
   transition: transform 0.2s var(--ease);
 }
-.credits-toggle:hover .icon { color: var(--copper); }
-.credits-toggle.open .icon { transform: rotate(180deg); }
+/* Lit by what folds the card, not by the help or the reset beside it. */
+.fold-head:hover .icon, .fold-btn:hover .icon { color: var(--copper); }
+/* A rule of its own: an engine that cannot read :has drops only this one,
+   and lights the chevron when it is itself pointed at, as before. */
+.card-head.folds .card-head-main:hover:not(:has(.help-btn:hover)) + .card-tools .fold-btn .icon {
+  color: var(--copper);
+}
+.fold-head.open .icon, .fold-btn.open .icon { transform: rotate(180deg); }
+/* Credits: a group per role, a line per person, the callsign beside them. */
 .credit-group { display: grid; gap: 0.5rem; }
 .credit { display: grid; gap: 0.1rem; }
 .credit-name {

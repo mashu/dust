@@ -25,8 +25,8 @@ use crate::ui::paddle::PaddlePad;
 use crate::ui::settings_charset::CharsetCard;
 use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
-    CardHead, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange, SliderField, Switch,
-    control_id, db_share, html_bool, range_label, share_db,
+    CardHead, FoldPanel, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange,
+    SliderField, Switch, control_id, db_share, html_bool, range_label, share_db,
 };
 
 /// What an aim is called on screen.
@@ -65,7 +65,8 @@ fn keyer_description(mode: KeyerMode) -> &'static str {
 }
 
 /// A settings card's head: its icon, title and note, the button that puts
-/// the section back to its defaults, and its ⓘ with what the options do.
+/// the section back to its defaults, and its ⓘ with what the options do;
+/// for a card that folds, whether it is open ([`CardHead`]).
 #[component]
 fn SectionHead(
     icon: IconName,
@@ -74,9 +75,10 @@ fn SectionHead(
     settings: Signal<TrainingSettings>,
     section: SettingsSection,
     help: Element,
+    #[props(default)] fold: Option<Signal<bool>>,
 ) -> Element {
     rsx! {
-        CardHead { icon, title, note, help,
+        CardHead { icon, title, note, help, fold,
             SectionReset {
                 label: title.to_lowercase(),
                 on_reset: move |()| settings.write().reset_section(section),
@@ -923,6 +925,7 @@ fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
         f64::from(RECOGNITION_BAND_MIN_MS),
         f64::from(RECOGNITION_BAND_MAX_MS),
     );
+    let open = use_signal(|| false);
     rsx! {
         div { class: "card stack-sm",
             SectionHead {
@@ -932,38 +935,41 @@ fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
                 settings,
                 section: SettingsSection::Recognition,
                 help: help::recognition(),
+                fold: open,
             }
-            div { class: "field-grid",
-                NumberField {
-                    label: "Fast under",
-                    value: f64::from(fast),
-                    min: low,
-                    max: high,
-                    step: 50.0,
-                    unit: "ms",
-                    onchange: edge(RecognitionEdge::Fast),
+            FoldPanel { title: "Recognition", open,
+                div { class: "field-grid",
+                    NumberField {
+                        label: "Fast under",
+                        value: f64::from(fast),
+                        min: low,
+                        max: high,
+                        step: 50.0,
+                        unit: "ms",
+                        onchange: edge(RecognitionEdge::Fast),
+                    }
+                    NumberField {
+                        label: "ICR under",
+                        value: f64::from(icr),
+                        min: low,
+                        max: high,
+                        step: 50.0,
+                        unit: "ms",
+                        onchange: edge(RecognitionEdge::Icr),
+                    }
+                    NumberField {
+                        label: "Slow under",
+                        value: f64::from(slow),
+                        min: low,
+                        max: high,
+                        step: 50.0,
+                        unit: "ms",
+                        onchange: edge(RecognitionEdge::Slow),
+                    }
                 }
-                NumberField {
-                    label: "ICR under",
-                    value: f64::from(icr),
-                    min: low,
-                    max: high,
-                    step: 50.0,
-                    unit: "ms",
-                    onchange: edge(RecognitionEdge::Icr),
+                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                    "Green under {fast} ms, yellow (ICR) under {icr} ms, orange under {slow} ms, red from {slow} ms: the time from a character's sound going out to your speaker or headphones to your key."
                 }
-                NumberField {
-                    label: "Slow under",
-                    value: f64::from(slow),
-                    min: low,
-                    max: high,
-                    step: 50.0,
-                    unit: "ms",
-                    onchange: edge(RecognitionEdge::Slow),
-                }
-            }
-            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                "Green under {fast} ms, yellow (ICR) under {icr} ms, orange under {slow} ms, red from {slow} ms: the time from a character's sound going out to your speaker or headphones to your key."
             }
         }
     }
@@ -973,6 +979,7 @@ fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
 fn SamplingCard(settings: Signal<TrainingSettings>) -> Element {
     let auto = use_auto_level(settings);
     let a = auto.read();
+    let open = use_signal(|| false);
     rsx! {
         div { class: "card stack-sm",
             SectionHead {
@@ -982,30 +989,33 @@ fn SamplingCard(settings: Signal<TrainingSettings>) -> Element {
                 settings,
                 section: SettingsSection::CharacterSampling,
                 help: help::sampling(),
+                fold: open,
             }
-            div { class: "field-grid",
-                NumberField {
-                    label: "Error-weight strength",
-                    value: a.error_weight_strength,
-                    min: 0.0,
-                    max: ERROR_WEIGHT_MAX,
-                    step: 0.5,
-                    onchange: move |v| settings.write().auto_level.error_weight_strength = v,
+            FoldPanel { title: "Character sampling", open,
+                div { class: "field-grid",
+                    NumberField {
+                        label: "Error-weight strength",
+                        value: a.error_weight_strength,
+                        min: 0.0,
+                        max: ERROR_WEIGHT_MAX,
+                        step: 0.5,
+                        onchange: move |v| settings.write().auto_level.error_weight_strength = v,
+                    }
+                    NumberField {
+                        label: "Coverage strength",
+                        value: a.char_sampling_coverage_strength,
+                        min: 0.0,
+                        max: COVERAGE_STRENGTH_MAX,
+                        step: 0.5,
+                        onchange: move |v| settings.write().auto_level.char_sampling_coverage_strength = v,
+                    }
                 }
-                NumberField {
-                    label: "Coverage strength",
-                    value: a.char_sampling_coverage_strength,
-                    min: 0.0,
-                    max: COVERAGE_STRENGTH_MAX,
-                    step: 0.5,
-                    onchange: move |v| settings.write().auto_level.char_sampling_coverage_strength = v,
+                Switch {
+                    title: "Thompson sampling",
+                    description: "Draws from each letter's uncertainty instead of its average error rate.",
+                    checked: a.char_sampling_thompson,
+                    onchange: move |on| settings.write().auto_level.char_sampling_thompson = on,
                 }
-            }
-            Switch {
-                title: "Thompson sampling",
-                description: "Draws from each letter's uncertainty instead of its average error rate.",
-                checked: a.char_sampling_thompson,
-                onchange: move |on| settings.write().auto_level.char_sampling_thompson = on,
             }
         }
     }

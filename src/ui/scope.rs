@@ -590,7 +590,7 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
                 p { id: "scope-over-hiss", class: "muted scope-legend", "{note}" }
             }
             p { class: "muted scope-legend",
-                "Top, RF: the band as it reaches the AGC, dashed where the AGC starts, dotted at the band's own hiss. Below, AF: what the receiver puts out before the volume, against where the limiter starts at full volume. The last seven seconds; the AGC lamp is lit while the AGC holds the gain down."
+                "Top, RF: the band as it reaches the AGC, dashed where the AGC starts, dotted at the band's own hiss. Below, AF: what the receiver puts out before the volume, against where the limiter starts at full volume. With the AGC off, AF is RF moved down; with it on, the stations come out level and the hiss between them comes up with them. The last seven seconds; the AGC lamp is lit while the AGC holds the gain down."
             }
         }
     }
