@@ -177,6 +177,16 @@ impl Mixer {
             && self.send.as_ref().is_none_or(|send| !send.is_sounding())
     }
 
+    /// Whether a send is still to be heard, or riding out its release: what
+    /// a stream moved to another device would cut off.
+    #[cfg(feature = "native-audio")]
+    pub fn is_sending(&self) -> bool {
+        self.send
+            .iter()
+            .chain(&self.retiring)
+            .any(SendVoice::is_sounding)
+    }
+
     /// How long after it starts a send goes to the output, in seconds: the
     /// receiver's look-ahead.
     pub fn lookahead_sec(&self) -> f64 {

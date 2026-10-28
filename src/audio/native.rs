@@ -19,7 +19,7 @@ use super::ToneRequest;
 use super::mixer::{BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept};
 use super::shape::Gains;
 use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming};
-use state::{PlayerState, ToneSignal, went_silent};
+use state::{PlayerState, ToneSignal, moved_off_default, went_silent};
 
 /// The furthest behind the callback the speaker is believed to be. A host
 /// that reports more is reporting nonsense, and a send would wait for it.
@@ -52,6 +52,8 @@ pub struct MorsePlayer {
     opened_at: Instant,
     /// When the device last refused to open.
     refused_at: Option<Instant>,
+    /// When the system's default output was last asked after.
+    default_asked: Option<Instant>,
     /// When the send playing is heard from, as this player said it would
     /// be: what a send asked to start at a given time takes over from it
     /// against.
@@ -75,6 +77,8 @@ pub struct MorsePlayer {
 /// found not to have been called for a while is taken for broken too.
 struct OpenStream {
     _stream: cpal::Stream,
+    /// The device's name, where it has one to read.
+    device: Option<String>,
     failed: Arc<AtomicBool>,
     beat: Arc<AtomicU32>,
     /// The count last seen, and when it was seen to move.
@@ -166,6 +170,7 @@ impl MorsePlayer {
             stream: None,
             opened_at: Instant::now(),
             refused_at: None,
+            default_asked: None,
             heard_at: None,
             gains: Gains::UNITY,
             meter,
@@ -222,6 +227,29 @@ impl MorsePlayer {
         self.open(&device, &supported)
     }
 
+    /// Let the stream go if the system's default output has changed since it
+    /// opened, for the next use to open on the new one: headphones plugged
+    /// in or a headset connected mid-session, which a stream on Windows or
+    /// macOS does not follow of itself. Asked at most once a
+    /// [`REOPEN_AFTER`], and never under a send, so none is cut off; the band
+    /// and whatever else the mixer holds carry on in the new stream.
+    fn follow_default(&mut self) {
+        let due = self
+            .default_asked
+            .is_none_or(|at| at.elapsed() >= REOPEN_AFTER);
+        if !due || self.stream.is_none() || self.mixer().is_sending() {
+            return;
+        }
+        self.default_asked = Some(Instant::now());
+        let default = cpal::default_host()
+            .default_output_device()
+            .and_then(|device| device.name().ok());
+        let opened = self.stream.as_ref().and_then(|open| open.device.as_deref());
+        if moved_off_default(opened, default.as_deref()) {
+            self.stream = None;
+        }
+    }
+
     /// [`MorsePlayer::ensure_output`], unless the device refused a moment
     /// ago: a squeeze of the paddle or a slider being dragged would otherwise
     /// probe it again on every event.
@@ -267,6 +295,7 @@ impl MorseBackend for MorsePlayer {
     /// Opens the stream first, so a device that changed rate is known about
     /// before the band is built at the old one.
     fn apply_band(&mut self, settings: &TrainingSettings) {
+        self.follow_default();
         // A stream that will not open is reported by the next send.
         self.ensure_output_unless_refused();
         let gains = Gains::of(settings);
@@ -559,6 +588,7 @@ fn open_stream(
             Ok(stream) => {
                 return Ok(OpenStream {
                     _stream: stream,
+                    device: device.name().ok(),
                     failed,
                     beat,
                     seen: (0, Instant::now()),

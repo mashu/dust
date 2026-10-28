@@ -23,6 +23,10 @@ pub struct Meter {
 }
 
 impl Meter {
+    /// How many of its last frames it keeps for a reader ([`KEPT`]).
+    #[cfg(any(feature = "web", test))]
+    pub const KEPT: usize = KEPT;
+
     pub fn new() -> Self {
         let zeros = || std::array::from_fn(|_| AtomicU32::new(0));
         Self {

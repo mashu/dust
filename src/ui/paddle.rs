@@ -28,80 +28,48 @@ const HEARD_KEEP: usize = 32;
 /// Whether the key events that reach the page's root are what key the
 /// paddles. The desktop build hears them from its window instead, so a USB
 /// keyer works without the webview's focus and without waiting on its IPC,
-/// and the web build from the whole document, so they work with nothing
-/// focused at all. Tests, and the mobile builds, drive the root.
-const ROOT_KEYS_THE_PADDLES: bool =
-    cfg!(test) || !(cfg!(feature = "desktop") || cfg!(feature = "web"));
+/// and the web and mobile builds from the whole document, so they work with
+/// nothing focused at all: a HID paddle on a phone keys with nothing tapped
+/// first. Tests drive the root.
+const ROOT_KEYS_THE_PADDLES: bool = cfg!(test);
 
-/// X11 key auto-repeat is a fake release+press pair. tao on Linux never marks
-/// those as `repeat`, so a leftover press after you let go keeps the keyer
-/// running. Wait this long for the fake press; a real re-squeeze is slower.
-/// Elsewhere tao marks a repeat as one, and a release is taken at once.
-#[cfg(all(feature = "desktop", target_os = "linux", not(test)))]
-const REPEAT_RELEASE_MS: u64 = 16;
-
-/// Held-paddle contacts after X11 auto-repeat has been stripped. Only the
+/// Which paddle contacts are closed, as the desktop build's raw key events
+/// leave them. tao on Linux never marks a held key's repeated presses as
+/// repeats, so a press of a contact already closed is dropped; GTK asks X11
+/// for detectable auto-repeat, and Wayland repeats in the client, so a held
+/// key sends one release, at its real key-up, which is taken at once. Only the
 /// desktop build listens to raw key events, so only it — and the tests — need
 /// one.
 #[cfg(any(feature = "desktop", test))]
 #[derive(Clone, Copy, Debug, Default)]
-struct RepeatFilter {
+struct Contacts {
     dit: bool,
     dah: bool,
-    dit_release: u64,
-    dah_release: u64,
 }
 
 #[cfg(any(feature = "desktop", test))]
-impl RepeatFilter {
-    fn slot(&mut self, paddle: Paddle) -> (&mut bool, &mut u64) {
+impl Contacts {
+    fn slot(&mut self, paddle: Paddle) -> &mut bool {
         match paddle {
-            Paddle::Dit => (&mut self.dit, &mut self.dit_release),
-            Paddle::Dah => (&mut self.dah, &mut self.dah_release),
+            Paddle::Dit => &mut self.dit,
+            Paddle::Dah => &mut self.dah,
         }
     }
 
-    /// A press that is not the matching half of a fake release. `true` means
-    /// the paddle just closed.
+    /// Whether a press closed the contact, rather than repeated one held.
     fn press(&mut self, paddle: Paddle) -> bool {
-        let (down, generation) = self.slot(paddle);
-        *generation = generation.wrapping_add(1);
-        if *down {
-            false
-        } else {
-            *down = true;
-            true
-        }
+        !std::mem::replace(self.slot(paddle), true)
     }
 
-    /// Start a delayed release. The generation is what [`confirm_release`]
-    /// needs so a following fake press can cancel it.
-    fn release(&mut self, paddle: Paddle) -> Option<u64> {
-        let (down, generation) = self.slot(paddle);
-        if !*down {
-            return None;
-        }
-        *generation = generation.wrapping_add(1);
-        Some(*generation)
-    }
-
-    fn confirm_release(&mut self, paddle: Paddle, generation: u64) -> bool {
-        let (down, current) = self.slot(paddle);
-        if *current != generation {
-            return false;
-        }
-        *down = false;
-        true
+    /// Whether a release opened the contact, rather than one already open.
+    fn release(&mut self, paddle: Paddle) -> bool {
+        std::mem::replace(self.slot(paddle), false)
     }
 
     /// Every contact open, as when the window lost the focus and the key
-    /// releases with it. A release still waiting out a fake press is void.
+    /// releases with it.
     fn open_all(&mut self) {
-        for paddle in [Paddle::Dit, Paddle::Dah] {
-            let (down, generation) = self.slot(paddle);
-            *down = false;
-            *generation = generation.wrapping_add(1);
-        }
+        *self = Self::default();
     }
 }
 
@@ -227,6 +195,7 @@ pub fn use_paddle_keys(
     use_page_hidden(PADDLES_HIDDEN, move || keys.release_all());
     listen_native_paddles(keys);
     listen_document_paddles(keys);
+    listen_page_paddles(keys);
     keys
 }
 
@@ -295,7 +264,8 @@ impl PaddleKeys {
         self.release_at(paddle, mono_ms());
     }
 
-    /// A paddle opened at `at`, which a release confirmed late is timed by.
+    /// A paddle opened at `at`: both of them at the one moment, when every
+    /// contact opens together.
     fn release_at(mut self, paddle: Paddle, at: u64) {
         let out = self.keyer.write().release(paddle, at);
         self.act(out);
@@ -342,8 +312,8 @@ impl PaddleKeys {
     }
 
     /// The same for a screen of fields, the run's Call and Exchange, where a
-    /// word space keyed — the paddles quiet for six dits after a letter —
-    /// does what Space does: `space`.
+    /// word space keyed — the paddles quiet for six dits after a letter's
+    /// last element — does what Space does: `space`.
     pub fn use_fields(
         self,
         open: bool,
@@ -497,33 +467,16 @@ impl PaddleKeys {
 fn listen_native_paddles(keys: PaddleKeys) {
     use std::cell::RefCell;
 
-    let contacts = use_hook(|| Rc::new(RefCell::new(RepeatFilter::default())));
+    let contacts = use_hook(|| Rc::new(RefCell::new(Contacts::default())));
     let unfocused = Rc::clone(&contacts);
     let dispatch = use_callback(move |(paddle, pressed): (Paddle, bool)| {
         if pressed {
             if contacts.borrow_mut().press(paddle) {
                 keys.press(paddle);
             }
-            return;
+        } else if contacts.borrow_mut().release(paddle) {
+            keys.release(paddle);
         }
-        let Some(generation) = contacts.borrow_mut().release(paddle) else {
-            return;
-        };
-        // When the key opened: a release confirmed late is timed from then.
-        let at = mono_ms();
-        let contacts = Rc::clone(&contacts);
-        let confirm = move || {
-            if contacts.borrow_mut().confirm_release(paddle, generation) {
-                keys.release_at(paddle, at);
-            }
-        };
-        #[cfg(target_os = "linux")]
-        dioxus::core::spawn_forever(async move {
-            sleep_keyer(REPEAT_RELEASE_MS).await;
-            confirm();
-        });
-        #[cfg(not(target_os = "linux"))]
-        confirm();
     });
     dioxus::desktop::use_wry_event_handler(move |event, _| {
         use dioxus::desktop::tao::event::{ElementState, Event, WindowEvent};
@@ -638,12 +591,84 @@ fn listen_document_paddles(keys: PaddleKeys) {
 #[cfg(not(feature = "web"))]
 fn listen_document_paddles(_keys: PaddleKeys) {}
 
+/// The mobile builds' webview delivers keys as a browser does, to whatever
+/// has focus, and a tapped button takes none on iOS. So, as the web build's
+/// ([`listen_document_paddles`]), they hear the paddles from the whole
+/// document: the page's script keeps a bracket from the page and hands it
+/// over, a press with Ctrl, Alt or Meta down being a shortcut, a repeat being
+/// nothing, and a release always heard; and the window losing the focus, or
+/// Command let go, opens both.
+#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+const PAGE_PADDLES_SCRIPT: &str = r#"if (window.__dustPaddleKeys) {
+    window.__dustPaddleKeys();
+}
+const bracket = (e) => e.key === "[" || e.key === "]" || e.code === "BracketLeft" || e.code === "BracketRight";
+const shortcut = (e) => e.ctrlKey || e.altKey || e.metaKey;
+const down = (e) => {
+    if (bracket(e) && !shortcut(e)) {
+        e.preventDefault();
+        if (!e.repeat) {
+            dioxus.send(["down", e.key, e.code]);
+        }
+    }
+};
+const up = (e) => {
+    if (bracket(e)) {
+        e.preventDefault();
+        dioxus.send(["up", e.key, e.code]);
+    } else if (e.key === "Meta") {
+        dioxus.send(["open", "", ""]);
+    }
+};
+const blur = () => dioxus.send(["open", "", ""]);
+document.addEventListener("keydown", down);
+document.addEventListener("keyup", up);
+window.addEventListener("blur", blur);
+window.__dustPaddleKeys = () => {
+    document.removeEventListener("keydown", down);
+    document.removeEventListener("keyup", up);
+    window.removeEventListener("blur", blur);
+    window.__dustPaddleKeys = null;
+};"#;
+
+/// The script that takes the page's paddle listener off again.
+#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+const STOP_PAGE_PADDLES: &str = r#"if (window.__dustPaddleKeys) {
+    window.__dustPaddleKeys();
+}"#;
+
+#[cfg(all(not(feature = "desktop"), not(feature = "web"), not(test)))]
+fn listen_page_paddles(keys: PaddleKeys) {
+    use_hook(move || {
+        spawn(async move {
+            let mut page = document::eval(PAGE_PADDLES_SCRIPT);
+            while let Ok((kind, key, code)) = page.recv::<(String, String, String)>().await {
+                let swap = keys.settings.peek().playback.paddle_swap;
+                match (kind.as_str(), paddle_for_key(&key, &code, false, swap)) {
+                    ("down", Some(paddle)) => keys.press(paddle),
+                    ("up", Some(paddle)) => keys.release(paddle),
+                    ("open", _) => keys.release_all(),
+                    _ => {}
+                }
+            }
+        })
+    });
+    use_drop(|| {
+        dioxus::core::spawn_forever(async {
+            let _ = document::eval(STOP_PAGE_PADDLES).await;
+        });
+    });
+}
+
+#[cfg(not(all(not(feature = "desktop"), not(feature = "web"), not(test))))]
+fn listen_page_paddles(_keys: PaddleKeys) {}
+
 /// How to key with the paddles in `mode`: what the practice pad and the
 /// training screen both tell you.
 pub fn paddle_hint(mode: KeyerMode) -> &'static str {
     match mode {
         KeyerMode::Straight => {
-            "Hold [ or ] as a straight key — a short press is a dit, a long one a dah."
+            "Hold [ or ] as a straight key — a short press is a dit, a long one a dah, as long as the key speed says."
         }
         KeyerMode::Ultimatic => {
             "Hold [ for dits and ] for dahs. The last paddle you close repeats — squeeze for the middle of X or P."
@@ -694,39 +719,59 @@ pub fn PaddlePad(mode: KeyerMode) -> Element {
 mod tests {
     use super::*;
 
+    /// The mobile builds' page listener keeps the brackets from the page and
+    /// hands them over, a shortcut press and a repeat aside, every release
+    /// heard, the focus lost opening both; and it comes off again, one left
+    /// before taken off first.
     #[test]
-    fn a_fake_press_after_release_cancels_the_up() {
-        let mut contacts = RepeatFilter::default();
+    fn the_page_hands_over_the_paddles() {
+        let script = PAGE_PADDLES_SCRIPT;
+        assert!(script.starts_with(STOP_PAGE_PADDLES), "{script}");
+        for listened in [
+            r#"document.addEventListener("keydown", down)"#,
+            r#"document.addEventListener("keyup", up)"#,
+            r#"window.addEventListener("blur", blur)"#,
+            r#"document.removeEventListener("keydown", down)"#,
+            r#"document.removeEventListener("keyup", up)"#,
+            r#"window.removeEventListener("blur", blur)"#,
+            "if (bracket(e) && !shortcut(e))",
+            "if (!e.repeat)",
+        ] {
+            assert!(script.contains(listened), "{listened}");
+        }
+        assert_eq!(paddle_for_key("[", "", false, false), Some(Paddle::Dit));
+        assert_eq!(
+            paddle_for_key("", "BracketRight", false, false),
+            Some(Paddle::Dah)
+        );
+    }
+
+    #[test]
+    fn the_straight_key_says_the_key_speed_times_it() {
+        assert!(paddle_hint(KeyerMode::Straight).contains("key speed"));
+    }
+
+    /// A held key's repeated presses close its contact once, and its one
+    /// release opens it at once.
+    #[test]
+    fn a_held_key_closes_its_contact_once_and_its_release_opens_it() {
+        let mut contacts = Contacts::default();
         assert!(contacts.press(Paddle::Dah));
-        assert!(!contacts.press(Paddle::Dah));
-        let generation = contacts.release(Paddle::Dah).expect("was down");
-        assert!(!contacts.press(Paddle::Dah));
-        assert!(!contacts.confirm_release(Paddle::Dah, generation));
-        let later = contacts.release(Paddle::Dah).expect("still down");
-        assert!(contacts.confirm_release(Paddle::Dah, later));
-        assert!(contacts.release(Paddle::Dah).is_none());
+        assert!(!contacts.press(Paddle::Dah), "repeated");
+        assert!(contacts.release(Paddle::Dah));
+        assert!(!contacts.release(Paddle::Dah), "already open");
+        assert!(contacts.press(Paddle::Dah));
     }
 
-    #[test]
-    fn a_real_release_is_confirmed_when_no_press_follows() {
-        let mut contacts = RepeatFilter::default();
-        assert!(contacts.press(Paddle::Dit));
-        let generation = contacts.release(Paddle::Dit).expect("was down");
-        assert!(contacts.confirm_release(Paddle::Dit, generation));
-        assert!(contacts.press(Paddle::Dit));
-    }
-
-    /// The window losing the focus opens every contact, and a release that
-    /// was waiting out a fake press is void: the next press is a press.
+    /// The window losing the focus opens every contact: the next press is a
+    /// press.
     #[test]
     fn losing_the_focus_opens_every_contact() {
-        let mut contacts = RepeatFilter::default();
+        let mut contacts = Contacts::default();
         assert!(contacts.press(Paddle::Dah));
-        let waiting = contacts.release(Paddle::Dah).expect("was down");
         contacts.open_all();
-        assert!(!contacts.confirm_release(Paddle::Dah, waiting));
         assert!(contacts.press(Paddle::Dah), "open, so a press closes it");
-        assert!(contacts.release(Paddle::Dit).is_none(), "never closed");
+        assert!(!contacts.release(Paddle::Dit), "never closed");
     }
 
     #[test]

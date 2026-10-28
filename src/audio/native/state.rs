@@ -70,6 +70,14 @@ pub fn went_silent(seen: &mut (u32, Instant), beat: u32, now: Instant) -> bool {
     now.saturating_duration_since(seen.1) > SILENT_AFTER
 }
 
+/// Whether a stream opened on the device named `opened` should move to the
+/// default now named `default`: only when both names are known and differ,
+/// so a device that cannot say its name never has the stream reopened over
+/// and over.
+pub fn moved_off_default(opened: Option<&str>, default: Option<&str>) -> bool {
+    matches!((opened, default), (Some(opened), Some(default)) if opened != default)
+}
+
 /// What the stream tells a waiter.
 pub struct ToneSignal {
     ticket: Ticket,
@@ -136,6 +144,14 @@ mod tests {
     /// than a host's longest buffer and then some, counted from when it was
     /// last seen to be called; never for a long gap between looks at one
     /// that was called in it.
+    #[test]
+    fn a_stream_moves_only_when_the_default_does() {
+        assert!(!moved_off_default(Some("Speakers"), Some("Speakers")));
+        assert!(moved_off_default(Some("Speakers"), Some("Headphones")));
+        assert!(!moved_off_default(None, Some("Headphones")));
+        assert!(!moved_off_default(Some("Speakers"), None));
+    }
+
     #[test]
     fn a_stream_left_uncalled_has_gone_silent() {
         let opened = Instant::now();

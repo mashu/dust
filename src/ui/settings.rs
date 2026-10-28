@@ -51,7 +51,7 @@ const KEYER_MODES: [(KeyerMode, &str); 4] = [
 fn keyer_description(mode: KeyerMode) -> &'static str {
     match mode {
         KeyerMode::Straight => {
-            "One contact. Hold [ or ] — a short press is a dit, a long one a dah. You time the elements."
+            "One contact. Hold [ or ] — a short press is a dit, a long one a dah. You time the elements: set the key speed to the speed you send at, as it decides where a dit becomes a dah and how long a pause ends a letter."
         }
         KeyerMode::IambicA => {
             "Hold a paddle and it repeats at the key speed you set. Squeeze both to alternate. Let go and the element you were on finishes, then it stops."

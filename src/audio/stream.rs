@@ -178,12 +178,22 @@ impl<N: Clone> ReceiverStream<N> {
         (self.time(self.next), taken)
     }
 
-    /// The stretches over by `now`, let go of.
+    /// The stretches over by `now`, let go of; and the meter's frames heard
+    /// longer ago than the meter keeps its own ([`Meter::KEPT`]), as its
+    /// ring lets them go, so that with no scope to read them none pile up.
     pub fn played_by(&mut self, now: f64) -> Vec<N> {
         let now = self.sample_at(now);
         let mut over = Vec::new();
         while self.queued.front().is_some_and(|queued| queued.ends <= now) {
             over.extend(self.queued.pop_front().map(|queued| queued.node));
+        }
+        let kept = self.frame_len * Meter::KEPT as u64;
+        while self
+            .frames
+            .front()
+            .is_some_and(|(ends, _)| ends + kept <= now)
+        {
+            self.frames.pop_front();
         }
         over
     }
@@ -319,6 +329,27 @@ mod tests {
             }
             out
         }
+    }
+
+    /// The meter's frames are held for a reader only as long as the meter
+    /// keeps its own: a minute played with none taken, the scope not shown,
+    /// holds no more than that, and a reader then gets the newest of them.
+    #[test]
+    fn untaken_frames_are_let_go_as_the_meters_own_are() {
+        let settings = settings();
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut browser = Browser::default();
+        for second in 1..=60 {
+            let now = f64::from(second);
+            let _ = stream.render_until(now - 1.0, now, |starts, samples| {
+                browser.play(starts, samples)
+            });
+            let _ = stream.played_by(now - 0.5);
+        }
+        let _ = stream.played_by(60.0);
+        let mut frames = Vec::new();
+        stream.take_frames(60.0, &mut frames);
+        assert_eq!(frames.len(), Meter::KEPT, "frames held for no one");
     }
 
     /// A change made mid-stretch, the queue a good way ahead of it, plays
