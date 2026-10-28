@@ -182,21 +182,17 @@ pub(crate) fn rf_trace_step(settings: &TrainingSettings, over_db: f64) -> String
 }
 
 /// Where the scope marks the band's hiss, and what it says of the threshold
-/// against it, for the knee and the hiss `heard`, the threshold raised by
-/// `raise` and the RF gain at `rf_gain`: the hiss as it reaches the AGC, a
+/// against it, for the knee and the hiss `heard` and the RF gain, the
+/// threshold and the AGC `settings` set: the hiss as it reaches the AGC, a
 /// steady tone's worth of it, in decibels over the lowest threshold, so the
 /// mark sits as far under the line at its lowest as the threshold stands
 /// over the hiss; and, with the AGC on, how far the threshold stands over
 /// the hiss, RMS to RMS, as a station's S/N is read. Neither with no hiss.
-fn hiss_marks(
-    heard: KneeHeard,
-    raise: f64,
-    rf_gain: f64,
-    agc_on: bool,
-) -> (Option<f64>, Option<f64>) {
-    let hiss = heard.hiss * rf_gain;
+fn hiss_marks(heard: KneeHeard, settings: &TrainingSettings) -> (Option<f64>, Option<f64>) {
+    let hiss = heard.hiss * settings.rf_gain();
     let mark = threshold_over_hiss_db(heard.knee, hiss).map(|over| -over);
-    let over = threshold_over_hiss_db(heard.knee * raise, hiss).filter(|_| agc_on);
+    let raised = heard.knee * threshold_raise(&settings.band);
+    let over = threshold_over_hiss_db(raised, hiss).filter(|_| settings.band.agc_enabled);
     (mark, over)
 }
 
@@ -206,12 +202,7 @@ fn hiss_marks(
 fn marks_of(settings: &TrainingSettings) -> (Option<f64>, Option<f64>) {
     let (on, receiver) = knee_asked(settings);
     agc_knee(&on, &receiver).map_or((None, None), |knee| {
-        hiss_marks(
-            KneeHeard::of(&on, &receiver, knee),
-            threshold_raise(&settings.band),
-            settings.rf_gain(),
-            settings.band.agc_enabled,
-        )
+        hiss_marks(KneeHeard::of(&on, &receiver, knee), settings)
     })
 }
 
@@ -448,7 +439,7 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
     // measured its knee; the line follows the threshold, which only raises
     // it, at once, and the hiss mark the RF gain.
     let band_knee = try_use_context::<BandKnee>();
-    let (heard, raise, agc_on, rf_gain) = use_memo(move || {
+    let (heard, raise, agc_on, (hiss_db, over_hiss)) = use_memo(move || {
         let settings = settings.read();
         let heard = match band_knee {
             Some(BandKnee(heard)) => heard(),
@@ -463,7 +454,7 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
             heard,
             threshold_raise(&settings.band),
             settings.band.agc_enabled,
-            settings.rf_gain(),
+            heard.map_or((None, None), |heard| hiss_marks(heard, &settings)),
         )
     })();
     // Nothing is placed against a line not yet known.
@@ -473,9 +464,6 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
     let frames = if known { &kept.frames } else { &empty };
     let columns = if known { kept.columns() } else { Vec::new() };
     let knee = heard.map_or(1.0, |heard| heard.knee);
-    let (hiss_db, over_hiss) = heard.map_or((None, None), |heard| {
-        hiss_marks(heard, raise, rf_gain, agc_on)
-    });
     let Drawing {
         rf,
         af,

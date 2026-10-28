@@ -510,6 +510,48 @@ fn the_meter_reads_the_agcs_input_its_held_gain_and_what_was_played() {
     assert_eq!(output, loudest(&played));
 }
 
+/// The meter reads the gain the AGC's hang holds, not the instants its
+/// limiter or ceiling squash a crash: on the default band's static alone,
+/// read as the scope's lamp reads it, five frames on end a decibel or more
+/// down, it lights for the odd long crash, a few times a minute, where the
+/// AGC's whole gain would flicker with the crackle some thirty.
+#[test]
+fn the_meter_holds_the_band_down_for_the_hang_not_the_crackle() {
+    let mut settings = TrainingSettings::default();
+    settings.band.qsb_enabled = false;
+    let settings = settings.clamp();
+    assert!(settings.band.qrn_enabled);
+    let lamp = 10f32.powf(-1.0 / 20.0);
+    let mut flashes = 0;
+    for seed in [1, 2, 3] {
+        let mut mixer = Mixer::new(SR);
+        let meter = mixer.meter();
+        let mut swept = Swept::new();
+        mixer.set_band(Some(band(&settings, seed)), &mut swept);
+        mixer.set_gains(Gains::of(&settings));
+        render(&mut mixer, SR as usize / 2);
+        let (mut seen, mut frames) = (0, Vec::new());
+        meter.read_since(&mut seen, &mut frames);
+        frames.clear();
+        let mut lit = false;
+        // Twenty seconds, a second's hundred frames at a time.
+        for _ in 0..20 {
+            render(&mut mixer, SR as usize);
+            meter.read_since(&mut seen, &mut frames);
+            for poll in frames.chunks(5) {
+                let most = poll.iter().fold(0.0f32, |a, f| a.max(f.held));
+                flashes += usize::from(most <= lamp && !lit);
+                lit = most <= lamp;
+            }
+            frames.clear();
+        }
+    }
+    assert!(
+        flashes <= 6,
+        "the lamp lit {flashes} times a minute on static"
+    );
+}
+
 /// The band preview's pause after its loudest call lets the band back at
 /// Fast, so the hiss is heard returning and the next call starts on a gain
 /// of its own, and at Slow it is still held down at the end of it, which is
