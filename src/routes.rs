@@ -7,7 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use cw_core::band::{agc_knee, band_hiss_rms, loudest_station, remembered_agc_knee};
+use cw_core::band::{agc_knee, loudest_station, remembered_agc_knee};
 use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
@@ -332,20 +332,17 @@ fn use_band_warm(ctx: AppCtx) {
 /// it failed.
 async fn warm_agc_knee(settings: &TrainingSettings) -> Option<KneeHeard> {
     let (on, receiver) = knee_asked(settings);
-    // Worked out here, closed form, from the receiver already in hand.
-    let hiss = band_hiss_rms(&on, &receiver);
-    let heard = move |knee: Option<f64>| knee.map(|knee| KneeHeard { knee, hiss });
     let settings = settings.clone();
     let measure = move || {
-        let knee = agc_knee(&on, &receiver);
+        let heard = agc_knee(&on, &receiver).map(|knee| KneeHeard::of(&on, &receiver, knee));
         loudest_station(&settings);
-        knee
+        heard
     };
     // A worker measures it, and the slider is not held up at all. A worker
     // that panicked has measured nothing, which leaves it to the band.
     #[cfg(all(not(target_arch = "wasm32"), not(test)))]
     {
-        heard(tokio::task::spawn_blocking(measure).await.ok().flatten())
+        tokio::task::spawn_blocking(measure).await.ok().flatten()
     }
     // The browser has the one thread. It measures here, then lets the page
     // draw and take input before the band is built: two short tasks rather
@@ -354,9 +351,9 @@ async fn warm_agc_knee(settings: &TrainingSettings) -> Option<KneeHeard> {
     // would land a different number of steps later every run.
     #[cfg(any(target_arch = "wasm32", test))]
     {
-        let knee = measure();
+        let heard = measure();
         sleep_ms(1).await;
-        heard(knee)
+        heard
     }
 }
 

@@ -471,9 +471,10 @@ fn at_full_volume_no_station_reaches_the_limiter_and_every_one_comes_close() {
 
 /// The meter reads a frame every ten milliseconds of what the mixer
 /// plays: the station at its strength where it reaches the AGC, the gain
-/// the AGC ducks it to, and the loudest of what was played, to the sample.
+/// the AGC's hang holds it at, and the loudest of what was played, to the
+/// sample.
 #[test]
-fn the_meter_reads_the_agcs_input_its_gain_and_what_was_played() {
+fn the_meter_reads_the_agcs_input_its_held_gain_and_what_was_played() {
     let settings = hiss();
     let mut mixer = Mixer::new(SR);
     let meter = mixer.meter();
@@ -485,7 +486,7 @@ fn the_meter_reads_the_agcs_input_its_gain_and_what_was_played() {
     meter.read_since(&mut seen, &mut frames);
     assert_eq!(frames.len(), 50, "a frame every 10 ms");
     assert!(
-        frames.iter().all(|f| f.gain == 1.0),
+        frames.iter().all(|f| f.held == 1.0),
         "the hiss moved the AGC"
     );
     frames.clear();
@@ -495,7 +496,7 @@ fn the_meter_reads_the_agcs_input_its_gain_and_what_was_played() {
     meter.read_since(&mut seen, &mut frames);
     assert_eq!(frames.len(), 100);
     let input = frames.iter().fold(0.0f32, |a, f| a.max(f.input));
-    let gain = frames.iter().fold(1.0f32, |a, f| a.min(f.gain));
+    let held = frames.iter().fold(1.0f32, |a, f| a.min(f.held));
     let output = frames.iter().fold(0.0f32, |a, f| a.max(f.output));
     // The station's own level, as its plan keys it: what `send` sends.
     let voice = resolve_station(&settings, &mut SplitMix64::new(5));
@@ -505,7 +506,7 @@ fn the_meter_reads_the_agcs_input_its_gain_and_what_was_played() {
         (input / at_strength - 1.0).abs() < 0.15,
         "{input} at the AGC, against {at_strength}"
     );
-    assert!(gain < 0.8, "the AGC took {gain} off the station");
+    assert!(held < 0.8, "the AGC held the station at {held}");
     assert_eq!(output, loudest(&played));
 }
 
@@ -517,7 +518,8 @@ fn the_meter_reads_the_agcs_input_its_gain_and_what_was_played() {
 #[test]
 fn the_preview_pause_lets_the_band_back_at_fast_and_holds_it_at_slow() {
     use crate::playback::{BAND_PREVIEW_CALL, BAND_PREVIEW_STRENGTHS, band_preview_gap_ms};
-    // The gain through the pause after the loudest call, a frame at a time.
+    // The gain held through the pause after the loudest call, a frame at a
+    // time.
     let pause = |decay: cw_core::AgcDecay| -> Vec<f32> {
         let mut settings = hiss();
         settings.band.agc_decay = decay;
@@ -541,7 +543,7 @@ fn the_preview_pause_lets_the_band_back_at_fast_and_holds_it_at_slow() {
             band_preview_gap_ms() as usize * SR as usize / 1_000,
         );
         meter.read_since(&mut seen, &mut frames);
-        frames.iter().map(|frame| frame.gain).collect()
+        frames.iter().map(|frame| frame.held).collect()
     };
     let fast = pause(cw_core::AgcDecay::Fast);
     let back = 10f64.powf(-1.0 / 20.0) as f32;

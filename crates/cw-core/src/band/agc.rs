@@ -388,6 +388,13 @@ impl Agc {
         self.gain
     }
 
+    /// The gain the hang is holding: what a signal that stood over the knee
+    /// has set, without the instants the limiter or the ceiling squash a
+    /// crash for. One while nothing has, and with the AGC off.
+    pub fn held(&self) -> f64 {
+        self.held
+    }
+
     /// Pick up where `previous` left off: the same detector reading, the
     /// same hang, the same gain. A band rebuilt under a station would
     /// otherwise open its gain wide and duck the station afresh — a swell on
@@ -813,6 +820,61 @@ mod tests {
                 db(after)
             );
         }
+    }
+
+    /// The hang holds the band down for what stays over the knee, not for
+    /// the static's crackle, which the limiter squashes and lets go of: an
+    /// AGC lamp lit by the hang, as the level scope's is, lights for the odd
+    /// long crash the AGC takes for a signal, as a rig's hang AGC does, where
+    /// one lit by the gain would flicker with every crackle. Read as the
+    /// scope reads it: a twentieth of a second of 10 ms frames, each at its
+    /// lowest, held a decibel or more down throughout. A minute of the
+    /// default band's light static, and of the hiss alone.
+    #[test]
+    fn the_static_alone_seldom_holds_the_band_down() {
+        // How many times each would light the lamp, the hang and the gain.
+        let flashes = |settings: &TrainingSettings| -> (usize, usize) {
+            let frame = SR as usize / 100;
+            let mut counts = (0, 0);
+            for seed in [1, 2, 3] {
+                let mut mixer = BandMixer::new(SR, settings, seed);
+                let mut lit = (false, false);
+                // Twenty seconds of polls.
+                for _ in 0..20 * 20 {
+                    // The most each let through, of the poll's frames' lowest.
+                    let (mut held, mut gain) = (0.0f64, 0.0f64);
+                    for _ in 0..5 {
+                        let (mut frame_held, mut frame_gain) = (1.0f64, 1.0f64);
+                        for _ in 0..frame {
+                            let received = mixer.next(0.0);
+                            frame_held = frame_held.min(received.held);
+                            frame_gain = frame_gain.min(received.gain);
+                        }
+                        held = held.max(frame_held);
+                        gain = gain.max(frame_gain);
+                    }
+                    let now = (db(held) <= -1.0, db(gain) <= -1.0);
+                    counts.0 += usize::from(now.0 && !lit.0);
+                    counts.1 += usize::from(now.1 && !lit.1);
+                    lit = now;
+                }
+            }
+            counts
+        };
+        let settings = TrainingSettings::default().clamp();
+        assert!(settings.band.qrn_enabled && settings.band.stations_max == 1);
+        let (held, gain) = flashes(&settings);
+        assert!(
+            gain >= 15,
+            "the static should crackle: {gain} flickers a minute"
+        );
+        assert!(
+            held <= 6 && held * 4 <= gain,
+            "the hang held the band {held} times a minute, the gain dipped {gain}"
+        );
+        let mut hiss = settings;
+        hiss.band.qrn_enabled = false;
+        assert_eq!(flashes(&hiss), (0, 0), "the hiss alone moved the AGC");
     }
 
     /// However loud a crash, nothing past the ceiling reaches the audio

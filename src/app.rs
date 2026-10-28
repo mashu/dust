@@ -1816,7 +1816,7 @@ mod ui_tests {
             recorder.meter.borrow_mut().extend(std::iter::repeat_n(
                 crate::audio::MeterFrame {
                     input: line * db(9.0),
-                    gain: db(-4.0),
+                    held: db(-4.0),
                     output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
                 },
                 60,
@@ -1840,6 +1840,14 @@ mod ui_tests {
                 "{}",
                 ui.html()
             );
+            let mark = crate::ui::scope::hiss_mark_at(&settings).expect("a band with hiss");
+            let html = ui.html();
+            let hiss_line = html
+                .split("class=\"scope-hiss\"")
+                .nth(1)
+                .and_then(|rest| rest.split('>').next())
+                .unwrap_or_default();
+            assert!(hiss_line.contains(&mark), "{mark} in {hiss_line:?}");
             assert!(
                 recorder.meter.borrow().is_empty(),
                 "the scope took the frames"
@@ -1866,7 +1874,7 @@ mod ui_tests {
             for poll in 0..40 {
                 // A station over the line and gone again, the AGC taking it
                 // down and letting go, a poll each way.
-                let (input, gain) = if poll % 4 < 2 {
+                let (input, held) = if poll % 4 < 2 {
                     (line * 8.0, 0.25)
                 } else {
                     (line * 0.1, 1.0)
@@ -1874,7 +1882,7 @@ mod ui_tests {
                 recorder.meter.borrow_mut().extend(std::iter::repeat_n(
                     crate::audio::MeterFrame {
                         input,
-                        gain,
+                        held,
                         output: 0.2 + poll as f32 * 0.01,
                     },
                     5,
@@ -1918,7 +1926,7 @@ mod ui_tests {
             recorder.meter.borrow_mut().extend(std::iter::repeat_n(
                 crate::audio::MeterFrame {
                     input: line * db(9.0),
-                    gain: db(-4.0),
+                    held: db(-4.0),
                     output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
                 },
                 60,
@@ -2083,7 +2091,7 @@ mod ui_tests {
         recorder.meter.borrow_mut().extend(std::iter::repeat_n(
             crate::audio::MeterFrame {
                 input: line * db(over),
-                gain: 1.0,
+                held: 1.0,
                 output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
             },
             60,
@@ -2137,6 +2145,10 @@ mod ui_tests {
             let (said, drawn) = scope_reads(&mut ui, &recorder, &taken, 9.0).await;
             assert_eq!(said, "off · 3 dB under the limiter");
             assert!(drawn, "drawn by the knee of the move taken: {}", ui.html());
+            assert!(
+                !ui.shows("scope-over-hiss"),
+                "a threshold figure with the AGC off"
+            );
         });
     }
 

@@ -40,12 +40,13 @@ pub const METER_FRAME_SEC: f64 = 0.01;
 
 /// What the receiver did over one short stretch, for the level scope: the
 /// loudest of what reached its AGC, the band and the Morse together through
-/// the filter; the gain the AGC rode at, at its lowest; and the loudest of
-/// what it played, at the volume, before the limiter.
+/// the filter; the gain the AGC's hang held, at its lowest, which a signal
+/// over the threshold sets and a crash squashed for an instant does not;
+/// and the loudest of what it played, at the volume, before the limiter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeterFrame {
     pub input: f32,
-    pub gain: f32,
+    pub held: f32,
     pub output: f32,
 }
 
@@ -54,7 +55,7 @@ impl MeterFrame {
     /// metered, and what merging starts from.
     pub const QUIET: Self = Self {
         input: 0.0,
-        gain: 1.0,
+        held: 1.0,
         output: 0.0,
     };
 
@@ -63,7 +64,7 @@ impl MeterFrame {
     pub fn merge(self, other: Self) -> Self {
         Self {
             input: self.input.max(other.input),
-            gain: self.gain.min(other.gain),
+            held: self.held.min(other.held),
             output: self.output.max(other.output),
         }
     }

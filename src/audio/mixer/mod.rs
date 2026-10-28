@@ -438,11 +438,11 @@ impl Mixer {
             // What reached the AGC, for the meter: the send alone, through
             // the RF gain, with no band to meet it.
             let mut input = coming.heard * now.rf;
-            // The AGC's gain, for the meter, and what the send rides: that
-            // gain at the AF gain of the band riding it. While one band
-            // hands over to the next, or to none, the send eases from the
-            // one to the other with the fade, the two sized alike for the
-            // strongest station, so it never steps.
+            // The gain the AGC's hang holds, for the meter, and what the send
+            // rides: the AGC's gain at the AF gain of the band riding it.
+            // While one band hands over to the next, or to none, the send
+            // eases from the one to the other with the fade, the two sized
+            // alike for the strongest station, so it never steps.
             let mut current = None;
             if let Some(band) = self.band.as_mut() {
                 let played = band.next(coming.heard, now.rf);
@@ -462,7 +462,7 @@ impl Mixer {
                     outgoing.get_or_insert(played);
                 }
             }
-            let (gain, riding) = match (current, outgoing) {
+            let (held, riding) = match (current, outgoing) {
                 (Some(new), old) => {
                     let from = match &old {
                         Some(old) => old.gain * old.af,
@@ -476,12 +476,12 @@ impl Mixer {
                         self.handed_over = None;
                     }
                     let to = new.gain * new.af;
-                    (new.gain, from + (to - from) * new.weight)
+                    (new.held, from + (to - from) * new.weight)
                 }
                 (None, Some(old)) => {
                     self.handed_over = None;
                     (
-                        1.0 + (old.gain - 1.0) * old.weight,
+                        1.0 + (old.held - 1.0) * old.weight,
                         alone + (old.gain * old.af - alone) * old.weight,
                     )
                 }
@@ -504,7 +504,7 @@ impl Mixer {
             let received = self.audio.process(background + heard);
             let played = (received * self.gate + send.dry) * now.volume;
             *slot += played as f32;
-            self.metering.add(input, gain, played);
+            self.metering.add(input, held, played);
         }
         self.audio.settle();
         // A send is heard the look-ahead after it was played, as well as the

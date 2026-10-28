@@ -7,7 +7,6 @@
 //! line comes out level with the others, one under it at its own level.
 
 use std::collections::VecDeque;
-use std::f64::consts::SQRT_2;
 
 use cw_core::band::{
     FilterDesign, SOFT_LIMIT_KNEE, agc_knee, band_hiss_rms, gain_to_db, threshold_over_hiss_db,
@@ -37,22 +36,25 @@ const KEPT_FRAMES: usize = COLUMNS * FRAMES_A_COLUMN + 1;
 
 /// How much of the past the readout's room under the limiter is of: the
 /// last half second. At 10 WPM and over a dah or two of the station is
-/// always in it; in a long Farnsworth gap it reads the hiss, as a rig's
-/// S-meter falls back to the noise between a slow sender's characters.
+/// always in it; in a long Farnsworth gap it reads the hiss coming out
+/// between a slow sender's characters.
 const READ_OVER: usize = (0.5 / METER_FRAME_SEC) as usize;
 
 /// How often the scope takes the frames the player has metered.
 const POLL_MS: u32 = 50;
 
 /// How many of the newest frames the lamp is lit by, one poll's worth: the
-/// AGC is acting while it has held the gain down through every one of them.
+/// AGC is acting while its hang has held the gain down through every one of
+/// them.
 const HELD_OVER: usize = 5;
 
-/// How far down the AGC has to have held the gain for the lamp to light: a
-/// decibel, through [`HELD_OVER`] frames on end. A crackle of static ducks
-/// the gain through the AGC's limiter and lets go within a frame or two, so
-/// it seldom lights it; a station over the threshold holds it lit, and so
-/// do the hang and the decay after one.
+/// How far down the AGC's hang has to have held the gain for the lamp to
+/// light: a decibel, through [`HELD_OVER`] frames on end. The hang holds
+/// only what stood over the threshold for a Morse element, so a station
+/// over it lights the lamp and the hang and the decay after it keep it lit,
+/// and so does the odd long crash the AGC takes for a signal, as a rig's
+/// hang AGC does; the crackle of static, which the AGC squashes for an
+/// instant and lets go of, never lights it.
 const LAMP_DB: f64 = 1.0;
 
 /// One pane of the scope: where it starts down the drawing, and the levels
@@ -84,10 +86,12 @@ impl Pane {
 }
 
 /// RF: what reaches the AGC, in decibels over the band's lowest threshold.
-/// The strongest station stands about 28 over it and the quietest hiss
-/// about 7 under it; with the RF gain backed off all the way the hiss is
-/// still on it, 37 under, and with the threshold raised all the way the
-/// line is too, 30 over.
+/// The strongest station stands about 28 over it, and the crests of the
+/// quietest hiss about 7 under it; with the RF gain backed off all the way
+/// they are still on it, 37 under, and with the threshold raised all the
+/// way the line is too, 30 over. The hiss mark, a few decibels under its
+/// crests, leaves the pane before them, as a panadapter's floor drops off
+/// its screen.
 const RF: Pane = Pane {
     top: 0.0,
     top_db: 32.0,
@@ -168,17 +172,6 @@ pub(crate) fn threshold(settings: &TrainingSettings) -> f64 {
     agc_knee(&on, &receiver).unwrap_or(1.0) * threshold_raise(&settings.band)
 }
 
-/// How far the threshold these settings set stands over the band's hiss,
-/// as the scope reads it: what tests hold its figure to.
-#[cfg(test)]
-pub(crate) fn over_hiss(settings: &TrainingSettings) -> Option<f64> {
-    let (on, receiver) = knee_asked(settings);
-    threshold_over_hiss_db(
-        threshold(settings),
-        band_hiss_rms(&on, &receiver) * settings.rf_gain(),
-    )
-}
-
 /// The step the RF trace takes to a level `over_db` over the threshold
 /// these settings set, as it is written in the trace: what tests find a
 /// level drawn by its knee with.
@@ -186,6 +179,57 @@ pub(crate) fn over_hiss(settings: &TrainingSettings) -> Option<f64> {
 pub(crate) fn rf_trace_step(settings: &TrainingSettings, over_db: f64) -> String {
     let over_lowest = over_db + gain_to_db(threshold_raise(&settings.band));
     format!("V{}h", tenths(RF.y(over_lowest)))
+}
+
+/// Where the scope marks the band's hiss, and what it says of the threshold
+/// against it, for the knee and the hiss `heard`, the threshold raised by
+/// `raise` and the RF gain at `rf_gain`: the hiss as it reaches the AGC, a
+/// steady tone's worth of it, in decibels over the lowest threshold, so the
+/// mark sits as far under the line at its lowest as the threshold stands
+/// over the hiss; and, with the AGC on, how far the threshold stands over
+/// the hiss, RMS to RMS, as a station's S/N is read. Neither with no hiss.
+fn hiss_marks(
+    heard: KneeHeard,
+    raise: f64,
+    rf_gain: f64,
+    agc_on: bool,
+) -> (Option<f64>, Option<f64>) {
+    let hiss = heard.hiss * rf_gain;
+    let mark = threshold_over_hiss_db(heard.knee, hiss).map(|over| -over);
+    let over = threshold_over_hiss_db(heard.knee * raise, hiss).filter(|_| agc_on);
+    (mark, over)
+}
+
+/// The scope's hiss mark and threshold figure for these settings, their
+/// knee measured: what tests hold them to.
+#[cfg(test)]
+fn marks_of(settings: &TrainingSettings) -> (Option<f64>, Option<f64>) {
+    let (on, receiver) = knee_asked(settings);
+    agc_knee(&on, &receiver).map_or((None, None), |knee| {
+        hiss_marks(
+            KneeHeard::of(&on, &receiver, knee),
+            threshold_raise(&settings.band),
+            settings.rf_gain(),
+            settings.band.agc_enabled,
+        )
+    })
+}
+
+/// How far the threshold these settings set stands over the band's hiss,
+/// as the scope reads it.
+#[cfg(test)]
+pub(crate) fn over_hiss(settings: &TrainingSettings) -> Option<f64> {
+    marks_of(settings).1
+}
+
+/// Where the hiss mark is drawn for these settings, as the drawing writes
+/// it: what tests find it by.
+#[cfg(test)]
+pub(crate) fn hiss_mark_at(settings: &TrainingSettings) -> Option<String> {
+    let mark = marks_of(settings).0;
+    Drawing::of(&[], 1.0, 1.0, mark)
+        .hiss
+        .map(|y| format!("y1=\"{y:.1}\""))
 }
 
 /// A ratio in decibels, and nothing at all, at the foot of any pane, for no
@@ -274,7 +318,11 @@ impl Drawing {
             rf: trace_path(start, RF.base(), rf),
             af: trace_path(start, AF.base(), af),
             line: RF.y(db(raise)),
-            hiss: hiss_db.map(|level| RF.y(level)),
+            // Under the pane, the mark would sit on the floor as if the hiss
+            // were there.
+            hiss: hiss_db
+                .filter(|level| *level > RF.bottom_db)
+                .map(|level| RF.y(level)),
         }
     }
 }
@@ -324,7 +372,7 @@ impl Reading {
         let newest = |n: usize| frames.iter().rev().take(n);
         // The most gain any of them let through: what was held throughout.
         let held = newest(HELD_OVER).fold(None, |most: Option<f32>, frame| {
-            Some(most.map_or(frame.gain, |most| most.max(frame.gain)))
+            Some(most.map_or(frame.held, |most| most.max(frame.held)))
         })?;
         let output = newest(READ_OVER).fold(0.0f32, |loudest, frame| loudest.max(frame.output));
         Some(Self {
@@ -425,13 +473,9 @@ pub fn LevelScope(settings: Signal<TrainingSettings>) -> Element {
     let frames = if known { &kept.frames } else { &empty };
     let columns = if known { kept.columns() } else { Vec::new() };
     let knee = heard.map_or(1.0, |heard| heard.knee);
-    // The hiss as it reaches the AGC, a steady tone's worth of it, over the
-    // lowest threshold: the mark the threshold is read against.
-    let hiss = heard.filter(|heard| heard.hiss > 0.0);
-    let hiss_db = hiss.map(|heard| db(heard.hiss * rf_gain * SQRT_2 / heard.knee));
-    let over_hiss = hiss
-        .filter(|_| agc_on)
-        .and_then(|heard| threshold_over_hiss_db(heard.knee * raise, heard.hiss * rf_gain));
+    let (hiss_db, over_hiss) = heard.map_or((None, None), |heard| {
+        hiss_marks(heard, raise, rf_gain, agc_on)
+    });
     let Drawing {
         rf,
         af,
@@ -542,9 +586,9 @@ mod tests {
 
     fn frames(of: &[(f32, f32, f32)]) -> VecDeque<MeterFrame> {
         of.iter()
-            .map(|&(input, gain, output)| MeterFrame {
+            .map(|&(input, held, output)| MeterFrame {
                 input,
-                gain,
+                held,
                 output,
             })
             .collect()
@@ -585,10 +629,11 @@ mod tests {
         assert!(grazing.says(true).ends_with("0 dB under the limiter"));
     }
 
-    /// The lamp is lit only while the AGC has held the gain a decibel or
-    /// more down through every one of the newest poll's frames: not by a
-    /// crash it lets go of at once, and out as soon as it lets go. Dashed
-    /// with the AGC off, dark before anything is heard.
+    /// The lamp is lit only while the AGC's hang has held the gain a decibel
+    /// or more down through every one of the newest poll's frames: not by a
+    /// crash the AGC only squashes, which leaves the hang at one, nor by a
+    /// hold only just begun, and out as soon as it lets go. Dashed with the
+    /// AGC off, dark before anything is heard.
     #[test]
     fn the_lamp_lights_only_while_the_gain_is_held_a_decibel_down() {
         let lit = |kept: &VecDeque<MeterFrame>| lamp_class(true, Reading::of(kept).as_ref());
@@ -600,8 +645,11 @@ mod tests {
         letting_go.extend(frames(&[(0.5, gain(-0.5), 0.5)]));
         assert_eq!(lit(&letting_go), "badge scope-lamp");
         let mut crash = frames(&[(0.1, 1.0, 0.1); 49]);
-        crash.extend(frames(&[(0.9, 0.1, 0.6)]));
+        crash.extend(frames(&[(0.9, 1.0, 0.6); HELD_OVER]));
         assert_eq!(lit(&crash), "badge scope-lamp");
+        let mut begun = frames(&[(0.1, 1.0, 0.1); 49]);
+        begun.extend(frames(&[(0.9, gain(-12.0), 0.6)]));
+        assert_eq!(lit(&begun), "badge scope-lamp");
         let mut gone = frames(&[(0.5, gain(-6.0), 0.5); 50]);
         gone.extend(frames(&[(0.01, 1.0, 0.01)]));
         assert_eq!(lit(&gone), "badge scope-lamp");
@@ -620,7 +668,7 @@ mod tests {
     fn two_frames_make_a_column_and_a_column_never_changes() {
         let frame = |i: usize| MeterFrame {
             input: i as f32,
-            gain: 1.0 / (i as f32 + 1.0),
+            held: 1.0 / (i as f32 + 1.0),
             output: (i % 3) as f32,
         };
         let give = |kept: &mut Kept, given: &mut usize, n: usize| {
@@ -647,7 +695,32 @@ mod tests {
             columns.last(),
             Some(&frame(newest_pair).merge(frame(newest_pair + 1)))
         );
-        assert!(kept.heard);
+        // Its partner come, the oldest kept is the second of a pair whose
+        // first is gone: the columns move along by one, none paired anew.
+        give(&mut kept, &mut given, 1);
+        let moved = kept.columns();
+        assert_eq!(moved[..COLUMNS - 1], columns[1..]);
+        assert_eq!(
+            moved.last(),
+            Some(&frame(given - 2).merge(frame(given - 1)))
+        );
+    }
+
+    /// Nothing is heard until something reaches the AGC: a scope given
+    /// only silence is still listening, and once heard it stays heard
+    /// through the silence after.
+    #[test]
+    fn silence_alone_is_not_heard_and_once_heard_stays_heard() {
+        let quiet = |n| vec![MeterFrame::QUIET; n];
+        let mut kept = Kept::new();
+        kept.add(&mut quiet(5));
+        assert!(!kept.heard, "silence alone was heard");
+        kept.add(&mut vec![MeterFrame {
+            input: 0.01,
+            ..MeterFrame::QUIET
+        }]);
+        kept.add(&mut quiet(5));
+        assert!(kept.heard, "the silence after a call was not heard through");
     }
 
     /// The threshold moves the line and leaves both traces where they were;
@@ -658,7 +731,7 @@ mod tests {
     fn the_threshold_moves_the_line_and_the_rf_gain_the_trace() {
         let heard = [MeterFrame {
             input: 0.1,
-            gain: 1.0,
+            held: 1.0,
             output: 0.1,
         }; 4];
         let lowest = Drawing::of(&heard, 0.1, 1.0, Some(-12.0));
@@ -677,6 +750,9 @@ mod tests {
         assert_eq!(backed_off.line, lowest.line);
         assert_ne!(backed_off.rf, lowest.rf);
         assert_eq!(backed_off.hiss.zip(lowest.hiss), Some((64.0, 44.0)));
+        // A hiss under the pane leaves it rather than sit on its floor.
+        assert_eq!(Drawing::of(&heard, 0.1, 1.0, Some(-42.6)).hiss, None);
+        assert_eq!(Drawing::of(&heard, 0.1, 1.0, Some(-39.9)).hiss, Some(71.9));
         let top = Drawing::of(
             &heard,
             0.1,
@@ -694,7 +770,7 @@ mod tests {
     fn the_af_pane_is_drawn_against_the_limiter() {
         let played = |output: f64| MeterFrame {
             input: 0.1,
-            gain: 1.0,
+            held: 1.0,
             output: output as f32,
         };
         let at = |output: f64, knee: f64, raise: f64| {
@@ -757,23 +833,33 @@ mod tests {
     /// threshold is raised, wherever the RF gain is; with the AGC off, where
     /// it would start were it switched on. The figure under the readout is
     /// that threshold over the band's hiss, raised with it, and with the RF
-    /// gain backed off.
+    /// gain backed off, and says nothing with the AGC off. The hiss mark
+    /// sits as far under the line at its lowest as that figure, and moves
+    /// with the RF gain alone.
     #[test]
     fn the_line_is_the_agc_threshold() {
         let mut settings = TrainingSettings::default();
         let lowest = threshold(&settings);
-        let over = over_hiss(&settings).expect("a band with hiss");
+        let (mark, over) = marks_of(&settings);
+        let (mark, over) = (mark.expect("a band with hiss"), over.expect("hiss"));
         assert!((10.0..14.0).contains(&over), "{over:.1} dB over the hiss");
+        assert!((mark + over).abs() < 1e-9, "{mark:.2} against {over:.2}");
         settings.band.agc_threshold_db = 10.0;
         let raised = threshold(&settings);
         assert!((db(raised / lowest) - 10.0).abs() < 1e-9);
-        assert!((over_hiss(&settings).expect("hiss") - over - 10.0).abs() < 1e-9);
+        let (raised_mark, raised_over) = marks_of(&settings);
+        assert!((raised_over.expect("hiss") - over - 10.0).abs() < 1e-9);
+        assert_eq!(raised_mark, Some(mark), "the threshold moved the mark");
         settings.band.rf_gain_db = -20.0;
         assert_eq!(threshold(&settings), raised);
-        assert!((over_hiss(&settings).expect("hiss") - over - 30.0).abs() < 1e-9);
+        let (backed_off_mark, backed_off_over) = marks_of(&settings);
+        assert!((backed_off_over.expect("hiss") - over - 30.0).abs() < 1e-9);
+        assert!((backed_off_mark.expect("hiss") - mark + 20.0).abs() < 1e-9);
         settings.band.agc_enabled = false;
         assert_eq!(threshold(&settings), raised);
+        assert_eq!(over_hiss(&settings), None, "a figure with the AGC off");
+        assert!(marks_of(&settings).0.is_some(), "the hiss is still marked");
         settings.band.noise_enabled = false;
-        assert_eq!(over_hiss(&settings), None);
+        assert_eq!(marks_of(&settings), (None, None));
     }
 }

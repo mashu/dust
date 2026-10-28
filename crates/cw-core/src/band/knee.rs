@@ -216,7 +216,7 @@ mod tests {
 
     /// At its lowest the knee stands 10 dB or more over the band's own hiss
     /// in the filter, as the threshold's words say: a steady tone at it is
-    /// 9-12 dB over the hiss through the default receiver at any floor loud
+    /// 10-11 dB over the hiss through the default receiver at any floor loud
     /// enough for the knee to follow it, with the static off, and 12-13 dB on
     /// the default band, its light static or none. Heavy static it is kept
     /// clear of too, so it stands further over the hiss.
@@ -227,7 +227,7 @@ mod tests {
                 s.band.qrn_enabled = false;
                 s.band.noise_level = level;
             });
-            assert!((9.0..12.0).contains(&over), "{level}: {over:.1} dB");
+            assert!((10.0..11.0).contains(&over), "{level}: {over:.2} dB");
         }
         let quiet = lowest_over_hiss(|s| s.band.qrn_enabled = false);
         let light = lowest_over_hiss(|_| {});
