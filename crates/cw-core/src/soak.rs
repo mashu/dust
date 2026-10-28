@@ -294,8 +294,12 @@ fn any_settings_clamp_into_something_the_trainer_can_start_from() {
                 "seed {seed}"
             );
             assert!(
-                event.start_sec + event.duration_sec <= plan.duration_sec + 1e-6,
-                "seed {seed}: a tone runs past the end of the plan"
+                event.start_sec + event.keyed_sec <= plan.duration_sec + 1e-6,
+                "seed {seed}: a tone is keyed past the end of the plan"
+            );
+            assert!(
+                event.end_sec() <= plan.duration_sec + settings.band.steepness / 1000.0 + 1e-6,
+                "seed {seed}: a tone sounds on past the plan by more than its fall"
             );
             assert!(
                 event
@@ -1077,7 +1081,7 @@ fn a_pile_up_is_always_something_you_could_copy() {
         for plan in &planned.others {
             for event in &plan.events {
                 assert!(
-                    event.start_sec + event.duration_sec <= ends_at + 1e-9,
+                    event.start_sec + event.keyed_sec <= ends_at + 1e-9,
                     "seed {seed}: a station ran past the send"
                 );
                 assert!(event.frequency_hz.is_finite() && event.frequency_hz > 0.0);

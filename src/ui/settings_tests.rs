@@ -1347,7 +1347,10 @@ fn every_settings_card_says_what_its_options_do() {
                 "How much more often the characters you miss are sent",
             ),
             ("recognition", "How fast counts as what on Letter accuracy"),
-            ("band-conditions", "Slow swells and dips of the signal."),
+            (
+                "band-conditions",
+                "Slow swells and dips of each station, every one on a path of its own",
+            ),
         ] {
             let help = format!("help-{card}");
             assert!(!ui.has(says), "{card} keeps its help closed");

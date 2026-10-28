@@ -52,6 +52,10 @@ pub const STEEPNESS_MAX_MS: f64 = 50.0;
 /// How fast the band fades, in fades a second.
 pub const QSB_RATE_MIN_HZ: f64 = 0.03;
 pub const QSB_RATE_MAX_HZ: f64 = 1.5;
+/// How deep the Band card's fading goes at full depth, in decibels: the
+/// fades of an HF path, which take a signal two or three S-units down and
+/// now and then further.
+pub const QSB_DEPTH_MAX_DB: f64 = 20.0;
 /// Sessions above or below the threshold before the level moves.
 pub const ADJUST_COUNT_MAX: u32 = 20;
 /// The session accuracy, in percent, that counts as above the threshold.
@@ -463,6 +467,10 @@ pub struct BandSettings {
     pub steepness: f64,
     pub envelope_smoothing: f64,
     pub qsb_enabled: bool,
+    /// How deep the fades go, as a share of [`QSB_DEPTH_MAX_DB`]: every bit
+    /// of the slider's travel is heard, in decibels, as an ear hears a fade.
+    /// Out of the box a 12 dB fade, which under the AGC is the hiss swelling
+    /// up beneath a station that holds roughly steady, as on the air.
     pub qsb_depth: f64,
     pub qsb_rate_hz: f64,
     pub qrn_enabled: bool,
@@ -543,7 +551,7 @@ impl Default for BandSettings {
             steepness: 6.0,
             envelope_smoothing: 0.75,
             qsb_enabled: true,
-            qsb_depth: 0.35,
+            qsb_depth: 0.6,
             qsb_rate_hz: 0.12,
             qrn_enabled: true,
             qrn_level: 0.25,

@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use super::envelope::build_envelope_curve;
+use super::envelope::{build_envelope_curve, edge_sec};
+#[cfg(doc)]
+use super::pileup::Interferer;
 use super::pileup::Transmission;
 use super::station::StationVoice;
 use super::{clamp_extra_spacing, dot_seconds, spacing_unit_sec};
@@ -21,15 +23,45 @@ pub const DEFAULT_TARGET_GAIN: f64 = 0.3;
 /// playing, and no sooner than that send can be ridden down.
 pub const SEND_RELEASE_SEC: f64 = 0.008;
 
+/// One element, keyed. A transmitter starts its rise as the key goes down
+/// and its fall as the key comes up, so the tone sounds on past the key by
+/// its fall, and is heard at half strength for exactly as long as the key
+/// was held.
 #[derive(Clone, Debug)]
 pub struct ToneEvent {
+    /// When the key goes down.
     pub start_sec: f64,
+    /// How long it sounds: from key-down to the end of its fall.
     pub duration_sec: f64,
+    /// How long the key is held: the element, as Morse is timed.
+    pub keyed_sec: f64,
     pub frequency_hz: f64,
     pub target_gain: f64,
     /// The keying envelope, sampled over the tone. Shared between every tone
     /// of the same length in a send.
     pub envelope: Arc<[f32]>,
+}
+
+impl ToneEvent {
+    /// The keying envelope `t_sec` into the tone, read off its curve with
+    /// straight lines between the points, as every player plays it.
+    pub fn envelope_at(&self, t_sec: f64) -> f64 {
+        let curve = &self.envelope;
+        if curve.len() < 2 || self.duration_sec <= 0.0 {
+            return self.target_gain;
+        }
+        let pos = (t_sec / self.duration_sec).clamp(0.0, 1.0) * (curve.len() - 1) as f64;
+        let i = pos.floor() as usize;
+        let frac = pos - i as f64;
+        let a = f64::from(curve.get(i).copied().unwrap_or(0.0));
+        let b = curve.get(i + 1).map_or(a, |b| f64::from(*b));
+        a + (b - a) * frac
+    }
+
+    /// When it has stopped sounding.
+    pub fn end_sec(&self) -> f64 {
+        self.start_sec + self.duration_sec
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +73,10 @@ pub struct PlaybackPlan {
     pub duration_sec: f64,
     pub resolved_char_wpm: f64,
     pub resolved_effective_wpm: f64,
+    /// Where this station's path is in the band's fading, in seconds of the
+    /// fade past where the send starts on it: nothing for the station you
+    /// copy, and a point of its own for each other ([`Interferer`]).
+    pub fade_from_sec: f64,
 }
 
 /// Where one character of a send sounds.
@@ -101,7 +137,7 @@ impl PlannedTransmission {
             .filter_map(|plan| {
                 let first = plan.events.first()?;
                 let last = plan.events.last()?;
-                Some((first.start_sec, last.start_sec + last.duration_sec))
+                Some((first.start_sec, last.end_sec()))
             })
             .collect();
         spans
@@ -119,33 +155,36 @@ impl PlannedTransmission {
 
 /// Lay out every station's sound against one clock.
 ///
-/// The others are pushed back by their own delay and cut off at the end of the
-/// wanted send — whole elements only, so nothing stops mid-tone. What the
-/// listener gets is stations still calling as the one they want finishes,
-/// which is exactly how it sounds on the air.
+/// The send starts with whoever calls first: the station you copy is put
+/// back by as much as anyone calls before it, and the others each by their
+/// own delay after it. They are cut off at the end of the wanted send —
+/// whole elements only, so nothing stops mid-tone: one keyed by then is
+/// kept, its fall and all. What the listener gets is stations still calling
+/// as the one they want finishes, which is exactly how it sounds on the air.
 pub fn plan_transmission(
     transmission: &Transmission,
     settings: &TrainingSettings,
 ) -> PlannedTransmission {
-    let wanted = plan_morse_playback_for(&transmission.text, settings, &transmission.voice);
+    let lead = transmission
+        .others
+        .iter()
+        .map(|other| -other.delay_sec)
+        .fold(0.0, f64::max);
+    let wanted =
+        plan_morse_playback_for(&transmission.text, settings, &transmission.voice).later(lead);
     let ends_at = wanted.duration_sec;
     let others = transmission
         .others
         .iter()
         .map(|other| {
-            let mut plan = plan_morse_playback_for(&other.text, settings, &other.voice);
-            let delay = other.delay_sec.max(0.0);
-            plan.events.retain_mut(|event| {
-                event.start_sec += delay;
-                event.start_sec + event.duration_sec <= ends_at
-            });
-            plan.chars = plan
-                .chars
-                .into_iter()
-                .map(|span| span.later(delay))
-                .filter(|span| span.end_sec <= ends_at)
-                .collect();
-            plan.duration_sec = (plan.duration_sec + delay).min(ends_at);
+            let delay = (other.delay_sec + lead).max(0.0);
+            let mut plan =
+                plan_morse_playback_for(&other.text, settings, &other.voice).later(delay);
+            plan.events
+                .retain(|event| event.start_sec + event.keyed_sec <= ends_at);
+            plan.chars.retain(|span| span.end_sec <= ends_at);
+            plan.duration_sec = plan.duration_sec.min(ends_at);
+            plan.fade_from_sec = other.fade_from_sec;
             plan
         })
         .collect();
@@ -154,6 +193,21 @@ pub fn plan_transmission(
         others,
         dry_wanted: false,
         muted_until: None,
+    }
+}
+
+impl PlaybackPlan {
+    /// The same send started `by` seconds later.
+    #[must_use]
+    fn later(mut self, by: f64) -> Self {
+        for event in &mut self.events {
+            event.start_sec += by;
+        }
+        for span in &mut self.chars {
+            *span = span.later(by);
+        }
+        self.duration_sec += by;
+        self
     }
 }
 
@@ -197,11 +251,15 @@ pub(crate) fn plan_morse_playback_at(
     let rise_time = settings.band.steepness / 1000.0;
     let smoothing = settings.band.envelope_smoothing.clamp(0.0, 1.0);
     // Every dit of a send has the same envelope, and every dah: two curves,
-    // shared by every tone that uses them.
+    // shared by every tone that uses them, each over its element and the
+    // fall after it. No gap is shorter than the one between the elements of
+    // a letter, so no fall runs into the next rise.
+    let dit_edge = edge_sec(rise_time, dot_duration, symbol_space);
+    let dah_edge = edge_sec(rise_time, dash_duration, symbol_space);
     let dit_curve: Arc<[f32]> =
-        build_envelope_curve(dot_duration, rise_time, target_gain, smoothing).into();
+        build_envelope_curve(dot_duration + dit_edge, dit_edge, target_gain, smoothing).into();
     let dah_curve: Arc<[f32]> =
-        build_envelope_curve(dash_duration, rise_time, target_gain, smoothing).into();
+        build_envelope_curve(dash_duration + dah_edge, dah_edge, target_gain, smoothing).into();
 
     let chars: Vec<char> = text.chars().collect();
     let last_morse_idx = chars.iter().enumerate().rev().find_map(|(i, raw)| {
@@ -225,14 +283,15 @@ pub(crate) fn plan_morse_playback_at(
         let mut end_sec = current_time;
         let last_symbol = morse.chars().count().saturating_sub(1);
         for (k, symbol) in morse.chars().enumerate() {
-            let (duration, envelope) = if symbol == '.' {
-                (dot_duration, &dit_curve)
+            let (duration, edge, envelope) = if symbol == '.' {
+                (dot_duration, dit_edge, &dit_curve)
             } else {
-                (dash_duration, &dah_curve)
+                (dash_duration, dah_edge, &dah_curve)
             };
             events.push(ToneEvent {
                 start_sec: current_time,
-                duration_sec: duration,
+                duration_sec: duration + edge,
+                keyed_sec: duration,
                 frequency_hz: side_tone,
                 target_gain,
                 envelope: Arc::clone(envelope),
@@ -266,14 +325,15 @@ pub(crate) fn plan_morse_playback_at(
         duration_sec: current_time,
         resolved_char_wpm,
         resolved_effective_wpm,
+        fade_from_sec: 0.0,
     }
 }
 
 /// `plan` from `from_sec` into it on, moved to start at nothing: for a send
-/// that goes on from where one cut short was. A tone sounding at `from_sec`
+/// that goes on from where one cut short was. A tone keyed at `from_sec`
 /// goes on to its end, with a rise of its own rather than starting on a
-/// step, unless less is left of it than a rise and a fall; tones before it
-/// are gone.
+/// step, unless less is left of its key than an edge, or none; tones before
+/// it are gone.
 pub(crate) fn plan_from(
     plan: PlaybackPlan,
     from_sec: f64,
@@ -282,22 +342,23 @@ pub(crate) fn plan_from(
     if !from_sec.is_finite() || from_sec <= 0.0 {
         return plan;
     }
-    let rise_time = settings.band.steepness / 1000.0;
     let smoothing = settings.band.envelope_smoothing.clamp(0.0, 1.0);
     let events = plan
         .events
         .into_iter()
         .filter_map(|mut tone| {
-            let end = tone.start_sec + tone.duration_sec;
             if tone.start_sec < from_sec {
-                let left = end - from_sec;
-                if left < 2.0 * rise_time.max(0.0) || left <= 0.0 {
+                let edge = tone.duration_sec - tone.keyed_sec;
+                let keyed = tone.start_sec + tone.keyed_sec - from_sec;
+                if keyed <= 0.0 || keyed < edge {
                     return None;
                 }
                 tone.start_sec = from_sec;
-                tone.duration_sec = left;
+                tone.keyed_sec = keyed;
+                tone.duration_sec = keyed + edge;
                 tone.envelope =
-                    build_envelope_curve(left, rise_time, tone.target_gain, smoothing).into();
+                    build_envelope_curve(tone.duration_sec, edge, tone.target_gain, smoothing)
+                        .into();
             }
             tone.start_sec -= from_sec;
             Some(tone)
@@ -366,7 +427,7 @@ mod tests {
         let tones: Vec<&ToneEvent> = plan.events.iter().collect();
         assert_eq!((spans[0].at, spans[1].at), (0, 1));
         assert_eq!(spans[0].start_sec, 0.0);
-        assert!((spans[0].end_sec - (tones[2].start_sec + tones[2].duration_sec)).abs() < 1e-9);
+        assert!((spans[0].end_sec - (tones[2].start_sec + tones[2].keyed_sec)).abs() < 1e-9);
         assert!((spans[1].start_sec - tones[3].start_sec).abs() < 1e-9);
         assert!(
             (spans[1].end_sec - plan.duration_sec).abs() < 1e-9,
@@ -547,9 +608,9 @@ mod tests {
             let plan = plan_morse_playback_for(text, &s, &voice);
             let last = plan.events.last().expect("tones");
             assert!(
-                (plan.duration_sec - (last.start_sec + last.duration_sec)).abs() < 1e-12,
+                (plan.duration_sec - (last.start_sec + last.keyed_sec)).abs() < 1e-12,
                 "{text} ran {:.4}s past its last element",
-                plan.duration_sec - (last.start_sec + last.duration_sec)
+                plan.duration_sec - (last.start_sec + last.keyed_sec)
             );
         }
         // PARIS is fifty dots with its word space, the definition of a word a
@@ -657,10 +718,68 @@ mod tests {
             plan_morse_playback_for("EEEEE", &s, voice)
                 .events
                 .iter()
-                .map(|e| e.duration_sec)
+                .map(|e| e.keyed_sec)
                 .sum::<f64>()
         };
         assert!(down(&heavy) > down(&light) * 1.2, "the fists sound alike");
+    }
+
+    /// Each element is heard for as long as it is keyed: its tone rises from
+    /// key-down and falls from key-up, so it stands at half strength for
+    /// exactly the element, the way a transmitter keys and the band's own
+    /// stations sound, at every speed, rise time and fist. And its fall is
+    /// over before the next element rises.
+    #[test]
+    fn each_element_is_heard_as_long_as_it_is_keyed() {
+        let sr = 48_000.0;
+        for wpm in [15.0, 20.0, 40.0, 60.0, 80.0] {
+            for steepness in [3.0, 6.0, 10.0, 20.0] {
+                for weight in [0.82, 1.0, 1.18] {
+                    let mut s = fixed_speed(wpm);
+                    s.band.steepness = steepness;
+                    let voice = StationVoice {
+                        tone_hz: 600.0,
+                        char_wpm: wpm,
+                        effective_wpm: wpm,
+                        volume: 1.0,
+                        weight,
+                        dash_ratio: 3.0,
+                    };
+                    let plan = plan_morse_playback_for("PARIS", &s, &voice);
+                    let here = format!("{wpm} WPM, {steepness} ms, weight {weight}");
+                    for tone in &plan.events {
+                        let half = tone.target_gain / 2.0;
+                        let samples = (tone.duration_sec * sr).ceil() as usize;
+                        let above = (0..=samples)
+                            .filter(|i| tone.envelope_at(*i as f64 / sr) >= half)
+                            .count();
+                        let heard = above as f64 / sr;
+                        assert!(
+                            (heard - tone.keyed_sec).abs() < 0.000_5,
+                            "{here}: a {:.1} ms element heard for {:.1} ms",
+                            tone.keyed_sec * 1000.0,
+                            heard * 1000.0
+                        );
+                    }
+                    for pair in plan.events.windows(2) {
+                        assert!(
+                            pair[0].end_sec() <= pair[1].start_sec + 1e-12,
+                            "{here}: a fall ran into the next rise"
+                        );
+                    }
+                    let dot = dot_seconds(wpm) * weight;
+                    let dit = plan
+                        .events
+                        .iter()
+                        .find(|tone| (tone.keyed_sec - dot).abs() < 1e-12)
+                        .expect("a dit");
+                    assert!(
+                        (dit.keyed_sec - dot).abs() < 1e-12 && dit.duration_sec > dit.keyed_sec,
+                        "{here}: the dit has no fall past its key"
+                    );
+                }
+            }
+        }
     }
 
     /// Every dit of a send has the same envelope, and so does every dah:

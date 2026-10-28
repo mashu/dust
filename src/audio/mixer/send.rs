@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "native-audio")]
 use std::time::Instant;
 
-use cw_core::band::{FilterDesign, Qsb, ReceiverFilter};
+use cw_core::band::{FADE_STEP_SEC, FilterDesign, Qsb, ReceiverFilter};
 use cw_core::{PlannedTransmission, PlaybackPlan, ToneEvent};
 
 use crate::audio::shape::{SEND_RELEASE_SEC, release_gain};
@@ -23,17 +23,13 @@ const TAIL_SEC: f64 = 0.05;
 /// stands is a step.
 const TAIL_FADE_SEC: f64 = 0.005;
 
-/// How often the fading's level is worked out, with a straight line between.
-/// The fastest fade moves at a few hertz, so four sines a sample to follow it
-/// would be waste; a millisecond apart, the line is the fade to a fiftieth
-/// of a decibel even where it turns at the ends of its range.
-const FADING_STEP_SEC: f64 = 0.001;
-
-/// One station's elements, in order, and where the send has got to in them.
+/// One station's elements, in order, where the send has got to in them, and
+/// the fading on the path it arrives over.
 #[derive(Clone)]
 struct Station {
     elements: Vec<Element>,
     next: usize,
+    fading: Option<Fading>,
 }
 
 /// One tone, placed on the sample clock.
@@ -62,26 +58,12 @@ impl Element {
     /// The tone `i` samples in, keyed by its envelope.
     fn sample(&self, i: usize, sample_rate: f64) -> f32 {
         let t = i as f64 / sample_rate;
-        (self.angular_hz * t).sin() as f32 * envelope_gain(&self.tone, t)
+        ((self.angular_hz * t).sin() * self.tone.envelope_at(t)) as f32
     }
-}
-
-/// The keying envelope at `t` seconds into a tone, read off its curve.
-fn envelope_gain(tone: &ToneEvent, t: f64) -> f32 {
-    let curve = &tone.envelope;
-    if curve.len() < 2 || tone.duration_sec <= 0.0 {
-        return tone.target_gain as f32;
-    }
-    let rel = (t / tone.duration_sec).clamp(0.0, 1.0);
-    let pos = rel * (curve.len() - 1) as f64;
-    let i = pos.floor() as usize;
-    let frac = (pos - i as f64) as f32;
-    let a = curve.get(i).copied().unwrap_or(0.0);
-    let b = curve.get(i + 1).copied().unwrap_or(a);
-    a * (1.0 - frac) + b * frac
 }
 
 impl Station {
+    /// `plan`'s station, unfaded.
     fn new(plan: &PlaybackPlan, sample_rate: f64) -> Self {
         Self {
             elements: plan
@@ -90,12 +72,28 @@ impl Station {
                 .map(|tone| Element::new(tone, sample_rate))
                 .collect(),
             next: 0,
+            fading: None,
+        }
+    }
+
+    /// `plan`'s station as the receiver hears it, under the band's fading
+    /// `qsb` along its own path, the send starting `started_at_sec` on the
+    /// band's clock.
+    fn heard(plan: &PlaybackPlan, sample_rate: f64, qsb: Option<Qsb>, started_at_sec: f64) -> Self {
+        let from_sec = started_at_sec + plan.fade_from_sec;
+        Self {
+            fading: qsb.map(|qsb| Fading::new(qsb, from_sec, sample_rate)),
+            ..Self::new(plan, sample_rate)
         }
     }
 
     /// This station's sound at sample `pos`. Called with `pos` rising one at
     /// a time, so the elements it has finished are never looked at again.
     fn sample(&mut self, pos: usize, sample_rate: f64) -> f32 {
+        let fade = self
+            .fading
+            .as_mut()
+            .map_or(1.0, |fading| fading.next(pos, sample_rate));
         while self
             .elements
             .get(self.next)
@@ -105,17 +103,19 @@ impl Station {
         }
         match self.elements.get(self.next) {
             Some(element) if element.start <= pos => {
-                element.sample(pos - element.start, sample_rate)
+                (f64::from(element.sample(pos - element.start, sample_rate)) * fade) as f32
             }
             _ => 0.0,
         }
     }
 }
 
-/// The fading on a send, followed a step at a time.
+/// The fading on one station's path, followed a step at a time.
 #[derive(Clone)]
 struct Fading {
     qsb: Qsb,
+    /// Where on the band's clock its path is at the send's first sample.
+    from_sec: f64,
     /// Samples between the points it is worked out at.
     every: usize,
     level: f64,
@@ -123,11 +123,39 @@ struct Fading {
     left: usize,
 }
 
+impl Fading {
+    fn new(qsb: Qsb, from_sec: f64, sample_rate: f64) -> Self {
+        Self {
+            qsb,
+            from_sec,
+            every: ((FADE_STEP_SEC * sample_rate).round() as usize).max(1),
+            level: f64::from(qsb.gain_at(from_sec)),
+            slope: 0.0,
+            left: 0,
+        }
+    }
+
+    /// How much of the signal the path lets through at sample `pos`, with
+    /// `pos` rising one at a time.
+    fn next(&mut self, pos: usize, sample_rate: f64) -> f64 {
+        if self.left == 0 {
+            let ahead = (pos + self.every) as f64 / sample_rate;
+            let target = f64::from(self.qsb.gain_at(self.from_sec + ahead));
+            self.slope = (target - self.level) / self.every as f64;
+            self.left = self.every;
+        }
+        let level = self.level;
+        self.level += self.slope;
+        self.left -= 1;
+        level
+    }
+}
+
 /// One sample of a send, for the two places the mixer adds it, and whether
 /// the receiver is to be muted for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SendSample {
-    /// Through the receiver's filter and under the fading, as its AGC hears
+    /// Under the fading and through the receiver's filter, as its AGC hears
     /// it.
     pub heard: f64,
     /// Past the receiver: your own message in a contest, at the level you
@@ -146,27 +174,25 @@ impl AddAssign for SendSample {
     }
 }
 
-/// One send playing out: every station's tones, summed — interference is
-/// addition — through the receiver's filter and under the fading; and, in a
-/// contest, your own message beside them, which the receiver never hears.
+/// One send playing out: every station's tones, each under the fading of the
+/// path it arrives over, summed — interference is addition — through the
+/// receiver's filter; and, in a contest, your own message beside them, which
+/// the receiver never hears.
 ///
 /// Built on the UI thread from the plan, which is all it allocates; the
 /// audio callback only reads it forward.
 #[derive(Clone)]
 pub struct SendVoice {
-    /// The stations the receiver hears.
+    /// The stations the receiver hears, each fading on a path of its own.
+    /// Fading is a property of the path, not of the group: each starts where
+    /// the band's clock stands as the send does, so no two groups fade alike.
     stations: Vec<Station>,
     /// Your message, when the plan says it is dry: played as a rig's
     /// sidetone is, neither filtered nor faded, so its level is the one the
     /// plan gave it.
     dry: Option<Station>,
     filter: ReceiverFilter,
-    fading: Option<Fading>,
     sample_rate: f64,
-    /// Where the send starts on the band's clock. Fading is a property of
-    /// the path, not of the group: starting every send at the same point of
-    /// the fade would give every group an identical one.
-    started_at_sec: f64,
     /// Silence still to play before its first sample: a send that starts at
     /// a given time, a contest's continuation taking over from the send
     /// before as that one gives way.
@@ -216,24 +242,21 @@ impl SendVoice {
         let stations: Vec<Station> = received
             .into_iter()
             .chain(&plan.others)
-            .map(|station| Station::new(station, sr))
+            .map(|station| Station::heard(station, sr, fading, started_at_sec))
             .collect();
         let samples = |seconds: f64| (seconds * sr).round().max(1.0) as usize;
-        let length = (plan.wanted.duration_sec.max(0.0) * sr).ceil() as usize;
+        // To the last fall of any station's, which runs on past its key.
+        let ends = std::iter::once(&plan.wanted)
+            .chain(&plan.others)
+            .flat_map(|station| station.events.iter().map(ToneEvent::end_sec))
+            .fold(plan.wanted.duration_sec, f64::max);
+        let length = (ends.max(0.0) * sr).ceil() as usize;
         let at = |seconds: f64| (seconds.max(0.0) * sr).round() as usize;
         Self {
             stations,
             dry: plan.dry_wanted.then(|| Station::new(&plan.wanted, sr)),
             filter: ReceiverFilter::new(sample_rate, receiver),
-            fading: fading.map(|qsb| Fading {
-                qsb,
-                every: samples(FADING_STEP_SEC),
-                level: f64::from(qsb.gain_at(started_at_sec)),
-                slope: 0.0,
-                left: 0,
-            }),
             sample_rate: sr,
-            started_at_sec,
             wait: 0,
             pos: 0,
             muted_until: plan.muted_until.map(at),
@@ -387,28 +410,12 @@ impl SendVoice {
             1.0
         };
         // A stop takes your message down with the rest; the fading is the
-        // path's, and yours never crossed it.
+        // paths', and yours never crossed one.
         SendSample {
-            heard: heard * self.fading_gain(pos) * release * tail,
+            heard: heard * release * tail,
             dry: dry * release * tail,
             keyed,
         }
-    }
-
-    fn fading_gain(&mut self, pos: usize) -> f64 {
-        let Some(fading) = &mut self.fading else {
-            return 1.0;
-        };
-        if fading.left == 0 {
-            let ahead = (pos + fading.every) as f64 / self.sample_rate;
-            let target = f64::from(fading.qsb.gain_at(self.started_at_sec + ahead));
-            fading.slope = (target - fading.level) / fading.every as f64;
-            fading.left = fading.every;
-        }
-        let level = fading.level;
-        fading.level += fading.slope;
-        fading.left -= 1;
-        level
     }
 
     /// Say the send is over once its last sample has been heard: `latency`
@@ -484,6 +491,7 @@ mod tests {
                     ..voice
                 },
                 delay_sec: 0.1 * (k + 1) as f64,
+                fade_from_sec: 500.0 * (k + 1) as f64,
             })
             .collect();
         plan_transmission(
@@ -511,23 +519,22 @@ mod tests {
     fn a_send_is_the_stations_summed_through_the_receiver() {
         let plan = planned("PARIS", &["DL1ABC", "K"]);
         let sr = f64::from(SR);
-        let length = (plan.wanted.duration_sec * sr).ceil() as usize;
+        // To the last fall, past the last key-up.
+        let ends = std::iter::once(&plan.wanted)
+            .chain(&plan.others)
+            .flat_map(|station| station.events.iter().map(ToneEvent::end_sec))
+            .fold(plan.wanted.duration_sec, f64::max);
+        let length = (ends * sr).ceil() as usize;
         // Rendered whole, the way it used to be.
         let mut expected = vec![0.0f32; length + (TAIL_SEC * sr) as usize];
         for station in std::iter::once(&plan.wanted).chain(&plan.others) {
             for tone in &station.events {
                 let start = (tone.start_sec * sr).round() as usize;
                 let len = ((tone.duration_sec * sr).round() as usize).max(1);
-                let last = (tone.envelope.len() - 1) as f64;
                 for i in 0..len {
                     let t = i as f64 / sr;
-                    let pos = (t / tone.duration_sec).clamp(0.0, 1.0) * last;
-                    let k = pos.floor() as usize;
-                    let frac = (pos - k as f64) as f32;
-                    let a = tone.envelope[k];
-                    let b = tone.envelope.get(k + 1).copied().unwrap_or(a);
-                    let sample = (std::f64::consts::TAU * tone.frequency_hz * t).sin() as f32
-                        * (a * (1.0 - frac) + b * frac);
+                    let sample = ((std::f64::consts::TAU * tone.frequency_hz * t).sin()
+                        * tone.envelope_at(t)) as f32;
                     if let Some(slot) = expected.get_mut(start + i) {
                         *slot += sample;
                     }
@@ -575,7 +582,8 @@ mod tests {
     }
 
     /// Fading follows the shared fade, read off the band's clock from where
-    /// the send starts.
+    /// the send starts, on the path the station arrives over: ahead of the
+    /// receiver, as a fade happens on the way to the antenna.
     #[test]
     fn the_fading_follows_the_band_clock() {
         let mut fast = settings();
@@ -584,18 +592,69 @@ mod tests {
         fast.band.qsb_rate_hz = 1.5;
         let qsb = Qsb::of(&fast.band).expect("fading");
         let plan = planned("TTTTTTTTTT", &[]);
-        let mut plain = SendVoice::new(&plan, &receiver(), None, SR, 0.0);
+        let sr = f64::from(SR);
         let mut faded = SendVoice::new(&plan, &receiver(), Some(qsb), SR, 40.0);
+        let mut station = Station::new(&plan.wanted, sr);
+        let mut filter = ReceiverFilter::new(SR, &receiver());
+        let (mut peak, mut worst) = (0.0f64, 0.0f64);
         for i in 0..SR as usize {
-            let (a, b) = (plain.next().heard, faded.next().heard);
-            if a.abs() > 1e-3 {
-                let expected = f64::from(qsb.gain_at(40.0 + i as f64 / f64::from(SR)));
-                assert!(
-                    (b / a - expected).abs() < 3e-3,
-                    "at {i}: {} against {expected}",
-                    b / a
-                );
-            }
+            let fade = f64::from(qsb.gain_at(40.0 + i as f64 / sr));
+            let expected = filter.process(f64::from(station.sample(i, sr)) * fade);
+            peak = peak.max(expected.abs());
+            worst = worst.max((faded.next().heard - expected).abs());
+        }
+        assert!(peak > 0.05, "it played: {peak}");
+        assert!(worst < 3e-3 * peak, "{worst} off a peak of {peak}");
+    }
+
+    /// Each station fades over a path of its own: the one you copy keeps the
+    /// band's clock, and in a pile-up the callers rise and fall apart from
+    /// it, so which of them stands out changes as they do.
+    #[test]
+    fn every_station_fades_on_a_path_of_its_own() {
+        let mut deep = settings();
+        deep.band.qsb_enabled = true;
+        deep.band.qsb_depth = 0.75;
+        deep.band.qsb_rate_hz = 0.5;
+        let qsb = Qsb::of(&deep.band).expect("fading");
+        let plan = planned_with(&deep, "PARIS", &["DL1ABC", "K"]);
+        let voice = SendVoice::new(&plan, &receiver(), Some(qsb), SR, 12.0);
+        let sr = f64::from(SR);
+        let every = SR as usize / 100;
+        let paths: Vec<Vec<f64>> = voice
+            .stations
+            .iter()
+            .map(|station| {
+                let mut fading = station.fading.clone().expect("faded");
+                let gains: Vec<f64> = (0..20 * SR as usize)
+                    .map(|pos| fading.next(pos, sr))
+                    .collect();
+                gains
+                    .iter()
+                    .step_by(every)
+                    .map(|g| 20.0 * g.log10())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(paths.len(), 3);
+        for (k, db) in paths[0].iter().enumerate() {
+            let t = 12.0 + (k * every) as f64 / sr;
+            let band = 20.0 * f64::from(qsb.gain_at(t)).log10();
+            assert!(
+                (db - band).abs() < 0.05,
+                "at {t:.2} s: {db:.2} against {band:.2} dB"
+            );
+        }
+        let correlation = |a: &[f64], b: &[f64]| {
+            let mean = |x: &[f64]| x.iter().sum::<f64>() / x.len() as f64;
+            let (ma, mb) = (mean(a), mean(b));
+            let cov: f64 = a.iter().zip(b).map(|(x, y)| (x - ma) * (y - mb)).sum();
+            let var = |x: &[f64], m: f64| x.iter().map(|v| (v - m).powi(2)).sum::<f64>();
+            cov / (var(a, ma) * var(b, mb)).sqrt()
+        };
+        for caller in &paths[1..] {
+            let r = correlation(&paths[0], caller);
+            assert!(r.abs() < 0.5, "a caller faded with you: r = {r:.2}");
         }
     }
 
@@ -751,27 +810,28 @@ mod tests {
         let tone = ToneEvent {
             start_sec: 0.0,
             duration_sec: 1.0,
+            keyed_sec: 1.0,
             frequency_hz: 600.0,
             target_gain: 0.5,
             envelope: vec![0.0, 1.0].into(),
         };
-        assert_eq!(envelope_gain(&tone, 0.0), 0.0);
-        assert_eq!(envelope_gain(&tone, 0.5), 0.5);
-        assert_eq!(envelope_gain(&tone, 1.0), 1.0);
+        assert_eq!(tone.envelope_at(0.0), 0.0);
+        assert_eq!(tone.envelope_at(0.5), 0.5);
+        assert_eq!(tone.envelope_at(1.0), 1.0);
         // Outside the symbol the curve is clamped, not extrapolated.
-        assert_eq!(envelope_gain(&tone, -1.0), 0.0);
-        assert_eq!(envelope_gain(&tone, 9.0), 1.0);
+        assert_eq!(tone.envelope_at(-1.0), 0.0);
+        assert_eq!(tone.envelope_at(9.0), 1.0);
         // A symbol with no curve holds its level.
         let flat = ToneEvent {
             envelope: vec![1.0].into(),
             target_gain: 0.25,
             ..tone
         };
-        assert_eq!(envelope_gain(&flat, 0.5), 0.25);
+        assert_eq!(flat.envelope_at(0.5), 0.25);
         let instant = ToneEvent {
             duration_sec: 0.0,
             ..flat
         };
-        assert_eq!(envelope_gain(&instant, 0.0), 0.25);
+        assert_eq!(instant.envelope_at(0.0), 0.25);
     }
 }

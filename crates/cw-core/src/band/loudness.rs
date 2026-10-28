@@ -211,7 +211,7 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, c
         let angular = std::f64::consts::TAU * tone.frequency_hz;
         for i in 0..len.min(end - start) {
             let t = i as f64 / sr;
-            listen((angular * t).sin() * envelope_at(tone, t));
+            listen((angular * t).sin() * tone.envelope_at(t));
         }
         at = start + len;
     }
@@ -221,21 +221,6 @@ fn loudest_through(tones: &[ToneEvent], receiver: &FilterDesign, mut agc: Agc, c
         listen(0.0);
     }
     loudest
-}
-
-/// The keying envelope `t` seconds into `tone`, read off its curve as the
-/// players read it.
-fn envelope_at(tone: &ToneEvent, t: f64) -> f64 {
-    let curve = &tone.envelope;
-    if curve.len() < 2 || tone.duration_sec <= 0.0 {
-        return tone.target_gain;
-    }
-    let pos = (t / tone.duration_sec).clamp(0.0, 1.0) * (curve.len() - 1) as f64;
-    let i = pos.floor() as usize;
-    let frac = pos - i as f64;
-    let a = f64::from(curve.get(i).copied().unwrap_or(0.0));
-    let b = curve.get(i + 1).map_or(a, |b| f64::from(*b));
-    a + (b - a) * frac
 }
 
 #[cfg(test)]

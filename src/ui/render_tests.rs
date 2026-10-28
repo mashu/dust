@@ -3354,15 +3354,15 @@ mod interactions {
             assert!(!ui.has(gone), "{gone} should no longer be on the card");
         }
 
-        assert!(!ui.has("Slow swells and dips of the signal."));
+        assert!(!ui.has("Slow swells and dips of each station, every one on a path of its own"));
         ui.click("help-band-conditions");
         assert!(
-            ui.has("Slow swells and dips of the signal."),
+            ui.has("Slow swells and dips of each station, every one on a path of its own"),
             "the help should have opened"
         );
         ui.click("help-band-conditions");
         assert!(
-            !ui.has("Slow swells and dips of the signal."),
+            !ui.has("Slow swells and dips of each station, every one on a path of its own"),
             "and closes again"
         );
 

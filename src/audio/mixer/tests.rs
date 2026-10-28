@@ -1793,3 +1793,86 @@ fn a_send_waiting_to_take_over_starts_on_time_or_not_at_all() {
     assert!(after.iter().all(|s| s.abs() < 1e-3), "the send played on");
     assert!(after[SR as usize / 4..].iter().all(|s| *s == 0.0));
 }
+
+/// Out of the box, fading is heard under the AGC as it is on the air: the
+/// station the AGC rides holds nearly steady, while the hiss between its
+/// elements swells up and sinks back with each fade, by most of the fade's
+/// depth. A fade as shallow as the old default's was, under the AGC, no
+/// fading at all to the ear.
+#[test]
+fn fading_is_heard_under_the_agc_out_of_the_box() {
+    let mut settings = TrainingSettings::default();
+    // Static would cover the hiss it is heard in; a quicker fade puts
+    // several in the listen.
+    settings.band.qrn_enabled = false;
+    settings.band.qsb_rate_hz = 0.5;
+    for wpm in [
+        &mut settings.playback.char_wpm_min,
+        &mut settings.playback.char_wpm_max,
+        &mut settings.playback.effective_wpm_min,
+        &mut settings.playback.effective_wpm_max,
+    ] {
+        *wpm = 20.0;
+    }
+    let voice = resolve_station(&settings, &mut SplitMix64::new(5));
+    let plan = plan_transmission(&Transmission::alone("5".repeat(64), voice), &settings);
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    mixer.set_band(Some(band(&settings, 3)), &mut swept);
+    mixer.start(
+        SendVoice::new(
+            &plan,
+            &FilterDesign::from_settings(&settings),
+            Qsb::of(&settings.band),
+            SR,
+            0.0,
+        ),
+        &mut swept,
+    );
+    let out = render(
+        &mut mixer,
+        late() + (plan.wanted.duration_sec * f64::from(SR)) as usize,
+    );
+    let at = |t: f64| late() + (t * f64::from(SR)) as usize;
+    let ms = 0.001;
+    // Each second, from the third on: the station within its elements, and
+    // the hiss in the gaps between them, past the filter's ringing.
+    let (mut marks, mut gaps) = (vec![(0.0, 0); 48], vec![(0.0, 0); 48]);
+    let add = |into: &mut (f64, usize), samples: &[f32]| {
+        into.0 += power(samples);
+        into.1 += 1;
+    };
+    for pair in plan.wanted.events.windows(2) {
+        let (tone, next) = (&pair[0], &pair[1]);
+        let second = tone.start_sec as usize;
+        if second < 2 || second >= marks.len() {
+            continue;
+        }
+        let up = tone.start_sec + tone.keyed_sec;
+        add(
+            &mut marks[second],
+            &out[at(tone.start_sec + 10.0 * ms)..at(up - 5.0 * ms)],
+        );
+        if next.start_sec - up > 0.05 {
+            add(
+                &mut gaps[second],
+                &out[at(up + 25.0 * ms)..at(next.start_sec - 5.0 * ms)],
+            );
+        }
+    }
+    let mean = |(sum, count): &(f64, usize)| sum / *count as f64;
+    let seconds: Vec<(f64, f64)> = marks
+        .iter()
+        .zip(&gaps)
+        .filter(|(mark, gap)| mark.1 > 0 && gap.1 > 0)
+        .map(|(mark, gap)| (db(mean(mark)), db(mean(mark) / mean(gap))))
+        .collect();
+    assert!(seconds.len() > 15, "{} seconds heard", seconds.len());
+    let range = |pick: fn(&(f64, f64)) -> f64| {
+        let values = seconds.iter().map(pick);
+        values.clone().fold(f64::MIN, f64::max) - values.fold(f64::MAX, f64::min)
+    };
+    let (station, under) = (range(|s| s.0), range(|s| s.1));
+    assert!(station < 4.5, "the station moved {station:.1} dB");
+    assert!(under >= 9.0, "the hiss under it moved {under:.1} dB");
+}

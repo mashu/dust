@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use crate::band::{Qsb, SOFT_LIMIT_KNEE};
+use crate::band::{FADE_STEP_SEC, Qsb, SOFT_LIMIT_KNEE};
 use crate::session::MonoMs;
 use crate::settings::{TrainingSettings, VOLUME_MAX};
 use crate::timing::{
@@ -206,6 +206,8 @@ impl Turn {
                     text: segment.text.clone(),
                     voice: segment.voice,
                     delay_sec: segment.start_sec,
+                    // Its fading is in its tones (`plan_turn`).
+                    fade_from_sec: 0.0,
                 })
                 .collect(),
         })
@@ -345,6 +347,7 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
             duration_sec: 0.0,
             resolved_char_wpm: char_wpm,
             resolved_effective_wpm: effective_wpm,
+            fade_from_sec: 0.0,
         }
     });
     wanted.duration_sec = wanted.duration_sec.max(ends);
@@ -357,14 +360,19 @@ pub fn plan_turn(turn: &Turn, settings: &TrainingSettings) -> PlannedTransmissio
 }
 
 /// Lay `fade` into each of `tones`, timed from the start of their segment:
-/// every point of a tone's envelope, which is sampled at the envelope's
-/// rate (`ENVELOPE_SAMPLE_RATE`), is scaled by the fade at the moment it
-/// plays, so a fade a few times a second still moves smoothly through a long
-/// dah. Each tone has an envelope of its own then, no longer one shared by
-/// every dit, and its level, which a player reads only where it cannot play
-/// the envelope, is scaled by the fade at its middle.
+/// every point of a tone's envelope is scaled by the fade at the moment it
+/// plays, read a step apart along the tone ([`FADE_STEP_SEC`]) with straight
+/// lines between, as a player reads a send's fading, so a fade a few times a
+/// second still moves smoothly through a long dah. Each tone has an envelope
+/// of its own then, no longer one shared by every dit, and its level, which
+/// a player reads only where it cannot play the envelope, is scaled by the
+/// fade at its middle.
 fn fade_tones(tones: &mut [ToneEvent], fade: Fade) {
     for tone in tones {
+        let steps = ((tone.duration_sec / FADE_STEP_SEC).ceil() as usize).max(1);
+        let marks: Vec<f32> = (0..=steps)
+            .map(|k| fade.gain_at(tone.start_sec + tone.duration_sec * k as f64 / steps as f64))
+            .collect();
         let points = tone.envelope.len();
         let at = |point: usize| {
             let through = if points > 1 {
@@ -372,7 +380,10 @@ fn fade_tones(tones: &mut [ToneEvent], fade: Fade) {
             } else {
                 0.5
             };
-            fade.gain_at(tone.start_sec + tone.duration_sec * through)
+            let along = through * steps as f64;
+            let k = (along.floor() as usize).min(steps - 1);
+            let frac = (along - k as f64) as f32;
+            marks[k] + (marks[k + 1] - marks[k]) * frac
         };
         let faded: Vec<f32> = tone
             .envelope
@@ -552,6 +563,7 @@ mod tests {
                         text: "W7ABC".to_string(),
                         voice,
                         delay_sec: 0.1 * f64::from(k),
+                        fade_from_sec: 0.0,
                     })
                     .collect(),
             },
@@ -574,7 +586,7 @@ mod tests {
             "it waits its delay"
         );
         for tone in &planned.others[0].events {
-            assert!(tone.start_sec + tone.duration_sec <= planned.wanted.duration_sec + 1e-9);
+            assert!(tone.start_sec + tone.keyed_sec <= planned.wanted.duration_sec + 1e-9);
         }
     }
 
@@ -600,7 +612,7 @@ mod tests {
             .wanted
             .events
             .iter()
-            .map(|tone| tone.duration_sec)
+            .map(|tone| tone.keyed_sec)
             .fold(f64::MAX, f64::min);
         assert!((shortest - 1.2 / 30.0).abs() < 1e-9);
     }
@@ -627,10 +639,11 @@ mod tests {
         turn
     }
 
-    /// A caller's fade is laid into each of its tones, point by point at the
-    /// moment each point plays, every tone with an envelope of its own and
-    /// its level scaled to match; it moves smoothly from point to point, and
-    /// two callers read from their own points in it rise and fall apart.
+    /// A caller's fade is laid into each of its tones, every point at the
+    /// moment it plays, as a player reads a fade; every tone with an
+    /// envelope of its own and its level scaled to match. It moves smoothly
+    /// from point to point, and two callers read from their own points in it
+    /// rise and fall apart.
     #[test]
     fn callers_fade_independently_and_smoothly() {
         let settings = settings();
@@ -652,8 +665,13 @@ mod tests {
                     tone.envelope.iter().zip(base.envelope.iter()).enumerate()
                 {
                     let t = from_sec + start + tone.duration_sec * point as f64 / points as f64;
+                    // Read a millisecond apart: to a few hundredths of a
+                    // decibel.
                     let expected = level_then * qsb.gain_at(t);
-                    assert!((level - expected).abs() < 1e-6, "tone {at}, point {point}");
+                    assert!(
+                        (level - expected).abs() <= 0.005 * level_then,
+                        "tone {at}, point {point}"
+                    );
                 }
                 let middle = qsb.gain_at(from_sec + start + tone.duration_sec / 2.0);
                 assert!((tone.target_gain - base.target_gain * f64::from(middle)).abs() < 1e-9);
@@ -899,7 +917,9 @@ mod tests {
                     let t = start + tone.duration_sec * point as f64 / points as f64;
                     let both =
                         qsb.map_or(1.0, |qsb| qsb.gain_at(11.0 + t)) * flutter.gain_at(11.0 + t);
-                    assert!((level - level_then * both).abs() < 1e-6);
+                    // A millisecond apart, a flutter's corners are cut by a
+                    // fifth of a decibel at most.
+                    assert!((level - level_then * both).abs() <= 0.025 * level_then);
                     assert!((fade.gain_at(t) - both).abs() < 1e-6);
                 }
                 heard.push(fade.gain_at(start + tone.duration_sec / 2.0));

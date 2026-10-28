@@ -109,11 +109,11 @@ pub use settings::{
     GROUP_TIMEOUT_MAX_SEC, LevelAxis, MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, MY_CALL_MAX,
     MY_NAME_MAX, MY_POWER_MAX, MY_SENDING_MAX_DB, MY_SENDING_OFF_DB, MY_ZONE_MAX,
     MixedAutoLevelAxis, NUM_GROUPS_MAX, NUM_GROUPS_MIN, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
-    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, QSB_RATE_MAX_HZ,
-    QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
-    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
-    SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN, class_reading,
-    power_reading, section_code, state_code,
+    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, PlaybackSettings, PracticeWindow, QSB_DEPTH_MAX_DB,
+    QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RangeValues,
+    SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
+    STEEPNESS_MIN_MS, SettingsSection, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    class_reading, power_reading, section_code, state_code,
 };
 pub use span::LengthForecast;
 pub use speed::{SpeedForecast, SpeedPath};

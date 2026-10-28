@@ -2,9 +2,9 @@ use cw_core::band::{FilterDesign, NOISE_LEVEL_PER_DB, heard_snr_db};
 use cw_core::{
     AGC_THRESHOLD_MAX_DB, AGC_THRESHOLD_MIN_DB, AgcDecay, BandSettings, CallerHabits, CharSetMode,
     ContestRules, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Field, FilterShape, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
-    RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RunStyle, STATIONS_MAX, STATIONS_MIN,
-    SettingsSection, Side, TrainingSettings, filter_capacity,
+    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_DEPTH_MAX_DB, QSB_RATE_MAX_HZ,
+    QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RunStyle, STATIONS_MAX,
+    STATIONS_MIN, SettingsSection, Side, TrainingSettings, filter_capacity,
 };
 use dioxus::prelude::*;
 
@@ -307,14 +307,14 @@ pub fn BandConditionsCard(
             }
             Switch {
                 title: "QSB fading".to_string(),
-                description: "Slow gain swells on the Morse signal only.".to_string(),
+                description: "Slow swells and fades on the stations calling, each over a path of its own.".to_string(),
                 checked: b.qsb_enabled,
                 onchange: move |on| settings.write().band.qsb_enabled = on,
             }
             div { class: "field-grid",
                 SliderField {
                     label: "Depth".to_string(),
-                    value_label: format!("{:.0}%", b.qsb_depth * 100.0),
+                    value_label: format!("{:.0} dB", b.qsb_depth * QSB_DEPTH_MAX_DB),
                     value: b.qsb_depth,
                     min: 0.0,
                     max: 1.0,

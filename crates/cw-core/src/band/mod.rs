@@ -73,7 +73,7 @@ pub use output::{
     AUDIO_HIGH_PASS_HZ, AudioHighPass, SOFT_LIMIT_HEADROOM, SOFT_LIMIT_KNEE, soft_limit,
     soft_limit_curve,
 };
-pub use qsb::Qsb;
+pub use qsb::{FADE_OFFSET_MAX_SEC, FADE_STEP_SEC, Qsb};
 pub use source::BandSource;
 
 use crate::settings::{BandSettings, STATIONS_MIN, TrainingSettings};

@@ -448,6 +448,7 @@ mod tests {
             duration_sec,
             resolved_char_wpm: 20.0,
             resolved_effective_wpm: 18.0,
+            fade_from_sec: 0.0,
         };
         PlaybackWait::new(
             &plan,

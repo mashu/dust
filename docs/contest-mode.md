@@ -1653,8 +1653,10 @@ the browser plays that same mixer.
 
 Each caller gets the band's `Qsb` model at its own time offset, following
 the Band card's QSB switch. `plan_turn` bakes the fade into each tone's
-curve point by point at `ENVELOPE_SAMPLE_RATE` (`envelope.rs:9`), one `Arc`
-per tone, and scales `target_gain` to match. As built (2a), single callers
+curve point by point (`ENVELOPE_SAMPLE_RATE`, 4,800 a second), reading the
+fade a millisecond apart along the tone (`FADE_STEP_SEC`) with straight
+lines between, as the player reads a send's fading; one `Arc` per tone, and
+`target_gain` scaled to match. As built (2a), single callers
 fade too. The machine holds `Qsb::of` the run's band settings, none with
 the switch off, and each caller draws a start point of its own up to an
 hour into the fade; a segment carries `Fade { qsb, from_sec }`, the
@@ -1663,16 +1665,15 @@ key time, plus the segment's start), and `plan_turn` reads only that, as
 the runtime plays from settings with the switch off. A segment of yours
 is never faded, whatever it carries. The QSB control runs
 0.03–1.5 Hz (`settings/mod.rs:47-48`) with components up to 2.3× that
-(`band/qsb.rs:26`), so a fade held per tone would step audibly. The web
-curve cache (`web/send.rs:128-143`) then holds a few hundred entries per
-turn. No player changes.
+(`band/qsb.rs`), so a fade held per tone would step audibly. No player
+changes: training's pile-ups fade the same way in the player, each station
+on a path of its own (`fade_from_sec`, drawn as a caller's is).
 
 As built (5a), flutter: under the Band card's flutter (`contestFlutter`,
 §8, in Contest mode), three callers in ten flutter, as MorseRunner's
 flutter has them (`DxStn.pas:97-99`): a caller's signal rises and falls at
 a rate drawn for it from 3 to 33 Hz, from half to three quarters of the way
-down, as deep as the band's fading ever goes, so a fluttering caller is
-rough but never lost. MorseRunner's flutter only quickens a station's
+down (6 to 12 dB), so a fluttering caller is rough but never lost. MorseRunner's flutter only quickens a station's
 fading, full depth, and acts only with its QSB on; here it is a flutter of
 its own, the band's wandering multipath fading at the flutter's rate
 (`Qsb::flutter`), over the band's fading where that is on and alone where it
@@ -1683,10 +1684,11 @@ flutter off draws as it always has. A segment's fade carries it (`Fade {
 qsb, flutter, from_sec }`), read along the caller's own path, so it carries
 through continuations and a dupe calling again keeps it; `plan_turn` lays it
 into the tones' envelopes as it lays the fading, and your message never
-flutters, nor QRM. The envelopes are sampled at 1,200 points a second,
-sixteen to a cycle of the fastest path of the fastest flutter (2.3 × 33 Hz),
-and both players play them as they are, so no player changes for it: the
-browser plays the native mixer, rendered ahead of its clock.
+flutters, nor QRM. The fade is read a millisecond apart, thirteen readings
+to a cycle of the fastest path of the fastest flutter (2.3 × 33 Hz), which
+cuts its corners by a fifth of a decibel at most, and both players play the
+envelopes as they are, so no player changes for it: the browser plays the
+native mixer, rendered ahead of its clock.
 
 ### 5.6 QRM and the background
 

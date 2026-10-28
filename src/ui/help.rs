@@ -474,7 +474,7 @@ pub fn envelope() -> Element {
         }
         dl { class: "help-terms",
             dt { "Rise time" }
-            dd { "How long an element takes to reach full volume and to fade. Short is crisp but clicks at speed; long is soft but blurs fast dits." }
+            dd { "How long an element takes to reach full volume and to fade. It rises as the key goes down and fades as it comes up, as a transmitter does, so each element is heard as long as it is keyed. Short is crisp but clicks; long is soft but blurs fast dits into one another." }
             dt { "Edge smoothing" }
             dd { "The shape of that ramp: harder edges snap, smoother ones are gentler on the ear. Your paddle's sidetone opens and closes the same way, as a rig's follows its transmitter." }
             dt { "Dit · Dah · CQ" }
@@ -545,7 +545,7 @@ pub fn band() -> Element {
             dt { "Band noise" }
             dd { "The steady hiss of the band; its S/N is as heard through your filter." }
             dt { "QSB fading" }
-            dd { "Slow swells and dips of the signal." }
+            dd { "Slow swells and dips of each station, every one on a path of its own, down as far as the depth says. With the AGC on a strong station holds nearly steady as it fades, and the hiss rises around it, as on the air." }
             dt { "QRN static" }
             dd { "Lightning: the crackle of distant storms and the crash of a near one." }
             dt { "RF gain" }
