@@ -3745,6 +3745,25 @@ mod interactions {
         });
     }
 
+    /// A Mac sends no key release for a key let go while Command was down,
+    /// and on the desktop there it is the root that keys the paddles: so
+    /// Command let go opens them, the element sounding finishes, and the
+    /// pad hears a T rather than dahs on and on.
+    #[test]
+    fn letting_command_go_opens_the_paddles() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            ui.press_key("keyed-root", Key::Character("]".into()), Code::BracketRight);
+            ui.advance(100).await;
+            let command = dioxus::prelude::Modifiers::META;
+            ui.press_key_held("keyed-root", Key::Meta, Code::MetaLeft, command);
+            // The `]` let go now goes unheard.
+            ui.release_key("keyed-root", Key::Meta, Code::MetaLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
     #[test]
     fn the_pad_keeps_only_the_last_line_it_heard() {
         crate::testing::run(|| async {

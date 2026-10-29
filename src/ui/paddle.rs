@@ -26,12 +26,18 @@ use crate::ui::widgets::control_id;
 const HEARD_KEEP: usize = 32;
 
 /// Whether the key events that reach the page's root are what key the
-/// paddles. The desktop build hears them from its window instead, so a USB
-/// keyer works without the webview's focus and without waiting on its IPC,
-/// and the web and mobile builds from the whole document, so they work with
-/// nothing focused at all: a HID paddle on a phone keys with nothing tapped
-/// first. Tests drive the root.
-const ROOT_KEYS_THE_PADDLES: bool = cfg!(test);
+/// paddles. They are on the desktop on macOS and Windows, whose window
+/// hears no keys: the webview takes every one, WKWebView as the window's
+/// first responder, WebView2 in a window of its own inside it. On Linux the
+/// desktop hears them from its window instead, so a USB keyer works without
+/// the webview's focus and without waiting on its IPC, and the web and
+/// mobile builds from the whole document, so they work with nothing focused
+/// at all: a HID paddle on a phone keys with nothing tapped first. Tests
+/// drive the root.
+const ROOT_KEYS_THE_PADDLES: bool = cfg!(any(
+    test,
+    all(feature = "desktop", not(target_os = "linux"))
+));
 
 /// Which paddle contacts are closed, and by which key: the code of the key
 /// that closed each.
@@ -286,8 +292,9 @@ pub fn use_paddle_keys(
 }
 
 impl PaddleKeys {
-    /// The page root's keydown. `[` and `]` are paddles, never text — on the
-    /// desktop the window keys them, but the answer box must not type them.
+    /// The page root's keydown. `[` and `]` are paddles, never text — on
+    /// Linux the desktop's window keys them, but the answer box must not
+    /// type them.
     pub fn keydown(self, e: Event<KeyboardData>) {
         let (key, code) = key_and_code(&e);
         let mods = e.modifiers();
@@ -316,6 +323,10 @@ impl PaddleKeys {
         };
         if paddle {
             e.prevent_default();
+        } else if ROOT_KEYS_THE_PADDLES && e.key() == Key::Meta {
+            // A Mac sends no key release for a key let go while Command
+            // was down, as its browsers do not.
+            self.release_all();
         }
     }
 
@@ -587,6 +598,8 @@ impl PaddleKeys {
     }
 }
 
+/// The desktop's window: on Linux it keys the paddles, as it hears them,
+/// and everywhere it opens them as it loses the focus.
 #[cfg(all(feature = "desktop", not(test)))]
 fn listen_native_paddles(keys: PaddleKeys) {
     use std::cell::Cell;
@@ -623,7 +636,9 @@ fn listen_native_paddles(keys: PaddleKeys) {
                 });
                 return;
             }
-            WindowEvent::KeyboardInput { event: key, .. } => key,
+            // Where the root keys the paddles the window hears no keys, and
+            // must key none: the root's own would be keyed twice.
+            WindowEvent::KeyboardInput { event: key, .. } if !ROOT_KEYS_THE_PADDLES => key,
             _ => return,
         };
         if key.repeat {
@@ -638,11 +653,6 @@ fn listen_native_paddles(keys: PaddleKeys) {
         let code = key.physical_key.to_string();
         match key.state {
             ElementState::Pressed => dispatch.call((typed.to_string(), code, true)),
-            ElementState::Released if key.logical_key == Key::Super => {
-                // A Mac sends no key release for a key let go while Command
-                // was down, as its browsers do not.
-                keys.release_all();
-            }
             ElementState::Released => dispatch.call((typed.to_string(), code, false)),
             _ => {}
         }
