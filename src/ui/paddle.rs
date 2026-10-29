@@ -33,37 +33,56 @@ const HEARD_KEEP: usize = 32;
 /// first. Tests drive the root.
 const ROOT_KEYS_THE_PADDLES: bool = cfg!(test);
 
-/// Which paddle contacts are closed, as the desktop build's raw key events
-/// leave them. tao on Linux never marks a held key's repeated presses as
-/// repeats, so a press of a contact already closed is dropped; GTK asks X11
-/// for detectable auto-repeat, and Wayland repeats in the client, so a held
-/// key sends one release, at its real key-up, which is taken at once. Only the
-/// desktop build listens to raw key events, so only it — and the tests — need
-/// one.
-#[cfg(any(feature = "desktop", test))]
-#[derive(Clone, Copy, Debug, Default)]
+/// Which paddle contacts are closed, and by which key: the code of the key
+/// that closed each.
+///
+/// A key's release opens the contact it closed, whatever it types by then.
+/// A bracket typed with AltGr or Option — `[` is AltGr+8 on a German
+/// keyboard — whose modifier is let go first, is let go as `8`, and was
+/// lost: the paddle stayed down, the keyer sending on and on, and a
+/// training session waited on its letter for good.
+///
+/// A press of a contact already closed is dropped: tao on Linux never marks
+/// a held key's repeated presses as repeats. GTK asks X11 for detectable
+/// auto-repeat, and Wayland repeats in the client, so a held key sends one
+/// release, at its real key-up, which is taken at once.
+#[derive(Clone, Debug, Default)]
 struct Contacts {
-    dit: bool,
-    dah: bool,
+    dit: Option<String>,
+    dah: Option<String>,
 }
 
-#[cfg(any(feature = "desktop", test))]
 impl Contacts {
-    fn slot(&mut self, paddle: Paddle) -> &mut bool {
+    fn slot(&mut self, paddle: Paddle) -> &mut Option<String> {
         match paddle {
             Paddle::Dit => &mut self.dit,
             Paddle::Dah => &mut self.dah,
         }
     }
 
-    /// Whether a press closed the contact, rather than repeated one held.
-    fn press(&mut self, paddle: Paddle) -> bool {
-        !std::mem::replace(self.slot(paddle), true)
+    /// Whether the key at `code` closed `paddle`'s contact, rather than
+    /// finding it closed: a held key repeating, or another key of the paddle.
+    fn press(&mut self, paddle: Paddle, code: &str) -> bool {
+        let slot = self.slot(paddle);
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(code.to_string());
+        true
     }
 
-    /// Whether a release opened the contact, rather than one already open.
-    fn release(&mut self, paddle: Paddle) -> bool {
-        std::mem::replace(self.slot(paddle), false)
+    /// The paddle a key's release at `code` opens: the one that key closed,
+    /// whatever it types now, or else `reads_as`, the paddle the key reads
+    /// as. Its contact is open after, if it was not already.
+    fn release(&mut self, code: &str, reads_as: Option<Paddle>) -> Option<Paddle> {
+        // A key the page cannot place could be any key.
+        let placed = !code.is_empty() && !code.contains("Unidentified");
+        let closed_by = [Paddle::Dit, Paddle::Dah]
+            .into_iter()
+            .find(|paddle| placed && self.slot(*paddle).as_deref() == Some(code));
+        let paddle = closed_by.or(reads_as)?;
+        *self.slot(paddle) = None;
+        Some(paddle)
     }
 
     /// Every contact open, as when the window lost the focus and the key
@@ -71,6 +90,14 @@ impl Contacts {
     fn open_all(&mut self) {
         *self = Self::default();
     }
+}
+
+/// Ctrl, Alt and Meta, as held with a key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Held {
+    ctrl: bool,
+    alt: bool,
+    meta: bool,
 }
 
 /// Wait `ms` on the keyer's clock.
@@ -91,14 +118,35 @@ async fn sleep_keyer(ms: u64) {
     }
 }
 
-/// The paddle a key is, if it is one: `[` or `]` ([`bracket_for_key`]), and
-/// only with no Ctrl, Alt or Meta held, which make it a shortcut. `swap`
-/// turns the paddles round.
-fn paddle_for_key(key: &str, code: &str, shortcut: bool, swap: bool) -> Option<Paddle> {
-    if shortcut {
-        return None;
-    }
+/// What a key event types, as text — nothing for a key that types none —
+/// and where the key sits.
+fn key_and_code(e: &Event<KeyboardData>) -> (String, String) {
+    let key = match e.key() {
+        Key::Character(text) => text,
+        _ => String::new(),
+    };
+    (key, e.code().to_string())
+}
+
+/// The paddle a key is, if it is one: `[` or `]` ([`bracket_for_key`]).
+/// `swap` turns the paddles round.
+fn paddle_for_key(key: &str, code: &str, swap: bool) -> Option<Paddle> {
     paddle_from_bracket(bracket_for_key(key, code)?, swap)
+}
+
+/// The paddle a key pressed with `held` down is, if it is one and not a
+/// shortcut. Meta makes any key one. Ctrl or Alt make the brackets' own keys
+/// one, but not a bracket typed elsewhere: that took AltGr, which Windows
+/// holds as Ctrl and Alt, or a Mac's Option, which is Alt — `[` is AltGr+8
+/// on a German keyboard, Option+5 on a German Mac — so they are how it was
+/// typed. It keys the paddle, as on Linux, where AltGr is neither and it
+/// always did: on a keyboard whose bracket keys type something else, it is
+/// the way to key without a USB paddle.
+fn paddle_for_press(key: &str, code: &str, held: Held, swap: bool) -> Option<Paddle> {
+    let paddle = paddle_for_key(key, code, swap)?;
+    let on_bracket_key = matches!(code, "BracketLeft" | "BracketRight");
+    let shortcut = held.meta || ((held.ctrl || held.alt) && on_bracket_key);
+    (!shortcut).then_some(paddle)
 }
 
 /// The bracket a key typing `key` at `code` is, if it is one: `[` or `]` by
@@ -147,6 +195,9 @@ type BoxLetter = (char, Option<MonoMs>);
 #[derive(Clone, Copy)]
 pub struct PaddleKeys {
     keyer: CopyValue<Keyer>,
+    /// The paddle contacts the keys have closed, as the listener keying the
+    /// paddles hears them.
+    contacts: CopyValue<Contacts>,
     /// The wake the clock is waiting for. A timer that finds another one here
     /// has been superseded and does nothing.
     armed: CopyValue<Option<u64>>,
@@ -172,6 +223,7 @@ pub fn use_paddle_keys(
             let playback = &settings.peek().playback;
             PaddleKeys {
                 keyer: CopyValue::new(Keyer::new(playback.keyer_mode, playback.keyer_wpm)),
+                contacts: CopyValue::new(Contacts::default()),
                 armed: CopyValue::new(None),
                 answer: CopyValue::new(None),
                 app: CopyValue::new(app),
@@ -222,38 +274,65 @@ impl PaddleKeys {
     /// The page root's keydown. `[` and `]` are paddles, never text — on the
     /// desktop the window keys them, but the answer box must not type them.
     pub fn keydown(self, e: Event<KeyboardData>) {
-        let Some(paddle) = self.paddle_for(&e, true) else {
-            return;
+        let (key, code) = key_and_code(&e);
+        let mods = e.modifiers();
+        let held = Held {
+            ctrl: mods.ctrl(),
+            alt: mods.alt(),
+            meta: mods.meta(),
         };
-        e.prevent_default();
-        if ROOT_KEYS_THE_PADDLES && !e.is_auto_repeating() {
-            self.press(paddle);
+        let paddle = if ROOT_KEYS_THE_PADDLES {
+            self.key_down(&key, &code, held, e.is_auto_repeating())
+        } else {
+            paddle_for_press(&key, &code, held, self.swap()).is_some()
+        };
+        if paddle {
+            e.prevent_default();
         }
     }
 
     /// The page root's keyup.
     pub fn keyup(self, e: Event<KeyboardData>) {
-        let Some(paddle) = self.paddle_for(&e, false) else {
-            return;
+        let (key, code) = key_and_code(&e);
+        let paddle = if ROOT_KEYS_THE_PADDLES {
+            self.key_up(&key, &code)
+        } else {
+            paddle_for_key(&key, &code, self.swap()).is_some()
         };
-        e.prevent_default();
-        if ROOT_KEYS_THE_PADDLES {
-            self.release(paddle);
+        if paddle {
+            e.prevent_default();
         }
     }
 
-    /// The paddle a key is, if it is one, pressed or else released. Ctrl,
-    /// Alt or Meta held make a press a shortcut, but never a release: a
-    /// paddle held when one of them went down still has to open.
-    fn paddle_for(self, e: &Event<KeyboardData>, press: bool) -> Option<Paddle> {
-        let key = match e.key() {
-            Key::Character(text) => text,
-            _ => String::new(),
+    /// A key typing `key` at `code` pressed with `held` down, or repeating
+    /// while held: whether it is a paddle, to keep from the page. A press
+    /// closes the paddle's contact, and remembers which key did.
+    fn key_down(mut self, key: &str, code: &str, held: Held, repeat: bool) -> bool {
+        let Some(paddle) = paddle_for_press(key, code, held, self.swap()) else {
+            return false;
         };
-        let mods = e.modifiers();
-        let shortcut = press && (mods.ctrl() || mods.alt() || mods.meta());
-        let swap = self.settings.peek().playback.paddle_swap;
-        paddle_for_key(&key, &e.code().to_string(), shortcut, swap)
+        if !repeat && self.contacts.write().press(paddle, code) {
+            self.press(paddle);
+        }
+        true
+    }
+
+    /// A key typing `key` at `code` let go: whether it was a paddle's. It
+    /// opens the contact it closed, whatever it types now and whatever is
+    /// held — a paddle held when Ctrl went down still has to open — or else
+    /// the paddle it reads as.
+    fn key_up(mut self, key: &str, code: &str) -> bool {
+        let reads_as = paddle_for_key(key, code, self.swap());
+        let opened = self.contacts.write().release(code, reads_as);
+        if let Some(paddle) = opened {
+            self.release(paddle);
+        }
+        opened.is_some()
+    }
+
+    /// Whether the paddles are turned round.
+    fn swap(self) -> bool {
+        self.settings.peek().playback.paddle_swap
     }
 
     /// A paddle closed.
@@ -293,7 +372,8 @@ impl PaddleKeys {
     /// Open both paddles: the window lost the focus, or the page went out
     /// of sight, and the key releases with it. The element sounding
     /// finishes, so the letter it ends is still heard.
-    pub fn release_all(self) {
+    pub fn release_all(mut self) {
+        self.contacts.write().open_all();
         let now = mono_ms();
         for paddle in [Paddle::Dit, Paddle::Dah] {
             self.release_at(paddle, now);
@@ -490,39 +570,42 @@ impl PaddleKeys {
 
 #[cfg(all(feature = "desktop", not(test)))]
 fn listen_native_paddles(keys: PaddleKeys) {
-    use std::cell::RefCell;
+    use std::cell::Cell;
 
-    let contacts = use_hook(|| Rc::new(RefCell::new(Contacts::default())));
-    let unfocused = Rc::clone(&contacts);
-    let dispatch = use_callback(move |(paddle, pressed): (Paddle, bool)| {
+    // The modifiers held, which the window says when they change rather
+    // than with each key.
+    let held = use_hook(|| Rc::new(Cell::new(Held::default())));
+    let modifiers = Rc::clone(&held);
+    let dispatch = use_callback(move |(key, code, pressed): (String, String, bool)| {
         if pressed {
-            if contacts.borrow_mut().press(paddle) {
-                keys.press(paddle);
-            }
-        } else if contacts.borrow_mut().release(paddle) {
-            keys.release(paddle);
+            keys.key_down(&key, &code, held.get(), false);
+        } else {
+            keys.key_up(&key, &code);
         }
     });
     dioxus::desktop::use_wry_event_handler(move |event, _| {
         use dioxus::desktop::tao::event::{ElementState, Event, WindowEvent};
         use dioxus::desktop::tao::keyboard::Key;
-        // Linux and macOS send no key release once the window has lost the
-        // focus, so the paddles open with it.
-        if let Event::WindowEvent {
-            event: WindowEvent::Focused(false),
-            ..
-        } = event
-        {
-            unfocused.borrow_mut().open_all();
-            keys.release_all();
+        let Event::WindowEvent { event, .. } = event else {
             return;
-        }
-        let Event::WindowEvent {
-            event: WindowEvent::KeyboardInput { event: key, .. },
-            ..
-        } = event
-        else {
-            return;
+        };
+        let key = match event {
+            // Linux and macOS send no key release once the window has lost
+            // the focus, so the paddles open with it.
+            WindowEvent::Focused(false) => {
+                keys.release_all();
+                return;
+            }
+            WindowEvent::ModifiersChanged(state) => {
+                modifiers.set(Held {
+                    ctrl: state.control_key(),
+                    alt: state.alt_key(),
+                    meta: state.super_key(),
+                });
+                return;
+            }
+            WindowEvent::KeyboardInput { event: key, .. } => key,
+            _ => return,
         };
         if key.repeat {
             return;
@@ -533,13 +616,15 @@ fn listen_native_paddles(keys: PaddleKeys) {
             Key::Character(text) => *text,
             _ => "",
         };
-        let swap = keys.settings.peek().playback.paddle_swap;
-        let Some(paddle) = paddle_for_key(typed, &key.physical_key.to_string(), false, swap) else {
-            return;
-        };
+        let code = key.physical_key.to_string();
         match key.state {
-            ElementState::Pressed => dispatch.call((paddle, true)),
-            ElementState::Released => dispatch.call((paddle, false)),
+            ElementState::Pressed => dispatch.call((typed.to_string(), code, true)),
+            ElementState::Released if key.logical_key == Key::Super => {
+                // A Mac sends no key release for a key let go while Command
+                // was down, as its browsers do not.
+                keys.release_all();
+            }
+            ElementState::Released => dispatch.call((typed.to_string(), code, false)),
             _ => {}
         }
     });
@@ -561,24 +646,19 @@ fn listen_document_paddles(keys: PaddleKeys) {
     let listeners = use_hook(|| {
         let window = web_sys::window()?;
         let document = window.document()?;
-        // Ctrl, Alt or Meta make a press a shortcut, never a release.
-        let paddle_for = move |e: &KeyboardEvent, press: bool| {
-            let shortcut = press && (e.ctrl_key() || e.alt_key() || e.meta_key());
-            let swap = keys.settings.peek().playback.paddle_swap;
-            paddle_for_key(&e.key(), &e.code(), shortcut, swap)
-        };
         let down: Listener = Closure::new(move |e: KeyboardEvent| {
-            if let Some(paddle) = paddle_for(&e, true) {
+            let held = Held {
+                ctrl: e.ctrl_key(),
+                alt: e.alt_key(),
+                meta: e.meta_key(),
+            };
+            if keys.key_down(&e.key(), &e.code(), held, e.repeat()) {
                 e.prevent_default();
-                if !e.repeat() {
-                    keys.press(paddle);
-                }
             }
         });
         let up: Listener = Closure::new(move |e: KeyboardEvent| {
-            if let Some(paddle) = paddle_for(&e, false) {
+            if keys.key_up(&e.key(), &e.code()) {
                 e.prevent_default();
-                keys.release(paddle);
             } else if e.key() == "Meta" {
                 // A Mac's browser sends no key release for a key let go
                 // while Command was down.
@@ -617,10 +697,11 @@ fn listen_document_paddles(_keys: PaddleKeys) {}
 /// has focus, and a tapped button takes none on iOS. So, as the web build's
 /// ([`listen_document_paddles`]), they hear the paddles from the whole
 /// document: the page's script keeps a bracket from the page, read as
-/// [`bracket_for_key`] reads one, and hands it over, a press with Ctrl, Alt
-/// or Meta down being a shortcut, a repeat being
-/// nothing, and a release always heard; and the window losing the focus, or
-/// Command let go, opens both.
+/// [`bracket_for_key`] reads one, and hands it over, a press that is a
+/// shortcut ([`paddle_for_press`]) or a repeat being nothing; a release is
+/// always heard, and so is the release of a key that closed a paddle,
+/// whatever it types by then; and the window losing the focus, or Command
+/// let go, opens both.
 #[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
 const PAGE_PADDLES_SCRIPT: &str = r#"if (window.__dustPaddleKeys) {
     window.__dustPaddleKeys();
@@ -629,24 +710,33 @@ const typed = "+,./0123456789=?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw
 const typesMorse = (e) => e.key.length === 1 && typed.includes(e.key);
 const bracketKey = (e) => e.code === "BracketLeft" || e.code === "BracketRight";
 const bracket = (e) => e.key === "[" || e.key === "]" || (!typesMorse(e) && bracketKey(e));
-const shortcut = (e) => e.ctrlKey || e.altKey || e.metaKey;
+const shortcut = (e) => e.metaKey || ((e.ctrlKey || e.altKey) && bracketKey(e));
+const held = new Set();
 const down = (e) => {
     if (bracket(e) && !shortcut(e)) {
         e.preventDefault();
         if (!e.repeat) {
+            if (e.code) {
+                held.add(e.code);
+            }
             dioxus.send(["down", e.key, e.code]);
         }
     }
 };
 const up = (e) => {
-    if (bracket(e)) {
+    if (bracket(e) || held.has(e.code)) {
+        held.delete(e.code);
         e.preventDefault();
         dioxus.send(["up", e.key, e.code]);
     } else if (e.key === "Meta") {
+        held.clear();
         dioxus.send(["open", "", ""]);
     }
 };
-const blur = () => dioxus.send(["open", "", ""]);
+const blur = () => {
+    held.clear();
+    dioxus.send(["open", "", ""]);
+};
 document.addEventListener("keydown", down);
 document.addEventListener("keyup", up);
 window.addEventListener("blur", blur);
@@ -663,25 +753,20 @@ const STOP_PAGE_PADDLES: &str = r#"if (window.__dustPaddleKeys) {
     window.__dustPaddleKeys();
 }"#;
 
-/// What the page's word about a key does to the paddles: one closes or
-/// opens, or both open.
+/// Hand the page's word, `kind` of a key typing `key` at `code`, to the
+/// paddles: a press, a release, or both opened. The page has taken the
+/// shortcuts and the repeats out already.
 #[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PageKey {
-    Press(Paddle),
-    Release(Paddle),
-    OpenBoth,
-}
-
-/// The page's word, `kind` of a key `key` at `code`, as the paddles take it:
-/// none for a key that is no paddle.
-#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
-fn page_key(kind: &str, key: &str, code: &str, swap: bool) -> Option<PageKey> {
-    match (kind, paddle_for_key(key, code, false, swap)) {
-        ("down", Some(paddle)) => Some(PageKey::Press(paddle)),
-        ("up", Some(paddle)) => Some(PageKey::Release(paddle)),
-        ("open", _) => Some(PageKey::OpenBoth),
-        _ => None,
+pub(super) fn page_key(keys: PaddleKeys, kind: &str, key: &str, code: &str) {
+    match kind {
+        "down" => {
+            keys.key_down(key, code, Held::default(), false);
+        }
+        "up" => {
+            keys.key_up(key, code);
+        }
+        "open" => keys.release_all(),
+        _ => {}
     }
 }
 
@@ -691,13 +776,7 @@ fn listen_page_paddles(keys: PaddleKeys) {
         spawn(async move {
             let mut page = document::eval(PAGE_PADDLES_SCRIPT);
             while let Ok((kind, key, code)) = page.recv::<(String, String, String)>().await {
-                let swap = keys.settings.peek().playback.paddle_swap;
-                match page_key(&kind, &key, &code, swap) {
-                    Some(PageKey::Press(paddle)) => keys.press(paddle),
-                    Some(PageKey::Release(paddle)) => keys.release(paddle),
-                    Some(PageKey::OpenBoth) => keys.release_all(),
-                    None => {}
-                }
+                page_key(keys, &kind, &key, &code);
             }
         })
     });
@@ -786,26 +865,30 @@ mod tests {
             "if (!e.repeat)",
             // Every release heard, a modifier held or not, and the Command
             // key's own, after which a browser sends no other, opening both.
-            "const up = (e) => {\n    if (bracket(e)) {",
+            "const up = (e) => {\n    if (bracket(e) || held.has(e.code)) {",
             r#"} else if (e.key === "Meta") {"#,
         ] {
             assert!(script.contains(listened), "{listened}");
         }
-        assert_eq!(paddle_for_key("[", "", false, false), Some(Paddle::Dit));
-        assert_eq!(
-            paddle_for_key("", "BracketRight", false, false),
-            Some(Paddle::Dah)
-        );
-        assert_eq!(
-            page_key("down", "[", "BracketLeft", false),
-            Some(PageKey::Press(Paddle::Dit))
-        );
-        assert_eq!(
-            page_key("up", "]", "BracketRight", false),
-            Some(PageKey::Release(Paddle::Dah))
-        );
-        assert_eq!(page_key("open", "", "", false), Some(PageKey::OpenBoth));
-        assert_eq!(page_key("up", "a", "KeyA", false), None);
+    }
+
+    /// The page's script takes a press for a shortcut as the app does
+    /// ([`paddle_for_press`]), and remembers the key that closed a paddle,
+    /// so that its release is heard whatever it types by then: forgotten
+    /// as the paddles open, it is not heard again.
+    #[test]
+    fn the_page_remembers_which_key_closed_a_paddle() {
+        let script = PAGE_PADDLES_SCRIPT;
+        for listened in [
+            "const shortcut = (e) => e.metaKey || ((e.ctrlKey || e.altKey) && bracketKey(e));",
+            "const held = new Set();",
+            "                held.add(e.code);",
+            "        held.delete(e.code);",
+            "const blur = () => {\n    held.clear();",
+            "        held.clear();\n        dioxus.send([\"open\", \"\", \"\"]);",
+        ] {
+            assert!(script.contains(listened), "{listened}\n{script}");
+        }
     }
 
     #[test]
@@ -818,11 +901,37 @@ mod tests {
     #[test]
     fn a_held_key_closes_its_contact_once_and_its_release_opens_it() {
         let mut contacts = Contacts::default();
-        assert!(contacts.press(Paddle::Dah));
-        assert!(!contacts.press(Paddle::Dah), "repeated");
-        assert!(contacts.release(Paddle::Dah));
-        assert!(!contacts.release(Paddle::Dah), "already open");
-        assert!(contacts.press(Paddle::Dah));
+        let dah = Some(Paddle::Dah);
+        assert!(contacts.press(Paddle::Dah, "BracketRight"));
+        assert!(!contacts.press(Paddle::Dah, "BracketRight"), "repeated");
+        assert_eq!(contacts.release("BracketRight", dah), dah);
+        assert_eq!(contacts.dah, None);
+        assert!(contacts.press(Paddle::Dah, "BracketRight"));
+    }
+
+    /// A key let go opens the contact it closed, whatever it types by then:
+    /// AltGr let go before the 8 it typed `[` with. Any key a paddle reads
+    /// as opens that paddle, and one that is no paddle and closed none
+    /// opens nothing.
+    #[test]
+    fn a_key_let_go_opens_the_contact_it_closed() {
+        let mut contacts = Contacts::default();
+        assert!(contacts.press(Paddle::Dit, "Digit8"));
+        assert!(contacts.press(Paddle::Dah, "BracketRight"));
+        assert_eq!(contacts.release("KeyA", None), None);
+        assert_eq!(contacts.release("Digit8", None), Some(Paddle::Dit));
+        assert_eq!(contacts.dit, None);
+        assert_eq!(contacts.dah.as_deref(), Some("BracketRight"));
+        // The other paddle's key, by what it types.
+        assert_eq!(
+            contacts.release("Digit9", Some(Paddle::Dah)),
+            Some(Paddle::Dah)
+        );
+        assert_eq!(contacts.dah, None);
+        // A key the page cannot place is no key in particular.
+        assert!(contacts.press(Paddle::Dit, ""));
+        assert_eq!(contacts.release("", None), None);
+        assert_eq!(contacts.release("", Some(Paddle::Dit)), Some(Paddle::Dit));
     }
 
     /// The window losing the focus opens every contact: the next press is a
@@ -830,28 +939,25 @@ mod tests {
     #[test]
     fn losing_the_focus_opens_every_contact() {
         let mut contacts = Contacts::default();
-        assert!(contacts.press(Paddle::Dah));
+        assert!(contacts.press(Paddle::Dah, "BracketRight"));
         contacts.open_all();
-        assert!(contacts.press(Paddle::Dah), "open, so a press closes it");
-        assert!(!contacts.release(Paddle::Dit), "never closed");
+        assert!(
+            contacts.press(Paddle::Dah, "BracketRight"),
+            "open, so a press closes it"
+        );
+        assert_eq!(contacts.release("Digit8", None), None, "never closed");
     }
 
     #[test]
     fn a_bracket_is_a_paddle_by_what_it_types_or_where_it_sits() {
-        assert_eq!(paddle_for_key("[", "", false, false), Some(Paddle::Dit));
-        assert_eq!(paddle_for_key("]", "", false, false), Some(Paddle::Dah));
+        assert_eq!(paddle_for_key("[", "", false), Some(Paddle::Dit));
+        assert_eq!(paddle_for_key("]", "", false), Some(Paddle::Dah));
         // A layout where the key types something else: its place decides.
-        assert_eq!(
-            paddle_for_key("ü", "BracketLeft", false, false),
-            Some(Paddle::Dit)
-        );
+        assert_eq!(paddle_for_key("ü", "BracketLeft", false), Some(Paddle::Dit));
         // What it types wins over where it sits.
-        assert_eq!(
-            paddle_for_key("]", "BracketLeft", false, false),
-            Some(Paddle::Dah)
-        );
-        assert_eq!(paddle_for_key("[", "", false, true), Some(Paddle::Dah));
-        assert_eq!(paddle_for_key("a", "KeyA", false, false), None);
+        assert_eq!(paddle_for_key("]", "BracketLeft", false), Some(Paddle::Dah));
+        assert_eq!(paddle_for_key("[", "", true), Some(Paddle::Dah));
+        assert_eq!(paddle_for_key("a", "KeyA", false), None);
     }
 
     /// Where the brackets' own keys type a character Morse has, it is typed:
@@ -871,7 +977,7 @@ mod tests {
             ("p", "BracketLeft"),
             ("8", "BracketRight"),
         ] {
-            assert_eq!(paddle_for_key(key, code, false, false), None, "{key}");
+            assert_eq!(paddle_for_key(key, code, false), None, "{key}");
         }
         for (key, code, paddle) in [
             ("Dead", "BracketLeft", Paddle::Dit),
@@ -883,14 +989,10 @@ mod tests {
             ("{", "BracketLeft", Paddle::Dit),
             ("*", "BracketRight", Paddle::Dah),
         ] {
-            assert_eq!(
-                paddle_for_key(key, code, false, false),
-                Some(paddle),
-                "{key}"
-            );
+            assert_eq!(paddle_for_key(key, code, false), Some(paddle), "{key}");
         }
         // Typed anywhere else, it was never a paddle.
-        assert_eq!(paddle_for_key("+", "NumpadAdd", false, false), None);
+        assert_eq!(paddle_for_key("+", "NumpadAdd", false), None);
     }
 
     /// The page's script knows the characters Morse has as the app does, so
@@ -909,15 +1011,55 @@ mod tests {
         ] {
             assert!(script.contains(&read), "{read}\n{script}");
         }
-        assert_eq!(page_key("down", "+", "BracketRight", false), None);
+    }
+
+    /// Meta makes any press a shortcut, and Ctrl or Alt make one of the
+    /// brackets' own keys, whatever they type.
+    #[test]
+    fn a_bracket_with_a_modifier_is_a_shortcut_not_a_paddle() {
+        let none = Held::default();
+        let ctrl = Held { ctrl: true, ..none };
+        let alt = Held { alt: true, ..none };
+        let meta = Held { meta: true, ..none };
+        for held in [ctrl, alt, meta] {
+            assert_eq!(paddle_for_press("[", "BracketLeft", held, false), None);
+            assert_eq!(paddle_for_press("ü", "BracketLeft", held, false), None);
+            assert_eq!(paddle_for_press("", "BracketRight", held, false), None);
+        }
         assert_eq!(
-            page_key("down", "Dead", "BracketLeft", false),
-            Some(PageKey::Press(Paddle::Dit))
+            paddle_for_press("[", "BracketLeft", none, false),
+            Some(Paddle::Dit)
         );
     }
 
+    /// A bracket typed off the brackets' keys took AltGr or Option to type,
+    /// and keys its paddle on every platform: Windows holds AltGr as Ctrl
+    /// and Alt, a Mac's Option is Alt, and Linux holds AltGr as neither.
+    /// Meta with it is still a shortcut.
     #[test]
-    fn a_bracket_with_a_modifier_is_a_shortcut_not_a_paddle() {
-        assert_eq!(paddle_for_key("[", "BracketLeft", true, false), None);
+    fn a_bracket_typed_with_altgr_or_option_keys_its_paddle() {
+        let windows = Held {
+            ctrl: true,
+            alt: true,
+            meta: false,
+        };
+        let mac = Held {
+            alt: true,
+            ..Held::default()
+        };
+        for held in [windows, mac, Held::default()] {
+            assert_eq!(
+                paddle_for_press("[", "Digit8", held, false),
+                Some(Paddle::Dit),
+                "{held:?}"
+            );
+            assert_eq!(
+                paddle_for_press("]", "Digit5", held, false),
+                Some(Paddle::Dah),
+                "{held:?}"
+            );
+        }
+        let command = Held { meta: true, ..mac };
+        assert_eq!(paddle_for_press("[", "Digit5", command, false), None);
     }
 }

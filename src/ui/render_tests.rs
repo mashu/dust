@@ -21,7 +21,7 @@ use super::envelope::EnvelopeCard;
 use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
-use super::paddle::{PaddlePad, use_paddle_keys};
+use super::paddle::{PaddleKeys, PaddlePad, page_key, use_paddle_keys};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
@@ -3595,6 +3595,72 @@ mod interactions {
                 Code::BracketRight,
                 dioxus::prelude::Modifiers::CONTROL,
             );
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    /// A bracket typed with AltGr — `]` is AltGr+9 on a German keyboard, and
+    /// Windows holds AltGr as Ctrl and Alt — keys its paddle, and the key
+    /// opens it again let go after AltGr, as a 9: the dah stops, and the pad
+    /// hears a T rather than dahs on and on.
+    #[test]
+    fn a_paddle_typed_with_altgr_opens_when_altgr_goes_first() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let altgr = dioxus::prelude::Modifiers::CONTROL | dioxus::prelude::Modifiers::ALT;
+            assert!(
+                !ui.press_key_held(
+                    "keyed-root",
+                    Key::Character("]".into()),
+                    Code::Digit9,
+                    altgr
+                ),
+                "the ] was left to the box"
+            );
+            ui.advance(100).await;
+            ui.release_key("keyed-root", Key::Character("9".into()), Code::Digit9);
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn PageWordsHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                PageWords {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// Buttons that hand the paddles what the mobile page's script would:
+    /// `]` closed by AltGr+9, and the 9 let go.
+    #[component]
+    fn PageWords() -> Element {
+        let keys = use_context::<PaddleKeys>();
+        rsx! {
+            button {
+                id: control_id("btn", "page down"),
+                onclick: move |_| page_key(keys, "down", "]", "Digit9"),
+            }
+            button {
+                id: control_id("btn", "page up"),
+                onclick: move |_| page_key(keys, "up", "9", "Digit9"),
+            }
+        }
+    }
+
+    /// The mobile page's word of a key let go opens the paddle that key
+    /// closed, whatever it types by then.
+    #[test]
+    fn the_page_opens_the_paddle_its_key_closed() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PageWordsHarness, ());
+            ui.click("btn-page-down");
+            ui.advance(100).await;
+            ui.click("btn-page-up");
             ui.advance(1_000).await;
             assert!(ui.has(">T<"), "{}", ui.html());
         });
