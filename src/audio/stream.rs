@@ -23,6 +23,11 @@ use super::mixer::{Mixer, Swept};
 /// has several queued, short enough that one remade is little work.
 pub const STRETCH_SEC: f64 = 0.1;
 
+/// The most of a stall the mixer is run on over unheard, to keep its time
+/// with the clock's ([`ReceiverStream::render_until`]): longer than a send
+/// lasts, short enough to make up in a moment.
+const CATCH_UP_MOST_SEC: f64 = 10.0;
+
 /// The mixer, run ahead of a clock: what it has rendered, still to play,
 /// each stretch with the node `N` it was handed over as. Everything is
 /// counted in samples from the clock's moment the stream started at, so
@@ -94,10 +99,11 @@ impl<N: Clone> ReceiverStream<N> {
         until: f64,
         mut play: impl FnMut(f64, &[f32]) -> Result<N, E>,
     ) -> Result<(), E> {
-        // Fallen behind — a long task, a hidden page — it picks up from
-        // there rather than playing into the past all at once.
-        self.next = self.next.max(self.sample_at(soonest));
+        self.catch_up(self.sample_at(soonest));
         while !self.idle && self.time(self.next) < until {
+            // What has finished goes before the copy is taken, so no copy
+            // carries it.
+            self.mixer.sweep(&mut Swept::new());
             let before = self.mixer.clone();
             let len = self.stretch;
             self.render(len);
@@ -150,8 +156,8 @@ impl<N: Clone> ReceiverStream<N> {
             taken.extend(later.into_iter().map(|queued| Taken::Never(queued.node)));
         } else {
             // Nothing rendered from `at` on: the mixer stands no later than
-            // it, and picks up there.
-            self.next = self.next.max(at);
+            // it, and is run on to there.
+            self.catch_up(at);
         }
         self.idle = false;
         let mut swept = Swept::new();
@@ -168,6 +174,29 @@ impl<N: Clone> ReceiverStream<N> {
             over.extend(self.queued.pop_front().map(|queued| queued.node));
         }
         over
+    }
+
+    /// Fallen behind `soonest` — a long task, a hidden page — the stream
+    /// picks up from there rather than playing into the past all at once.
+    /// What should have played meanwhile is lost, but the mixer is run on
+    /// over it unheard, so everything after it plays when it was meant to,
+    /// and a send's own clock still says when it is heard. A stall longer
+    /// than [`CATCH_UP_MOST_SEC`] is skipped over beyond that, rather than
+    /// stall the page again making it up.
+    fn catch_up(&mut self, soonest: u64) {
+        if self.next >= soonest {
+            return;
+        }
+        if !self.idle {
+            let most = (CATCH_UP_MOST_SEC * self.sample_rate) as u64;
+            let mut left = (soonest - self.next).min(most) as usize;
+            while left > 0 {
+                let len = left.min(self.stretch);
+                self.render(len);
+                left -= len;
+            }
+        }
+        self.next = soonest;
     }
 
     /// Whether nothing is being rendered, there being nothing to hear.
@@ -278,6 +307,35 @@ mod tests {
             }
             out
         }
+    }
+
+    /// Fallen behind the clock — the page busy, or hidden — the stream picks
+    /// up where the clock is, and what it plays from there is what the
+    /// mixer plays there: the time in between is lost, not slipped into
+    /// everything after it, so a send ends when its own clock says it does.
+    #[test]
+    fn a_stream_that_falls_behind_keeps_its_time() {
+        let settings = settings();
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut browser = Browser::default();
+        stream
+            .render_until(0.0, 0.3, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        stream
+            .render_until(1.5, 2.0, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        let total = 2 * SR as usize;
+        let heard = browser.heard(total);
+        let mut straight = mixer(&settings);
+        let mut expected = vec![0.0f32; total];
+        straight.render(&mut expected, 0);
+        let from = (1.5 * f64::from(SR)).round() as usize;
+        assert!(heard[from..].iter().any(|s| *s != 0.0), "nothing played");
+        let first_off = heard[from..]
+            .iter()
+            .zip(&expected[from..])
+            .position(|(a, b)| a != b);
+        assert_eq!(first_off, None, "the stream slipped behind the mixer");
     }
 
     /// A change made mid-stretch, the queue a good way ahead of it, plays

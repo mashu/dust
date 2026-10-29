@@ -557,6 +557,29 @@ fn a_stopped_send_leaves_the_band_as_it_was() {
     );
 }
 
+/// Until an output has called back, how far behind it the speaker is is
+/// not known; once heard it is kept, until the output is another one.
+#[test]
+fn the_speakers_latency_is_heard_from_each_output() {
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    assert!(!mixer.latency_heard());
+    let mut out = vec![0.0f32; 64];
+    mixer.render(&mut out, 800);
+    assert!(mixer.latency_heard());
+    assert!((mixer.output_latency_sec() - 800.0 / f64::from(SR)).abs() < 1e-12);
+    mixer.forget_latency();
+    assert!(!mixer.latency_heard());
+    assert_eq!(mixer.output_latency_sec(), 0.0);
+    mixer.render(&mut out, 400);
+    assert!(mixer.latency_heard());
+    mixer.clear(SR, &mut swept);
+    assert!(
+        !mixer.latency_heard(),
+        "a stream started again is heard afresh"
+    );
+}
+
 /// A send is over once its last sample has been heard, `latency` frames
 /// after it was played.
 #[test]

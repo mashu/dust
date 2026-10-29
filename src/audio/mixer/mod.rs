@@ -47,8 +47,10 @@ const FADING_BANDS: usize = 8;
 /// release is a few milliseconds; sends are seconds apart.
 const RETIRING_SENDS: usize = 4;
 
-/// The highest rate the room for the look-ahead is made for up front. A
-/// stream opened higher has it grown before it starts.
+/// The highest rate the room for the look-ahead is made for up front, so a
+/// native stream reopened at another rate needs none made. A stream opened
+/// higher has it grown before it starts.
+#[cfg(feature = "native-audio")]
 const HIGHEST_RATE: u32 = 384_000;
 
 /// The band and the Morse, mixed. The UI hands it bands and sends under its
@@ -71,6 +73,9 @@ pub struct Mixer {
     /// How far behind the last callback the speaker was, in frames: how
     /// long a send started now waits to be heard.
     latency: usize,
+    /// Whether `latency` was heard from the output now open, rather than
+    /// kept from one before it or never heard at all.
+    latency_heard: bool,
     /// How open the receiver's output is: shut while you send without full
     /// break-in, moving between the two a straight line at a time, over
     /// [`GATE_RAMP_SEC`], so it never clicks.
@@ -135,6 +140,7 @@ impl Mixer {
             send: None,
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
             latency: 0,
+            latency_heard: false,
             gate: 1.0,
             gains: Gains::UNITY,
             gains_asked: Gains::UNITY,
@@ -184,6 +190,21 @@ impl Mixer {
     #[cfg(feature = "native-audio")]
     pub fn output_latency_sec(&self) -> f64 {
         self.latency as f64 / f64::from(self.sample_rate)
+    }
+
+    /// Whether the output now open has said how far behind it the speaker
+    /// is: not until its first callback, after a device change.
+    #[cfg(feature = "native-audio")]
+    pub fn latency_heard(&self) -> bool {
+        self.latency_heard
+    }
+
+    /// The output is another one now: how far behind it the speaker is
+    /// waits to be heard from it.
+    #[cfg(feature = "native-audio")]
+    pub fn forget_latency(&mut self) {
+        self.latency = 0;
+        self.latency_heard = false;
     }
 
     /// Play at `gains` from here on, the band as it is: the AF gain it is
@@ -340,6 +361,7 @@ impl Mixer {
     #[cfg(feature = "native-audio")]
     pub fn clear(&mut self, sample_rate: u32, swept: &mut Swept) {
         self.sample_rate = sample_rate.max(1);
+        self.forget_latency();
         self.gate = 1.0;
         self.gains = self.gains_asked;
         self.af = Glide::at(self.gains_asked.af);
@@ -385,6 +407,7 @@ impl Mixer {
     /// sample has been heard, not when it was played.
     pub fn render(&mut self, out: &mut [f32], latency: usize) {
         self.latency = latency;
+        self.latency_heard = true;
         self.start_retune();
         // The band's own traffic makes room for a pile-up while it calls.
         let callers = self.send.as_ref().map_or(0, SendVoice::callers_now);
@@ -474,24 +497,35 @@ impl Mixer {
             // is never muted.
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
-            let received = self.audio.process(background + heard);
+            // A sample that is not a number would stay in the high-pass for
+            // good and silence everything after it.
+            let into = background + heard;
+            let received = self
+                .audio
+                .process(if into.is_finite() { into } else { 0.0 });
             let out = received * self.gate + send.dry;
             *slot += (out * now.volume) as f32;
         }
         self.audio.settle();
         // A send is heard the look-ahead after it was played, as well as the
-        // speaker's own latency.
+        // speaker's own latency, which is counted from the start of this
+        // buffer: by the time the callback returns, only what was played a
+        // whole buffer before that has been heard.
         for send in self.send.iter().chain(&self.retiring) {
-            send.settle(latency + self.late_len);
+            send.settle(latency + self.late_len + out.len());
         }
     }
 }
 
-/// How much room the send's look-ahead is given at `sample_rate`: enough
-/// for the highest rate up front, so a stream reopened at another needs
-/// none made, and more for a higher one.
+/// How much room the send's look-ahead is given at `sample_rate`: natively,
+/// enough for the highest rate up front, so a stream reopened at another
+/// needs none made, and more for a higher one. The browser's rate never
+/// changes, and it copies the mixer for every stretch it renders ahead, so
+/// there it is the rate's own.
 fn late_room(sample_rate: u32) -> usize {
-    agc_lookahead_samples(sample_rate.max(HIGHEST_RATE))
+    #[cfg(feature = "native-audio")]
+    let sample_rate = sample_rate.max(HIGHEST_RATE);
+    agc_lookahead_samples(sample_rate)
 }
 
 #[cfg(all(test, feature = "native-audio"))]

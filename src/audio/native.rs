@@ -66,6 +66,9 @@ pub struct MorsePlayer {
     /// them only when they move: a callback that finds it held plays a
     /// buffer without it.
     gains: Gains,
+    /// The device the mixer last heard the speaker's latency from: one the
+    /// stream reopens on with another name has it heard afresh.
+    latency_device: Option<String>,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -171,6 +174,7 @@ impl MorsePlayer {
             default_asked: None,
             heard_at: None,
             gains: Gains::UNITY,
+            latency_device: None,
         };
         if let Err(err) = player.open(&device, &supported) {
             eprintln!("audio output: {err}");
@@ -276,6 +280,13 @@ impl MorsePlayer {
         }
         let open = open_stream(device, supported, &self.mixer, &self.sidetone)
             .inspect_err(|_| self.note_refusal())?;
+        // Woken on the same device, the speaker is as far behind as it was;
+        // on another one, how far waits for its first callback. A device
+        // that cannot say its name cannot be told from the last.
+        if open.device.is_some() && open.device != self.latency_device {
+            self.mixer().forget_latency();
+            self.latency_device.clone_from(&open.device);
+        }
         self.stream = Some(open);
         self.refused_at = None;
         Ok(())
@@ -355,12 +366,13 @@ impl MorseBackend for MorsePlayer {
         // the end of that statement, and the voice would be built — its
         // allocations and all — with the audio callback locked out of the
         // mixer.
-        let (rate, lookahead_sec, output_latency_sec) = {
+        let (rate, lookahead_sec, output_latency_sec, latency_heard) = {
             let mixer = self.mixer();
             (
                 mixer.sample_rate(),
                 mixer.lookahead_sec(),
                 mixer.output_latency_sec(),
+                mixer.latency_heard(),
             )
         };
         // How long after it starts a send is heard.
@@ -386,6 +398,12 @@ impl MorseBackend for MorsePlayer {
             self.fade_origin_sec + self.opened_at.elapsed().as_secs_f64() + wait_sec,
         );
         let (finished, late) = (voice.finished_flag(), voice.late_flag());
+        // An output that has not called back yet has not said how far behind
+        // it the speaker is, so when the send is heard is not known: it is
+        // not timed, as one held up on its way is not.
+        if !latency_heard {
+            late.store(true, Ordering::Release);
+        }
         let armed = self.state.arm();
         let mut waits = 0;
         self.with_mixer(|mixer, swept| {
