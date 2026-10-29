@@ -306,9 +306,15 @@ Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_last_backup`, `dust_open_session_*`) and
 file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
-that field. A history that
+that field. A settings file from before the AGC threshold went comes back
+with a threshold raised under the AGC as the RF gain backed off as far, which
+is how the AGC heard it. A history that
 cannot be read at all is set aside beside the new one rather than written over,
-and if it cannot even be moved, nothing is saved over it.
+and if it cannot even be moved, nothing is saved over it until a later read
+of it reads, or sets it aside: a file another program had open for a moment
+holds back no more than the saves made meanwhile. A browser keeps the newest
+five copies it set aside, `dust_sessions_unreadable`, `_2`, `_3`…, and lets
+the oldest go first when a new one needs the room.
 
 From contest mode on, a mode added later is written under the name of the
 older mode closest to it, plus a mark only newer builds read, so older builds
@@ -341,14 +347,18 @@ card:
     show in the Files app under On My iPhone, Dust.
 - **Restore a backup** adds the sessions in the file that are not here yet
   and takes its settings, level included. Undo, in the message that follows,
-  puts both back as they were. A file that is not a backup, or far too large
+  puts both back as they were: what the restore added taken out, what it
+  filled in as it was, and what the history let go to make room for it back,
+  while whatever another window kept or deleted meanwhile stands. A file that is not a backup, or far too large
   to be one, is refused, and the card says why. A session or a setting the
   file can no longer read is left out, as when the store is read. A backup
   saved by any build restores on any other: the web app's on a phone, a
   phone's on a computer.
 - After ten sessions without a backup the card says so, and its Save button
   stands out. When the last one was saved is kept under `dust_last_backup`,
-  or in `last_backup.txt`.
+  or in `last_backup.txt`. A browser never says whether it kept a download,
+  so the web app's card says the last backup was handed to the browser, not
+  saved.
 
 On a phone a file is chosen through the webview's own picker
 (`src/ui/file_pick.rs`), for backups and word lists alike. The renderer asks
