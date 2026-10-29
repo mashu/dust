@@ -89,8 +89,8 @@ fn save(env: &mut JNIEnv, activity: &JObject, name: &str, bytes: &[u8]) -> Resul
         .and_then(|value| value.i())
         .map_err(|err| err.to_string())?;
     if version >= ANDROID_10 {
-        into_downloads(env, activity, name, bytes).map_err(|err| err.to_string())?;
-        return Ok(format!("{name}, in Downloads"));
+        let saved = into_downloads(env, activity, name, bytes).map_err(|err| err.to_string())?;
+        return Ok(format!("{saved}, in Downloads"));
     }
     let folder = app_downloads(env, activity).map_err(|err| err.to_string())?;
     let name = free_name(&folder, name);
@@ -98,14 +98,15 @@ fn save(env: &mut JNIEnv, activity: &JObject, name: &str, bytes: &[u8]) -> Resul
     Ok(folder.join(name).display().to_string())
 }
 
-/// Add a file to Downloads through the media store. One already called
-/// `name` is kept; the media store names the new one apart.
+/// Add a file to Downloads through the media store, and say what it is
+/// called. One already called `name` is kept; the media store names the
+/// new one apart, `name (1)`.
 fn into_downloads(
     env: &mut JNIEnv,
     activity: &JObject,
     name: &str,
     bytes: &[u8],
-) -> jni::errors::Result<()> {
+) -> jni::errors::Result<String> {
     let resolver = env
         .call_method(
             activity,
@@ -166,7 +167,70 @@ fn into_downloads(
         );
         let _ = env.exception_clear();
     }
-    written
+    written?;
+    // The name the file was given is the one to tell of; the one asked
+    // for, should the media store not say.
+    let saved = display_name(env, &resolver, &file);
+    let _ = env.exception_clear();
+    Ok(saved.unwrap_or_else(|_| name.to_string()))
+}
+
+/// The name the media store gave `file`: the one asked for, or that name
+/// told apart from a file already there.
+fn display_name(
+    env: &mut JNIEnv,
+    resolver: &JObject,
+    file: &JObject,
+) -> jni::errors::Result<String> {
+    let column = env.new_string("_display_name")?;
+    let columns = env.new_object_array(1, "java/lang/String", &column)?;
+    let cursor = env
+        .call_method(
+            resolver,
+            "query",
+            "(Landroid/net/Uri;[Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)Landroid/database/Cursor;",
+            &[
+                JValue::Object(file),
+                JValue::Object(&columns),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+            ],
+        )?
+        .l()?;
+    if cursor.is_null() {
+        return Err(jni::errors::Error::NullPtr(
+            "the media store has no such file",
+        ));
+    }
+    let name = first_string(env, &cursor);
+    // Closed, read or not, an exception the read left pending cleared
+    // first.
+    let _ = env.exception_clear();
+    let _ = env.call_method(&cursor, "close", "()V", &[]);
+    name
+}
+
+/// The first column of `cursor`'s first row, as a string.
+fn first_string(env: &mut JNIEnv, cursor: &JObject) -> jni::errors::Result<String> {
+    if !env.call_method(cursor, "moveToFirst", "()Z", &[])?.z()? {
+        return Err(jni::errors::Error::NullPtr(
+            "the media store has no such file",
+        ));
+    }
+    let name: JString = env
+        .call_method(
+            cursor,
+            "getString",
+            "(I)Ljava/lang/String;",
+            &[JValue::Int(0)],
+        )?
+        .l()?
+        .into();
+    if name.is_null() {
+        return Err(jni::errors::Error::NullPtr("the file has no name"));
+    }
+    Ok(env.get_string(&name)?.into())
 }
 
 /// Write `bytes` into `file`, a file the media store made, and close it,
