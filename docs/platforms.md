@@ -356,7 +356,9 @@ card:
   phone's on a computer.
 - After ten sessions without a backup the card says so, and its Save button
   stands out. When the last one was saved is kept under `dust_last_backup`,
-  or in `last_backup.txt`. A browser never says whether it kept a download,
+  or in `last_backup.txt`. A restored backup counts as the last one only when
+  it holds every session here that had finished by the time it was saved: one
+  from another device leaves this one's own sessions in no backup. A browser never says whether it kept a download,
   so the web app's card says the last backup was handed to the browser, not
   saved.
 
