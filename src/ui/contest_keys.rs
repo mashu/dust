@@ -47,7 +47,8 @@ enum Known {
     Alt(&'static str),
     /// By the character it types, Shift held or not: `+` takes Shift on
     /// many a keyboard, `;` on others. A key the paddles sit on, `[` or
-    /// `]`, stays theirs whatever it types.
+    /// `]`, stays theirs whatever it types, while the paddles are on those
+    /// keys by place ([`cw_core::PlaybackSettings::paddle_keys_by_place`]).
     Typed(&'static str),
     /// Enter, with Shift, Ctrl or Alt held.
     HeldEnter,
@@ -150,13 +151,15 @@ fn listed(kind: fn(Known) -> Option<&'static str>) -> String {
 /// browser can. A key held down is kept from the browser too, but told
 /// once. Ctrl and the Command key make a shortcut of any other key, and
 /// Shift of any but a character, so those are passed by. A listener left by
-/// a run before is taken off first.
-fn keys_script() -> String {
+/// a run before is taken off first. `by_place`, a character typed on the
+/// keys the paddles sit on is the paddles' (a German keyboard's `+`).
+fn keys_script(by_place: bool) -> String {
     format!(
         r#"{STOP_LISTENING}
 const alone = new Set({alone});
 const withAlt = new Set({alt});
 const typed = new Set({typed});
+const paddlesByPlace = {by_place};
 const name = (e) => {{
     if (e.code === "Enter" || e.code === "NumpadEnter") {{
         return e.shiftKey || e.ctrlKey || e.altKey ? "{HELD_ENTER}" : null;
@@ -167,7 +170,7 @@ const name = (e) => {{
     if (e.altKey) {{
         return withAlt.has(e.code) ? "Alt+" + e.code : null;
     }}
-    if (typed.has(e.key) && !e.code.startsWith("Bracket")) {{
+    if (typed.has(e.key) && !(paddlesByPlace && e.code.startsWith("Bracket"))) {{
         return e.key;
     }}
     return !e.shiftKey && alone.has(e.code) ? e.code : null;
@@ -230,7 +233,8 @@ pub fn use_run_keys(ctx: AppCtx) {
     {
         use_hook(move || {
             spawn(async move {
-                let mut page = document::eval(&keys_script());
+                let by_place = ctx.settings.peek().playback.paddle_keys_by_place;
+                let mut page = document::eval(&keys_script(by_place));
                 while let Ok(name) = page.recv::<String>().await {
                     pressed(ctx, &name);
                 }
@@ -309,7 +313,7 @@ mod tests {
     /// where it can, and comes off again, a run before's listener first.
     #[test]
     fn the_page_keeps_the_runs_keys_from_the_browser() {
-        let script = keys_script();
+        let script = keys_script(true);
         assert!(
             script.contains(
                 r#"new Set(["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F12", "Insert", "Escape", "PageUp", "PageDown"])"#
@@ -331,8 +335,15 @@ mod tests {
                 .contains(r#"return e.shiftKey || e.ctrlKey || e.altKey ? "Shift+Enter" : null;"#),
             "{script}"
         );
-        // A character the paddles' keys type is still the paddles'.
-        assert!(script.contains(r#"!e.code.startsWith("Bracket")"#));
+        // A character the paddles' keys type is still the paddles', while
+        // they are on those keys by place.
+        assert!(
+            script.contains(
+                r#"typed.has(e.key) && !(paddlesByPlace && e.code.startsWith("Bracket"))"#
+            )
+        );
+        assert!(script.contains("const paddlesByPlace = true;"));
+        assert!(keys_script(false).contains("const paddlesByPlace = false;"));
         assert!(!script.contains("F11"));
         let prevent = script.find("e.preventDefault()").expect("kept");
         let send = script.find("dioxus.send(key)").expect("told");

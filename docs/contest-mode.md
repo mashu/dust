@@ -1118,7 +1118,9 @@ key that sends nothing reads no other caller's call into it (9.1).
 - `;` `.` `,` `+` are known by the character they type, Shift held or not
   (`+` takes Shift on many a keyboard, `;` on others), and never typed into
   a field, as in MorseRunner; one typed by a paddle key (`+` sits on `]` in
-  German layouts) stays the paddle's. Enter held with Shift, Ctrl or Alt
+  German layouts) stays the paddle's, while Settings has the paddles on the
+  keys right of P whatever they type, as a USB paddle needs. With that
+  switched off those keys type, and their `+` is the run's. Enter held with Shift, Ctrl or Alt
   is no Enter in the fields; the listener hears it as log without sending.
   With the Command key, which the listener passes by, it is Enter still.
 - Paddles key into the focused field (`paddle.rs:287-299`) and never

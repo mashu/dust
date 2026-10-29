@@ -30,6 +30,7 @@ impl TrainingSettings {
                 self.playback.lock_input_during_group_playback =
                     d.playback.lock_input_during_group_playback;
                 self.playback.paddle_swap = d.playback.paddle_swap;
+                self.playback.paddle_keys_by_place = d.playback.paddle_keys_by_place;
                 self.playback.keyer_mode = d.playback.keyer_mode;
                 self.playback.keyer_wpm = d.playback.keyer_wpm;
                 self.contest.contest_minutes = d.contest.contest_minutes;

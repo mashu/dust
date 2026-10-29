@@ -51,12 +51,16 @@ fn Keyed(
     screen: Screen,
     #[props(default)] keyer_mode: KeyerMode,
     #[props(default)] no_device: bool,
+    /// The keys right of P type, and only `[` and `]` are paddles.
+    #[props(default)]
+    typed: bool,
     children: Element,
 ) -> Element {
     // Owned by the root scope, as the shell's are.
     let settings = use_hook(|| {
         let mut settings = crate::testing::test_settings();
         settings.playback.keyer_mode = keyer_mode;
+        settings.playback.paddle_keys_by_place = !typed;
         in_root(|| Signal::new(settings))
     });
     let screen = use_hook(|| in_root(|| Signal::new(screen)));
@@ -3666,13 +3670,47 @@ mod interactions {
         });
     }
 
-    /// A bracket key typing a character Morse has types it: the page leaves
-    /// a German keyboard's `+` to the box, and no paddle keys. A dead key
-    /// there is still the paddle.
+    #[component]
+    fn TypedPadHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings, typed: true,
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// The keys right of P are the paddles whatever they type, as a USB
+    /// paddle sends them on any layout: a German keyboard's `+` keys the
+    /// dah, kept from the box, and its dead accent the dit.
     #[test]
-    fn a_bracket_key_typing_plus_is_typed_not_keyed() {
+    fn a_bracket_key_typing_plus_is_the_paddle_by_place() {
         crate::testing::run(|| async {
             let mut ui = Ui::new(PaddlePadHarness, ());
+            let plus = Key::Character("+".into());
+            assert!(
+                !ui.press_key("keyed-root", plus.clone(), Code::BracketRight),
+                "the + was left to the box"
+            );
+            ui.advance(100).await;
+            ui.release_key("keyed-root", plus, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+            let dead = Key::Dead;
+            assert!(!ui.press_key("keyed-root", dead.clone(), Code::BracketLeft));
+            ui.advance(30).await;
+            ui.release_key("keyed-root", dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">TE<"), "{}", ui.html());
+        });
+    }
+
+    /// With the paddles off the keys right of P, those keys type: the `+`
+    /// goes to the box and keys nothing, and a `[`, however typed, is still
+    /// the dit.
+    #[test]
+    fn a_bracket_key_typing_plus_is_typed_when_not_by_place() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(TypedPadHarness, ());
             let plus = Key::Character("+".into());
             assert!(
                 ui.press_key("keyed-root", plus.clone(), Code::BracketRight),
@@ -3682,10 +3720,11 @@ mod interactions {
             ui.release_key("keyed-root", plus, Code::BracketRight);
             ui.advance(1_000).await;
             assert!(ui.has(">· −<"), "a paddle keyed: {}", ui.html());
-            let dead = Key::Dead;
-            assert!(!ui.press_key("keyed-root", dead.clone(), Code::BracketLeft));
+            let altgr = dioxus::prelude::Modifiers::CONTROL | dioxus::prelude::Modifiers::ALT;
+            let bracket = Key::Character("[".into());
+            assert!(!ui.press_key_held("keyed-root", bracket.clone(), Code::Digit8, altgr));
             ui.advance(30).await;
-            ui.release_key("keyed-root", dead, Code::BracketLeft);
+            ui.release_key("keyed-root", bracket, Code::Digit8);
             ui.advance(1_000).await;
             assert!(ui.has(">E<"), "{}", ui.html());
         });

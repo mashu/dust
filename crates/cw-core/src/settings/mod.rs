@@ -362,6 +362,12 @@ pub struct PlaybackSettings {
     pub lock_input_during_group_playback: bool,
     /// `[` is dit and `]` is dah on a USB keyer. Set when the paddles are wired the other way.
     pub paddle_swap: bool,
+    /// The two keys right of P are the paddles, whatever the keyboard's
+    /// layout has them type: a USB paddle sends those keys, and on a German
+    /// layout they type `ü` and `+`. Off, they type what the layout says —
+    /// `+`, `/` or `=` where it puts one there — and only `[` and `]`
+    /// typed, however they are, key the paddles.
+    pub paddle_keys_by_place: bool,
     /// How the `[` / `]` paddles time elements. Iambic B unless chosen
     /// otherwise; older saves have no field and load at it too.
     pub keyer_mode: KeyerMode,
@@ -397,6 +403,7 @@ impl Default for PlaybackSettings {
             // be. Who chose either keeps it: only a new install starts here.
             lock_input_during_group_playback: false,
             paddle_swap: false,
+            paddle_keys_by_place: true,
             keyer_mode: KeyerMode::IambicB,
             keyer_wpm: 20.0,
             fist_variation: 0.35,
@@ -1727,6 +1734,7 @@ mod tests {
         s.playback.group_pause_sec = 6.0;
         s.playback.lock_input_during_group_playback = false;
         s.playback.paddle_swap = true;
+        s.playback.paddle_keys_by_place = false;
         s.playback.keyer_mode = KeyerMode::Ultimatic;
         s.playback.keyer_wpm = 32.0;
         s.playback.group_repeat_min = 2;

@@ -261,6 +261,7 @@ struct SessionShape {
     keyer_mode: KeyerMode,
     keyer_wpm: f64,
     paddle_swap: bool,
+    paddle_keys_by_place: bool,
 }
 
 impl SessionShape {
@@ -285,6 +286,7 @@ impl SessionShape {
             keyer_mode: p.keyer_mode,
             keyer_wpm: p.keyer_wpm,
             paddle_swap: p.paddle_swap,
+            paddle_keys_by_place: p.paddle_keys_by_place,
         }
     }
 }
@@ -497,6 +499,12 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     checked: s.paddle_swap,
                     onchange: move |on| settings.write().playback.paddle_swap = on,
                 }
+            }
+            Switch {
+                title: "Paddles on the keys right of P",
+                description: "The two keys right of P are the paddles, whatever your keyboard types on them, as a USB paddle needs. Turn this off to type what they type, such as + on a German keyboard; then only [ and ] key the paddles.",
+                checked: s.paddle_keys_by_place,
+                onchange: move |on| settings.write().playback.paddle_keys_by_place = on,
             }
         }
     }
