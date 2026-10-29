@@ -2317,8 +2317,12 @@ below. A preset that wrote the tier, the run style, the habits, the
 stations, the band and your speed put back whatever the learner had set
 there, and the tier, the stations and the band are group training's too.
 The learner sets those, and a preset leaves them as they are. The card
-reads "Callers at 15–18 WPM", or on none "Custom · a preset sets how fast
-the callers come, and nothing else", and reads Custom once the callers'
+reads "Callers at 15–18 WPM", or on none "Custom · a preset sets the Speed
+card's speeds, which group training uses too, and nothing else" (as built,
+2026-10-29: it read "how fast the callers come, and nothing else", which
+hid that the speed ranges a preset writes are group training's as well; a
+contest has no speed range of its own, and the Speed card in Contest mode
+says the same), and reads Custom once the callers'
 speed is edited, as Experience does; Experience in turn sets the group
 size and the speed, and no longer the session's length. What follows is
 the presets as they were built before that, kept for the record.

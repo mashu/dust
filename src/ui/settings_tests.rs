@@ -888,11 +888,15 @@ fn a_session_on_words_sends_the_words_of_the_list() {
 /// card and the Speed card show it, and nothing else: the tier, the run
 /// style, the callers' habits, the band and your own speed stay as they
 /// were. The card reads Custom once the callers' speed is changed, and a
-/// change to anything else leaves the preset chosen.
+/// change to anything else leaves the preset chosen. The speed is the
+/// Speed card's, which group training uses too, and the card says so.
 #[test]
 fn a_contest_preset_sets_the_callers_speed_and_nothing_else() {
     run(|| async {
-        let custom = "Custom · a preset sets how fast the callers come, and nothing else";
+        let custom = crate::ui::settings_charset::PRESET_CUSTOM;
+        assert!(custom.contains("which group training uses too"));
+        // As the page escapes it.
+        let custom = &custom.replace('\'', "&#39;");
         let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
         let before = ui.store.load_settings();
         ui.click("nav-settings");
@@ -1127,7 +1131,9 @@ fn your_speed_is_on_the_speed_card_in_contest_mode() {
             ui.html()
         );
         assert!(!ui.shows("btn-callers-middle"));
-        assert!(ui.has("Callers come at speeds drawn from these ranges."));
+        assert!(ui.has(
+            "Callers come at speeds drawn from these ranges. Group training sends at them too."
+        ));
         // It sits on the Speed card, after the callers' ranges.
         let html = ui.html();
         let card = html.find(">Speed<").expect("the card");

@@ -626,7 +626,7 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
             }
             if speed.contest {
                 p { class: "muted hint small",
-                    "Callers come at speeds drawn from these ranges."
+                    "Callers come at speeds drawn from these ranges. Group training sends at them too."
                 }
                 Switch {
                     title: "Adapt callers' speed to me",

@@ -513,14 +513,20 @@ fn ContestBody(
     }
 }
 
+/// What the line under the contest presets says while none is chosen.
+pub(crate) const PRESET_CUSTOM: &str = "Custom · a preset sets the Speed card's speeds, which group training uses too, and nothing else";
+
 /// Where a run starts from: a preset for a first QSO, a club operator or a
-/// contester, each setting how fast the callers come and nothing else. The
-/// settings read Custom once that is changed, as the Experience presets do.
+/// contester, each setting how fast the callers come and nothing else. That
+/// is the Speed card's speeds, which group training sends at too, as a
+/// contest has no speed of its own, and the line under the presets says so.
+/// The settings read Custom once that is changed, as the Experience presets
+/// do.
 #[component]
 fn PresetPicker(settings: Signal<TrainingSettings>, preset: Option<ContestPreset>) -> Element {
     let line = match preset {
         Some(preset) => preset_summary(preset),
-        None => "Custom · a preset sets how fast the callers come, and nothing else".to_string(),
+        None => PRESET_CUSTOM.to_string(),
     };
     rsx! {
         div { class: "eyebrow", "Preset" }
