@@ -675,6 +675,34 @@ mod ui_tests {
         });
     }
 
+    /// A session paused while the page was out of sight says so, takes no
+    /// typing, and goes on from Resume.
+    #[test]
+    fn a_paused_session_says_so_and_resumes_from_its_button() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(short_session());
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            ui.with_app(|ctx| {
+                crate::session_runtime::send_event(ctx, cw_core::SessionEvent::Pause)
+            });
+            assert!(ui.has("Paused while the page was out of sight."));
+            assert!(ui.has("Paused"));
+            let sent = recorder.texts().len();
+            ui.advance(30_000).await;
+            assert_eq!(recorder.texts().len(), sent, "sent while paused");
+            assert_eq!(ui.screen(), "training");
+            ui.click("btn-resume");
+            assert!(!ui.shows("btn-resume"));
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            assert_eq!(
+                recorder.texts().len(),
+                sent,
+                "a group heard in full is not sent again"
+            );
+        });
+    }
+
     #[test]
     fn a_group_locks_while_it_plays_then_unlocks() {
         run(|| async {

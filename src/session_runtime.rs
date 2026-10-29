@@ -876,6 +876,31 @@ mod tests {
         });
     }
 
+    /// The page going out of sight pauses a session: its group stops, and
+    /// nothing moves it on however long nobody is there, so no answer
+    /// closes empty. Resumed, it counts down and sends the group again.
+    #[test]
+    fn a_session_paused_while_hidden_closes_no_answer_and_resumes() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 1.0;
+            settings.playback.countdown_sec = 2;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.texts().len() == 1).await);
+            h.send(SessionEvent::Pause);
+            assert_eq!(h.phase(), Some(SessionPhase::Paused { index: 0 }));
+            h.advance(60_000).await;
+            assert_eq!(h.phase(), Some(SessionPhase::Paused { index: 0 }));
+            assert_eq!(h.texts().len(), 1, "sent while paused");
+            assert_eq!(input_of(&h, 0).as_deref(), Some(""));
+            h.send(SessionEvent::Resume);
+            assert_eq!(h.phase(), Some(SessionPhase::Countdown { remaining: 2 }));
+            assert!(h.run_until(3_000, |h| h.texts().len() == 2).await);
+            assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
+        });
+    }
+
     /// A session counts down before its first group, a second a step, and
     /// sends nothing until it has.
     #[test]

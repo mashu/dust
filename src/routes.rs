@@ -10,7 +10,7 @@ use std::rc::Rc;
 use cw_core::{CharSetMode, SessionEvent, compute_char_pool};
 use dioxus::prelude::*;
 
-use crate::page_hidden::{LISTEN_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
+use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
 use crate::playback;
 use crate::session_runtime::{TypedAnswer, send_event, start_session};
@@ -284,6 +284,11 @@ fn TrainingRoute() -> Element {
     let on_confirm = use_callback(move |()| send_event(ctx, SessionEvent::Confirm));
     let on_submit = use_callback(move |()| send_event(ctx, SessionEvent::FinishNow));
     let on_stop = use_callback(move |()| send_event(ctx, SessionEvent::Abort));
+    let on_resume = use_callback(move |()| send_event(ctx, SessionEvent::Resume));
+    // A session of groups holds while nobody can hear it, as a run does,
+    // rather than close answers nobody is there to type. A run has a
+    // listener of its own; this one says nothing to it.
+    use_page_hidden(SESSION_HIDDEN, move || send_event(ctx, SessionEvent::Pause));
     if contest() {
         return rsx! { ContestRunView {} };
     }
@@ -303,6 +308,7 @@ fn TrainingRoute() -> Element {
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
                 countdown: view.countdown,
+                paused: view.paused,
             }
             TrainingView {
                 current: view.current,
@@ -315,12 +321,14 @@ fn TrainingRoute() -> Element {
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
                 countdown: view.countdown,
+                paused: view.paused,
                 speed: view.speed,
                 answer: ctx.answer,
                 on_change,
                 on_confirm,
                 on_submit,
                 on_stop,
+                on_resume,
             }
         }
     }

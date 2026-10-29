@@ -35,11 +35,16 @@ pub fn TrainingProgress(
     open: bool,
     repeat_total: u32,
     repeat_done: u32,
-    /// Seconds left before the first group, while the session counts down.
+    /// Seconds left before the next group, while the session counts down.
     countdown: Option<u32>,
+    /// The session is on hold until it is resumed.
+    #[props(default)]
+    paused: bool,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
-    let status = if let Some(left) = countdown {
+    let status = if paused {
+        "Paused".to_string()
+    } else if let Some(left) = countdown {
         format!("Starting in {left}")
     } else if playing && repeat_total > 1 {
         format!("Sending {send_index} of {repeat_total}")
@@ -55,7 +60,7 @@ pub fn TrainingProgress(
     };
     let dot = if playing {
         StatusDot::Live
-    } else if open {
+    } else if open && !paused {
         StatusDot::Ready
     } else {
         StatusDot::Waiting
@@ -376,8 +381,9 @@ fn AnswerBox(
                     e.prevent_default();
                     return;
                 }
-                // What is typed reaches the session ahead of the confirm.
-                if e.key() == Key::Enter {
+                // What is typed reaches the session ahead of the confirm. A
+                // key held down repeats; only its press is an Enter.
+                if e.key() == Key::Enter && !e.is_auto_repeating() {
                     on_confirm.call(());
                 }
             },
@@ -604,8 +610,12 @@ pub fn TrainingView(
     locked: bool,
     repeat_total: u32,
     repeat_done: u32,
-    /// Seconds left before the first group, while the session counts down.
+    /// Seconds left before the next group, while the session counts down.
     countdown: Option<u32>,
+    /// The session is on hold, the page having gone out of sight, until
+    /// Resume.
+    #[props(default)]
+    paused: bool,
     /// The speed adaptive speed chose for the current group, if it chose.
     #[props(default)]
     speed: Option<ChosenSpeed>,
@@ -615,9 +625,12 @@ pub fn TrainingView(
     on_confirm: EventHandler<()>,
     on_submit: EventHandler<()>,
     on_stop: EventHandler<()>,
+    #[props(default)] on_resume: EventHandler<()>,
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
     let asking = use_discard_ask(Discarded::Session);
+    // Counting down to the first group, or to the one a pause goes on with.
+    let first = !confirmed.iter().any(|done| *done) && current == 0;
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     // The open box is never drawn from the session, so a view drawn afresh
     // on a session under way — after a hot reload, say — starts its draft
@@ -657,7 +670,9 @@ pub fn TrainingView(
         keys.stop();
     }));
 
-    let placeholder = if countdown.is_some() {
+    let placeholder = if paused {
+        "Paused"
+    } else if countdown.is_some() {
         "Get ready…"
     } else if awaiting_play {
         "Waiting…"
@@ -688,8 +703,12 @@ pub fn TrainingView(
     // say, beside the paddles, not something to read with a group to copy.
     // Each fits one line of a narrow phone, so the groups below never move
     // as it changes.
-    let hint = if countdown.is_some() {
+    let hint = if paused {
+        "Paused while the page was out of sight."
+    } else if countdown.is_some() && first {
         "Get ready — the first group is coming."
+    } else if countdown.is_some() {
+        "Get ready — the group is coming again."
     } else if playing && locked {
         "Listen — the box opens when it ends."
     } else if playing {
@@ -729,7 +748,13 @@ pub fn TrainingView(
                         if let Some(left) = countdown {
                             div { class: "group countdown", role: "status",
                                 span { id: "countdown", class: "countdown-num", "{left}" }
-                                span { class: "muted", "The first group starts in {left} s" }
+                                span { class: "muted",
+                                    if first {
+                                        "The first group starts in {left} s"
+                                    } else {
+                                        "The group starts again in {left} s"
+                                    }
+                                }
                             }
                         } else if let Some(idx) = previous {
                             PreviousCard {
@@ -772,9 +797,18 @@ pub fn TrainingView(
                         },
                     }
                 } else {
+                    if paused {
+                        button {
+                            id: control_id("btn", "resume"),
+                            class: "btn btn-primary",
+                            onclick: move |_| on_resume.call(()),
+                            Icon { name: IconName::Play }
+                            "Resume"
+                        }
+                    }
                     button {
                         id: control_id("btn", "end session"),
-                        class: "btn btn-primary",
+                        class: if paused { "btn btn-secondary" } else { "btn btn-primary" },
                         onclick: move |_| on_submit.call(()),
                         Icon { name: IconName::Flag }
                         "End session"

@@ -132,6 +132,12 @@ pub enum SessionPhase {
     AwaitingAnswer {
         index: usize,
     },
+    /// Put on hold while nobody can hear it — the page out of sight — until
+    /// it is resumed, with group `index` the one it goes on with. Nothing is
+    /// sent, nothing can be typed and no answer window runs meanwhile.
+    Paused {
+        index: usize,
+    },
     Finished,
     Aborted,
 }
@@ -264,9 +270,11 @@ pub struct SessionView {
     /// The current group is being sent, or is between two of its sends.
     pub playing: bool,
     pub locked: bool,
-    /// Seconds left before the first group is sent, while the session
-    /// counts down to it.
+    /// Seconds left before the next group is sent, while the session counts
+    /// down to it.
     pub countdown: Option<u32>,
+    /// The session is on hold until it is resumed.
+    pub paused: bool,
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
     pub repeat_done: u32,
@@ -346,7 +354,12 @@ impl GroupSession {
     /// sent at all.
     pub fn input_locked(&self, index: usize) -> bool {
         let sending = self.settings.playback.lock_input_during_group_playback && self.playing();
-        (sending || self.countdown().is_some()) && index == self.current_group
+        (sending || self.countdown().is_some() || self.paused()) && index == self.current_group
+    }
+
+    /// Whether the session is on hold until it is resumed.
+    pub fn paused(&self) -> bool {
+        matches!(self.phase, SessionPhase::Paused { .. })
     }
 
     /// Seconds left before the first group, while the session counts down.
@@ -375,6 +388,7 @@ impl GroupSession {
             playing: self.playing(),
             locked: self.input_locked(self.current_group),
             countdown: self.countdown(),
+            paused: self.paused(),
             repeat_total: current.map_or(1, |g| g.repeats.max(1)),
             repeat_done: current.map_or(0, |g| g.plays_done),
             speed: self.chosen_speed(self.current_group),
