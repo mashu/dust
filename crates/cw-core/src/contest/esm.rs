@@ -574,6 +574,8 @@ pub fn message_text(
             MessagePart::Nil => "NIL".to_string(),
             MessagePart::NrQuery => rules.query.to_string(),
         })
+        // A part with nothing to say, as an empty call, leaves no space.
+        .filter(|said| !said.is_empty())
         .collect();
     parts.join(" ")
 }
@@ -1292,6 +1294,31 @@ mod tests {
         // An exchange with no number in it is asked for again as AGN.
         let simple = ContestKind::SimpleQso.rules();
         assert_eq!(message_text(&[NrQuery], simple, Side::Dx, &me()), "AGN");
+    }
+
+    /// A part with nothing in it, as an empty call, leaves no space behind:
+    /// none doubled, none to start or end the message.
+    #[test]
+    fn an_empty_part_leaves_no_space() {
+        use MessagePart::MyCall;
+        let empty = HisCall(String::new());
+        let nobody = Fill {
+            my_call: "",
+            ..me()
+        };
+        for (message, me, text) in [
+            (vec![empty.clone(), Exchange], me(), "5NN TT7"),
+            (
+                vec![HisCall("K5XYZ".to_string()), empty.clone(), Tu],
+                me(),
+                "K5XYZ TU",
+            ),
+            (vec![Again, empty.clone()], me(), "?"),
+            (vec![empty.clone(), MyCall, empty], nobody, ""),
+        ] {
+            let sent = message_text(&message, rules(), Side::Dx, &me);
+            assert_eq!(sent, text, "{message:?}");
+        }
     }
 
     #[test]
