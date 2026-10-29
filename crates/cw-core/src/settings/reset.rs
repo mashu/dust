@@ -63,6 +63,9 @@ impl TrainingSettings {
                 self.contest.contest_kind = d.contest.contest_kind;
                 self.contest.contest_style = d.contest.contest_style;
                 self.contest.contest_tu_call = d.contest.contest_tu_call;
+                // A single caller again, or no contest: the stations a
+                // pile-up opened go back.
+                self.fit_stations_to_pileup();
             }
             SettingsSection::ToneAndVolume => {
                 self.band.side_tone_min = d.band.side_tone_min;
@@ -89,6 +92,7 @@ impl TrainingSettings {
                 self.band.filter_shape = d.band.filter_shape;
                 self.band.stations_min = d.band.stations_min;
                 self.band.stations_max = d.band.stations_max;
+                self.contest.stations_opened_by_pileup = d.contest.stations_opened_by_pileup;
                 self.band.pileup_spread_hz = d.band.pileup_spread_hz;
                 self.band.pileup_level_db = d.band.pileup_level_db;
                 self.contest.contest_habits = d.contest.contest_habits;

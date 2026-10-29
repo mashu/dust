@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
+use super::{CharSetMode, STATIONS_MIN, TrainingSettings, WPM_MAX, WPM_MIN};
 use crate::callsign::parse_callsign;
 use crate::contest::data::places::{DX, call_section, fold_labrador, in_us_or_canada, place_code};
 use crate::contest::data::sections::{fold_yukon, listed_section};
@@ -90,6 +90,13 @@ pub struct ContestSettings {
     /// One caller at a time, or a pile-up of as many as the Band card's
     /// stations range draws.
     pub contest_style: RunStyle,
+    /// The Band card's stations range was opened to one to three callers by
+    /// picking Pile-up, and has not been set since: what to put back once
+    /// the pile-up is left, as the range is group training's too
+    /// ([`TrainingSettings::set_contest_style`]). Kept with the range, on
+    /// the Band card.
+    #[serde(deserialize_with = "forgiving_off")]
+    pub stations_opened_by_pileup: bool,
     /// How the callers operate: plain digits and no mistakes, numbers as
     /// contesters send them, or that with careless operators and stations
     /// on your frequency that are not calling you. Set on the Band card.
@@ -168,6 +175,7 @@ impl Default for ContestSettings {
         Self {
             contest_kind: ContestKind::Wpx,
             contest_style: RunStyle::Single,
+            stations_opened_by_pileup: false,
             contest_habits: CallerHabits::Easy,
             contest_flutter: false,
             contest_minutes: 10,
@@ -490,10 +498,49 @@ impl TrainingSettings {
     /// station opens the range to one to three callers, as MorseRunner's
     /// pile-up starts busier than its single calls (`Ini.pas:261`); a range
     /// you have set is left as it is.
+    ///
+    /// The range is group training's too, so a single caller puts back the
+    /// one station the pile-up opened up from, as leaving Contest mode does
+    /// ([`Self::fit_stations_to_pileup`]): neither a single caller nor a
+    /// Koch session gets a pile-up nobody set.
     pub fn set_contest_style(&mut self, style: RunStyle) {
         self.contest.contest_style = style;
-        if style == RunStyle::Pileup && self.band.stations_max <= STATIONS_MIN {
+        match style {
+            RunStyle::Pileup => self.open_stations_for_pileup(),
+            RunStyle::Single => self.close_stations_after_pileup(),
+        }
+    }
+
+    /// Open the stations range for a pile-up while runs are one, Pile-up in
+    /// Contest mode, and put back what a pile-up opened once they are not.
+    pub(crate) fn fit_stations_to_pileup(&mut self) {
+        let pileup = self.curriculum.char_set_mode == CharSetMode::Contest
+            && self.contest.contest_style == RunStyle::Pileup;
+        if pileup {
+            self.open_stations_for_pileup();
+        } else {
+            self.close_stations_after_pileup();
+        }
+    }
+
+    /// A range of one station opened to one to three callers, and kept in
+    /// mind as opened.
+    fn open_stations_for_pileup(&mut self) {
+        if self.band.stations_max <= STATIONS_MIN {
             self.band.stations_max = PILEUP_CALLERS_MAX;
+            self.contest.stations_opened_by_pileup = true;
+        }
+    }
+
+    /// A range a pile-up opened, and that is still as it opened it, back to
+    /// one station. One set since is the learner's own, and stays.
+    fn close_stations_after_pileup(&mut self) {
+        if !self.contest.stations_opened_by_pileup {
+            return;
+        }
+        self.contest.stations_opened_by_pileup = false;
+        if (self.band.stations_min, self.band.stations_max) == (STATIONS_MIN, PILEUP_CALLERS_MAX) {
+            self.band.stations_max = STATIONS_MIN;
         }
     }
 }
@@ -606,6 +653,7 @@ pub(super) fn clean_call(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{RangeSetting, SettingsSection};
 
     #[test]
     fn a_call_is_kept_as_a_call_can_be_written() {
@@ -626,31 +674,90 @@ mod tests {
         assert_eq!(settings.my_call, "DL1ABC/P");
     }
 
+    /// The Band card's stations range, as a pair.
+    fn stations(settings: &TrainingSettings) -> (u32, u32) {
+        (settings.band.stations_min, settings.band.stations_max)
+    }
+
     /// Picking a pile-up on a stations range of one opens it to one to
-    /// three callers; a range already set is kept, and so is the range when
-    /// a single caller is picked again.
+    /// three callers, and a single caller again puts back the one station;
+    /// a range already set is kept, whichever is picked.
     #[test]
     fn a_pile_up_picked_on_a_range_of_one_opens_it() {
         let mut settings = TrainingSettings::default();
         settings.set_contest_style(RunStyle::Pileup);
         assert_eq!(settings.contest.contest_style, RunStyle::Pileup);
-        assert_eq!(
-            (settings.band.stations_min, settings.band.stations_max),
-            (1, 3)
-        );
+        assert_eq!(stations(&settings), (1, 3));
         settings.set_contest_style(RunStyle::Single);
         assert_eq!(settings.contest.contest_style, RunStyle::Single);
-        assert_eq!(
-            (settings.band.stations_min, settings.band.stations_max),
-            (1, 3)
-        );
+        assert_eq!(stations(&settings), (1, 1));
         settings.band.stations_min = 2;
         settings.band.stations_max = 2;
         settings.set_contest_style(RunStyle::Pileup);
-        assert_eq!(
-            (settings.band.stations_min, settings.band.stations_max),
-            (2, 2)
-        );
+        assert_eq!(stations(&settings), (2, 2));
+        settings.set_contest_style(RunStyle::Single);
+        assert_eq!(stations(&settings), (2, 2));
+    }
+
+    /// The stations range is group training's too, so what a pile-up opened
+    /// is no one else's: Default, then Contest, Pile-up, Single caller and
+    /// Koch leaves Koch, and a single caller, with the one station nobody
+    /// changed.
+    #[test]
+    fn a_pile_up_leaves_no_pile_up_behind_it() {
+        let mut settings = TrainingSettings::default();
+        settings.set_char_set_mode(CharSetMode::Contest);
+        assert_eq!(stations(&settings), (1, 1));
+        settings.set_contest_style(RunStyle::Pileup);
+        assert_eq!(stations(&settings), (1, 3));
+        settings.set_contest_style(RunStyle::Single);
+        assert_eq!(stations(&settings), (1, 1), "a single caller");
+        settings.set_char_set_mode(CharSetMode::Koch);
+        assert_eq!(stations(&settings), (1, 1), "Koch");
+        assert_eq!(settings.band, TrainingSettings::default().band);
+    }
+
+    /// Left in Pile-up for another character set, the range goes back to
+    /// one station there, and opens again on coming back to the pile-up,
+    /// across a save read back in between; the Character set's reset, back
+    /// to a single caller, puts it back too.
+    #[test]
+    fn group_training_never_hears_a_pile_up_left_behind() {
+        let mut settings = TrainingSettings::default();
+        settings.set_char_set_mode(CharSetMode::Contest);
+        settings.set_contest_style(RunStyle::Pileup);
+        settings.set_char_set_mode(CharSetMode::Koch);
+        assert_eq!(stations(&settings), (1, 1));
+        settings.set_char_set_mode(CharSetMode::Contest);
+        assert_eq!(stations(&settings), (1, 3));
+        let json = serde_json::to_string(&settings).expect("serialize");
+        let mut settings: TrainingSettings = serde_json::from_str(&json).expect("a save loads");
+        settings.set_char_set_mode(CharSetMode::Callsign);
+        assert_eq!(stations(&settings), (1, 1), "after a save");
+        settings.set_char_set_mode(CharSetMode::Contest);
+        settings.reset_section(SettingsSection::CharacterSet);
+        assert_eq!(stations(&settings), (1, 1), "after the reset");
+    }
+
+    /// A range set by hand is the learner's own: one set in the pile-up,
+    /// even to what the pile-up opened, and one set before it, each stays
+    /// as set once the pile-up is left.
+    #[test]
+    fn a_stations_range_set_by_hand_stays_after_a_pile_up() {
+        let mut settings = TrainingSettings::default();
+        settings.set_char_set_mode(CharSetMode::Contest);
+        settings.set_contest_style(RunStyle::Pileup);
+        settings.set_range_max(RangeSetting::Stations, 3.0);
+        settings.set_contest_style(RunStyle::Single);
+        assert_eq!(stations(&settings), (1, 3));
+
+        let mut settings = TrainingSettings::default();
+        settings.set_range_linked(RangeSetting::Stations, false);
+        assert_eq!(stations(&settings), (1, 2));
+        settings.set_char_set_mode(CharSetMode::Contest);
+        settings.set_contest_style(RunStyle::Pileup);
+        settings.set_char_set_mode(CharSetMode::Koch);
+        assert_eq!(stations(&settings), (1, 2));
     }
 
     /// A name is kept as it is sent: letters only, upper case, ten at most.

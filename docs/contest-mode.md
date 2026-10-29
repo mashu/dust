@@ -632,6 +632,11 @@ settings so scores compare between people.
   call alone (F4) brings callers too once a QSO is in the log, as MRCE's
   (`Contest.pas:1001-1025`). A pile-up of one caller is none, so picking
   Pile-up while the stations range holds one station opens it to 1–3 (8).
+  As built (2026-10-29), the range is group training's too, so Single
+  caller, or another character set, puts back the one station a pile-up
+  opened it from, unless the range was set since
+  (`stationsOpenedByPileup`); it used to stay open, and a single caller
+  or a Koch session got a pile-up nobody set.
   As built (2026-10-23), the callers a message brings, and every other
   caller answering it, start no sooner than a station leaving has
   finished: one your CQ, TU or NIL sent on its way while it was still
@@ -2290,7 +2295,7 @@ fist variation.
 |---|---|
 | Character and effective speed ranges | the callers' speeds, drawn within them from your copy speed while the callers adapt (`contestAdaptSpeed`, on as it ships), evenly otherwise; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
 | `callsignLevel` | the callers' call shapes, shared with Callsigns mode |
-| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept |
+| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept, and one the pile-up opened goes back to one station on leaving it, for Single or another character set (as built, 2026-10-29) |
 | `pileupSpreadHz` | Pile-up only: how far either side of the centre callers land; hidden for Single, where it does nothing |
 | Session shape's first field | "Minutes per run" in place of "Groups per session" (`settings.rs:288-295`) |
 

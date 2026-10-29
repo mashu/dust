@@ -140,6 +140,9 @@ impl TrainingSettings {
             RangeSetting::Stations => {
                 self.band.stations_min = as_u32(min);
                 self.band.stations_max = as_u32(max);
+                // Set by hand, the range is the learner's own: leaving a
+                // pile-up leaves it as it is.
+                self.contest.stations_opened_by_pileup = false;
             }
         }
     }
