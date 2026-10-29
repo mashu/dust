@@ -102,6 +102,12 @@ jobs:
             find site -maxdepth 3 -type f
             exit 1
           fi
+          # The tab icon is inline in index.html; without it a browser asks
+          # for /favicon.ico at the domain's root, outside a project site.
+          if ! grep -q 'rel="icon"' site/index.html; then
+            echo "Bundled page links no icon"
+            exit 1
+          fi
           test -f site/privacy/index.html
           ls -lh site site/assets
 
