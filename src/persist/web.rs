@@ -288,10 +288,16 @@ impl Store for WebStore {
         true
     }
 
+    /// A browser says nothing of a download it blocks, or one the user
+    /// turns down, so the file is told of as handed over, not as saved.
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
         saved_now(
             download(name, contents)
-                .map(|()| format!("{name}, in your downloads"))
+                .map(|()| {
+                    format!(
+                        "Backup handed to your browser to save as {name}: look for it in your downloads."
+                    )
+                })
                 .ok_or_else(|| "this browser would not hand over the file".into()),
         )
     }

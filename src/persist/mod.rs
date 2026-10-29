@@ -75,7 +75,8 @@ pub trait Store {
     /// Hand `contents` to the user as a file called `name`, outside the
     /// store, somewhere they can reach it: a download in a browser, a file
     /// in Downloads on a computer or an Android phone, one in the Files app
-    /// on an iPhone. Says where it went, or why it could not go.
+    /// on an iPhone. Says what became of it, in words for the user, or why
+    /// it could not go.
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving;
     /// Ask the platform to keep what is stored rather than clear it when it
     /// needs room. Only a browser clears a store on its own, and it may ask
@@ -141,6 +142,12 @@ pub type BackupSaving = Pin<Box<dyn Future<Output = Result<String, String>>>>;
 #[cfg_attr(all(target_os = "android", not(test)), allow(dead_code))]
 fn saved_now(result: Result<String, String>) -> BackupSaving {
     Box::pin(std::future::ready(result))
+}
+
+/// What the user is told of a backup file saved as `place`.
+#[cfg(any(feature = "native-runtime", test))]
+fn saved_as(place: &str) -> String {
+    format!("Backup saved as {place}.")
 }
 
 /// What became of a history handed to [`Store::save_sessions`].

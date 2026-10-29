@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, saved_now,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, saved_as,
+    saved_now,
 };
 
 #[derive(Default)]
@@ -128,7 +129,7 @@ impl Store for MemoryStore {
         self.backup_files
             .borrow_mut()
             .push((name.to_string(), contents.to_string()));
-        saved_now(Ok(format!("{name}, in your downloads")))
+        saved_now(Ok(saved_as(&format!("{name}, in your downloads"))))
     }
 
     fn ask_to_keep(&self) {

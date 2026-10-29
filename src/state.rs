@@ -444,11 +444,11 @@ impl AppCtx {
         let saving = self.app().store.save_backup_file(&name, &contents);
         dioxus::core::spawn_forever(async move {
             match saving.await {
-                Ok(place) => {
+                Ok(said) => {
                     self.app().store.mark_backup(at);
                     let mut last_backup = self.last_backup;
                     last_backup.set(Some(at));
-                    self.toasts.show(format!("Backup saved as {place}."));
+                    self.toasts.show(said);
                 }
                 Err(why) => self
                     .toasts
