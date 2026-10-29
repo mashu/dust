@@ -198,7 +198,7 @@ impl ContestCard {
                     my_section: or_stand_in(contest.section_sent(), "<your section>"),
                     // The QSO is your first: its TU signs as a run's
                     // first would, with your call in TU every QSO.
-                    tu_signed: rules.tu_adds_call(style, contest.contest_tu_call, 1),
+                    tu_signed: rules.tu_adds_call(contest.contest_tu_call, 1),
                     ..Fill::default()
                 },
             ),
@@ -398,9 +398,7 @@ pub fn CharsetCard(
             }
             if let Some(contest) = c.contest.clone() {
                 RunStylePicker { settings, style: contest.style, callers: contest.callers }
-                // A single caller's TU never signs, as MorseRunner's single
-                // calls never do.
-                if let (RunStyle::Pileup, Some(tu_call)) = (contest.style, contest.tu_call) {
+                if let Some(tu_call) = contest.tu_call {
                     TuCallPicker { settings, tu_call }
                 }
             }
@@ -587,9 +585,9 @@ fn RunStylePicker(settings: Signal<TrainingSettings>, style: RunStyle, callers: 
     }
 }
 
-/// How often your TU signs with your call in a pile-up: every QSO, every
-/// third, as MorseRunner's station ID rate has it, or never. The callers
-/// call after your TU whichever it is.
+/// How often your TU signs with your call, with one caller at a time or a
+/// pile-up: every QSO, every third, as MorseRunner's station ID rate has
+/// it, or never. The callers call after your TU whichever it is.
 #[component]
 fn TuCallPicker(settings: Signal<TrainingSettings>, tu_call: TuCall) -> Element {
     let line = match tu_call {

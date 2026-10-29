@@ -218,17 +218,19 @@ impl CallerHabits {
     }
 }
 
-/// How often your TU signs with your call in a pile-up, where the
-/// contest's TU does not sign by its own rules: MorseRunner's station ID
-/// rate (`StationIdRate`, `Contest.pas:468-474`), every third QSO unless
-/// set otherwise. A station tuning in hears who is running from it; the
-/// callers call after your TU whether it signs or not, as MorseRunner's do.
+/// How often your TU signs with your call, with one caller at a time or a
+/// pile-up, where the contest's TU does not sign by its own rules: every
+/// QSO unless set otherwise, as a run's TU goes out on the air; every
+/// third is MorseRunner's station ID rate (`StationIdRate`,
+/// `Contest.pas:468-474`). A station tuning in hears who is running from
+/// it; the callers call after your TU whether it signs or not, as
+/// MorseRunner's do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TuCall {
     /// Every TU signs.
+    #[default]
     Every,
     /// Every third QSO's TU signs.
-    #[default]
     Third,
     /// No TU signs.
     Never,
@@ -241,13 +243,19 @@ impl TuCall {
     pub fn name(self) -> &'static str {
         match self {
             Self::Every => "every",
-            Self::Third => "third",
+            Self::Third => "everyThird",
             Self::Never => "never",
         }
     }
 
-    /// The choice saved as `name`, if this build knows it.
+    /// The choice saved as `name`, if this build knows it. `third` is a save
+    /// from before every TU signed out of the box: every third was the
+    /// default then, and saved as `third` whether chosen or not, so it reads
+    /// as every QSO, once. Every third chosen now saves as `everyThird`.
     pub fn from_name(name: &str) -> Option<Self> {
+        if name == "third" {
+            return Some(Self::Every);
+        }
         Self::ALL.into_iter().find(|choice| choice.name() == name)
     }
 
@@ -399,7 +407,7 @@ mod tests {
         let habits = serde_json::from_value::<CallerHabits>("lids".into()).ok();
         assert_eq!(habits, Some(CallerHabits::Easy));
         let tu = serde_json::from_value::<TuCall>("sometimes".into()).ok();
-        assert_eq!(tu, Some(TuCall::Third));
+        assert_eq!(tu, Some(TuCall::Every));
         assert_eq!(ContestKind::from_name("cwt"), None);
     }
 
@@ -411,7 +419,22 @@ mod tests {
         assert_eq!(signed(TuCall::Every), [1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(signed(TuCall::Third), [3, 6]);
         assert!(signed(TuCall::Never).is_empty());
-        assert_eq!(TuCall::default(), TuCall::Third);
+        assert_eq!(TuCall::default(), TuCall::Every);
+    }
+
+    /// Every third was the default until every TU signed, and saved as
+    /// `third` whether chosen or not: a save from then reads as every QSO.
+    /// Every third chosen now saves under a name of its own, and each
+    /// choice reads back as it was saved.
+    #[test]
+    fn an_older_saves_every_third_reads_as_every_qso() {
+        let read = |name: &str| serde_json::from_value::<TuCall>(name.into()).ok();
+        assert_eq!(read("third"), Some(TuCall::Every));
+        assert_eq!(TuCall::Third.name(), "everyThird");
+        for choice in TuCall::ALL {
+            let saved = serde_json::to_value(choice).expect("it saves");
+            assert_eq!(serde_json::from_value::<TuCall>(saved).ok(), Some(choice));
+        }
     }
 
     /// Every contest on the card has its row of rules, and one only.

@@ -388,7 +388,7 @@ mod tests {
             ui.type_into("field-exchange", &serial);
             ui.with_app(|ctx| pressed(ctx, "."));
             let tu = sent(&recorder).expect("TU");
-            assert_eq!(tu.text, "TU");
+            assert_eq!(tu.text, "TU DL1ABC");
             assert_eq!(
                 ui.with_app(|ctx| ctx.contest.peek().as_ref().map(|view| view.qsos)),
                 Some(1)
@@ -447,7 +447,7 @@ mod tests {
             ui.with_app(|ctx| pressed(ctx, "F3"));
             assert_eq!(
                 sent(&recorder).map(|turn| turn.text),
-                Some("TU".to_string())
+                Some("TU DL1ABC".to_string())
             );
             assert_eq!(
                 ui.with_app(|ctx| ctx.contest.peek().as_ref().map(|view| view.qsos)),

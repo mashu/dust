@@ -1412,9 +1412,9 @@ mod ui_tests {
                 .collect();
             let lines = qso_lines(&ui);
             assert_eq!(lines, sent);
-            let tus = lines.iter().filter(|line| *line == "You TU").count();
+            let tus = lines.iter().filter(|line| *line == "You TU DL1ABC").count();
             assert_eq!(tus, 3, "{lines:?}");
-            assert_eq!(lines.last().map(String::as_str), Some("You TU"));
+            assert_eq!(lines.last().map(String::as_str), Some("You TU DL1ABC"));
             // Each QSO after the first set apart where its caller comes in.
             let html = ui.html();
             assert_eq!(html.matches("qso-next").count(), 2, "{lines:?}");

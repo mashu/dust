@@ -1305,24 +1305,23 @@ fn the_station_strength_is_typed_in_decibels() {
     });
 }
 
-/// Your call in TU is on the contest card in a pile-up, where the
-/// contest's TU leaves it to you: every QSO, every third (as it starts)
-/// or never, each saying what it does, and the card's example QSO, your
-/// first, signing its TU as that QSO would. Not for a single caller, the
-/// Sprint, whose TU always signs, or Simple QSO, whose TU is its own; the
-/// card's reset puts every third back.
+/// Your call in TU is on the contest card, with one caller at a time or a
+/// pile-up, where the contest's TU leaves it to you: every QSO (as it
+/// starts), every third or never, each saying what it does, and the card's
+/// example QSO, your first, signing its TU as that QSO would. Not for the
+/// Sprint, whose TU always signs, or Simple QSO, whose TU is its own, which
+/// keep what was chosen; the card's reset puts every QSO back.
 #[test]
-fn your_call_in_tu_is_on_the_contest_card_in_a_pile_up() {
+fn your_call_in_tu_is_on_the_contest_card() {
     run(|| async {
         let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
         ui.click("nav-settings");
-        assert!(!ui.shows("tu-every-third"), "a single caller's never signs");
-        ui.click("style-pile-up");
-        assert!(ui.input_tag("tu-every-third").contains("active"));
+        // A single caller's TU signs as a pile-up's does.
+        assert!(ui.input_tag("tu-every-qso").contains("active"));
         assert!(ui.has("Your call in TU"));
-        assert!(ui.has(
-            "Every third QSO&#39;s TU signs with your call, so a station tuning in hears who is running"
-        ));
+        assert!(ui.has("Every TU signs with your call"));
+        // The example QSO is your first: every QSO's TU signs it.
+        assert!(ui.has(">TU DL1ABC<"), "the example's TU signs");
         ui.click("tu-never");
         assert_eq!(
             ui.stored_settings().await.contest.contest_tu_call,
@@ -1330,13 +1329,13 @@ fn your_call_in_tu_is_on_the_contest_card_in_a_pile_up() {
         );
         assert!(ui.has("No TU signs with your call; the callers still call after each"));
         assert!(ui.has(">TU<") && !ui.has(">TU DL1ABC<"), "the example's TU");
-        ui.click("tu-every-qso");
-        assert!(ui.has("Every TU signs with your call"));
-        // The example QSO is your first: every QSO's TU signs it.
-        assert!(ui.has(">TU DL1ABC<"), "the example's TU signs");
+        ui.click("style-pile-up");
+        assert!(ui.input_tag("tu-never").contains("active"));
         ui.click("tu-every-third");
+        assert!(ui.has(
+            "Every third QSO&#39;s TU signs with your call, so a station tuning in hears who is running"
+        ));
         assert!(!ui.has(">TU DL1ABC<"), "your first QSO is not your third");
-        ui.click("tu-every-qso");
         for (contest, shown) in [
             ("contest-na-sprint", false),
             ("contest-simple-qso", false),
@@ -1347,18 +1346,16 @@ fn your_call_in_tu_is_on_the_contest_card_in_a_pile_up() {
         ] {
             ui.click(contest);
             assert_eq!(ui.shows("tu-every-qso"), shown, "{contest}");
+            assert_eq!(
+                ui.stored_settings().await.contest.contest_tu_call,
+                cw_core::TuCall::Third,
+                "{contest}: kept while it is not shown"
+            );
         }
-        ui.click("style-single-caller");
-        assert!(!ui.shows("tu-every-qso"));
-        assert_eq!(
-            ui.stored_settings().await.contest.contest_tu_call,
-            cw_core::TuCall::Every,
-            "kept while it is not shown"
-        );
         ui.click("reset-character-set");
         assert_eq!(
             ui.stored_settings().await.contest.contest_tu_call,
-            cw_core::TuCall::Third
+            cw_core::TuCall::Every
         );
     });
 }
@@ -1461,5 +1458,75 @@ fn the_cards_there_is_least_call_for_start_folded_and_open_from_their_heads() {
         );
         // The cards in daily use are open as they were.
         assert!(ui.shows("slider-agc-threshold"), "the band card is open");
+    });
+}
+
+/// The titles of the cards on the page, top to bottom.
+fn card_titles(ui: &Ui) -> Vec<String> {
+    ui.html()
+        .split("class=\"card-title\">")
+        .skip(1)
+        .map(|rest| {
+            rest.split('<')
+                .next()
+                .unwrap_or_default()
+                .replace("&#38;", "&")
+        })
+        .collect()
+}
+
+/// Settings runs from what a learner sets first to what there is least
+/// call for: the cards the guided setup walks through, in the order it
+/// visits them, then the band and the keying envelope, the most there is
+/// to set, then the cards that start folded, so no open card sits among
+/// folded ones. A contest has its station after its character set, and no
+/// preset or level to move.
+#[test]
+fn settings_run_from_what_is_set_first_to_what_there_is_least_call_for() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app();
+        ui.click("nav-settings");
+        assert_eq!(
+            card_titles(&ui),
+            [
+                "Experience",
+                "Character set",
+                "Speed",
+                "Session shape",
+                "Tone & volume",
+                "Auto level",
+                "Band conditions",
+                "Keying envelope",
+                // Folded.
+                "Character sampling",
+                "Recognition",
+                "Display",
+                "Privacy",
+                "Credits",
+            ]
+        );
+
+        let mut contest = test_settings();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        let (mut ui, _recorder) = Ui::app_with_settings(contest);
+        ui.click("nav-settings");
+        assert_eq!(
+            card_titles(&ui),
+            [
+                "Character set",
+                "Your station",
+                "Speed",
+                "Session shape",
+                "Tone & volume",
+                "Band conditions",
+                "Keying envelope",
+                // Folded.
+                "Character sampling",
+                "Recognition",
+                "Display",
+                "Privacy",
+                "Credits",
+            ]
+        );
     });
 }
