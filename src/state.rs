@@ -2,6 +2,7 @@
 //! shares.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -10,7 +11,10 @@ use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
 use crate::persist::backup::{Backup, backup_name, merge_sessions, write_backup};
-use crate::persist::{CutOff, HistorySaved, OpenSession, Store, merge_history, merge_settings};
+use crate::persist::{
+    CutOff, HistorySaved, MAX_SESSIONS, OpenSession, SessionKey, Store, merge_history,
+    merge_settings,
+};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live};
@@ -336,6 +340,12 @@ impl AppCtx {
     /// ([`merge_history`]), and what is stored is shown here too. A store
     /// that takes nothing leaves the history here as it was.
     pub fn store_history(self) -> HistorySaved {
+        self.store_history_counted().0
+    }
+
+    /// As [`Self::store_history`], and how many of the oldest sessions the
+    /// store let go, for want of room.
+    fn store_history_counted(self) -> (HistorySaved, usize) {
         let mut sessions = self.sessions;
         let mut stored = self.stored_history;
         let store = self.app().store;
@@ -345,14 +355,16 @@ impl AppCtx {
             None => sessions.peek().clone(),
         };
         let saved = store.save_sessions(&merged);
-        if let Some(kept) = saved.kept() {
-            let kept = merged[merged.len().saturating_sub(kept)..].to_vec();
-            if *sessions.peek() != kept {
-                sessions.set(kept.clone());
-            }
-            stored.set(kept);
+        let Some(kept) = saved.kept() else {
+            return (saved, 0);
+        };
+        let let_go = merged.len().saturating_sub(kept);
+        let kept = merged[let_go..].to_vec();
+        if *sessions.peek() != kept {
+            sessions.set(kept.clone());
         }
-        saved
+        stored.set(kept);
+        (saved, let_go)
     }
 
     /// Take `picked` out of the history, and out of the store. Until another
@@ -453,9 +465,9 @@ impl AppCtx {
         let mut sessions = self.sessions;
         let mut settings = self.settings;
         let before = (sessions.peek().clone(), settings.peek().clone());
-        let (merged, added, filled) = merge_sessions(&before.0, backup.sessions);
-        sessions.set(merged);
-        let saved = self.store_history();
+        let merged = merge_sessions(&before.0, backup.sessions);
+        sessions.set(merged.sessions);
+        let (saved, let_go) = self.store_history_counted();
         if let Some(why) = why_not_stored(&saved) {
             sessions.set(before.0);
             self.toasts.show(format!("Nothing was restored: {why}."));
@@ -482,10 +494,16 @@ impl AppCtx {
             .filter(|_| backup.saved_at > 0)
             .map(|day| format!(" from {}", short_date(&day)))
             .unwrap_or_default();
+        // Only what the history kept: a session older than the newest it
+        // has room for goes again as it is stored.
+        let kept: HashSet<SessionKey> = sessions.peek().iter().map(SessionKey::of).collect();
+        let still = |keys: &[SessionKey]| keys.iter().filter(|key| kept.contains(key)).count();
+        let (added, filled) = (still(&merged.added), still(&merged.filled));
         let mut text = match (added, filled) {
-            (0, 0) => {
+            (0, 0) if merged.added.is_empty() && merged.filled.is_empty() => {
                 format!("Restored your settings{from}. Every session in it was already here.")
             }
+            (0, 0) => format!("Restored your settings{from}."),
             (0, _) => format!(
                 "Filled in {} and restored your settings{from}.",
                 counted(filled, "session")
@@ -501,6 +519,14 @@ impl AppCtx {
         };
         if let Some(problem) = saved.problem() {
             text = format!("{text} {problem}");
+        } else if let_go > 0 {
+            let oldest = match let_go {
+                1 => "the oldest was".to_string(),
+                n => format!("the {n} oldest were"),
+            };
+            text = format!(
+                "{text} The history keeps only the newest {MAX_SESSIONS} sessions, so {oldest} let go."
+            );
         }
         self.toasts.show_with(text, ToastAction::UndoRestore);
     }
@@ -910,10 +936,52 @@ mod tests {
         assert_eq!(a.shown(), [1, 2, 3, 4, 5]);
     }
 
+    /// A restore that takes the history past the newest it keeps counts
+    /// only the sessions that stayed, and says the oldest were let go. It
+    /// used to count every session it added, though the oldest went again
+    /// as they were stored.
+    #[test]
+    fn a_restore_counts_only_the_sessions_the_history_kept() {
+        let max = MAX_SESSIONS as u64;
+        let restore = |tab: &Tab| {
+            tab.act(|ctx| {
+                ctx.restore_backup(Backup {
+                    saved_at: 0,
+                    settings: TrainingSettings::default(),
+                    sessions: (1..=10).map(day).collect(),
+                })
+            });
+            tab.toast().expect("told").text
+        };
+
+        let store = holding(11..=max + 5);
+        let tab = Tab::on(&store);
+        assert_eq!(
+            restore(&tab),
+            format!(
+                "Restored 5 sessions and your settings. The history keeps only the newest {max} sessions, so the 5 oldest were let go."
+            )
+        );
+        let stored = days(&store.load_sessions());
+        assert_eq!(stored, (6..=max + 5).collect::<Vec<_>>());
+        assert_eq!(tab.shown(), stored);
+
+        // Every one of them older than the newest kept: none restored.
+        let store = holding(11..=max + 10);
+        let tab = Tab::on(&store);
+        assert_eq!(
+            restore(&tab),
+            format!(
+                "Restored your settings. The history keeps only the newest {max} sessions, so the 10 oldest were let go."
+            )
+        );
+        assert_eq!(store.load_sessions().len(), MAX_SESSIONS);
+    }
+
     /// Between them, tabs keep the newest sessions the history has room for.
     #[test]
     fn tabs_keep_the_newest_sessions_between_them() {
-        let max = crate::persist::MAX_SESSIONS as u64;
+        let max = MAX_SESSIONS as u64;
         let store = holding(1..=max);
         let (a, b) = (Tab::on(&store), Tab::on(&store));
         b.finish(day(max + 1));
