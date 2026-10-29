@@ -356,15 +356,10 @@ impl Store for DesktopStore {
 
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
         #[cfg(all(target_os = "android", not(test)))]
-        {
-            let saving = super::android::save_backup(name.to_string(), contents.to_string());
-            return Box::pin(async move { saving.await.map(|place| super::saved_as(&place)) });
-        }
+        let saving = super::android::save_backup(name.to_string(), contents.to_string());
         #[cfg(not(all(target_os = "android", not(test))))]
-        super::saved_now(
-            self.save_in_folder(name, contents)
-                .map(|place| super::saved_as(&place)),
-        )
+        let saving = super::saved_now(self.save_in_folder(name, contents));
+        Box::pin(async move { saving.await.map(|place| super::saved_as(&place)) })
     }
 
     /// Written unsynced: it is only a mark, and the first group waits on
