@@ -113,13 +113,14 @@ pub struct Received {
     /// gain for everything it hears, so a crash ducks the station you are
     /// copying with the noise.
     pub gain: f64,
-    /// The part of that gain the AGC's hang holds: what a signal that stood
-    /// over the threshold has set, which a crash it only squashes for an
-    /// instant leaves alone. What an AGC lamp lights by.
+    /// The part of that gain the AGC's hang holds, which a crash it only
+    /// squashes for an instant leaves alone: what the tests read an AGC lamp
+    /// by.
+    #[cfg(test)]
     pub held: f64,
     /// What reached the AGC: the band and the send together, through the
     /// filter and the RF gain, before the AGC's, as it arrived rather than
-    /// the look-ahead late. What a level meter on the receiver reads.
+    /// the look-ahead late.
     pub input: f64,
 }
 
@@ -224,6 +225,7 @@ impl BandMixer {
         Received {
             band: ridden + self.audio_floor.next_sample(),
             gain: self.agc.gain(),
+            #[cfg(test)]
             held: self.agc.held(),
             input,
         }
