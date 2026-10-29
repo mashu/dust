@@ -15,10 +15,10 @@ as-is, with cpal routing it to AAudio through
 oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just
 the SDK.
 
-The project `dx` generates needs three things put right, and `dx` 0.7 has a
+The project `dx` generates needs four things put right, and `dx` 0.7 has a
 setting for none of them. Every bundle command below, in CI as well, first
 installs a Gradle init hook, [`scripts/android-gradle-hook.sh`](../scripts/android-gradle-hook.sh),
-that does all three:
+that does all four:
 
 - **Launcher icon.** The icon is [`assets/icon.png`](../assets/icon.png).
   Android 8 and later show the adaptive icon packed in the app, and `dx`
@@ -44,6 +44,18 @@ that does all three:
   of the library the app ships. The script stops if that file is missing.
   Play reads it from the bundle. The hook still points the plugin at
   `ANDROID_NDK_HOME` (`ndkPath` and `ndkVersion`) as the plugin is applied.
+- **Configuration changes.** `dx`'s manifest has the activity handle only a
+  turn of the screen itself. For any other change Android recreates the
+  activity, and the webview with it, and the app ends: Dioxus has no window
+  left, and tao exits the process. Dark mode turned on, a keyboard or a
+  paddle adapter plugged in, the font or display size changed, a new
+  language, a foldable opened: each closed it, mid-session or not. The hook
+  rewrites the activity's `android:configChanges` in the generated manifest
+  to every change there is (`ANDROID_CONFIG_CHANGES`), and fails the build if
+  it finds none to rewrite. The webview lays itself out again for a new size
+  or density. The Auto theme follows dark mode switched on meanwhile only as
+  far as the webview passes the change on to the page; Light and Dark pin
+  it either way.
 
 The screen stays on through a session — the count down, every send and
 every answer — through the window's own keep-screen-on flag
@@ -53,6 +65,26 @@ system lets go of it with the window. The answer box asks for no on-screen
 keyboard (`inputmode="none"`): the training screen has a keypad of its own, so
 nothing slides in over the groups. A keyboard plugged in or paired still types
 into the box.
+
+Out of sight — another app in front, the screen locked — a session or a
+contest run pauses, as it does in a browser tab, and Resume carries on. The
+webview gives a hidden page no animation frames, and Dioxus waits for each
+render to be drawn on one before it runs anything else, the pause the page
+asks for among it. The page's head stands a timer in for a frame that does
+not come ([`src/keep_running.js`](../src/keep_running.js), the desktop
+build's too), so the pause lands at once. A process the system freezes
+whole runs nothing until it thaws, and then its timers all come due at once:
+a session and a run each keep a heartbeat, and a gap in it of more than two
+seconds is taken as a pause from where it began, before anything that waited
+out the gap is heard. No answer closes empty for it, and the time away is
+not answering time. The same holds on iOS.
+
+Whatever else plays stops out of sight, on every build: the band preview,
+the letters, a sample, Hear a QSO. The stream of groups stops too on a
+phone, where the system may freeze an app out of sight whole, and holds the
+screen on while it plays instead, as Hear a QSO does. On the desktop and in
+a browser it plays on, as it is there to be copied while you work in another
+program or tab ([below](#copying-while-you-work-in-other-programs)).
 
 The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
@@ -176,7 +208,9 @@ The store listing privacy-policy URL is
 That page is [`docs/privacy.html`](privacy.html), copied into the Pages site
 on every deploy. Settings in the app links to the same URL. The page has to
 be live on `main` before Play review: a listing that points at it before the
-Pages workflow has published it will fail the check.
+Pages workflow has published it will fail the check. The Pages workflow
+deploys a push to `main` once its whole CI run has passed, so a change to the
+page goes live a CI run after it is merged.
 
 ## iOS
 
@@ -207,8 +241,12 @@ sideloaded apps at a time — the tools re-sign in place before it expires. A pa
 membership removes both limits and is the only route to TestFlight or the App
 Store.
 
-CI type-checks the simulator target on every PR, which needs no Apple account
-and covers the audio-session code and cpal's CoreAudio backend.
+CI lints the simulator target with Clippy on every PR, which needs no Apple
+account and covers the audio-session code and cpal's CoreAudio backend. The
+Android target is linted the same way, the `mobile` build with oboe's C++,
+and the desktop build on Windows and macOS as well as Linux, where it is
+also tested. The web app is built and its site checked as Pages would serve
+it.
 
 ## Desktop bundles
 
@@ -217,6 +255,15 @@ and covers the audio-session code and cpal's CoreAudio backend.
 (WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS). macOS builds
 are unsigned (right-click → Open the first time). Windows needs WebView2,
 already present on typical Windows 10/11.
+
+On Linux, **Restore a backup** and **Load a text file** open the desktop's
+file chooser portal (`xdg-desktop-portal`, with a backend that chooses
+files: `-gtk`, `-gnome` or `-kde`), or `zenity` where there is none. Every
+desktop install has one or the other; a bare window manager may have
+neither, and then no chooser opens. Dioxus hands the app no file then, as
+for a chooser cancelled, so the button looks for either where the desktop
+keeps them (the XDG data folders, the `PATH`) and, finding neither, says
+what to install.
 
 **Launcher icon.** GNOME looks the icon up in the hicolor theme, and only in
 the sizes that theme lists. [`assets/icon.png`](../assets/icon.png) is scaled
@@ -281,11 +328,13 @@ gives it:
 | Web | `localStorage` for that exact origin (`https://mashu.github.io`, or `localhost:8080` while developing — the two are separate stores) |
 | Linux | `~/.local/share/dust/` (`$XDG_DATA_HOME`) |
 | Windows / macOS | the platform data dir `dirs` reports |
-| Android | `/data/data/<package>/files/dust/` — `dirs` has no `HOME` to work from, so the store resolves the package name from `/proc/self/cmdline` |
+| Android | `dust/` in the app's own files folder, which Android names for the user the app runs as: `/data/data/<package>/files/` for the phone's owner, `/data/user/<user>/<package>/files/` for a work profile, another user, Private Space or a cloned app. `dirs` has no `HOME` to work from, so the store asks Android (`Context.getFilesDir()`, over JNI), or failing that works it out from `/proc/self/cmdline` and the process's uid |
 | iOS | `Library/Application Support/dust/` inside the app container |
 
 `DUST_DATA_DIR` overrides the directory on every desktop and mobile build,
-which is what a portable install uses.
+which is what a portable install uses. A build with no data folder to be
+had keeps `dust/` in the temporary folder, never in whatever folder it was
+started in.
 
 A session or contest run is marked open while it runs, and the mark goes
 once it ends, stored or discarded. Each copy of the app marks its own, a
@@ -296,9 +345,14 @@ off, and the app says so, once, on the screen it opens on, or once the
 session it starts next is over, if the window that was running it stopped
 meanwhile. A mark another window still holds is left to it. On desktop and
 mobile the marks are `open/<id>.json`, each beside the `open/<id>.lock` its
-copy holds; one a power cut left empty still says a session was cut off. In
-a browser they are `dust_open_session_<id>` in `localStorage`, each held by
-a Web Lock of the same name. A browser without Web Locks marks nothing,
+copy holds; one a power cut left empty still says a session was cut off. A
+lock file is locked under another name first and only then renamed into
+place, so a copy looking for marks never finds one unheld that is about to
+be held. In a browser they are `dust_open_session_<id>` in `localStorage`,
+each held by a Web Lock of the same name. The browser grants a lock a moment
+after it is asked for, so the mark goes in only once its lock is held, and
+under the lock a tab looking for marks holds while it looks; it goes again
+before its lock is let go of. A browser without Web Locks marks nothing,
 rather than take a tab still running for one cut off.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,

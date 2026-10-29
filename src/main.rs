@@ -36,8 +36,10 @@ mod ui;
 
 use crate::app::App;
 
-/// Keeps the app's tasks running while the window is minimised or covered.
-#[cfg(feature = "desktop")]
+/// Keeps the app's tasks running while its page is out of sight: a window
+/// minimised or covered, a phone locked or another app in front. Every
+/// webview build has it in the page's head, ahead of the renderer.
+#[cfg(not(feature = "web"))]
 pub(crate) const KEEP_RUNNING_JS: &str = include_str!("keep_running.js");
 
 #[cfg(feature = "desktop")]
@@ -66,6 +68,29 @@ fn themed_document_head() -> String {
         crate::app::FONT_CSS_URL
     ));
     head
+}
+
+/// The phone's page head: only what keeps the app running out of sight.
+/// The stylesheet and the fonts go in from the app itself (`AppHead`).
+#[cfg(not(any(feature = "desktop", feature = "web")))]
+fn mobile_document_head() -> String {
+    format!("<script>{KEEP_RUNNING_JS}</script>")
+}
+
+#[cfg(all(test, not(any(feature = "desktop", feature = "web"))))]
+mod mobile_tests {
+    /// A phone's page out of sight must not stop the app either: Android's
+    /// and iOS's webviews give a hidden page no animation frames, and a
+    /// render left waiting on one held back the pause the page's going
+    /// asks for.
+    #[test]
+    fn the_mobile_head_does_not_wait_on_frames_a_hidden_page_never_gets() {
+        let head = super::mobile_document_head();
+        assert!(head.starts_with("<script>"));
+        assert!(head.ends_with("</script>"));
+        assert!(head.contains("window.requestAnimationFrame ="));
+        assert!(head.contains("document.hidden"));
+    }
 }
 
 #[cfg(all(test, feature = "desktop"))]
@@ -146,13 +171,26 @@ fn launch_desktop() {
         .launch(App);
 }
 
+/// Android and iOS: the desktop's webview stack, in a window the system
+/// owns.
+#[cfg(not(any(feature = "desktop", feature = "web")))]
+fn launch_mobile() {
+    dioxus::LaunchBuilder::mobile()
+        .with_cfg(dioxus::mobile::Config::new().with_custom_head(mobile_document_head()))
+        .launch(App);
+}
+
 fn main() {
     #[cfg(feature = "desktop")]
     {
         launch_desktop();
     }
-    // Android, iOS and the web build still use a webview the OS owns.
-    #[cfg(not(feature = "desktop"))]
+    #[cfg(not(any(feature = "desktop", feature = "web")))]
+    {
+        launch_mobile();
+    }
+    // A browser applies each render as it comes, frames or none.
+    #[cfg(feature = "web")]
     {
         dioxus::launch(App);
     }

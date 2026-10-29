@@ -153,6 +153,16 @@ impl Preview {
     }
 }
 
+/// Whether the stream of groups plays on with the page out of sight, where
+/// everything else that plays stops. On the desktop and in a browser it
+/// does: it is there to be copied while you work in another program or
+/// tab, and the desktop's floating window shows its groups over them. A
+/// phone's app out of sight is a locked screen or another app in front,
+/// which the system may freeze whole, so there the stream stops too, and
+/// holds the screen on while it plays instead, as Hear a QSO does.
+pub const STREAM_PLAYS_OUT_OF_SIGHT: bool =
+    !cfg!(any(feature = "mobile", feature = "mobile-silent"));
+
 /// Play `kind`: take the audio for it, run `play` under the lease, and once
 /// that ends — finished, failed or taken over — leave nothing behind.
 ///

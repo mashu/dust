@@ -38,9 +38,9 @@ pub struct WebStore {
     history_held: Cell<bool>,
     /// The browser has been asked to keep the store, this visit.
     asked_to_keep: Cell<bool>,
-    /// This page's mark, while its session is marked open: its name, and
-    /// what lets go of its lock.
-    open_held: RefCell<Option<(String, js_sys::Function)>>,
+    /// This page's mark, while its session is marked open: what writes it,
+    /// and takes it away with its lock ([`hold_mark`]).
+    open_held: RefCell<Option<js_sys::Function>>,
 }
 
 fn storage() -> Option<web_sys::Storage> {
@@ -72,23 +72,56 @@ impl Aside for Shelf<'_> {
     }
 }
 
-/// Hold the Web Lock `name` until the function handed back is called; none
-/// in a browser without Web Locks, where nothing is marked, so no running
-/// tab is ever taken for one cut off. Asked for at once, as the call
-/// returns: a lock asked for is as good as held to a page looking for marks.
-fn hold_lock(name: &str) -> Option<js_sys::Function> {
+/// Hold the Web Lock `name`, and keep the mark of the same name in
+/// `localStorage` only while the lock is held. The function handed back
+/// takes the mark's text, or, given none, takes the mark away and lets go
+/// of the lock. None in a browser without Web Locks, where nothing is
+/// marked, so no running tab is ever taken for one cut off.
+///
+/// A lock asked for is not held at once: the browser grants it a moment
+/// later, and only then does a page looking for marks see it, held or
+/// waiting. A mark written as the lock was asked for could be found in
+/// that moment without it, taken for one cut off, told of in the page that
+/// looked, and deleted from under this one as it ran on. So the mark goes
+/// in once the lock is granted, and under the lock pages look under
+/// ([`take_marks`]): a look finds no mark, or one whose lock is held. It
+/// is taken away before the lock is let go of.
+fn hold_mark(name: &str) -> Option<js_sys::Function> {
     let hold = js_sys::Function::new_with_args(
-        "name",
+        "name, look",
         "if (!navigator.locks) return null;
         let release;
         const held = new Promise((done) => { release = done; });
-        navigator.locks.request(name, () => held);
-        return release;",
+        let text = null;
+        let placed = false;
+        let gone = false;
+        const place = () => {
+            if (!gone && text !== null) localStorage.setItem(name, text);
+            placed = true;
+        };
+        navigator.locks
+            .request(name, () => navigator.locks.request(look, place).then(() => held, () => held))
+            .catch(() => {});
+        return (raw) => {
+            if (typeof raw !== 'string') {
+                gone = true;
+                localStorage.removeItem(name);
+                release();
+                return;
+            }
+            text = raw;
+            if (placed && !gone) localStorage.setItem(name, raw);
+        };",
     );
-    hold.call1(&JsValue::NULL, &JsValue::from_str(name))
-        .ok()?
-        .dyn_into()
-        .ok()
+    let look = format!("{OPEN_PREFIX}look");
+    hold.call2(
+        &JsValue::NULL,
+        &JsValue::from_str(name),
+        &JsValue::from_str(&look),
+    )
+    .ok()?
+    .dyn_into()
+    .ok()
 }
 
 /// Take every mark whose page has gone, and hand back what each said: one
@@ -327,30 +360,28 @@ impl Store for WebStore {
     }
 
     fn mark_open(&self, open: Option<OpenSession>) {
-        let Some(store) = storage() else {
+        if storage().is_none() {
             return;
-        };
+        }
         let mut held = self.open_held.borrow_mut();
         match open {
             Some(open) => {
                 // The lock first: a page looking for marks then never finds
                 // this one without it.
                 let mark = held.take().or_else(|| {
-                    let name = format!("{OPEN_PREFIX}{:016x}", crate::time::seed_rng());
-                    hold_lock(&name).map(|release| (name, release))
+                    hold_mark(&format!("{OPEN_PREFIX}{:016x}", crate::time::seed_rng()))
                 });
-                let Some((name, release)) = mark else {
+                let Some(mark) = mark else {
                     return;
                 };
                 if let Ok(raw) = serde_json::to_string(&open) {
-                    let _ = store.set_item(&name, &raw);
+                    let _ = mark.call1(&JsValue::NULL, &JsValue::from_str(&raw));
                 }
-                *held = Some((name, release));
+                *held = Some(mark);
             }
             None => {
-                if let Some((name, release)) = held.take() {
-                    let _ = store.remove_item(&name);
-                    let _ = release.call0(&JsValue::NULL);
+                if let Some(mark) = held.take() {
+                    let _ = mark.call0(&JsValue::NULL);
                 }
             }
         }

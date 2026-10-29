@@ -12,7 +12,7 @@ use dioxus::prelude::*;
 
 use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
-use crate::playback;
+use crate::playback::{self, Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen, SessionPick};
 use crate::time::{local_date_string, mono_ms, sleep_ms};
@@ -111,7 +111,7 @@ fn SettingsRoute() -> Element {
     let on_hear_qsos = use_callback(move |()| playback::start_qsos(ctx));
     use_band_follow(ctx);
     use_qsos_follow(ctx);
-    use_qsos_stop_when_hidden(ctx, SETTINGS_HIDDEN);
+    use_preview_stop_when_hidden(ctx, SETTINGS_HIDDEN);
     let preview = ctx.preview.read();
     rsx! {
         SettingsView {
@@ -150,12 +150,16 @@ fn use_qsos_follow(ctx: AppCtx) {
     });
 }
 
-/// While a screen that plays Hear a QSO is up, the page going out of sight
-/// stops it, as it pauses a run: QSOs played to nobody are only to be heard
-/// again, and stopping is all a demonstration needs.
-fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
+/// While a screen that plays anything is up, the page going out of sight
+/// stops what it plays, as it pauses a run: the band, letters or QSOs
+/// played to nobody are only to be heard again, and stopping is all a
+/// preview needs. The stream of groups plays on where copying it out of
+/// sight is what it is for ([`STREAM_PLAYS_OUT_OF_SIGHT`]).
+fn use_preview_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
     use_page_hidden(slot, move || {
-        if ctx.preview.peek().is_qsos() {
+        let preview = ctx.preview.peek().clone();
+        let plays_on = preview.is_stream() && STREAM_PLAYS_OUT_OF_SIGHT;
+        if preview != Preview::Idle && !plays_on {
             ctx.stop_audio();
         }
     });
@@ -261,7 +265,7 @@ fn ListenRoute() -> Element {
     let on_put_away = use_callback(move |()| dialogue.set(None));
     let on_stop = use_callback(move |()| ctx.stop_audio());
     let on_back = use_callback(move |()| ctx.go_to(Screen::Home));
-    use_qsos_stop_when_hidden(ctx, LISTEN_HIDDEN);
+    use_preview_stop_when_hidden(ctx, LISTEN_HIDDEN);
     let preview = ctx.preview.read();
     #[cfg(feature = "desktop")]
     let floating = use_context::<crate::ui::floating::FloatingWindow>();
@@ -437,6 +441,64 @@ mod tests {
                 },
             );
             assert!(ui.has("No result."));
+        });
+    }
+
+    /// The page going out of sight stops the band preview, as it stops
+    /// Hear a QSO: nothing plays on to nobody, the screen left to dim
+    /// among it.
+    #[test]
+    fn hiding_the_page_stops_the_band_preview() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            ui.click("nav-settings");
+            ui.click("btn-band-preview");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            ui.with_app(|_| crate::page_hidden::hide_page());
+            assert!(ui.has("Live preview"), "still previewing: {}", ui.html());
+            let sent = recorder.texts().len();
+            ui.advance(3_000).await;
+            assert_eq!(recorder.texts().len(), sent, "the band played on");
+        });
+    }
+
+    /// The stream of groups plays on out of sight on the desktop and in a
+    /// browser, where copying it while you do something else is what it is
+    /// for; a phone's stops, as everything else that plays does.
+    #[test]
+    fn hiding_the_page_stops_the_stream_only_on_a_phone() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(test_settings());
+            ui.click("btn-listen-to-letters");
+            ui.click("btn-stream-groups");
+            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
+            ui.with_app(|_| crate::page_hidden::hide_page());
+            assert_eq!(ui.has("Stream groups"), !STREAM_PLAYS_OUT_OF_SIGHT);
+            let sent = recorder.texts().len();
+            ui.advance(10_000).await;
+            assert_eq!(
+                recorder.texts().len() > sent,
+                STREAM_PLAYS_OUT_OF_SIGHT,
+                "{:?}",
+                recorder.texts()
+            );
+        });
+    }
+
+    /// The page going out of sight pauses a session of groups on the
+    /// training screen, and Resume carries it on.
+    #[test]
+    fn hiding_the_page_pauses_a_session() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.click("btn-start-training");
+            ui.advance(500).await;
+            ui.with_app(|_| crate::page_hidden::hide_page());
+            let paused = ui.with_app(|ctx| ctx.runtime.peek().as_ref().map(|s| s.paused()));
+            assert_eq!(paused, Some(true));
+            ui.click("btn-resume");
+            let paused = ui.with_app(|ctx| ctx.runtime.peek().as_ref().map(|s| s.paused()));
+            assert_eq!(paused, Some(false));
         });
     }
 }
