@@ -83,6 +83,9 @@ impl MixerStream {
     /// later. When it was made.
     pub fn change_at(&self, at: f64, change: impl FnOnce(&mut Mixer, &mut Swept)) -> f64 {
         let mut state = self.state.borrow_mut();
+        // Caught up first: a change put at the clock read before catching
+        // up would land in what the catching up then runs on over unheard.
+        state.catch_up();
         let at = at.max(state.soonest());
         let (made, taken) = state.stream.change_at(at, change);
         for taken in taken {
@@ -124,12 +127,21 @@ impl StreamState {
         self.ctx.current_time() + reported_latency(&self.ctx, "baseLatency") + CHANGE_MARGIN_SEC
     }
 
+    /// Run the mixer on to the clock, should it have fallen behind it.
+    fn catch_up(&mut self) {
+        let soonest = self.soonest();
+        self.stream.catch_up_to(soonest);
+    }
+
     /// Render until the receiver runs `lead` ahead of the clock, and let go
     /// of what has played.
     fn top_up(&mut self, lead: f64) {
         if self.ctx.state() == AudioContextState::Closed {
             return;
         }
+        // Caught up before the clock is read: catching up takes time, and a
+        // stretch put at the moment read before it would start in the past.
+        self.catch_up();
         let now = self.ctx.current_time();
         let soonest = self.soonest();
         let (ctx, into) = (&self.ctx, &self.into);

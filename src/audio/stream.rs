@@ -24,9 +24,10 @@ use super::mixer::{Mixer, Swept};
 pub const STRETCH_SEC: f64 = 0.1;
 
 /// The most of a stall the mixer is run on over unheard, to keep its time
-/// with the clock's ([`ReceiverStream::render_until`]): longer than a send
-/// lasts, short enough to make up in a moment.
-const CATCH_UP_MOST_SEC: f64 = 10.0;
+/// with the clock's ([`ReceiverStream::catch_up_to`]): the length of a
+/// send or so, which the page makes up in a few tens of milliseconds even
+/// in a browser on a phone. A longer stall is skipped beyond it.
+const CATCH_UP_MOST_SEC: f64 = 2.0;
 
 /// The mixer, run ahead of a clock: what it has rendered, still to play,
 /// each stretch with the node `N` it was handed over as. Everything is
@@ -174,6 +175,13 @@ impl<N: Clone> ReceiverStream<N> {
             over.extend(self.queued.pop_front().map(|queued| queued.node));
         }
         over
+    }
+
+    /// Run the mixer on to the clock's moment `soonest`, should it have
+    /// fallen behind it ([`Self::catch_up`]). Catching up takes time, so a
+    /// caller reads the clock again after it before scheduling anything.
+    pub fn catch_up_to(&mut self, soonest: f64) {
+        self.catch_up(self.sample_at(soonest));
     }
 
     /// Fallen behind `soonest` — a long task, a hidden page — the stream
@@ -336,6 +344,42 @@ mod tests {
             .zip(&expected[from..])
             .position(|(a, b)| a != b);
         assert_eq!(first_off, None, "the stream slipped behind the mixer");
+    }
+
+    /// Caught up to the clock before anything is scheduled, as the browser
+    /// does, a stream picks up from the clock as it stands after catching
+    /// up, which has moved on meanwhile, and still plays there what the
+    /// mixer plays there; a stall longer than it catches up over is skipped
+    /// beyond that.
+    #[test]
+    fn a_stream_caught_up_first_plays_on_from_the_clock_after() {
+        let settings = settings();
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let mut browser = Browser::default();
+        stream
+            .render_until(0.0, 0.3, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        stream.catch_up_to(1.5);
+        stream
+            .render_until(1.6, 2.0, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        let total = 2 * SR as usize;
+        let heard = browser.heard(total);
+        let mut straight = mixer(&settings);
+        let mut expected = vec![0.0f32; total];
+        straight.render(&mut expected, 0);
+        let from = (1.6 * f64::from(SR)).round() as usize;
+        let first_off = heard[from..]
+            .iter()
+            .zip(&expected[from..])
+            .position(|(a, b)| a != b);
+        assert_eq!(first_off, None, "the stream slipped behind the mixer");
+        assert!(
+            heard[(0.3 * f64::from(SR)) as usize..from]
+                .iter()
+                .all(|s| *s == 0.0),
+            "the stall was played"
+        );
     }
 
     /// A change made mid-stretch, the queue a good way ahead of it, plays

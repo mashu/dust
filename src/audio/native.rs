@@ -278,15 +278,18 @@ impl MorsePlayer {
             self.with_mixer(|mixer, swept| mixer.clear(rate, swept));
             self.state.forget_band();
         }
+        // Woken on the same device, the speaker is as far behind as it was;
+        // on another one, how far waits for its first callback. Forgotten
+        // before the stream starts, so that callback is never the one
+        // forgotten. A device that cannot say its name cannot be told from
+        // the last.
+        let name = device.name().ok();
+        if name.is_some() && name != self.latency_device {
+            self.mixer().forget_latency();
+            self.latency_device = name;
+        }
         let open = open_stream(device, supported, &self.mixer, &self.sidetone)
             .inspect_err(|_| self.note_refusal())?;
-        // Woken on the same device, the speaker is as far behind as it was;
-        // on another one, how far waits for its first callback. A device
-        // that cannot say its name cannot be told from the last.
-        if open.device.is_some() && open.device != self.latency_device {
-            self.mixer().forget_latency();
-            self.latency_device.clone_from(&open.device);
-        }
         self.stream = Some(open);
         self.refused_at = None;
         Ok(())
