@@ -239,7 +239,13 @@ impl Move {
         match self {
             Self::Start => start_session(ctx),
             Self::Discard => abort_run(ctx),
-            Self::OpenSettings => ctx.go_to(Screen::Settings),
+            Self::OpenSettings => {
+                // Settings is not to be had while a session is going.
+                if ctx.session_running() {
+                    abort_run(ctx);
+                }
+                ctx.go_to(Screen::Settings);
+            }
             _ => {}
         }
     }
@@ -815,8 +821,18 @@ fn first_launch(ctx: AppCtx) -> bool {
 /// undone, is done on the way: Next out of a session discards it, rather
 /// than leaving it running under a step that points at Settings. A run is
 /// the exception, left to the learner to start ([`Move::take_there`]).
+///
+/// A session or a run still going is discarded on the way to any step not
+/// on the training screen, however it came to be going: the screen that
+/// step is about cannot be reached while it is, and its nav is hidden.
 fn next(ctx: AppCtx, at: usize) {
     let now = ctx.tour.peek().unwrap_or_default();
+    let away = steps(now)
+        .get(at + 1)
+        .is_some_and(|step| step.screen != Some(Screen::Training));
+    if away && ctx.session_running() {
+        abort_run(ctx);
+    }
     if let Some(step) = steps(now).get(at).filter(|step| step.moves_on) {
         for step_move in step.moves.iter().copied() {
             if !made_now(ctx, step_move) {
@@ -906,16 +922,27 @@ pub fn TourDock() -> Element {
     });
 
     // Follow what the learner does: a session started, a group answered in
-    // it, the session left again. A step that moves on by itself does so
-    // when it is done there, and not when it is come back to done already.
+    // it, the session left again. Each session, or run, is followed from
+    // its start: one left before, without a group answered or before the
+    // guide got to Discard, ticks off nothing for the next, which is still
+    // to be left. A step that moves on by itself does so when it is done
+    // there, and not when it is come back to done already.
     let mut last = use_hook(|| CopyValue::new(None::<(usize, bool)>));
+    let mut on_training = use_hook(|| CopyValue::new(false));
     use_effect(move || {
         let (screen, answered, _) = (screen(), answered(), at());
+        // The training screen comes only with a session or a run starting.
+        let starting = screen == Screen::Training && !*on_training.peek();
+        on_training.set(screen == Screen::Training);
         let Some(before) = *tour.peek() else {
             last.set(None);
             return;
         };
         let mut now = before;
+        if starting {
+            now.answered = false;
+            now.left = false;
+        }
         now.started |= screen == Screen::Training;
         now.answered |= now.started && answered;
         now.left |= now.started && screen != Screen::Training;
@@ -1575,6 +1602,62 @@ mod tests {
         });
     }
 
+    /// A session left without a group answered, then started again, is
+    /// followed afresh: its group answered moves the guide on to Discard
+    /// with Discard still to do, and Next there discards it. Leaving the
+    /// first used to tick Discard off for good, so Next went on to Settings
+    /// over the second, still running.
+    #[test]
+    fn a_session_started_again_is_followed_afresh() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(needs_everything());
+            ui.click("btn-guided-setup");
+            ui.click("btn-start-training");
+            assert!(on_step(&ui, 1));
+            ui.click("btn-discard");
+            ui.click("btn-discard-session");
+            assert_eq!(ui.screen(), "home");
+            assert!(on_step(&ui, 1), "{}", ui.html());
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().last().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(
+                ui.run_until(2_000, |ui| on_step(ui, 2)).await,
+                "{}",
+                ui.html()
+            );
+            assert_eq!(moves_made(&ui), 0, "Discard was ticked: {}", ui.html());
+            ui.click("tour-next");
+            assert_eq!(ui.screen(), "home", "Next left the session running");
+            assert!(on_step(&ui, 3), "{}", ui.html());
+            assert!(ui.store.load_sessions().is_empty(), "the session was kept");
+        });
+    }
+
+    /// A session started under a step that is not about it is discarded by
+    /// Next on the way to Settings, which it keeps out of reach: the guide
+    /// used to go on to the settings steps over the training screen.
+    #[test]
+    fn next_to_settings_discards_a_session_still_going() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(needs_everything());
+            ui.click("btn-guided-setup");
+            for _ in 0..3 {
+                ui.click("tour-next");
+            }
+            assert!(on_step(&ui, 3), "{}", ui.html());
+            assert_eq!(ui.screen(), "home");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            assert!(on_step(&ui, 3), "{}", ui.html());
+            ui.click("tour-next");
+            assert_eq!(ui.screen(), "settings");
+            assert!(on_step(&ui, first_on_settings()), "{}", ui.html());
+            assert!(ui.store.load_sessions().is_empty(), "the session was kept");
+        });
+    }
+
     /// A step that moves on by itself does so when it is done there, not
     /// when it is come back to done already.
     #[test]
@@ -1816,6 +1899,37 @@ mod tests {
             assert!(ui.store.load_sessions().is_empty(), "the run was kept");
             ui.click("tour-start-practising");
             assert!(!ui.shows("tour-next"));
+        });
+    }
+
+    /// A run ended before the guide got to Discard, then another started,
+    /// is followed afresh: Discard is still to do, and Next there discards
+    /// the run going. It used to be ticked off already, so Next went on
+    /// past it, and Start practising closed the guide over the run.
+    #[test]
+    fn a_run_started_again_is_followed_afresh() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-guided-setup");
+            ui.click("btn-start-training");
+            assert!(on_contest_step(&ui, 1), "{}", ui.html());
+            ui.click("btn-end-run");
+            assert_ne!(ui.screen(), "training");
+            if ui.screen() != "home" {
+                ui.click("nav-practice");
+            }
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            let discard = CONTEST_STEPS.len() - 2;
+            for _ in 1..discard {
+                ui.click("tour-next");
+            }
+            assert!(on_contest_step(&ui, discard), "{}", ui.html());
+            assert_eq!(moves_made(&ui), 0, "Discard was ticked: {}", ui.html());
+            ui.click("tour-next");
+            assert_eq!(ui.screen(), "home", "Next left the run going");
+            assert!(on_contest_step(&ui, discard + 1), "{}", ui.html());
+            assert!(ui.with_app(|ctx| ctx.contest.peek().is_none()));
         });
     }
 
