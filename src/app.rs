@@ -1817,6 +1817,26 @@ mod ui_tests {
         });
     }
 
+    /// A move of the volume alone builds nothing, and the band follows it
+    /// at once rather than once the slider pauses.
+    #[test]
+    fn a_volume_move_is_followed_at_once() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            ui.advance(crate::routes::BAND_SETTLE_MS + 50).await;
+            let before = follows(&recorder);
+            ui.type_into("slider-volume", "-6");
+            assert_eq!(follows(&recorder), before + 1, "the volume waited");
+            ui.type_into("slider-volume", "-9");
+            assert_eq!(follows(&recorder), before + 2);
+            // And a band move after it still waits for the pause.
+            ui.type_into("slider-filter-width", "400");
+            assert_eq!(follows(&recorder), before + 2);
+            ui.advance(crate::routes::BAND_SETTLE_MS + 10).await;
+            assert_eq!(follows(&recorder), before + 3);
+        });
+    }
+
     /// A slider that never pauses still has the band follow it, at least
     /// every BAND_FOLLOW_MAX_MS, so a long drag is heard as it goes.
     #[test]

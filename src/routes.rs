@@ -4,10 +4,10 @@
 //! practice screen's history, and a key in a training answer does not
 //! rebuild the shell.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use cw_core::{CharSetMode, SessionEvent, compute_char_pool};
+use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
 use dioxus::prelude::*;
 
 use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
@@ -165,17 +165,32 @@ fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
 /// settle ([`BAND_SETTLE_MS`]), and at least every [`BAND_FOLLOW_MAX_MS`]
 /// under a slider that never pauses. Building the band for new receiver
 /// settings measures its AGC, on the thread that draws in the browser, so it
-/// is done once a drag pauses, not under every step of it.
+/// is done once a drag pauses, not under every step of it. A move of the
+/// volume or the RF gain alone builds nothing, and is followed at once.
 fn use_band_follow(ctx: AppCtx) {
     let waiting = use_hook(|| Rc::new(Cell::new(Waiting::default())));
+    // The settings the band was last brought in line with, clamped.
+    let followed = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
     use_effect(move || {
         let previewing = ctx.preview.read().is_band();
         // Read to follow every move; the follow takes them as they stand.
-        let _ = ctx.settings.read();
+        let settings = ctx.settings.read();
         let turn = waiting.get().turn.wrapping_add(1);
         if !previewing {
             // A stopped preview has no band to follow the settings with.
             waiting.set(Waiting { since: None, turn });
+            followed.borrow_mut().take();
+            return;
+        }
+        let clamped = settings.clone().clamp();
+        drop(settings);
+        let gains_only = followed
+            .borrow()
+            .as_ref()
+            .is_some_and(|last| only_gains_moved(last, &clamped));
+        if gains_only {
+            ctx.app().player.follow_band(&clamped);
+            *followed.borrow_mut() = Some(clamped);
             return;
         }
         let now = mono_ms();
@@ -185,7 +200,7 @@ fn use_band_follow(ctx: AppCtx) {
             turn,
         });
         let due = (now + BAND_SETTLE_MS).min(since + BAND_FOLLOW_MAX_MS);
-        let waiting = waiting.clone();
+        let (waiting, followed) = (waiting.clone(), followed.clone());
         spawn(async move {
             sleep_ms(due.saturating_sub(now).try_into().unwrap_or(u32::MAX)).await;
             // A newer move has a follow of its own coming, due no later.
@@ -195,8 +210,18 @@ fn use_band_follow(ctx: AppCtx) {
             waiting.set(Waiting { since: None, turn });
             let settings = ctx.settings.peek().clone().clamp();
             ctx.app().player.follow_band(&settings);
+            *followed.borrow_mut() = Some(settings);
         });
     });
+}
+
+/// Whether `now` is `last` but for the volume and the RF gain, which the
+/// player moves a sample at a time without building anything.
+fn only_gains_moved(last: &TrainingSettings, now: &TrainingSettings) -> bool {
+    let mut gains_put_back = now.clone();
+    gains_put_back.band.master_volume = last.band.master_volume;
+    gains_put_back.band.rf_gain_db = last.band.rf_gain_db;
+    gains_put_back == *last && now != last
 }
 
 /// The settings moves the band has still to follow: since when, and which
