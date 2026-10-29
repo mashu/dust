@@ -330,9 +330,14 @@ off, and the app says so, once, on the screen it opens on, or once the
 session it starts next is over, if the window that was running it stopped
 meanwhile. A mark another window still holds is left to it. On desktop and
 mobile the marks are `open/<id>.json`, each beside the `open/<id>.lock` its
-copy holds; one a power cut left empty still says a session was cut off. In
-a browser they are `dust_open_session_<id>` in `localStorage`, each held by
-a Web Lock of the same name. A browser without Web Locks marks nothing,
+copy holds; one a power cut left empty still says a session was cut off. A
+lock file is locked under another name first and only then renamed into
+place, so a copy looking for marks never finds one unheld that is about to
+be held. In a browser they are `dust_open_session_<id>` in `localStorage`,
+each held by a Web Lock of the same name. The browser grants a lock a moment
+after it is asked for, so the mark goes in only once its lock is held, and
+under the lock a tab looking for marks holds while it looks; it goes again
+before its lock is let go of. A browser without Web Locks marks nothing,
 rather than take a tab still running for one cut off.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,

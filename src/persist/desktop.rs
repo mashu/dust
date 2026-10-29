@@ -405,15 +405,28 @@ impl DesktopStore {
     }
 
     /// A mark of this copy's own, its lock held.
+    ///
+    /// The lock file is made, and locked, under a name no look reads, and
+    /// only then put where looks find it. Made there and locked after, a
+    /// copy looking for marks in between found it unheld, took it for one
+    /// cut off, and deleted it from under this copy, whose session then had
+    /// no mark at all.
     fn new_mark(&self) -> Option<HeldMark> {
         fs::create_dir_all(self.root.join(OPEN)).ok()?;
         let id = format!("{:016x}", crate::time::seed_rng());
+        let making = self.mark_path(&id, "making");
         let lock = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(self.mark_path(&id, "lock"))
+            .open(&making)
             .ok()?;
-        lock.try_lock().ok()?;
+        // A rename keeps the file, and the lock held on it.
+        let placed =
+            lock.try_lock().is_ok() && fs::rename(&making, self.mark_path(&id, "lock")).is_ok();
+        if !placed {
+            let _ = fs::remove_file(&making);
+            return None;
+        }
         Some(HeldMark { id, lock })
     }
 
@@ -629,6 +642,36 @@ mod tests {
         assert_eq!(third.cut_off(), None, "told of once");
         let left = fs::read_dir(dir.0.join(OPEN)).unwrap().count();
         assert_eq!(left, 0, "nothing left behind");
+    }
+
+    /// A mark's lock file is where looks find it only once its lock is
+    /// held, and nothing it was made under is left behind.
+    #[test]
+    fn a_mark_is_found_only_with_its_lock_held() {
+        let (dir, store) = store("open-held");
+        store.mark_open(Some(open_at(1)));
+        let id = store
+            .open_held
+            .borrow()
+            .as_ref()
+            .map(|mark| mark.id.clone());
+        let id = id.expect("marked");
+        let mut left: Vec<String> = fs::read_dir(dir.0.join(OPEN))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, [format!("{id}.json"), format!("{id}.lock")]);
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .open(store.mark_path(&id, "lock"))
+            .unwrap();
+        assert!(
+            lock.try_lock().is_err(),
+            "the lock was let go of on the way"
+        );
+        assert_eq!(DesktopStore::at(dir.0.clone()).cut_off(), None);
     }
 
     /// A mark a power cut left empty still says a session was cut off.
