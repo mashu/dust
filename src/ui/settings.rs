@@ -1057,12 +1057,6 @@ fn SamplingCard(settings: Signal<TrainingSettings>) -> Element {
                         onchange: move |v| settings.write().auto_level.char_sampling_coverage_strength = v,
                     }
                 }
-                Switch {
-                    title: "Thompson sampling",
-                    description: "Draws from each letter's uncertainty instead of its average error rate.",
-                    checked: a.char_sampling_thompson,
-                    onchange: move |on| settings.write().auto_level.char_sampling_thompson = on,
-                }
             }
         }
     }

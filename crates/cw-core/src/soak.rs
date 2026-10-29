@@ -973,6 +973,11 @@ fn auto_levelling_never_walks_the_settings_out_of_range() {
                     "seed {seed} round {round}: a level moved by more than one"
                 );
                 assert!(change.to >= LEVEL_MIN, "seed {seed} round {round}");
+                assert_eq!(
+                    change.raised(),
+                    change.accuracy_pct >= change.threshold_pct,
+                    "seed {seed} round {round}: a session moved the level against itself"
+                );
                 apply_auto_level(&mut settings, &change);
             }
             assert_eq!(

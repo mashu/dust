@@ -156,7 +156,6 @@ impl TrainingSettings {
                 let a = &from.auto_level;
                 self.auto_level.error_weight_strength = a.error_weight_strength;
                 self.auto_level.char_sampling_coverage_strength = a.char_sampling_coverage_strength;
-                self.auto_level.char_sampling_thompson = a.char_sampling_thompson;
             }
             SettingsSection::Recognition => self.recognition = from.recognition,
             SettingsSection::Station => {

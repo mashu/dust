@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::CopyTally;
+use crate::belief::{SESSION_FADE, sessions_faded};
 use crate::callsign::{CallSpec, GeneratedCall, generate_call};
 use crate::contest::{CallSource, Side};
 use crate::machine::GroupSource;
@@ -43,14 +44,34 @@ impl CharSamplingState {
     /// counts, whatever character set, unlock order or level it was
     /// practised at: a character is as hard to copy whichever of them sent
     /// it, and no setting hides what was learned.
+    ///
+    /// Older sessions count for less, as they do for the span and the
+    /// speed: a session ten sessions back counts half as much as the latest
+    /// ([`sessions_faded`]). A weakness put right long ago stops drawing the
+    /// character more often, and a character not heard for a while is less
+    /// certain again.
     pub fn from_history(history: &[SessionResult]) -> Self {
         let mut state = Self::default();
-        for session in history {
+        for (session, worth) in sessions_faded(history) {
             for (character, stats) in session.letter_accuracy().iter() {
                 let belief = state.beliefs.entry(*character).or_default();
-                belief.alpha += f64::from(stats.correct);
-                belief.beta += f64::from(stats.total.saturating_sub(stats.correct));
+                belief.alpha += worth * f64::from(stats.correct);
+                belief.beta += worth * f64::from(stats.total.saturating_sub(stats.correct));
             }
+        }
+        state
+    }
+
+    /// The beliefs a new session starts from: the history's, all of it one
+    /// session older, so the last session counts for a little less than
+    /// the one about to be sent, as the span's and the speed's do.
+    pub fn for_session(history: &[SessionResult]) -> Self {
+        let mut state = Self::from_history(history);
+        for belief in state.beliefs.values_mut() {
+            belief.alpha = CHAR_SAMPLING_PRIOR_ALPHA
+                + (belief.alpha - CHAR_SAMPLING_PRIOR_ALPHA) * SESSION_FADE;
+            belief.beta =
+                CHAR_SAMPLING_PRIOR_BETA + (belief.beta - CHAR_SAMPLING_PRIOR_BETA) * SESSION_FADE;
         }
         state
     }
@@ -91,7 +112,7 @@ impl Sampler {
     /// to session.
     pub fn new(history: &[SessionResult], settings: &TrainingSettings, seed: u64) -> Self {
         Self {
-            state: CharSamplingState::from_history(history),
+            state: CharSamplingState::for_session(history),
             span: SpanBelief::for_session(history, settings),
             speed: SpeedBelief::for_session(history, settings),
             rng: SplitMix64::new(seed),
@@ -266,7 +287,6 @@ pub(crate) fn adaptive_bounds(settings: &TrainingSettings) -> Option<(usize, usi
 pub struct CharSamplingConfig {
     pub error_weight_strength: f64,
     pub coverage_strength: f64,
-    pub thompson_sampling: bool,
     pub mixed_letters_percent: u32,
     pub char_set_mode: CharSetMode,
 }
@@ -275,7 +295,6 @@ pub fn config_from_settings(settings: &TrainingSettings) -> CharSamplingConfig {
     CharSamplingConfig {
         error_weight_strength: settings.auto_level.error_weight_strength,
         coverage_strength: settings.auto_level.char_sampling_coverage_strength,
-        thompson_sampling: settings.auto_level.char_sampling_thompson,
         mixed_letters_percent: settings.curriculum.mixed_letters_percent,
         char_set_mode: settings.curriculum.char_set_mode,
     }
@@ -324,6 +343,31 @@ fn coverage_factors(
     factors
 }
 
+/// How often the sampler takes a character to go wrong when it weighs it:
+/// the belief's best guess and one standard deviation above it, at most
+/// always.
+///
+/// Of two characters heard as often, the one missed more weighs more. Of
+/// two with the same best guess, the one the trainer has heard less of
+/// weighs more, its belief being wider: a new character, never heard, is
+/// taken to go wrong about four times in five (a half and a spread of 0.29),
+/// and comes round more until the trainer is sure of it. Within its prior
+/// of one hit and one miss the bound only rises with the share missed, so a
+/// worse character never weighs less than a better one heard as often.
+///
+/// A draw from the belief in its place, Thompson sampling, did neither on
+/// average: weighed in proportion, a draw averages back to the best guess.
+pub fn error_to_weigh(belief: CharBetaBelief) -> f64 {
+    let (right, wrong) = (belief.alpha.max(0.0), belief.beta.max(0.0));
+    let heard = right + wrong;
+    if !(heard > 0.0 && heard.is_finite()) {
+        return error_to_weigh(CharBetaBelief::default());
+    }
+    let guess = wrong / heard;
+    let spread = (right * wrong / (heard * heard * (heard + 1.0))).sqrt();
+    (guess + spread).min(1.0)
+}
+
 fn difficulty_factor(p_error: f64, error_weight_strength: f64) -> f64 {
     if error_weight_strength <= 0.0 {
         1.0
@@ -332,67 +376,18 @@ fn difficulty_factor(p_error: f64, error_weight_strength: f64) -> f64 {
     }
 }
 
-/// Marsaglia–Tsang rejection sampling. Each rejection loop is bounded: real
-/// draws accept within a handful of tries, and only a generator stuck on one
-/// value could exhaust them, in which case the mean is as good an answer as
-/// any.
-fn sample_gamma(shape: f64, rng: &mut impl Rng) -> f64 {
-    const TRIES: usize = 64;
-    // Not `shape <= 0.0`: NaN fails every comparison and would fall through
-    // into a loop that can never accept.
-    if !(shape > 0.0 && shape.is_finite()) {
-        return 0.0;
-    }
-    if shape < 1.0 {
-        let boosted = sample_gamma(shape + 1.0, rng);
-        return boosted * rng.f64().powf(1.0 / shape);
-    }
-    let d = shape - 1.0 / 3.0;
-    let c = 1.0 / (9.0 * d).sqrt();
-    for _ in 0..TRIES {
-        let Some((x, v)) = (0..TRIES).find_map(|_| {
-            let x = rng.normal();
-            let v = 1.0 + c * x;
-            (v > 0.0).then_some((x, v))
-        }) else {
-            break;
-        };
-        let v = v * v * v;
-        let u = rng.f64();
-        if u < 1.0 - 0.0331 * x * x * x * x || u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln()) {
-            return d * v;
-        }
-    }
-    shape
-}
-
-pub fn sample_beta(alpha: f64, beta: f64, rng: &mut impl Rng) -> f64 {
-    let x = sample_gamma(alpha, rng);
-    let y = sample_gamma(beta, rng);
-    let denom = x + y;
-    if denom.is_finite() && denom > 0.0 {
-        x / denom
-    } else {
-        0.5
-    }
-}
-
+/// Each character's weight in the draw: one, and the error it is weighed
+/// by ([`error_to_weigh`]) times the error-weight strength, times its
+/// coverage lift for this session.
 pub fn compute_raw_sampling_weights(
     pool: &[char],
     state: &CharSamplingState,
     config: &CharSamplingConfig,
-    rng: &mut impl Rng,
 ) -> BTreeMap<char, f64> {
     let coverage = coverage_factors(pool, &state.session_sample_counts, config.coverage_strength);
     let mut weights = BTreeMap::new();
     for character in pool {
-        let belief = belief_for(state, *character);
-        let p_error = if config.thompson_sampling {
-            // Beta(α, β) is P(correct); difficulty weighting needs P(error).
-            (1.0 - sample_beta(belief.alpha, belief.beta, rng)).clamp(0.0, 1.0)
-        } else {
-            beta_posterior_mean_error(belief)
-        };
+        let p_error = error_to_weigh(belief_for(state, *character));
         let coverage_factor = coverage.get(character).copied().unwrap_or(1.0);
         weights.insert(
             *character,
@@ -402,39 +397,55 @@ pub fn compute_raw_sampling_weights(
     weights
 }
 
-pub fn normalize_weights(pool: &[char], weights: &BTreeMap<char, f64>) -> BTreeMap<char, f64> {
-    let total: f64 = pool
-        .iter()
-        .map(|c| weights.get(c).copied().unwrap_or(0.0))
-        .sum();
-    let mut out = BTreeMap::new();
-    if total <= 0.0 {
-        let uniform = if pool.is_empty() {
-            0.0
-        } else {
-            1.0 / pool.len() as f64
-        };
-        for c in pool {
-            out.insert(*c, uniform);
-        }
-        return out;
-    }
-    for c in pool {
-        out.insert(*c, weights.get(c).copied().unwrap_or(0.0) / total);
-    }
-    out
-}
-
-fn pick_from_pool(
+/// The chance each character of `pool` is the next one drawn, in the pool's
+/// order, from the sampler's `weights`: what the sampler draws from and what
+/// the Sampling tab shows, so the two cannot drift apart.
+///
+/// Mixed gives the letters and the digits the share of the draws asked for,
+/// when the pool holds both, and each character its weight's part of its
+/// own side's share: ten letters and two digits at 70% letters draw each
+/// digit 15% of the time, not one time in twelve. Anywhere else a character
+/// is drawn by its weight from the whole pool. A side whose weights come to
+/// nothing is drawn from evenly.
+pub(crate) fn draw_chances(
     pool: &[char],
     weights: &BTreeMap<char, f64>,
-    rng: &mut impl Rng,
-) -> Option<char> {
-    let weight_list: Vec<f64> = pool
-        .iter()
-        .map(|c| weights.get(c).copied().unwrap_or(1.0))
-        .collect();
-    weighted_random_pick(pool, &weight_list, rng)
+    config: &CharSamplingConfig,
+) -> Vec<f64> {
+    let is_digit = |c: &char| c.is_ascii_digit();
+    let both = pool.iter().any(is_digit) && !pool.iter().all(is_digit);
+    let letters_share = (config.char_set_mode == CharSetMode::Mixed && both)
+        .then(|| f64::from(config.mixed_letters_percent.min(100)) / 100.0);
+    let side = |c: &char| match letters_share {
+        Some(share) if is_digit(c) => (true, 1.0 - share),
+        Some(share) => (false, share),
+        None => (false, 1.0),
+    };
+    let weight = |c: &char| {
+        weights
+            .get(c)
+            .copied()
+            .filter(|w| w.is_finite() && *w > 0.0)
+            .unwrap_or(0.0)
+    };
+    // Each side's total weight and size, digits apart from the rest.
+    let mut totals = [(0.0, 0usize); 2];
+    for c in pool {
+        let total = &mut totals[usize::from(side(c).0)];
+        total.0 += weight(c);
+        total.1 += 1;
+    }
+    pool.iter()
+        .map(|c| {
+            let (digit, share) = side(c);
+            let (total, count) = totals[usize::from(digit)];
+            if total > 0.0 {
+                share * weight(c) / total
+            } else {
+                share / count.max(1) as f64
+            }
+        })
+        .collect()
 }
 
 pub fn sample_training_group(
@@ -444,22 +455,11 @@ pub fn sample_training_group(
     config: &CharSamplingConfig,
     rng: &mut impl Rng,
 ) -> String {
-    let raw_weights = compute_raw_sampling_weights(pool, state, config, rng);
-    // Mixed draws each character from the letters or the digits by the
-    // share asked for — when the pool holds both to draw from.
-    let (letters, digits): (Vec<char>, Vec<char>) = pool.iter().partition(|c| !c.is_ascii_digit());
-    let split =
-        (config.char_set_mode == CharSetMode::Mixed && !letters.is_empty() && !digits.is_empty())
-            .then(|| f64::from(config.mixed_letters_percent.min(100)) / 100.0);
-
+    let weights = compute_raw_sampling_weights(pool, state, config);
+    let chances = draw_chances(pool, &weights, config);
     let mut group = String::with_capacity(group_size);
     for _ in 0..group_size {
-        let from = match split {
-            Some(letters_share) if rng.f64() < letters_share => &letters,
-            Some(_) => &digits,
-            None => pool,
-        };
-        group.extend(pick_from_pool(from, &raw_weights, rng));
+        group.extend(weighted_random_pick(pool, &chances, rng));
     }
     state.count_sent(&group);
     group
@@ -564,7 +564,7 @@ fn most_wanted<R: Rng, T: AsRef<str>>(
     mut draw: impl FnMut(&mut R) -> T,
 ) -> T {
     let pool = compute_char_pool(settings);
-    let weights = compute_raw_sampling_weights(&pool, state, config, rng);
+    let weights = compute_raw_sampling_weights(&pool, state, config);
     let appetite = |group: &str| {
         let mut total = 0.0;
         let mut count = 0.0;
@@ -1009,48 +1009,6 @@ mod tests {
         assert_eq!(belief_for(&sampler.state, 'K').alpha, 2.0);
     }
 
-    /// A generator stuck on one value: the worst a broken stub can do.
-    struct Stuck(f64);
-
-    impl Rng for Stuck {
-        fn f64(&mut self) -> f64 {
-            self.0
-        }
-    }
-
-    /// Nothing about the shape or the generator can hang the sampler. A NaN
-    /// shape used to fall through the guard into a loop that never accepts,
-    /// and a generator stuck on zero spun the normal draw forever.
-    #[test]
-    fn the_samplers_always_come_back() {
-        for shape in [f64::NAN, f64::INFINITY, -1.0, 0.0, 1e-9, 0.5, 3.0, 1e6] {
-            for stuck in [0.0, 0.5, 0.999_999, 1.0] {
-                let g = sample_gamma(shape, &mut Stuck(stuck));
-                assert!(g.is_finite() && g >= 0.0, "gamma({shape}) on {stuck}: {g}");
-                let b = sample_beta(shape, 2.0, &mut Stuck(stuck));
-                assert!((0.0..=1.0).contains(&b), "beta({shape}, 2) on {stuck}: {b}");
-            }
-        }
-        let n = Stuck(0.0).normal();
-        assert!(n.is_finite());
-    }
-
-    /// And the real thing is still the real thing: Beta(α, β) has mean
-    /// α/(α+β).
-    #[test]
-    fn beta_draws_have_the_right_mean() {
-        let mut rng = crate::rng::SplitMix64::new(42);
-        for (a, b) in [(2.0, 5.0), (0.5, 0.5), (9.0, 1.0)] {
-            let n = 20_000;
-            let mean = (0..n).map(|_| sample_beta(a, b, &mut rng)).sum::<f64>() / f64::from(n);
-            let expected = a / (a + b);
-            assert!(
-                (mean - expected).abs() < 0.01,
-                "Beta({a}, {b}): mean {mean:.4}, wanted {expected:.4}"
-            );
-        }
-    }
-
     #[test]
     fn group_length_respects_fixed_size() {
         let mut settings = TrainingSettings::default();
@@ -1065,22 +1023,6 @@ mod tests {
         for ch in group.chars() {
             assert!(ch == 'K' || ch == 'M');
         }
-    }
-
-    #[test]
-    fn thompson_weights_are_positive() {
-        let pool = ['K', 'M'];
-        let state = CharSamplingState::default();
-        let config = CharSamplingConfig {
-            error_weight_strength: 3.0,
-            coverage_strength: 1.0,
-            thompson_sampling: true,
-            mixed_letters_percent: 70,
-            char_set_mode: CharSetMode::Koch,
-        };
-        let mut rng = SplitMix64::default();
-        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
-        assert!(weights.values().all(|w| *w > 0.0));
     }
 
     #[test]
@@ -1111,42 +1053,6 @@ mod tests {
         next.learn(&CopyTally::of("KM", "KX"));
         let m = next.beliefs.get(&'M').copied().unwrap_or_default();
         assert!((m.beta - (CHAR_SAMPLING_PRIOR_BETA + 1.0)).abs() < 1e-9);
-    }
-
-    #[test]
-    fn thompson_weights_hard_letters_above_easy() {
-        let pool = ['K', 'M'];
-        let mut state = CharSamplingState::default();
-        state.beliefs.insert(
-            'K',
-            CharBetaBelief {
-                alpha: 40.0,
-                beta: 1.0,
-            },
-        );
-        state.beliefs.insert(
-            'M',
-            CharBetaBelief {
-                alpha: 1.0,
-                beta: 40.0,
-            },
-        );
-        let config = CharSamplingConfig {
-            error_weight_strength: 3.0,
-            coverage_strength: 0.0,
-            thompson_sampling: true,
-            mixed_letters_percent: 70,
-            char_set_mode: CharSetMode::Koch,
-        };
-        let mut rng = SplitMix64::default();
-        let mut k_sum = 0.0;
-        let mut m_sum = 0.0;
-        for _ in 0..400 {
-            let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
-            k_sum += weights.get(&'K').copied().unwrap_or(0.0);
-            m_sum += weights.get(&'M').copied().unwrap_or(0.0);
-        }
-        assert!(m_sum > k_sum);
     }
 
     #[test]
@@ -1195,7 +1101,6 @@ mod tests {
         CharSamplingConfig {
             error_weight_strength: 3.0,
             coverage_strength: 1.0,
-            thompson_sampling: false,
             mixed_letters_percent: pct,
             char_set_mode: mode,
         }
@@ -1227,14 +1132,13 @@ mod tests {
         let mut state = CharSamplingState::default();
         state.session_sample_counts.insert('K', 10);
         let config = config(CharSetMode::Koch, 70);
-        let mut rng = SplitMix64::default();
-        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
+        let weights = compute_raw_sampling_weights(&pool, &state, &config);
         assert!(weights[&'M'] > weights[&'K']);
 
         // With coverage off both characters weigh the same.
-        let mut flat = config.clone();
+        let mut flat = config;
         flat.coverage_strength = 0.0;
-        let weights = compute_raw_sampling_weights(&pool, &state, &flat, &mut rng);
+        let weights = compute_raw_sampling_weights(&pool, &state, &flat);
         assert_eq!(weights[&'M'], weights[&'K']);
     }
 
@@ -1244,8 +1148,7 @@ mod tests {
         let pool = ['K', 'M'];
         let state = CharSamplingState::default();
         let config = config(CharSetMode::Koch, 70);
-        let mut rng = SplitMix64::default();
-        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
+        let weights = compute_raw_sampling_weights(&pool, &state, &config);
         assert_eq!(weights[&'K'], weights[&'M']);
         assert!(weights[&'K'] > 0.0);
     }
@@ -1264,37 +1167,169 @@ mod tests {
         let mut config = config(CharSetMode::Koch, 70);
         config.error_weight_strength = 0.0;
         config.coverage_strength = 0.0;
-        let mut rng = SplitMix64::default();
-        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
+        let weights = compute_raw_sampling_weights(&pool, &state, &config);
         assert_eq!(weights[&'K'], weights[&'M']);
     }
 
-    #[test]
-    fn thompson_draws_stay_inside_the_unit_interval() {
-        let mut rng = SplitMix64::new(12345);
-        for _ in 0..200 {
-            let x = sample_beta(0.4, 2.5, &mut rng);
-            assert!((0.0..=1.0).contains(&x), "beta draw out of range: {x}");
+    /// The share of the characters drawn that are `character`, over many
+    /// groups from `state` with coverage off.
+    fn share_drawn(pool: &[char], state: &CharSamplingState, character: char) -> f64 {
+        let mut config = config(CharSetMode::Koch, 70);
+        config.coverage_strength = 0.0;
+        let mut rng = SplitMix64::new(3);
+        let (mut hits, mut all) = (0usize, 0usize);
+        for _ in 0..4_000 {
+            let group = sample_training_group(pool, 5, &mut state.clone(), &config, &mut rng);
+            hits += group.chars().filter(|c| *c == character).count();
+            all += group.chars().count();
         }
-        // A degenerate pair cannot divide by zero.
-        assert_eq!(sample_beta(0.0, 0.0, &mut rng), 0.5);
-        assert_eq!(sample_beta(-1.0, -1.0, &mut rng), 0.5);
+        hits as f64 / all as f64
     }
 
-    #[test]
-    fn weights_normalise_to_one_or_fall_back_to_uniform() {
-        let pool = ['K', 'M', 'U'];
-        let mut weights = BTreeMap::new();
-        weights.insert('K', 1.0);
-        weights.insert('M', 3.0);
-        let normalized = normalize_weights(&pool, &weights);
-        assert!((normalized.values().sum::<f64>() - 1.0).abs() < 1e-9);
-        assert_eq!(normalized[&'U'], 0.0);
+    fn believed(heard: &[(char, f64, f64)]) -> CharSamplingState {
+        let mut state = CharSamplingState::default();
+        for (character, right, wrong) in heard {
+            state.beliefs.insert(
+                *character,
+                CharBetaBelief {
+                    alpha: CHAR_SAMPLING_PRIOR_ALPHA + right,
+                    beta: CHAR_SAMPLING_PRIOR_BETA + wrong,
+                },
+            );
+        }
+        state
+    }
 
-        // All-zero weights spread evenly rather than dividing by zero.
-        let zeroed = normalize_weights(&pool, &BTreeMap::new());
-        assert!(zeroed.values().all(|v| (*v - 1.0 / 3.0).abs() < 1e-9));
-        assert!(normalize_weights(&[], &BTreeMap::new()).is_empty());
+    /// Heard as often, the character missed more is drawn more: at every
+    /// amount of evidence, from one try to a thousand.
+    #[test]
+    fn a_worse_character_is_drawn_more_than_a_better_one_heard_as_often() {
+        for heard in [1.0, 4.0, 40.0, 1_000.0] {
+            for (worse, better) in [(0.6, 0.4), (0.3, 0.1), (1.0, 0.75), (0.05, 0.0)] {
+                let state = believed(&[
+                    ('M', heard * (1.0 - worse), heard * worse),
+                    ('K', heard * (1.0 - better), heard * better),
+                ]);
+                let weighed = |c| error_to_weigh(belief_for(&state, c));
+                assert!(
+                    weighed('M') > weighed('K'),
+                    "{heard} heard, {worse} against {better} wrong"
+                );
+            }
+        }
+        let state = believed(&[('M', 30.0, 10.0), ('K', 36.0, 4.0)]);
+        let (m, k) = (
+            share_drawn(&['K', 'M'], &state, 'M'),
+            share_drawn(&['K', 'M'], &state, 'K'),
+        );
+        assert!(m > k + 0.05, "M {m:.3}, K {k:.3}");
+    }
+
+    /// With the same best guess, the character the trainer has heard less
+    /// of is drawn more: a new one more than one heard a thousand times,
+    /// whether that one is missed half the time or one time in ten. A
+    /// Thompson draw in its place drew the unsure one no more, and in fact a
+    /// little less, than the one it knew.
+    #[test]
+    fn an_uncertain_character_is_drawn_more_than_a_well_known_one_with_the_same_guess() {
+        for (right, wrong) in [(1.0, 1.0), (9.0, 1.0), (1.0, 3.0)] {
+            let state = believed(&[
+                ('Q', right - 1.0, wrong - 1.0),
+                ('K', 500.0 * right, 500.0 * wrong),
+            ]);
+            let guess = |c| beta_posterior_mean_error(belief_for(&state, c));
+            assert!((guess('Q') - guess('K')).abs() < 1e-3);
+            let weighed = |c| error_to_weigh(belief_for(&state, c));
+            assert!(weighed('Q') > weighed('K') + 0.05, "{right}/{wrong}");
+        }
+        // Q never heard; the rest known a thousand times, missed half the
+        // time and one time in ten.
+        for known in [0.5, 0.1] {
+            let pool: Vec<char> = "KMRSUAQ".chars().collect();
+            let heard: Vec<(char, f64, f64)> = "KMRSUA"
+                .chars()
+                .map(|c| (c, 1_000.0 * (1.0 - known), 1_000.0 * known))
+                .collect();
+            let state = believed(&heard);
+            let q = share_drawn(&pool, &state, 'Q');
+            assert!(
+                q > 1.0 / 7.0 + 0.01,
+                "Q drawn {q:.3} of the time against six known {known} wrong"
+            );
+        }
+    }
+
+    /// What the help says the weighing does, at the strength it ships with:
+    /// once both are well known, one missed half the time comes 2½ times as
+    /// often as one never missed; one never heard, more than three times as
+    /// often, and less than four.
+    #[test]
+    fn the_weighing_does_what_the_help_says() {
+        let strength = TrainingSettings::default().auto_level.error_weight_strength;
+        assert_eq!(strength, 3.0);
+        let weight = |right: f64, wrong: f64| {
+            let state = believed(&[('K', right, wrong)]);
+            difficulty_factor(error_to_weigh(belief_for(&state, 'K')), strength)
+        };
+        let never_missed = weight(10_000.0, 0.0);
+        let ratio = weight(5_000.0, 5_000.0) / never_missed;
+        assert!((ratio - 2.5).abs() < 0.03, "{ratio}");
+        let new = weight(0.0, 0.0) / never_missed;
+        assert!(new > 3.0 && new < 4.0, "{new}");
+        assert!((error_to_weigh(CharBetaBelief::default()) - 0.789).abs() < 1e-3);
+        // A belief that cannot be read is taken as one never heard.
+        let broken = CharBetaBelief {
+            alpha: f64::NAN,
+            beta: 0.0,
+        };
+        assert_eq!(
+            error_to_weigh(broken),
+            error_to_weigh(CharBetaBelief::default())
+        );
+    }
+
+    /// Mixed gives letters and digits the share asked for, however many of
+    /// each the pool holds, and each character its weight's part of its
+    /// side: the chances the sampler draws from are the ones the Sampling
+    /// tab shows.
+    #[test]
+    fn mixed_chances_give_each_side_its_share_whatever_the_pool() {
+        let pool: Vec<char> = "KMURESNAPT01".chars().collect();
+        let even: BTreeMap<char, f64> = pool.iter().map(|c| (*c, 1.0)).collect();
+        let chances = draw_chances(&pool, &even, &config(CharSetMode::Mixed, 70));
+        assert!((chances.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        for (c, chance) in pool.iter().zip(&chances) {
+            let expected = if c.is_ascii_digit() { 0.15 } else { 0.07 };
+            assert!((chance - expected).abs() < 1e-12, "{c}: {chance}");
+        }
+        // Within a side, by weight.
+        let mut heavy = even.clone();
+        heavy.insert('0', 3.0);
+        let chances = draw_chances(&pool, &heavy, &config(CharSetMode::Mixed, 70));
+        assert!((chances[10] - 0.225).abs() < 1e-12 && (chances[11] - 0.075).abs() < 1e-12);
+        assert!((chances[0] - 0.07).abs() < 1e-12, "the letters keep theirs");
+
+        // Outside Mixed, or with only one side in the pool, the whole pool
+        // is drawn from by weight.
+        let koch = draw_chances(&pool, &even, &config(CharSetMode::Koch, 70));
+        assert!(
+            koch.iter()
+                .all(|chance| (chance - 1.0 / 12.0).abs() < 1e-12)
+        );
+        let letters = draw_chances(&['K', 'M'], &even, &config(CharSetMode::Mixed, 70));
+        assert_eq!(letters, [0.5, 0.5]);
+        // A share of none draws nothing of that side.
+        let all_letters = draw_chances(&pool, &even, &config(CharSetMode::Mixed, 100));
+        assert_eq!(&all_letters[10..], [0.0, 0.0]);
+
+        // Weights that come to nothing, or are missing, are drawn evenly.
+        let none = draw_chances(
+            &['K', 'M', 'U'],
+            &BTreeMap::new(),
+            &config(CharSetMode::Koch, 70),
+        );
+        assert!(none.iter().all(|chance| (chance - 1.0 / 3.0).abs() < 1e-12));
+        assert!(draw_chances(&[], &even, &config(CharSetMode::Mixed, 70)).is_empty());
     }
 
     #[test]
@@ -1314,9 +1349,9 @@ mod tests {
         let pool = ['K', 'M', '0', '1'];
         let mut next = CharSamplingState::default();
         let config = config(CharSetMode::Mixed, 50);
-        // Draws below 0.5 pick letters, above pick digits. Each character costs
-        // two draws: one for the subset, one for the weighted pick.
-        let mut rng = ScriptedRng::new(&[0.1, 0.0, 0.9, 0.0]);
+        // Each character is a quarter of the draws: the lowest quarter is K,
+        // the highest 1.
+        let mut rng = ScriptedRng::new(&[0.1, 0.9]);
         let group = sample_training_group(&pool, 2, &mut next, &config, &mut rng);
         assert_eq!(group.chars().count(), 2);
         let mut chars = group.chars();
@@ -1372,25 +1407,81 @@ mod tests {
     }
 
     /// Every session seeds the beliefs, a digits session's K as much as a
-    /// Koch one's.
+    /// Koch one's, each counting a little less than the one after it.
     #[test]
     fn history_from_earlier_sessions_seeds_the_beliefs() {
-        let session = |copies: &[(&str, &str)]| {
-            let mut result = SessionResult::empty_for_test();
+        let session = |timestamp, copies: &[(&str, &str)]| {
+            let mut result = SessionResult {
+                timestamp,
+                ..SessionResult::empty_for_test()
+            };
             for (sent, received) in copies {
                 result.tally.add(sent, received);
             }
             result
         };
-        let first = session(&[("KKKKK", "KKKXX")]);
-        let second = session(&[("K", "K")]);
-        let mut digits = session(&[("K", "X")]);
+        let first = session(1, &[("KKKKK", "KKKXX")]);
+        let second = session(2, &[("K", "K")]);
+        let mut digits = session(3, &[("K", "X")]);
         digits.char_set_mode = CharSetMode::Digits;
-        let state = CharSamplingState::from_history(&[first, second, digits]);
+        let state = CharSamplingState::from_history(&[digits, second, first]);
         let belief = state.beliefs[&'K'];
-        assert_eq!(belief.alpha, CHAR_SAMPLING_PRIOR_ALPHA + 4.0);
-        assert_eq!(belief.beta, CHAR_SAMPLING_PRIOR_BETA + 3.0);
+        let fade = SESSION_FADE;
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(near(
+            belief.alpha,
+            CHAR_SAMPLING_PRIOR_ALPHA + 3.0 * fade * fade + fade
+        ));
+        assert!(near(
+            belief.beta,
+            CHAR_SAMPLING_PRIOR_BETA + 2.0 * fade * fade + 1.0
+        ));
         assert!(state.session_sample_counts.is_empty());
+        // A session starts from all of it one session older.
+        let once = [session(1, &[("KKKKK", "KKKXX")])];
+        let started = CharSamplingState::for_session(&once).beliefs[&'K'];
+        assert!(near(started.alpha, CHAR_SAMPLING_PRIOR_ALPHA + 3.0 * fade));
+        assert!(near(started.beta, CHAR_SAMPLING_PRIOR_BETA + 2.0 * fade));
+    }
+
+    /// A character missed for weeks and copied clean ever since stops being
+    /// drawn as a weak one: its misses fade as the sessions pass, halving
+    /// every ten, and it ends up drawn about as often as one never missed.
+    /// Counted as one sum, its old misses would hold it near one in three
+    /// wrong for good.
+    #[test]
+    fn a_weakness_put_right_long_ago_stops_weighing() {
+        let session = |timestamp, copies: &[(&str, &str)]| {
+            let mut result = SessionResult {
+                timestamp,
+                ..SessionResult::empty_for_test()
+            };
+            for (sent, received) in copies {
+                result.tally.add(sent, received);
+            }
+            result
+        };
+        let mut history: Vec<SessionResult> = (0..10)
+            .map(|at| session(at, &[("MMMMMMMMMM", "MMMXXXXXXX"), ("KKKKK", "KKKKK")]))
+            .collect();
+        history.extend((10..50).map(|at| session(at, &[("MMMMM", "MMMMM"), ("KKKKK", "KKKKK")])));
+        let state = CharSamplingState::from_history(&history);
+        let error = |c| beta_posterior_mean_error(belief_for(&state, c));
+        let summed = (70.0 + 1.0) / (300.0 + 2.0);
+        assert!(
+            error('M') < 0.07,
+            "M: {:.3}, {summed:.3} summed",
+            error('M')
+        );
+        let pool = ['K', 'M'];
+        let config = config(CharSetMode::Koch, 70);
+        let weights = compute_raw_sampling_weights(&pool, &state, &config);
+        let chances = draw_chances(&pool, &weights, &config);
+        assert!(chances[1] < 0.55, "M drawn {:.3} of the time", chances[1]);
+        // Recent misses still count in full.
+        history.push(session(50, &[("MMMMM", "XXXXX")]));
+        let state = CharSamplingState::from_history(&history);
+        assert!(beta_posterior_mean_error(belief_for(&state, 'M')) > 0.1);
     }
 
     /// The sampler a session draws from learns as the session goes: a
@@ -1512,7 +1603,7 @@ mod tests {
         let settings = length_settings(false);
         let history = history_of("KMKMKMKM", true);
         let mut sampler = Sampler::new(&history, &settings, 42);
-        let mut state = CharSamplingState::from_history(&history);
+        let mut state = CharSamplingState::for_session(&history);
         let mut rng = SplitMix64::new(42);
         for _ in 0..50 {
             let expected = (
@@ -1591,12 +1682,16 @@ mod tests {
     /// end with a chance that falls as it grows longer; a group not held is
     /// lost from a random point on. With `span_falls`, the span shrinks at
     /// speed as well, with the square root of the speed against 20 WPM.
+    /// `gives_up` is the chance that a character not recognised ends the
+    /// copy there, the rest of the group going by while they look for it,
+    /// rather than being typed wrong.
     struct Learner {
         copy: f64,
         slope: f64,
         span: f64,
         spread: f64,
         span_falls: bool,
+        gives_up: f64,
     }
 
     impl Learner {
@@ -1630,19 +1725,28 @@ mod tests {
                 rng.usize_in(0, length.saturating_sub(1))
             };
             let recognised = self.recognises(speed);
-            sent.chars()
-                .take(kept)
-                .map(|c| if rng.f64() < recognised { c } else { 'E' })
-                .collect()
+            let mut typed = String::new();
+            for c in sent.chars().take(kept) {
+                if rng.f64() < recognised {
+                    typed.push(c);
+                } else if self.gives_up > 0.0 && rng.f64() < self.gives_up {
+                    break;
+                } else {
+                    typed.push('E');
+                }
+            }
+            typed
         }
     }
 
     /// What a run of both adaptive features made of one learner: over its
     /// second half, the share of characters right (of those a speed could
-    /// change), of groups copied whole, and the mean speed and length; at
-    /// its end, the speed the belief puts at the target and the span.
+    /// change), of every character sent, of groups copied whole, and the
+    /// mean speed and length; at its end, the speed the belief puts at the
+    /// target and the span.
     struct Run {
         chars_right: f64,
+        sent_right: f64,
         whole: f64,
         speed: f64,
         length: f64,
@@ -1651,22 +1755,34 @@ mod tests {
     }
 
     fn run_both(learner: &Learner, groups: usize, seed: u64) -> Run {
-        run_with(learner, groups, seed, false)
+        run_with(learner, groups, seed, false, true)
     }
 
     /// As [`run_both`], or, `naive`, with the speed learning from whole
     /// groups the way the span does: a group copied whole all right, any
-    /// other all wrong.
-    fn run_with(learner: &Learner, groups: usize, seed: u64, naive: bool) -> Run {
-        let mut settings = length_settings(true);
+    /// other all wrong. Without `adapt_length`, the groups are two to five
+    /// characters long, drawn evenly.
+    fn run_with(
+        learner: &Learner,
+        groups: usize,
+        seed: u64,
+        naive: bool,
+        adapt_length: bool,
+    ) -> Run {
+        let mut settings = length_settings(adapt_length);
+        if !adapt_length {
+            settings.curriculum.max_group_size = 5;
+        }
         settings.playback.char_wpm_min = 10.0;
         settings.playback.char_wpm_max = 50.0;
         settings.playback.link_char_to_effective = true;
         settings.playback.adaptive_speed = true;
+        let floor = adaptive_bounds(&settings).map(|(shortest, _)| shortest);
         let target = settings.curriculum.aim.chars_right();
         let mut sampler = Sampler::new(&[], &settings, seed);
         let mut rng = SplitMix64::new(seed ^ 0xA5A5);
         let (mut right, mut counted, mut whole, mut speeds, mut lengths) = (0, 0, 0, 0.0, 0);
+        let (mut sent_right, mut sent_all) = (0, 0);
         let half = groups / 2;
         for n in 0..groups {
             let (sent, _) = sampler.next_group(&settings);
@@ -1675,10 +1791,13 @@ mod tests {
             let speed = crate::score::copy_speed(played.0, played.1);
             let typed = learner.answer(&sent, speed, &mut rng);
             if n >= half {
-                if let Some((r, c)) = crate::speed::speed_evidence(&sent, &typed) {
+                if let Some((r, c)) = crate::speed::speed_evidence(&sent, &typed, floor) {
                     right += r;
                     counted += c;
                 }
+                let copied = CopyTally::of(&sent, &typed);
+                sent_right += copied.sent.values().map(|each| each.correct).sum::<u32>();
+                sent_all += copied.sent.values().map(|each| each.total).sum::<u32>();
                 whole += usize::from(typed == sent);
                 speeds += speed;
                 lengths += sent.chars().count();
@@ -1702,6 +1821,7 @@ mod tests {
         let counted_groups = (groups - half) as f64;
         Run {
             chars_right: f64::from(right) / f64::from(counted.max(1)),
+            sent_right: f64::from(sent_right) / f64::from(sent_all.max(1)),
             whole: whole as f64 / counted_groups,
             speed: speeds / counted_groups,
             length: lengths as f64 / counted_groups,
@@ -1720,6 +1840,7 @@ mod tests {
                     span: 5.0,
                     spread: 0.7,
                     span_falls: false,
+                    gives_up: 0.0,
                 },
             ),
             (
@@ -1730,6 +1851,7 @@ mod tests {
                     span: 7.0,
                     spread: 1.0,
                     span_falls: false,
+                    gives_up: 0.0,
                 },
             ),
             (
@@ -1740,6 +1862,7 @@ mod tests {
                     span: 4.0,
                     spread: 0.7,
                     span_falls: false,
+                    gives_up: 0.0,
                 },
             ),
             (
@@ -1750,9 +1873,60 @@ mod tests {
                     span: 7.0,
                     spread: 1.0,
                     span_falls: true,
+                    gives_up: 0.0,
                 },
             ),
         ]
+    }
+
+    /// Learners who stop typing at a character they miss, the rest of the
+    /// group going by: every time, or half the time. Their span is long, so
+    /// whatever they lose they lose to the speed.
+    fn learners_who_give_up() -> [(&'static str, Learner); 2] {
+        let gives_up = |gives_up| Learner {
+            copy: 20.0,
+            slope: 0.12,
+            span: 20.0,
+            spread: 1.0,
+            span_falls: false,
+            gives_up,
+        };
+        [
+            ("copies 90% at 20, stops at every miss", gives_up(1.0)),
+            ("copies 90% at 20, stops at half the misses", gives_up(0.5)),
+        ]
+    }
+
+    /// A learner who stops typing at the first character they miss shows
+    /// the speed only characters copied right, and the speed used to run to
+    /// the top of the range: 41 WPM, with 3% of characters copied. The
+    /// character copy broke off at now counts against the speed whenever
+    /// the length cannot answer for it: always while group size does not
+    /// adapt, and at the shortest length while it does. The speed settles
+    /// near the learner's own, and most of what is sent is copied.
+    #[test]
+    fn a_learner_who_stops_at_a_miss_does_not_run_the_speed_away() {
+        let aim = crate::settings::Aim::Balanced;
+        for (name, learner) in learners_who_give_up() {
+            let true_speed = learner.speed_for(aim.chars_right());
+            for adapt_length in [false, true] {
+                let run = run_with(&learner, 400, 7, false, adapt_length);
+                // With the length adapting too, the groups go short first
+                // and the speed is held only at the shortest, so it is
+                // left a little faster.
+                let over = if adapt_length { 1.3 } else { 1.12 };
+                assert!(
+                    run.speed < true_speed * over && run.speed > true_speed * 0.8,
+                    "{name}, length adapting {adapt_length}: sent at {:.1} WPM for {true_speed:.1}",
+                    run.speed
+                );
+                assert!(
+                    run.sent_right > 0.65,
+                    "{name}, length adapting {adapt_length}: {:.3} of characters copied",
+                    run.sent_right
+                );
+            }
+        }
     }
 
     /// Both adaptive features together settle where each was asked to: the
@@ -1826,7 +2000,7 @@ mod tests {
         println!("| --- | --- | --- | --- | --- | --- |");
         for (name, learner) in learners() {
             for seed in [7, 8, 9] {
-                let run = run_with(&learner, 400, seed, true);
+                let run = run_with(&learner, 400, seed, true, true);
                 println!(
                     "| {name} | {:.1} | {:.1} | {:.1}% | {:.1} | {:.0}% |",
                     learner.speed_for(aim.chars_right()),
@@ -1835,6 +2009,33 @@ mod tests {
                     run.length,
                     run.whole * 100.0
                 );
+            }
+        }
+        println!();
+        println!("Learners who stop typing at a miss.");
+        println!(
+            "| Learner | Group size | Speed for 94% | Sent at | Characters right | Of all sent | Length | Copied whole |"
+        );
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+        for (name, learner) in learners_who_give_up() {
+            for adapt_length in [true, false] {
+                for seed in [7, 8, 9] {
+                    let run = run_with(&learner, 400, seed, false, adapt_length);
+                    println!(
+                        "| {name} | {} | {:.1} | {:.1} | {:.1}% | {:.1}% | {:.1} | {:.0}% |",
+                        if adapt_length {
+                            "adapts, 2–10"
+                        } else {
+                            "2–5"
+                        },
+                        learner.speed_for(aim.chars_right()),
+                        run.speed,
+                        run.chars_right * 100.0,
+                        run.sent_right * 100.0,
+                        run.length,
+                        run.whole * 100.0
+                    );
+                }
             }
         }
     }

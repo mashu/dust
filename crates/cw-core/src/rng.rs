@@ -140,7 +140,8 @@ fn mix(mut z: u64) -> u64 {
 }
 
 /// One of `pool`, each as likely as its weight; a missing weight counts as
-/// one. `None` only for an empty pool.
+/// one. One weighed at nothing is never picked while any other weighs
+/// something, whatever the generator gives. `None` only for an empty pool.
 pub fn weighted_random_pick(pool: &[char], weights: &[f64], rng: &mut impl Rng) -> Option<char> {
     let last = pool.len().checked_sub(1)?;
     let weight = |i: usize| weights.get(i).copied().unwrap_or(1.0);
@@ -149,13 +150,18 @@ pub fn weighted_random_pick(pool: &[char], weights: &[f64], rng: &mut impl Rng) 
         return pool.get(rng.usize_in(0, last)).copied();
     }
     let mut r = rng.f64() * total;
+    let mut picked = None;
     for (i, ch) in pool.iter().enumerate() {
+        if weight(i) <= 0.0 {
+            continue;
+        }
+        picked = Some(*ch);
         r -= weight(i);
         if r <= 0.0 {
-            return Some(*ch);
+            break;
         }
     }
-    pool.last().copied()
+    picked
 }
 
 #[cfg(test)]
@@ -186,6 +192,19 @@ mod tests {
             }
         }
         assert!(a > 900);
+    }
+
+    /// A generator at its very bottom does not pick a character weighed at
+    /// nothing, nor one at its top: Mixed at 100% letters weighs every digit
+    /// at nothing.
+    #[test]
+    fn nothing_weighed_at_nothing_is_picked() {
+        let pool = ['0', 'K', '1', 'M', '2'];
+        let weights = [0.0, 1.0, 0.0, 2.0, 0.0];
+        for at in [0.0, 0.5, 0.999_999_9] {
+            let picked = weighted_random_pick(&pool, &weights, &mut Fixed(at));
+            assert!(matches!(picked, Some('K' | 'M')), "{at}: {picked:?}");
+        }
     }
 
     struct Fixed(f64);
@@ -250,11 +269,12 @@ mod tests {
             Some('D')
         );
         // Fewer weights than characters: the missing ones count as one each,
-        // so the total is positive and the walk starts at the first character.
+        // so the total is positive, and the one weighed at nothing is passed
+        // over even by a draw at the very bottom.
         let mut rng = Fixed(0.0);
         assert_eq!(
             weighted_random_pick(&['A', 'B'], &[0.0], &mut rng),
-            Some('A')
+            Some('B')
         );
         let mut rng = Fixed(0.99);
         assert_eq!(

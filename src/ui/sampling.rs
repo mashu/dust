@@ -23,8 +23,6 @@ use crate::ui::widgets::{CardHead, IconName, Seg, control_id};
 const LIKELY: f64 = 0.8;
 /// A likely range wider than this, and the trainer is still finding out.
 const UNSURE_WIDTH: f64 = 0.2;
-/// Less evidence than this, and a character has not been heard.
-const NEW_BELOW: f64 = 0.5;
 
 /// Where a character stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,7 +79,7 @@ struct Line {
 
 fn line(row: &SamplingRow, threshold: f64) -> Line {
     let likely = row.error_interval(LIKELY);
-    let standing = if row.evidence() < NEW_BELOW {
+    let standing = if row.tries == 0 {
         Standing::New
     } else if likely.1 - likely.0 > UNSURE_WIDTH {
         Standing::FindingOut
@@ -350,7 +348,8 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
 mod tests {
     use super::*;
 
-    /// A row whose belief has `copied` and `missed` beyond the flat prior.
+    /// A row whose belief has `copied` and `missed` beyond the flat prior,
+    /// heard as many times.
     fn row(copied: f64, missed: f64, drawn_now: bool) -> SamplingRow {
         let (alpha, beta) = (1.0 + copied, 1.0 + missed);
         SamplingRow {
@@ -361,11 +360,14 @@ mod tests {
             beta,
             is_letter: true,
             drawn_now,
+            tries: (copied + missed).round() as u32,
         }
     }
 
     /// Never heard is new; heard a little is still finding out; known well,
-    /// it is solid under your threshold and to work on over it.
+    /// it is solid under your threshold and to work on over it. Heard long
+    /// ago, its belief faded to next to nothing, it is still finding out
+    /// rather than new.
     #[test]
     fn each_character_stands_where_its_belief_puts_it() {
         let standing = |row: SamplingRow| line(&row, 0.1).standing;
@@ -373,6 +375,11 @@ mod tests {
         assert_eq!(standing(row(4.0, 2.0, true)), Standing::FindingOut);
         assert_eq!(standing(row(190.0, 5.0, true)), Standing::Solid);
         assert_eq!(standing(row(160.0, 40.0, true)), Standing::ToWorkOn);
+        let long_ago = SamplingRow {
+            tries: 12,
+            ..row(0.3, 0.1, true)
+        };
+        assert_eq!(standing(long_ago), Standing::FindingOut);
     }
 
     /// The line under the bar says the range its paler stretch runs over,
