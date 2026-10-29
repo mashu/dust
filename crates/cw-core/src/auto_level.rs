@@ -117,6 +117,12 @@ fn candidate_axes(
 /// Decide whether the session just finished moves a level. Counts it in
 /// `counters`, the run for the level it was at, and returns the change when
 /// the run is long enough and there is somewhere to move.
+///
+/// A session only ever moves the level its own way: a good one can complete
+/// a run up, a bad one a run down. The other run may already be long enough
+/// — its target was lowered since, or it was switched back on — and is left
+/// for a session of its own kind to complete: a session at 40% never raises
+/// the level, whatever went before it.
 pub fn evaluate_auto_level(
     result: &SessionResult,
     settings: &TrainingSettings,
@@ -130,23 +136,24 @@ pub fn evaluate_auto_level(
         .auto_adjust_threshold
         .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT);
     let accuracy_pct = result.accuracy * 100.0;
+    let raise = accuracy_pct >= threshold_pct;
     // Counters come back from storage, so they are not trusted to be small.
-    if accuracy_pct >= threshold_pct {
+    let (run, target) = if raise {
         counters.above = counters.above.saturating_add(1);
+        (
+            counters.above,
+            settings.auto_level.auto_adjust_above_threshold_count,
+        )
     } else {
         counters.below = counters.below.saturating_add(1);
-    }
-
-    let above_target = settings.auto_level.auto_adjust_above_threshold_count;
-    let below_target = settings.auto_level.auto_adjust_below_threshold_count;
-    let rise_due = above_target > 0 && counters.above >= above_target;
-    let fall_due = below_target > 0 && counters.below >= below_target;
-    let raise = match (rise_due, fall_due) {
-        (true, true) => counters.above >= counters.below,
-        (true, false) => true,
-        (false, true) => false,
-        (false, false) => return None,
+        (
+            counters.below,
+            settings.auto_level.auto_adjust_below_threshold_count,
+        )
     };
+    if target == 0 || run < target {
+        return None;
+    }
 
     let delta = if raise { 1 } else { -1 };
     let moved = candidate_axes(result, settings, raise, threshold_pct)
@@ -187,11 +194,7 @@ pub fn evaluate_auto_level(
         to,
         accuracy_pct,
         threshold_pct,
-        sessions: if raise {
-            counters.above
-        } else {
-            counters.below
-        },
+        sessions: run,
         next_mixed_axis,
         counters_cleared: [CountersKey::of(settings), CountersKey::of(&after)],
     })
@@ -479,16 +482,36 @@ mod tests {
         assert!(progress.above_disabled && progress.below_disabled);
     }
 
+    /// Both runs can be long enough at once: a target lowered after the run
+    /// grew, or a direction switched back on. A session still moves the
+    /// level only its own way. A failing session used to raise it, its toast
+    /// reading "Level increased … accuracy 40%", and a perfect one to lower
+    /// it.
     #[test]
-    fn when_both_runs_are_due_the_longer_one_wins() {
-        let s = koch(5);
-        let mut up = AutoLevelCounters { above: 4, below: 2 };
-        let change = evaluate_auto_level(&after(1.0), &s, &mut up);
-        assert_eq!(change.map(|c| c.raised()), Some(true));
+    fn a_session_only_moves_the_level_its_own_way() {
+        let mut s = koch(5);
+        s.auto_level.auto_adjust_above_threshold_count = 2;
+        s.auto_level.auto_adjust_below_threshold_count = 3;
 
-        let mut down = AutoLevelCounters { above: 1, below: 9 };
-        let change = evaluate_auto_level(&after(1.0), &s, &mut down);
-        assert_eq!(change.map(|c| c.raised()), Some(false));
+        // "Sessions above" lowered from five to two, three good sessions in.
+        let mut up = AutoLevelCounters { above: 3, below: 0 };
+        assert_eq!(evaluate_auto_level(&after(0.4), &s, &mut up), None);
+        assert_eq!(up, AutoLevelCounters { above: 3, below: 1 });
+        let change = evaluate_auto_level(&after(1.0), &s, &mut up).expect("up");
+        assert!(change.raised());
+        assert_eq!(change.sessions, 4);
+
+        // And a run down long enough already waits for a bad session.
+        let mut down = AutoLevelCounters { above: 0, below: 9 };
+        assert_eq!(evaluate_auto_level(&after(1.0), &s, &mut down), None);
+        let change = evaluate_auto_level(&after(0.4), &s, &mut down).expect("down");
+        assert!(!change.raised());
+        assert_eq!((change.sessions, change.accuracy_pct), (10, 40.0));
+
+        // With "Sessions below" at zero a bad session moves nothing at all.
+        s.auto_level.auto_adjust_below_threshold_count = 0;
+        let mut stale = AutoLevelCounters { above: 7, below: 0 };
+        assert_eq!(evaluate_auto_level(&after(0.4), &s, &mut stale), None);
     }
 
     #[test]
