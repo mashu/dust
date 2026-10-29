@@ -277,6 +277,7 @@ pub fn App() -> Element {
                                     match action {
                                         ToastAction::UndoDelete => ctx.undo_delete(),
                                         ToastAction::UndoRestore => ctx.undo_restore(),
+                                        ToastAction::PutCardBack => ctx.undo_reset(),
                                     }
                                     toasts.dismiss(&toast);
                                 },

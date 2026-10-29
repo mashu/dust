@@ -767,11 +767,10 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
                 note,
                 help: help::station(),
                 SectionReset {
-                    label: "your station",
-                    on_reset: move |()| {
-                        unsay();
-                        settings.write().reset_section(SettingsSection::Station);
-                    },
+                    card: "Your station",
+                    settings,
+                    section: SettingsSection::Station,
+                    on_reset: move |()| unsay(),
                 }
             }
             // WPX sends nothing of yours but the call; the fields a contest

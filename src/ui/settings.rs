@@ -79,10 +79,7 @@ fn SectionHead(
 ) -> Element {
     rsx! {
         CardHead { icon, title, note, help, fold,
-            SectionReset {
-                label: title.to_lowercase(),
-                on_reset: move |()| settings.write().reset_section(section),
-            }
+            SectionReset { card: title, settings, section }
         }
     }
 }

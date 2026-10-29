@@ -294,10 +294,9 @@ pub fn CharsetCard(
                 note: c.note(),
                 help: help::character_set(),
                 SectionReset {
-                    label: "character set",
-                    on_reset: move |()| {
-                        settings.write().reset_section(SettingsSection::CharacterSet);
-                    },
+                    card: "Character set",
+                    settings,
+                    section: SettingsSection::CharacterSet,
                 }
             }
             div { class: "segmented charset-modes", role: "group", aria_label: "Character set",

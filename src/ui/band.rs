@@ -252,10 +252,9 @@ pub fn BandConditionsCard(
                     }
                 }
                 SectionReset {
-                    label: "band conditions",
-                    on_reset: move |()| {
-                        settings.write().reset_section(SettingsSection::BandConditions);
-                    },
+                    card: "Band conditions",
+                    settings,
+                    section: SettingsSection::BandConditions,
                 }
             }
             if previewing {

@@ -208,7 +208,12 @@ three and three at 600 px and below, so Contest is never alone on a row.
 
 **The card in Contest mode.** The title stays "Character set", so its Reset
 still means what it says; the note (`settings_charset.rs:123-142`) reads
-"Contest · CQ WPX". The body shows:
+"Contest · CQ WPX". As built (2026-10-29), its Reset in Contest mode puts
+the contest, the run style and your call in TU back and stays in Contest
+(it used to drop to Mixed), and leaves an unlock order of your own and the
+word list as they are; every card's Reset leaves a message with Undo, which
+puts that card back, Your station's call and exchange among them. The body
+shows:
 
 - one pill per contest, once its phase ships (a control that does nothing
   is removed, `src/app.rs:1606-1635`);

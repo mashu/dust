@@ -1302,6 +1302,63 @@ fn an_effective_speed_above_the_characters_says_what_it_is_used_as() {
     });
 }
 
+/// A card's reset can be undone from the message it leaves: Your station's
+/// puts back the call that took typing, and a change made on another card
+/// in between stays. In Contest mode the Character set's reset puts the
+/// contest's own choices back and stays in Contest.
+#[test]
+fn a_cards_reset_can_be_undone() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        ui.click("reset-your-station");
+        assert!(ui.has("Your station reset to defaults"), "{}", ui.html());
+        assert!(ui.shows("toast-undo"));
+        assert_eq!(ui.stored_settings().await.contest.my_call, "");
+        ui.commit("number-minutes-per-run", "12");
+        ui.click("toast-undo");
+        assert!(!ui.shows("toast-undo"));
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.contest.my_call, "DL1ABC");
+        assert_eq!(
+            stored.contest.contest_minutes, 12,
+            "the other card's change"
+        );
+
+        ui.click("contest-cq-ww");
+        ui.click("reset-character-set");
+        assert!(ui.input_tag("seg-contest").contains("active"));
+        assert!(ui.input_tag("contest-cq-wpx").contains("active"));
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Contest);
+        ui.click("toast-undo");
+        assert!(ui.input_tag("contest-cq-ww").contains("active"));
+
+        // A card already at its defaults has nothing to undo.
+        ui.click("reset-keying-envelope");
+        assert!(!ui.shows("toast-undo"));
+    });
+}
+
+/// The Character set's reset leaves an unlock order of the learner's own as
+/// it is, as it does the word list: what took typing is theirs.
+#[test]
+fn the_character_sets_reset_leaves_an_order_of_ones_own() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.word_list = vec!["PARIS".to_string()];
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        ui.commit("field-sequence-order", "KMURESN");
+        ui.click("reset-character-set");
+        assert!(ui.input_tag("pill-your-own").contains("active"));
+        assert_eq!(value_of(&ui, "field-sequence-order"), "KMURESN");
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Mixed);
+        assert_eq!(stored.curriculum.word_list, ["PARIS"]);
+    });
+}
+
 /// Your sending is on the Tone and volume card in Contest mode only, in
 /// decibels from the loudest down to off, at -3 dB until you set it; it
 /// is stored, a preset leaves it alone, and the card's reset puts it back.

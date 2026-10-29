@@ -1,6 +1,8 @@
 use cw_core::band::{db_to_gain, gain_to_db};
-use cw_core::{GroupResult, RangeSetting, TrainingSettings, align_group};
+use cw_core::{GroupResult, RangeSetting, SettingsSection, TrainingSettings, align_group};
 use dioxus::prelude::*;
+
+use crate::state::AppCtx;
 
 /// What was typed into a number field, held inside its bounds. `None` for
 /// anything that is not a finite number, which leaves the value as it was.
@@ -998,17 +1000,38 @@ pub fn NumberField(
 /// everything", because the thing you want back is almost always the corner
 /// you have just been experimenting in — and a single global reset is the one
 /// nobody dares press.
+///
+/// In the app, Undo is offered for a while after ([`AppCtx::reset_section`]):
+/// a card can hold what took typing, and one press should not cost it. A
+/// card drawn on its own, with no app around it, just resets.
 #[component]
-pub fn SectionReset(#[props(into)] label: String, on_reset: EventHandler<()>) -> Element {
-    let title = format!("Reset {label} to defaults");
+pub fn SectionReset(
+    /// The card's title, as it shows: "Band conditions".
+    #[props(into)]
+    card: String,
+    settings: Signal<TrainingSettings>,
+    section: SettingsSection,
+    /// What the card does besides, as it is reset.
+    #[props(default)]
+    on_reset: EventHandler<()>,
+) -> Element {
+    let app = try_use_context::<AppCtx>();
+    let title = format!("Reset {} to defaults", card.to_lowercase());
+    let id = control_id("reset", &card);
     rsx! {
         button {
-            id: control_id("reset", &label),
+            id,
             class: "icon-btn",
             r#type: "button",
             title: "{title}",
             aria_label: "{title}",
-            onclick: move |_| on_reset.call(()),
+            onclick: move |_| {
+                on_reset.call(());
+                match app {
+                    Some(app) => app.reset_section(section, &card),
+                    None => settings.write().reset_section(section),
+                }
+            },
             Icon { name: IconName::Reset }
         }
     }

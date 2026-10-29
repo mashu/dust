@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cw_core::{ContestView, GroupSession, SessionResult, TrainingSettings};
+use cw_core::{ContestView, GroupSession, SessionResult, SettingsSection, TrainingSettings};
 use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
@@ -160,6 +160,9 @@ pub struct AppCtx {
     trash: Signal<Vec<(usize, SessionResult)>>,
     /// What the last restore changed, for Undo to put back.
     before_restore: Signal<Option<Restored>>,
+    /// The settings card reset last, and the settings before it, for Undo
+    /// to put back.
+    before_reset: Signal<Option<(SettingsSection, TrainingSettings)>>,
     /// The settings as they were stored last, so that settings stored
     /// already are not stored again.
     stored_settings: CopyValue<TrainingSettings>,
@@ -208,6 +211,7 @@ impl AppCtx {
                 notices: Signal::new(Vec::new()),
                 trash: Signal::new(Vec::new()),
                 before_restore: Signal::new(None),
+                before_reset: Signal::new(None),
                 stored_settings,
                 stored_history,
                 settings_unsaved: CopyValue::new(false),
@@ -613,6 +617,37 @@ impl AppCtx {
         settings.set(restored.settings);
     }
 
+    /// Put one settings card back to its defaults, called `card` in what
+    /// is said of it. Until another reset, Undo puts the card back as it
+    /// was: a card can hold what took typing, your call and exchange or a
+    /// list, and one press should not cost it. A card already at its
+    /// defaults has nothing to undo, and nothing is said.
+    pub fn reset_section(self, section: SettingsSection, card: &str) {
+        let mut settings = self.settings;
+        let before = settings.peek().clone();
+        settings.write().reset_section(section);
+        if *settings.peek() == before {
+            return;
+        }
+        let mut before_reset = self.before_reset;
+        before_reset.set(Some((section, before)));
+        self.toasts.show_with(
+            format!("{card} reset to defaults"),
+            ToastAction::PutCardBack,
+        );
+    }
+
+    /// Put the card reset last back as it was before the reset. Every other
+    /// card, changed since or not, stays as it is now.
+    pub fn undo_reset(self) {
+        let mut before_reset = self.before_reset;
+        let Some((section, before)) = before_reset.write().take() else {
+            return;
+        };
+        let mut settings = self.settings;
+        settings.write().restore_section(section, &before);
+    }
+
     /// Put each of `taken` back where it sat, in the order they sat in; or,
     /// where the history has changed around that place since, where it
     /// falls by when it finished.
@@ -858,12 +893,14 @@ pub enum ToastAction {
     UndoDelete,
     /// Put the history and settings back as they were before a restore.
     UndoRestore,
+    /// Put the settings card reset last back as it was.
+    PutCardBack,
 }
 
 impl ToastAction {
     pub fn label(self) -> &'static str {
         match self {
-            Self::UndoDelete | Self::UndoRestore => "Undo",
+            Self::UndoDelete | Self::UndoRestore | Self::PutCardBack => "Undo",
         }
     }
 }
