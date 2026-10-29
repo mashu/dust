@@ -619,6 +619,37 @@ fn a_send_finishes_when_it_has_been_heard() {
     assert!(alone.output_latency_sec().abs() < 1e-12);
 }
 
+/// A send is still sending, so the stream is not moved to another output
+/// under it, until it has been heard to its end. Played to its last sample,
+/// it is not yet: that is still in the look-ahead and on its way to the
+/// speaker, and a stream moved then, to an output at another rate, would
+/// drop it, its waiter never told it was heard and sending it again.
+#[test]
+fn a_send_is_sending_until_it_has_been_heard() {
+    let settings = hiss();
+    let mut mixer = Mixer::new(SR);
+    let mut swept = Swept::new();
+    let voice = send(&settings, "E");
+    let finished = voice.finished_flag();
+    mixer.start(voice, &mut swept);
+    let latency = SR as usize / 10;
+    let mut out = vec![0.0f32; 64];
+    let mut played = 0;
+    while mixer.send.as_ref().is_some_and(SendVoice::is_sounding) && played < SR as usize {
+        mixer.render(&mut out, latency);
+        played += out.len();
+    }
+    assert!(played < SR as usize, "the dit played out");
+    assert!(!finished.load(Ordering::Acquire), "not yet heard");
+    assert!(mixer.is_sending(), "on its way to the ear");
+    while !finished.load(Ordering::Acquire) && played < 2 * SR as usize {
+        mixer.render(&mut out, latency);
+        played += out.len();
+    }
+    assert!(finished.load(Ordering::Acquire), "heard");
+    assert!(!mixer.is_sending(), "heard to its end");
+}
+
 /// A keyer at `tone_hz` and `volume`, at 25 WPM.
 fn keyer(tone_hz: f64, volume: f64) -> StationVoice {
     StationVoice {
