@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use cw_core::{
     KeyedLetter, Keyer, KeyerMode, KeyerOutput, MonoMs, Paddle, ToneEdge, TrainingSettings,
-    paddle_from_bracket,
+    morse_for, paddle_from_bracket,
 };
 use dioxus::prelude::*;
 
@@ -91,23 +91,39 @@ async fn sleep_keyer(ms: u64) {
     }
 }
 
-/// The paddle a key is, if it is one: `[` or `]`, by the character it types
-/// or else by where it sits on the keyboard — and only with no Ctrl, Alt or
-/// Meta held, which make it a shortcut. `swap` turns the paddles round.
+/// The paddle a key is, if it is one: `[` or `]` ([`bracket_for_key`]), and
+/// only with no Ctrl, Alt or Meta held, which make it a shortcut. `swap`
+/// turns the paddles round.
 fn paddle_for_key(key: &str, code: &str, shortcut: bool, swap: bool) -> Option<Paddle> {
     if shortcut {
         return None;
     }
-    let bracket = match key {
-        "[" => '[',
-        "]" => ']',
+    paddle_from_bracket(bracket_for_key(key, code)?, swap)
+}
+
+/// The bracket a key typing `key` at `code` is, if it is one: `[` or `]` by
+/// the character it types, or else by where it sits, on the brackets' own
+/// keys, which are a USB paddle's whatever the layout. Only where it types
+/// no character Morse has, though: an answer, or a call, can hold one. On a
+/// German keyboard the key right of P types `ü` and keys the dit, but the
+/// one after it types `+`, and a Dvorak's type `/` and `=`; those are typed.
+fn bracket_for_key(key: &str, code: &str) -> Option<char> {
+    match key {
+        "[" => Some('['),
+        "]" => Some(']'),
+        _ if types_morse(key) => None,
         _ => match code {
-            "BracketLeft" => '[',
-            "BracketRight" => ']',
-            _ => return None,
+            "BracketLeft" => Some('['),
+            "BracketRight" => Some(']'),
+            _ => None,
         },
-    };
-    paddle_from_bracket(bracket, swap)
+    }
+}
+
+/// Whether a key typing `key` types a character Morse has: one a box takes.
+fn types_morse(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!((chars.next(), chars.next()), (Some(ch), None) if morse_for(ch).is_some())
 }
 
 /// What a screen taking paddled letters lends the keyer: whether it is
@@ -489,7 +505,7 @@ fn listen_native_paddles(keys: PaddleKeys) {
     });
     dioxus::desktop::use_wry_event_handler(move |event, _| {
         use dioxus::desktop::tao::event::{ElementState, Event, WindowEvent};
-        use dioxus::desktop::tao::keyboard::{Key, KeyCode};
+        use dioxus::desktop::tao::keyboard::Key;
         // Linux and macOS send no key release once the window has lost the
         // focus, so the paddles open with it.
         if let Event::WindowEvent {
@@ -511,17 +527,14 @@ fn listen_native_paddles(keys: PaddleKeys) {
         if key.repeat {
             return;
         }
-        let ch = match key.physical_key {
-            KeyCode::BracketLeft => '[',
-            KeyCode::BracketRight => ']',
-            _ => match &key.logical_key {
-                Key::Character(s) if *s == "[" => '[',
-                Key::Character(s) if *s == "]" => ']',
-                _ => return,
-            },
+        // Read as the page reads it, so the paddle it keys is the bracket
+        // the page keeps from the box: what it types, and where it sits.
+        let typed = match &key.logical_key {
+            Key::Character(text) => *text,
+            _ => "",
         };
         let swap = keys.settings.peek().playback.paddle_swap;
-        let Some(paddle) = paddle_from_bracket(ch, swap) else {
+        let Some(paddle) = paddle_for_key(typed, &key.physical_key.to_string(), false, swap) else {
             return;
         };
         match key.state {
@@ -603,15 +616,19 @@ fn listen_document_paddles(_keys: PaddleKeys) {}
 /// The mobile builds' webview delivers keys as a browser does, to whatever
 /// has focus, and a tapped button takes none on iOS. So, as the web build's
 /// ([`listen_document_paddles`]), they hear the paddles from the whole
-/// document: the page's script keeps a bracket from the page and hands it
-/// over, a press with Ctrl, Alt or Meta down being a shortcut, a repeat being
+/// document: the page's script keeps a bracket from the page, read as
+/// [`bracket_for_key`] reads one, and hands it over, a press with Ctrl, Alt
+/// or Meta down being a shortcut, a repeat being
 /// nothing, and a release always heard; and the window losing the focus, or
 /// Command let go, opens both.
 #[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
 const PAGE_PADDLES_SCRIPT: &str = r#"if (window.__dustPaddleKeys) {
     window.__dustPaddleKeys();
 }
-const bracket = (e) => e.key === "[" || e.key === "]" || e.code === "BracketLeft" || e.code === "BracketRight";
+const typed = "+,./0123456789=?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const typesMorse = (e) => e.key.length === 1 && typed.includes(e.key);
+const bracketKey = (e) => e.code === "BracketLeft" || e.code === "BracketRight";
+const bracket = (e) => e.key === "[" || e.key === "]" || (!typesMorse(e) && bracketKey(e));
 const shortcut = (e) => e.ctrlKey || e.altKey || e.metaKey;
 const down = (e) => {
     if (bracket(e) && !shortcut(e)) {
@@ -835,6 +852,68 @@ mod tests {
         );
         assert_eq!(paddle_for_key("[", "", false, true), Some(Paddle::Dah));
         assert_eq!(paddle_for_key("a", "KeyA", false, false), None);
+    }
+
+    /// Where the brackets' own keys type a character Morse has, it is typed:
+    /// German, Italian and Spanish keyboards' `+` right of `ü`, `è` or the
+    /// accent, Portugal's `+` right of P, Dvorak's `/` and `=`. They used to
+    /// key a paddle, and a `+` or a `/` could not be typed at all. A key
+    /// typing nothing, or nothing Morse has, is a paddle by where it sits:
+    /// a dead key, one unidentified, `å`, `$`.
+    #[test]
+    fn a_bracket_key_typing_a_morse_character_types_it() {
+        for (key, code) in [
+            ("+", "BracketRight"),
+            ("+", "BracketLeft"),
+            ("/", "BracketLeft"),
+            ("?", "BracketLeft"),
+            ("=", "BracketRight"),
+            ("p", "BracketLeft"),
+            ("8", "BracketRight"),
+        ] {
+            assert_eq!(paddle_for_key(key, code, false, false), None, "{key}");
+        }
+        for (key, code, paddle) in [
+            ("Dead", "BracketLeft", Paddle::Dit),
+            ("Unidentified", "BracketRight", Paddle::Dah),
+            ("", "BracketLeft", Paddle::Dit),
+            ("å", "BracketLeft", Paddle::Dit),
+            ("è", "BracketLeft", Paddle::Dit),
+            ("$", "BracketRight", Paddle::Dah),
+            ("{", "BracketLeft", Paddle::Dit),
+            ("*", "BracketRight", Paddle::Dah),
+        ] {
+            assert_eq!(
+                paddle_for_key(key, code, false, false),
+                Some(paddle),
+                "{key}"
+            );
+        }
+        // Typed anywhere else, it was never a paddle.
+        assert_eq!(paddle_for_key("+", "NumpadAdd", false, false), None);
+    }
+
+    /// The page's script knows the characters Morse has as the app does, so
+    /// it leaves to the box what the root and the desktop leave to it.
+    #[test]
+    fn the_page_reads_a_bracket_key_as_the_app_does() {
+        let typed: String = (' '..='~').filter(|ch| morse_for(*ch).is_some()).collect();
+        let script = PAGE_PADDLES_SCRIPT;
+        for read in [
+            format!("const typed = {typed:?};"),
+            "const typesMorse = (e) => e.key.length === 1 && typed.includes(e.key);".to_string(),
+            r#"const bracketKey = (e) => e.code === "BracketLeft" || e.code === "BracketRight";"#
+                .to_string(),
+            r#"const bracket = (e) => e.key === "[" || e.key === "]" || (!typesMorse(e) && bracketKey(e));"#
+                .to_string(),
+        ] {
+            assert!(script.contains(&read), "{read}\n{script}");
+        }
+        assert_eq!(page_key("down", "+", "BracketRight", false), None);
+        assert_eq!(
+            page_key("down", "Dead", "BracketLeft", false),
+            Some(PageKey::Press(Paddle::Dit))
+        );
     }
 
     #[test]

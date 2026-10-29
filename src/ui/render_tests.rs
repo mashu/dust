@@ -3600,6 +3600,31 @@ mod interactions {
         });
     }
 
+    /// A bracket key typing a character Morse has types it: the page leaves
+    /// a German keyboard's `+` to the box, and no paddle keys. A dead key
+    /// there is still the paddle.
+    #[test]
+    fn a_bracket_key_typing_plus_is_typed_not_keyed() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let plus = Key::Character("+".into());
+            assert!(
+                ui.press_key("keyed-root", plus.clone(), Code::BracketRight),
+                "the + was kept from the box"
+            );
+            ui.advance(100).await;
+            ui.release_key("keyed-root", plus, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(ui.has(">· −<"), "a paddle keyed: {}", ui.html());
+            let dead = Key::Dead;
+            assert!(!ui.press_key("keyed-root", dead.clone(), Code::BracketLeft));
+            ui.advance(30).await;
+            ui.release_key("keyed-root", dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">E<"), "{}", ui.html());
+        });
+    }
+
     /// The window losing the focus, or the page going, takes the key
     /// releases with it: the paddles open, the element sounding finishes,
     /// and the letter it ends is heard.
