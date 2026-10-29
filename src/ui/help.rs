@@ -380,7 +380,7 @@ pub fn character_set() -> Element {
             dt { "Callsigns" }
             dd { "Real callsigns, as they are heard on the air. The tier sets how hard they come; each keeps what the ones below send." }
             dt { "Words" }
-            dd { "Whole words, from the starter list or your own, one to a line." }
+            dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =." }
             dt { "Contest" }
             dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange." }
             dt { "Unlock order" }

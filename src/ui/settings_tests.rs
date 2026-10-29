@@ -632,7 +632,7 @@ fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
     run(|| async {
         let (ui, _recorder) = on_words();
         assert!(
-            ui.has("Starter words, sent whole · 81 words"),
+            ui.has("Starter words, sent whole · 80 words"),
             "{}",
             ui.html()
         );
@@ -640,7 +640,7 @@ fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
         // How many words there are to draw from is said; the list itself is
         // folded away, and no character is shown on its own: a word is sent
         // whole.
-        assert!(ui.has("81 words to draw from"), "{}", ui.html());
+        assert!(ui.has("80 words to draw from"), "{}", ui.html());
         assert!(!ui.has(">QTH<"), "the list starts folded");
         assert!(!ui.has("ch sent-row"), "single characters in Words mode");
         assert_eq!(value_of(&ui, "field-word-list"), "");
@@ -721,7 +721,7 @@ fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
         // Emptying the box goes back to the starter words.
         ui.commit("field-word-list", "  \n");
         assert_eq!(word_report(&ui), "Back to the starter words.");
-        assert!(ui.has("Starter words, sent whole · 81 words"));
+        assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
     });
 }

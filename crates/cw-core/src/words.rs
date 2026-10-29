@@ -2,8 +2,9 @@
 //! or loaded from a text file with a word to a line.
 //!
 //! Until there is a list, Words sends a starter one: the Q-codes,
-//! abbreviations, prosigns and reports a CW contact is made of. A list is read the same way however it
-//! arrives, and what could not be kept is counted, so the screen can say so.
+//! abbreviations, prosigns and reports a CW contact is made of. A list is
+//! read the same way however it arrives, and what could not be kept is
+//! counted, so the screen can say so.
 
 use crate::morse::morse_for;
 use crate::settings::{GROUP_SIZE_MAX, TrainingSettings};
@@ -16,13 +17,22 @@ pub const WORD_LIST_MAX: usize = 2_000;
 /// What Words sends until a list of the learner's own replaces it: the
 /// Q-codes, abbreviations, prosigns, numbers and reports a CW contact is
 /// made of, the Q-codes first.
+///
+/// A prosign is two letters run together as one sign, with no gap between
+/// them, and is heard that way on the air. A group sends each character
+/// with a gap after it, so a prosign goes in only where Morse has a
+/// character of its own for it: + for AR (.-.-.) and = for BT (-...-), each
+/// sent as the one sign it is and typed as that character. KN and SK have
+/// none here, and sent as two letters they would teach the wrong rhythm, so
+/// the list leaves them out. BK is in it as the abbreviation for break, which
+/// is as often sent as two letters.
 pub const STARTER_WORDS: &[&str] = &[
     "QRL", "QRM", "QRN", "QRO", "QRP", "QRS", "QRT", "QRZ", "QSB", "QSL", "QSO", "QSY", "QTH",
     "AGN", "ANT", "CFM", "CPI", "CPY", "CQ", "CS", "CU", "CUAGN", "CUL", "DE", "DX", "ES", "FB",
     "FER", "FREQ", "GA", "GD", "GE", "GL", "GM", "GN", "GUD", "HR", "HW?", "IS", "K", "MY", "NAME",
     "NR", "OK", "OM", "OP", "POTA", "PSE", "PWR", "REF", "RIG", "RST", "SIG", "SKED", "SN", "SOTA",
-    "SRI", "TEMP", "TEST", "TNX", "TU", "UR", "VY", "WX", "YL", "AR", "BK", "KN", "SK", "44", "72",
-    "73", "88", "539", "559", "579", "599", "53N", "55N", "57N", "5NN",
+    "SRI", "TEMP", "TEST", "TNX", "TU", "UR", "VY", "WX", "YL", "+", "=", "BK", "44", "72", "73",
+    "88", "539", "559", "579", "599", "53N", "55N", "57N", "5NN",
 ];
 
 /// A list as it was read, and what was left out of it.
@@ -249,6 +259,15 @@ mod tests {
         let starter = WordList::from_words(STARTER_WORDS.iter().copied());
         assert_eq!(starter.words.len(), STARTER_WORDS.len());
         assert_eq!(starter.left_out(), 0);
+
+        // The prosigns are sent as the one sign each is: AR as +, BT as =.
+        // None is sent as two letters with a gap between them.
+        assert_eq!(crate::morse::morse_for('+'), Some(".-.-."));
+        assert_eq!(crate::morse::morse_for('='), Some("-...-"));
+        assert!(STARTER_WORDS.contains(&"+") && STARTER_WORDS.contains(&"="));
+        for spelled in ["AR", "BT", "KN", "SK"] {
+            assert!(!STARTER_WORDS.contains(&spelled), "{spelled}");
+        }
 
         settings.curriculum.word_list = vec!["PARIS".into(), "CODEX".into()];
         assert!(settings.has_own_words());
