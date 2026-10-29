@@ -638,6 +638,49 @@ pub fn pair_sessions(from: &[&SessionResult], to: &[&SessionResult]) -> Vec<Opti
     paired
 }
 
+/// Store the newest of `sessions` that fit, with `set`, which writes a
+/// history and says whether the store took it: as many as fit `budget`, and
+/// if the store has less room than that, as many as fit in half as much,
+/// and so on, down to the newest alone.
+///
+/// Never fewer than that: a store with no room even for the newest session
+/// is full, and nothing is written. Halving used to go on below the newest
+/// session's size, down to an empty list, which a store always takes; so a
+/// browser short of room wrote an empty history over the whole of the one
+/// it held, and said it had kept the newest none.
+#[cfg(any(feature = "web", test))]
+fn store_newest_that_fit(
+    sessions: &[SessionResult],
+    budget: usize,
+    mut set: impl FnMut(&str) -> bool,
+) -> HistorySaved {
+    let full = || HistorySaved::Failed("this browser's storage is full.".into());
+    // The room the newest session takes on its own, as a list of one.
+    let newest_alone = sessions
+        .last()
+        .and_then(|session| serde_json::to_string(session).ok())
+        .map_or(0, |json| json.len() + "[]".len());
+    let mut budget = budget;
+    loop {
+        let (raw, kept) = newest_that_fit(sessions, budget);
+        if kept == 0 && !sessions.is_empty() {
+            return full();
+        }
+        if set(&raw) {
+            return if kept < sessions.len() {
+                let runs = sessions.iter().any(|session| session.contest.is_some());
+                HistorySaved::Squeezed { kept, runs }
+            } else {
+                HistorySaved::Stored { kept }
+            };
+        }
+        if kept <= 1 {
+            return full();
+        }
+        budget = (raw.len() / 2).max(newest_alone);
+    }
+}
+
 /// The newest of `sessions` whose JSON fits in `budget` bytes, as one JSON
 /// list, and how many it holds.
 ///
@@ -1231,6 +1274,51 @@ pub(crate) mod tests {
             (10, Some(10))
         );
         assert_eq!(newest_that_fit(&all, 3), ("[]".to_string(), 0));
+    }
+
+    /// A store short of room keeps the newest sessions that fit, down to
+    /// the newest alone, and with no room even for that writes nothing:
+    /// halving its room used to end at an empty list, which went over the
+    /// whole history as "the newest 0".
+    #[test]
+    fn a_store_short_of_room_never_writes_an_empty_history() {
+        let mut all: Vec<SessionResult> = (0..5)
+            .map(|i| session(&format!("2026-01-{i:02}")))
+            .collect();
+        // The newest is far larger than the others, as a long run is.
+        all[4].alphabet_fingerprint = "x".repeat(20_000);
+        let newest = serde_json::to_string(&all[4]).unwrap().len() + 2;
+        let writes = std::cell::RefCell::new(Vec::<String>::new());
+        let written = &writes;
+        let with_room = |room: usize| {
+            move |raw: &str| {
+                written.borrow_mut().push(raw.to_string());
+                raw.len() <= room
+            }
+        };
+        // Room for the newest alone, but not twice it.
+        let saved = store_newest_that_fit(&all, usize::MAX, with_room(newest + 10));
+        assert_eq!(
+            saved,
+            HistorySaved::Squeezed {
+                kept: 1,
+                runs: false
+            }
+        );
+        let last = written.borrow().last().cloned().unwrap();
+        assert_eq!(parse_sessions(&last).map(|s| s.len()), Some(1));
+        assert!(written.borrow().iter().all(|raw| raw != "[]"));
+        // No room even for that: nothing is written over what is there.
+        written.borrow_mut().clear();
+        let saved = store_newest_that_fit(&all, usize::MAX, with_room(newest - 1));
+        assert!(matches!(saved, HistorySaved::Failed(_)), "{saved:?}");
+        assert!(written.borrow().iter().all(|raw| raw != "[]"));
+        // Room for everything: everything.
+        let saved = store_newest_that_fit(&all, usize::MAX, |_| true);
+        assert_eq!(saved, HistorySaved::Stored { kept: 5 });
+        // A history every session was deleted from is stored empty.
+        let saved = store_newest_that_fit(&[], usize::MAX, |raw| raw == "[]");
+        assert_eq!(saved, HistorySaved::Stored { kept: 0 });
     }
 
     #[test]

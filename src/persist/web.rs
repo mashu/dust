@@ -8,7 +8,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::{
     Aside, BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, keep_aside,
-    newest, newest_that_fit, read_history, read_settings_from, saved_now,
+    newest, read_history, read_settings_from, saved_now, store_newest_that_fit,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -252,24 +252,9 @@ impl Store for WebStore {
         let Some(store) = storage() else {
             return HistorySaved::Failed("this browser has no storage for it.".into());
         };
-        let newest = newest(sessions);
-        // The newest that fit the budget; and if the browser has less room
-        // than that, the newest that fit in half as much, and so on.
-        let mut budget = HISTORY_BUDGET;
-        loop {
-            let (raw, kept) = newest_that_fit(newest, budget);
-            match store.set_item(SESSIONS_KEY, &raw) {
-                Ok(()) if kept < newest.len() => {
-                    let runs = newest.iter().any(|session| session.contest.is_some());
-                    return HistorySaved::Squeezed { kept, runs };
-                }
-                Ok(()) => return HistorySaved::Stored { kept },
-                Err(_) if kept > 1 => budget = raw.len() / 2,
-                Err(_) => {
-                    return HistorySaved::Failed("this browser's storage is full.".into());
-                }
-            }
-        }
+        store_newest_that_fit(newest(sessions), HISTORY_BUDGET, |raw| {
+            store.set_item(SESSIONS_KEY, raw).is_ok()
+        })
     }
 
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters {
