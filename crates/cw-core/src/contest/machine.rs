@@ -975,6 +975,11 @@ struct Air {
     /// How much of each reply has been counted: a key that logs without
     /// sending counts what has reached you so far.
     counted: Vec<Counted>,
+    /// The place among its segments of QRM carried on from a turn taken off
+    /// the air, some of which went out under your message there, the
+    /// receiver muted: no send heard, though it sounds here, as a caller's
+    /// so is ([`Counted::Muted`]).
+    qrm_muted: Option<usize>,
     /// Log rows whose check shows once their TU is out
     /// ([`Self::checks_at_sec`]), or once it is off the air.
     pending: Vec<usize>,
@@ -1086,9 +1091,22 @@ struct Carried {
     parts: Vec<(MessagePart, usize)>,
     pending: Vec<usize>,
     callers: Vec<Overlapping>,
-    /// The rest of the QRM still sending, and the whole of what it sends.
-    qrm: Option<(Segment, String)>,
+    qrm: Option<QrmRest>,
     splice: Option<Splice>,
+}
+
+/// What is left of the QRM still sending as a turn is taken off the air
+/// ([`ContestMachine::qrm_going_on`]).
+#[derive(Clone, Debug, PartialEq)]
+struct QrmRest {
+    /// The rest of it, from the character sounding then.
+    rest: Segment,
+    /// The whole of what it sends, which Show copy shows once it ends.
+    whole: String,
+    /// Some of it went out under your message, the receiver muted without
+    /// full break-in: it is no send heard, though its rest sounds after an
+    /// Esc, as a caller's so is ([`Counted::Muted`]).
+    muted: bool,
 }
 
 /// Where a key splices its continuation onto the turn on the air, your
@@ -2438,25 +2456,28 @@ impl<S: CallSource> ContestMachine<S> {
     /// With Show copy on, what each station sent in `air`, the whole of it,
     /// and when it shows: a moment after its send ends, in the order they
     /// show. Nothing with Show copy off, nor of a send that went out under
-    /// your message, the receiver muted, as nothing of it reached you.
+    /// your message, the receiver muted, as nothing of it reached you, a
+    /// caller's or QRM's rest going on after an Esc among them.
     fn shown_of(&self, air: &Air) -> Vec<ShownText> {
         if !self.settings.contest.contest_show_copy {
             return Vec::new();
         }
         let qsk = self.settings.contest.contest_qsk;
-        // A caller's rest that went out in part under your message before
-        // an Esc is never heard, though it sounds after it.
+        // A caller's rest, or QRM's, that went out in part under your
+        // message before an Esc is never heard, though it sounds after it.
         let mut counted = air.counted.iter();
         let mut shown: Vec<ShownText> = air
             .turn
             .segments
             .iter()
             .zip(&air.texts)
-            .filter(|(segment, _)| {
-                let unheard = segment.who.is_caller() && counted.next() == Some(&Counted::Muted);
+            .enumerate()
+            .filter(|(at, (segment, _))| {
+                let unheard = (segment.who.is_caller() && counted.next() == Some(&Counted::Muted))
+                    || air.qrm_muted == Some(*at);
                 segment.who != Sender::You && !air.turn.muted(segment, qsk) && !unheard
             })
-            .map(|(segment, text)| ShownText {
+            .map(|(_, (segment, text))| ShownText {
                 at: air
                     .heard_from
                     .plus(whole_ms(segment.end_sec) + SHOWN_AFTER_MS),
@@ -2820,11 +2841,13 @@ impl<S: CallSource> ContestMachine<S> {
         // waits are planned with it, so it never cuts the turn short. A rest
         // of it carried over your key goes on first, and nothing more of it
         // sends over that rest.
+        let mut qrm_muted = None;
         if let Some(qrm) = self.qrm.as_mut() {
-            if let Some((rest, whole)) = mine.qrm {
-                qrm.carried(start_run, rest.end_sec);
-                segments.push(rest);
-                texts.push(whole);
+            if let Some(going_on) = mine.qrm {
+                qrm.carried(start_run, going_on.rest.end_sec);
+                qrm_muted = going_on.muted.then_some(segments.len());
+                segments.push(going_on.rest);
+                texts.push(going_on.whole);
             }
             let length_sec = segments
                 .iter()
@@ -2871,6 +2894,7 @@ impl<S: CallSource> ContestMachine<S> {
             parts: mine.parts,
             my_chars,
             counted,
+            qrm_muted,
             replies,
             carried,
             texts,
@@ -3064,7 +3088,7 @@ impl<S: CallSource> ContestMachine<S> {
         // nothing of it went out under your message.
         let sounded = splice.is_some() || air.first_start.is_some();
         let callers = self.overlapping(&air, at, sounded);
-        let qrm = self.qrm_going_on(&air, at);
+        let qrm = self.qrm_going_on(&air, at, sounded);
         let Air {
             turn,
             parts,
@@ -3159,22 +3183,29 @@ impl<S: CallSource> ContestMachine<S> {
     /// not stop for you. One at the start of the turn whose sound has not
     /// reached the ear yet goes on as it was, and one whose first character
     /// is still sounding from where it is ([`Self::going_on_from`]); one
-    /// that had not begun is gone with the turn.
-    fn qrm_going_on(&self, air: &Air, run_now: u64) -> Option<(Segment, String)> {
+    /// that had not begun is gone with the turn. Without full break-in, one
+    /// some of which went out under your message, the turn having `sounded`
+    /// by `run_now`, goes on unheard, as a caller's rest does
+    /// ([`Self::overlapping`]), and so does one that went on so already.
+    fn qrm_going_on(&self, air: &Air, run_now: u64, sounded: bool) -> Option<QrmRest> {
         let heard_run = air.heard_run();
-        let (segment, whole) = air
-            .turn
-            .segments
-            .iter()
-            .zip(&air.texts)
-            .find(|(segment, _)| {
-                segment.who == Sender::Qrm && {
-                    let start = heard_run + whole_ms(segment.start_sec);
-                    let end = heard_run + whole_ms(segment.end_sec);
-                    end > run_now && (start < run_now || segment.start_sec == 0.0)
-                }
-            })?;
+        let (at, (segment, whole)) =
+            air.turn
+                .segments
+                .iter()
+                .zip(&air.texts)
+                .enumerate()
+                .find(|(_, (segment, _))| {
+                    segment.who == Sender::Qrm && {
+                        let start = heard_run + whole_ms(segment.start_sec);
+                        let end = heard_run + whole_ms(segment.end_sec);
+                        end > run_now && (start < run_now || segment.start_sec == 0.0)
+                    }
+                })?;
         let start = heard_run + whole_ms(segment.start_sec);
+        let qsk = self.settings.contest.contest_qsk;
+        let muted = air.qrm_muted == Some(at)
+            || (sounded && start < run_now && air.turn.muted(segment, qsk));
         let elapsed = run_now.saturating_sub(start) as f64 / 1_000.0;
         let (from, skip_sec) = self.going_on_from(segment, elapsed)?;
         let text = segment.text[from..].to_string();
@@ -3190,7 +3221,11 @@ impl<S: CallSource> ContestMachine<S> {
             }),
             skip_sec,
         };
-        Some((rest, whole.clone()))
+        Some(QrmRest {
+            rest,
+            whole: whole.clone(),
+            muted,
+        })
     }
 
     /// Where a caller's or QRM's `segment` goes on from, carried on
@@ -11783,11 +11818,20 @@ mod tests {
         assert_eq!(going_on[0].voice, first.voice);
     }
 
-    /// A run under rough habits from `seed` whose first CQ, after a second
-    /// of countdown, has QRM sending under it from its start.
-    fn qrm_under_the_first_cq(seed: u64) -> Runtime<ScriptCalls> {
+    /// A run's settings under rough habits, which bring QRM, with Show copy
+    /// on, and full break-in as `qsk` says.
+    fn qrm_settings(qsk: bool) -> TrainingSettings {
         let mut settings = run_settings(25.0);
         settings.contest.contest_habits = CallerHabits::Rough;
+        settings.contest.contest_show_copy = true;
+        settings.contest.contest_qsk = qsk;
+        settings
+    }
+
+    /// A run under [`qrm_settings`] from `seed` whose first CQ, after a
+    /// second of countdown, has QRM sending under it from its start.
+    fn qrm_under_the_first_cq(seed: u64, qsk: bool) -> Runtime<ScriptCalls> {
+        let mut settings = qrm_settings(qsk);
         settings.playback.countdown_sec = 1;
         let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["K5XYZ"]));
         runtime
@@ -11809,7 +11853,7 @@ mod tests {
     #[test]
     fn qrm_goes_on_past_an_esc() {
         for seed in 1..20 {
-            let mut runtime = qrm_under_the_first_cq(seed);
+            let mut runtime = qrm_under_the_first_cq(seed, false);
             let cq = runtime.last_turn().clone();
             assert_eq!(yours(&cq), "CQ DL1ABC TEST");
             let first = qrm_in(&cq)[0].clone();
@@ -11854,6 +11898,69 @@ mod tests {
             stopped += 1;
         }
         assert!(stopped > 0, "no QRM outlasted your message");
+    }
+
+    /// Without full break-in, QRM some of which went out under your
+    /// message is no send heard, as a caller's is not: past an Esc that
+    /// cuts your message short its rest sounds, the receiver open again,
+    /// but Show copy shows none of it, whether it goes on alone or beside a
+    /// caller answering the garbage. With full break-in it was heard
+    /// throughout, and Show copy shows the whole of it. Show copy used to
+    /// show the whole of it either way.
+    #[test]
+    fn qrm_the_receiver_cut_into_stays_unshown_after_esc() {
+        let qrm_shown = |runtime: &Runtime<ScriptCalls>| -> Vec<String> {
+            view(runtime)
+                .shown
+                .into_iter()
+                .filter(|text| text.qrm)
+                .map(|text| text.text)
+                .collect()
+        };
+        let mut tried = [0; 2];
+        for qsk in [false, true] {
+            for seed in 1..20 {
+                // Alone: your first CQ goes back with the caller it brought.
+                let alone = qrm_under_the_first_cq(seed, qsk);
+                // Beside K5XYZ, which answers the garbage of your call and
+                // exchange.
+                let calls = ScriptCalls::new(&["K5XYZ"]);
+                let mut beside = Runtime::start(seed, qrm_settings(qsk), calls);
+                beside.finish_turn();
+                let qrm = beside.machine.qrm.as_mut().expect("rough habits bring QRM");
+                qrm.start_at(0);
+                beside.key(OpKey::Esm, "K5XYZ", "");
+                for (mut runtime, calling) in [(alone, false), (beside, true)] {
+                    let turn = runtime.last_turn().clone();
+                    let first = qrm_in(&turn)[0].clone();
+                    // A station that came earlier may still hold the
+                    // frequency.
+                    if first.start_sec > 0.0 {
+                        continue;
+                    }
+                    tried[usize::from(calling)] += 1;
+                    assert_eq!(turn.muted(&first, qsk), !qsk);
+                    runtime.run_to(runtime.now + 800);
+                    let effects = runtime.key(OpKey::StopTx, "", "");
+                    let going = played(&effects).expect("it goes on").clone();
+                    assert_eq!(senders(&going).is_empty(), !calling, "seed {seed}");
+                    let sends = qrm_in(&going);
+                    assert!(first.text.ends_with(&sends[0].text));
+                    assert!(!going.muted(sends[0], qsk), "it sounds");
+                    // Any QRM sends after it in the turn are heard whole.
+                    let shown: Vec<String> = qsk
+                        .then(|| first.text.clone())
+                        .into_iter()
+                        .chain(sends[1..].iter().map(|send| send.text.clone()))
+                        .collect();
+                    let case = format!("seed {seed}, qsk {qsk}, calling {calling}");
+                    assert_eq!(qrm_shown(&runtime), shown, "{case}");
+                    runtime.finish_turn();
+                    assert_eq!(qrm_shown(&runtime), shown, "{case}: once it ends");
+                }
+            }
+        }
+        assert!(tried.iter().all(|tried| *tried >= 20), "{tried:?}");
     }
 
     /// QRM carried over your key, its rest timed from where it was heard,

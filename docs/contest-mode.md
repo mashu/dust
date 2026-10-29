@@ -1652,16 +1652,16 @@ spacing and no fist variation.
     spent all the same, a try on its timeout among it, as it was sent
     (`Counted::Muted`). Its rest going on after an Esc sounds, the gate
     open, but stays unheard, and Show copy shows nothing of it (as built,
-    2026-10-29; 5.2). A turn is timed from its key till the player says
-    it has started, but nothing of it has sounded till then, so an Esc in
-    that moment, a few milliseconds, finds nothing of a send carried under
-    your message gone out under it, and its rest is heard (as built,
-    2026-10-29, second Esc review). Collisions are as they were for the
-    callers: one still sending at your key never hears you and goes on
-    over you (4.3), now unheard, and calls again a moment after you, which
-    is heard. Every reply comes after your message, a tenth of a second at
-    least, so the gate, open again 5 ms after your message ends, takes none
-    of one.
+    2026-10-29; 5.2), and so does QRM's (5.6). A turn is timed from its key
+    till the player says it has started, but nothing of it has sounded till
+    then, so an Esc in that moment, a few milliseconds, finds nothing of a
+    send carried under your message gone out under it, and its rest is
+    heard (as built, 2026-10-29, second Esc review). Collisions are as they
+    were for the callers: one still sending at your key never hears you and
+    goes on over you (4.3), now unheard, and calls again a moment after
+    you, which is heard. Every reply comes after your message, a tenth of a
+    second at least, so the gate, open again 5 ms after your message ends,
+    takes none of one.
   - With full break-in (`contestQsk`, §8) nothing is muted: the band and a
     caller sending across your message are heard through it, as every run
     was before 5a.
@@ -1802,7 +1802,12 @@ copies and timing of §9.1 never look at it, and Hear a QSO shows it as it
 plays, a muted line of its own headed QRM that begins no QSO; with Show
 copy on (as built, 4b) the run's RX line shows its text as it shows the
 callers', muted and after a QRM tag, as Hear a QSO keeps it, and still
-counts it among no callers (§7). Its draws
+counts it among no callers (§7). As a caller's, a send of it some of which
+went out under your message, the receiver muted without full break-in,
+shows nothing (5.3), its rest going on after an Esc that cut your message
+short among them (as built, 2026-10-29, second Esc review: Show copy
+showed the whole of that rest's message, though the receiver had been
+muted for its start). Its draws
 come from a stream of its own, so a run under easier habits draws as it
 always has.
 
@@ -3910,9 +3915,12 @@ plus a mark); `scripts/callsign-prefixes.py` (zones and continents).
   reply is heard as with no Esc at all; a single caller's reply yet to
   begin or sounding comes on time, is heard as it was to end and logs
   clean with no repeat; QRM outlasting your message sends on in the turn;
-  Esc leaves C and N set once your message is out; and Esc before the
-  player says the turn started finds a rest carried under your message
-  never muted, and it is heard and shown.
+  Esc leaves C and N set once your message is out; Esc before the player
+  says the turn started finds a rest carried under your message never
+  muted, and it is heard and shown; and without full break-in QRM that
+  went out in part under your message shows nothing of its rest past an
+  Esc, alone or beside a caller answering the garbage, and shows whole
+  with full break-in.
 
 - from 5b: the keyer ends a word six dits of quiet after a letter's last
   element, a straight key's too, though its letter ends a dit sooner; a
@@ -4356,6 +4364,7 @@ keying with the paddles, a contest level, and more contests.
 | Where full break-in sits (5a) | the Tone and volume card, after your sending | Band conditions; Your station | it says what you hear while you send, as your sending does; Your station holds your call and exchange, and its reset would take the switch with them |
 | What the gate keys off (5a) | your message's span in the plan, from the turn's start to its end, your sending off or not | the dry tones | with your sending off there are no tones, and a rig transmits, and mutes, all the same |
 | A caller sending across your message, muted (5a) | unheard, the whole send: no copy, repeat, speed, Enter or Show copy, RX counting it from your message's end; its cost to its caller spent | its tail after your message counted | nothing you cannot hear may count as heard, and a call heard in part is no call heard |
+| QRM sending across your message, muted, going on past an Esc (2026-10-29, second Esc review) | unheard, as a caller's: Show copy shows none of it, the rest sounding after the Esc | its whole message shown once the rest ended | the receiver was muted for its start, so what Show copy shows was never heard whole; QRM follows the callers' rule, heard in part is not heard |
 | Flutter (5a) | a switch of its own on the Band card in Contest mode, three callers in ten at 3–33 Hz, half to three quarters deep, over the fading or alone; Contester turns it on | MorseRunner's: a quicker fading in place of a station's, full depth, only with QSB on | the switch does what it says, and no caller is fluttered out of hearing |
 | A continuation (5a) | a timed splice: the turn on the air plays out the character sounding, and any the player has begun, the next starts at the start of the next character, ridden over by then; with none left, half a word space after your message, the next message a word space after it | the next started at once from the character sounding, sent again whole; or started in the past, mid-character | no character twice and no gap; both players start a send at a moment ahead well, and your message is silent where they meet, so nothing clicks |
 | How soon a continuation can take over (5a) | the player's lead, as the last turn started at once found it, and a send's release, after the key | the moment your message is at as it reaches the ear | a player plays ahead of the ear, so a character starting inside its lead has begun already, and taking over there sent its start twice; a lead measured on every turn keeps up with the device |
