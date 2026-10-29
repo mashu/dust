@@ -234,6 +234,11 @@ pub mod fake {
         pub asleep: Cell<bool>,
         /// How many times it was put to sleep.
         pub sleeps: Cell<u32>,
+        /// What of the next send its stream skips, from and to so many
+        /// seconds into its sound, as a browser's stream fallen behind its
+        /// clock skips it: said once the send's clock has passed the start
+        /// of it.
+        pub skip_next: Cell<Option<(f64, f64)>>,
     }
 
     impl Recorder {
@@ -332,6 +337,8 @@ pub mod fake {
         /// How long it waits before it starts, a send asked to start at a
         /// given time, in the ticks of its clock.
         wait_ms: u32,
+        /// What of its sound its stream skips ([`Recorder::skip_next`]).
+        skipped: Option<(f64, f64)>,
     }
 
     impl FakeSignal {
@@ -403,8 +410,12 @@ pub mod fake {
                             .saturating_add(self.held_ms()),
                     );
                     self.played.set(played);
+                    let heard_ms = self.heard_ms(played);
                     WaitFlags {
-                        played_ms: Some(self.heard_ms(played)),
+                        played_ms: Some(heard_ms),
+                        missed: self
+                            .skipped
+                            .filter(|(from, _)| f64::from(heard_ms) >= from * 1_000.0),
                         ..Default::default()
                     }
                 }
@@ -460,6 +471,7 @@ pub mod fake {
                 played: Cell::new(0),
                 latency_sec,
                 wait_ms: (wait_sec * 1_000.0).round() as u32,
+                skipped: self.recorder.skip_next.take(),
             }))
         }
 

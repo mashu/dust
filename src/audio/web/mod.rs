@@ -74,7 +74,7 @@ struct Playing {
 /// The clock runs on, too, while the page is too busy to keep the receiver
 /// rendered ahead of it, and the stream then skips what it should have
 /// played meanwhile: the stream's watch on the send says whether it skipped
-/// any of this one.
+/// any of this one, and what.
 struct WebSignal {
     ctx: AudioContext,
     ticket: Ticket,
@@ -91,6 +91,14 @@ impl PlaybackSignal for WebSignal {
     }
 
     fn poll(&self) -> WaitFlags {
+        // Its clock says how far behind the app's it fell, but not whether
+        // the stream kept up with that clock: one that fell behind it
+        // skipped some of the send, which went unheard, and so was held up
+        // on its way too.
+        let missed = self
+            .watch
+            .missed()
+            .map(|(from, until)| (from - self.started_at, until - self.started_at));
         WaitFlags {
             cancelled: self.ticket.is_cancelled(),
             finished: false,
@@ -106,10 +114,8 @@ impl PlaybackSignal for WebSignal {
                 self.started_at,
                 self.timing.latency_sec,
             )),
-            // Its clock says how far behind the app's it fell, but not
-            // whether the stream kept up with that clock: one that fell
-            // behind it skipped some of the send, which went unheard.
-            late: self.watch.missed(),
+            late: missed.is_some(),
+            missed,
         }
     }
 }

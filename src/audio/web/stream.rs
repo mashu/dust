@@ -137,18 +137,18 @@ pub struct SendWatch {
 }
 
 impl SendWatch {
-    /// Whether some of the send's sound went unheard. The stream is caught
-    /// up first, as a tick would: after a stall the send's clock has run on
-    /// past where the stream got to, and the tick that finds it may come
-    /// only after the send's waiter has read that clock and taken the send
-    /// for heard.
-    pub fn missed(&self) -> bool {
+    /// What of the send's sound went unheard, if any: from when to when on
+    /// the context's clock ([`Missed`]). The stream is caught up first, as a
+    /// tick would: after a stall the send's clock has run on past where the
+    /// stream got to, and the tick that finds it may come only after the
+    /// send's waiter has read that clock and taken the send for heard.
+    pub fn missed(&self) -> Option<(f64, f64)> {
         if let Some(state) = self.state.upgrade()
             && let Ok(mut state) = state.try_borrow_mut()
         {
             state.catch_up();
         }
-        self.missed.is_set()
+        self.missed.span()
     }
 }
 

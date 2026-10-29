@@ -68,6 +68,11 @@ pub struct WaitFlags {
     /// fall behind its own clock, and skip some of the sound, says so here
     /// too, as that clock does not.
     pub late: bool,
+    /// Some of the sound went unheard, from and to so many seconds into it:
+    /// the stream it plays in fell behind its clock and skipped that much,
+    /// which the clock does not say. Only the browser's stream skips; a
+    /// native one plays everything, late.
+    pub missed: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,7 +270,17 @@ impl PlaybackWait {
         }
     }
 
+    /// Wait on it, told nothing of what of it went unheard.
+    #[cfg(test)]
     pub async fn wait(self) -> Waited {
+        self.wait_telling(|_, _| {}).await
+    }
+
+    /// Wait on it, telling `missed` what of its sound went unheard
+    /// ([`WaitFlags::missed`]), in seconds into it, as soon as a poll finds
+    /// it, before the send ends, and again whenever more of it does: so
+    /// whoever sent it knows before they act on what came after.
+    pub async fn wait_telling(self, mut missed: impl FnMut(f64, f64)) -> Waited {
         // Over once the last element has fallen silent, not at its key-up:
         // a soft edge sounds on for its rise time after it, and the answer
         // window opening then would open on the tone.
@@ -278,9 +293,17 @@ impl PlaybackWait {
         let mut polled_at = mono_ms();
         // Parked, or found late by the backend, at any poll.
         let mut held = false;
+        // What it was last told went unheard.
+        let mut told = None;
         loop {
             let flags = self.signal.poll();
-            held |= flags.suspended || flags.late;
+            held |= flags.suspended || flags.late || flags.missed.is_some();
+            if flags.missed != told
+                && let Some((from, until)) = flags.missed
+            {
+                told = flags.missed;
+                missed(from, until);
+            }
             if let WaitStep::Done(outcome) = next_wait_step(flags, waited, duration_ms, grace_ms) {
                 // How far its audio clock fell behind this one: nothing,
                 // however late this poll came, unless it was held up.
@@ -652,6 +675,48 @@ mod tests {
         assert_eq!(
             run(scripted(0.1, steady).wait()),
             on_time(PlaybackOutcome::Completed)
+        );
+    }
+
+    /// A send some of whose sound its stream skipped says what of it went
+    /// unheard as soon as a poll finds it, before it ends, and again only
+    /// when more of it goes; it was held up as well, however it ends.
+    #[test]
+    fn a_send_skipped_in_part_says_what_went_unheard_as_soon_as_it_is_found() {
+        let at = |played: u32, missed: Option<(f64, f64)>| WaitFlags {
+            played_ms: Some(played),
+            missed,
+            ..Default::default()
+        };
+        let signal = Rc::new(Scripted {
+            steps: RefCell::new(vec![
+                at(100, None),
+                at(500, Some((0.2, 0.4))),
+                at(550, Some((0.2, 0.4))),
+                at(900, Some((0.2, 0.8))),
+                at(1_000 + PLAYBACK_TAIL_MS, Some((0.2, 0.8))),
+            ]),
+        });
+        let wait = PlaybackWait::new(
+            &transmission(1.0, Vec::new()),
+            Rc::clone(&signal) as _,
+            MonoMs(mono_ms()),
+        );
+        let mut told = Vec::new();
+        let waited = run(wait.wait_telling(|from, until| {
+            told.push((from, until, signal.steps.borrow().len()));
+        }));
+        assert_eq!(
+            told,
+            [(0.2, 0.4, 3), (0.2, 0.8, 1)],
+            "each as its poll found it, the first before the end"
+        );
+        assert_eq!(
+            waited,
+            Waited {
+                outcome: PlaybackOutcome::Completed,
+                held_up: true,
+            }
         );
     }
 

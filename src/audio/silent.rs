@@ -47,6 +47,7 @@ impl PlaybackSignal for SilentSignal {
             // there is.
             played_ms: Some(u32::try_from(elapsed).unwrap_or(u32::MAX)),
             late: false,
+            missed: None,
         }
     }
 }

@@ -382,14 +382,40 @@ impl Mixer {
     }
 
     /// Every send out at once, and what of them is still waiting out the
-    /// look-ahead: cut, not ridden down, for a stream that starts again, or
-    /// one that has skipped on past where they had got to and whose output
-    /// was silent there already, where what is left of them would only
-    /// play late.
+    /// look-ahead: cut, not ridden down, for a stream that starts again.
+    #[cfg(feature = "native-audio")]
     pub fn drop_sends(&mut self, swept: &mut Swept) {
         swept.sends.append(&mut self.retiring);
         swept.sends.extend(self.send.take());
         self.late.fill(SendSample::default());
+    }
+
+    /// Pass over `samples` unheard, as a stream fallen far behind its clock
+    /// does rather than stall the page again working seconds of them out:
+    /// the sends that would have been heard in them — sounding, riding out
+    /// a release, waiting out the look-ahead, or due to start in them — are
+    /// dropped, cut rather than ridden down, as what is left of them would
+    /// only play late; and one still waiting to start after them waits as
+    /// much less, so it starts on the clock's time as if they had been
+    /// played. Of them, only the look-ahead's worth at the end is worked
+    /// out, unheard, so a send due to start in it goes out as it would
+    /// have. The band picks up where it was.
+    #[cfg(any(feature = "web", test))]
+    pub fn skip(&mut self, samples: u64, swept: &mut Swept) {
+        let worked = samples.min(self.late_len as u64);
+        let passed = samples - worked;
+        if passed > 0 {
+            if let Some(send) = self.send.take_if(|send| !send.skip_wait(passed)) {
+                swept.sends.push(send);
+            }
+            swept
+                .sends
+                .extend(self.retiring.extract_if(.., |send| !send.skip_wait(passed)));
+            // Played in what was passed over.
+            self.late.fill(SendSample::default());
+        }
+        let mut unheard = vec![0.0; worked as usize];
+        self.render(&mut unheard, 0);
     }
 
     /// Take out what has finished playing, and the oldest of what is on its
