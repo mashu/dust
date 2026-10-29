@@ -896,3 +896,29 @@ fn only_a_few_boxes_ease_their_size_or_place() {
         ]
     );
 }
+
+/// A button that holds one glyph, an icon or a − or +, centres it in its
+/// whole box. Left to the engine's own padding, 6px a side and in WebKit a
+/// pixel more under than over, the glyph sat above the middle in the desktop
+/// app, and a card's ⓘ, wider than the room that padding leaves it, a pixel
+/// right of it in every engine. The HTML tests never paint, so the rule
+/// itself is read.
+#[test]
+fn a_glyph_button_centres_its_glyph() {
+    let css = without_comments(CSS);
+    let rules = rules(&css);
+    for selector in [
+        ".icon-btn",
+        ".fold-btn",
+        ".stepper .step",
+        ".slider-row > .step",
+        ".run-speed .step",
+        ".history-delete",
+    ] {
+        assert_eq!(
+            last_value(&rules, selector, "padding").as_deref(),
+            Some("0"),
+            "{selector} leaves its glyph to the engine's padding"
+        );
+    }
+}

@@ -376,11 +376,17 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
   font-weight: 700;
 }
 .header-actions { display: flex; align-items: center; gap: 0.4rem; }
+/* A button that holds one glyph, an icon or a − or +, takes its padding to
+   0, here and on the steppers and history's delete, so the glyph centres in
+   its whole box. The engine's own, 6px a side and in WebKit a pixel more
+   under than over, set it above the middle, and right of it in a button too
+   narrow for both, such as a card's ⓘ. */
 .icon-btn {
   display: grid;
   place-items: center;
   width: 2.25rem;
   height: 2.25rem;
+  padding: 0;
   border-radius: 11px;
   border: 1px solid var(--line);
   background: var(--surface);
@@ -955,6 +961,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
 .stepper .step {
   width: 2.1rem;
   min-height: 2.4rem;
+  padding: 0;
   display: grid;
   place-items: center;
   color: var(--ink);
@@ -1125,6 +1132,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
 .slider-row > .step {
   width: 2.1rem;
   height: 2.1rem;
+  padding: 0;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
@@ -1667,6 +1675,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
   position: relative;
   width: 2rem;
   height: 2rem;
+  padding: 0;
   display: grid;
   place-items: center;
   border: 1px solid var(--line-strong);
@@ -2450,6 +2459,7 @@ h1, h2, h3, .page-title, .listen-glyph, .kpi .value, .fold-head .card-title {
   place-items: center;
   width: 2.2rem;
   height: 2.2rem;
+  padding: 0;
   border-radius: 10px;
   color: var(--ink-dim);
   transition: background 0.15s var(--ease), color 0.15s var(--ease);
