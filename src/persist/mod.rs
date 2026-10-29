@@ -798,6 +798,7 @@ pub(crate) mod tests {
         let k = &mut s.contest;
         k.contest_kind = cw_core::ContestKind::Sprint;
         k.contest_style = cw_core::RunStyle::Pileup;
+        k.stations_opened_by_pileup = true;
         k.contest_habits = cw_core::CallerHabits::Rough;
         k.contest_flutter = true;
         k.contest_minutes = 25;

@@ -9,12 +9,14 @@ use crate::ui::auto_level::AutoLevelCard;
 use crate::ui::heatmap::{ActivityHeatmap, StreakCard};
 use crate::ui::settings_charset::{pileup_callers, pileup_count};
 use crate::ui::settings_station::{
-    CallField, CallReading, NameField, SectionEntry, StateEntry, StationDraft, ZoneField,
-    focus_call_field, focus_name_field, focus_section_field, focus_state_field, focus_zone_field,
-    section_rejected, state_rejected,
+    CallField, CallReading, NameField, SectionEntry, StateEntry, ZoneField, focus_call_field,
+    focus_name_field, focus_section_field, focus_state_field, focus_zone_field, section_rejected,
+    state_rejected,
 };
 use crate::ui::tips::{CONTEST_TIPS, TIPS, TipsCarousel};
-use crate::ui::widgets::{CardHead, Icon, IconName, control_id, keep_focus, range_label};
+use crate::ui::widgets::{
+    CardHead, Icon, IconName, TextDraft, control_id, keep_focus, range_label,
+};
 
 /// Where the learner is, as Home says it: in the hero, and on the tile.
 #[derive(Debug, PartialEq)]
@@ -289,7 +291,7 @@ pub fn Home(
     // and keep what was typed there before they act. Leaving the box would
     // keep it on the press instead, and redraw the hero under the finger,
     // the button moved, before the click came.
-    let draft = StationDraft::use_draft();
+    let draft = TextDraft::use_draft();
     let hold = move |e: MouseEvent| {
         if asks.is_some() {
             keep_focus(e);

@@ -403,7 +403,7 @@ pub fn session_shape() -> Element {
             dt { "Groups per session" }
             dd { "How many groups one session sends; a contest run is timed in minutes instead." }
             dt { "Answer timeout" }
-            dd { "How long a group waits for you to start answering before it moves on. Once you type, it waits for you." }
+            dd { "How long a group waits for you to start answering before it moves on. At 0 it never moves on by itself: it waits for you to answer, or press Next. Once you type, it waits for you." }
             dt { "Pause after each group" }
             dd { "Time to read the last group before the next is sent. Zero keeps contest pace." }
             dt { "Countdown" }
@@ -433,13 +433,13 @@ pub fn speed_settings() -> Element {
             dt { "Character speed" }
             dd { "How fast each character is sent, in words a minute. A range draws each group's speed from it." }
             dt { "Effective speed" }
-            dd { "Farnsworth: the characters stay fast and the gaps between them stretch, so the overall pace is slower." }
+            dd { "Farnsworth: the characters stay fast and the gaps between them stretch, so the overall pace is slower. The gaps are never faster than the characters: whatever is set above Character speed goes at Character speed, and the card says what it is used as." }
             dt { "Adapt speed to me" }
             dd { "Within the range: faster while you copy the characters, slower when you miss them." }
             dt { "Operator fists" }
             dd { "How far stations stray from a perfect keyer: heavier or lighter elements, longer or shorter dahs. Zero sends like a machine." }
-            dt { "Extra word spacing" }
-            dd { "Lengthens the gap between groups, in multiples of the standard word space." }
+            dt { "Word space" }
+            dd { "Every gap between words and between groups, as a multiple of the standard word space of seven units: 1× is standard, more lengthens it, less shortens it, down to half." }
             dt { "Tie effective speed" }
             dd { "On, the gaps keep pace with the characters. Off gives you the Farnsworth controls." }
             dt { "Your speed" }

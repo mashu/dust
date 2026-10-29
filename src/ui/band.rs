@@ -252,10 +252,9 @@ pub fn BandConditionsCard(
                     }
                 }
                 SectionReset {
-                    label: "band conditions",
-                    on_reset: move |()| {
-                        settings.write().reset_section(SettingsSection::BandConditions);
-                    },
+                    card: "Band conditions",
+                    settings,
+                    section: SettingsSection::BandConditions,
                 }
             }
             if previewing {
@@ -281,7 +280,7 @@ pub fn BandConditionsCard(
             }
             div { class: "field",
                 span { class: "field-label", "Filter shape" }
-                div { class: "segmented",
+                div { class: "segmented", role: "group", aria_label: "Filter shape",
                     for (shape, label) in FILTER_SHAPES {
                         Seg {
                             label,
@@ -344,7 +343,7 @@ pub fn BandConditionsCard(
             if let Some((habits, line)) = &view.habits {
                 div { class: "field",
                     span { class: "field-label", "Caller habits" }
-                    div { class: "segmented",
+                    div { class: "segmented", role: "group", aria_label: "Caller habits",
                         for (each, label) in CALLER_HABITS {
                             Seg {
                                 label,
@@ -366,6 +365,7 @@ pub fn BandConditionsCard(
             div { class: "field-grid",
                 SliderField {
                     label: "Depth".to_string(),
+                    long_label: "QSB fading depth",
                     value_label: format!("{:.0} dB", b.qsb_depth * QSB_DEPTH_MAX_DB),
                     value: b.qsb_depth,
                     min: 0.0,
@@ -376,6 +376,7 @@ pub fn BandConditionsCard(
                 }
                 SliderField {
                     label: "Rate".to_string(),
+                    long_label: "QSB fading rate",
                     value_label: qsb_rate_label(b.qsb_rate_hz),
                     value: qsb_rate_step(b.qsb_rate_hz),
                     min: 0.0,
@@ -402,6 +403,7 @@ pub fn BandConditionsCard(
             SliderField {
                 label: "Intensity".to_string(),
                 id: "slider-qrn-intensity".to_string(),
+                long_label: "QRN static intensity",
                 value_label: format!("{:.0}%", b.qrn_level * 100.0),
                 value: b.qrn_level,
                 min: 0.0,
@@ -419,6 +421,7 @@ pub fn BandConditionsCard(
             SliderField {
                 label: "Level".to_string(),
                 id: "slider-noise-level".to_string(),
+                long_label: "Band noise level",
                 value_label: noise_reading,
                 value: b.noise_level,
                 min: 0.0,
@@ -463,7 +466,7 @@ pub fn BandConditionsCard(
                     if b.agc_enabled {
                         div { class: "field",
                             span { class: "field-label", "AGC decay" }
-                            div { class: "segmented",
+                            div { class: "segmented", role: "group", aria_label: "AGC decay",
                                 for (decay, label) in AGC_DECAYS {
                                     Seg {
                                         label,

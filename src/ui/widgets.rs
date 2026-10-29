@@ -1,12 +1,23 @@
 use cw_core::band::{db_to_gain, gain_to_db};
-use cw_core::{GroupResult, RangeSetting, TrainingSettings, align_group};
+use cw_core::{GroupResult, RangeSetting, SettingsSection, TrainingSettings, align_group};
 use dioxus::prelude::*;
+
+use crate::state::AppCtx;
 
 /// What was typed into a number field, held inside its bounds. `None` for
 /// anything that is not a finite number, which leaves the value as it was.
 fn parse_number_input(raw: &str, min: f64, max: f64) -> Option<f64> {
     let value: f64 = raw.trim().parse().ok()?;
     value.is_finite().then(|| value.clamp(min, max))
+}
+
+/// A number from a field, kept as a whole number: rounded to the nearest,
+/// as a range's ends are, so that every whole-number setting takes a typed
+/// fraction the same way: 2.9 groups is 3, not 2. Never below zero, and
+/// nothing that is not a number is zero.
+pub fn whole(value: f64) -> u32 {
+    // A float cast to an integer saturates at its ends, and NaN is 0.
+    value.max(0.0).round() as u32
 }
 
 /// Snap to the step grid so 0.1-steps do not drift into 0.30000000000000004.
@@ -113,6 +124,20 @@ pub fn pretty_number(value: f64) -> String {
         format!("{rounded}")
     };
     digits.replacen('-', "\u{2212}", 1)
+}
+
+/// A unit as a screen reader is to say it: "seconds" for sec, "times" for
+/// ×, and a unit it reads as it is, WPM or Hz, as it is.
+pub fn spoken_unit(unit: &str) -> &str {
+    match unit {
+        "sec" => "seconds",
+        "min" => "minutes",
+        "ms" => "milliseconds",
+        "chars" => "characters",
+        "×" => "times",
+        "%" => "percent",
+        other => other,
+    }
 }
 
 /// A range as it reads: one number when its ends meet, an en dash between
@@ -489,6 +514,14 @@ pub fn CardHead(
 ) -> Element {
     let mut open = use_signal(|| false);
     let id = control_id("help", &title);
+    // Named for the card it explains: a screen reader's list of buttons
+    // holds every card's ⓘ, and "What does this mean?" a dozen times over
+    // says nothing of which.
+    let help_name = if open() {
+        format!("Hide the help on {title}")
+    } else {
+        format!("Help on {title}")
+    };
     let shown = fold.is_none_or(|unfolded| unfolded());
     // What a test opens a folding card by, as a pointer on its title does.
     let head = fold.map(|_| control_id("head", &title));
@@ -517,7 +550,7 @@ pub fn CardHead(
                                 class: if open() { "icon-btn help-btn on" } else { "icon-btn help-btn" },
                                 r#type: "button",
                                 title: if open() { "Hide the help" } else { "What does this mean?" },
-                                aria_label: if open() { "Hide the help" } else { "What does this mean?" },
+                                aria_label: help_name,
                                 aria_expanded: open(),
                                 onclick: move |event| {
                                     event.stop_propagation();
@@ -698,14 +731,19 @@ pub fn SliderField(
     disabled: bool,
     /// Overrides the id derived from the label, where one label appears twice.
     id: Option<String>,
+    /// What a screen reader names it by, where the label alone leans on the
+    /// switch above it: "QSB fading depth" for Depth. The label otherwise.
+    #[props(into)]
+    long_label: Option<String>,
     onchange: EventHandler<f64>,
 ) -> Element {
     let pct = pct_between(value, min, max);
     let name = id.unwrap_or_else(|| control_id("slider", &label));
     let at_min = value <= min;
     let at_max = value >= max;
-    let less = format!("Decrease {label}");
-    let more = format!("Increase {label}");
+    let spoken = long_label.unwrap_or_else(|| label.clone());
+    let less = format!("Decrease {spoken}");
+    let more = format!("Increase {spoken}");
     rsx! {
         div { class: if disabled { "slider disabled" } else { "slider" },
             div { class: "slider-head",
@@ -729,7 +767,7 @@ pub fn SliderField(
                     input {
                         id: name.clone(),
                         r#type: "range",
-                        aria_label: "{label}",
+                        aria_label: "{spoken}",
                         // Read as it is shown — "every ~8 s", "S/N 38 dB" —
                         // rather than as the number the track runs on.
                         aria_valuetext: "{value_label}",
@@ -759,6 +797,112 @@ pub fn SliderField(
     }
 }
 
+/// What is typed into a box and not committed yet, held where nothing
+/// redraws for it: the rule every box the settings are typed into keeps.
+///
+/// A key does not redraw the box. Every redraw sends the box its `value`
+/// again, and on the desktop and phone builds that lands a frame later, over
+/// whatever was typed in the meantime: a box that redrew for every key lost
+/// keys typed quickly, a quick 120 coming out as 10 and `KMURESN` as
+/// `KMUREN`. So what is typed is held in a value nothing subscribes to, and
+/// the box redraws only when it is settled — committed, stepped, or taken by
+/// a button — or when what it is given changes. A redraw for any other
+/// reason shows the latest of what is typed rather than taking the box back.
+#[derive(Clone, Copy, PartialEq)]
+pub struct TextDraft {
+    /// The text being typed, until it is settled.
+    typed: CopyValue<Option<String>>,
+    /// Moved on by every settle. Reading it is what puts what the box is
+    /// given back in it afterwards, even when that did not move: 999 into a
+    /// field already at its top, or a list that kept nothing.
+    repaint: Signal<u64>,
+}
+
+impl TextDraft {
+    /// A draft for a box, held by the component that calls this.
+    pub fn use_draft() -> Self {
+        Self {
+            typed: use_hook(|| CopyValue::new(None)),
+            repaint: use_signal(|| 0),
+        }
+    }
+
+    /// What the box shows: what is typed, or else `value`. Reading it
+    /// redraws the caller on a settle, and never on a key.
+    pub fn shown(self, value: impl FnOnce() -> String) -> String {
+        let _ = self.repaint.read();
+        self.typed.peek().clone().unwrap_or_else(value)
+    }
+
+    /// A key: what the box holds now, kept without redrawing anything.
+    pub fn hold(mut self, text: String) {
+        self.typed.set(Some(text));
+    }
+
+    /// Drop what is typed and redraw the box, whether or not anything was:
+    /// what it is given goes back in, even when that did not change.
+    pub fn settle(mut self) {
+        self.typed.set(None);
+        self.repaint += 1;
+    }
+
+    /// What was typed and not kept yet, taken: from then on the box shows
+    /// what it is given, as it does once it is left. Nothing typed leaves
+    /// the box as it is.
+    pub fn take(mut self) -> Option<String> {
+        let typed = self.typed.write().take();
+        if typed.is_some() {
+            self.repaint += 1;
+        }
+        typed
+    }
+}
+
+/// A line of text typed in.
+///
+/// What is typed stays as typed until it is committed, on Enter or on
+/// leaving the box, or by a button given its `draft`, and only then is it
+/// kept as the setting keeps it ([`TextDraft`]). Each commit redraws the
+/// box, so it shows what was kept even when that is what it held already.
+#[component]
+pub fn TextField(
+    label: &'static str,
+    value: String,
+    #[props(default)] placeholder: Option<&'static str>,
+    /// The field's class: `field`, or a field of a width of its own.
+    #[props(default = "field")]
+    class: &'static str,
+    on_commit: EventHandler<String>,
+    /// Where something outside the field keeps what is typed in it, as
+    /// Home's Start does; otherwise the field holds its own.
+    #[props(default)]
+    draft: Option<TextDraft>,
+) -> Element {
+    let own = TextDraft::use_draft();
+    let draft = draft.unwrap_or(own);
+    let shown = draft.shown(|| value);
+    let id = control_id("field", label);
+    rsx! {
+        div { class,
+            label { r#for: "{id}", "{label}" }
+            input {
+                id,
+                class: "group-text",
+                value: "{shown}",
+                placeholder,
+                autocapitalize: "characters",
+                autocomplete: "off",
+                spellcheck: false,
+                oninput: move |e| draft.hold(e.value()),
+                onchange: move |e| {
+                    draft.settle();
+                    on_commit.call(e.value());
+                },
+            }
+        }
+    }
+}
+
 /// A number typed in, or stepped with − and +.
 ///
 /// What is typed stays in the box, and reaches `onchange` only once it is
@@ -767,14 +911,15 @@ pub fn SliderField(
 /// setting that took every key would take that too, which for one end of a
 /// range drags the other end down with it.
 ///
-/// A key does not redraw the field. Every redraw sends the box its `value`
-/// again, and on the desktop and phone builds that lands a frame later, over
-/// whatever was typed in the meantime: a quick 120 could come out as 10. So
-/// the field redraws only when it is committed or stepped, or when what it
-/// is given changes.
+/// A key does not redraw the field ([`TextDraft`]): it redraws only when it
+/// is committed or stepped, or when what it is given changes.
 ///
 /// − and + show the value they leave in the box, over anything typed and not
 /// committed, even when the setting did not take the step.
+///
+/// A screen reader names the box, and − and +, by its label and its unit,
+/// "Answer timeout (seconds)", or by `long_label` where the label leans on
+/// what is around it.
 #[component]
 pub fn NumberField(
     #[props(into)] label: String,
@@ -786,20 +931,19 @@ pub fn NumberField(
     /// Overrides the id derived from the label, for fields whose label is not
     /// unique or not stable.
     id: Option<String>,
+    /// What a screen reader names it by, its unit among it, where the label
+    /// alone is not enough to tell it from another: "Character speed, min
+    /// (WPM)" for Min (WPM).
+    #[props(into)]
+    long_label: Option<String>,
     onchange: EventHandler<f64>,
 ) -> Element {
     let name = id.unwrap_or_else(|| control_id("number", &label));
-    // The text being typed, until it is committed or stepped over. Nothing
-    // subscribes to it, so a key costs no redraw; a redraw for any other
-    // reason shows the latest of it rather than taking the box back to the
-    // value.
-    let mut typed = use_hook(|| CopyValue::new(None::<String>));
-    // Moved on by every commit and every step. Reading it here is what puts
-    // the value back in the box afterwards, even when the value itself did
-    // not move — 999 into a field already at its top, or a step the setting
-    // did not take.
-    let mut repaint = use_signal(|| 0u64);
-    let _ = repaint.read();
+    let spoken = long_label.unwrap_or_else(|| match &unit {
+        Some(unit) => format!("{label} ({})", spoken_unit(unit)),
+        None => label.clone(),
+    });
+    let draft = TextDraft::use_draft();
     // Drop what is typed, redraw the box, and hand `to` on if there is one.
     // − and + do this as well as a commit, because some typing is never
     // committed. Text put back the way it was has nothing to commit. A key
@@ -808,16 +952,15 @@ pub fn NumberField(
     // can keep the box focused through a tap on − or +. The text is still
     // held then, and a step that kept it would show it in place of the
     // number stepped to.
-    let mut settle = move |to: Option<f64>| {
-        typed.set(None);
-        repaint += 1;
+    let settle = move |to: Option<f64>| {
+        draft.settle();
         if let Some(v) = to {
             onchange.call(v);
         }
     };
-    let shown = typed.peek().clone().unwrap_or_else(|| value.to_string());
-    let less = format!("Decrease {label}");
-    let more = format!("Increase {label}");
+    let shown = draft.shown(|| value.to_string());
+    let less = format!("Decrease {spoken}");
+    let more = format!("Increase {spoken}");
     rsx! {
         div { class: "field",
             label { r#for: "{name}", "{label}" }
@@ -834,12 +977,13 @@ pub fn NumberField(
                 input {
                     id: name.clone(),
                     r#type: "number",
+                    aria_label: "{spoken}",
                     inputmode: "decimal",
                     min: "{min}",
                     max: "{max}",
                     step: "{step}",
                     value: "{shown}",
-                    oninput: move |e| typed.set(Some(e.value())),
+                    oninput: move |e| draft.hold(e.value()),
                     onchange: move |e| settle(parse_number_input(&e.value(), min, max)),
                 }
                 if let Some(unit) = unit {
@@ -865,17 +1009,38 @@ pub fn NumberField(
 /// everything", because the thing you want back is almost always the corner
 /// you have just been experimenting in — and a single global reset is the one
 /// nobody dares press.
+///
+/// In the app, Undo is offered for a while after ([`AppCtx::reset_section`]):
+/// a card can hold what took typing, and one press should not cost it. A
+/// card drawn on its own, with no app around it, just resets.
 #[component]
-pub fn SectionReset(#[props(into)] label: String, on_reset: EventHandler<()>) -> Element {
-    let title = format!("Reset {label} to defaults");
+pub fn SectionReset(
+    /// The card's title, as it shows: "Band conditions".
+    #[props(into)]
+    card: String,
+    settings: Signal<TrainingSettings>,
+    section: SettingsSection,
+    /// What the card does besides, as it is reset.
+    #[props(default)]
+    on_reset: EventHandler<()>,
+) -> Element {
+    let app = try_use_context::<AppCtx>();
+    let title = format!("Reset {} to defaults", card.to_lowercase());
+    let id = control_id("reset", &card);
     rsx! {
         button {
-            id: control_id("reset", &label),
+            id,
             class: "icon-btn",
             r#type: "button",
             title: "{title}",
             aria_label: "{title}",
-            onclick: move |_| on_reset.call(()),
+            onclick: move |_| {
+                on_reset.call(());
+                match app {
+                    Some(app) => app.reset_section(section, &card),
+                    None => settings.write().reset_section(section),
+                }
+            },
             Icon { name: IconName::Reset }
         }
     }
@@ -905,6 +1070,17 @@ pub fn LinkedRange(
     } else {
         format!("{} {unit}", range_label(min_value, max_value))
     };
+    // Named for the setting, as a screen reader meets every Min, Max and
+    // Fixed/Random on the page apart from the label above it: "Character
+    // speed, min (WPM)", and the toggle "Random character speed", pressed
+    // while it is.
+    let spoken = spoken_unit(unit);
+    let named = |end: &str| format!("{label}, {end} ({spoken})");
+    let mut setting = label.to_string();
+    if let Some(first) = setting.get_mut(..1) {
+        first.make_ascii_lowercase();
+    }
+    let toggle = format!("Random {setting}");
     rsx! {
         div { class: "range-field",
             div { class: "range-head",
@@ -915,6 +1091,8 @@ pub fn LinkedRange(
                         id: control_id("link", label),
                         class: if linked { "link-toggle on" } else { "link-toggle" },
                         r#type: "button",
+                        aria_label: toggle,
+                        aria_pressed: if linked { "false" } else { "true" },
                         onclick: move |_| on_link.call(!linked),
                         Icon { name: if linked { IconName::Target } else { IconName::Shuffle } }
                         if linked { "Fixed" } else { "Random" }
@@ -928,6 +1106,7 @@ pub fn LinkedRange(
                 NumberField {
                     label: format!("Value ({unit})"),
                     id: control_id("fixed", label),
+                    long_label: named("value"),
                     value: min_value,
                     min: min_bound,
                     max: max_bound,
@@ -939,6 +1118,7 @@ pub fn LinkedRange(
                     NumberField {
                         label: format!("Min ({unit})"),
                         id: control_id("from", label),
+                        long_label: named("min"),
                         value: min_value,
                         min: min_bound,
                         max: max_bound,
@@ -948,6 +1128,7 @@ pub fn LinkedRange(
                     NumberField {
                         label: format!("Max ({unit})"),
                         id: control_id("to", label),
+                        long_label: named("max"),
                         value: max_value,
                         min: min_bound,
                         max: max_bound,
@@ -1080,7 +1261,7 @@ mod tests {
 
     use super::{
         NumberField, control_id, focus_end_script, focus_script, html_bool, nudge,
-        parse_number_input, pct_between, pretty_number,
+        parse_number_input, pct_between, pretty_number, whole,
     };
     use crate::testing::Ui;
 
@@ -1226,6 +1407,18 @@ mod tests {
         ui.click("more-number-count");
         assert_eq!(ui.take_work(), 1, "the step left 57 in the box");
         assert!(ui.input_tag("number-count").contains("value=\"5\""));
+    }
+
+    /// A whole-number setting takes a typed fraction to the nearest whole
+    /// number, as every range's ends do, and never below zero.
+    #[test]
+    fn a_typed_fraction_rounds_to_the_nearest_whole_number() {
+        assert_eq!(whole(2.9), 3);
+        assert_eq!(whole(2.4), 2);
+        assert_eq!(whole(4.5), 5);
+        assert_eq!(whole(-1.0), 0);
+        assert_eq!(whole(f64::NAN), 0);
+        assert_eq!(whole(1e12), u32::MAX);
     }
 
     #[test]

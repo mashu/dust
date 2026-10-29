@@ -184,9 +184,13 @@ impl TrainingSettings {
         }
     }
 
-    /// Switch character set, starting it on its whole alphabet.
+    /// Switch character set, starting it on its whole alphabet. Into a
+    /// contest run as a pile-up, the stations range opens for it; out of
+    /// one, it goes back to what it was before a pile-up opened it, as group
+    /// training shares it ([`Self::set_contest_style`]).
     pub fn set_char_set_mode(&mut self, mode: CharSetMode) {
         self.curriculum.char_set_mode = mode;
         self.curriculum.practice_window = PracticeWindow::All;
+        self.fit_stations_to_pileup();
     }
 }

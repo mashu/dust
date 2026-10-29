@@ -26,7 +26,8 @@ use crate::ui::settings_charset::CharsetCard;
 use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
     CardHead, FoldPanel, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange,
-    SliderField, Switch, control_id, db_share, html_bool, range_label, share_db,
+    SliderField, Switch, control_id, db_share, html_bool, pretty_number, range_label, share_db,
+    whole,
 };
 
 /// What an aim is called on screen.
@@ -79,10 +80,7 @@ fn SectionHead(
 ) -> Element {
     rsx! {
         CardHead { icon, title, note, help, fold,
-            SectionReset {
-                label: title.to_lowercase(),
-                on_reset: move |()| settings.write().reset_section(section),
-            }
+            SectionReset { card: title, settings, section }
         }
     }
 }
@@ -313,7 +311,7 @@ fn AimFor(settings: Signal<TrainingSettings>, aim: Aim, note: String) -> Element
     rsx! {
         div { class: "field",
             span { class: "field-label", "Aim for" }
-            div { class: "segmented",
+            div { class: "segmented", role: "group", aria_label: "Aim for",
                 for each in Aim::ALL {
                     Seg {
                         label: aim_label(each),
@@ -350,7 +348,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                         max: f64::from(CONTEST_MINUTES_MAX),
                         step: 1.0,
                         unit: "min",
-                        onchange: move |v| settings.write().contest.contest_minutes = v as u32,
+                        onchange: move |v| settings.write().contest.contest_minutes = whole(v),
                     }
                 } else {
                     NumberField {
@@ -365,7 +363,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                         min: f64::from(NUM_GROUPS_MIN),
                         max: f64::from(NUM_GROUPS_MAX),
                         step: 1.0,
-                        onchange: move |v| settings.write().curriculum.num_groups = v as u32,
+                        onchange: move |v| settings.write().curriculum.num_groups = whole(v),
                     }
                     NumberField {
                         label: "Answer timeout",
@@ -397,7 +395,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     max: f64::from(COUNTDOWN_MAX_SEC),
                     step: 1.0,
                     unit: "sec",
-                    onchange: move |v| settings.write().playback.countdown_sec = v as u32,
+                    onchange: move |v| settings.write().playback.countdown_sec = whole(v),
                 }
             }
             if s.contest {
@@ -415,7 +413,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     "Time to read the last group before the next send. Zero keeps contest pace. Repeats of the same group stay a word space apart."
                 }
                 p { class: "muted hint small",
-                    "The answer timeout moves on from a group you have not started. Once you type, the group waits for you: it is checked when every character is in, or when you press Next or Enter."
+                    "The answer timeout moves on from a group you have not started; at 0 it never does. Once you type, the group waits for you: it is checked when every character is in, or when you press Next or Enter."
                 }
             }
             // A callsign or a word is as long as it is, so there is nothing to
@@ -469,7 +467,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
             }
             div { class: "field",
                 span { class: "field-label", "Key" }
-                div { class: "segmented",
+                div { class: "segmented", role: "group", aria_label: "Key",
                     for (mode, label) in KEYER_MODES {
                         Seg {
                             label,
@@ -527,16 +525,38 @@ struct Speed {
     aim: Aim,
     /// The ranges are a contest's callers'.
     contest: bool,
+    /// The effective speeds the spacing is sent at, where some of the range
+    /// set is above the fastest character speed and goes at that.
+    held: Option<(f64, f64)>,
+    /// The fastest character speed.
+    fastest_char: f64,
 }
 
 /// Why an adaptive speed switch does nothing with one speed set, naming
-/// only the ranges the card shows: tied, Effective speed is hidden.
-fn one_speed(tied: bool) -> &'static str {
-    if tied {
-        "Give Character speed a range to use this: one speed leaves nothing to adapt."
+/// only the ranges the card shows: tied, Effective speed is hidden. An
+/// effective speed held down to a single character speed is a range that
+/// leaves one speed all the same, and says so.
+fn one_speed(speed: &Speed) -> String {
+    if speed.tied {
+        "Give Character speed a range to use this: one speed leaves nothing to adapt.".to_string()
+    } else if speed.held.is_some() {
+        let fastest = pretty_number(speed.fastest_char);
+        format!(
+            "Effective speed is never faster than Character speed, so it is sent at {fastest}\u{a0}WPM and one speed is left: give Character speed a range, or Effective speed one under {fastest}\u{a0}WPM, to use this."
+        )
     } else {
-        "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
+        "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt.".to_string()
     }
+}
+
+/// What an effective speed held down to the characters is used as, under
+/// its range: "Used as 20 WPM: the spacing is never faster than Character
+/// speed."
+fn held_note((slowest, fastest): (f64, f64)) -> String {
+    format!(
+        "Used as {}\u{a0}WPM: the spacing is never faster than Character speed.",
+        range_label(slowest, fastest)
+    )
 }
 
 #[component]
@@ -555,6 +575,12 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
             aim_here: aim_section(&all) == SettingsSection::Speed,
             aim: all.curriculum.aim,
             contest,
+            held: all.effective_wpm_held(),
+            fastest_char: if p.link_char_wpm {
+                p.char_wpm_min
+            } else {
+                p.char_wpm_max.max(p.char_wpm_min)
+            },
         }
     })();
     let note = if speed.contest {
@@ -592,17 +618,21 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                     step: 1.0,
                     hint: "Farnsworth: characters stay fast, the gaps between them stretch.",
                 }
+                if let Some(held) = speed.held {
+                    p { id: "effective-held", class: "muted hint small", "{held_note(held)}" }
+                }
             }
             if speed.contest {
                 p { class: "muted hint small",
-                    "Callers come at speeds drawn from these ranges."
+                    "Callers come at speeds drawn from these ranges. Group training sends at them too."
                 }
                 Switch {
                     title: "Adapt callers' speed to me",
                     description: if speed.room {
                         "New callers come faster while you copy calls and numbers clean, slower when you miss them; those already calling keep their speed. Your copy speed is under Stats."
+                            .to_string()
                     } else {
-                        one_speed(speed.tied)
+                        one_speed(&speed)
                     },
                     checked: speed.adaptive,
                     onchange: move |on| settings.write().contest.contest_adapt_speed = on,
@@ -612,8 +642,9 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                     title: "Adapt speed to me",
                     description: if speed.room {
                         "Within these speeds: faster while you copy the characters, slower when you miss them. Your copy speed is under Stats."
+                            .to_string()
                     } else {
-                        one_speed(speed.tied)
+                        one_speed(&speed)
                     },
                     checked: speed.adaptive,
                     onchange: move |on| settings.write().playback.adaptive_speed = on,
@@ -652,13 +683,16 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 "How far the stations calling stray from a keyer — heavier or lighter elements, longer or shorter dahs, each operator sending their own way. At zero every station is a machine, which is what you want while a character is still new."
             }
             NumberField {
-                label: "Extra word spacing",
+                label: "Word space",
                 value: speed.extra_word_space,
                 min: EXTRA_WORD_SPACE_MIN,
                 max: EXTRA_WORD_SPACE_MAX,
                 step: 0.1,
                 unit: "×",
                 onchange: move |v| settings.write().playback.extra_word_space_multiplier = v,
+            }
+            p { id: "word-space-line", class: "muted hint small",
+                "Every gap between words and groups, times the standard seven units: 1× is standard, 2× twice as long, 0.5× half."
             }
             Switch {
                 title: "Tie effective speed to character speed",
@@ -693,7 +727,7 @@ fn YourSpeed(settings: Signal<TrainingSettings>) -> Element {
             max: WPM_MAX,
             step: 1.0,
             unit: "WPM",
-            onchange: move |v: f64| settings.write().contest.my_wpm = v.round() as u32,
+            onchange: move |v: f64| settings.write().contest.my_wpm = whole(v),
         }
         if my_wpm == 0 {
             p { id: "your-speed-line", class: "muted hint small",
@@ -902,7 +936,7 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
                     min: 0.0,
                     max: f64::from(ADJUST_COUNT_MAX),
                     step: 1.0,
-                    onchange: move |v| settings.write().auto_level.auto_adjust_above_threshold_count = v as u32,
+                    onchange: move |v| settings.write().auto_level.auto_adjust_above_threshold_count = whole(v),
                 }
                 NumberField {
                     label: "Sessions below to level down",
@@ -910,7 +944,7 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
                     min: 0.0,
                     max: f64::from(ADJUST_COUNT_MAX),
                     step: 1.0,
-                    onchange: move |v| settings.write().auto_level.auto_adjust_below_threshold_count = v as u32,
+                    onchange: move |v| settings.write().auto_level.auto_adjust_below_threshold_count = whole(v),
                 }
             }
         }
@@ -931,7 +965,7 @@ fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
     let edge = move |which: RecognitionEdge| {
         move |ms: f64| {
             let mut settings = settings.write();
-            settings.recognition = settings.recognition.with(which, ms.round() as u32);
+            settings.recognition = settings.recognition.with(which, whole(ms));
         }
     };
     let (low, high) = (

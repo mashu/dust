@@ -210,7 +210,12 @@ three and three at 600 px and below, so Contest is never alone on a row.
 
 **The card in Contest mode.** The title stays "Character set", so its Reset
 still means what it says; the note (`settings_charset.rs:123-142`) reads
-"Contest · CQ WPX". The body shows:
+"Contest · CQ WPX". As built (2026-10-29), its Reset in Contest mode puts
+the contest, the run style and your call in TU back and stays in Contest
+(it used to drop to Mixed), and leaves an unlock order of your own and the
+word list as they are; every card's Reset leaves a message with Undo, which
+puts that card back, Your station's call and exchange among them. The body
+shows:
 
 - one pill per contest, once its phase ships (a control that does nothing
   is removed, `src/app.rs:1606-1635`);
@@ -634,6 +639,11 @@ settings so scores compare between people.
   call alone (F4) brings callers too once a QSO is in the log, as MRCE's
   (`Contest.pas:1001-1025`). A pile-up of one caller is none, so picking
   Pile-up while the stations range holds one station opens it to 1–3 (8).
+  As built (2026-10-29), the range is group training's too, so Single
+  caller, or another character set, puts back the one station a pile-up
+  opened it from, unless the range was set since
+  (`stationsOpenedByPileup`); it used to stay open, and a single caller
+  or a Koch session got a pile-up nobody set.
   As built (2026-10-23), the callers a message brings, and every other
   caller answering it, start no sooner than a station leaving has
   finished: one your CQ, TU or NIL sent on its way while it was still
@@ -2336,7 +2346,7 @@ fist variation.
 |---|---|
 | Character and effective speed ranges | the callers' speeds, drawn within them from your copy speed while the callers adapt (`contestAdaptSpeed`, on as it ships), evenly otherwise; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
 | `callsignLevel` | the callers' call shapes, shared with Callsigns mode |
-| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept |
+| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept, and one the pile-up opened goes back to one station on leaving it, for Single or another character set (as built, 2026-10-29) |
 | `pileupSpreadHz` | Pile-up only: how far either side of the centre callers land; hidden for Single, where it does nothing |
 | Session shape's first field | "Minutes per run" in place of "Groups per session" (`settings.rs:288-295`) |
 
@@ -2358,8 +2368,12 @@ below. A preset that wrote the tier, the run style, the habits, the
 stations, the band and your speed put back whatever the learner had set
 there, and the tier, the stations and the band are group training's too.
 The learner sets those, and a preset leaves them as they are. The card
-reads "Callers at 15–18 WPM", or on none "Custom · a preset sets how fast
-the callers come, and nothing else", and reads Custom once the callers'
+reads "Callers at 15–18 WPM", or on none "Custom · a preset sets the Speed
+card's speeds, which group training uses too, and nothing else" (as built,
+2026-10-29: it read "how fast the callers come, and nothing else", which
+hid that the speed ranges a preset writes are group training's as well; a
+contest has no speed range of its own, and the Speed card in Contest mode
+says the same), and reads Custom once the callers'
 speed is edited, as Experience does; Experience in turn sets the group
 size and the speed, and no longer the session's length. What follows is
 the presets as they were built before that, kept for the record.

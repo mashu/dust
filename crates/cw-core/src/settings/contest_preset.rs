@@ -1,5 +1,8 @@
 //! Starting points for three kinds of operator in Contest mode: how fast
-//! the callers come. That and nothing more.
+//! the callers come. That and nothing more. A contest has no speed of its
+//! own: the callers come at the Speed card's character and effective
+//! speeds, which group training sends at too, so a preset sets those, and
+//! the card under the presets says so.
 //!
 //! As with the Experience presets ([`super::Experience`]), a preset is
 //! applied once, through the same calls the settings screen makes, and no
@@ -47,7 +50,8 @@ impl ContestPreset {
     }
 
     /// Put the settings on this preset: the callers' speed, the way the
-    /// settings screen sets it.
+    /// settings screen sets it: the Speed card's ranges, which are group
+    /// training's speed too.
     /// The spacing goes with the characters: tied, it follows them; with
     /// Farnsworth spacing set, the same range goes there, as callers in a
     /// contest space at the speed they key. Your own speed is left as it
