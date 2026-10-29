@@ -58,6 +58,42 @@ fn typing_into_one_end_of_the_side_tone_keeps_its_box() {
     });
 }
 
+/// Fixed, then Random, opens a range to draw from on every range the page
+/// shows, so that Random does something at once, and a note that asks for
+/// a range is answered by the press. Each used to stay at its one value
+/// but the side tone and the stations.
+#[test]
+fn random_opens_every_fixed_value_into_a_range() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.commit("switch-tie-effective-speed-to-character-speed", "false");
+        ui.click("link-group-size");
+        assert!(ui.has("Set Group size to Random to use this"));
+        for name in [
+            "character-speed",
+            "effective-speed",
+            "group-size",
+            "sends-per-group",
+            "side-tone",
+            "station-strength",
+            "stations-calling",
+        ] {
+            let link = format!("link-{name}");
+            if !ui.shows(&format!("fixed-{name}")) {
+                ui.click(&link);
+            }
+            assert!(ui.shows(&format!("fixed-{name}")), "{name} is not fixed");
+            ui.click(&link);
+            let (from, to) = (format!("from-{name}"), format!("to-{name}"));
+            assert_ne!(value_of(&ui, &from), value_of(&ui, &to), "{name}");
+        }
+        assert_eq!(value_of(&ui, "from-group-size"), "2");
+        assert_eq!(value_of(&ui, "to-group-size"), "3");
+        assert!(!ui.has("Set Group size to Random to use this"));
+    });
+}
+
 /// A number committed past what the field allows comes back as the most it
 /// allows, even when that is what the setting already was. Until then the
 /// 999 is the box's own: nothing is written over it while it is typed.

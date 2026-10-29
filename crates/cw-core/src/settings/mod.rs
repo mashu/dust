@@ -812,8 +812,11 @@ mod tests {
         let range = s.range(RangeSetting::GroupRepeat);
         assert_eq!((range.min, range.max, range.linked), (3.0, 3.0, true));
 
-        // Unlinking leaves the value where it was; the range opens by editing.
+        // Unlinking opens the value into a range up from it, which editing
+        // then moves.
         s.set_range_linked(RangeSetting::GroupRepeat, false);
+        let range = s.range(RangeSetting::GroupRepeat);
+        assert_eq!((range.min, range.max, range.linked), (3.0, 4.0, false));
         s.set_range_max(RangeSetting::GroupRepeat, 5.0);
         let range = s.range(RangeSetting::GroupRepeat);
         assert_eq!((range.min, range.max, range.linked), (3.0, 5.0, false));
@@ -1388,6 +1391,71 @@ mod tests {
         // Collapsing sends both ends to the lower bound.
         s.set_range_linked(RangeSetting::SideTone, true);
         assert_eq!(s.band.side_tone_max, 1000.0);
+    }
+
+    /// Random has to draw from more than one value, whichever range it is
+    /// on: Fixed then Random opens the value into a range around it, inside
+    /// the range's bounds, at the bottom of them, in the middle and at the
+    /// top, and the settings stay as clamping keeps them. A range open
+    /// already stays as it is.
+    #[test]
+    fn every_fixed_range_opens_into_a_range() {
+        let cases = [
+            (RangeSetting::CharWpm, WPM_MIN, WPM_MAX),
+            (RangeSetting::EffectiveWpm, WPM_MIN, WPM_MAX),
+            (
+                RangeSetting::GroupSize,
+                f64::from(GROUP_SIZE_MIN),
+                f64::from(GROUP_SIZE_MAX),
+            ),
+            (
+                RangeSetting::GroupRepeat,
+                f64::from(GROUP_REPEAT_MIN),
+                f64::from(GROUP_REPEAT_MAX),
+            ),
+            (RangeSetting::SideTone, SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ),
+            (RangeSetting::Volume, VOLUME_MIN, VOLUME_MAX),
+            (
+                RangeSetting::Stations,
+                f64::from(STATIONS_MIN),
+                f64::from(STATIONS_MAX),
+            ),
+        ];
+        for (which, low, high) in cases {
+            for start in [low, ((low + high) / 2.0).round().max(low), high] {
+                let case = format!("{which:?} from {start}");
+                let mut s = TrainingSettings::default();
+                s.playback.link_char_to_effective = false;
+                s.set_range_linked(which, true);
+                s.set_range_min(which, start);
+                assert!(s.range(which).linked, "{case}");
+                s.set_range_linked(which, false);
+                let range = s.range(which);
+                assert!(!range.linked, "{case}");
+                assert!(range.min < range.max, "{case}: {range:?}");
+                assert!(
+                    range.min <= start + 1e-3 && start <= range.max + 1e-3,
+                    "{case}: {range:?}"
+                );
+                assert!(low <= range.min && range.max <= high, "{case}: {range:?}");
+                assert_eq!(s.clone().clamp(), s, "{case}");
+
+                s.set_range_max(which, high);
+                s.set_range_min(which, low);
+                s.set_range_linked(which, false);
+                let range = s.range(which);
+                assert_eq!((range.min, range.max), (low, high), "{case}, open");
+            }
+        }
+        // Effective speed opens downwards, under the characters, as
+        // Farnsworth spacing does.
+        let mut s = TrainingSettings::default();
+        s.playback.link_char_to_effective = false;
+        s.set_range_linked(RangeSetting::EffectiveWpm, true);
+        s.set_range_min(RangeSetting::EffectiveWpm, 20.0);
+        s.set_range_linked(RangeSetting::EffectiveWpm, false);
+        let range = s.range(RangeSetting::EffectiveWpm);
+        assert_eq!((range.min, range.max), (15.0, 20.0));
     }
 
     #[test]

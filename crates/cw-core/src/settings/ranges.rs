@@ -1,15 +1,82 @@
 use std::ops::RangeInclusive;
 
 use super::{
-    MASTER_VOLUME_MAX, MASTER_VOLUME_MIN, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting,
-    RangeValues, SIDE_TONE_MAX_HZ, SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS,
-    STEEPNESS_MIN_MS, TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
+    GROUP_REPEAT_MAX, GROUP_REPEAT_MIN, GROUP_SIZE_MAX, GROUP_SIZE_MIN, MASTER_VOLUME_MAX,
+    MASTER_VOLUME_MIN, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RangeValues, SIDE_TONE_MAX_HZ,
+    SIDE_TONE_MIN_HZ, STATIONS_MAX, STATIONS_MIN, STEEPNESS_MAX_MS, STEEPNESS_MIN_MS,
+    TrainingSettings, VOLUME_MAX, VOLUME_MIN, WPM_MAX, WPM_MIN,
 };
 use crate::band::{db_to_gain, full_volume_gain, gain_to_db};
 
 /// How far apart the side tone bounds are pushed when a fixed pitch is opened
 /// back up into a range.
 const SIDE_TONE_SPREAD_HZ: f64 = 200.0;
+
+/// How far apart a fixed speed's ends are pushed when it is opened into a
+/// range, in words a minute: a speed a little faster or slower is heard.
+const SPEED_SPREAD_WPM: f64 = 5.0;
+
+/// How far apart a fixed station strength's ends are pushed, in decibels,
+/// as it is shown: a station an S-unit stronger or weaker.
+const VOLUME_SPREAD_DB: f64 = 6.0;
+
+/// How a fixed value is opened into a range: how far apart its ends go, and
+/// the bounds they stay inside, as the range is shown.
+struct Opening {
+    spread: f64,
+    low: f64,
+    high: f64,
+    /// Towards the slower end first, rather than the faster: Farnsworth
+    /// spacing, which is slower than the characters.
+    downwards: bool,
+}
+
+impl Opening {
+    fn of(which: RangeSetting) -> Self {
+        let up = |spread, low, high| Self {
+            spread,
+            low,
+            high,
+            downwards: false,
+        };
+        match which {
+            RangeSetting::CharWpm => up(SPEED_SPREAD_WPM, WPM_MIN, WPM_MAX),
+            RangeSetting::EffectiveWpm => Self {
+                downwards: true,
+                ..up(SPEED_SPREAD_WPM, WPM_MIN, WPM_MAX)
+            },
+            RangeSetting::GroupSize => {
+                up(1.0, f64::from(GROUP_SIZE_MIN), f64::from(GROUP_SIZE_MAX))
+            }
+            RangeSetting::GroupRepeat => up(
+                1.0,
+                f64::from(GROUP_REPEAT_MIN),
+                f64::from(GROUP_REPEAT_MAX),
+            ),
+            RangeSetting::SideTone => up(SIDE_TONE_SPREAD_HZ, SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ),
+            RangeSetting::Volume => up(
+                VOLUME_SPREAD_DB,
+                gain_to_db(VOLUME_MIN),
+                gain_to_db(VOLUME_MAX),
+            ),
+            // One station either side is the smallest range that is still a
+            // range.
+            RangeSetting::Stations => up(1.0, f64::from(STATIONS_MIN), f64::from(STATIONS_MAX)),
+        }
+    }
+
+    /// The range `value` opens into: `spread` wide, from `value` on where
+    /// there is room, and pushed back from the bound where there is not.
+    fn around(&self, value: f64) -> (f64, f64) {
+        if self.downwards {
+            let low = (value - self.spread).max(self.low);
+            (low, (low + self.spread).min(self.high))
+        } else {
+            let high = (value + self.spread).min(self.high);
+            ((high - self.spread).max(self.low), high)
+        }
+    }
+}
 
 impl TrainingSettings {
     pub fn range(&self, which: RangeSetting) -> RangeValues {
@@ -81,6 +148,14 @@ impl TrainingSettings {
     }
 
     /// Collapse a range to its lower bound, or open a fixed value back up.
+    ///
+    /// A fixed value is a range whose ends are together, so opening one has
+    /// to push them apart, or Random would draw the one value still, and
+    /// do nothing until an end was edited. Every range opens the same way
+    /// ([`Opening`]): from the value up, a little way, inside its bounds;
+    /// Effective speed from the value down, as Farnsworth spacing is slower
+    /// than the characters. A range whose ends are apart already stays as
+    /// it is.
     pub fn set_range_linked(&mut self, which: RangeSetting, linked: bool) {
         let current = self.range(which);
         match which {
@@ -94,17 +169,19 @@ impl TrainingSettings {
         }
         if linked {
             self.write_range(which, current.min, current.min);
-        } else if which == RangeSetting::SideTone {
-            let max = (current.min + SIDE_TONE_SPREAD_HZ).min(SIDE_TONE_MAX_HZ);
-            let min = (max - SIDE_TONE_SPREAD_HZ).max(SIDE_TONE_MIN_HZ);
-            self.write_range(which, min, max);
-        } else if which == RangeSetting::Stations {
-            // Neither of these stores a link flag — the bounds themselves say
-            // whether the value is fixed — so opening one back up has to push
-            // them apart, or the button would do nothing at all. One station
-            // either side is the smallest range that is still a range.
-            let max = (current.min + 1.0).min(f64::from(STATIONS_MAX));
-            let min = (max - 1.0).max(f64::from(STATIONS_MIN));
+        } else if (current.max - current.min).abs() < f64::EPSILON {
+            let opening = Opening::of(which);
+            let (min, max) = if which == RangeSetting::Volume {
+                // In decibels, as it is shown, and kept as a share of full.
+                let share = |db: f64| {
+                    let share = db_to_gain(db).clamp(VOLUME_MIN, VOLUME_MAX);
+                    (share * 10_000.0).round() / 10_000.0
+                };
+                let (low, high) = opening.around(gain_to_db(current.min));
+                (share(low), share(high))
+            } else {
+                opening.around(current.min)
+            };
             self.write_range(which, min, max);
         }
     }
