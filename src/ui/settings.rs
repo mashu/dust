@@ -113,6 +113,10 @@ pub fn SettingsView(
                 h2 { class: "page-title", "Settings" }
                 p { class: "page-sub", "Everything the trainer sends, and how hard it makes you work." }
             }
+            // From what a learner sets first to what there is least call
+            // for: the cards the guided setup walks through, in its order;
+            // then the band and the keying envelope, the most there is to
+            // set; then the cards that start folded, under every open one.
             if !contest {
                 ExperienceCard { settings }
             }
@@ -126,28 +130,29 @@ pub fn SettingsView(
             if contest {
                 StationCard { settings }
             }
-            SessionShapeCard { settings }
             SpeedCard { settings }
+            SessionShapeCard { settings }
             ToneCard { settings }
-            EnvelopeCard {
-                settings,
-                sample_playing,
-                on_play: on_play_sample,
-                on_stop: on_stop_band,
-            }
             if !contest {
                 AutoLevelSettingsCard { settings }
             }
-            // The bands colour Letter accuracy, which keeps every mode's
-            // times, contest runs' among them, whatever mode is on.
-            RecognitionCard { settings }
-            SamplingCard { settings }
             BandConditionsCard {
                 settings,
                 previewing,
                 on_preview: on_preview_band,
                 on_stop: on_stop_band,
             }
+            EnvelopeCard {
+                settings,
+                sample_playing,
+                on_play: on_play_sample,
+                on_stop: on_stop_band,
+            }
+            // What the trainer sends before what Stats colours it by. The
+            // bands colour Letter accuracy, which keeps every mode's times,
+            // contest runs' among them, whatever mode is on.
+            SamplingCard { settings }
+            RecognitionCard { settings }
             crate::ui::display::DisplayCard {}
             crate::ui::privacy::PrivacyCard {}
             crate::ui::credits::CreditsCard {}

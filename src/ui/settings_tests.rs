@@ -1463,3 +1463,73 @@ fn the_cards_there_is_least_call_for_start_folded_and_open_from_their_heads() {
         assert!(ui.shows("slider-agc-threshold"), "the band card is open");
     });
 }
+
+/// The titles of the cards on the page, top to bottom.
+fn card_titles(ui: &Ui) -> Vec<String> {
+    ui.html()
+        .split("class=\"card-title\">")
+        .skip(1)
+        .map(|rest| {
+            rest.split('<')
+                .next()
+                .unwrap_or_default()
+                .replace("&#38;", "&")
+        })
+        .collect()
+}
+
+/// Settings runs from what a learner sets first to what there is least
+/// call for: the cards the guided setup walks through, in the order it
+/// visits them, then the band and the keying envelope, the most there is
+/// to set, then the cards that start folded, so no open card sits among
+/// folded ones. A contest has its station after its character set, and no
+/// preset or level to move.
+#[test]
+fn settings_run_from_what_is_set_first_to_what_there_is_least_call_for() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app();
+        ui.click("nav-settings");
+        assert_eq!(
+            card_titles(&ui),
+            [
+                "Experience",
+                "Character set",
+                "Speed",
+                "Session shape",
+                "Tone & volume",
+                "Auto level",
+                "Band conditions",
+                "Keying envelope",
+                // Folded.
+                "Character sampling",
+                "Recognition",
+                "Display",
+                "Privacy",
+                "Credits",
+            ]
+        );
+
+        let mut contest = test_settings();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        let (mut ui, _recorder) = Ui::app_with_settings(contest);
+        ui.click("nav-settings");
+        assert_eq!(
+            card_titles(&ui),
+            [
+                "Character set",
+                "Your station",
+                "Speed",
+                "Session shape",
+                "Tone & volume",
+                "Band conditions",
+                "Keying envelope",
+                // Folded.
+                "Character sampling",
+                "Recognition",
+                "Display",
+                "Privacy",
+                "Credits",
+            ]
+        );
+    });
+}
