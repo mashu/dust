@@ -181,6 +181,10 @@ pub struct Group {
     repeats: u32,
     /// Sends already finished for this group.
     plays_done: u32,
+    /// Its answer was complete when the session was paused. It stands as
+    /// it was timed, unless it is changed after the pause: keys either
+    /// side of a pause cannot be timed against one send.
+    paused_complete: bool,
 }
 
 impl Group {
@@ -198,6 +202,7 @@ impl Group {
             planned_wpm: None,
             repeats: 1,
             plays_done: 0,
+            paused_complete: false,
         }
     }
 
@@ -516,13 +521,25 @@ impl GroupSession {
     /// characters. An answer already complete when it paused is timed as it
     /// stands.
     pub(crate) fn note_paused(&mut self, index: usize, ms: u64) {
-        if let Some(group) = self.groups.get_mut(index)
-            && !group.confirmed()
-            && group.answer_at.is_none()
-        {
-            group.end_at = group.end_at.map(|end| end.plus(ms));
-            if let Some(sounding) = &mut group.sounding {
-                sounding.trusted = false;
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        if group.confirmed() {
+            return;
+        }
+        group.end_at = group.end_at.map(|end| end.plus(ms));
+        match &mut group.answer_at {
+            // Complete already: moved on with the end, so it stands as
+            // timed, and an answer corrected after the pause is timed from
+            // the end of the send less the pause, as one not complete is.
+            Some(answer) => {
+                *answer = answer.plus(ms);
+                group.paused_complete = true;
+            }
+            None => {
+                if let Some(sounding) = &mut group.sounding {
+                    sounding.trusted = false;
+                }
             }
         }
     }
@@ -605,7 +622,14 @@ impl GroupSession {
         if let Some(group) = self.groups.get_mut(index)
             && !group.confirmed()
         {
-            group.input = normalize_answer(&group.sent, typed);
+            let input = normalize_answer(&group.sent, typed);
+            if group.paused_complete
+                && input != group.input
+                && let Some(sounding) = &mut group.sounding
+            {
+                sounding.trusted = false;
+            }
+            group.input = input;
             let length = group.input.chars().count();
             group.keys = keys.fitted(length);
         }

@@ -544,6 +544,11 @@ impl<S: GroupSource> SessionMachine<S> {
     }
 
     fn finish_now(&mut self, now: MonoMs) -> Vec<SessionEffect> {
+        // Ended while paused waiting on an answer: the pause is no time
+        // spent answering, as on Resume.
+        if let Some((Resume::Answer(index), since)) = self.resume {
+            self.session.note_paused(index, now.since(since));
+        }
         // Something typed but not yet confirmed is kept.
         let typed = self
             .session
@@ -992,6 +997,81 @@ mod tests {
             timing.time_to_complete_ms
         );
         assert_eq!(timing.char_times, None, "timed across the pause");
+    }
+
+    /// `KMR` sent from 0 and heard in full by 800, as the pause tests hear it.
+    fn heard_kmr() -> SessionMachine<Script> {
+        let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
+        let start = SendStart {
+            char_wpm: 20.0,
+            effective_wpm: 18.0,
+            output_at: MonoMs(0),
+            char_ends_ms: vec![200, 500, 800],
+            first_char_ms: 0,
+            latency_ms: 0,
+        };
+        let _ = m.apply(SessionEvent::PlaybackStarted { index: 0, start }, MonoMs(0));
+        let _ = m.apply(ended(0), MonoMs(800));
+        m
+    }
+
+    /// End session while paused in the answer window takes the pause off the
+    /// answer's time, as Resume does: the group was timed at the whole
+    /// pause, ten minutes here, and scored as answered that slowly.
+    #[test]
+    fn ending_a_session_paused_in_the_answer_window_is_not_answering_time() {
+        let mut m = heard_kmr();
+        let _ = m.apply(typed(0, "KM"), MonoMs(1_000));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(1_100));
+        let effects = m.apply(SessionEvent::FinishNow, MonoMs(601_100));
+        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        let result = m.session().result(0, "2026-01-01".into());
+        let timing = &result.group_timings[0];
+        assert!(
+            (timing.time_to_complete_ms - 300.0).abs() < 1.0,
+            "{} ms to answer",
+            timing.time_to_complete_ms
+        );
+        assert_eq!(timing.char_times, None, "timed across the pause");
+    }
+
+    /// An answer complete when paused and corrected after it is timed from
+    /// the end of the send less the pause, and its characters, keyed either
+    /// side of the pause, are not timed against when they ended. It kept
+    /// its stamp from before the pause until corrected, then took a new one
+    /// with the pause in it.
+    #[test]
+    fn an_answer_complete_at_a_pause_and_corrected_after_is_not_timed_across_it() {
+        let mut m = heard_kmr();
+        let _ = m.apply(typed(0, "KMX"), MonoMs(1_000));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(1_100));
+        let _ = m.apply(SessionEvent::Resume, MonoMs(601_100));
+        let _ = m.apply(typed(0, "KM"), MonoMs(601_200));
+        let _ = m.apply(typed(0, "KMR"), MonoMs(601_300));
+        let effects = m.apply(SessionEvent::Confirm, MonoMs(601_400));
+        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        let result = m.session().result(0, "2026-01-01".into());
+        let timing = &result.group_timings[0];
+        assert!(
+            (timing.time_to_complete_ms - 500.0).abs() < 1.0,
+            "{} ms to answer",
+            timing.time_to_complete_ms
+        );
+        assert_eq!(timing.char_times, None, "timed across the pause");
+
+        // Left as it was, it stands as it was timed, before the pause.
+        let mut m = heard_kmr();
+        let _ = m.apply(typed(0, "KMR"), MonoMs(1_400));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(1_500));
+        let auto = m.apply(SessionEvent::Resume, MonoMs(601_500));
+        let _ = fire(&mut m, &auto, 601_500 + u64::from(AUTO_CONFIRM_DELAY_MS));
+        let result = m.session().result(0, "2026-01-01".into());
+        let timing = &result.group_timings[0];
+        assert!(
+            (timing.time_to_complete_ms - 600.0).abs() < 1.0,
+            "{} ms to answer",
+            timing.time_to_complete_ms
+        );
     }
 
     /// A pause while an answer typed in full waits to confirm itself sends
