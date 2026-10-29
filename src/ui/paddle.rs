@@ -25,19 +25,96 @@ use crate::ui::widgets::control_id;
 /// How many decoded characters the practice pad keeps: about a line's worth.
 const HEARD_KEEP: usize = 32;
 
-/// Whether the key events that reach the page's root are what key the
-/// paddles. They are on the desktop on macOS and Windows, whose window
-/// hears no keys: the webview takes every one, WKWebView as the window's
-/// first responder, WebView2 in a window of its own inside it. On Linux the
-/// desktop hears them from its window instead, so a USB keyer works without
-/// the webview's focus and without waiting on its IPC, and the web and
-/// mobile builds from the whole document, so they work with nothing focused
-/// at all: a HID paddle on a phone keys with nothing tapped first. Tests
-/// drive the root.
-const ROOT_KEYS_THE_PADDLES: bool = cfg!(any(
+/// Which of the key events that reach the page's root it keys the paddles
+/// from. Another listener keys the rest, so that none is keyed twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootKeys {
+    /// Every one: the desktop on macOS and Windows, whose window hears no
+    /// keys, the webview taking them all — WKWebView as the window's first
+    /// responder, WebView2 in a window of its own inside it. Tests drive
+    /// the root too.
+    All,
+    /// Those the window drops: the desktop on Linux, whose window hears
+    /// the rest itself, so a USB keyer works without the webview's focus
+    /// and without waiting on its IPC ([`root_keys`]).
+    DroppedByWindow,
+    /// None: the web and mobile builds hear them from the whole document,
+    /// so they work with nothing focused at all — a HID paddle on a phone
+    /// keys with nothing tapped first.
+    Nothing,
+}
+
+/// Which key events the page's root keys the paddles from, in this build.
+const ROOT_KEYS: RootKeys = if cfg!(any(
     test,
     all(feature = "desktop", not(target_os = "linux"))
-));
+)) {
+    RootKeys::All
+} else if cfg!(feature = "desktop") {
+    RootKeys::DroppedByWindow
+} else {
+    RootKeys::Nothing
+};
+
+/// Whether the page's root keys the paddles from an event of the key at
+/// `code`, typing `key`, as `root` has it. `plain_types` is whether that
+/// key pressed alone, on the first layout, types a character, as the
+/// window's keymap says ([`plain_key_types`]): None when it cannot say.
+///
+/// tao on Linux reads a key by what it types pressed alone on the first
+/// layout, and drops the event, whatever it types, if that is nothing: a
+/// dead key, as the dit key is on a French, Belgian or Spanish keyboard
+/// and the dah key on a Portuguese, Swiss German or Nordic one. Every
+/// event of such a key is dropped, the `[` AltGr types on the Spanish dit
+/// key among them, and under any layout chosen after the first. The root
+/// keys each event of such a key, press and release alike, and no other:
+/// a dead accent that a key typing a character alone types under a second
+/// layout is the window's to key, by place. A key the keymap has nothing
+/// for, tao reads by what each event types, and the root keys an event
+/// typing nothing it can name: a dead key, or one it cannot identify.
+/// Only the brackets' own keys are asked about: a bracket typed elsewhere
+/// takes AltGr on a digit or a letter, which the window hears.
+fn root_keys(root: RootKeys, key: &Key, code: &str, plain_types: Option<bool>) -> bool {
+    match root {
+        RootKeys::All => true,
+        RootKeys::Nothing => false,
+        RootKeys::DroppedByWindow => {
+            let dropped = match plain_types {
+                Some(types) => !types,
+                None => matches!(key, Key::Dead | Key::Unidentified),
+            };
+            dropped && matches!(code, "BracketLeft" | "BracketRight")
+        }
+    }
+}
+
+/// Whether the key at `code`, one of the brackets' own, types a character
+/// pressed alone on the first layout: what tao on Linux reads it by, the
+/// keyval GDK's keymap has for it at group 0, level 0. None for another
+/// key, or one the keymap has no such keyval for, which tao reads by the
+/// keyval of each event instead.
+#[cfg(all(feature = "desktop", target_os = "linux", not(test)))]
+fn plain_key_types(code: &str) -> Option<bool> {
+    use gtk::gdk;
+    // How X11 numbers the keys, and Wayland after it: evdev's code, and 8.
+    let keycode = match code {
+        "BracketLeft" => 34,
+        "BracketRight" => 35,
+        _ => return None,
+    };
+    let keymap = gdk::Display::default().and_then(|display| gdk::Keymap::for_display(&display))?;
+    let (_, keyval) = keymap
+        .entries_for_keycode(keycode)
+        .into_iter()
+        .find(|(at, _)| at.group() == 0 && at.level() == 0)?;
+    let text = gdk::keys::Key::from(keyval).to_unicode();
+    Some(text.is_some_and(|ch| ch >= ' ' && ch != '\x7f'))
+}
+
+#[cfg(not(all(feature = "desktop", target_os = "linux", not(test))))]
+fn plain_key_types(_code: &str) -> Option<bool> {
+    None
+}
 
 /// Which paddle contacts are closed, and by which key: the code of the key
 /// that closed each.
@@ -230,6 +307,8 @@ pub struct PaddleKeys {
     heard: Signal<String>,
     /// Why the sidetone cannot sound, once a try has found out.
     sidetone_error: Signal<Option<String>>,
+    /// Which key events the page's root keys the paddles from.
+    root: RootKeys,
 }
 
 /// Start the app's keyer, and hand it to every screen below.
@@ -252,6 +331,7 @@ pub fn use_paddle_keys(
                 screen,
                 heard: Signal::new(String::new()),
                 sidetone_error: Signal::new(None),
+                root: ROOT_KEYS,
             }
         })
     });
@@ -292,9 +372,9 @@ pub fn use_paddle_keys(
 }
 
 impl PaddleKeys {
-    /// The page root's keydown. `[` and `]` are paddles, never text — on
-    /// Linux the desktop's window keys them, but the answer box must not
-    /// type them.
+    /// The page root's keydown. `[` and `]` are paddles, never text —
+    /// another listener may key them ([`root_keys`]), but the answer box
+    /// must not type them.
     pub fn keydown(self, e: Event<KeyboardData>) {
         let (key, code) = key_and_code(&e);
         let mods = e.modifiers();
@@ -303,7 +383,7 @@ impl PaddleKeys {
             alt: mods.alt(),
             meta: mods.meta(),
         };
-        let paddle = if ROOT_KEYS_THE_PADDLES {
+        let paddle = if self.root_keys(&e, &code) {
             self.key_down(&key, &code, held, e.is_auto_repeating())
         } else {
             paddle_for_press(&key, &code, held, self.reading()).is_some()
@@ -316,17 +396,34 @@ impl PaddleKeys {
     /// The page root's keyup.
     pub fn keyup(self, e: Event<KeyboardData>) {
         let (key, code) = key_and_code(&e);
-        let paddle = if ROOT_KEYS_THE_PADDLES {
+        let rooted = self.root_keys(&e, &code);
+        let paddle = if rooted {
             self.key_up(&key, &code)
         } else {
             paddle_for_key(&key, &code, self.reading()).is_some()
         };
         if paddle {
             e.prevent_default();
-        } else if ROOT_KEYS_THE_PADDLES && e.key() == Key::Meta {
+        } else if rooted && e.key() == Key::Meta {
             // A Mac sends no key release for a key let go while Command
             // was down, as its browsers do not.
             self.release_all();
+        }
+    }
+
+    /// Whether the root keys the paddles from `e`, an event of the key at
+    /// `code` ([`root_keys`]).
+    fn root_keys(self, e: &Event<KeyboardData>, code: &str) -> bool {
+        root_keys(self.root, &e.key(), code, plain_key_types(code))
+    }
+
+    /// The keyer as the desktop's root has it on Linux, keying only the
+    /// keys the window drops.
+    #[cfg(test)]
+    pub(super) fn keyed_as_on_linux(self) -> Self {
+        Self {
+            root: RootKeys::DroppedByWindow,
+            ..self
         }
     }
 
@@ -618,9 +715,10 @@ fn listen_native_paddles(keys: PaddleKeys) {
                 keys.release_all();
                 return;
             }
-            // Where the root keys the paddles the window hears no keys, and
-            // must key none: the root's own would be keyed twice.
-            WindowEvent::KeyboardInput { event: key, .. } if !ROOT_KEYS_THE_PADDLES => key,
+            // Where the root keys every key, the window hears none and must
+            // key none, or the root's would be keyed twice. On Linux it keys
+            // every one it hears, and the root only those it drops.
+            WindowEvent::KeyboardInput { event: key, .. } if keys.root != RootKeys::All => key,
             _ => return,
         };
         if key.repeat {
@@ -1122,5 +1220,71 @@ mod tests {
             paddle_for_press("[", "Digit5", command, Reading::DEFAULT),
             None
         );
+    }
+
+    /// Tests drive the paddles from the root, as the desktop on macOS and
+    /// Windows does.
+    #[test]
+    fn tests_key_the_paddles_from_the_root() {
+        assert_eq!(ROOT_KEYS, RootKeys::All);
+    }
+
+    /// The root keys every event where the window hears no keys, and none
+    /// where the document's listener keys them.
+    #[test]
+    fn the_root_keys_all_or_nothing_off_linux() {
+        let dah = Key::Character("]".into());
+        for (key, code) in [
+            (&Key::Dead, "BracketLeft"),
+            (&dah, "BracketRight"),
+            (&dah, "Digit9"),
+            (&Key::Meta, "MetaLeft"),
+        ] {
+            for plain in [None, Some(true), Some(false)] {
+                assert!(root_keys(RootKeys::All, key, code, plain), "{key:?}");
+                assert!(!root_keys(RootKeys::Nothing, key, code, plain), "{key:?}");
+            }
+        }
+    }
+
+    /// On Linux the root keys the events of a bracket key that types
+    /// nothing alone on the first layout, whatever each types — dead, or
+    /// the `[` of AltGr on a Spanish keyboard's — for the window drops
+    /// them all, and no event of a key that types something alone, which
+    /// the window hears even when it types a dead accent now.
+    #[test]
+    fn on_linux_the_root_keys_a_bracket_key_the_window_drops() {
+        let linux = RootKeys::DroppedByWindow;
+        let dit = Key::Character("[".into());
+        let dah = Key::Character("]".into());
+        for key in [&Key::Dead, &dit, &Key::Unidentified] {
+            assert!(root_keys(linux, key, "BracketLeft", Some(false)), "{key:?}");
+            assert!(
+                root_keys(linux, key, "BracketRight", Some(false)),
+                "{key:?}"
+            );
+            assert!(!root_keys(linux, key, "BracketLeft", Some(true)), "{key:?}");
+        }
+        assert!(!root_keys(linux, &dah, "BracketRight", Some(true)));
+        // Off the brackets' own keys, whatever it types, the window hears it.
+        assert!(!root_keys(linux, &dit, "Digit8", Some(false)));
+        assert!(!root_keys(linux, &Key::Dead, "Quote", None));
+        assert!(!root_keys(linux, &Key::Meta, "MetaLeft", None));
+    }
+
+    /// A bracket key the keymap says nothing of, the window reads by what
+    /// each event types, and drops one typing nothing it can name: the
+    /// root keys a dead key, or one the page cannot identify, and nothing
+    /// that types a character.
+    #[test]
+    fn on_linux_the_root_keys_a_dead_bracket_key_the_keymap_does_not_know() {
+        let linux = RootKeys::DroppedByWindow;
+        assert!(root_keys(linux, &Key::Dead, "BracketLeft", None));
+        assert!(root_keys(linux, &Key::Unidentified, "BracketRight", None));
+        for typed in ["[", "]", "+", "ü"] {
+            let key = Key::Character(typed.into());
+            assert!(!root_keys(linux, &key, "BracketLeft", None), "{typed}");
+            assert!(!root_keys(linux, &key, "BracketRight", None), "{typed}");
+        }
     }
 }
