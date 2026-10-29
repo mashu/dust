@@ -231,13 +231,22 @@ impl MorseBackend for MorsePlayer {
     /// its grace — which is what rebuilds the player and, failing that, tells
     /// the listener — rather than leaving the session parked on a promise
     /// that may never settle.
+    ///
+    /// Resumed whenever this player put it to sleep, not only when it reads
+    /// suspended: Safari and Firefox go on reading running for a moment
+    /// after a suspend is asked for, and a tap in that moment would be lost,
+    /// the suspend landing after it and the send's clock frozen, with no
+    /// gesture left to start it again on iOS. Nor only from suspended: iOS
+    /// reads interrupted after a call or Siri. A resume asked after the
+    /// suspend is carried out after it.
     fn resume_from_gesture(&mut self) {
         if !self.claimed_session {
             claim_playback_session();
             self.claimed_session = true;
         }
-        self.asleep.set(false);
-        if self.ctx.state() == AudioContextState::Suspended {
+        let asleep = self.asleep.replace(false);
+        let state = self.ctx.state();
+        if state != AudioContextState::Closed && (asleep || state != AudioContextState::Running) {
             let _ = self.ctx.resume();
         }
     }
