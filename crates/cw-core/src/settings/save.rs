@@ -542,4 +542,23 @@ mod tests {
         assert_eq!(settings.curriculum.level, 5);
         assert!(!settings.auto_level.auto_adjust_level);
     }
+
+    /// Character sampling had a Thompson switch, which did nothing on
+    /// average and was taken out. A save with it switched on still loads,
+    /// the rest of it as it was, and the next save no longer writes it.
+    #[test]
+    fn a_save_from_before_the_thompson_switch_went_still_loads() {
+        let settings = load(serde_json::json!({
+            "charSamplingThompson": true,
+            "errorWeightStrength": 4.5,
+            "charSamplingCoverageStrength": 0.5,
+            "level": 7,
+        }));
+        assert_eq!(settings.auto_level.error_weight_strength, 4.5);
+        assert_eq!(settings.auto_level.char_sampling_coverage_strength, 0.5);
+        assert_eq!(settings.curriculum.level, 7);
+        let saved = serde_json::to_value(&settings).expect("settings write");
+        assert!(saved.get("charSamplingThompson").is_none(), "{saved}");
+        assert!(saved.get("errorWeightStrength").is_some());
+    }
 }

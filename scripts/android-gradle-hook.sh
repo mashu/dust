@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gradle init hook for the Android project dx generates.
 #
-# dx 0.7 leaves three things out for this app, and has a setting for none:
+# dx 0.7 leaves four things out for this app, and has a setting for none:
 #
 # - It always writes Android's stock green robot as the launcher icon (an
 #   adaptive icon under mipmap-anydpi-v26, which is what Android 8+ shows),
@@ -14,6 +14,14 @@
 #   enough: rustc already removed the debug info, the plugin's strip then
 #   changes nothing, and it packs no symbol file. The Play script writes
 #   that file itself, and refuses to finish without it.
+# - Its manifest has the activity handle only a turn of the screen
+#   (orientation|screenLayout|screenSize|keyboardHidden) itself. Any other
+#   configuration change makes Android recreate the activity, and the
+#   webview with it; Dioxus then has no window left, and tao ends the
+#   process. Dark mode turned on, a keyboard or a paddle adapter plugged
+#   in, the font or display size changed, the language, a foldable opened:
+#   each closed the app, mid-session or not. The hook has the activity
+#   handle every change itself (ANDROID_CONFIG_CHANGES).
 #
 # Source this and call install_android_gradle_hook before
 # `dx bundle --platform android`. The caller removes $ANDROID_GRADLE_HOOK
@@ -47,6 +55,12 @@ dust_version_code() {
   fi
   echo $((major * 1000000 + minor * 1000 + patch))
 }
+
+# Every configuration change the activity handles itself, rather than be
+# recreated for it: every flag `android:configChanges` takes under the
+# compile SDK in Dioxus.toml. The webview lays itself out again for a new
+# size or density, and the app's page has nothing to reload for the rest.
+ANDROID_CONFIG_CHANGES="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender"
 
 install_android_gradle_hook() {
   local root=$1
@@ -124,6 +138,21 @@ gradle.beforeProject { project ->
             into res
         }
         println "Dust: installed launcher icon from " + iconRes
+
+        // The activity handles every configuration change itself: one it
+        // leaves to Android recreates it, and that ends the app. The
+        // manifest is read when it is merged, after this.
+        def manifest = project.file("src/main/AndroidManifest.xml")
+        def written = manifest.getText("UTF-8")
+        def handled = 'android:configChanges="${ANDROID_CONFIG_CHANGES}"'
+        def patched = written.replaceFirst(/android:configChanges="[^"]*"/, handled)
+        if (!patched.contains(handled)) {
+            throw new GradleException("Dust: no android:configChanges in " + manifest)
+        }
+        if (patched != written) {
+            manifest.write(patched, "UTF-8")
+        }
+        println "Dust: the activity handles every configuration change"
     }
 }
 EOF

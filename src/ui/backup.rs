@@ -32,13 +32,31 @@ const AT_RISK: &str = if cfg!(target_arch = "wasm32") {
 };
 
 /// The files offered to restore from. An Android picker that filters by
-/// type hides a backup that another app stored untyped, so there every file
-/// is offered, and one that is not a backup is refused once it is read.
-const BACKUP_ACCEPT: &str = if cfg!(target_os = "android") {
-    ""
-} else {
-    ".json,application/json"
-};
+/// type hides a backup that another app stored untyped, so on Android —
+/// the app, or the web app in a browser there — every file is offered, and
+/// one that is not a backup is refused once it is read.
+fn backup_accept() -> &'static str {
+    if on_android() {
+        ""
+    } else {
+        ".json,application/json"
+    }
+}
+
+/// Whether the app runs on Android: built for it, or the web app in a
+/// browser that says it is there.
+fn on_android() -> bool {
+    #[cfg(feature = "web")]
+    {
+        web_sys::window()
+            .and_then(|window| window.navigator().user_agent().ok())
+            .is_some_and(|agent| agent.contains("Android"))
+    }
+    #[cfg(not(feature = "web"))]
+    {
+        cfg!(target_os = "android")
+    }
+}
 
 /// The backup a chosen file holds, or why it could not be restored from.
 fn backup_in(file: ChosenFile) -> Result<Backup, String> {
@@ -61,6 +79,8 @@ pub fn BackupCard(
     since: usize,
 ) -> Element {
     let mut problem = use_signal(|| None::<String>);
+    // Asked once: the browser says where it runs as the page opens.
+    let accept = use_hook(backup_accept);
     let Backups {
         last,
         can_save,
@@ -114,7 +134,7 @@ pub fn BackupCard(
                 }
                 FileButton {
                     id: control_id("file", "backup"),
-                    accept: BACKUP_ACCEPT,
+                    accept,
                     max_bytes: BACKUP_MAX_BYTES,
                     icon: IconName::Upload,
                     label: "Restore a backup",

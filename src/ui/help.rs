@@ -36,12 +36,12 @@ pub fn next_up(limit: f64) -> Element {
     let limit = pct(limit);
     rsx! {
         p {
-            "One row a character of your set. The bar is how often you get it wrong: the trainer's best guess from every time you have heard it, whatever set it was sent in."
+            "One row a character of your set. The bar is how often you get it wrong: the trainer's best guess from every time you have heard it, whatever set it was sent in, recent sessions counting more. A session ten sessions back counts half as much as your latest, so a weakness you put right long ago stops holding a character back, and one you have not heard for a while is less certain again."
         }
         dl { class: "help-terms",
             dt { "Under your {limit}" }
             dd {
-                "Green: wrong less than {limit} of the time. {limit} is what your Auto level threshold leaves: a session levels up at {pass} right (Settings → Auto level)."
+                "Green: wrong less than {limit} of the time. {limit} is what your Auto level threshold of {pass} right leaves (Settings → Auto level)."
             }
             dt { "Over it" }
             dd { "Copper: wrong more often than that. These hold your copy back: the ones to work on." }
@@ -50,7 +50,7 @@ pub fn next_up(limit: f64) -> Element {
             {likely_and_notch(format!("Your {limit}: the line between under and over."))}
             dt { "Chance next" }
             dd {
-                "How likely the next group is to hold the character. The trainer sends the ones you miss more often, and the ones it is least sure of (Settings → Character sampling)."
+                "Its share of the characters a new session draws: of every hundred characters sent, about this many are it. The trainer sends the ones you miss more often, and the ones it has heard too little of to be sure of; within a session, the ones that have come up less than their share come round more too (Settings → Character sampling)."
             }
             dt { "Not heard yet" }
             dd { "In your set but never sent: nothing to draw of them yet." }
@@ -74,7 +74,7 @@ pub fn letters(bands: RecognitionBands) -> Element {
     let building = pct(BUILDING_MIN_ACCURACY);
     rsx! {
         p {
-            "Every character you have copied, over all your sessions. The bar is the share of the times it was sent that you copied it right."
+            "Every character you have copied, over all your sessions. The bar is the share of the times it was sent that you copied it right, recent sessions counting more: a session ten sessions back counts half as much as your latest, so a weakness you put right long ago stops holding it back. The tries are every time it was sent."
         }
         dl { class: "help-terms",
             dt { "Mastered" }
@@ -228,16 +228,22 @@ pub fn bigram() -> Element {
     }
 }
 
-/// Accuracy over time, against the level-up threshold `pass`.
-pub fn accuracy_over_time(pass: f64) -> Element {
-    let pass = pct(pass);
+/// Accuracy over time, against the level-up threshold `pass` where a
+/// session's own accuracy is what levels you up.
+pub fn accuracy_over_time(pass: Option<f64>) -> Element {
     rsx! {
         p {
             "Each point is a session's accuracy, the share of the characters sent that you copied right, oldest on the left."
         }
-        dl { class: "help-terms",
-            dt { "The dashed green line" }
-            dd { "Your Auto level threshold, {pass}: a session over it counts towards the next level." }
+        if let Some(pass) = pass {
+            dl { class: "help-terms",
+                dt { "The dashed green line" }
+                dd { "Your Auto level threshold, {pct(pass)}: a session over it counts towards the next level." }
+            }
+        } else {
+            p {
+                "No threshold is marked: Auto level is off or never levels up, or an adaptive feature is on and judges sessions by more than this accuracy (Settings → Auto level)."
+            }
         }
     }
 }
@@ -374,7 +380,7 @@ pub fn character_set() -> Element {
             dt { "Callsigns" }
             dd { "Real callsigns, as they are heard on the air. The tier sets how hard they come; each keeps what the ones below send." }
             dt { "Words" }
-            dd { "Whole words, from the starter list or your own, one to a line." }
+            dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =." }
             dt { "Contest" }
             dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange." }
             dt { "Unlock order" }
@@ -403,7 +409,7 @@ pub fn session_shape() -> Element {
             dt { "Groups per session" }
             dd { "How many groups one session sends; a contest run is timed in minutes instead." }
             dt { "Answer timeout" }
-            dd { "How long a group waits for you to start answering before it moves on. Once you type, it waits for you." }
+            dd { "How long a group waits for you to start answering before it moves on. At 0 it never moves on by itself: it waits for you to answer, or press Next. Once you type, it waits for you." }
             dt { "Pause after each group" }
             dd { "Time to read the last group before the next is sent. Zero keeps contest pace." }
             dt { "Countdown" }
@@ -433,13 +439,13 @@ pub fn speed_settings() -> Element {
             dt { "Character speed" }
             dd { "How fast each character is sent, in words a minute. A range draws each group's speed from it." }
             dt { "Effective speed" }
-            dd { "Farnsworth: the characters stay fast and the gaps between them stretch, so the overall pace is slower." }
+            dd { "Farnsworth: the characters stay fast and the gaps between them stretch, so the overall pace is slower. The gaps are never faster than the characters: whatever is set above Character speed goes at Character speed, and the card says what it is used as." }
             dt { "Adapt speed to me" }
             dd { "Within the range: faster while you copy the characters, slower when you miss them." }
             dt { "Operator fists" }
             dd { "How far stations stray from a perfect keyer: heavier or lighter elements, longer or shorter dahs. Zero sends like a machine." }
-            dt { "Extra word spacing" }
-            dd { "Lengthens the gap between groups, in multiples of the standard word space." }
+            dt { "Word space" }
+            dd { "Every gap between words and between groups, as a multiple of the standard word space of seven units: 1× is standard, more lengthens it, less shortens it, down to half." }
             dt { "Tie effective speed" }
             dd { "On, the gaps keep pace with the characters. Off gives you the Farnsworth controls." }
             dt { "Your speed" }
@@ -508,6 +514,14 @@ pub fn auto_level() -> Element {
             dd { "Moves your level, how many characters are in play, by how your sessions go." }
             dt { "Accuracy threshold" }
             dd { "The share of characters right that counts a session as good. It is also the line What comes up next marks." }
+            dt { "With Adapt group size to me" }
+            dd {
+                "Groups are sent shorter until you copy them whole as often as Aim for asks, so the characters lost off the end of a group it can still shorten are left out: a session is judged on the characters you reached. A group with nothing typed counts as one character missed."
+            }
+            dt { "With Adapt speed to me" }
+            dd {
+                "The speed is moved to keep your characters right at your aim, so in the middle of your Character speed range a session counts neither way. Once it comes at the top or the bottom of the range, where the speed can go no further, it counts as a session at one speed does: up at the threshold or better, down below it. Set the top to the speed you are training for: a new character comes in once you copy the threshold there."
+            }
             dt { "Sessions above to level up" }
             dd { "How many good sessions it takes to unlock a new character. Zero never levels up." }
             dt { "Sessions below to level down" }
@@ -522,11 +536,11 @@ pub fn sampling() -> Element {
         p { "Which characters come round more often in your groups." }
         dl { class: "help-terms",
             dt { "Error-weight strength" }
-            dd { "How much more often the characters you miss are sent: at 3, one you miss half the time comes 2½ times as often as one you never miss. Zero sends them all alike." }
+            dd {
+                "How much more often the characters you miss are sent, and the ones the trainer is unsure of. Each is weighed by how often it believes the character goes wrong, plus one spread of that belief, so the less it has heard of a character the more it counts as missed. At 3, once it knows both well, one you miss half the time comes 2½ times as often as one you never miss; one never heard comes more than three times as often, until it has heard enough of it. Older sessions count for less, so a character not heard for a while comes round more again. Zero sends them all alike."
+            }
             dt { "Coverage strength" }
             dd { "Brings round the characters that have come up less than their share in this session, so none goes missing." }
-            dt { "Thompson sampling" }
-            dd { "Draws each character's error rate from what the trainer believes of it rather than its average, so the ones it is unsure of, new ones above all, come up more." }
         }
     }
 }

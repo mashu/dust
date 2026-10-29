@@ -405,15 +405,28 @@ impl DesktopStore {
     }
 
     /// A mark of this copy's own, its lock held.
+    ///
+    /// The lock file is made, and locked, under a name no look reads, and
+    /// only then put where looks find it. Made there and locked after, a
+    /// copy looking for marks in between found it unheld, took it for one
+    /// cut off, and deleted it from under this copy, whose session then had
+    /// no mark at all.
     fn new_mark(&self) -> Option<HeldMark> {
         fs::create_dir_all(self.root.join(OPEN)).ok()?;
         let id = format!("{:016x}", crate::time::seed_rng());
+        let making = self.mark_path(&id, "making");
         let lock = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(self.mark_path(&id, "lock"))
+            .open(&making)
             .ok()?;
-        lock.try_lock().ok()?;
+        // A rename keeps the file, and the lock held on it.
+        let placed =
+            lock.try_lock().is_ok() && fs::rename(&making, self.mark_path(&id, "lock")).is_ok();
+        if !placed {
+            let _ = fs::remove_file(&making);
+            return None;
+        }
         Some(HeldMark { id, lock })
     }
 
@@ -468,9 +481,8 @@ impl DesktopStore {
     }
 }
 
-/// Android hands an app no `HOME`, so `dirs` has nothing to work from. The
-/// first entry of `/proc/self/cmdline` is the package name, and
-/// `/data/data/<package>/files` is the private directory the app owns.
+/// The package an Android process runs: the first entry of
+/// `/proc/self/cmdline`.
 #[cfg(any(target_os = "android", test))]
 fn package_from_cmdline(raw: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(raw);
@@ -485,11 +497,46 @@ fn package_from_cmdline(raw: &[u8]) -> Option<String> {
     valid.then(|| name.to_string())
 }
 
+/// The Android user a process runs as, from its `/proc/self/status`: its
+/// uid over the 100 000 uids each user has.
+#[cfg(any(target_os = "android", test))]
+fn android_user_from_status(status: &str) -> Option<u32> {
+    let uid = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u32>()
+        .ok()?;
+    Some(uid / 100_000)
+}
+
+/// The folder Android gives `package` for its own files, as `user`, where
+/// it cannot be asked of Android itself.
+#[cfg(any(target_os = "android", test))]
+fn android_files_dir_of(user: u32, package: &str) -> PathBuf {
+    PathBuf::from(format!("/data/user/{user}/{package}/files"))
+}
+
+/// Android hands an app no `HOME`, so `dirs` has nothing to work from. The
+/// store goes in the app's own files folder, which Android names for the
+/// user the app runs as: the phone's owner, a work profile, another user,
+/// Private Space and a cloned app each have their own, and only the
+/// owner's is under `/data/data`. It is asked of Android itself
+/// ([`super::android::files_dir`]); failing that, it is worked out from the
+/// process, the package from `/proc/self/cmdline` and the user from its uid.
 #[cfg(target_os = "android")]
 fn android_data_dir() -> Option<PathBuf> {
-    let raw = fs::read("/proc/self/cmdline").ok()?;
-    let package = package_from_cmdline(&raw)?;
-    let dir = PathBuf::from(format!("/data/data/{package}/files/dust"));
+    #[cfg(not(test))]
+    let asked = super::android::files_dir();
+    #[cfg(test)]
+    let asked = None;
+    let files = asked.or_else(|| {
+        let package = package_from_cmdline(&fs::read("/proc/self/cmdline").ok()?)?;
+        let user = android_user_from_status(&fs::read_to_string("/proc/self/status").ok()?)?;
+        Some(android_files_dir_of(user, &package))
+    })?;
+    let dir = files.join("dust");
     fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
@@ -510,9 +557,15 @@ fn data_dir_from(overridden: Option<std::ffi::OsString>) -> PathBuf {
     if let Some(dir) = android_data_dir() {
         return dir;
     }
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("dust")
+    under_data_dir(dirs::data_dir())
+}
+
+/// `dust` in the platform's data folder `data`. With none, it goes in the
+/// temporary folder, a whole path of its own, rather than in the folder the
+/// app happened to start in, which on a phone is the root, `/`, where
+/// nothing can be written.
+fn under_data_dir(data: Option<PathBuf>) -> PathBuf {
+    data.unwrap_or_else(std::env::temp_dir).join("dust")
 }
 
 #[cfg(test)]
@@ -589,6 +642,36 @@ mod tests {
         assert_eq!(third.cut_off(), None, "told of once");
         let left = fs::read_dir(dir.0.join(OPEN)).unwrap().count();
         assert_eq!(left, 0, "nothing left behind");
+    }
+
+    /// A mark's lock file is where looks find it only once its lock is
+    /// held, and nothing it was made under is left behind.
+    #[test]
+    fn a_mark_is_found_only_with_its_lock_held() {
+        let (dir, store) = store("open-held");
+        store.mark_open(Some(open_at(1)));
+        let id = store
+            .open_held
+            .borrow()
+            .as_ref()
+            .map(|mark| mark.id.clone());
+        let id = id.expect("marked");
+        let mut left: Vec<String> = fs::read_dir(dir.0.join(OPEN))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, [format!("{id}.json"), format!("{id}.lock")]);
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .open(store.mark_path(&id, "lock"))
+            .unwrap();
+        assert!(
+            lock.try_lock().is_err(),
+            "the lock was let go of on the way"
+        );
+        assert_eq!(DesktopStore::at(dir.0.clone()).cut_off(), None);
     }
 
     /// A mark a power cut left empty still says a session was cut off.
@@ -1089,5 +1172,42 @@ mod tests {
         // A desktop process name has no dots and must not become a /data/data path.
         assert_eq!(package_from_cmdline(b"dust\0"), None);
         assert_eq!(package_from_cmdline(b"/usr/bin/dust\0"), None);
+    }
+
+    /// The phone's owner keeps the app's files under `/data/user/0`, which
+    /// is `/data/data`; a work profile, another user, Private Space or a
+    /// cloned app under a user of its own, read from the process's uid.
+    #[test]
+    fn the_android_files_folder_is_the_users_own() {
+        let status = |uid: &str| {
+            format!(
+                "Name:\tdev.dust.morse\nUmask:\t0077\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nGid:\t{uid}\t{uid}\t{uid}\t{uid}\n"
+            )
+        };
+        assert_eq!(android_user_from_status(&status("10123")), Some(0));
+        assert_eq!(android_user_from_status(&status("1010123")), Some(10));
+        assert_eq!(android_user_from_status(&status("95010123")), Some(950));
+        assert_eq!(android_user_from_status("Name:\tdust\n"), None);
+        assert_eq!(android_user_from_status("Uid:\tnobody\n"), None);
+        assert_eq!(
+            android_files_dir_of(0, "dev.dust.morse"),
+            PathBuf::from("/data/user/0/dev.dust.morse/files")
+        );
+        assert_eq!(
+            android_files_dir_of(10, "dev.dust.morse"),
+            PathBuf::from("/data/user/10/dev.dust.morse/files")
+        );
+    }
+
+    /// With no data folder to be had — no home to find one from — the
+    /// store still goes somewhere whole, never under whatever folder the
+    /// app was started in.
+    #[test]
+    fn the_data_directory_is_never_a_relative_path() {
+        assert!(under_data_dir(None).is_absolute());
+        assert!(under_data_dir(None).ends_with("dust"));
+        let data = std::env::temp_dir().join("data");
+        assert_eq!(under_data_dir(Some(data.clone())), data.join("dust"));
+        assert!(data_dir_from(None).is_absolute());
     }
 }

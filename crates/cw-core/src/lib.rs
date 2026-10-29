@@ -17,6 +17,8 @@ mod contest;
 mod endurance;
 mod heatmap;
 mod keyer;
+#[cfg(test)]
+mod learner_sim;
 mod level;
 mod machine;
 mod morse;
@@ -41,7 +43,7 @@ mod words;
 pub use alignment::{AlignmentPair, CopyTally, LetterAccuracy, align_group};
 pub use auto_level::{
     AutoLevelChange, AutoLevelCounters, AutoLevelProgress, Completion, CountersKey, CountersUpdate,
-    apply_auto_level, auto_level_progress, complete_session, evaluate_auto_level,
+    apply_auto_level, auto_level_progress, complete_session, evaluate_auto_level, level_up_line,
 };
 pub use belief::{Estimate, EstimatePoint};
 pub use board::{

@@ -137,10 +137,9 @@ pub fn EnvelopeCard(
                 help: help::envelope(),
                 note: format!("A dit and a dah at {} WPM · dit {dot_ms} ms", shape.wpm as u32),
                 SectionReset {
-                    label: "keying envelope",
-                    on_reset: move |()| {
-                        settings.write().reset_section(SettingsSection::KeyingEnvelope);
-                    },
+                    card: "Keying envelope",
+                    settings,
+                    section: SettingsSection::KeyingEnvelope,
                 }
             }
             div { class: "envelope-stage",

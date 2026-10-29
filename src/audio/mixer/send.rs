@@ -304,6 +304,26 @@ impl SendVoice {
         self.wait = samples;
     }
 
+    /// Pass over `samples` of the silence it waits out before it starts,
+    /// unplayed, if it is to wait that long: whether it was, so that all of
+    /// it is still to come, as many samples sooner. A stream fallen far
+    /// behind its clock passes over them so, rather than work them out.
+    #[cfg(any(feature = "web", test))]
+    pub fn skip_wait(&mut self, samples: u64) -> bool {
+        let Ok(samples) = usize::try_from(samples) else {
+            return false;
+        };
+        if self.wait < samples {
+            return false;
+        }
+        self.wait -= samples;
+        #[cfg(feature = "native-audio")]
+        {
+            self.rendered += samples;
+        }
+        true
+    }
+
     /// Stop: ride down to silence over the release rather than cutting the
     /// waveform where it stands, which is a click. Your sending is over, so
     /// the receiver comes back at once.

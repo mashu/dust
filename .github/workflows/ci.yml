@@ -101,6 +101,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+          components: clippy
 
       - name: Resolve the Android NDK toolchain
         run: |
@@ -146,10 +147,12 @@ jobs:
         with:
           shared-key: android-check
 
-      # `cargo check` never links, so this catches mobile regressions without
-      # building an APK — including the cpal/oboe C++ that Android audio needs.
-      - name: Check the mobile build
-        run: cargo check -p dust --no-default-features --features mobile --target aarch64-linux-android --locked
+      # Clippy never links, so this catches mobile regressions without
+      # building an APK — including the cpal/oboe C++ that Android audio
+      # needs — and holds the Android-only code (JNI, the files folder, the
+      # screen flag) to the workspace lints, which no other job compiles.
+      - name: Lint the mobile build
+        run: cargo clippy -p dust --no-default-features --features mobile --target aarch64-linux-android --locked -- -D warnings
 
   ios-check:
     name: iOS type-check
@@ -162,6 +165,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios-sim
+          components: clippy
 
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@v2
@@ -170,7 +174,46 @@ jobs:
 
       # The simulator target needs no signing and no Apple account, so this
       # catches iOS regressions — including the AVAudioSession code and cpal's
-      # CoreAudio backend — on every PR. The IPA itself is built on demand by
-      # the iOS IPA workflow.
-      - name: Check the iOS build
-        run: cargo check -p dust --no-default-features --features mobile --target aarch64-apple-ios-sim --locked
+      # CoreAudio backend — on every PR, under the workspace lints. The IPA
+      # itself is built on demand by the iOS IPA workflow.
+      - name: Lint the iOS build
+        run: cargo clippy -p dust --no-default-features --features mobile --target aarch64-apple-ios-sim --locked -- -D warnings
+
+  # The desktop app is tested on Linux only. Windows and macOS each compile
+  # code of their own — WebView2 or WKWebView, WASAPI or CoreAudio, the
+  # floating window's click-through, where files go — so each is linted on
+  # its own runner, tests included, before a release has to find out.
+  desktop-check:
+    name: Desktop lint (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-check-${{ matrix.os }}
+
+      - name: Lint the desktop build
+        run: cargo clippy --workspace --features desktop --all-targets --locked -- -D warnings
+
+  # The web app built as Pages serves it, and the site it makes checked, on
+  # every pull request: what only `dx bundle` does — wasm-bindgen, the
+  # stylesheet asset, the page's head — fails here rather than on main.
+  web:
+    name: Web site
+    uses: ./.github/workflows/web-site.yml

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::alignment::align_group;
-use crate::belief::EstimatePoint;
+use crate::belief::{EstimatePoint, sessions_faded};
 use crate::contest::{ContestKind, StoredLog};
 use crate::morse::LCWO_SEQUENCE;
 use crate::numeric::median;
@@ -14,8 +14,8 @@ use crate::recognition::{
 use crate::sampling::{
     CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
     adaptive_bounds, adapts_speed, belief_for, beta_posterior_mean_error,
-    compute_raw_sampling_weights, config_from_settings, generate_callsign_group,
-    generate_contest_call, generate_word_group, group_size_bounds, normalize_weights,
+    compute_raw_sampling_weights, config_from_settings, draw_chances, generate_callsign_group,
+    generate_contest_call, generate_word_group, group_size_bounds,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -57,9 +57,17 @@ const EARLIER_MIN_TRIES: u32 = 10;
 #[derive(Clone, Debug, PartialEq)]
 pub struct CharacterDiagnostic {
     pub letter: char,
+    /// The share of its tries copied right, older sessions counting for
+    /// less: a session ten sessions back counts half as much as the latest,
+    /// as the sampler's belief and the span and speed fade. What its status
+    /// is read from.
     pub accuracy_pct: f64,
+    /// Every time it was sent, and copied right, counted in full.
     pub total: u32,
     pub correct: u32,
+    /// What its tries are worth by now, faded as `accuracy_pct` is: what
+    /// its likely range is read from.
+    pub weight: f64,
     pub status: MasteryStatus,
     /// Accuracy over the latest sessions that hold [`RECENT_TRIES`] tries of
     /// it, and over the tries before them, in percent: which way it is going.
@@ -102,10 +110,12 @@ impl CharacterDiagnostic {
         }
     }
 
-    /// The range its accuracy is likely in ([`rate_interval`]).
+    /// The range its accuracy is likely in ([`rate_interval`]), from its
+    /// tries as faded: wider again once it has not been heard for a while.
     pub fn accuracy_interval(&self, mass: f64) -> (f64, f64) {
-        let wrong = self.total.saturating_sub(self.correct);
-        rate_interval(f64::from(self.correct) + 1.0, f64::from(wrong) + 1.0, mass)
+        let right = self.accuracy_pct / 100.0 * self.weight;
+        let wrong = self.weight - right;
+        rate_interval(right + 1.0, wrong.max(0.0) + 1.0, mass)
     }
 }
 
@@ -205,11 +215,16 @@ pub struct SamplingRow {
     /// The chance it is drawn next; nothing for a character the current
     /// set does not draw.
     pub sampling_prob: f64,
+    /// The belief in how often it is copied right and wrong, older sessions
+    /// counting for less ([`CharSamplingState::from_history`]).
     pub alpha: f64,
     pub beta: f64,
     pub is_letter: bool,
     /// Whether the current set draws it at all.
     pub drawn_now: bool,
+    /// How many times it has been sent, every one counted: none for a
+    /// character never heard, however long ago the rest were.
+    pub tries: u32,
 }
 
 impl SamplingRow {
@@ -390,59 +405,76 @@ pub fn session_recognition(session: &SessionResult) -> Option<SessionRecognition
 pub fn mastered_count(sessions: &[SessionResult]) -> usize {
     letter_tallies(sessions)
         .into_iter()
-        .filter(|(_, (correct, total), _)| {
-            classify_mastery(rate(*correct, *total), *total) == MasteryStatus::Mastered
-        })
+        .filter(|tally| classify_mastery(tally.rate(), tally.total) == MasteryStatus::Mastered)
         .count()
 }
-
-/// A character's tries: right, and in all.
-type Tally = (u32, u32);
 
 /// A character's tries in one session: when, right, and in all.
 type SessionTally = (u64, u32, u32);
 
-/// Each character's tallies in `sessions`: in all, and by session, for its
-/// trend.
-fn letter_tallies(sessions: &[SessionResult]) -> Vec<(char, Tally, Vec<SessionTally>)> {
-    let mut totals: BTreeMap<char, (Tally, Vec<SessionTally>)> = BTreeMap::new();
-    for session in sessions {
-        for (letter, stats) in session.letter_accuracy().iter() {
-            let (total, by_session) = totals.entry(*letter).or_default();
-            total.0 += stats.correct;
-            total.1 += stats.total;
-            by_session.push((session.timestamp, stats.correct, stats.total));
-        }
-    }
-    totals
-        .into_iter()
-        .map(|(letter, (total, by_session))| (letter, total, by_session))
-        .collect()
+/// One character's tries over the history.
+#[derive(Default)]
+struct LetterTally {
+    letter: char,
+    /// Right and in all, every try counted in full.
+    correct: u32,
+    total: u32,
+    /// Right and in all, each session's tries faded by how many sessions
+    /// have passed since ([`sessions_faded`]).
+    faded_correct: f64,
+    faded_total: f64,
+    /// By session, for its trend.
+    by_session: Vec<SessionTally>,
 }
 
-fn rate(correct: u32, total: u32) -> f64 {
-    if total == 0 {
-        0.0
-    } else {
-        f64::from(correct) / f64::from(total)
+impl LetterTally {
+    /// The share right, as faded: a weakness put right long ago no longer
+    /// holds it down.
+    fn rate(&self) -> f64 {
+        if self.faded_total > 0.0 {
+            self.faded_correct / self.faded_total
+        } else {
+            0.0
+        }
     }
+}
+
+/// Each character's tallies in `sessions`, in the order of its character.
+fn letter_tallies(sessions: &[SessionResult]) -> Vec<LetterTally> {
+    let mut tallies: BTreeMap<char, LetterTally> = BTreeMap::new();
+    for (session, worth) in sessions_faded(sessions) {
+        for (letter, stats) in session.letter_accuracy().iter() {
+            let tally = tallies.entry(*letter).or_default();
+            tally.letter = *letter;
+            tally.correct += stats.correct;
+            tally.total += stats.total;
+            tally.faded_correct += worth * f64::from(stats.correct);
+            tally.faded_total += worth * f64::from(stats.total);
+            tally
+                .by_session
+                .push((session.timestamp, stats.correct, stats.total));
+        }
+    }
+    tallies.into_values().collect()
 }
 
 pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnostic> {
     let mut recognised = recognition_times(sessions);
     let mut out: Vec<CharacterDiagnostic> = letter_tallies(sessions)
         .into_iter()
-        .map(|(letter, (correct, total), by_session)| {
-            let accuracy01 = rate(correct, total);
-            let status = classify_mastery(accuracy01, total);
-            let (recent_pct, earlier_pct) = trend(by_session);
+        .map(|tally| {
+            let accuracy01 = tally.rate();
+            let status = classify_mastery(accuracy01, tally.total);
+            let letter = tally.letter;
+            let (recent_pct, earlier_pct) = trend(tally.by_session);
             let (recognition_tries, latest) = recognised.remove(&letter).unwrap_or_default();
             let recognition_ms = median(&latest);
             CharacterDiagnostic {
                 letter,
                 accuracy_pct: accuracy01 * 100.0,
-                total,
-                correct,
+                total: tally.total,
+                correct: tally.correct,
+                weight: tally.faded_total,
                 status,
                 recent_pct,
                 earlier_pct,
@@ -711,8 +743,7 @@ fn whole_group_character_shares(
 pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) -> Vec<SamplingRow> {
     let state = CharSamplingState::from_history(sessions);
     let pool = compute_char_pool(settings);
-    let mut config = config_from_settings(settings);
-    config.thompson_sampling = false;
+    let config = config_from_settings(settings);
     let mut rng = crate::rng::SplitMix64::default();
     let probs = if !settings.curriculum.char_set_mode.draws_characters() {
         // Callsigns and words are not drawn character by character, so a
@@ -720,8 +751,11 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
         // generator instead.
         whole_group_character_shares(settings, &state, &config, &pool, &mut rng)
     } else {
-        let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
-        normalize_weights(&pool, &weights)
+        let weights = compute_raw_sampling_weights(&pool, &state, &config);
+        pool.iter()
+            .copied()
+            .zip(draw_chances(&pool, &weights, &config))
+            .collect()
     };
     let mut others: Vec<char> = state
         .beliefs
@@ -734,9 +768,14 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
         let unlocked = LCWO_SEQUENCE.iter().position(|each| each == character);
         (unlocked.unwrap_or(usize::MAX), *character)
     });
+    let tries: BTreeMap<char, u32> = letter_tallies(sessions)
+        .into_iter()
+        .map(|tally| (tally.letter, tally.total))
+        .collect();
     let row = |character: char, drawn_now: bool| {
         let belief = belief_for(&state, character);
         SamplingRow {
+            tries: tries.get(&character).copied().unwrap_or(0),
             character,
             p_error: beta_posterior_mean_error(belief),
             sampling_prob: probs.get(&character).copied().unwrap_or(0.0),
@@ -1282,6 +1321,7 @@ mod tests {
             beta: CHAR_SAMPLING_PRIOR_BETA,
             is_letter: true,
             drawn_now: true,
+            tries: 0,
         };
         assert_eq!(row.evidence(), 0.0);
         // Never heard: even everywhere, its likely range most of the way.
@@ -1307,6 +1347,7 @@ mod tests {
             beta: CHAR_SAMPLING_PRIOR_BETA + 10.0,
             is_letter: true,
             drawn_now: true,
+            tries: 0,
         };
         let density = rate_density(row.beta, row.alpha, 1_000);
         let area = density.iter().sum::<f64>() / 1_000.0;
@@ -1466,22 +1507,117 @@ mod tests {
         assert!(callers < calls / 2.0, "{callers} against {calls}");
     }
 
+    /// A character weak for its first weeks and copied clean ever since is
+    /// mastered: its old misses fade as the sessions pass, halving every
+    /// ten, as the span and the speed do. Counted as one sum, they held it
+    /// at Building for good. Its tries are still every one it was sent, and
+    /// a weakness now shows at once.
     #[test]
-    fn callsign_sampling_shows_mean_weights_even_with_thompson_sampling_on() {
-        // The table describes the average draw, so random Thompson draws must
-        // not leak into it, whatever the setting says.
-        let mut settings = TrainingSettings::default();
-        settings.curriculum.char_set_mode = CharSetMode::Callsign;
-        settings.curriculum.callsign_level = crate::callsign::CALLSIGN_TIER_MAX;
-        settings.auto_level.char_sampling_thompson = false;
-        let shares = |rows: Vec<SamplingRow>| -> Vec<(char, f64)> {
-            rows.into_iter()
-                .map(|row| (row.character, row.sampling_prob))
-                .collect()
+    fn a_weakness_put_right_long_ago_stops_flagging_a_character() {
+        let practised = |timestamp: u64, sent: &str, received: &str| {
+            let mut session = SessionResult {
+                timestamp,
+                ..SessionResult::empty_for_test()
+            };
+            session.tally.add(sent, received);
+            session
         };
-        let without = shares(sampling_rows(&settings, &[]));
-        settings.auto_level.char_sampling_thompson = true;
-        assert_eq!(shares(sampling_rows(&settings, &[])), without);
+        let mut history: Vec<SessionResult> = (0..10)
+            .map(|at| practised(at, "MMMMMMMMMM", "MMMMXXXXXX"))
+            .collect();
+        history.extend((10..50).map(|at| practised(at, "MMMMM", "MMMMM")));
+        let m = |history: &[SessionResult]| {
+            character_diagnostics(history)
+                .into_iter()
+                .find(|d| d.letter == 'M')
+                .expect("M")
+        };
+        let now = m(&history);
+        assert_eq!((now.correct, now.total), (240, 300));
+        assert!(now.accuracy_pct > 95.0, "{}", now.accuracy_pct);
+        assert_eq!(now.status, MasteryStatus::Mastered);
+        assert_eq!(mastered_count(&history), 1);
+        let (low, high) = now.accuracy_interval(0.8);
+        assert!(low > 0.9 && high > low, "{low}–{high}");
+
+        // The other way round, a recent slump shows though the history
+        // before it is long and clean.
+        history.extend((50..53).map(|at| practised(at, "MMMMM", "XXXXM")));
+        let slump = m(&history);
+        assert!(slump.accuracy_pct < 90.0, "{}", slump.accuracy_pct);
+        assert_eq!(slump.status, MasteryStatus::Building);
+        assert_eq!(mastered_count(&history), 0);
+    }
+
+    /// Mixed draws letters and digits by the share asked for before it
+    /// weighs one character against another, and the chances shown are the
+    /// ones it draws by: ten letters and two digits at 70% letters used to
+    /// show the digits at two in twelve while the sampler drew them three
+    /// times in ten. A digit missed often still leads its side.
+    #[test]
+    fn mixed_chances_shown_are_the_ones_drawn() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        settings.curriculum.level = 9;
+        settings.curriculum.digits_level = 1;
+        settings.curriculum.mixed_letters_percent = 70;
+        settings.curriculum.min_group_size = 5;
+        settings.curriculum.max_group_size = 5;
+        // Coverage changes the weights as a session goes; the chances shown
+        // are a fresh session's.
+        settings.auto_level.char_sampling_coverage_strength = 0.0;
+        let settings = settings.clamp();
+        let pool = compute_char_pool(&settings);
+        assert_eq!(
+            (
+                pool.iter().filter(|c| !c.is_ascii_digit()).count(),
+                pool.iter().filter(|c| c.is_ascii_digit()).count()
+            ),
+            (10, 2)
+        );
+        let digit = *pool.iter().find(|c| c.is_ascii_digit()).expect("a digit");
+        let mut missed = SessionResult::empty_for_test();
+        missed.tally = CopyTally::of(&digit.to_string().repeat(8), "");
+        let history = [missed];
+
+        let rows = sampling_rows(&settings, &history);
+        let shown = |keep: &dyn Fn(char) -> bool| -> f64 {
+            rows.iter()
+                .filter(|row| keep(row.character))
+                .map(|row| row.sampling_prob)
+                .sum()
+        };
+        assert!((shown(&|c| c.is_ascii_digit()) - 0.3).abs() < 1e-9);
+        assert!((shown(&|_| true) - 1.0).abs() < 1e-9);
+
+        let mut drawn: BTreeMap<char, f64> = BTreeMap::new();
+        let mut sampler = crate::Sampler::new(&history, &settings, 7);
+        let groups = 4_000;
+        for _ in 0..groups {
+            let (group, _) = crate::machine::GroupSource::next_group(&mut sampler, &settings);
+            for c in group.chars() {
+                *drawn.entry(c).or_default() += 1.0 / f64::from(groups * 5);
+            }
+        }
+        for row in &rows {
+            let seen = drawn.get(&row.character).copied().unwrap_or(0.0);
+            assert!(
+                (row.sampling_prob - seen).abs() < 0.01,
+                "{}: shown {:.3}, drawn {seen:.3}",
+                row.character,
+                row.sampling_prob
+            );
+        }
+        let chance = |c: char| {
+            rows.iter()
+                .find(|row| row.character == c)
+                .map(|row| row.sampling_prob)
+        };
+        let other = *pool
+            .iter()
+            .rfind(|c| c.is_ascii_digit())
+            .expect("two digits");
+        assert!(chance(digit) > chance(other), "the digit missed comes more");
     }
 
     /// A character's history counts wherever it was practised: a K missed
@@ -1502,6 +1638,7 @@ mod tests {
         );
         let mut digits = koch.clone();
         digits.char_set_mode = CharSetMode::Digits;
+        digits.timestamp = koch.timestamp + 1;
         digits.tally.sent.insert(
             'K',
             LetterAccuracy {
@@ -1512,12 +1649,16 @@ mod tests {
         let k_belief = |rows: &[SamplingRow]| {
             rows.iter()
                 .find(|row| row.character == 'K')
-                .map(|row| (row.alpha, row.beta))
+                .map(|row| (row.alpha, row.beta, row.tries))
                 .expect("K in pool")
         };
-        let (alpha, beta) = k_belief(&sampling_rows(&settings, &[koch.clone()]));
+        let (alpha, beta, tries) = k_belief(&sampling_rows(&settings, &[koch.clone()]));
         let both = k_belief(&sampling_rows(&settings, &[koch, digits]));
-        assert_eq!(both, (alpha, beta + 10.0));
+        // The Koch session is one session back once the digits one follows.
+        let faded = CHAR_SAMPLING_PRIOR_ALPHA
+            + (alpha - CHAR_SAMPLING_PRIOR_ALPHA) * crate::belief::SESSION_FADE;
+        assert!((both.0 - faded).abs() < 1e-12, "{both:?}");
+        assert_eq!((both.1, both.2), (beta + 10.0, tries + 10));
     }
 
     /// A character the current set does not draw is still listed, after the

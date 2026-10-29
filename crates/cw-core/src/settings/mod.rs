@@ -26,7 +26,8 @@ pub const GROUP_REPEAT_MAX: u32 = 8;
 /// Speeds, in words a minute: character, effective and the paddles' own.
 pub const WPM_MIN: f64 = 5.0;
 pub const WPM_MAX: f64 = 80.0;
-/// How far the word space is stretched beyond seven units. Never under half:
+/// The word space, as a multiple of its standard seven units: 1 is the
+/// standard, above it longer and below it shorter. Never under half:
 /// three and a half units, still longer than the three between letters, or
 /// the gap between two groups would be shorter than one inside a group and
 /// the groups would run together.
@@ -348,6 +349,9 @@ pub struct PlaybackSettings {
     /// learning your copy speed as it goes ([`crate::speed`]). Off draws the
     /// speed evenly from the ranges. Older saves have no field and load off.
     pub adaptive_speed: bool,
+    /// Every word space, between groups and between the words of a send,
+    /// as a multiple of the standard seven units: 1 adds nothing, 0.5
+    /// halves it. Shown as Word space.
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
     /// Seconds to sit on the last group after it is sent, so the card can be
@@ -585,7 +589,6 @@ pub struct AutoLevelSettings {
     pub auto_adjust_above_threshold_count: u32,
     pub error_weight_strength: f64,
     pub char_sampling_coverage_strength: f64,
-    pub char_sampling_thompson: bool,
 }
 
 impl Default for AutoLevelSettings {
@@ -598,7 +601,6 @@ impl Default for AutoLevelSettings {
             auto_adjust_above_threshold_count: 2,
             error_weight_strength: 3.0,
             char_sampling_coverage_strength: 1.0,
-            char_sampling_thompson: false,
         }
     }
 }
@@ -720,6 +722,7 @@ pub use experience::Experience;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequences::{PresetId, SequenceChoice};
 
     #[test]
     fn clamp_links_and_bounds() {
@@ -812,8 +815,11 @@ mod tests {
         let range = s.range(RangeSetting::GroupRepeat);
         assert_eq!((range.min, range.max, range.linked), (3.0, 3.0, true));
 
-        // Unlinking leaves the value where it was; the range opens by editing.
+        // Unlinking opens the value into a range up from it, which editing
+        // then moves.
         s.set_range_linked(RangeSetting::GroupRepeat, false);
+        let range = s.range(RangeSetting::GroupRepeat);
+        assert_eq!((range.min, range.max, range.linked), (3.0, 4.0, false));
         s.set_range_max(RangeSetting::GroupRepeat, 5.0);
         let range = s.range(RangeSetting::GroupRepeat);
         assert_eq!((range.min, range.max, range.linked), (3.0, 5.0, false));
@@ -1390,6 +1396,71 @@ mod tests {
         assert_eq!(s.band.side_tone_max, 1000.0);
     }
 
+    /// Random has to draw from more than one value, whichever range it is
+    /// on: Fixed then Random opens the value into a range around it, inside
+    /// the range's bounds, at the bottom of them, in the middle and at the
+    /// top, and the settings stay as clamping keeps them. A range open
+    /// already stays as it is.
+    #[test]
+    fn every_fixed_range_opens_into_a_range() {
+        let cases = [
+            (RangeSetting::CharWpm, WPM_MIN, WPM_MAX),
+            (RangeSetting::EffectiveWpm, WPM_MIN, WPM_MAX),
+            (
+                RangeSetting::GroupSize,
+                f64::from(GROUP_SIZE_MIN),
+                f64::from(GROUP_SIZE_MAX),
+            ),
+            (
+                RangeSetting::GroupRepeat,
+                f64::from(GROUP_REPEAT_MIN),
+                f64::from(GROUP_REPEAT_MAX),
+            ),
+            (RangeSetting::SideTone, SIDE_TONE_MIN_HZ, SIDE_TONE_MAX_HZ),
+            (RangeSetting::Volume, VOLUME_MIN, VOLUME_MAX),
+            (
+                RangeSetting::Stations,
+                f64::from(STATIONS_MIN),
+                f64::from(STATIONS_MAX),
+            ),
+        ];
+        for (which, low, high) in cases {
+            for start in [low, ((low + high) / 2.0).round().max(low), high] {
+                let case = format!("{which:?} from {start}");
+                let mut s = TrainingSettings::default();
+                s.playback.link_char_to_effective = false;
+                s.set_range_linked(which, true);
+                s.set_range_min(which, start);
+                assert!(s.range(which).linked, "{case}");
+                s.set_range_linked(which, false);
+                let range = s.range(which);
+                assert!(!range.linked, "{case}");
+                assert!(range.min < range.max, "{case}: {range:?}");
+                assert!(
+                    range.min <= start + 1e-3 && start <= range.max + 1e-3,
+                    "{case}: {range:?}"
+                );
+                assert!(low <= range.min && range.max <= high, "{case}: {range:?}");
+                assert_eq!(s.clone().clamp(), s, "{case}");
+
+                s.set_range_max(which, high);
+                s.set_range_min(which, low);
+                s.set_range_linked(which, false);
+                let range = s.range(which);
+                assert_eq!((range.min, range.max), (low, high), "{case}, open");
+            }
+        }
+        // Effective speed opens downwards, under the characters, as
+        // Farnsworth spacing does.
+        let mut s = TrainingSettings::default();
+        s.playback.link_char_to_effective = false;
+        s.set_range_linked(RangeSetting::EffectiveWpm, true);
+        s.set_range_min(RangeSetting::EffectiveWpm, 20.0);
+        s.set_range_linked(RangeSetting::EffectiveWpm, false);
+        let range = s.range(RangeSetting::EffectiveWpm);
+        assert_eq!((range.min, range.max), (15.0, 20.0));
+    }
+
     #[test]
     fn every_range_can_be_read_moved_and_linked() {
         let cases = [
@@ -1439,6 +1510,28 @@ mod tests {
         s.set_range_min(RangeSetting::EffectiveWpm, 9.0);
         s.set_range_min(RangeSetting::CharWpm, 28.0);
         assert_eq!(s.playback.effective_wpm_min, 9.0);
+    }
+
+    /// The spacing is never faster than the characters, so an effective
+    /// speed set above the fastest character speed is sent at that, which is
+    /// what the Speed card says it is used as; tied, or all of it under the
+    /// characters, it is heard as set.
+    #[test]
+    fn an_effective_speed_above_the_characters_is_held_to_them() {
+        let mut s = TrainingSettings::default();
+        assert_eq!(s.effective_wpm_held(), None, "tied");
+        s.playback.link_char_to_effective = false;
+        s.set_range_linked(RangeSetting::CharWpm, true);
+        s.set_range_min(RangeSetting::CharWpm, 20.0);
+        s.set_range_min(RangeSetting::EffectiveWpm, 25.0);
+        s.set_range_max(RangeSetting::EffectiveWpm, 35.0);
+        assert_eq!(s.effective_wpm_held(), Some((20.0, 20.0)));
+        assert!(!crate::speed::SpeedPath::of(&s).has_room());
+        s.set_range_min(RangeSetting::EffectiveWpm, 12.0);
+        assert_eq!(s.effective_wpm_held(), Some((12.0, 20.0)));
+        assert!(crate::speed::SpeedPath::of(&s).has_room());
+        s.set_range_max(RangeSetting::EffectiveWpm, 20.0);
+        assert_eq!(s.effective_wpm_held(), None);
     }
 
     #[test]
@@ -1626,26 +1719,24 @@ mod tests {
     /// and this names it.
     #[test]
     fn every_setting_belongs_to_exactly_one_section() {
-        // Progress, not preference: where you have got to, and what the
-        // sampler has learned. No reset button touches these.
-        const PROGRESS: &[&str] = &["level", "digitsLevel", "callsignLevel"];
-
         let mut changed = wildly_different();
         for section in SettingsSection::ALL {
             changed.reset_section(section);
         }
 
         let after = serde_json::to_value(&changed).expect("serialize");
+        let moved = serde_json::to_value(wildly_different()).expect("serialize");
         let fresh = serde_json::to_value(TrainingSettings::default()).expect("serialize");
-        let (after, fresh) = (
+        let (after, moved, fresh) = (
             after.as_object().expect("an object"),
+            moved.as_object().expect("an object"),
             fresh.as_object().expect("an object"),
         );
 
         let orphans: Vec<&String> = after
             .iter()
             .filter(|(key, value)| {
-                !PROGRESS.contains(&key.as_str()) && fresh.get(*key) != Some(*value)
+                !LEFT_BY_RESETS.contains(&key.as_str()) && fresh.get(*key) != Some(*value)
             })
             .map(|(key, _)| key)
             .collect();
@@ -1653,6 +1744,112 @@ mod tests {
             orphans.is_empty(),
             "no section resets these, so nothing can put them back: {orphans:?}"
         );
+        // And what is the learner's own is still as they had it.
+        for key in LEFT_BY_RESETS {
+            assert_eq!(after.get(*key), moved.get(*key), "{key}");
+        }
+    }
+
+    /// What no card's reset touches. Progress, not preference: where you have
+    /// got to, and what the sampler has learned. And what the learner made,
+    /// which one press should not cost them: an unlock order of their own,
+    /// and their word list.
+    const LEFT_BY_RESETS: &[&str] = &[
+        "level",
+        "digitsLevel",
+        "callsignLevel",
+        "customSequence",
+        "sequenceIsCustom",
+        "wordList",
+    ];
+
+    /// [`wildly_different`] moves every stored setting off its default, so
+    /// that a reset that misses one, or a preset that writes one, shows: a
+    /// setting added and left out of it fails here, the word list among
+    /// them.
+    #[test]
+    fn wildly_different_moves_every_setting() {
+        let moved = serde_json::to_value(wildly_different()).expect("serialize");
+        let fresh = serde_json::to_value(TrainingSettings::default()).expect("serialize");
+        let (moved, fresh) = (
+            moved.as_object().expect("an object"),
+            fresh.as_object().expect("an object"),
+        );
+        let unmoved: Vec<&String> = fresh
+            .iter()
+            .filter(|(key, value)| moved.get(*key) == Some(*value))
+            .map(|(key, _)| key)
+            .collect();
+        assert!(
+            unmoved.is_empty(),
+            "wildly_different leaves these at their defaults: {unmoved:?}"
+        );
+        assert_eq!(moved.len(), fresh.len());
+    }
+
+    /// The Character set's reset puts back an unlock order a preset gave,
+    /// and leaves one of the learner's own, and their word list, as they
+    /// are. In Contest mode it puts the contest's own choices back and stays
+    /// in Contest: the contest is where the card is.
+    #[test]
+    fn the_character_sets_reset_keeps_what_the_learner_made_and_the_contest() {
+        let mut preset = wildly_different();
+        preset.choose_sequence(SequenceChoice::Preset(PresetId::MorseMania));
+        preset.reset_section(SettingsSection::CharacterSet);
+        assert_eq!(
+            preset.sequence_choice(),
+            SequenceChoice::Preset(PresetId::Lcwo)
+        );
+        assert_eq!(preset.curriculum.char_set_mode, CharSetMode::Mixed);
+        assert_eq!(preset.curriculum.word_list, ["PARIS", "QRZ"]);
+
+        let mut own = wildly_different();
+        own.reset_section(SettingsSection::CharacterSet);
+        assert_eq!(own.sequence_choice(), SequenceChoice::Custom);
+        assert_eq!(own.curriculum.custom_sequence, ['Z', 'Q']);
+
+        let mut contest = wildly_different();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        contest.reset_section(SettingsSection::CharacterSet);
+        assert_eq!(contest.curriculum.char_set_mode, CharSetMode::Contest);
+        let d = ContestSettings::default();
+        assert_eq!(contest.contest.contest_kind, d.contest_kind);
+        assert_eq!(contest.contest.contest_style, d.contest_style);
+        assert_eq!(contest.contest.contest_tu_call, d.contest_tu_call);
+    }
+
+    /// Undo after a reset puts that card back as it was, and only that one:
+    /// a change to another card made in between stays.
+    #[test]
+    fn a_reset_can_be_undone_card_by_card() {
+        let mut before = wildly_different().clamp();
+        // The stations were set by hand: no pile-up opened them.
+        before.contest.stations_opened_by_pileup = false;
+        for section in SettingsSection::ALL {
+            let mut settings = before.clone();
+            settings.reset_section(section);
+            assert_ne!(settings, before, "{section:?}");
+            let elsewhere = if section == SettingsSection::KeyingEnvelope {
+                SettingsSection::Recognition
+            } else {
+                SettingsSection::KeyingEnvelope
+            };
+            settings.reset_section(elsewhere);
+            settings.restore_section(section, &before);
+            let mut expected = before.clone();
+            expected.reset_section(elsewhere);
+            assert_eq!(settings, expected, "{section:?}");
+        }
+
+        // A pile-up a reset ended opens its stations again on Undo.
+        let mut pileup = TrainingSettings::default();
+        pileup.set_char_set_mode(CharSetMode::Contest);
+        pileup.set_contest_style(crate::contest::RunStyle::Pileup);
+        let before = pileup.clone();
+        pileup.reset_section(SettingsSection::CharacterSet);
+        assert_eq!(pileup.band.stations_max, STATIONS_MIN);
+        pileup.restore_section(SettingsSection::CharacterSet, &before);
+        assert_eq!(pileup, before);
     }
 
     /// And a reset stays inside its own card: changing everything, then
@@ -1711,8 +1908,11 @@ mod tests {
     /// preset something to leave alone.
     pub(super) fn wildly_different() -> TrainingSettings {
         let mut s = TrainingSettings::default();
+        s.curriculum.level = 9;
+        s.curriculum.digits_level = 4;
+        s.curriculum.callsign_level = 3;
         s.curriculum.num_groups = 7;
-        s.curriculum.min_group_size = 2;
+        s.curriculum.min_group_size = 4;
         s.curriculum.max_group_size = 9;
         s.curriculum.link_group_size = true;
         s.curriculum.adaptive_group_size = true;
@@ -1722,6 +1922,7 @@ mod tests {
         s.curriculum.custom_sequence = vec!['Z', 'Q'];
         s.curriculum.sequence_is_custom = true;
         s.curriculum.practice_window = PracticeWindow::Last3;
+        s.curriculum.word_list = vec!["PARIS".to_string(), "QRZ".to_string()];
         s.playback.char_wpm_min = 31.0;
         s.playback.char_wpm_max = 33.0;
         s.playback.link_char_wpm = true;
@@ -1729,17 +1930,20 @@ mod tests {
         s.playback.effective_wpm_max = 13.0;
         s.playback.link_effective_wpm = true;
         s.playback.link_char_to_effective = false;
+        s.playback.adaptive_speed = true;
         s.playback.extra_word_space_multiplier = 2.5;
         s.playback.group_timeout = 9_000.0;
         s.playback.group_pause_sec = 6.0;
-        s.playback.lock_input_during_group_playback = false;
+        s.playback.countdown_sec = 7;
+        s.playback.fist_variation = 0.8;
+        s.playback.lock_input_during_group_playback = true;
         s.playback.paddle_swap = true;
         s.playback.paddle_keys_by_place = false;
         s.playback.keyer_mode = KeyerMode::Ultimatic;
         s.playback.keyer_wpm = 32.0;
         s.playback.group_repeat_min = 2;
         s.playback.group_repeat_max = 4;
-        s.playback.link_group_repeat = true;
+        s.playback.link_group_repeat = false;
         s.band.side_tone_min = 700.0;
         s.band.side_tone_max = 900.0;
         s.band.volume_min = 0.3;
@@ -1771,7 +1975,6 @@ mod tests {
         s.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Digits;
         s.auto_level.error_weight_strength = 0.9;
         s.auto_level.char_sampling_coverage_strength = 0.9;
-        s.auto_level.char_sampling_thompson = false;
         s.recognition = RecognitionBands {
             fast_ms: 300,
             icr_ms: 500,
@@ -1779,6 +1982,7 @@ mod tests {
         };
         s.contest.contest_kind = crate::contest::ContestKind::Sprint;
         s.contest.contest_style = crate::contest::RunStyle::Pileup;
+        s.contest.stations_opened_by_pileup = true;
         s.contest.contest_habits = crate::contest::CallerHabits::Real;
         s.contest.contest_flutter = true;
         s.contest.contest_minutes = 25;

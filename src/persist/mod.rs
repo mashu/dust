@@ -789,7 +789,6 @@ pub(crate) mod tests {
         a.auto_adjust_above_threshold_count = 9;
         a.error_weight_strength = 0.9;
         a.char_sampling_coverage_strength = 0.9;
-        a.char_sampling_thompson = true;
         s.recognition = cw_core::RecognitionBands {
             fast_ms: 350,
             icr_ms: 550,
@@ -798,6 +797,7 @@ pub(crate) mod tests {
         let k = &mut s.contest;
         k.contest_kind = cw_core::ContestKind::Sprint;
         k.contest_style = cw_core::RunStyle::Pileup;
+        k.stations_opened_by_pileup = true;
         k.contest_habits = cw_core::CallerHabits::Rough;
         k.contest_flutter = true;
         k.contest_minutes = 25;

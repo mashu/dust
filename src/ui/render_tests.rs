@@ -478,6 +478,7 @@ fn auto_level_card_shows_both_meters() {
                     below_disabled: false,
                     alternating_mixed: true,
                     next_mixed_axis: Some(MixedAutoLevelAxis::Letters),
+                    judged_at: None,
                 },
             }
         }
@@ -485,6 +486,34 @@ fn auto_level_card_shows_both_meters() {
     assert!(html.contains("Auto level"));
     assert!(html.contains("3/5"));
     assert!(html.contains("90% to pass"));
+    assert!(!html.contains("Adapt speed to me"));
+}
+
+/// With adaptive speed steering, the card says where a session counts.
+#[test]
+fn auto_level_card_says_where_adaptive_speed_counts() {
+    let html = render(|| {
+        rsx! {
+            AutoLevelCard {
+                progress: AutoLevelProgress {
+                    threshold: 90.0,
+                    above_count: 1,
+                    above_target: 2,
+                    below_count: 0,
+                    below_target: 1,
+                    above_disabled: false,
+                    below_disabled: false,
+                    alternating_mixed: false,
+                    next_mixed_axis: None,
+                    judged_at: Some((15.0, 30.0)),
+                },
+            }
+        }
+    });
+    assert!(html.contains("90% to pass"), "{html}");
+    assert!(html.contains(
+        "a session counts only once it comes at the top of your speed range, 30 WPM, or its bottom, 15 WPM. In between it counts neither way."
+    ));
 }
 
 #[test]
@@ -646,10 +675,38 @@ fn settings_renders_every_card() {
     // Every control says what it is to a screen reader: a number field's
     // label is tied to its input, and a step button names what it steps.
     assert!(html.contains("for=\"number-key-speed\""), "{html}");
-    assert!(html.contains("aria-label=\"Decrease Key speed\""));
+    assert!(html.contains("aria-label=\"Decrease Key speed (WPM)\""));
     assert!(html.contains("aria-label=\"Increase Rise time\""));
     assert!(html.contains("for=\"field-sequence-order\""));
     assert!(html.contains("aria-label=\"Rise time\""));
+    // Named by what it is, unit and all, and by the setting where its
+    // label leans on what is around it: two Min (WPM) are two names, each
+    // Fixed/Random and ⓘ is its card's, and each group of segments and
+    // each band slider says what it sets.
+    for named in [
+        r#"aria-label="Key speed (WPM)""#,
+        r#"aria-label="Answer timeout (seconds)""#,
+        r#"aria-label="Word space (times)""#,
+        r#"aria-label="Character speed, min (WPM)""#,
+        r#"aria-label="Character speed, max (WPM)""#,
+        r#"aria-label="Decrease Group size, min (characters)""#,
+        r#"aria-label="Random character speed" aria-pressed="true""#,
+        r#"aria-label="Random sends per group" aria-pressed="false""#,
+        r#"aria-label="Help on Speed""#,
+        r#"aria-label="Help on Band conditions""#,
+        r#"role="group" aria-label="Key""#,
+        r#"role="group" aria-label="Filter shape""#,
+        r#"role="group" aria-label="Character set""#,
+        r#"role="group" aria-label="Unlock order""#,
+        r#"aria-label="QSB fading depth""#,
+        r#"aria-label="Increase QSB fading rate""#,
+        r#"aria-label="QRN static intensity""#,
+        r#"aria-label="Band noise level""#,
+    ] {
+        assert!(html.contains(named), "no {named} in {html}");
+    }
+    assert!(!html.contains(r#"aria-label="What does this mean?""#));
+    assert_eq!(html.matches(r#"aria-label="Min (WPM)""#).count(), 0);
 }
 
 /// In Contest mode the Character set card shows the contest in place of an
@@ -677,7 +734,9 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
     for shown in [
         ">Character set<",
         "Contest · CQ WPX",
-        r#"<div class="eyebrow">Contest</div><div class="mode-pills">"#,
+        r#"<div class="eyebrow">Contest</div><div class="mode-pills" role="group" aria-label="Contest">"#,
+        r#"role="group" aria-label="Run style""#,
+        r#"role="group" aria-label="Caller habits""#,
         r#"id="contest-cq-wpx" class="pill active""#,
         "You send 5NN + serial\u{a0}· You\u{a0}copy\u{a0}NR",
         r#"<li class="qso-line you"><span class="qso-who tiny">You</span><span class="qso-sends"><span class="call">CQ DL1ABC TEST</span>"#,
@@ -1351,6 +1410,42 @@ fn stats_renders_the_chart_with_one_session() {
         html.contains("<circle"),
         "a single session still draws its point"
     );
+}
+
+/// The chart marks the level-up threshold, and its chip says it, only where
+/// a session's own accuracy is what levels you up: not with auto level off
+/// or never levelling up, nor while adaptive speed judges sessions at the
+/// ends of its range.
+#[test]
+fn the_level_up_line_shows_only_where_it_is_what_levels_you_up() {
+    let overview = |settings: TrainingSettings| {
+        render_props(
+            StatsView,
+            StatsViewProps {
+                settings,
+                sessions: vec![session("2026-09-01", 0.85), session("2026-09-02", 0.95)],
+                on_delete: None,
+                backups: None,
+            },
+        )
+    };
+    let marked =
+        |html: &str| html.contains("Level up at 90%") && html.contains("stroke-dasharray=\"4 4\"");
+    let mut settings = TrainingSettings::default();
+    assert!(marked(&overview(settings.clone())));
+    settings.auto_level.auto_adjust_above_threshold_count = 0;
+    assert!(!marked(&overview(settings.clone())), "never levels up");
+    settings = TrainingSettings::default();
+    settings.auto_level.auto_adjust_level = false;
+    assert!(!marked(&overview(settings.clone())), "auto level off");
+    settings = TrainingSettings::default();
+    settings.playback.adaptive_speed = true;
+    let html = overview(settings);
+    assert!(
+        !html.contains("Level up at"),
+        "adaptive speed judges otherwise"
+    );
+    assert!(html.contains("Accuracy over time"));
 }
 
 #[test]
@@ -2547,7 +2642,9 @@ mod interactions {
     }
 
     /// The Letters card says where each character stands, which way it is
-    /// going, and that two tries are too few to call M anything.
+    /// going, and that two tries are too few to call M anything. K's share
+    /// right fades its older sessions: 84%, not the 83% of its thirty tries
+    /// summed.
     #[test]
     fn letter_accuracy_says_where_each_stands_and_which_way_it_goes() {
         let ui = Ui::new(LettersHarness, ());
@@ -2558,13 +2655,13 @@ mod interactions {
         assert!(!ui.has(">Weak · "), "nothing is weak");
         let k = ui.input_tag("letter-k");
         assert!(k.contains("letter-row stat-row building"), "{k}");
-        assert!(k.contains("aria-label=\"K: 83% right of 30, likely"), "{k}");
+        assert!(k.contains("aria-label=\"K: 84% right of 30, likely"), "{k}");
         assert!(k.contains("up 50 points lately"), "{k}");
         assert!(ui.has(">↑ 50<"));
         assert!(ui.has("Building · 30 tries · likely "), "{}", ui.html());
         // The bar is as long as the share right, with a notch at the
         // Mastered line.
-        assert!(ui.has("width: 83.3%;"));
+        assert!(ui.has("width: 84.5%;"));
         assert!(ui.has("class=\"bar-mark\" style=\"left: 90.0%;\""));
         let m = ui.input_tag("letter-m");
         assert!(m.contains("letter-row stat-row finding-out"), "{m}");
@@ -2750,7 +2847,9 @@ mod interactions {
         ui.click("help-what-comes-up-next");
         assert!(ui.has("class=\"help-note\""));
         assert!(ui.has(">Under your 10%<"), "{}", ui.html());
-        assert!(ui.has("a session levels up at 90% right (Settings → Auto level)"));
+        assert!(
+            ui.has("what your Auto level threshold of 90% right leaves (Settings → Auto level)")
+        );
         assert!(
             ui.input_tag("help-what-comes-up-next")
                 .contains("aria-expanded=true")

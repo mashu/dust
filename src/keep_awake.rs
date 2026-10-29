@@ -4,6 +4,10 @@
 //! or a contest run holds it while it is live; paused, it lets the screen
 //! sleep, and neither is lost to that. Hear a QSO holds it
 //! while it plays, its lines on the screen: a page out of sight stops it.
+//! So does a phone's stream of groups, which a page out of sight stops too
+//! ([`STREAM_PLAYS_OUT_OF_SIGHT`]). The band preview, a letter and a sample
+//! hold nothing: they are heard while the settings or the letters are
+//! being worked, and a screen left to dim stops them with the page.
 //!
 //! Android sets its window's own keep-screen-on flag, which the system holds
 //! for as long as the window is in front and lets go of with it. Everywhere
@@ -15,12 +19,12 @@
 use cw_core::{ContestPhase, ContestView, GroupSession};
 use dioxus::prelude::*;
 
-use crate::playback::Preview;
+use crate::playback::{Preview, STREAM_PLAYS_OUT_OF_SIGHT};
 use crate::state::Screen;
 
 /// Hold the screen on for exactly as long as the training screen is up with
 /// a session on it that is not paused, or a contest run on it is live, or
-/// Hear a QSO plays.
+/// Hear a QSO plays, or a stream of groups that stops out of sight.
 pub fn use_keep_awake(
     screen: Signal<Screen>,
     session: Signal<Option<GroupSession>>,
@@ -34,7 +38,10 @@ pub fn use_keep_awake(
         ),
         None => {
             let paused = session.read().as_ref().is_some_and(GroupSession::paused);
-            (screen() == Screen::Training && !paused) || preview.read().is_qsos()
+            let preview = preview.read();
+            (screen() == Screen::Training && !paused)
+                || preview.is_qsos()
+                || (preview.is_stream() && !STREAM_PLAYS_OUT_OF_SIGHT)
         }
     });
     // What was last asked for, so starting up off asks for nothing.
@@ -155,6 +162,7 @@ pub(crate) mod tests {
 
     use super::wake_lock_script;
     use crate::audio::fake::Call;
+    use crate::playback::STREAM_PLAYS_OUT_OF_SIGHT;
     use crate::testing::{Ui, contest_settings, run, test_settings};
 
     thread_local! {
@@ -244,6 +252,24 @@ pub(crate) mod tests {
             ui.advance(2_000).await;
             ui.click("btn-stop");
             assert_eq!(asked(), vec![true, false]);
+        });
+    }
+
+    /// A phone's stream of groups holds the screen on while it plays, as a
+    /// page out of sight stops it there. Elsewhere it plays on out of
+    /// sight, and holds nothing.
+    #[test]
+    fn the_screen_stays_on_for_a_stream_only_where_out_of_sight_stops_it() {
+        run(|| async {
+            ASKED.with(|asked| asked.borrow_mut().clear());
+            let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+            ui.click("btn-listen-to-letters");
+            ui.click("btn-stream-groups");
+            let held = !STREAM_PLAYS_OUT_OF_SIGHT;
+            assert_eq!(asked(), if held { vec![true] } else { vec![] });
+            ui.advance(2_000).await;
+            ui.click("btn-stop");
+            assert_eq!(asked(), if held { vec![true, false] } else { vec![] });
         });
     }
 

@@ -1637,6 +1637,7 @@ dependencies = [
  "gloo-timers",
  "gtk",
  "js-sys",
+ "ndk-context",
  "objc2-avf-audio",
  "serde",
  "serde_json",

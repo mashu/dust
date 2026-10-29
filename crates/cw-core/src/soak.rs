@@ -352,10 +352,13 @@ fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -
         .map(|_| KEYS[rng.usize_in(0, KEYS.len() - 1)])
         .collect();
     match rng.usize_in(0, 10) {
-        0 if rng.f64() < 0.2 => SessionEvent::PlaybackHeldUp { index },
-        0 => SessionEvent::PlaybackEnded {
-            index,
-            duration_sec: rng.pick_in_range(0.0, 5.0),
+        0 => match rng.f64() {
+            draw if draw < 0.1 => SessionEvent::PlaybackHeldUp { index },
+            draw if draw < 0.2 => SessionEvent::PlaybackMissed { index },
+            _ => SessionEvent::PlaybackEnded {
+                index,
+                duration_sec: rng.pick_in_range(0.0, 5.0),
+            },
         },
         1 => SessionEvent::PlaybackStopped { index },
         2 => SessionEvent::Input {
@@ -507,6 +510,7 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 SessionEvent::Input { .. }
                     | SessionEvent::PlaybackStarted { .. }
                     | SessionEvent::PlaybackHeldUp { .. }
+                    | SessionEvent::PlaybackMissed { .. }
             ) {
                 assert!(
                     effects
@@ -969,6 +973,11 @@ fn auto_levelling_never_walks_the_settings_out_of_range() {
                     "seed {seed} round {round}: a level moved by more than one"
                 );
                 assert!(change.to >= LEVEL_MIN, "seed {seed} round {round}");
+                assert_eq!(
+                    change.raised(),
+                    change.accuracy_pct >= change.threshold_pct,
+                    "seed {seed} round {round}: a session moved the level against itself"
+                );
                 apply_auto_level(&mut settings, &change);
             }
             assert_eq!(
@@ -1602,9 +1611,16 @@ fn random_contest_event(
         ContestEvent::TurnEnded {
             id: pick(rng, &seen.turns),
         }
-    } else if draw < 0.62 {
+    } else if draw < 0.615 {
         ContestEvent::TurnHeldUp {
             id: pick(rng, &seen.turns),
+        }
+    } else if draw < 0.62 {
+        let from_sec = rng.pick_in_range(0.0, 4.0);
+        ContestEvent::TurnMissed {
+            id: pick(rng, &seen.turns),
+            from_sec,
+            until_sec: from_sec + rng.pick_in_range(0.0, 2.5),
         }
     } else if draw < 0.65 {
         ContestEvent::TurnCancelled {

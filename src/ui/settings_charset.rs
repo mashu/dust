@@ -13,44 +13,13 @@ use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
 use crate::ui::widgets::{
-    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id, range_label,
+    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, TextDraft, TextField,
+    control_id, range_label, whole,
 };
 
 /// The largest file read as a word list. The longest list kept is a few
 /// tens of kilobytes; anything near this is not a word list.
 const WORD_FILE_MAX_BYTES: u64 = 1_000_000;
-
-/// A list of characters, typed out.
-///
-/// What is typed stays as typed until it is committed — on Enter, or on
-/// leaving the field — and only then is it cleaned down to the characters
-/// that can be sent. Cleaned on every key, the box would move under the
-/// cursor whenever a key was dropped, and could never be emptied to start
-/// again: an empty unlock order is LCWO's, so clearing it would fill it
-/// straight back up.
-#[component]
-fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<String>) -> Element {
-    let mut typed = use_signal(|| None::<String>);
-    let shown = typed().unwrap_or(value);
-    let id = control_id("field", label);
-    rsx! {
-        div { class: "field",
-            label { r#for: "{id}", "{label}" }
-            input {
-                id,
-                class: "group-text",
-                value: "{shown}",
-                autocapitalize: "characters",
-                spellcheck: false,
-                oninput: move |e| typed.set(Some(e.value())),
-                onchange: move |e| {
-                    typed.set(None);
-                    on_commit.call(e.value());
-                },
-            }
-        }
-    }
-}
 
 /// The character sets, in the order the control offers them.
 pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 6] = [
@@ -325,13 +294,12 @@ pub fn CharsetCard(
                 note: c.note(),
                 help: help::character_set(),
                 SectionReset {
-                    label: "character set",
-                    on_reset: move |()| {
-                        settings.write().reset_section(SettingsSection::CharacterSet);
-                    },
+                    card: "Character set",
+                    settings,
+                    section: SettingsSection::CharacterSet,
                 }
             }
-            div { class: "segmented charset-modes",
+            div { class: "segmented charset-modes", role: "group", aria_label: "Character set",
                 for (mode, label) in CHAR_SET_MODES {
                     Seg {
                         label,
@@ -352,7 +320,7 @@ pub fn CharsetCard(
             }
             if has_unlock_order {
                 div { class: "eyebrow", "Unlock order" }
-                div { class: "mode-pills",
+                div { class: "mode-pills", role: "group", aria_label: "Unlock order",
                     for choice in SEQUENCE_PRESETS
                         .iter()
                         .map(|preset| (SequenceChoice::Preset(preset.id), preset.name))
@@ -366,7 +334,12 @@ pub fn CharsetCard(
                         }
                     }
                 }
-                AlphabetField {
+                // Cleaned down to what can be sent once it is committed, and
+                // not before. Cleaned on every key, the box would move under
+                // the cursor whenever a key was dropped, and could never be
+                // emptied to start again: an empty unlock order is LCWO's, so
+                // clearing it would fill it straight back up.
+                TextField {
                     label: "Sequence order",
                     value: c.sequence.clone(),
                     on_commit: move |typed: String| settings.write().type_sequence(&typed),
@@ -386,7 +359,7 @@ pub fn CharsetCard(
                     min: 1.0,
                     max: f64::from(c.level_max),
                     step: 1.0,
-                    onchange: move |v| settings.write().set_active_level(v as u32),
+                    onchange: move |v| settings.write().set_active_level(whole(v)),
                 }
                 if c.mode == CharSetMode::Mixed {
                     NumberField {
@@ -396,7 +369,7 @@ pub fn CharsetCard(
                         min: 1.0,
                         max: f64::from(MAX_DIGITS_LEVEL),
                         step: 1.0,
-                        onchange: move |v| settings.write().curriculum.digits_level = v as u32,
+                        onchange: move |v| settings.write().curriculum.digits_level = whole(v),
                     }
                 }
             }
@@ -415,7 +388,7 @@ pub fn CharsetCard(
                     max: 100.0,
                     step: 5.0,
                     unit: "%",
-                    onchange: move |v| settings.write().curriculum.mixed_letters_percent = v as u32,
+                    onchange: move |v| settings.write().curriculum.mixed_letters_percent = whole(v),
                 }
             }
             if words {
@@ -438,7 +411,7 @@ pub fn CharsetCard(
                 }
             } else if !callsigns {
                 div { class: "eyebrow", "Practice window" }
-                div { class: "mode-pills",
+                div { class: "mode-pills", role: "group", aria_label: "Practice window",
                     for (window, label, needs) in PRACTICE_WINDOWS {
                         if c.unlocked >= needs {
                             Seg {
@@ -487,7 +460,7 @@ fn ContestBody(
         .map_or_else(|| "A QSO".to_string(), |heard| heard_label(heard, hearing));
     rsx! {
         div { class: "eyebrow", "Contest" }
-        div { class: "mode-pills",
+        div { class: "mode-pills", role: "group", aria_label: "Contest",
             for kind in ContestKind::ALL {
                 Seg {
                     label: kind.label(),
@@ -539,18 +512,24 @@ fn ContestBody(
     }
 }
 
+/// What the line under the contest presets says while none is chosen.
+pub(crate) const PRESET_CUSTOM: &str = "Custom · a preset sets the Speed card's speeds, which group training uses too, and nothing else";
+
 /// Where a run starts from: a preset for a first QSO, a club operator or a
-/// contester, each setting how fast the callers come and nothing else. The
-/// settings read Custom once that is changed, as the Experience presets do.
+/// contester, each setting how fast the callers come and nothing else. That
+/// is the Speed card's speeds, which group training sends at too, as a
+/// contest has no speed of its own, and the line under the presets says so.
+/// The settings read Custom once that is changed, as the Experience presets
+/// do.
 #[component]
 fn PresetPicker(settings: Signal<TrainingSettings>, preset: Option<ContestPreset>) -> Element {
     let line = match preset {
         Some(preset) => preset_summary(preset),
-        None => "Custom · a preset sets how fast the callers come, and nothing else".to_string(),
+        None => PRESET_CUSTOM.to_string(),
     };
     rsx! {
         div { class: "eyebrow", "Preset" }
-        div { class: "mode-pills",
+        div { class: "mode-pills", role: "group", aria_label: "Preset",
             for each in ContestPreset::ALL {
                 Seg {
                     label: each.name(),
@@ -575,7 +554,7 @@ fn RunStylePicker(settings: Signal<TrainingSettings>, style: RunStyle, callers: 
     };
     rsx! {
         div { class: "eyebrow", "Run style" }
-        div { class: "mode-pills",
+        div { class: "mode-pills", role: "group", aria_label: "Run style",
             for (each, label) in RUN_STYLES {
                 Seg {
                     label,
@@ -604,7 +583,7 @@ fn TuCallPicker(settings: Signal<TrainingSettings>, tu_call: TuCall) -> Element 
     };
     rsx! {
         div { class: "eyebrow", "Your call in TU" }
-        div { class: "mode-pills",
+        div { class: "mode-pills", role: "group", aria_label: "Your call in TU",
             for (each, label) in TU_CALLS {
                 Seg {
                     label,
@@ -702,28 +681,24 @@ fn take_word_file(
 ///
 /// What is typed stays as typed until it is committed, on leaving the box,
 /// and is then read as a list: upper-cased, each word once, what cannot be
-/// sent left out and said. A key does not redraw the box — on the desktop
-/// and phone builds a redraw reaches it a frame late, over what was typed
-/// since — so the count of what is being typed is drawn beside it instead.
+/// sent left out and said. A key does not redraw the box ([`TextDraft`]),
+/// so the count of what is being typed is drawn beside it instead.
 #[component]
 fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: bool) -> Element {
-    // The text being typed, until it is committed. Only the count reads it.
-    let mut draft = use_signal(|| None::<String>);
+    let draft = TextDraft::use_draft();
+    // The text being typed again, for the count under the box, which alone
+    // reads it: the box goes by the draft, which redraws nothing.
+    let mut counting = use_signal(|| None::<String>);
     let report = use_signal(|| None::<String>);
-    // Moved on by every commit, so the box shows the list again afterwards
-    // even when the list did not change: text that kept nothing goes.
-    let mut repaint = use_signal(|| 0u64);
-    let _ = repaint.read();
+    // Every commit puts the list back in the box, even when the list did not
+    // change: text that kept nothing goes.
     let mut settle = move || {
-        draft.set(None);
-        repaint += 1;
+        draft.settle();
+        counting.set(None);
     };
     // The starter list, unfolded.
     let mut show_list = use_signal(|| false);
-    let shown = draft
-        .peek()
-        .clone()
-        .unwrap_or_else(|| if own { words.join("\n") } else { String::new() });
+    let shown = draft.shown(|| if own { words.join("\n") } else { String::new() });
     rsx! {
         div { class: "eyebrow", "Your words" }
         textarea {
@@ -735,7 +710,10 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
             aria_label: "Your words, one to a line",
             autocapitalize: "characters",
             spellcheck: false,
-            oninput: move |e| draft.set(Some(e.value())),
+            oninput: move |e| {
+                draft.hold(e.value());
+                counting.set(Some(e.value()));
+            },
             onchange: move |e| {
                 settle();
                 take_list(settings, report, &e.value(), None);
@@ -768,7 +746,7 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
                 }
             }
         }
-        WordCount { draft, report, count: words.len(), own }
+        WordCount { typing: counting, report, count: words.len(), own }
         if !own {
             p { class: "muted hint",
                 "Until you add your own, Words sends a starter list of the abbreviations and Q-codes a contact is made of."
@@ -801,12 +779,12 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
 /// are.
 #[component]
 fn WordCount(
-    draft: Signal<Option<String>>,
+    typing: Signal<Option<String>>,
     report: Signal<Option<String>>,
     count: usize,
     own: bool,
 ) -> Element {
-    let line = match draft() {
+    let line = match typing() {
         Some(text) => format!(
             "{} — taken when you leave the box",
             list_report(&WordList::read(&text), None)

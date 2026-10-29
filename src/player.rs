@@ -73,6 +73,13 @@ pub enum SendNews<'a> {
     /// it went out later than planned, and none of it can be timed. Said
     /// once known, as it ends or is stopped.
     HeldUp,
+    /// Some of its sound went unheard, from and to so many seconds into
+    /// it: the browser's stream fell so far behind its clock that it
+    /// skipped that much, and none of it reached the ear. Said as soon as
+    /// it is found, before the send ends, and again should more of it go;
+    /// it was held up as well. A native player never skips: what it cannot
+    /// play on time it plays late.
+    Missed { from_sec: f64, until_sec: f64 },
 }
 
 /// The one audio player the app has. Cheap to clone; every clone is the same
@@ -532,7 +539,14 @@ impl Ticket<'_> {
         let start = wait.start();
         on_news(SendNews::Started(&start));
         let duration_sec = wait.duration_sec;
-        let waited = wait.wait().await;
+        let waited = wait
+            .wait_telling(|from_sec, until_sec| {
+                on_news(SendNews::Missed {
+                    from_sec,
+                    until_sec,
+                });
+            })
+            .await;
         // Heard out or stopped, a send held up on its way says so: what of
         // it was heard went out late. One that failed is sent again.
         if waited.held_up && waited.outcome != PlaybackOutcome::Failed {
@@ -820,10 +834,12 @@ mod tests {
             let began = MonoMs(crate::time::mono_ms());
             let mut starts = Vec::new();
             let mut held_up = false;
+            let mut missed = false;
             let sent = lease
                 .send(&cq(), &settings, |news| match news {
                     SendNews::Started(start) => starts.push(start.clone()),
                     SendNews::HeldUp => held_up = true,
+                    SendNews::Missed { .. } => missed = true,
                 })
                 .await
                 .expect("sent");
@@ -839,7 +855,7 @@ mod tests {
                 start.char_ends_ms.last().copied(),
                 Some((sent.duration_sec * 1_000.0).round() as u32)
             );
-            assert!(!held_up);
+            assert!(!held_up && !missed);
 
             // Parked on its way, heard out: held up.
             let parked = async {
@@ -872,6 +888,33 @@ mod tests {
             recorder.set_page_hidden(false);
             assert_eq!(sent, Err(AudioError::Cancelled));
             assert_eq!(news, [false, true]);
+        });
+    }
+
+    /// A send its stream skipped some of says what of it went unheard as
+    /// soon as that is found, before it ends, and that it was held up.
+    #[test]
+    fn a_send_skipped_in_part_says_so_before_it_ends() {
+        run(|| async {
+            let (player, recorder) = player();
+            let settings = test_settings();
+            let lease = player.claim(&settings).expect("a player");
+            recorder.skip_next.set(Some((0.05, 0.15)));
+            let mut news = Vec::new();
+            let sent = lease
+                .send(&cq(), &settings, |said| {
+                    news.push(match said {
+                        SendNews::Started(_) => "started".to_string(),
+                        SendNews::Missed {
+                            from_sec,
+                            until_sec,
+                        } => format!("missed {from_sec}..{until_sec}"),
+                        SendNews::HeldUp => "held up".to_string(),
+                    });
+                })
+                .await;
+            assert!(sent.is_ok(), "heard out, in part");
+            assert_eq!(news, ["started", "missed 0.05..0.15", "held up"]);
         });
     }
 

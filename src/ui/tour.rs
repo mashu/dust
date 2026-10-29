@@ -1788,7 +1788,8 @@ mod tests {
             assert!(ui.shows("fixed-character-speed"), "Random was made unseen");
             ui.advance(u64::from(POINT_MS)).await;
             assert!(ui.shows("from-character-speed"), "Random was not made");
-            assert_eq!(moves_made(&ui), 1);
+            // Random opens the 20 into 20–25, which is Max 25 made with it.
+            assert_eq!(moves_made(&ui), 2);
             ui.advance(u64::from(SHOWN_MS)).await;
             assert!(ui.has("#from-character-speed {"));
 

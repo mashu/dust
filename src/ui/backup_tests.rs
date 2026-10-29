@@ -264,3 +264,18 @@ fn a_build_that_cannot_save_a_backup_can_still_restore_one() {
         assert!(ui.has("Bring in a backup saved by the web app"));
     });
 }
+
+/// Off Android the picker offers backups, the JSON files. On Android, the
+/// app or the web app in a browser there, it offers every file: a picker
+/// there that filters by type hides a backup another app stored untyped.
+#[test]
+fn the_restore_picker_offers_backups_off_android() {
+    run(|| async {
+        let ui = open(MemoryStore::default(), &history(1));
+        let input = ui.input_tag("file-backup");
+        assert!(
+            input.contains(r#"accept=".json,application/json""#),
+            "{input}"
+        );
+    });
+}

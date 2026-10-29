@@ -51,6 +51,16 @@ impl Live {
     }
 }
 
+/// How often a running session's heartbeat says the app is still running
+/// ([`beat`]).
+const HEARTBEAT_MS: u32 = 250;
+
+/// A gap this long since the app was last seen running a session is time it
+/// was not running: a phone locked, a process put on hold, a webview that
+/// held every task back. The heartbeat comes every quarter second, and a
+/// busy page delays one by far less.
+const HEARTBEAT_GAP_MS: u64 = 2_000;
+
 /// A session in progress: the machine that decides it, the stations it is
 /// sent by, and its hold on the audio.
 pub struct LiveSession {
@@ -60,6 +70,9 @@ pub struct LiveSession {
     /// the same operators.
     stations: SplitMix64,
     lease: Lease,
+    /// When the app was last seen running the session: its last heartbeat,
+    /// or the last news it heard.
+    last_seen: MonoMs,
 }
 
 impl LiveSession {
@@ -306,21 +319,77 @@ pub fn start_session(ctx: AppCtx) {
     // Each session draws from a sampler of its own, seeded afresh.
     ctx.answer.clear();
     let sampler = Sampler::new(&sessions.peek(), &fitted, seed_rng());
-    let (machine, effects) = SessionMachine::start(
-        SessionId::new(lease.turn()),
-        MonoMs(mono_ms()),
-        fitted,
-        sampler,
-    );
+    let now = MonoMs(mono_ms());
+    let (machine, effects) =
+        SessionMachine::start(SessionId::new(lease.turn()), now, fitted, sampler);
     runtime.set(Some(machine.session().clone()));
     screen.set(Screen::Training);
     *app.session.borrow_mut() = Some(Live::Groups(Box::new(LiveSession {
         machine,
         stations: SplitMix64::new(seed_rng()),
         lease: lease.clone(),
+        last_seen: now,
     })));
     ctx.mark_running(false);
+    beat(ctx, lease.clone());
     run_effects(ctx, &lease, effects);
+}
+
+/// While `lease` holds the audio, say every [`HEARTBEAT_MS`] that the app is
+/// still running the session. A pause gives the audio back, and the beat
+/// stops with it; Resume starts it again under the new claim.
+///
+/// It is the session's own task, on the root scope, so it beats whatever
+/// screen is up, and stops with the session, the way its timers do.
+fn beat(ctx: AppCtx, lease: Lease) {
+    spawn_forever(async move {
+        while lease.sleep(HEARTBEAT_MS).await.is_ok() {
+            pause_if_away(ctx, &lease);
+        }
+    });
+}
+
+/// Before the session hears anything, and on every heartbeat: a gap since
+/// the app was last seen running it, longer than any heartbeat takes, is
+/// time the app was not running, and the session is paused from when it
+/// was last seen, as it would have been had it heard the page go.
+///
+/// A webview whose render waits on a frame a hidden page never gets holds
+/// back every task the app has, and a frozen process holds back everything;
+/// either way the page's word that it was hidden comes in after the timers
+/// that came due in the gap, which would have closed answers nobody was
+/// there to type, and sent groups to nobody. Here the first of them to run
+/// pauses the session, and they find it paused. Typing still waiting out
+/// the box's pause came before the gap, so the session hears it first.
+fn pause_if_away(ctx: AppCtx, lease: &Lease) {
+    let mut runtime = ctx.runtime;
+    let app = ctx.app();
+    let effects = {
+        let mut slot = app.session.borrow_mut();
+        let Some(live) = slot
+            .as_mut()
+            .and_then(Live::groups_mut)
+            .filter(|live| live.hears(lease))
+        else {
+            return;
+        };
+        let now = MonoMs(mono_ms());
+        let seen = std::mem::replace(&mut live.last_seen, now);
+        if now.since(seen) <= HEARTBEAT_GAP_MS || live.machine.session().paused() {
+            return;
+        }
+        let mut effects = ctx
+            .answer
+            .take()
+            .map_or_else(Vec::new, |typed| live.machine.apply(typed.into(), seen));
+        effects.extend(live.machine.apply(SessionEvent::Pause, seen));
+        let session = live.machine.session();
+        if runtime.peek().as_ref() != Some(session) {
+            runtime.set(Some(session.clone()));
+        }
+        effects
+    };
+    run_effects(ctx, lease, effects);
 }
 
 /// Carry on after a pause. The audio a pause gave back is claimed afresh
@@ -344,6 +413,7 @@ pub fn resume_session(ctx: AppCtx) {
         live.lease = lease.clone();
     }
     dispatch(ctx, &lease, SessionEvent::Resume);
+    beat(ctx, lease);
 }
 
 /// Hand the running session something the user did. Nothing happens when
@@ -405,7 +475,11 @@ enum Ended {
 /// that has ended, or from one before the session now running, is dropped
 /// rather than handed to a machine it means nothing to. A paused session
 /// has given its audio back, and still hears what is done to it.
+///
+/// News that waited out a gap the app was not running in finds the session
+/// paused from the start of the gap ([`pause_if_away`]).
 fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) -> Option<Ended> {
+    pause_if_away(ctx, lease);
     let mut runtime = ctx.runtime;
     let app = ctx.app();
     let closes = app
@@ -526,14 +600,16 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     spawn_forever(async move {
         // The send's timeline, the moment its first sample goes out: what
         // its characters are timed from, and the speed it went at, however
-        // soon the group is answered; and whether it was held up on its
-        // way, however it ended.
+        // soon the group is answered; whether any of it went unheard, as
+        // soon as that is found; and whether it was held up on its way,
+        // however it ended.
         let news = |news: SendNews<'_>| {
             let event = match news {
                 SendNews::Started(start) => SessionEvent::PlaybackStarted {
                     index,
                     start: start.clone(),
                 },
+                SendNews::Missed { .. } => SessionEvent::PlaybackMissed { index },
                 SendNews::HeldUp => SessionEvent::PlaybackHeldUp { index },
             };
             dispatch(ctx, &lease, event);
@@ -944,6 +1020,77 @@ mod tests {
             assert_eq!(h.phase(), Some(SessionPhase::Countdown { remaining: 2 }));
             assert!(h.run_until(3_000, |h| h.texts().len() == 2).await);
             assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
+        });
+    }
+
+    /// A webview can hold back every task the app has — a render waiting
+    /// on a frame a hidden page never gets, a phone's process frozen whole
+    /// — while the clock runs on. Let go, the timers that came due in the
+    /// gap fire before the page's word that it was hidden can land. The
+    /// session is paused from when it was last seen running, so the answer
+    /// window that ran out meanwhile closes nothing, and the gap is no time
+    /// spent answering.
+    #[test]
+    fn a_gap_the_app_was_not_running_in_pauses_the_session_from_its_start() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 1.0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let seen = mono_ms();
+            // Held back: the clock runs a minute, and nothing is polled.
+            tokio::time::advance(std::time::Duration::from_secs(60)).await;
+            tokio::task::yield_now().await;
+            h.pump();
+            // The page's word, at last.
+            h.send(SessionEvent::Pause);
+            assert_eq!(h.phase(), Some(SessionPhase::Paused { index: 0 }));
+            assert_eq!(h.texts().len(), 1, "the next group was sent");
+            let confirmed = h.ctx.runtime.peek().as_ref().map(|s| s.view().confirmed);
+            assert_eq!(
+                confirmed,
+                Some(vec![false, false]),
+                "an answer closed empty"
+            );
+            assert!(
+                matches!(h.calls().last(), Some(Call::Shutdown)),
+                "the audio was not given back: {:?}",
+                h.calls()
+            );
+            // Resumed, the group is waited on again, with a fresh window,
+            // and answered: the minute away is not its answering time.
+            h.send(SessionEvent::Resume);
+            assert_eq!(h.awaiting_answer(), Some(0));
+            h.advance(400).await;
+            let text = h.sent(0);
+            h.type_answer(0, &text);
+            h.send(SessionEvent::Confirm);
+            assert!(mono_ms() - seen > 60_000);
+            let session = h.ctx.runtime.peek().clone().expect("a session");
+            assert!(session.group(0).is_some_and(|g| g.confirmed()));
+            let timing = &session.result(0, String::new()).group_timings[0];
+            assert!(
+                timing.time_to_complete_ms < 2_000.0,
+                "the gap counted as answering: {} ms",
+                timing.time_to_complete_ms
+            );
+        });
+    }
+
+    /// A session that runs on, with nothing held back, never pauses
+    /// itself, however long it waits on a send: its heartbeat goes on
+    /// under it.
+    #[test]
+    fn a_session_running_on_never_pauses_itself() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.group_timeout = 0.0;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            h.advance(30_000).await;
+            assert_eq!(h.awaiting_answer(), Some(0));
         });
     }
 
@@ -1446,6 +1593,42 @@ mod tests {
             assert_eq!(h.screen(), Screen::Training);
             h.play_through(120_000).await;
             assert_eq!(h.screen(), Screen::Results);
+        });
+    }
+
+    /// A send its stream skipped some of, the page stalled for a while, is
+    /// no group heard: the group goes out again from the start once the
+    /// send ends, and only then is its answer waited for; nothing has gone
+    /// wrong, so nothing is said. A send only parked on its way, heard
+    /// whole, is answered as ever.
+    #[test]
+    fn a_group_heard_in_part_is_sent_again_before_it_is_answered() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let mut h = Harness::with_settings(settings);
+            h.recorder.skip_next.set(Some((0.02, 0.06)));
+            h.start_training();
+            let sent = h.sent(0);
+            let mut answer_opened_early = false;
+            assert!(
+                h.run_until(10_000, |h| {
+                    answer_opened_early |= h.awaiting_answer().is_some();
+                    h.texts().len() == 2
+                })
+                .await,
+                "sent again"
+            );
+            assert!(
+                !answer_opened_early,
+                "the answer waited for the group heard whole"
+            );
+            assert_eq!(h.texts(), vec![sent; 2], "the same group, from the start");
+            assert!(h.run_until(5_000, |h| h.awaiting_answer() == Some(0)).await);
+            assert_eq!(h.toast(), None, "nothing has gone wrong");
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.texts().len(), 2, "heard whole the second time");
         });
     }
 

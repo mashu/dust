@@ -1,7 +1,7 @@
 use cw_core::{
     AccuracyPoint, CharSetMode, Estimate, EstimatePoint, SessionResult, TrainingSettings,
-    accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, mastered_count,
-    practised_modes, span_history, speed_history,
+    accuracy_chart, adaptive_speed_on, adapts_group_size, adapts_speed, level_up_line,
+    mastered_count, practised_modes, span_history, speed_history,
 };
 use dioxus::prelude::*;
 
@@ -57,7 +57,9 @@ fn chart_floor(points: &[AccuracyPoint]) -> f64 {
     (((min - 6.0) / 10.0).floor() * 10.0).clamp(0.0, 80.0)
 }
 
-fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartGeometry> {
+/// The chart of `points`, with a line at `threshold_pct` where there is one
+/// to draw.
+fn chart_geometry(points: &[AccuracyPoint], threshold_pct: Option<f64>) -> Option<ChartGeometry> {
     if points.is_empty() {
         return None;
     }
@@ -81,8 +83,9 @@ fn chart_geometry(points: &[AccuracyPoint], threshold_pct: f64) -> Option<ChartG
         area: format!("{} Z", path(outline)),
         dots: marks(&coords, points.len()),
         floor_pct,
-        threshold_y: (threshold_pct > floor_pct && threshold_pct < 100.0)
-            .then(|| y_at(threshold_pct)),
+        threshold_y: threshold_pct
+            .filter(|pct| *pct > floor_pct && *pct < 100.0)
+            .map(y_at),
     })
 }
 
@@ -370,7 +373,10 @@ pub fn StatsView(
 
 #[component]
 fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Element {
-    let threshold = settings.auto_level.auto_adjust_threshold;
+    // A line, and a chip, only where a session's own accuracy is what levels
+    // you up: not with auto level off or never levelling up, nor while an
+    // adaptive feature steers and sessions are judged otherwise.
+    let threshold = level_up_line(&settings);
     let chart = accuracy_chart(&sessions);
     let avg = if sessions.is_empty() {
         0.0
@@ -414,7 +420,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                             icon: IconName::Chart,
                             title: "Accuracy over time",
                             note: format!("{} · latest {}%", counted(sessions.len(), "session"), latest.round()),
-                            help: help::accuracy_over_time(threshold / 100.0),
+                            help: help::accuracy_over_time(threshold.map(|pct| pct / 100.0)),
                         }
                         svg {
                             class: "sparkline",
@@ -461,7 +467,9 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
                             span { class: "tiny", style: "text-transform: none; letter-spacing: 0.02em;",
                                 "Scale {geometry.floor_pct}–100%"
                             }
-                            span { class: "chip good", "Level up at {threshold.round()}%" }
+                            if let Some(threshold) = threshold {
+                                span { class: "chip good", "Level up at {threshold.round()}%" }
+                            }
                         }
                     }
                 }
@@ -492,12 +500,12 @@ mod tests {
 
     #[test]
     fn no_sessions_means_no_chart() {
-        assert!(chart_geometry(&[], 90.0).is_none());
+        assert!(chart_geometry(&[], Some(90.0)).is_none());
     }
 
     #[test]
     fn one_session_draws_a_flat_line_with_a_point() {
-        let geometry = chart_geometry(&points(&[89.0]), 90.0).unwrap();
+        let geometry = chart_geometry(&points(&[89.0]), Some(90.0)).unwrap();
         // Two coordinates, so the polyline actually has a segment to draw.
         assert_eq!(geometry.line.split(' ').count(), 2);
         assert!(geometry.line.starts_with("0.0,"));
@@ -518,7 +526,7 @@ mod tests {
 
     #[test]
     fn the_series_spans_the_full_width_and_height() {
-        let geometry = chart_geometry(&points(&[60.0, 100.0, 80.0]), 90.0).unwrap();
+        let geometry = chart_geometry(&points(&[60.0, 100.0, 80.0]), Some(90.0)).unwrap();
         let coords: Vec<(f64, f64)> = geometry
             .line
             .split(' ')
@@ -542,22 +550,25 @@ mod tests {
     #[test]
     fn only_the_last_point_is_marked_on_a_long_history() {
         let long: Vec<f64> = (0..40).map(|i| 60.0 + f64::from(i % 20)).collect();
-        let geometry = chart_geometry(&points(&long), 90.0).unwrap();
+        let geometry = chart_geometry(&points(&long), Some(90.0)).unwrap();
         assert_eq!(geometry.dots.len(), 1);
     }
 
     #[test]
     fn the_threshold_line_hides_when_it_is_off_the_scale() {
         // Sessions in the 90s: the 90% guide sits inside the visible range.
-        let inside = chart_geometry(&points(&[92.0, 97.0]), 90.0).unwrap();
+        let inside = chart_geometry(&points(&[92.0, 97.0]), Some(90.0)).unwrap();
         assert!(inside.threshold_y.is_some());
         // A threshold under the floor has nowhere to sit.
-        let below = chart_geometry(&points(&[96.0, 99.0]), 50.0).unwrap();
+        let below = chart_geometry(&points(&[96.0, 99.0]), Some(50.0)).unwrap();
         assert_eq!(below.floor_pct, 80.0);
         assert!(below.threshold_y.is_none());
         // Neither does one at the very top.
-        let top = chart_geometry(&points(&[80.0]), 100.0).unwrap();
+        let top = chart_geometry(&points(&[80.0]), Some(100.0)).unwrap();
         assert!(top.threshold_y.is_none());
+        // And with no threshold to mark, there is no line.
+        let none = chart_geometry(&points(&[92.0, 97.0]), None).unwrap();
+        assert!(none.threshold_y.is_none());
     }
 
     /// A move is said to the places the estimate is given to; one that would

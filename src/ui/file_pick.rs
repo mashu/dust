@@ -9,15 +9,92 @@
 //! own picker instead, through a file input made outside the app's page,
 //! where the renderer does not reach, and the file is read there and handed
 //! back.
+//!
+//! On Linux the desktop build's file input opens the desktop's file chooser
+//! portal, or zenity without one. With neither, nothing opens, and the
+//! renderer hands the input no file, just as for a dialog cancelled: so
+//! when no file comes back and neither is there, the button says why.
 
 use dioxus::html::FileData;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::state::AppCtx;
 use crate::ui::widgets::{Icon, IconName};
 
 /// Whether this build chooses files through the webview's own picker.
 const WEBVIEW_PICKER: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// What the button says when no file came back and no file chooser could
+/// have opened.
+const NO_FILE_CHOOSER: &str = "No file chooser could open. Dust asks the desktop's file chooser portal for one, or zenity: install xdg-desktop-portal with a backend for your desktop (-gtk, -gnome or -kde), or zenity.";
+
+/// Whether a file chooser can open here. Only the Linux desktop build can
+/// be without one; asked once, the first time no file comes back.
+fn file_chooser_here() -> bool {
+    #[cfg(all(feature = "desktop", target_os = "linux"))]
+    {
+        static HERE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *HERE.get_or_init(|| {
+            let env = |name| std::env::var_os(name).unwrap_or_default();
+            std::path::Path::new("/.flatpak-info").exists()
+                || on_path("zenity", &env("PATH"))
+                || portal_chooses_files(&data_dirs(&env("XDG_DATA_HOME"), &env("XDG_DATA_DIRS")))
+        })
+    }
+    #[cfg(not(all(feature = "desktop", target_os = "linux")))]
+    {
+        true
+    }
+}
+
+/// Whether `program` is in a folder of `path`.
+#[cfg(any(all(feature = "desktop", target_os = "linux"), test))]
+fn on_path(program: &str, path: &std::ffi::OsStr) -> bool {
+    std::env::split_paths(path).any(|dir| dir.join(program).is_file())
+}
+
+/// The folders the desktop's data is looked for in, as the XDG base
+/// directories have it: the user's own first, then the system's.
+#[cfg(any(all(feature = "desktop", target_os = "linux"), test))]
+fn data_dirs(home: &std::ffi::OsStr, system: &std::ffi::OsStr) -> Vec<std::path::PathBuf> {
+    let home = if home.is_empty() {
+        dirs::home_dir().map(|home| home.join(".local/share"))
+    } else {
+        Some(home.into())
+    };
+    let system = if system.is_empty() {
+        std::ffi::OsStr::new("/usr/local/share:/usr/share")
+    } else {
+        system
+    };
+    home.into_iter()
+        .chain(std::env::split_paths(system))
+        .collect()
+}
+
+/// Whether the file chooser portal is installed in one of `dirs`, with a
+/// backend that chooses files: its D-Bus service, and a `.portal` file
+/// that names the FileChooser interface.
+#[cfg(any(all(feature = "desktop", target_os = "linux"), test))]
+fn portal_chooses_files(dirs: &[std::path::PathBuf]) -> bool {
+    let frontend = dirs.iter().any(|dir| {
+        dir.join("dbus-1/services/org.freedesktop.portal.Desktop.service")
+            .is_file()
+    });
+    let backend = dirs.iter().any(|dir| {
+        std::fs::read_dir(dir.join("xdg-desktop-portal/portals"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "portal"))
+            .any(|entry| {
+                std::fs::read_to_string(entry.path())
+                    .is_ok_and(|text| text.contains("org.freedesktop.impl.portal.FileChooser"))
+            })
+    });
+    frontend && backend
+}
 
 /// A file chosen, as the button hands it over: its name and size, and its
 /// text, unless it was larger than the button reads or could not be read as
@@ -138,6 +215,10 @@ pub fn FileButton(
                             spawn(async move {
                                 on_choose.call(read_chosen(file, max_bytes).await);
                             });
+                        } else if !file_chooser_here()
+                            && let Some(ctx) = try_consume_context::<AppCtx>()
+                        {
+                            ctx.toasts.show(NO_FILE_CHOOSER);
                         }
                     },
                 }
@@ -150,7 +231,93 @@ pub fn FileButton(
 
 #[cfg(test)]
 mod tests {
-    use super::picker_script;
+    use super::{data_dirs, on_path, picker_script, portal_chooses_files};
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// A scratch folder, gone again with the test.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("dust-file-pick-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn put(&self, path: &str, text: &str) {
+            let path = self.0.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A file chooser is had from the portal only with a backend that
+    /// chooses files, from any of the data folders; or from zenity, found
+    /// on the path.
+    #[test]
+    fn a_file_chooser_is_looked_for_where_the_desktop_keeps_one() {
+        let user = Scratch::new("user");
+        let system = Scratch::new("system");
+        let dirs = [user.0.clone(), system.0.clone()];
+        assert!(!portal_chooses_files(&dirs));
+        system.put(
+            "dbus-1/services/org.freedesktop.portal.Desktop.service",
+            "[D-BUS Service]\n",
+        );
+        assert!(!portal_chooses_files(&dirs), "a portal with no backend");
+        user.put(
+            "xdg-desktop-portal/portals/wlr.portal",
+            "[portal]\nInterfaces=org.freedesktop.impl.portal.Screenshot;\n",
+        );
+        assert!(
+            !portal_chooses_files(&dirs),
+            "a backend that chooses no files"
+        );
+        user.put(
+            "xdg-desktop-portal/portals/gtk.portal",
+            "[portal]\nInterfaces=org.freedesktop.impl.portal.FileChooser;\n",
+        );
+        assert!(portal_chooses_files(&dirs));
+
+        let bin = Scratch::new("bin");
+        let path = std::env::join_paths([user.0.clone(), bin.0.clone()]).unwrap();
+        assert!(!on_path("zenity", &path));
+        bin.put("zenity", "");
+        assert!(on_path("zenity", &path));
+    }
+
+    /// The XDG base directories: the user's own data folder first, then
+    /// the system's, each with its default when unset.
+    #[test]
+    fn the_data_folders_are_the_xdg_ones() {
+        let dirs = data_dirs(
+            OsStr::new("/home/me/.data"),
+            OsStr::new("/opt/share:/usr/share"),
+        );
+        assert_eq!(
+            dirs,
+            [
+                PathBuf::from("/home/me/.data"),
+                PathBuf::from("/opt/share"),
+                PathBuf::from("/usr/share")
+            ]
+        );
+        let defaults = data_dirs(OsStr::new(""), OsStr::new(""));
+        assert!(defaults.ends_with(&[
+            PathBuf::from("/usr/local/share"),
+            PathBuf::from("/usr/share")
+        ]));
+    }
 
     /// The picker is the body's own, opened from the button with the click
     /// that pressed it, and a file too large is handed back unread.

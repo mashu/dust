@@ -1,13 +1,17 @@
-# Deploy the WASM web app to GitHub Pages on pushes to main.
+# Deploy the WASM web app to GitHub Pages once CI has passed on main.
 #
 # One-time: Settings → Pages → Build and deployment → Source: GitHub Actions.
-# Project sites are served at https://<owner>.github.io/<repo>/ ; base_path is
-# injected here so local `dx serve --platform web` still runs at /.
+# The site is built by web-site.yml, the same build CI checks on every pull
+# request. Only a push to main whose whole CI run passed is deployed, from
+# the commit that run tested; Run workflow deploys the chosen branch as it
+# stands.
 
 name: GitHub Pages
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -20,101 +24,17 @@ permissions:
   pages: write
   id-token: write
 
-env:
-  CARGO_TERM_COLOR: always
-  DIOXUS_CLI_VERSION: "0.7.10"
-  # Belt and braces with .cargo/config.toml: a Pages runner on a new LLVM
-  # must not strip the wasm-bindgen metadata section.
-  CARGO_PROFILE_RELEASE_STRIP: none
-
 jobs:
   build:
     name: Build web
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Add wasm target
-        run: rustup target add wasm32-unknown-unknown
-
-      - name: Cache Rust builds
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: pages-web
-          cache-directories: target/dx
-
-      - name: Install cargo-binstall
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-binstall
-
-      - name: Install Dioxus CLI
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          cargo binstall "dioxus-cli@${DIOXUS_CLI_VERSION}" --no-confirm --locked \
-            || cargo install dioxus-cli --version "${DIOXUS_CLI_VERSION}" --locked
-          dx --version
-
-      - name: Set GitHub Pages base path
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY##*/}"
-          if [[ "$repo" == *.github.io ]]; then
-            echo "User or org site; leaving base_path unset"
-            exit 0
-          fi
-          sed -i "/^\[web.app\]/a base_path = \"${repo}\"" Dioxus.toml
-          echo "Set web.app.base_path = ${repo}"
-          cat Dioxus.toml
-
-      - name: Bundle web
-        run: dx bundle --release --locked --platform web --out-dir dist
-
-      - name: Prepare Pages site
-        run: |
-          set -euo pipefail
-          src=""
-          for candidate in dist/public dist target/dx/dust/release/web/public; do
-            if [[ -f "${candidate}/index.html" ]]; then
-              src="$candidate"
-              break
-            fi
-          done
-          if [[ -z "$src" ]]; then
-            echo "Web build output not found"
-            find . -name index.html | head -50
-            exit 1
-          fi
-          mkdir -p site
-          cp -a "$src"/. site/
-          cp site/index.html site/404.html
-          mkdir -p site/privacy
-          cp docs/privacy.html site/privacy/index.html
-          touch site/.nojekyll
-          if ! find site -name '*.css' | grep -q .; then
-            echo "Bundled site has no stylesheet"
-            find site -maxdepth 3 -type f
-            exit 1
-          fi
-          # The tab icon is inline in index.html; without it a browser asks
-          # for /favicon.ico at the domain's root, outside a project site.
-          if ! grep -q 'rel="icon"' site/index.html; then
-            echo "Bundled page links no icon"
-            exit 1
-          fi
-          test -f site/privacy/index.html
-          ls -lh site site/assets
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: site
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push')
+    uses: ./.github/workflows/web-site.yml
+    with:
+      ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      upload: true
 
   deploy:
     name: Deploy

@@ -58,6 +58,42 @@ fn typing_into_one_end_of_the_side_tone_keeps_its_box() {
     });
 }
 
+/// Fixed, then Random, opens a range to draw from on every range the page
+/// shows, so that Random does something at once, and a note that asks for
+/// a range is answered by the press. Each used to stay at its one value
+/// but the side tone and the stations.
+#[test]
+fn random_opens_every_fixed_value_into_a_range() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.commit("switch-tie-effective-speed-to-character-speed", "false");
+        ui.click("link-group-size");
+        assert!(ui.has("Set Group size to Random to use this"));
+        for name in [
+            "character-speed",
+            "effective-speed",
+            "group-size",
+            "sends-per-group",
+            "side-tone",
+            "station-strength",
+            "stations-calling",
+        ] {
+            let link = format!("link-{name}");
+            if !ui.shows(&format!("fixed-{name}")) {
+                ui.click(&link);
+            }
+            assert!(ui.shows(&format!("fixed-{name}")), "{name} is not fixed");
+            ui.click(&link);
+            let (from, to) = (format!("from-{name}"), format!("to-{name}"));
+            assert_ne!(value_of(&ui, &from), value_of(&ui, &to), "{name}");
+        }
+        assert_eq!(value_of(&ui, "from-group-size"), "2");
+        assert_eq!(value_of(&ui, "to-group-size"), "3");
+        assert!(!ui.has("Set Group size to Random to use this"));
+    });
+}
+
 /// A number committed past what the field allows comes back as the most it
 /// allows, even when that is what the setting already was. Until then the
 /// 999 is the box's own: nothing is written over it while it is typed.
@@ -88,37 +124,44 @@ fn a_number_committed_out_of_bounds_shows_where_it_landed() {
     });
 }
 
-/// A number typed faster than the page draws is committed whole.
+/// Type `text` into `field` a key at a time, faster than the page draws, and
+/// give back what the box on screen holds at the end.
 ///
 /// On the desktop and phone builds a redraw reaches the box a frame after it
 /// was made, and it sends the box its `value` whether or not that changed. A
 /// field that redrew for every key wrote each key's text back over whatever
-/// had been typed since, and a quick 120 came out as 10. The harness draws
-/// at once, so this plays the webview's part, at its worst: every redraw
-/// lands a key late.
+/// had been typed since. The harness draws at once, so this plays the
+/// webview's part, at its worst: every redraw lands a key late.
+fn type_faster_than_the_page_draws(ui: &mut Ui, field: &str, text: &str) -> String {
+    let _ = ui.take_work();
+    // What the box on screen holds, and a redraw still on its way to it.
+    let mut screen = String::new();
+    let mut on_its_way: Option<String> = None;
+    for key in text.chars() {
+        screen.push(key);
+        ui.type_into(field, &screen);
+        if let Some(late) = on_its_way.take() {
+            screen = late;
+        }
+        if ui.take_work() > 0 {
+            on_its_way = Some(value_of(ui, field));
+        }
+    }
+    if let Some(late) = on_its_way {
+        screen = late;
+    }
+    screen
+}
+
+/// A number typed faster than the page draws is committed whole: a field
+/// that redrew for every key turned a quick 120 into 10.
 #[test]
 fn a_number_typed_faster_than_the_page_draws_is_committed_whole() {
     run(|| async {
         let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
         ui.click("nav-settings");
         let field = "number-groups-per-session";
-        let _ = ui.take_work();
-        // What the box on screen holds, and a redraw still on its way to it.
-        let mut screen = String::new();
-        let mut on_its_way: Option<String> = None;
-        for key in ['1', '2', '0'] {
-            screen.push(key);
-            ui.type_into(field, &screen);
-            if let Some(late) = on_its_way.take() {
-                screen = late;
-            }
-            if ui.take_work() > 0 {
-                on_its_way = Some(value_of(&ui, field));
-            }
-        }
-        if let Some(late) = on_its_way {
-            screen = late;
-        }
+        let screen = type_faster_than_the_page_draws(&mut ui, field, "120");
         assert_eq!(screen, "120");
         assert_eq!(
             ui.stored_settings().await.curriculum.num_groups,
@@ -128,6 +171,59 @@ fn a_number_typed_faster_than_the_page_draws_is_committed_whole() {
         ui.commit(field, &screen);
         assert_eq!(value_of(&ui, field), "120");
         assert_eq!(ui.stored_settings().await.curriculum.num_groups, 120);
+    });
+}
+
+/// An unlock order typed faster than the page draws is committed whole. Its
+/// box read what was typed as it drew, so every key redrew it, and a quick
+/// KMURESN came out as KMUREN.
+#[test]
+fn an_unlock_order_typed_faster_than_the_page_draws_is_committed_whole() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        let field = "field-sequence-order";
+        let screen = type_faster_than_the_page_draws(&mut ui, field, "KMURESN");
+        assert_eq!(screen, "KMURESN");
+        ui.commit(field, &screen);
+        assert_eq!(value_of(&ui, field), "KMURESN");
+        let stored = ui.stored_settings().await.curriculum.custom_sequence;
+        assert_eq!(stored.iter().collect::<String>(), "KMURESN");
+    });
+}
+
+/// A callsign typed faster than the page draws is committed whole, as every
+/// other box the settings are typed into is.
+#[test]
+fn a_callsign_typed_faster_than_the_page_draws_is_committed_whole() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        let field = "field-your-callsign";
+        let screen = type_faster_than_the_page_draws(&mut ui, field, "VP2E/DL1ABC");
+        assert_eq!(screen, "VP2E/DL1ABC");
+        ui.commit(field, &screen);
+        assert_eq!(value_of(&ui, field), "VP2E/DL1ABC");
+        assert_eq!(ui.stored_settings().await.contest.my_call, "VP2E/DL1ABC");
+    });
+}
+
+/// A fraction typed into a whole-number field is rounded to the nearest
+/// whole number, as a range's ends are, rather than cut off: 2.9 groups
+/// used to be 2, while 2.9 characters a group was 3.
+#[test]
+fn a_fraction_typed_into_a_whole_number_rounds() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.commit("number-groups-per-session", "2.9");
+        ui.commit("number-countdown-before-the-first-group", "2.6");
+        ui.commit("to-group-size", "4.7");
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.num_groups, 3);
+        assert_eq!(stored.playback.countdown_sec, 3);
+        assert_eq!(stored.curriculum.max_group_size, 5);
+        assert_eq!(value_of(&ui, "number-groups-per-session"), "3");
     });
 }
 
@@ -246,10 +342,13 @@ fn the_unlock_order_can_be_cleared_and_typed_again() {
         settings.curriculum.level = 20;
         let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
+        // Emptied and typed into, the box is left as typed: nothing is
+        // written back over it until it is committed.
+        let _ = ui.take_work();
         ui.type_into("field-sequence-order", "");
-        assert_eq!(value_of(&ui, "field-sequence-order"), "");
+        assert_eq!(ui.take_work(), 0, "the emptied box was written over");
         ui.type_into("field-sequence-order", "KM");
-        assert_eq!(value_of(&ui, "field-sequence-order"), "KM");
+        assert_eq!(ui.take_work(), 0, "typing wrote over the box");
         assert_eq!(value_of(&ui, "field-level"), "20", "nothing is read yet");
 
         let lcwo: String = cw_core::SEQUENCE_PRESETS[0].sequence.iter().collect();
@@ -632,7 +731,7 @@ fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
     run(|| async {
         let (ui, _recorder) = on_words();
         assert!(
-            ui.has("Starter words, sent whole · 81 words"),
+            ui.has("Starter words, sent whole · 80 words"),
             "{}",
             ui.html()
         );
@@ -640,7 +739,7 @@ fn words_start_on_the_starter_list_and_drop_what_a_word_has_none_of() {
         // How many words there are to draw from is said; the list itself is
         // folded away, and no character is shown on its own: a word is sent
         // whole.
-        assert!(ui.has("81 words to draw from"), "{}", ui.html());
+        assert!(ui.has("80 words to draw from"), "{}", ui.html());
         assert!(!ui.has(">QTH<"), "the list starts folded");
         assert!(!ui.has("ch sent-row"), "single characters in Words mode");
         assert_eq!(value_of(&ui, "field-word-list"), "");
@@ -721,7 +820,7 @@ fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
         // Emptying the box goes back to the starter words.
         ui.commit("field-word-list", "  \n");
         assert_eq!(word_report(&ui), "Back to the starter words.");
-        assert!(ui.has("Starter words, sent whole · 81 words"));
+        assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
     });
 }
@@ -808,11 +907,15 @@ fn a_session_on_words_sends_the_words_of_the_list() {
 /// card and the Speed card show it, and nothing else: the tier, the run
 /// style, the callers' habits, the band and your own speed stay as they
 /// were. The card reads Custom once the callers' speed is changed, and a
-/// change to anything else leaves the preset chosen.
+/// change to anything else leaves the preset chosen. The speed is the
+/// Speed card's, which group training uses too, and the card says so.
 #[test]
 fn a_contest_preset_sets_the_callers_speed_and_nothing_else() {
     run(|| async {
-        let custom = "Custom · a preset sets how fast the callers come, and nothing else";
+        let custom = crate::ui::settings_charset::PRESET_CUSTOM;
+        assert!(custom.contains("which group training uses too"));
+        // As the page escapes it.
+        let custom = &custom.replace('\'', "&#39;");
         let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
         let before = ui.store.load_settings();
         ui.click("nav-settings");
@@ -1047,7 +1150,9 @@ fn your_speed_is_on_the_speed_card_in_contest_mode() {
             ui.html()
         );
         assert!(!ui.shows("btn-callers-middle"));
-        assert!(ui.has("Callers come at speeds drawn from these ranges."));
+        assert!(ui.has(
+            "Callers come at speeds drawn from these ranges. Group training sends at them too."
+        ));
         // It sits on the Speed card, after the callers' ranges.
         let html = ui.html();
         let card = html.find(">Speed<").expect("the card");
@@ -1166,6 +1271,128 @@ fn the_callers_adaptive_speed_is_on_the_speed_card_in_contest_mode() {
         assert!(fixed.has(
             "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
         ));
+    });
+}
+
+/// An effective speed set above the fastest character speed is sent at
+/// that, as the spacing is never faster than the characters. The card says
+/// what it is used as under its range, and the adapt switch why a range
+/// there leaves one speed, rather than asking for a range it has.
+#[test]
+fn an_effective_speed_above_the_characters_says_what_it_is_used_as() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.char_wpm_max = 20.0;
+        settings.playback.link_char_wpm = true;
+        settings.playback.link_char_to_effective = false;
+        settings.playback.effective_wpm_min = 25.0;
+        settings.playback.effective_wpm_max = 35.0;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(ui.has("25–35 WPM"), "the range as set");
+        let held = |ui: &Ui| {
+            ui.html()
+                .split("id=\"effective-held\"")
+                .nth(1)
+                .map(str::to_string)
+        };
+        assert!(
+            held(&ui).is_some_and(|line| line.contains(
+                ">Used as 20\u{a0}WPM: the spacing is never faster than Character speed.<"
+            )),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has(
+            "Effective speed is never faster than Character speed, so it is sent at 20\u{a0}WPM and one speed is left: give Character speed a range, or Effective speed one under 20\u{a0}WPM, to use this."
+        ));
+        assert!(!ui.has("Give Character speed or Effective speed a range"));
+
+        // Part of it under the characters is a range to adapt in, used up
+        // to them.
+        ui.commit("from-effective-speed", "12");
+        assert!(held(&ui).is_some_and(|line| line.contains(">Used as 12–20\u{a0}WPM")));
+        assert!(ui.has("Within these speeds: faster while you copy the characters"));
+
+        // All of it under them is heard as set, and nothing is said.
+        ui.commit("to-effective-speed", "18");
+        assert!(!ui.shows("effective-held"));
+    });
+}
+
+/// The word space is a multiple of the standard one, which shortens it
+/// as well as lengthens it, and an answer timeout of 0 never moves on:
+/// each says so at its control and in the card's help.
+#[test]
+fn the_word_space_and_a_timeout_of_zero_say_what_they_do() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(ui.shows("number-word-space"));
+        assert!(ui.has("1× is standard, 2× twice as long, 0.5× half."));
+        assert!(ui.has("; at 0 it never does."));
+        ui.click("help-speed");
+        assert!(ui.has("more lengthens it, less shortens it, down to half"));
+        ui.click("help-session-shape");
+        assert!(ui.has("At 0 it never moves on by itself"));
+    });
+}
+
+/// A card's reset can be undone from the message it leaves: Your station's
+/// puts back the call that took typing, and a change made on another card
+/// in between stays. In Contest mode the Character set's reset puts the
+/// contest's own choices back and stays in Contest.
+#[test]
+fn a_cards_reset_can_be_undone() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        ui.click("reset-your-station");
+        assert!(ui.has("Your station reset to defaults"), "{}", ui.html());
+        assert!(ui.shows("toast-undo"));
+        assert_eq!(ui.stored_settings().await.contest.my_call, "");
+        ui.commit("number-minutes-per-run", "12");
+        ui.click("toast-undo");
+        assert!(!ui.shows("toast-undo"));
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.contest.my_call, "DL1ABC");
+        assert_eq!(
+            stored.contest.contest_minutes, 12,
+            "the other card's change"
+        );
+
+        ui.click("contest-cq-ww");
+        ui.click("reset-character-set");
+        assert!(ui.input_tag("seg-contest").contains("active"));
+        assert!(ui.input_tag("contest-cq-wpx").contains("active"));
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Contest);
+        ui.click("toast-undo");
+        assert!(ui.input_tag("contest-cq-ww").contains("active"));
+
+        // A card already at its defaults has nothing to undo.
+        ui.click("reset-keying-envelope");
+        assert!(!ui.shows("toast-undo"));
+    });
+}
+
+/// The Character set's reset leaves an unlock order of the learner's own as
+/// it is, as it does the word list: what took typing is theirs.
+#[test]
+fn the_character_sets_reset_leaves_an_order_of_ones_own() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.curriculum.word_list = vec!["PARIS".to_string()];
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        ui.commit("field-sequence-order", "KMURESN");
+        ui.click("reset-character-set");
+        assert!(ui.input_tag("pill-your-own").contains("active"));
+        assert_eq!(value_of(&ui, "field-sequence-order"), "KMURESN");
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.char_set_mode, CharSetMode::Mixed);
+        assert_eq!(stored.curriculum.word_list, ["PARIS"]);
     });
 }
 
@@ -1443,7 +1670,7 @@ fn the_cards_there_is_least_call_for_start_folded_and_open_from_their_heads() {
         ui.click("nav-settings");
         for (card, held) in [
             ("recognition", "number-fast-under"),
-            ("character-sampling", "switch-thompson-sampling"),
+            ("character-sampling", "number-error-weight-strength"),
             ("display", "btn-check-display"),
             ("privacy", "privacy-link"),
             ("credits", "credit-link"),
