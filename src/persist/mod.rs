@@ -17,7 +17,7 @@ pub mod memory;
 #[cfg(feature = "web")]
 mod web;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -439,54 +439,101 @@ impl SessionKey {
 /// and bring back the other. So every session added here is added, every
 /// one deleted here is deleted, and one changed here — filled in by a
 /// restore — is kept as it is here; whatever another copy added, deleted
-/// or changed stands. Sessions are known by their [`SessionKey`], and those
-/// alike in it by their order.
+/// or changed stands. Sessions are known as [`pair_sessions`] knows them.
 pub fn merge_history(
     base: &[SessionResult],
     ours: &[SessionResult],
     theirs: &[SessionResult],
 ) -> Vec<SessionResult> {
-    let base: HashMap<_, _> = keyed(base).collect();
-    let stored: HashMap<_, _> = keyed(theirs).collect();
-    let mut merged = Vec::with_capacity(theirs.len().max(ours.len()));
-    let mut here = HashSet::new();
-    for (key, session) in keyed(ours) {
-        let kept = match (base.get(&key), stored.get(&key)) {
-            // Added here.
-            (None, _) => Some(session),
-            // Deleted elsewhere.
-            (Some(_), None) => None,
-            // Changed here, or else as it is stored.
-            (Some(was), Some(stored)) => Some(if session == *was { *stored } else { session }),
-        };
-        merged.extend(kept.cloned());
-        here.insert(key);
+    fn each(sessions: &[SessionResult]) -> Vec<&SessionResult> {
+        sessions.iter().collect()
     }
+    let was_here = pair_sessions(&each(base), &each(ours));
+    let was_there = pair_sessions(&each(base), &each(theirs));
+    // Each session of `base` as it is stored now, if it still is.
+    let mut stored = vec![None; base.len()];
+    for (session, was) in theirs.iter().zip(&was_there) {
+        if let Some(was) = was {
+            stored[*was] = Some(session);
+        }
+    }
+    let mut merged = Vec::with_capacity(theirs.len().max(ours.len()));
+    let mut added_here = Vec::new();
+    for (session, was) in ours.iter().zip(&was_here) {
+        match was {
+            None => {
+                merged.push(session.clone());
+                added_here.push(session);
+            }
+            Some(was) => match stored[*was] {
+                // Deleted elsewhere.
+                None => {}
+                // Changed here, or else as it is stored.
+                Some(stored) if *session == base[*was] => merged.push(stored.clone()),
+                Some(_) => merged.push(session.clone()),
+            },
+        }
+    }
+    // Added elsewhere, unless it was added here too, as two copies
+    // restoring one backup each add the same session.
+    let added_there: Vec<&SessionResult> = theirs
+        .iter()
+        .zip(&was_there)
+        .filter(|(_, was)| was.is_none())
+        .map(|(session, _)| session)
+        .collect();
     let before = merged.len();
     merged.extend(
-        keyed(theirs)
-            .filter(|(key, _)| !here.contains(key) && !base.contains_key(key))
-            .map(|(_, session)| session.clone()),
+        added_there
+            .iter()
+            .zip(pair_sessions(&added_here, &added_there))
+            .filter(|(_, same)| same.is_none())
+            .map(|(session, _)| (*session).clone()),
     );
-    // Added elsewhere: in among the rest, by when each finished.
+    // In among the rest, by when each finished.
     if merged.len() > before {
         merged.sort_by_key(|session| session.timestamp);
     }
     merged
 }
 
-/// Each of `sessions` by its key, and which of those alike in it it is.
-fn keyed(
-    sessions: &[SessionResult],
-) -> impl Iterator<Item = ((SessionKey, usize), &SessionResult)> {
-    let mut seen: HashMap<SessionKey, usize> = HashMap::new();
-    sessions.iter().map(move |session| {
-        let key = SessionKey::of(session);
-        let alike = seen.entry(key.clone()).or_default();
-        let nth = *alike;
-        *alike += 1;
-        ((key, nth), session)
-    })
+/// Which of `from` each of `to` is, if any: the one with the same
+/// [`SessionKey`] and everything else the same, or failing that, the first
+/// with the same key still unclaimed.
+///
+/// Sessions alike in their key are told apart by what they hold before
+/// their order: one deleted from a copy would otherwise shift every one
+/// after it onto the session before, and a merge would keep one twice and
+/// lose another. Only one changed since, filled in by a restore, falls back
+/// to its order.
+pub fn pair_sessions(from: &[&SessionResult], to: &[&SessionResult]) -> Vec<Option<usize>> {
+    let mut by_key: HashMap<SessionKey, Vec<usize>> = HashMap::new();
+    for (at, session) in from.iter().enumerate() {
+        by_key.entry(SessionKey::of(session)).or_default().push(at);
+    }
+    let mut claimed = vec![false; from.len()];
+    let mut paired = vec![None; to.len()];
+    let alike: Vec<Option<&Vec<usize>>> = to
+        .iter()
+        .map(|session| by_key.get(&SessionKey::of(session)))
+        .collect();
+    // Those alike in everything first, then the rest by their order.
+    for whole in [true, false] {
+        for (at, session) in to.iter().enumerate() {
+            let Some(alike) = alike[at].filter(|_| paired[at].is_none()) else {
+                continue;
+            };
+            let found = alike
+                .iter()
+                .copied()
+                .find(|&was| !claimed[was] && (!whole || from[was] == *session));
+            if let Some(was) = found {
+                claimed[was] = true;
+                paired[at] = Some(was);
+            }
+        }
+    }
+    paired
 }
 
 /// The newest of `sessions` whose JSON fits in `budget` bytes, as one JSON
@@ -782,6 +829,34 @@ pub(crate) mod tests {
         assert_eq!(merged, [second]);
         let merged = merge_history(&both, &both, std::slice::from_ref(&first));
         assert_eq!(merged, [first]);
+    }
+
+    /// Sessions alike in their key are told apart by what they hold, not
+    /// by where they sit: one deleted elsewhere does not move the others
+    /// up a place. Told apart by order, the first was taken for the one
+    /// deleted, the second came back twice and the third went.
+    #[test]
+    fn a_deletion_elsewhere_does_not_shift_sessions_alike() {
+        let alike = |accuracy| SessionResult { accuracy, ..at(1) };
+        let (first, second, third) = (alike(0.1), alike(0.2), alike(0.3));
+        let mut filled = second.clone();
+        filled.avg_response_ms = 700.0;
+        let base = [first.clone(), second.clone(), third.clone()];
+        let ours = [first, filled.clone(), third.clone()];
+        let theirs = [second, third.clone()];
+        assert_eq!(merge_history(&base, &ours, &theirs), [filled, third]);
+    }
+
+    /// The same session added on both sides is kept once, and two alike in
+    /// their key but not in what they hold are both kept.
+    #[test]
+    fn sessions_added_on_both_sides_are_kept_once() {
+        let mut other = at(7);
+        other.accuracy = 0.5;
+        assert_eq!(
+            merge_history(&[], &[at(7)], &[at(7), other.clone()]),
+            [at(7), other]
+        );
     }
 
     pub(super) fn session(date: &str) -> SessionResult {
