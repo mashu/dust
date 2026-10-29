@@ -488,7 +488,7 @@ impl PaddleKeys {
     }
 
     fn act(self, out: KeyerOutput) {
-        if let Some(edge) = out.tone {
+        for edge in out.edges() {
             self.sound(edge);
         }
         if let Some(keyed) = out.letter {
