@@ -125,10 +125,14 @@ fn plain_key_types(_code: &str) -> Option<bool> {
 /// lost: the paddle stayed down, the keyer sending on and on, and a
 /// training session waited on its letter for good.
 ///
-/// A press of a contact already closed is dropped: tao on Linux never marks
-/// a held key's repeated presses as repeats. GTK asks X11 for detectable
+/// A press of a key that has closed a contact is dropped, and so is a
+/// press of a contact already closed: tao on Linux never marks a held
+/// key's repeated presses as repeats. GTK asks X11 for detectable
 /// auto-repeat, and Wayland repeats in the client, so a held key sends one
-/// release, at its real key-up, which is taken at once.
+/// release, at its real key-up, which is taken at once. A repeat is the
+/// key's whatever paddle it reads as by then: `[` held while the paddles
+/// are swapped repeats as the dah, and took it, and its one release opened
+/// only the dit, the dah keying on and on.
 #[derive(Clone, Debug, Default)]
 struct Contacts {
     dit: Option<String>,
@@ -143,9 +147,26 @@ impl Contacts {
         }
     }
 
+    /// The paddle whose contact the key at `code` closed, if it closed one.
+    /// A key the page cannot place could be any key, and is none of them.
+    fn closed_by(&self, code: &str) -> Option<Paddle> {
+        let placed = !code.is_empty() && !code.contains("Unidentified");
+        let closer = |paddle| match paddle {
+            Paddle::Dit => self.dit.as_deref(),
+            Paddle::Dah => self.dah.as_deref(),
+        };
+        [Paddle::Dit, Paddle::Dah]
+            .into_iter()
+            .find(|paddle| placed && closer(*paddle) == Some(code))
+    }
+
     /// Whether the key at `code` closed `paddle`'s contact, rather than
-    /// finding it closed: a held key repeating, or another key of the paddle.
+    /// being held, its presses repeating, or finding the contact closed by
+    /// another key of the paddle.
     fn press(&mut self, paddle: Paddle, code: &str) -> bool {
+        if self.closed_by(code).is_some() {
+            return false;
+        }
         let slot = self.slot(paddle);
         if slot.is_some() {
             return false;
@@ -158,12 +179,7 @@ impl Contacts {
     /// whatever it types now, or else `reads_as`, the paddle the key reads
     /// as. Its contact is open after, if it was not already.
     fn release(&mut self, code: &str, reads_as: Option<Paddle>) -> Option<Paddle> {
-        // A key the page cannot place could be any key.
-        let placed = !code.is_empty() && !code.contains("Unidentified");
-        let closed_by = [Paddle::Dit, Paddle::Dah]
-            .into_iter()
-            .find(|paddle| placed && self.slot(*paddle).as_deref() == Some(code));
-        let paddle = closed_by.or(reads_as)?;
+        let paddle = self.closed_by(code).or(reads_as)?;
         *self.slot(paddle) = None;
         Some(paddle)
     }
@@ -293,8 +309,8 @@ type BoxLetter = (char, Option<MonoMs>);
 #[derive(Clone, Copy)]
 pub struct PaddleKeys {
     keyer: CopyValue<Keyer>,
-    /// The paddle contacts the keys have closed, as the listener keying the
-    /// paddles hears them.
+    /// The paddle contacts the keys have closed, as the listeners keying
+    /// the paddles hear them.
     contacts: CopyValue<Contacts>,
     /// The wake the clock is waiting for. A timer that finds another one here
     /// has been superseded and does nothing.
@@ -1050,6 +1066,27 @@ mod tests {
         assert_eq!(contacts.release("BracketRight", dah), dah);
         assert_eq!(contacts.dah, None);
         assert!(contacts.press(Paddle::Dah, "BracketRight"));
+    }
+
+    /// A held key keeps the contact it closed when the paddles are swapped
+    /// under it: its next press, which tao on Linux does not mark as a
+    /// repeat, reads as the other paddle and is a repeat all the same, and
+    /// its one release opens the contact it closed, the other never closed.
+    #[test]
+    fn a_key_held_across_a_swap_repeats_rather_than_closing_the_other_paddle() {
+        let mut contacts = Contacts::default();
+        assert!(contacts.press(Paddle::Dit, "BracketLeft"));
+        assert!(!contacts.press(Paddle::Dah, "BracketLeft"), "a repeat");
+        assert_eq!(contacts.dah, None);
+        assert_eq!(
+            contacts.release("BracketLeft", Some(Paddle::Dah)),
+            Some(Paddle::Dit)
+        );
+        assert_eq!(contacts.dit, None);
+        assert_eq!(contacts.dah, None);
+        // Keys the page cannot place are not taken for one another.
+        assert!(contacts.press(Paddle::Dit, ""));
+        assert!(contacts.press(Paddle::Dah, "Unidentified"));
     }
 
     /// A key let go opens the contact it closed, whatever it types by then:
