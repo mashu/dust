@@ -257,7 +257,12 @@ impl Charset {
             window: current_practice_window(settings),
             pool: compute_char_pool(settings),
             tier_examples,
-            words: settings.words().into_iter().map(str::to_string).collect(),
+            // Only Words shows them, and every settings write comes here.
+            words: if c.char_set_mode == CharSetMode::Words {
+                settings.words().into_iter().map(str::to_string).collect()
+            } else {
+                Vec::new()
+            },
             own_words: settings.has_own_words(),
         }
     }

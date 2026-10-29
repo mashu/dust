@@ -50,16 +50,20 @@ impl WordList {
     /// keeps, and count the rest.
     pub fn from_words<'a>(words: impl IntoIterator<Item = &'a str>) -> Self {
         let mut list = Self::default();
+        // Every settings write clamps the list, so seen words are looked up
+        // in a set: a list at its longest is two thousand words.
+        let mut seen = std::collections::HashSet::new();
         for word in words {
             let Some(word) = clean_word(word) else {
                 list.unsendable += 1;
                 continue;
             };
-            if list.words.contains(&word) {
+            if seen.contains(&word) {
                 list.repeated += 1;
             } else if list.words.len() >= WORD_LIST_MAX {
                 list.over += 1;
             } else {
+                seen.insert(word.clone());
                 list.words.push(word);
             }
         }

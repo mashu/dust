@@ -298,9 +298,15 @@ fn use_stored_settings(ctx: AppCtx) {
         if screen == Screen::Training {
             return;
         }
-        let persist = settings.read().clone().clamp();
-        if screen != Screen::Settings && persist != *settings.peek() {
-            settings.set(persist);
+        if screen == Screen::Settings {
+            // Followed, not clamped: that waits for the store, once the edit
+            // has been still a moment, not every step of a slider.
+            let _ = settings.read();
+        } else {
+            let persist = settings.read().clone().clamp();
+            if persist != *settings.peek() {
+                settings.set(persist);
+            }
         }
         // Whatever edit was still waiting, this one replaces it.
         let edit = edits.get() + 1;
