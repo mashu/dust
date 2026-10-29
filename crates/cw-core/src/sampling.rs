@@ -1682,12 +1682,16 @@ mod tests {
     /// end with a chance that falls as it grows longer; a group not held is
     /// lost from a random point on. With `span_falls`, the span shrinks at
     /// speed as well, with the square root of the speed against 20 WPM.
+    /// `gives_up` is the chance that a character not recognised ends the
+    /// copy there, the rest of the group going by while they look for it,
+    /// rather than being typed wrong.
     struct Learner {
         copy: f64,
         slope: f64,
         span: f64,
         spread: f64,
         span_falls: bool,
+        gives_up: f64,
     }
 
     impl Learner {
@@ -1721,19 +1725,28 @@ mod tests {
                 rng.usize_in(0, length.saturating_sub(1))
             };
             let recognised = self.recognises(speed);
-            sent.chars()
-                .take(kept)
-                .map(|c| if rng.f64() < recognised { c } else { 'E' })
-                .collect()
+            let mut typed = String::new();
+            for c in sent.chars().take(kept) {
+                if rng.f64() < recognised {
+                    typed.push(c);
+                } else if self.gives_up > 0.0 && rng.f64() < self.gives_up {
+                    break;
+                } else {
+                    typed.push('E');
+                }
+            }
+            typed
         }
     }
 
     /// What a run of both adaptive features made of one learner: over its
     /// second half, the share of characters right (of those a speed could
-    /// change), of groups copied whole, and the mean speed and length; at
-    /// its end, the speed the belief puts at the target and the span.
+    /// change), of every character sent, of groups copied whole, and the
+    /// mean speed and length; at its end, the speed the belief puts at the
+    /// target and the span.
     struct Run {
         chars_right: f64,
+        sent_right: f64,
         whole: f64,
         speed: f64,
         length: f64,
@@ -1742,22 +1755,34 @@ mod tests {
     }
 
     fn run_both(learner: &Learner, groups: usize, seed: u64) -> Run {
-        run_with(learner, groups, seed, false)
+        run_with(learner, groups, seed, false, true)
     }
 
     /// As [`run_both`], or, `naive`, with the speed learning from whole
     /// groups the way the span does: a group copied whole all right, any
-    /// other all wrong.
-    fn run_with(learner: &Learner, groups: usize, seed: u64, naive: bool) -> Run {
-        let mut settings = length_settings(true);
+    /// other all wrong. Without `adapt_length`, the groups are two to five
+    /// characters long, drawn evenly.
+    fn run_with(
+        learner: &Learner,
+        groups: usize,
+        seed: u64,
+        naive: bool,
+        adapt_length: bool,
+    ) -> Run {
+        let mut settings = length_settings(adapt_length);
+        if !adapt_length {
+            settings.curriculum.max_group_size = 5;
+        }
         settings.playback.char_wpm_min = 10.0;
         settings.playback.char_wpm_max = 50.0;
         settings.playback.link_char_to_effective = true;
         settings.playback.adaptive_speed = true;
+        let floor = adaptive_bounds(&settings).map(|(shortest, _)| shortest);
         let target = settings.curriculum.aim.chars_right();
         let mut sampler = Sampler::new(&[], &settings, seed);
         let mut rng = SplitMix64::new(seed ^ 0xA5A5);
         let (mut right, mut counted, mut whole, mut speeds, mut lengths) = (0, 0, 0, 0.0, 0);
+        let (mut sent_right, mut sent_all) = (0, 0);
         let half = groups / 2;
         for n in 0..groups {
             let (sent, _) = sampler.next_group(&settings);
@@ -1766,10 +1791,13 @@ mod tests {
             let speed = crate::score::copy_speed(played.0, played.1);
             let typed = learner.answer(&sent, speed, &mut rng);
             if n >= half {
-                if let Some((r, c)) = crate::speed::speed_evidence(&sent, &typed) {
+                if let Some((r, c)) = crate::speed::speed_evidence(&sent, &typed, floor) {
                     right += r;
                     counted += c;
                 }
+                let copied = CopyTally::of(&sent, &typed);
+                sent_right += copied.sent.values().map(|each| each.correct).sum::<u32>();
+                sent_all += copied.sent.values().map(|each| each.total).sum::<u32>();
                 whole += usize::from(typed == sent);
                 speeds += speed;
                 lengths += sent.chars().count();
@@ -1793,6 +1821,7 @@ mod tests {
         let counted_groups = (groups - half) as f64;
         Run {
             chars_right: f64::from(right) / f64::from(counted.max(1)),
+            sent_right: f64::from(sent_right) / f64::from(sent_all.max(1)),
             whole: whole as f64 / counted_groups,
             speed: speeds / counted_groups,
             length: lengths as f64 / counted_groups,
@@ -1811,6 +1840,7 @@ mod tests {
                     span: 5.0,
                     spread: 0.7,
                     span_falls: false,
+                    gives_up: 0.0,
                 },
             ),
             (
@@ -1821,6 +1851,7 @@ mod tests {
                     span: 7.0,
                     spread: 1.0,
                     span_falls: false,
+                    gives_up: 0.0,
                 },
             ),
             (
@@ -1831,6 +1862,7 @@ mod tests {
                     span: 4.0,
                     spread: 0.7,
                     span_falls: false,
+                    gives_up: 0.0,
                 },
             ),
             (
@@ -1841,9 +1873,60 @@ mod tests {
                     span: 7.0,
                     spread: 1.0,
                     span_falls: true,
+                    gives_up: 0.0,
                 },
             ),
         ]
+    }
+
+    /// Learners who stop typing at a character they miss, the rest of the
+    /// group going by: every time, or half the time. Their span is long, so
+    /// whatever they lose they lose to the speed.
+    fn learners_who_give_up() -> [(&'static str, Learner); 2] {
+        let gives_up = |gives_up| Learner {
+            copy: 20.0,
+            slope: 0.12,
+            span: 20.0,
+            spread: 1.0,
+            span_falls: false,
+            gives_up,
+        };
+        [
+            ("copies 90% at 20, stops at every miss", gives_up(1.0)),
+            ("copies 90% at 20, stops at half the misses", gives_up(0.5)),
+        ]
+    }
+
+    /// A learner who stops typing at the first character they miss shows
+    /// the speed only characters copied right, and the speed used to run to
+    /// the top of the range: 41 WPM, with 3% of characters copied. The
+    /// character copy broke off at now counts against the speed whenever
+    /// the length cannot answer for it: always while group size does not
+    /// adapt, and at the shortest length while it does. The speed settles
+    /// near the learner's own, and most of what is sent is copied.
+    #[test]
+    fn a_learner_who_stops_at_a_miss_does_not_run_the_speed_away() {
+        let aim = crate::settings::Aim::Balanced;
+        for (name, learner) in learners_who_give_up() {
+            let true_speed = learner.speed_for(aim.chars_right());
+            for adapt_length in [false, true] {
+                let run = run_with(&learner, 400, 7, false, adapt_length);
+                // With the length adapting too, the groups go short first
+                // and the speed is held only at the shortest, so it is
+                // left a little faster.
+                let over = if adapt_length { 1.3 } else { 1.12 };
+                assert!(
+                    run.speed < true_speed * over && run.speed > true_speed * 0.8,
+                    "{name}, length adapting {adapt_length}: sent at {:.1} WPM for {true_speed:.1}",
+                    run.speed
+                );
+                assert!(
+                    run.sent_right > 0.65,
+                    "{name}, length adapting {adapt_length}: {:.3} of characters copied",
+                    run.sent_right
+                );
+            }
+        }
     }
 
     /// Both adaptive features together settle where each was asked to: the
@@ -1917,7 +2000,7 @@ mod tests {
         println!("| --- | --- | --- | --- | --- | --- |");
         for (name, learner) in learners() {
             for seed in [7, 8, 9] {
-                let run = run_with(&learner, 400, seed, true);
+                let run = run_with(&learner, 400, seed, true, true);
                 println!(
                     "| {name} | {:.1} | {:.1} | {:.1}% | {:.1} | {:.0}% |",
                     learner.speed_for(aim.chars_right()),
@@ -1926,6 +2009,33 @@ mod tests {
                     run.length,
                     run.whole * 100.0
                 );
+            }
+        }
+        println!();
+        println!("Learners who stop typing at a miss.");
+        println!(
+            "| Learner | Group size | Speed for 94% | Sent at | Characters right | Of all sent | Length | Copied whole |"
+        );
+        println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+        for (name, learner) in learners_who_give_up() {
+            for adapt_length in [true, false] {
+                for seed in [7, 8, 9] {
+                    let run = run_with(&learner, 400, seed, false, adapt_length);
+                    println!(
+                        "| {name} | {} | {:.1} | {:.1} | {:.1}% | {:.1}% | {:.1} | {:.0}% |",
+                        if adapt_length {
+                            "adapts, 2–10"
+                        } else {
+                            "2–5"
+                        },
+                        learner.speed_for(aim.chars_right()),
+                        run.speed,
+                        run.chars_right * 100.0,
+                        run.sent_right * 100.0,
+                        run.length,
+                        run.whole * 100.0
+                    );
+                }
             }
         }
     }

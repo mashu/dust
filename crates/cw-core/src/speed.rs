@@ -21,8 +21,11 @@
 //! independent of each other — a send too fast loses several together — so
 //! a long group must not weigh like many short ones. It counts as the share
 //! of its characters copied right, and only the characters a faster or slower
-//! send could have changed: what was lost off the end of a group, after the
-//! last character typed, is the group's length to answer for, which the copy
+//! send could have changed ([`speed_tally`]). A group can end early two ways:
+//! too long to hold, or broken off at a character not recognised. One group
+//! cannot tell which, so the character copy broke off at counts against the
+//! speed unless adaptive group size can still answer for it by sending
+//! shorter groups; the rest of a lost end is the length's, which the copy
 //! span learns from. So the span and the speed learn from different
 //! evidence, and both can steer at once without pulling against each other.
 //! A contest's call or number is as long as it is, and no span answers for
@@ -39,7 +42,7 @@
 use std::sync::OnceLock;
 
 use crate::aim::{self, Leaning, Spread};
-use crate::alignment::{align_group, align_holding};
+use crate::alignment::{CopyTally, align_group, align_holding};
 use crate::belief::{Estimate, EstimatePoint, GridBelief, Tally, pick_index, sessions_in_order};
 use crate::callsign::parse_callsign;
 use crate::contest::{Field, GroupCopy};
@@ -140,23 +143,85 @@ fn log_chance_table() -> &'static [[f64; 2]] {
     })
 }
 
-/// What a group says about speed: of the characters a faster or slower send
-/// could have changed, how many were copied right, and how many count.
+/// The characters of a group a faster or slower send could have changed,
+/// each copied right or not, and those typed that were never sent: what a
+/// group says about speed, and what auto level judges while group size
+/// adapts.
 ///
-/// Characters lost off the end of a group, after the last one typed, are its
-/// length's to answer for: you heard them, and the group was longer than you
-/// could hold. A group with nothing typed says nothing about speed at all —
-/// a send too fast to follow and a group too long to hold both leave a blank
-/// — so it is the length's alone; a send that really is too fast shows in
-/// what does get typed. Characters typed that were never sent count against
-/// the speed. Nothing sent, nothing to count.
-pub fn speed_evidence(sent: &str, received: &str) -> Option<(u32, u32)> {
-    if sent.is_empty() || received.trim().is_empty() {
+/// Everything up to the last character typed counts, misheard, dropped or
+/// added. A group can also end early, with characters lost off its end, and
+/// that happens two ways: the group was longer than you could hold, or copy
+/// broke off at a character you did not recognise and the rest went by while
+/// you looked for it. One group cannot tell which. The rest of a lost end is
+/// a consequence either way, and is the length's alone. The character copy
+/// broke off at, the first one lost, counts as a miss unless adaptive group
+/// size can still answer for it: `length_floor` is the shortest group it
+/// draws while it adapts, and a group longer than that can be sent shorter.
+/// A group already as short as the range allows, or one whose length does
+/// not adapt, has nothing else to answer for its break. Left out, a learner
+/// who stops typing at the first miss only ever showed the speed characters
+/// copied right, and drove it to the top of the range while copying almost
+/// nothing.
+///
+/// A group with nothing typed speaks of no character: neither what was
+/// recognised nor where copy broke. While group size adapts it is the
+/// length's alone, at the shortest length too: there a blank is as often a
+/// slip as a send too fast, and a send too fast shows in what does get
+/// typed, now that the character copy broke off at counts. Where the length
+/// does not adapt, nothing else learns from it, and it counts as its first
+/// character missed.
+///
+/// Nothing sent, or a blank the length answers for: nothing to count.
+pub(crate) fn speed_tally(
+    sent: &str,
+    received: &str,
+    length_floor: Option<usize>,
+) -> Option<CopyTally> {
+    let sent_chars: Vec<char> = sent.chars().map(|c| c.to_ascii_uppercase()).collect();
+    if sent_chars.is_empty() {
         return None;
     }
-    let (held, _) = align_holding(sent, received);
-    let right = held.iter().filter(|pair| pair.matched).count() as u32;
-    let counted = held.len() as u32;
+    let length_answers = length_floor.is_some_and(|floor| sent_chars.len() > floor);
+    let mut tally = CopyTally::default();
+    let lost = if received.trim().is_empty() {
+        if length_floor.is_some() {
+            return None;
+        }
+        sent_chars.len()
+    } else {
+        let (held, lost) = align_holding(sent, received);
+        for pair in held {
+            match (pair.sent_char, pair.received_char) {
+                (Some(ch), _) => {
+                    let entry = tally.sent.entry(ch).or_default();
+                    entry.total += 1;
+                    entry.correct += u32::from(pair.matched);
+                }
+                (None, Some(ch)) => *tally.inserted.entry(ch).or_default() += 1,
+                (None, None) => {}
+            }
+        }
+        lost
+    };
+    if lost > 0 && !length_answers {
+        let broke_at = sent_chars[sent_chars.len() - lost];
+        tally.sent.entry(broke_at).or_default().total += 1;
+    }
+    (!tally.sent.is_empty() || !tally.inserted.is_empty()).then_some(tally)
+}
+
+/// What a group says about speed ([`speed_tally`]): of the characters a
+/// faster or slower send could have changed, how many were copied right,
+/// and how many count.
+pub fn speed_evidence(
+    sent: &str,
+    received: &str,
+    length_floor: Option<usize>,
+) -> Option<(u32, u32)> {
+    let tally = speed_tally(sent, received, length_floor)?;
+    let right = tally.sent.values().map(|each| each.correct).sum::<u32>();
+    let counted = tally.sent.values().map(|each| each.total).sum::<u32>()
+        + tally.inserted.values().sum::<u32>();
     (counted > 0).then_some((right, counted))
 }
 
@@ -174,6 +239,30 @@ pub fn whole_evidence(sent: &str, received: &str) -> Option<(u32, u32)> {
     let aligned = align_group(sent, received);
     let right = aligned.iter().filter(|pair| pair.matched).count() as u32;
     Some((right, aligned.len() as u32))
+}
+
+/// A group's evidence as hits and misses: each character counted is its
+/// share of the group as sent, so a group copied to its end counts once,
+/// whatever its length, and one whose lost end is the length's counts for
+/// as much of it as was heard. A miss that broke the copy off weighs as a
+/// character misheard does: the characters it cost are not counted, so they
+/// do not weigh it down. Counted as a share of what was counted instead, a
+/// group broken off at its second character came out half wrong, and a
+/// learner who stops at a miss was held to a far slower speed than their
+/// own.
+fn by_character(sent: &str, (right, counted): (u32, u32)) -> (f64, f64) {
+    let length = sent.chars().count().max(1) as f64;
+    (
+        f64::from(right) / length,
+        f64::from(counted.saturating_sub(right)) / length,
+    )
+}
+
+/// A contest call's or number's evidence as hits and misses: the share of
+/// it right and wrong, the whole of it counting once ([`whole_evidence`]).
+fn as_whole((right, counted): (u32, u32)) -> (f64, f64) {
+    let share = f64::from(right) / f64::from(counted.max(1));
+    (share, 1.0 - share)
 }
 
 /// Whether a contest run's group says how fast you copy: a call or a number
@@ -315,6 +404,10 @@ pub struct SpeedForecast {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpeedBelief {
     belief: GridBelief,
+    /// The shortest group adaptive group size draws, while it adapts: a
+    /// group longer than that answers for its own lost end
+    /// ([`speed_tally`]).
+    length_floor: Option<usize>,
 }
 
 impl SpeedBelief {
@@ -327,6 +420,7 @@ impl SpeedBelief {
             .collect();
         Self {
             belief: GridBelief::new(prior),
+            length_floor: None,
         }
     }
 
@@ -364,7 +458,9 @@ impl SpeedBelief {
     /// Learn from the history in the order it was practised, telling `after`
     /// where the belief stands after each session. Only sessions of the
     /// character set `settings` trains count: a callsign at 30 WPM is not a
-    /// two-letter Koch group at 30 WPM.
+    /// two-letter Koch group at 30 WPM. Groups cut short are read as
+    /// `settings` would read them now: their lost ends the length's while
+    /// group size adapts and the group could be shorter ([`speed_tally`]).
     fn replay(
         history: &[SessionResult],
         settings: &TrainingSettings,
@@ -372,12 +468,18 @@ impl SpeedBelief {
     ) -> Self {
         let (low, high) = SpeedPath::of(settings).bounds();
         let mut speed = Self::new((low * high).sqrt());
+        speed.length_floor =
+            crate::sampling::adaptive_bounds(settings).map(|(shortest, _)| shortest);
+        let floor = speed.length_floor;
         for session in sessions_in_order(history, settings.curriculum.char_set_mode) {
             speed.belief.fade();
-            let evidence = if session.char_set_mode == CharSetMode::Contest {
-                whole_evidence
-            } else {
-                speed_evidence
+            let contest = session.char_set_mode == CharSetMode::Contest;
+            let evidence = |sent: &str, received: &str| {
+                if contest {
+                    whole_evidence(sent, received).map(as_whole)
+                } else {
+                    speed_evidence(sent, received, floor).map(|counts| by_character(sent, counts))
+                }
             };
             let mut tally = Tally::new();
             let counted = session.groups.iter().zip(speed_groups(session));
@@ -392,10 +494,9 @@ impl SpeedBelief {
                 let effective_wpm = timing
                     .and_then(|timing| timing.effective_wpm)
                     .unwrap_or(session.effective_wpm);
-                if let Some((right, counted)) = evidence(&group.sent, &group.received) {
-                    let share = f64::from(right) / f64::from(counted);
+                if let Some((hits, misses)) = evidence(&group.sent, &group.received) {
                     let bin = speed_bin(copy_speed(char_wpm, effective_wpm).ln());
-                    tally.add(bin, share, 1.0 - share);
+                    tally.add(bin, hits, misses);
                 }
             }
             for (bin, hits, misses) in tally.rows() {
@@ -420,22 +521,22 @@ impl SpeedBelief {
     /// Learn from one group sent at `copy` WPM: what was sent, and what came
     /// back.
     pub fn learn(&mut self, sent: &str, received: &str, copy: f64) {
-        self.learn_share(speed_evidence(sent, received), copy);
+        let evidence = speed_evidence(sent, received, self.length_floor);
+        self.learn_share(evidence.map(|counts| by_character(sent, counts)), copy);
     }
 
     /// Learn from a contest's call or number sent at `copy` WPM, every
     /// character of it counting ([`whole_evidence`]), as the history will
     /// read it once its run is stored.
     pub fn learn_whole(&mut self, sent: &str, received: &str, copy: f64) {
-        self.learn_share(whole_evidence(sent, received), copy);
+        self.learn_share(whole_evidence(sent, received).map(as_whole), copy);
     }
 
-    /// Learn from what a copy says, its characters right of those counted,
-    /// sent at `copy` WPM.
-    fn learn_share(&mut self, evidence: Option<(u32, u32)>, copy: f64) {
-        if let Some((right, counted)) = evidence {
-            let share = f64::from(right) / f64::from(counted);
-            self.observe(speed_bin(copy.max(1.0).ln()), share, 1.0 - share);
+    /// Learn from what a copy says, its hits and misses as shares of a
+    /// group, sent at `copy` WPM.
+    fn learn_share(&mut self, evidence: Option<(f64, f64)>, copy: f64) {
+        if let Some((hits, misses)) = evidence {
+            self.observe(speed_bin(copy.max(1.0).ln()), hits, misses);
         }
     }
 
@@ -645,40 +746,80 @@ mod tests {
         );
     }
 
-    /// What was lost off the end is the group's length to answer for, not
-    /// its speed's; what was misheard inside it, the speed's.
+    /// What was misheard, dropped or added inside a group is the speed's.
+    /// Of an end lost, the character copy broke off at is the speed's too,
+    /// unless adaptive group size can still send the group shorter: then
+    /// the whole end is the length's, a blank included. The rest of an end
+    /// is the length's either way.
     #[test]
-    fn a_group_cut_short_says_nothing_against_the_speed() {
-        assert_eq!(speed_evidence("KMRSU", "KMRSU"), Some((5, 5)));
-        assert_eq!(speed_evidence("KMRSU", "KMR"), Some((3, 3)), "lost the end");
+    fn a_group_cut_short_counts_its_break_unless_the_length_answers_for_it() {
+        // Group size does not adapt: nothing else answers for an end.
+        let fixed = |received| speed_evidence("KMRSU", received, None);
+        assert_eq!(fixed("KMRSU"), Some((5, 5)));
+        assert_eq!(fixed("KMR"), Some((3, 4)), "broke off at S");
+        assert_eq!(fixed("KXRSU"), Some((4, 5)), "misheard one");
+        assert_eq!(fixed("KRSU"), Some((4, 5)), "dropped one inside");
+        assert_eq!(fixed("KMRSUE"), Some((5, 6)), "added one");
+        assert_eq!(fixed("KE"), Some((1, 3)), "one wrong, broke off at R");
+        assert_eq!(fixed(""), Some((0, 1)), "broke off at the first");
+        assert_eq!(speed_evidence("kmrsu", "KMR", None), Some((3, 4)), "case");
+        assert_eq!(speed_evidence("", "K", None), None, "nothing sent");
+        let tally = speed_tally("KMRSU", "KMR", None).expect("a tally");
+        assert_eq!(tally.sent[&'S'].total, 1);
+        assert_eq!(tally.sent[&'S'].correct, 0);
+        assert!(!tally.sent.contains_key(&'U'), "the rest is the length's");
+
+        // Group size adapts from two: a group of five could be shorter.
+        let adapts = |received| speed_evidence("KMRSU", received, Some(2));
+        assert_eq!(adapts("KMR"), Some((3, 3)), "lost the end");
+        assert_eq!(adapts("KE"), Some((1, 2)), "lost the end, one wrong");
+        assert_eq!(adapts(""), None, "a blank is the length's");
+        assert_eq!(adapts("KXRSU"), Some((4, 5)), "inside is the speed's still");
+        // At the shortest it draws, the length can do no more.
+        assert_eq!(speed_evidence("KM", "K", Some(2)), Some((1, 2)));
         assert_eq!(
-            speed_evidence("KMRSU", "KXRSU"),
-            Some((4, 5)),
-            "misheard one"
+            speed_evidence("KM", "", Some(2)),
+            None,
+            "a blank is the length's while it adapts"
         );
-        assert_eq!(
-            speed_evidence("KMRSU", "KRSU"),
-            Some((4, 5)),
-            "dropped one inside"
-        );
-        assert_eq!(speed_evidence("KMRSU", "KMRSUE"), Some((5, 6)), "added one");
-        assert_eq!(
-            speed_evidence("KMRSU", "KE"),
-            Some((1, 2)),
-            "lost the end, one wrong"
-        );
-        assert_eq!(
-            speed_evidence("kmrsu", "KMR"),
-            Some((3, 3)),
-            "case is no error"
-        );
-        assert_eq!(speed_evidence("KMRSU", ""), None, "a blank could be either");
-        assert_eq!(speed_evidence("", "K"), None);
-        // A prefix copied clean raises the speed, never lowers it.
+
+        // A prefix copied clean, of a group the length answers for, raises
+        // the speed; broken off where nothing else answers, it lowers it.
         let start = SpeedBelief::new(20.0);
+        let at = |belief: &SpeedBelief| belief.estimate(REFERENCE_RATE).mean;
         let mut cut = start.clone();
+        cut.length_floor = Some(2);
         cut.learn("KMRSUAB", "KMR", 22.0);
-        assert!(cut.estimate(REFERENCE_RATE).mean >= start.estimate(REFERENCE_RATE).mean);
+        assert!(at(&cut) >= at(&start));
+        let mut broke = start.clone();
+        for _ in 0..5 {
+            broke.learn("KMRSUAB", "KMR", 22.0);
+        }
+        assert!(at(&broke) < at(&start), "{} vs {}", at(&broke), at(&start));
+    }
+
+    /// A belief built for settings knows which ends the length answers for,
+    /// and reads the history so: a history of groups broken off early says
+    /// less against the speed while group size adapts.
+    #[test]
+    fn the_history_is_read_as_the_settings_answer_for_lost_ends() {
+        let mut adaptive = settings(15.0, 40.0);
+        adaptive.curriculum.min_group_size = 2;
+        adaptive.curriculum.max_group_size = 8;
+        adaptive.curriculum.adaptive_group_size = true;
+        let fixed = settings(15.0, 40.0);
+        assert_eq!(
+            SpeedBelief::from_history(&[], &adaptive).length_floor,
+            Some(2)
+        );
+        assert_eq!(SpeedBelief::from_history(&[], &fixed).length_floor, None);
+        let broken: Vec<SessionResult> = (1..=4).map(|at| stored(at, 30.0, "KM")).collect();
+        let speed = |settings: &TrainingSettings| {
+            SpeedBelief::from_history(&broken, settings)
+                .estimate(REFERENCE_RATE)
+                .mean
+        };
+        assert!(speed(&adaptive) > speed(&fixed) + 2.0);
     }
 
     /// A contest's call or number counts whole: an end lost is a miss, as no

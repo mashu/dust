@@ -48,13 +48,28 @@ So each belief learns from a different kind of mistake:
 - **Speed** learns from **characters**: misheard characters, characters
   dropped inside a group, and characters typed that were never sent. That is
   recognition, which speed changes.
-- **Length** learns from **whole groups**, as it always has. Characters lost
-  off the end of a group — everything after the last character typed — are
-  the length's alone: you heard them, and the group was longer than you could
-  hold.
-- A group with **nothing typed** is the length's alone too. A send too fast to
-  follow and a group too long to hold both leave a blank; a send that really
-  is too fast shows in what does get typed.
+- **Length** learns from **whole groups**, as it always has.
+- A group can **end early**, with characters lost off its end, two ways: it
+  was longer than you could hold, or copy broke off at a character you did
+  not recognise and the rest went by while you looked for it. One group
+  cannot tell which. The rest of the lost end is a consequence either way,
+  and is the length's alone. The character copy **broke off at**, the first
+  one lost, counts against the speed unless adaptive group size can still
+  answer for it, by sending the group shorter: while group size adapts and
+  the group is longer than the shortest it draws, the whole end is the
+  length's; at the shortest, or with group size fixed, nothing else answers
+  for the break, so the speed does.
+- A group with **nothing typed** speaks of no character. While group size
+  adapts it is the length's alone: a send too fast to follow and a group too
+  long to hold both leave a blank, and a send that really is too fast shows
+  in what does get typed, now that the character copy broke off at counts.
+  With group size fixed, nothing else learns from it, and it counts as its
+  first character missed.
+
+Before the character copy broke off at counted, a learner who stops typing
+at the first miss showed the speed only characters copied right: the speed
+ran to the top of the range, about 41 WPM for a learner who copies 90% at
+20, with 2–3% of characters copied (see the simulation below).
 
 Where an answer can be aligned more than one way at the same cost, the
 reading that loses the most off the end is taken: "KE" for "KMRSU" is one
@@ -74,11 +89,21 @@ speed $e$, so Farnsworth spacing counts.
 
 **Each group counts once.** Its characters are not independent — a send too
 fast loses several together — so a long group must not weigh like many short
-ones. It counts as one observation with fractional success $y$:
+ones. Each character counted is its share of the group as sent: a group of
+$L$ characters with $r$ right of the $c$ counted adds $r/L$ to the hits and
+$(c - r)/L$ to the misses. A group copied to its end counts once, with
+fractional success $y = r/L$; one whose lost end is the length's counts for
+as much of it as was heard. A miss that broke the copy off weighs as a
+character misheard does, the characters it cost not counted: as a share of
+what was counted instead, a group broken off at its second character came
+out half wrong, and a learner who stops at a miss was held well below their
+own speed.
 
 $$
-\log p(V, w \mid \text{data}) = \log p(V, w) + \sum_i \omega_i \left[y_i \log P_i + (1 - y_i)\log(1 - P_i)\right]
+\log p(V, w \mid \text{data}) = \log p(V, w) + \sum_i \omega_i \left[h_i \log P_i + m_i \log(1 - P_i)\right]
 $$
+
+with $h_i$ and $m_i$ group $i$'s hits and misses.
 
 **Psychometric curve,** on a log speed scale, so ten percent faster means
 the same at 15 WPM as at 40:
@@ -102,7 +127,9 @@ as log weights.
 - **History weights $\omega_i$:** as for the span, earlier evidence fades by
   $0.5^{1/10}$ a session.
 - **Which sessions count:** only sessions in the same character-set mode. A
-  callsign at 30 WPM is not a two-letter Koch group at 30 WPM.
+  callsign at 30 WPM is not a two-letter Koch group at 30 WPM. Their groups
+  are read as the settings now read them: a lost end is the length's while
+  group size adapts and the group could be shorter.
 
 Nothing new is stored: the speed every group was sent at is already kept
 with it. The belief is rebuilt when a session starts, faded once more, and
@@ -151,26 +178,31 @@ hold a group to its end with a span curve of their own; a group not held is
 lost from a random point on. Both adaptive features were on, at Balanced, with
 Character speed 10–50 WPM and Group size 2–10. Each run is 400 groups; the
 figures are over the second half, the estimates at the end, three seeds a
-learner.
+learner. Characters right are of those the speed counts.
 
 | Learner | Speed for 94% | Found | Sent at | Characters right | Span found | Length | Copied whole |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 90% at 20 WPM, span 5 | 18.6 | 19.5 | 18.5 | 94.5% | 4.1 | 3.0 | 76% |
-| | | 18.9 | 18.4 | 93.6% | 4.6 | 3.2 | 70% |
-| | | 18.9 | 18.5 | 92.4% | 4.1 | 3.1 | 69% |
-| 90% at 30 WPM, span 7 | 27.5 | 27.2 | 26.5 | 93.9% | 5.5 | 3.8 | 72% |
-| | | 29.2 | 27.7 | 94.9% | 6.1 | 4.3 | 67% |
-| | | 27.2 | 26.0 | 94.7% | 6.2 | 3.9 | 72% |
-| 90% at 40 WPM, span 4 | 37.7 | 37.1 | 35.8 | 93.8% | 3.5 | 2.6 | 74% |
-| | | 38.5 | 37.2 | 95.2% | 3.5 | 2.7 | 70% |
-| | | 36.5 | 35.2 | 94.3% | 4.0 | 3.0 | 64% |
-| 90% at 30 WPM, span 7 at 20 WPM shrinking with speed | 27.5 | 28.7 | 27.3 | 95.1% | 5.0 | 3.2 | 77% |
-| | | 28.0 | 27.3 | 93.4% | 5.4 | 3.5 | 74% |
-| | | 27.9 | 27.1 | 92.8% | 5.6 | 3.5 | 67% |
+| 90% at 20 WPM, span 5 | 18.6 | 19.4 | 18.4 | 93.8% | 4.3 | 3.2 | 75% |
+| | | 19.3 | 18.6 | 95.6% | 4.5 | 3.3 | 69% |
+| | | 18.9 | 18.5 | 93.3% | 4.4 | 3.1 | 68% |
+| 90% at 30 WPM, span 7 | 27.5 | 28.3 | 27.5 | 93.5% | 5.8 | 4.0 | 74% |
+| | | 27.4 | 26.9 | 93.5% | 6.1 | 4.7 | 64% |
+| | | 27.4 | 26.2 | 94.9% | 6.2 | 3.9 | 74% |
+| 90% at 40 WPM, span 4 | 37.7 | 36.4 | 36.3 | 92.6% | 3.7 | 2.8 | 69% |
+| | | 37.4 | 36.7 | 92.7% | 3.6 | 2.7 | 70% |
+| | | 35.1 | 34.8 | 93.2% | 3.9 | 2.8 | 67% |
+| 90% at 30 WPM, span 7 at 20 WPM shrinking with speed | 27.5 | 27.3 | 27.3 | 92.6% | 5.1 | 3.6 | 68% |
+| | | 27.7 | 26.9 | 93.9% | 5.7 | 4.1 | 64% |
+| | | 27.6 | 26.3 | 95.5% | 5.2 | 3.7 | 71% |
 
-The speed was found within about 5% of the truth every time. Characters came
-out at 94% on average against a 94% target, and groups were copied whole 71%
-of the time against 70%. Neither feature ran away with the other.
+The speed was found within about 7% of the truth every time, and within 5%
+in all but one run. Characters came out at 94% on average against a 94%
+target, and groups were copied whole 70% of the time against 70%. Neither
+feature ran away with the other. Over twenty seeds, the speed found
+averaged within 1% of the truth for three of the learners, and 6% under it
+for the one who holds only four characters: at the shortest groups the
+range allows, some of the groups it drops count against the speed, as
+nothing else can answer for them.
 
 The span found is shorter than the learners' memory span, as it should be:
 a group copied whole needs every character recognised as well as held, so
@@ -180,13 +212,40 @@ The same learners with the speed learning from whole groups instead:
 
 | Learner | Speed for 94% | Sent at | Characters right | Length | Copied whole |
 | --- | --- | --- | --- | --- | --- |
-| 90% at 20 WPM, span 5 | 18.6 | 10.3 | 98.1% | 4.0 | 70% |
+| 90% at 20 WPM, span 5 | 18.6 | 10.2 | 98.4% | 4.0 | 72% |
 | 90% at 30 WPM, span 7 | 27.5 | 10.2 | 98.4% | 5.6 | 70% |
-| 90% at 40 WPM, span 4 | 37.7 | 10.2 | 98.5% | 3.0 | 73% |
+| 90% at 40 WPM, span 4 | 37.7 | 10.2 | 98.0% | 3.0 | 73% |
 | 90% at 30 WPM, span 7 at 20, shrinking | 27.5 | 10.3 | 98.0% | 8.0 | 70% |
 
 (First seed shown; the other two are the same within 0.1 WPM.) The speed fell
 to the bottom of the range for every learner.
+
+Learners who stop typing at a character they miss, the rest of the group
+going by, every time or half the time, with a span long enough never to
+lose a group to its length. "Of all sent" is the share of every character
+sent that was copied right. Group size adapting from 2 to 10, or drawn
+evenly from 2 to 5:
+
+| Learner | Group size | Speed for 94% | Sent at | Characters right | Of all sent | Length | Copied whole |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 90% at 20 WPM, stops at every miss | adapts | 18.3 | 20.8 | 95.3% | 77.9% | 2.4 | 74% |
+| | | | 20.2 | 94.5% | 78.0% | 2.3 | 78% |
+| | | | 20.0 | 94.3% | 75.5% | 2.3 | 74% |
+| | 2–5 | 18.3 | 17.3 | 93.2% | 83.7% | 3.5 | 78% |
+| | | | 17.6 | 93.3% | 82.6% | 3.5 | 80% |
+| | | | 16.8 | 93.4% | 84.6% | 3.4 | 80% |
+| 90% at 20 WPM, stops at half the misses | adapts | 18.3 | 19.2 | 96.6% | 81.4% | 3.2 | 73% |
+| | | | 20.2 | 94.0% | 77.2% | 3.4 | 66% |
+| | | | 19.1 | 95.6% | 80.8% | 3.2 | 70% |
+| | 2–5 | 18.3 | 17.5 | 94.1% | 89.4% | 3.5 | 82% |
+| | | | 18.1 | 93.1% | 86.9% | 3.5 | 79% |
+| | | | 16.6 | 93.3% | 87.1% | 3.4 | 79% |
+
+Before the character copy broke off at counted, the learner who stops at
+every miss drove the speed to about 41 WPM either way, copying 2–3% of what
+was sent. With group size adapting, the groups go short first and the speed
+is held only at the shortest, so it settles a little fast, about 10% over;
+with it fixed, a little slow.
 
 Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 --ignored --nocapture`.
@@ -197,10 +256,12 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 
 - `speed.rs`: `SpeedBelief` (the speed's grid and curve on a `GridBelief`:
   history replay, learning from each group, `draw_speed`, `estimate`, and for
-  the Sampling card `drawn_near` and `right_at`), `speed_evidence` (which
-  characters count against the speed), `whole_evidence` (a contest's call or
-  number, every character of it counting, those lost off its end too), and
-  `SpeedPath` (the line through the speed settings).
+  the Sampling card `drawn_near` and `right_at`), `speed_tally` and
+  `speed_evidence` (which characters count against the speed: the character
+  copy broke off at too, unless adaptive group size can still send the group
+  shorter, which the belief knows as its `length_floor`), `whole_evidence` (a
+  contest's call or number, every character of it counting, those lost off
+  its end too), and `SpeedPath` (the line through the speed settings).
 - `belief.rs` and `aim.rs`: the grid posterior and the aim found by
   bisection, shared with the span. The speed's `Leaning` keeps its wider
   share around the aim (`Spread::Around`).
@@ -251,9 +312,12 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 
 ## Tests
 
-- **Core:** the estimate moves the right way; a group cut short says nothing
-  against the speed, and a blank says nothing at all; a simulated learner is
-  found and copied near the target; a range too easy or too hard leans on the
+- **Core:** the estimate moves the right way; a group cut short counts the
+  character it broke off at against the speed unless the length can still
+  answer for it, and a blank says nothing while group size adapts; the
+  history is read as the settings answer for lost ends; a learner who stops
+  typing at a miss does not run the speed away, with group size adapting or
+  not; a simulated learner is found and copied near the target; a range too easy or too hard leans on the
   right end; draws stay in the range whatever the generator does; the speed
   settings are one line from slowest to fastest, Farnsworth included; history
   is replayed in order, older sessions count less, other modes are ignored; a
