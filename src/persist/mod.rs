@@ -82,6 +82,13 @@ pub trait Store {
     /// on an iPhone. Says what became of it, in words for the user, or why
     /// it could not go.
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving;
+    /// Whether a backup file this store says it saved is known to be
+    /// saved, and so counts as the last backup. A browser hands a download
+    /// over and hears no more of it: blocked or turned down, it says
+    /// nothing.
+    fn confirms_backups(&self) -> bool {
+        true
+    }
     /// Ask the platform to keep what is stored rather than clear it when it
     /// needs room. Only a browser clears a store on its own, and it may ask
     /// the user first.

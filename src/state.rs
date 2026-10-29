@@ -445,8 +445,13 @@ impl AppCtx {
     }
 
     /// Hand the history and the settings to the user as a backup file, and
-    /// remember when, once it is saved. Saving goes on whichever screen is
-    /// up by then.
+    /// remember when, once it is known to be saved. Saving goes on
+    /// whichever screen is up by then.
+    ///
+    /// A file a browser was only handed, as a download it may have blocked
+    /// or the user turned down, is not remembered: the backup reminder
+    /// keeps counting from the last backup known to be kept, rather than
+    /// going quiet over one that may not exist.
     pub fn save_backup(self) {
         let at = crate::time::now_ms();
         let contents = write_backup(&self.settings.peek(), &self.sessions.peek(), at);
@@ -455,9 +460,12 @@ impl AppCtx {
         dioxus::core::spawn_forever(async move {
             match saving.await {
                 Ok(said) => {
-                    self.app().store.mark_backup(at);
-                    let mut last_backup = self.last_backup;
-                    last_backup.set(Some(at));
+                    let store = self.app().store;
+                    if store.confirms_backups() {
+                        store.mark_backup(at);
+                        let mut last_backup = self.last_backup;
+                        last_backup.set(Some(at));
+                    }
                     self.toasts.show(said);
                 }
                 Err(why) => self
@@ -900,6 +908,13 @@ mod tests {
             self.act(|ctx| ctx.toasts.current())
         }
 
+        /// Run whatever this copy has set going, as far as it goes at once.
+        fn settle(&mut self) {
+            use std::future::Future;
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let _ = std::pin::pin!(self.dom.wait_for_work()).poll(&mut cx);
+        }
+
         /// Keep `session`, as a session finished here is kept.
         fn finish(&self, session: SessionResult) {
             self.act(|ctx| crate::session_runtime::keep_and_show(ctx, session));
@@ -1265,6 +1280,29 @@ mod tests {
         let stored = days(&store.load_sessions());
         assert_eq!(stored, (3..=max + 2).collect::<Vec<_>>());
         assert_eq!(a.shown(), stored);
+    }
+
+    /// A backup a browser was only handed, which it may have blocked, is
+    /// not remembered as the last backup, so the reminder goes on counting;
+    /// one the store saved is. Every hand-over used to quiet the reminder.
+    #[test]
+    fn only_a_backup_known_to_be_kept_is_remembered() {
+        let store = holding([1, 2]);
+        store.unconfirmed_backups.set(true);
+        let mut tab = Tab::on(&store);
+        tab.act(AppCtx::save_backup);
+        tab.settle();
+        assert_eq!(store.backup_files.borrow().len(), 1, "handed over");
+        assert!(tab.toast().is_some(), "and said so");
+        assert_eq!(store.last_backup(), None);
+        assert_eq!(tab.act(|ctx| *ctx.last_backup.peek()), None);
+
+        store.unconfirmed_backups.set(false);
+        tab.act(AppCtx::save_backup);
+        tab.settle();
+        assert_eq!(store.backup_files.borrow().len(), 2);
+        assert!(store.last_backup().is_some());
+        assert_eq!(tab.act(|ctx| *ctx.last_backup.peek()), store.last_backup());
     }
 
     /// Settings the store would not take stay as they were set, and are

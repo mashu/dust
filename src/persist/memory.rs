@@ -39,6 +39,9 @@ pub struct MemoryStore {
     pub backup_files: RefCell<Vec<(String, String)>>,
     /// A build that cannot hand over a backup file, the way a phone's cannot.
     pub no_backups: Cell<bool>,
+    /// Backup files are handed over with no word of whether they were
+    /// kept, the way a browser's downloads are.
+    pub unconfirmed_backups: Cell<bool>,
     /// How many times the store was asked to keep its data.
     pub keep_asks: Cell<u32>,
     /// The session or run marked open, as a copy of the app that stopped
@@ -139,6 +142,10 @@ impl Store for MemoryStore {
             .borrow_mut()
             .push((name.to_string(), contents.to_string()));
         saved_now(Ok(saved_as(&format!("{name}, in your downloads"))))
+    }
+
+    fn confirms_backups(&self) -> bool {
+        !self.unconfirmed_backups.get()
     }
 
     fn ask_to_keep(&self) {
