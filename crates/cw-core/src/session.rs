@@ -273,6 +273,8 @@ pub struct SessionView {
     /// Seconds left before the next group is sent, while the session counts
     /// down to it.
     pub countdown: Option<u32>,
+    /// Which group a count down leads to.
+    pub countdown_to: CountdownTo,
     /// The session is on hold until it is resumed.
     pub paused: bool,
     /// Planned sends for the group being played, and how many are done.
@@ -281,6 +283,17 @@ pub struct SessionView {
     /// The speed the session chose for the current group, when it chooses
     /// one: adaptive speed does.
     pub speed: Option<ChosenSpeed>,
+}
+
+/// Which group a count down leads to, as the training screen says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CountdownTo {
+    /// The session's first group.
+    First,
+    /// A group not heard yet, after a pause between two groups.
+    Next,
+    /// A group heard in part before a pause, sent again.
+    Again,
 }
 
 /// The speed the session chose for a group, as the training screen shows it.
@@ -300,6 +313,9 @@ pub struct GroupSession {
     groups: Vec<Group>,
     current_group: usize,
     focused_group: usize,
+    /// The group a count down leads to: the first, or the one a paused
+    /// session goes on with.
+    countdown_to: usize,
     settings: TrainingSettings,
 }
 
@@ -315,6 +331,7 @@ impl GroupSession {
             groups: vec![Group::blank(); num_groups.max(1)],
             current_group: 0,
             focused_group: 0,
+            countdown_to: 0,
             settings,
         }
     }
@@ -388,6 +405,7 @@ impl GroupSession {
             playing: self.playing(),
             locked: self.input_locked(self.current_group),
             countdown: self.countdown(),
+            countdown_to: self.countdown_to(),
             paused: self.paused(),
             repeat_total: current.map_or(1, |g| g.repeats.max(1)),
             repeat_done: current.map_or(0, |g| g.plays_done),
@@ -475,6 +493,38 @@ impl GroupSession {
     /// session chose them; otherwise the station sending it decides.
     pub fn planned_wpm(&self, index: usize) -> Option<(f64, f64)> {
         self.groups.get(index)?.planned_wpm
+    }
+
+    /// A count down now leads to group `index`.
+    pub(crate) fn set_countdown_to(&mut self, index: usize) {
+        self.countdown_to = index;
+    }
+
+    /// Which group the count down leads to: one heard in part before a pause
+    /// is sent again.
+    fn countdown_to(&self) -> CountdownTo {
+        match self.groups.get(self.countdown_to) {
+            Some(group) if group.sounding.is_some() => CountdownTo::Again,
+            _ if self.countdown_to == 0 => CountdownTo::First,
+            _ => CountdownTo::Next,
+        }
+    }
+
+    /// Group `index` was paused for `ms` with its answer open: the answer
+    /// is timed from the group's end as if the pause had not been, and keys
+    /// typed either side of the pause cannot be timed against its
+    /// characters. An answer already complete when it paused is timed as it
+    /// stands.
+    pub(crate) fn note_paused(&mut self, index: usize, ms: u64) {
+        if let Some(group) = self.groups.get_mut(index)
+            && !group.confirmed()
+            && group.answer_at.is_none()
+        {
+            group.end_at = group.end_at.map(|end| end.plus(ms));
+            if let Some(sounding) = &mut group.sounding {
+                sounding.trusted = false;
+            }
+        }
     }
 
     pub(crate) fn begin_group(&mut self, index: usize, now: MonoMs) {

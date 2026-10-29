@@ -13,7 +13,7 @@ use dioxus::prelude::*;
 use crate::page_hidden::{LISTEN_HIDDEN, SESSION_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
 use crate::persist::auto_progress;
 use crate::playback;
-use crate::session_runtime::{TypedAnswer, send_event, start_session};
+use crate::session_runtime::{TypedAnswer, resume_session, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen, SessionPick};
 use crate::time::{local_date_string, mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
@@ -287,7 +287,7 @@ fn TrainingRoute() -> Element {
     let on_confirm = use_callback(move |()| send_event(ctx, SessionEvent::Confirm));
     let on_submit = use_callback(move |()| send_event(ctx, SessionEvent::FinishNow));
     let on_stop = use_callback(move |()| send_event(ctx, SessionEvent::Abort));
-    let on_resume = use_callback(move |()| send_event(ctx, SessionEvent::Resume));
+    let on_resume = use_callback(move |()| resume_session(ctx));
     // A session of groups holds while nobody can hear it, as a run does,
     // rather than close answers nobody is there to type. A run has a
     // listener of its own; this one says nothing to it.
@@ -324,6 +324,7 @@ fn TrainingRoute() -> Element {
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
                 countdown: view.countdown,
+                countdown_to: view.countdown_to,
                 paused: view.paused,
                 speed: view.speed,
                 answer: ctx.answer,

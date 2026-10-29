@@ -89,6 +89,10 @@ pub enum SessionEffect {
         text: String,
     },
     StopAudio,
+    /// Stop everything the session plays, the band too, and give the audio
+    /// back: a paused session plays nothing, and lets the output sleep.
+    /// [`SessionEvent::Resume`] comes with the audio claimed afresh.
+    ReleaseAudio,
     /// Send [`SessionEvent::TimerFired`] with this id once `ms` have passed.
     StartTimer {
         id: u64,
@@ -166,8 +170,9 @@ pub struct SessionMachine<S> {
     /// The group the count down leads to: the first, or the one a paused
     /// session goes on with.
     countdown_to: usize,
-    /// What a paused session goes on with; none unless it is paused.
-    resume: Option<Resume>,
+    /// What a paused session goes on with, and since when it has been
+    /// paused; none unless it is paused.
+    resume: Option<(Resume, MonoMs)>,
 }
 
 impl<S: GroupSource> SessionMachine<S> {
@@ -324,7 +329,7 @@ impl<S: GroupSource> SessionMachine<S> {
             SessionEvent::Input { index, text, keys } => self.input(index, &text, &keys, now),
             SessionEvent::Confirm if self.confirm_too_soon(now) => Vec::new(),
             SessionEvent::Confirm => self.confirm_current(now),
-            SessionEvent::Pause => self.pause(),
+            SessionEvent::Pause => self.pause(now),
             SessionEvent::Resume => self.resume(now),
             SessionEvent::TimerFired { id } => self.timer_fired(id, now),
             SessionEvent::FinishNow => self.finish_now(now),
@@ -495,9 +500,13 @@ impl<S: GroupSource> SessionMachine<S> {
 
     /// Answer the current group and teach the source what was copied.
     /// Whether it was answered just now.
-    fn record_answer(&mut self, now: MonoMs) -> bool {
+    ///
+    /// The box being locked — while a group is sent, counting down, or
+    /// paused — refuses an answer, unless `finishing`: End session keeps what
+    /// was typed before the lock, whenever it is pressed.
+    fn record_answer(&mut self, now: MonoMs, finishing: bool) -> bool {
         let index = self.session.current_group();
-        if self.session.input_locked(index) {
+        if self.session.input_locked(index) && !finishing {
             return false;
         }
         match self.session.confirm(index, now) {
@@ -510,7 +519,7 @@ impl<S: GroupSource> SessionMachine<S> {
     }
 
     fn confirm_current(&mut self, now: MonoMs) -> Vec<SessionEffect> {
-        if !self.record_answer(now) {
+        if !self.record_answer(now, false) {
             return Vec::new();
         }
         self.cancel_timers();
@@ -541,7 +550,7 @@ impl<S: GroupSource> SessionMachine<S> {
             .group(self.session.current_group())
             .is_some_and(|g| !g.input().is_empty() && !g.confirmed());
         if typed {
-            self.record_answer(now);
+            self.record_answer(now, true);
         }
         self.end(self.session.any_confirmed())
     }
@@ -560,10 +569,18 @@ impl<S: GroupSource> SessionMachine<S> {
         !typed && started.is_some_and(|start| now.since(start) < EMPTY_CONFIRM_GUARD_MS)
     }
 
-    /// Hold the session where it is: the sound stopped, every timer let go.
-    fn pause(&mut self) -> Vec<SessionEffect> {
+    /// Hold the session where it is: the sound and the band stopped, every
+    /// timer let go. A group answered in full, its auto-confirm still
+    /// waiting, needs no sending again: it is confirmed once resumed.
+    fn pause(&mut self, now: MonoMs) -> Vec<SessionEffect> {
+        let complete = self.auto_confirm.as_ref().map(|pending| pending.index);
         let resume = match self.phase() {
             SessionPhase::Countdown { .. } => Resume::Send(self.countdown_to),
+            SessionPhase::Playing { index } | SessionPhase::RepeatGap { index }
+                if complete == Some(index) =>
+            {
+                Resume::Answer(index)
+            }
             SessionPhase::Playing { index } | SessionPhase::RepeatGap { index } => {
                 Resume::Send(index)
             }
@@ -575,19 +592,31 @@ impl<S: GroupSource> SessionMachine<S> {
         };
         let (Resume::Send(index) | Resume::Answer(index)) = resume;
         self.cancel_timers();
-        self.resume = Some(resume);
+        self.resume = Some((resume, now));
         self.set_phase(SessionPhase::Paused { index });
-        vec![SessionEffect::StopAudio]
+        vec![SessionEffect::ReleaseAudio]
     }
 
     /// Carry on from a pause, as [`SessionEvent::Resume`] says.
     fn resume(&mut self, now: MonoMs) -> Vec<SessionEffect> {
-        let Some(resume) = self.resume.take() else {
+        let Some((resume, since)) = self.resume.take() else {
             return Vec::new();
         };
         match resume {
             Resume::Answer(index) => {
+                // The pause is no time spent answering, and keys typed
+                // either side of it cannot be timed.
+                self.session.note_paused(index, now.since(since));
                 self.set_phase(SessionPhase::AwaitingAnswer { index });
+                let Some(group) = self.session.group(index) else {
+                    return Vec::new();
+                };
+                let (sent, value) = (group.sent().to_string(), group.input().to_string());
+                if answer_length_matches(&sent, &value) {
+                    let (id, effect) = self.start_timer(AUTO_CONFIRM_DELAY_MS);
+                    self.auto_confirm = Some(PendingConfirm { id, index, value });
+                    return vec![effect];
+                }
                 let timeout_ms =
                     (self.session.settings().playback.group_timeout * 1000.0).round() as u32;
                 if timeout_ms == 0 {
@@ -600,13 +629,19 @@ impl<S: GroupSource> SessionMachine<S> {
                 if countdown == 0 {
                     return self.begin_group(index, now);
                 }
-                self.countdown_to = index;
+                self.count_down_to(index);
                 self.set_phase(SessionPhase::Countdown {
                     remaining: countdown,
                 });
                 vec![self.start_phase_timer(PhaseTimer::Countdown, COUNTDOWN_STEP_MS)]
             }
         }
+    }
+
+    /// The count down is to group `index`.
+    fn count_down_to(&mut self, index: usize) {
+        self.countdown_to = index;
+        self.session.set_countdown_to(index);
     }
 
     fn group_gap_ms(&self, next: usize) -> u32 {
@@ -640,6 +675,7 @@ mod tests {
 
     use super::*;
     use crate::alignment::CopyTally;
+    use crate::session::CountdownTo;
 
     /// Hands out the groups it is given, then "KM" for ever, and remembers
     /// what it was taught.
@@ -837,7 +873,7 @@ mod tests {
         let _ = m.apply(typed(0, "K"), MonoMs(2_500));
 
         let effects = m.apply(SessionEvent::Pause, MonoMs(2_600));
-        assert_eq!(effects, vec![SessionEffect::StopAudio]);
+        assert_eq!(effects, vec![SessionEffect::ReleaseAudio]);
         assert_eq!(m.phase(), SessionPhase::Paused { index: 0 });
         let view = m.session().view();
         assert!(view.paused && view.locked && !view.playing);
@@ -905,6 +941,123 @@ mod tests {
             }]
         );
         assert_eq!(m.phase(), SessionPhase::Playing { index: 1 });
+    }
+
+    /// End session while paused keeps what was typed into the group the
+    /// pause held, as it does with no pause: here on the first group, which
+    /// without it would leave nothing to keep, and the session would go.
+    #[test]
+    fn ending_a_paused_session_keeps_what_was_typed() {
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM", "UK"], 1));
+        let _ = m.apply(typed(0, "K"), MonoMs(300));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(400));
+        let effects = m.apply(SessionEvent::FinishNow, MonoMs(5_000));
+        assert!(
+            effects.contains(&SessionEffect::PersistAndShowResults),
+            "{effects:?}"
+        );
+        assert_eq!(m.phase(), SessionPhase::Finished);
+        assert!(m.session().group(0).is_some_and(|g| g.confirmed()));
+        assert_eq!(m.session().group(0).map(|g| g.input()), Some("K"));
+    }
+
+    /// A pause in the answer window is no time spent answering: the group is
+    /// timed from its end as if the pause had not been, and its characters,
+    /// keyed either side of the pause, are not timed against when they
+    /// ended.
+    #[test]
+    fn a_pause_in_the_answer_window_is_not_answering_time() {
+        let mut m = start_with(settings(1, false, 10.0), script(&["KMR"], 1));
+        let start = SendStart {
+            char_wpm: 20.0,
+            effective_wpm: 18.0,
+            output_at: MonoMs(0),
+            char_ends_ms: vec![200, 500, 800],
+            first_char_ms: 0,
+            latency_ms: 0,
+        };
+        let _ = m.apply(SessionEvent::PlaybackStarted { index: 0, start }, MonoMs(0));
+        let _ = m.apply(ended(0), MonoMs(800));
+        let _ = m.apply(typed(0, "K"), MonoMs(850));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(900));
+        let _ = m.apply(SessionEvent::Resume, MonoMs(60_900));
+        let _ = m.apply(typed(0, "KMR"), MonoMs(61_400));
+        let effects = m.apply(SessionEvent::Confirm, MonoMs(61_500));
+        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        let result = m.session().result(0, "2026-01-01".into());
+        let timing = &result.group_timings[0];
+        assert!(
+            (timing.time_to_complete_ms - 600.0).abs() < 1.0,
+            "{} ms to answer",
+            timing.time_to_complete_ms
+        );
+        assert_eq!(timing.char_times, None, "timed across the pause");
+    }
+
+    /// A pause while an answer typed in full waits to confirm itself sends
+    /// nothing again: resumed, the answer confirms itself as it was about
+    /// to, without Enter.
+    #[test]
+    fn a_complete_answer_paused_confirms_itself_once_resumed() {
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM", "UK"], 1));
+        let _ = play_out(&mut m, 0, MonoMs(500));
+        let _ = m.apply(typed(0, "KM"), MonoMs(600));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(700));
+        let auto = m.apply(SessionEvent::Resume, MonoMs(9_000));
+        assert_eq!(timer(&auto).1, AUTO_CONFIRM_DELAY_MS);
+        let next = fire(&mut m, &auto, 9_000 + u64::from(AUTO_CONFIRM_DELAY_MS));
+        assert!(next.contains(&SessionEffect::StopAudio), "{next:?}");
+        assert_eq!(m.phase(), SessionPhase::InterGroupGap { next: 1 });
+        // And typed along while the group was still being sent, the same.
+        let mut m = start_with(settings(2, false, 10.0), script(&["KM", "UK"], 1));
+        let _ = m.apply(typed(0, "KM"), MonoMs(300));
+        let _ = m.apply(SessionEvent::Pause, MonoMs(400));
+        assert_eq!(m.phase(), SessionPhase::Paused { index: 0 });
+        let auto = m.apply(SessionEvent::Resume, MonoMs(9_000));
+        assert_eq!(timer(&auto).1, AUTO_CONFIRM_DELAY_MS);
+        assert!(!auto.iter().any(|e| matches!(e, SessionEffect::Play { .. })));
+    }
+
+    /// The count down a resume brings says which group it leads to: the
+    /// first, one not heard yet, or one heard in part and sent again.
+    #[test]
+    fn a_count_down_says_which_group_it_leads_to() {
+        let mut ask = settings(2, false, 10.0);
+        ask.playback.countdown_sec = 1;
+        let (mut m, effects) = SessionMachine::start(
+            SessionId::new(7),
+            MonoMs(0),
+            ask.clone(),
+            script(&["KM", "UK"], 1),
+        );
+        assert_eq!(m.session().view().countdown_to, CountdownTo::First);
+        let _ = fire(&mut m, &effects, 1_000);
+        let start = SendStart {
+            char_wpm: 20.0,
+            effective_wpm: 18.0,
+            output_at: MonoMs(1_000),
+            char_ends_ms: Vec::new(),
+            first_char_ms: 0,
+            latency_ms: 0,
+        };
+        let _ = m.apply(
+            SessionEvent::PlaybackStarted { index: 0, start },
+            MonoMs(1_000),
+        );
+        let _ = m.apply(SessionEvent::Pause, MonoMs(1_100));
+        let _ = m.apply(SessionEvent::Resume, MonoMs(2_000));
+        assert_eq!(m.session().view().countdown_to, CountdownTo::Again);
+        let (mut m, effects) =
+            SessionMachine::start(SessionId::new(7), MonoMs(0), ask, script(&["KM", "UK"], 1));
+        let _ = fire(&mut m, &effects, 1_000);
+        let _ = play_out(&mut m, 0, MonoMs(1_500));
+        let _ = m.apply(typed(0, "KM"), MonoMs(1_600));
+        let _ = m.apply(SessionEvent::Confirm, MonoMs(1_700));
+        assert_eq!(m.phase(), SessionPhase::InterGroupGap { next: 1 });
+        let _ = m.apply(SessionEvent::Pause, MonoMs(1_800));
+        let _ = m.apply(SessionEvent::Resume, MonoMs(3_000));
+        assert_eq!(m.phase(), SessionPhase::Countdown { remaining: 1 });
+        assert_eq!(m.session().view().countdown_to, CountdownTo::Next);
     }
 
     /// An Enter with nothing typed, straight after a group starts, is taken

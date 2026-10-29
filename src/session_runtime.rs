@@ -63,6 +63,13 @@ pub struct LiveSession {
 }
 
 impl LiveSession {
+    /// Whether what comes under `lease` is this session's to hear: its own
+    /// claim, while it holds the audio, or while it is paused, having given
+    /// the audio back.
+    fn hears(&self, lease: &Lease) -> bool {
+        self.lease.is(lease) && (lease.is_current() || self.machine.session().paused())
+    }
+
     /// What the receiver hears for group `index`: the station being copied,
     /// and whoever else is calling across it.
     ///
@@ -309,9 +316,37 @@ pub fn start_session(ctx: AppCtx) {
     run_effects(ctx, &lease, effects);
 }
 
+/// Carry on after a pause. The audio a pause gave back is claimed afresh
+/// here, inside the tap on Resume, so the player opens where a browser lets
+/// it start; the session goes on under the new claim. A session that is not
+/// paused is left alone: a claim would cut its send from under it.
+pub fn resume_session(ctx: AppCtx) {
+    let app = ctx.app();
+    let settings = match app.session.borrow().as_ref().and_then(Live::groups) {
+        Some(live) if live.machine.session().paused() => live.machine.session().settings().clone(),
+        _ => return,
+    };
+    let lease = match app.player.claim(&settings) {
+        Ok(lease) => lease,
+        Err(err) => {
+            ctx.toasts.show(err.to_string());
+            return;
+        }
+    };
+    if let Some(live) = app.session.borrow_mut().as_mut().and_then(Live::groups_mut) {
+        live.lease = lease.clone();
+    }
+    dispatch(ctx, &lease, SessionEvent::Resume);
+}
+
 /// Hand the running session something the user did. Nothing happens when
-/// no session is running.
+/// no session is running. Resume claims the audio first
+/// ([`resume_session`]).
 pub fn send_event(ctx: AppCtx, event: SessionEvent) {
+    if event == SessionEvent::Resume {
+        resume_session(ctx);
+        return;
+    }
     let lease = ctx
         .app()
         .session
@@ -361,7 +396,8 @@ enum Ended {
 ///
 /// `lease` is the session the event belongs to: an event from a session
 /// that has ended, or from one before the session now running, is dropped
-/// rather than handed to a machine it means nothing to.
+/// rather than handed to a machine it means nothing to. A paused session
+/// has given its audio back, and still hears what is done to it.
 fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) -> Option<Ended> {
     let mut runtime = ctx.runtime;
     let app = ctx.app();
@@ -371,7 +407,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) -> Option<Ended> {
         .as_ref()
         .and_then(Live::groups)
         .and_then(|live| {
-            (live.lease.is(lease) && lease.is_current())
+            live.hears(lease)
                 .then(|| live.machine.closes_answer(&event))
                 .flatten()
         });
@@ -405,7 +441,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: SessionEvent) -> Option<Ended> {
         let live = slot
             .as_mut()
             .and_then(Live::groups_mut)
-            .filter(|live| live.lease.is(lease) && lease.is_current())?;
+            .filter(|live| live.hears(lease))?;
         let now = MonoMs(mono_ms());
         // Typing still waiting out the box's pause came before this event,
         // so the machine hears it first.
@@ -432,6 +468,9 @@ fn run_effects(ctx: AppCtx, lease: &Lease, effects: Vec<SessionEffect>) -> Optio
     for effect in effects {
         match effect {
             SessionEffect::StopAudio => lease.stop_sending(),
+            SessionEffect::ReleaseAudio => {
+                lease.release();
+            }
             SessionEffect::Play { index, text } => play(ctx, lease, index, text),
             SessionEffect::StartTimer { id, ms } => {
                 let lease = lease.clone();
@@ -898,6 +937,29 @@ mod tests {
             assert_eq!(h.phase(), Some(SessionPhase::Countdown { remaining: 2 }));
             assert!(h.run_until(3_000, |h| h.texts().len() == 2).await);
             assert_eq!(h.phase(), Some(SessionPhase::Playing { index: 0 }));
+        });
+    }
+
+    /// End session while paused keeps what was typed and stores the session,
+    /// though the audio was given back with the pause.
+    #[test]
+    fn ending_a_paused_session_keeps_it() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.lock_input_during_group_playback = false;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.texts().len() == 1).await);
+            h.send(SessionEvent::Input {
+                index: 0,
+                text: "K".into(),
+                keys: Default::default(),
+            });
+            h.send(SessionEvent::Pause);
+            assert_eq!(h.phase(), Some(SessionPhase::Paused { index: 0 }));
+            h.send(SessionEvent::FinishNow);
+            assert_eq!(h.phase(), None, "the session is over");
+            assert_eq!(h.ctx.sessions.peek().len(), 1, "and kept");
         });
     }
 

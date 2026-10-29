@@ -1,4 +1,4 @@
-use cw_core::{ChosenSpeed, MonoMs, answer_length_matches};
+use cw_core::{ChosenSpeed, CountdownTo, MonoMs, answer_length_matches};
 use dioxus::core::Runtime;
 use dioxus::prelude::*;
 
@@ -612,6 +612,9 @@ pub fn TrainingView(
     repeat_done: u32,
     /// Seconds left before the next group, while the session counts down.
     countdown: Option<u32>,
+    /// Which group the count down leads to.
+    #[props(default = CountdownTo::First)]
+    countdown_to: CountdownTo,
     /// The session is on hold, the page having gone out of sight, until
     /// Resume.
     #[props(default)]
@@ -629,8 +632,6 @@ pub fn TrainingView(
 ) -> Element {
     let send_index = (repeat_done + 1).min(repeat_total.max(1));
     let asking = use_discard_ask(Discarded::Session);
-    // Counting down to the first group, or to the one a pause goes on with.
-    let first = !confirmed.iter().any(|done| *done) && current == 0;
     let current_done = confirmed.get(current).copied().unwrap_or(false);
     // The open box is never drawn from the session, so a view drawn afresh
     // on a session under way — after a hot reload, say — starts its draft
@@ -705,10 +706,12 @@ pub fn TrainingView(
     // as it changes.
     let hint = if paused {
         "Paused while the page was out of sight."
-    } else if countdown.is_some() && first {
-        "Get ready — the first group is coming."
     } else if countdown.is_some() {
-        "Get ready — the group is coming again."
+        match countdown_to {
+            CountdownTo::First => "Get ready — the first group is coming.",
+            CountdownTo::Next => "Get ready — the next group is coming.",
+            CountdownTo::Again => "Get ready — the group is coming again.",
+        }
     } else if playing && locked {
         "Listen — the box opens when it ends."
     } else if playing {
@@ -749,10 +752,10 @@ pub fn TrainingView(
                             div { class: "group countdown", role: "status",
                                 span { id: "countdown", class: "countdown-num", "{left}" }
                                 span { class: "muted",
-                                    if first {
-                                        "The first group starts in {left} s"
-                                    } else {
-                                        "The group starts again in {left} s"
+                                    match countdown_to {
+                                        CountdownTo::First => format!("The first group starts in {left} s"),
+                                        CountdownTo::Next => format!("The next group starts in {left} s"),
+                                        CountdownTo::Again => format!("The group starts again in {left} s"),
                                     }
                                 }
                             }

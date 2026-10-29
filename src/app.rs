@@ -119,7 +119,7 @@ pub fn App() -> Element {
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
-    use_keep_awake(screen, ctx.contest, ctx.preview);
+    use_keep_awake(screen, ctx.runtime, ctx.contest, ctx.preview);
     // Each screen opens at its top, wherever the one before it was scrolled
     // to: a run started from the foot of its results would otherwise begin
     // with its clock and its fields out of sight.

@@ -1,8 +1,8 @@
 //! Keeps the screen on while a session runs: through the count down, every
 //! send and every answer. A phone that dims and locks part way through a
-//! group loses the group, and the screen is where the answer goes. A contest
-//! run holds it while it is live, counting down or running; paused, it lets
-//! the screen sleep, and a run is never lost to that. Hear a QSO holds it
+//! group loses the group, and the screen is where the answer goes. A session
+//! or a contest run holds it while it is live; paused, it lets the screen
+//! sleep, and neither is lost to that. Hear a QSO holds it
 //! while it plays, its lines on the screen: a page out of sight stops it.
 //!
 //! Android sets its window's own keep-screen-on flag, which the system holds
@@ -12,16 +12,18 @@
 //! later. A page loses its lock whenever it is hidden, so it asks again each
 //! time it comes back into view.
 
-use cw_core::{ContestPhase, ContestView};
+use cw_core::{ContestPhase, ContestView, GroupSession};
 use dioxus::prelude::*;
 
 use crate::playback::Preview;
 use crate::state::Screen;
 
 /// Hold the screen on for exactly as long as the training screen is up with
-/// a session on it, or a contest run on it is live, or Hear a QSO plays.
+/// a session on it that is not paused, or a contest run on it is live, or
+/// Hear a QSO plays.
 pub fn use_keep_awake(
     screen: Signal<Screen>,
+    session: Signal<Option<GroupSession>>,
     contest: Signal<Option<ContestView>>,
     preview: Signal<Preview>,
 ) {
@@ -30,7 +32,10 @@ pub fn use_keep_awake(
             run.phase,
             ContestPhase::Countdown { .. } | ContestPhase::Running
         ),
-        None => screen() == Screen::Training || preview.read().is_qsos(),
+        None => {
+            let paused = session.read().as_ref().is_some_and(GroupSession::paused);
+            (screen() == Screen::Training && !paused) || preview.read().is_qsos()
+        }
     });
     // What was last asked for, so starting up off asks for nothing.
     let mut held = use_hook(|| CopyValue::new(false));
@@ -199,6 +204,29 @@ pub(crate) mod tests {
             ui.click("btn-end-run");
             assert_eq!(ui.screen(), "results", "nobody was worked: nothing kept");
             assert_eq!(asked(), vec![true, false, true, false]);
+        });
+    }
+
+    /// A session of groups paused while out of sight lets the screen sleep
+    /// and gives the audio back, the band with it; Resume takes both again.
+    #[test]
+    fn a_paused_session_lets_the_screen_sleep() {
+        run(|| async {
+            ASKED.with(|asked| asked.borrow_mut().clear());
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            ui.click("btn-start-training");
+            assert_eq!(asked(), vec![true]);
+            ui.advance(500).await;
+            ui.with_app(|ctx| {
+                crate::session_runtime::send_event(ctx, cw_core::SessionEvent::Pause)
+            });
+            assert_eq!(asked(), vec![true, false]);
+            assert_eq!(recorder.calls().last(), Some(&Call::Shutdown));
+            assert!(!recorder.band_running.get(), "the band plays on paused");
+            ui.click("btn-resume");
+            assert_eq!(asked(), vec![true, false, true]);
         });
     }
 
