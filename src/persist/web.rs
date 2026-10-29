@@ -7,8 +7,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, keep_aside, newest,
-    newest_that_fit, read_history, read_settings_from, saved_now,
+    Aside, BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, keep_aside,
+    newest, newest_that_fit, read_history, read_settings_from, saved_now,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -32,8 +32,9 @@ const HISTORY_BUDGET: usize = 3_000_000;
 
 #[derive(Default)]
 pub struct WebStore {
-    /// The stored history could not be read, nor copied out of the way, so
-    /// it is not to be written over.
+    /// The stored history could not be read, nor copied out of the way, the
+    /// last time it was read, so it is not to be written over until a read
+    /// says otherwise.
     history_held: Cell<bool>,
     /// The browser has been asked to keep the store, this visit.
     asked_to_keep: Cell<bool>,
@@ -44,6 +45,31 @@ pub struct WebStore {
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// `localStorage`, as what is set aside is kept in it ([`keep_aside`]).
+struct Shelf<'a>(&'a web_sys::Storage);
+
+impl Aside for Shelf<'_> {
+    fn keys(&self) -> Result<Vec<String>, ()> {
+        let count = self.0.length().map_err(|_| ())?;
+        (0..count)
+            .map(|at| self.0.key(at).map_err(|_| ()))
+            .filter_map(Result::transpose)
+            .collect()
+    }
+
+    fn get(&self, key: &str) -> Result<Option<String>, ()> {
+        self.0.get_item(key).map_err(|_| ())
+    }
+
+    fn set(&self, key: &str, raw: &str) -> bool {
+        self.0.set_item(key, raw).is_ok()
+    }
+
+    fn remove(&self, key: &str) {
+        let _ = self.0.remove_item(key);
+    }
 }
 
 /// Hold the Web Lock `name` until the function handed back is called; none
@@ -189,18 +215,20 @@ impl Store for WebStore {
             .map_err(|_| "this browser's storage would not take them".into())
     }
 
+    /// Whether the history is held is this read's to say, whatever the last
+    /// one said: a copy there was no room to set aside then may fit now.
     fn read_sessions(&self) -> Option<Vec<SessionResult>> {
+        self.history_held.set(false);
         let store = storage()?;
         let raw = store.get_item(SESSIONS_KEY).ok().flatten()?;
         // Copies set aside go beside any set aside before, each under a key
         // of its own, as far as the room goes.
-        let get = |key: &str| store.get_item(key).map_err(|_| ());
-        let set = |key: &str, raw: &str| store.set_item(key, raw).is_ok();
+        let aside = Shelf(&store);
         let Some(read) = read_history(&raw) else {
             // Keep the unreadable copy where the next save cannot reach it —
             // and only once it is safely there take it out of the way. A copy
             // that would not fit is no copy, and the original stays put.
-            if keep_aside(UNREADABLE_SESSIONS_KEY, &raw, get, set) {
+            if keep_aside(&aside, UNREADABLE_SESSIONS_KEY, &raw) {
                 let _ = store.remove_item(SESSIONS_KEY);
             } else {
                 self.history_held.set(true);
@@ -210,7 +238,7 @@ impl Store for WebStore {
         // The sessions that do not read are set aside before the next save
         // leaves them out; where they cannot be, nothing is saved over them.
         if let Some(unread) = read.unread_json()
-            && !keep_aside(UNREADABLE_SESSIONS_KEY, &unread, get, set)
+            && !keep_aside(&aside, UNREADABLE_SESSIONS_KEY, &unread)
         {
             self.history_held.set(true);
         }

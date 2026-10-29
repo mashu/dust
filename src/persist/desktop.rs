@@ -32,8 +32,9 @@ pub struct DesktopStore {
     root: PathBuf,
     /// Where backup files go, when there is anywhere the user can reach.
     backup_folder: Option<PathBuf>,
-    /// The stored history could not be read, nor moved out of the way, so it
-    /// is not to be written over.
+    /// The stored history could not be read, nor moved out of the way, the
+    /// last time it was read, so it is not to be written over until a read
+    /// says otherwise.
     history_held: Cell<bool>,
     /// This copy's mark, while its session is marked open.
     open_held: RefCell<Option<HeldMark>>,
@@ -282,7 +283,12 @@ impl Store for DesktopStore {
         self.write(SETTINGS, &raw).map_err(|err| err.to_string())
     }
 
+    /// Whether the history is held is this read's to say, whatever the last
+    /// one said: a file another program had open a moment ago, an
+    /// antivirus scanning it say, may read now, and one that could not be
+    /// set aside then may be now.
     fn read_sessions(&self) -> Option<Vec<SessionResult>> {
+        self.history_held.set(false);
         let path = self.root.join(SESSIONS);
         let raw = match fs::read(&path) {
             Ok(raw) => raw,
@@ -873,6 +879,46 @@ mod tests {
             dir.0.join(SESSIONS).is_dir(),
             "the history was written over"
         );
+    }
+
+    /// A history that could not be read for a moment is held only until it
+    /// reads again: the next save after that goes ahead, over the history
+    /// as it was just read. The hold used to last until the app was closed,
+    /// and every session in between went unsaved.
+    #[test]
+    fn a_history_held_for_a_moment_is_let_go_once_it_reads() {
+        let (dir, store) = store("held-for-a-moment");
+        store.save_sessions(&[session("2026-09-01")]);
+        let path = dir.0.join(SESSIONS);
+        let stored = fs::read(&path).unwrap();
+        // Something else has it, the way an antivirus scanning it might:
+        // it is there, and does not read.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(store.read_sessions(), None);
+        assert_eq!(
+            store.save_sessions(&[session("2026-09-02")]),
+            HistorySaved::Held
+        );
+        assert!(path.is_dir(), "nothing written over it");
+        // Still held, however often it is saved, until a read says not.
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, &stored).unwrap();
+        assert_eq!(
+            store.save_sessions(&[session("2026-09-02")]),
+            HistorySaved::Held
+        );
+        let read = store.read_sessions().expect("it reads again");
+        assert_eq!(read.len(), 1);
+        let mut more = read;
+        more.push(session("2026-09-02"));
+        assert_eq!(store.save_sessions(&more), HistorySaved::Stored { kept: 2 });
+        assert_eq!(store.load_sessions().len(), 2);
+        // And held again the next time it does not read.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(store.load_sessions().is_empty());
+        assert_eq!(store.save_sessions(&more), HistorySaved::Held);
     }
 
     #[test]

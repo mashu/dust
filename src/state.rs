@@ -1191,6 +1191,27 @@ mod tests {
         assert_eq!(a.shown(), [1, 2, 3, 4, 5]);
     }
 
+    /// A history that could not be read for a moment holds back only the
+    /// sessions kept meanwhile, and only until it reads again: then they
+    /// are stored, beside what another tab kept in the meantime.
+    #[test]
+    fn a_history_that_could_not_be_read_for_a_moment_holds_only_that_moment() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        store.unreadable.set(true);
+        a.finish(day(2));
+        assert_eq!(
+            a.act(|ctx| ctx.notices.peek().clone()),
+            [Notice::History(HistorySaved::Held.problem().expect("told"))]
+        );
+        store.unreadable.set(false);
+        b.finish(day(3));
+        assert_eq!(days(&store.load_sessions()), [1, 3]);
+        a.finish(day(4));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4]);
+        assert_eq!(a.shown(), [1, 2, 3, 4]);
+    }
+
     /// A restore that takes the history past the newest it keeps counts
     /// only the sessions that stayed, and says the oldest were let go. It
     /// used to count every session it added, though the oldest went again

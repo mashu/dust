@@ -29,6 +29,11 @@ pub struct MemoryStore {
     pub room: Cell<Option<usize>>,
     /// A history that could not be read is in the way of any save.
     pub held: Cell<bool>,
+    /// The history cannot be read for now, the way a file another program
+    /// has open cannot: a read finds none, and holds it until a read does.
+    pub unreadable: Cell<bool>,
+    /// The last read could not read the history.
+    held_by_read: Cell<bool>,
     last_backup: Cell<Option<u64>>,
     /// Every backup file handed over: its name and what it held.
     pub backup_files: RefCell<Vec<(String, String)>>,
@@ -74,11 +79,15 @@ impl Store for MemoryStore {
     }
 
     fn read_sessions(&self) -> Option<Vec<SessionResult>> {
+        self.held_by_read.set(self.unreadable.get());
+        if self.unreadable.get() {
+            return None;
+        }
         self.sessions.borrow().clone()
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
-        if self.held.get() {
+        if self.held.get() || self.held_by_read.get() {
             return HistorySaved::Held;
         }
         let newest = newest(sessions);

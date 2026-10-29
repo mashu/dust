@@ -56,6 +56,10 @@ pub trait Store {
     /// Every stored session that can still be read, oldest first; `None`
     /// when no history is stored, or none that can be read at all, which
     /// is not the same as one every session was deleted from.
+    ///
+    /// Each read also says whether a save may go over what is stored: a
+    /// history this read could not read, nor set aside, is held until a
+    /// later read can ([`HistorySaved::Held`]).
     fn read_sessions(&self) -> Option<Vec<SessionResult>>;
     /// Every stored session that can still be read, oldest first.
     fn load_sessions(&self) -> Vec<SessionResult> {
@@ -163,7 +167,8 @@ pub enum HistorySaved {
     #[cfg_attr(not(feature = "web"), allow(dead_code))]
     Squeezed { kept: usize, runs: bool },
     /// Not stored. The history already there could not be read, nor moved
-    /// out of the way, so it is kept as it is rather than written over.
+    /// out of the way, when it was last read, so it is kept as it is rather
+    /// than written over.
     Held,
     /// Not stored, for the reason given.
     Failed(String),
@@ -295,34 +300,94 @@ impl ReadHistory {
 }
 
 /// How many copies of what could not be read a browser keeps set aside, at
-/// most. Its room runs out well before.
+/// most: the newest. Its room runs out well before many more would fit.
 #[cfg(any(feature = "web", test))]
-const MAX_SET_ASIDE: usize = 20;
+const MAX_SET_ASIDE: usize = 5;
 
-/// Keep `raw`, what could not be read of a history, under the first of
-/// `key`, `key_2`, `key_3`… that is free: a copy set aside before is never
-/// written over, and one set aside already is not kept twice. Says whether
-/// it is kept. `get` reads a key, failing as `Err`; `set` writes one, and
-/// says whether it took.
+/// Where a browser sets aside what it could not read: its `localStorage`,
+/// or a test's stand-in for it.
 #[cfg(any(feature = "web", test))]
-fn keep_aside(
-    key: &str,
-    raw: &str,
-    get: impl Fn(&str) -> Result<Option<String>, ()>,
-    set: impl Fn(&str, &str) -> bool,
-) -> bool {
-    (1..=MAX_SET_ASIDE)
-        .map(|n| match n {
-            1 => key.to_string(),
-            n => format!("{key}_{n}"),
-        })
-        .find_map(|slot| match get(&slot) {
-            Ok(Some(kept)) if kept == raw => Some(true),
-            Ok(Some(_)) => None,
-            Ok(None) => Some(set(&slot, raw)),
-            Err(()) => Some(false),
-        })
-        .unwrap_or(false)
+trait Aside {
+    /// Every key it holds; `Err` when they cannot be listed.
+    fn keys(&self) -> Result<Vec<String>, ()>;
+    /// What it holds under `key`; `Err` when that cannot be read.
+    fn get(&self, key: &str) -> Result<Option<String>, ()>;
+    /// Hold `raw` under `key`, and say whether it took.
+    fn set(&self, key: &str, raw: &str) -> bool;
+    fn remove(&self, key: &str);
+}
+
+/// Which copy set aside under `prefix` `key` is, counting from one: the
+/// first is `prefix` itself, the ones after it `prefix_2`, `prefix_3`…
+#[cfg(any(feature = "web", test))]
+fn aside_number(prefix: &str, key: &str) -> Option<u64> {
+    match key.strip_prefix(prefix)? {
+        "" => Some(1),
+        rest => {
+            let digits = rest.strip_prefix('_')?;
+            let number = digits.parse().ok()?;
+            (digits.bytes().all(|b| b.is_ascii_digit()) && number > 1).then_some(number)
+        }
+    }
+}
+
+/// Keep `raw`, what could not be read of a history, set aside in `store`
+/// under `prefix`, and say whether it is kept. A copy set aside before is
+/// never written over, and one set aside already is not kept twice.
+///
+/// Each copy goes under the number after the newest, so the numbers say
+/// which is newer, and only the newest [`MAX_SET_ASIDE`] are kept. One that
+/// does not fit lets the oldest go, one at a time, until it does; if it
+/// does not fit even then, those go back as they were. Nothing reads a
+/// copy set aside back but a person, while a history that cannot be set
+/// aside holds back every session finished after it: so old copies give
+/// way to a new one, the oldest first.
+#[cfg(any(feature = "web", test))]
+fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
+    let Ok(keys) = store.keys() else {
+        return false;
+    };
+    let mut numbered: Vec<(u64, String)> = keys
+        .into_iter()
+        .filter_map(|key| Some((aside_number(prefix, &key)?, key)))
+        .collect();
+    numbered.sort_unstable();
+    let Some(next) = numbered
+        .last()
+        .map_or(Some(1), |(number, _)| number.checked_add(1))
+    else {
+        return false;
+    };
+    // Each copy already set aside, oldest first, and what it holds.
+    let mut older = Vec::with_capacity(numbered.len());
+    for (_, key) in numbered {
+        match store.get(&key) {
+            Ok(Some(kept)) if kept == raw => return true,
+            Ok(Some(kept)) => older.push((key, kept)),
+            Ok(None) => {}
+            Err(()) => return false,
+        }
+    }
+    let key = match next {
+        1 => prefix.to_string(),
+        n => format!("{prefix}_{n}"),
+    };
+    let mut gone = 0;
+    while !store.set(&key, raw) {
+        let Some((oldest, _)) = older.get(gone) else {
+            for (key, kept) in &older {
+                store.set(key, kept);
+            }
+            return false;
+        };
+        store.remove(oldest);
+        gone += 1;
+    }
+    let first_kept = older.len().saturating_sub(MAX_SET_ASIDE - 1).max(gone);
+    for (key, _) in &older[gone..first_kept] {
+        store.remove(key);
+    }
+    true
 }
 
 /// Load settings without throwing away everything for one bad field.
@@ -913,37 +978,147 @@ pub(crate) mod tests {
         assert_eq!(parse_sessions("[]"), Some(Vec::new()));
     }
 
+    /// A browser's store, as far as setting aside goes: `room` characters
+    /// in all, as a browser's quota has, and keys of other kinds beside.
+    struct Shelf {
+        held: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
+        room: std::cell::Cell<usize>,
+        unreadable: std::cell::Cell<bool>,
+    }
+
+    impl Shelf {
+        fn with_room(room: usize) -> Self {
+            let shelf = Self {
+                held: Default::default(),
+                room: std::cell::Cell::new(room),
+                unreadable: Default::default(),
+            };
+            shelf.set("history", "[]");
+            shelf
+        }
+
+        /// What is set aside, by key.
+        fn aside(&self) -> Vec<(String, String)> {
+            let held = self.held.borrow();
+            held.iter()
+                .filter(|(key, _)| key.starts_with("aside"))
+                .map(|(key, raw)| (key.clone(), raw.clone()))
+                .collect()
+        }
+    }
+
+    impl Aside for Shelf {
+        fn keys(&self) -> Result<Vec<String>, ()> {
+            if self.unreadable.get() {
+                return Err(());
+            }
+            Ok(self.held.borrow().keys().cloned().collect())
+        }
+
+        fn get(&self, key: &str) -> Result<Option<String>, ()> {
+            if self.unreadable.get() {
+                return Err(());
+            }
+            Ok(self.held.borrow().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, raw: &str) -> bool {
+            let mut held = self.held.borrow_mut();
+            let used: usize = held
+                .iter()
+                .filter(|(held, _)| *held != key)
+                .map(|(_, raw)| raw.len())
+                .sum();
+            if used + raw.len() > self.room.get() {
+                return false;
+            }
+            held.insert(key.into(), raw.into());
+            true
+        }
+
+        fn remove(&self, key: &str) {
+            self.held.borrow_mut().remove(key);
+        }
+    }
+
+    fn shelved(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, raw)| (key.to_string(), raw.to_string()))
+            .collect()
+    }
+
     /// What could not be read is set aside under a key of its own: never
     /// over a copy set aside before, and never twice.
     #[test]
     fn what_could_not_be_read_is_set_aside_beside_what_was_before() {
-        let held = std::cell::RefCell::new(std::collections::BTreeMap::<String, String>::new());
-        let room = std::cell::Cell::new(true);
-        let get = |key: &str| Ok(held.borrow().get(key).cloned());
-        let set = |key: &str, raw: &str| {
-            room.get() && held.borrow_mut().insert(key.into(), raw.into()).is_none()
-        };
-        assert!(keep_aside("aside", "first", get, set));
-        assert!(keep_aside("aside", "second", get, set));
-        assert!(keep_aside("aside", "first", get, set), "kept already");
-        let kept = |key: &str| held.borrow().get(key).cloned();
-        assert_eq!(kept("aside").as_deref(), Some("first"));
-        assert_eq!(kept("aside_2").as_deref(), Some("second"));
-        assert_eq!(held.borrow().len(), 2);
-        // No room, or a store that cannot be read: not kept.
-        room.set(false);
-        assert!(!keep_aside("aside", "third", get, set));
-        assert!(!keep_aside("aside", "third", |_| Err(()), set));
-        room.set(true);
-        for n in 3..=MAX_SET_ASIDE {
-            assert!(keep_aside("aside", &n.to_string(), get, set));
-        }
-        assert!(!keep_aside("aside", "one too many", get, set));
-        assert_eq!(held.borrow().len(), MAX_SET_ASIDE);
+        let shelf = Shelf::with_room(usize::MAX);
+        assert!(keep_aside(&shelf, "aside", "first"));
+        assert!(keep_aside(&shelf, "aside", "second"));
+        assert!(keep_aside(&shelf, "aside", "first"), "kept already");
         assert_eq!(
-            kept("aside").as_deref(),
-            Some("first"),
-            "never written over"
+            shelf.aside(),
+            shelved(&[("aside", "first"), ("aside_2", "second")])
+        );
+        // A store that cannot be read: not kept, and nothing changed.
+        shelf.unreadable.set(true);
+        assert!(!keep_aside(&shelf, "aside", "third"));
+        shelf.unreadable.set(false);
+        assert_eq!(shelf.aside().len(), 2);
+        assert_eq!(aside_number("aside", "asidea"), None);
+        assert_eq!(aside_number("aside", "aside_1"), None);
+        assert_eq!(aside_number("aside", "aside_+3"), None);
+        assert_eq!(aside_number("aside", "aside_12"), Some(12));
+    }
+
+    /// Only the newest copies are kept. Every slot a browser had used to
+    /// stay full for good, and the next history that could not be read
+    /// could not be set aside, so nothing was saved over it again.
+    #[test]
+    fn only_the_newest_copies_set_aside_are_kept() {
+        let shelf = Shelf::with_room(usize::MAX);
+        // As twenty slots were filled before there was a limit.
+        shelf.set("aside", "1");
+        for n in 2..=20 {
+            shelf.set(&format!("aside_{n}"), &n.to_string());
+        }
+        assert!(keep_aside(&shelf, "aside", "new"));
+        assert_eq!(
+            shelf.aside(),
+            shelved(&[
+                ("aside_17", "17"),
+                ("aside_18", "18"),
+                ("aside_19", "19"),
+                ("aside_20", "20"),
+                ("aside_21", "new"),
+            ])
+        );
+        assert!(keep_aside(&shelf, "aside", "newer"));
+        assert_eq!(shelf.aside().len(), MAX_SET_ASIDE);
+        assert_eq!(
+            shelf.aside().last(),
+            Some(&("aside_22".into(), "newer".into()))
+        );
+    }
+
+    /// A copy that does not fit lets the oldest go until it does; one that
+    /// would not fit even then leaves every copy as it was.
+    #[test]
+    fn a_copy_set_aside_makes_room_by_letting_the_oldest_go() {
+        // The history's own room, and a little short of room for three.
+        let shelf = Shelf::with_room(2 + 4 + 4 + 5);
+        assert!(keep_aside(&shelf, "aside", "aaaa"));
+        assert!(keep_aside(&shelf, "aside", "bbbb"));
+        assert!(keep_aside(&shelf, "aside", "cccccc"), "room made");
+        assert_eq!(
+            shelf.aside(),
+            shelved(&[("aside_2", "bbbb"), ("aside_3", "cccccc")])
+        );
+        assert!(!keep_aside(&shelf, "aside", "far too long for it"));
+        assert_eq!(
+            shelf.aside(),
+            shelved(&[("aside_2", "bbbb"), ("aside_3", "cccccc")]),
+            "put back as they were"
         );
     }
 
