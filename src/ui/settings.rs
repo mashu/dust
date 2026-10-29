@@ -27,6 +27,7 @@ use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
     CardHead, FoldPanel, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange,
     SliderField, Switch, control_id, db_share, html_bool, pretty_number, range_label, share_db,
+    whole,
 };
 
 /// What an aim is called on screen.
@@ -347,7 +348,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                         max: f64::from(CONTEST_MINUTES_MAX),
                         step: 1.0,
                         unit: "min",
-                        onchange: move |v| settings.write().contest.contest_minutes = v as u32,
+                        onchange: move |v| settings.write().contest.contest_minutes = whole(v),
                     }
                 } else {
                     NumberField {
@@ -362,7 +363,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                         min: f64::from(NUM_GROUPS_MIN),
                         max: f64::from(NUM_GROUPS_MAX),
                         step: 1.0,
-                        onchange: move |v| settings.write().curriculum.num_groups = v as u32,
+                        onchange: move |v| settings.write().curriculum.num_groups = whole(v),
                     }
                     NumberField {
                         label: "Answer timeout",
@@ -394,7 +395,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     max: f64::from(COUNTDOWN_MAX_SEC),
                     step: 1.0,
                     unit: "sec",
-                    onchange: move |v| settings.write().playback.countdown_sec = v as u32,
+                    onchange: move |v| settings.write().playback.countdown_sec = whole(v),
                 }
             }
             if s.contest {
@@ -726,7 +727,7 @@ fn YourSpeed(settings: Signal<TrainingSettings>) -> Element {
             max: WPM_MAX,
             step: 1.0,
             unit: "WPM",
-            onchange: move |v: f64| settings.write().contest.my_wpm = v.round() as u32,
+            onchange: move |v: f64| settings.write().contest.my_wpm = whole(v),
         }
         if my_wpm == 0 {
             p { id: "your-speed-line", class: "muted hint small",
@@ -935,7 +936,7 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
                     min: 0.0,
                     max: f64::from(ADJUST_COUNT_MAX),
                     step: 1.0,
-                    onchange: move |v| settings.write().auto_level.auto_adjust_above_threshold_count = v as u32,
+                    onchange: move |v| settings.write().auto_level.auto_adjust_above_threshold_count = whole(v),
                 }
                 NumberField {
                     label: "Sessions below to level down",
@@ -943,7 +944,7 @@ fn AutoLevelSettingsCard(settings: Signal<TrainingSettings>) -> Element {
                     min: 0.0,
                     max: f64::from(ADJUST_COUNT_MAX),
                     step: 1.0,
-                    onchange: move |v| settings.write().auto_level.auto_adjust_below_threshold_count = v as u32,
+                    onchange: move |v| settings.write().auto_level.auto_adjust_below_threshold_count = whole(v),
                 }
             }
         }
@@ -964,7 +965,7 @@ fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
     let edge = move |which: RecognitionEdge| {
         move |ms: f64| {
             let mut settings = settings.write();
-            settings.recognition = settings.recognition.with(which, ms.round() as u32);
+            settings.recognition = settings.recognition.with(which, whole(ms));
         }
     };
     let (low, high) = (

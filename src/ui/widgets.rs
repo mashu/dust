@@ -11,6 +11,15 @@ fn parse_number_input(raw: &str, min: f64, max: f64) -> Option<f64> {
     value.is_finite().then(|| value.clamp(min, max))
 }
 
+/// A number from a field, kept as a whole number: rounded to the nearest,
+/// as a range's ends are, so that every whole-number setting takes a typed
+/// fraction the same way: 2.9 groups is 3, not 2. Never below zero, and
+/// nothing that is not a number is zero.
+pub fn whole(value: f64) -> u32 {
+    // A float cast to an integer saturates at its ends, and NaN is 0.
+    value.max(0.0).round() as u32
+}
+
 /// Snap to the step grid so 0.1-steps do not drift into 0.30000000000000004.
 fn nudge(value: f64, step: f64, min: f64, max: f64) -> f64 {
     let step = if step.abs() < f64::EPSILON { 1.0 } else { step };
@@ -1252,7 +1261,7 @@ mod tests {
 
     use super::{
         NumberField, control_id, focus_end_script, focus_script, html_bool, nudge,
-        parse_number_input, pct_between, pretty_number,
+        parse_number_input, pct_between, pretty_number, whole,
     };
     use crate::testing::Ui;
 
@@ -1398,6 +1407,18 @@ mod tests {
         ui.click("more-number-count");
         assert_eq!(ui.take_work(), 1, "the step left 57 in the box");
         assert!(ui.input_tag("number-count").contains("value=\"5\""));
+    }
+
+    /// A whole-number setting takes a typed fraction to the nearest whole
+    /// number, as every range's ends do, and never below zero.
+    #[test]
+    fn a_typed_fraction_rounds_to_the_nearest_whole_number() {
+        assert_eq!(whole(2.9), 3);
+        assert_eq!(whole(2.4), 2);
+        assert_eq!(whole(4.5), 5);
+        assert_eq!(whole(-1.0), 0);
+        assert_eq!(whole(f64::NAN), 0);
+        assert_eq!(whole(1e12), u32::MAX);
     }
 
     #[test]

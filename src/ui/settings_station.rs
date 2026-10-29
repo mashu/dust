@@ -15,7 +15,7 @@ use dioxus::prelude::*;
 
 use crate::ui::help;
 use crate::ui::widgets::{
-    CardHead, IconName, NumberField, SectionReset, TextDraft, TextField, control_id,
+    CardHead, IconName, NumberField, SectionReset, TextDraft, TextField, control_id, whole,
 };
 
 /// What the callsign, name, state, zone and power fields are called, and so
@@ -818,7 +818,7 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
                     min: 0.0,
                     max: f64::from(MY_ZONE_MAX),
                     step: 1.0,
-                    onchange: move |zone: f64| settings.write().contest.my_zone = zone as u32,
+                    onchange: move |zone: f64| settings.write().contest.my_zone = whole(zone),
                 }
                 ZoneReading {
                     given,

@@ -208,6 +208,25 @@ fn a_callsign_typed_faster_than_the_page_draws_is_committed_whole() {
     });
 }
 
+/// A fraction typed into a whole-number field is rounded to the nearest
+/// whole number, as a range's ends are, rather than cut off: 2.9 groups
+/// used to be 2, while 2.9 characters a group was 3.
+#[test]
+fn a_fraction_typed_into_a_whole_number_rounds() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        ui.commit("number-groups-per-session", "2.9");
+        ui.commit("number-countdown-before-the-first-group", "2.6");
+        ui.commit("to-group-size", "4.7");
+        let stored = ui.stored_settings().await;
+        assert_eq!(stored.curriculum.num_groups, 3);
+        assert_eq!(stored.playback.countdown_sec, 3);
+        assert_eq!(stored.curriculum.max_group_size, 5);
+        assert_eq!(value_of(&ui, "number-groups-per-session"), "3");
+    });
+}
+
 /// − and + move the box as well as the setting, before anything is typed
 /// and after.
 #[test]

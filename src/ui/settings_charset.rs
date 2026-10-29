@@ -14,7 +14,7 @@ use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, TextDraft, TextField,
-    control_id, range_label,
+    control_id, range_label, whole,
 };
 
 /// The largest file read as a word list. The longest list kept is a few
@@ -359,7 +359,7 @@ pub fn CharsetCard(
                     min: 1.0,
                     max: f64::from(c.level_max),
                     step: 1.0,
-                    onchange: move |v| settings.write().set_active_level(v as u32),
+                    onchange: move |v| settings.write().set_active_level(whole(v)),
                 }
                 if c.mode == CharSetMode::Mixed {
                     NumberField {
@@ -369,7 +369,7 @@ pub fn CharsetCard(
                         min: 1.0,
                         max: f64::from(MAX_DIGITS_LEVEL),
                         step: 1.0,
-                        onchange: move |v| settings.write().curriculum.digits_level = v as u32,
+                        onchange: move |v| settings.write().curriculum.digits_level = whole(v),
                     }
                 }
             }
@@ -388,7 +388,7 @@ pub fn CharsetCard(
                     max: 100.0,
                     step: 5.0,
                     unit: "%",
-                    onchange: move |v| settings.write().curriculum.mixed_letters_percent = v as u32,
+                    onchange: move |v| settings.write().curriculum.mixed_letters_percent = whole(v),
                 }
             }
             if words {
