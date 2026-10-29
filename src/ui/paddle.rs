@@ -29,28 +29,26 @@ const HEARD_KEEP: usize = 32;
 /// from. Another listener keys the rest, so that none is keyed twice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RootKeys {
-    /// Every one: the desktop on macOS and Windows, whose window hears no
-    /// keys, the webview taking them all — WKWebView as the window's first
-    /// responder, WebView2 in a window of its own inside it. Tests drive
-    /// the root too.
+    /// Every one: tests drive the root.
     All,
     /// Those the window drops: the desktop on Linux, whose window hears
     /// the rest itself, so a USB keyer works without the webview's focus
     /// and without waiting on its IPC ([`root_keys`]).
     DroppedByWindow,
-    /// None: the web and mobile builds hear them from the whole document,
-    /// so they work with nothing focused at all — a HID paddle on a phone
-    /// keys with nothing tapped first.
+    /// None: the web and mobile builds, and the desktop on macOS and
+    /// Windows, hear them from the whole document, so they work with
+    /// nothing focused at all — a HID paddle on a phone keys with nothing
+    /// tapped first, and one on a computer with nothing clicked. The
+    /// desktop's window hears no keys there, the webview taking them all:
+    /// WKWebView as the window's first responder, WebView2 in a window of
+    /// its own inside it ([`listen_page_paddles`]).
     Nothing,
 }
 
 /// Which key events the page's root keys the paddles from, in this build.
-const ROOT_KEYS: RootKeys = if cfg!(any(
-    test,
-    all(feature = "desktop", not(target_os = "linux"))
-)) {
+const ROOT_KEYS: RootKeys = if cfg!(test) {
     RootKeys::All
-} else if cfg!(feature = "desktop") {
+} else if cfg!(all(feature = "desktop", target_os = "linux")) {
     RootKeys::DroppedByWindow
 } else {
     RootKeys::Nothing
@@ -712,7 +710,8 @@ impl PaddleKeys {
 }
 
 /// The desktop's window: on Linux it keys the paddles, as it hears them,
-/// and everywhere it opens them as it loses the focus.
+/// and everywhere it opens them as it loses the focus. Elsewhere the page's
+/// script keys them ([`listen_page_paddles`]).
 #[cfg(all(feature = "desktop", not(test)))]
 fn listen_native_paddles(keys: PaddleKeys) {
     let heard = use_callback(move |(key, code, pressed): (String, String, bool)| {
@@ -731,10 +730,10 @@ fn listen_native_paddles(keys: PaddleKeys) {
                 keys.release_all();
                 return;
             }
-            // Where the root keys every key, the window hears none and must
-            // key none, or the root's would be keyed twice. On Linux it keys
-            // every one it hears, and the root only those it drops.
-            WindowEvent::KeyboardInput { event: key, .. } if keys.root != RootKeys::All => key,
+            // On Linux it keys every one it hears, and the root only those
+            // it drops. Elsewhere it hears none, the webview taking them,
+            // and must key none, or the page's would be keyed twice.
+            WindowEvent::KeyboardInput { event: key, .. } if cfg!(target_os = "linux") => key,
             _ => return,
         };
         if key.repeat {
@@ -839,16 +838,21 @@ fn listen_document_paddles(keys: PaddleKeys) {
 fn listen_document_paddles(_keys: PaddleKeys) {}
 
 /// The mobile builds' webview delivers keys as a browser does, to whatever
-/// has focus, and a tapped button takes none on iOS. So, as the web build's
-/// ([`listen_document_paddles`]), they hear the paddles from the whole
-/// document: the page's script keeps a bracket from the page, read as
+/// has focus, and a tapped button takes none on iOS; and the desktop's on
+/// macOS and Windows takes every key from its window. So, as the web
+/// build's ([`listen_document_paddles`]), they hear the paddles from the
+/// whole document: the page's script keeps a bracket from the page, read as
 /// [`bracket_for_key`] reads one, by place as long as the window's flag
 /// does not say otherwise ([`by_place_script`]), and hands it over, a press
 /// that is a shortcut ([`paddle_for_press`]) or a repeat being nothing; a
 /// release is always heard, and so is the release of a key that closed a
 /// paddle, whatever it types by then; and the window losing the focus, or
 /// Command let go, opens both.
-#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+#[cfg(any(
+    all(not(feature = "desktop"), not(feature = "web")),
+    all(feature = "desktop", not(target_os = "linux")),
+    test
+))]
 const PAGE_PADDLES_SCRIPT: &str = r#"if (window.__dustPaddleKeys) {
     window.__dustPaddleKeys();
 }
@@ -894,13 +898,21 @@ window.__dustPaddleKeys = () => {
 
 /// The script that tells the page's paddle listener whether the keys right
 /// of P are the paddles, whatever they type.
-#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+#[cfg(any(
+    all(not(feature = "desktop"), not(feature = "web")),
+    all(feature = "desktop", not(target_os = "linux")),
+    test
+))]
 fn by_place_script(by_place: bool) -> String {
     format!("window.__dustPaddlesByPlace = {by_place};")
 }
 
 /// The script that takes the page's paddle listener off again.
-#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+#[cfg(any(
+    all(not(feature = "desktop"), not(feature = "web")),
+    all(feature = "desktop", not(target_os = "linux")),
+    test
+))]
 const STOP_PAGE_PADDLES: &str = r#"if (window.__dustPaddleKeys) {
     window.__dustPaddleKeys();
 }"#;
@@ -908,7 +920,11 @@ const STOP_PAGE_PADDLES: &str = r#"if (window.__dustPaddleKeys) {
 /// Hand the page's word, `kind` of a key typing `key` at `code`, to the
 /// paddles: a press, a release, or both opened. The page has taken the
 /// shortcuts and the repeats out already.
-#[cfg(any(all(not(feature = "desktop"), not(feature = "web")), test))]
+#[cfg(any(
+    all(not(feature = "desktop"), not(feature = "web")),
+    all(feature = "desktop", not(target_os = "linux")),
+    test
+))]
 pub(super) fn page_key(keys: PaddleKeys, kind: &str, key: &str, code: &str) {
     match kind {
         "down" => {
@@ -922,7 +938,13 @@ pub(super) fn page_key(keys: PaddleKeys, kind: &str, key: &str, code: &str) {
     }
 }
 
-#[cfg(all(not(feature = "desktop"), not(feature = "web"), not(test)))]
+#[cfg(all(
+    any(
+        all(not(feature = "desktop"), not(feature = "web")),
+        all(feature = "desktop", not(target_os = "linux"))
+    ),
+    not(test)
+))]
 fn listen_page_paddles(keys: PaddleKeys) {
     let by_place = use_memo(move || keys.settings.read().playback.paddle_keys_by_place);
     use_effect(move || {
@@ -946,7 +968,13 @@ fn listen_page_paddles(keys: PaddleKeys) {
     });
 }
 
-#[cfg(not(all(not(feature = "desktop"), not(feature = "web"), not(test))))]
+#[cfg(not(all(
+    any(
+        all(not(feature = "desktop"), not(feature = "web")),
+        all(feature = "desktop", not(target_os = "linux"))
+    ),
+    not(test)
+)))]
 fn listen_page_paddles(_keys: PaddleKeys) {}
 
 /// How to key with the paddles in `mode`: what the practice pad and the
@@ -1259,15 +1287,14 @@ mod tests {
         );
     }
 
-    /// Tests drive the paddles from the root, as the desktop on macOS and
-    /// Windows does.
+    /// Tests drive the paddles from the root.
     #[test]
     fn tests_key_the_paddles_from_the_root() {
         assert_eq!(ROOT_KEYS, RootKeys::All);
     }
 
-    /// The root keys every event where the window hears no keys, and none
-    /// where the document's listener keys them.
+    /// The root keys every event where it drives the paddles, as in tests,
+    /// and none where the document's listener keys them.
     #[test]
     fn the_root_keys_all_or_nothing_off_linux() {
         let dah = Key::Character("]".into());
