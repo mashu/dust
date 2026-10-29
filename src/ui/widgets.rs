@@ -115,6 +115,20 @@ pub fn pretty_number(value: f64) -> String {
     digits.replacen('-', "\u{2212}", 1)
 }
 
+/// A unit as a screen reader is to say it: "seconds" for sec, "times" for
+/// ×, and a unit it reads as it is, WPM or Hz, as it is.
+pub fn spoken_unit(unit: &str) -> &str {
+    match unit {
+        "sec" => "seconds",
+        "min" => "minutes",
+        "ms" => "milliseconds",
+        "chars" => "characters",
+        "×" => "times",
+        "%" => "percent",
+        other => other,
+    }
+}
+
 /// A range as it reads: one number when its ends meet, an en dash between
 /// them, or "to" where a minus sign would make the dash read as a third.
 pub fn range_label(min: f64, max: f64) -> String {
@@ -489,6 +503,14 @@ pub fn CardHead(
 ) -> Element {
     let mut open = use_signal(|| false);
     let id = control_id("help", &title);
+    // Named for the card it explains: a screen reader's list of buttons
+    // holds every card's ⓘ, and "What does this mean?" a dozen times over
+    // says nothing of which.
+    let help_name = if open() {
+        format!("Hide the help on {title}")
+    } else {
+        format!("Help on {title}")
+    };
     let shown = fold.is_none_or(|unfolded| unfolded());
     // What a test opens a folding card by, as a pointer on its title does.
     let head = fold.map(|_| control_id("head", &title));
@@ -517,7 +539,7 @@ pub fn CardHead(
                                 class: if open() { "icon-btn help-btn on" } else { "icon-btn help-btn" },
                                 r#type: "button",
                                 title: if open() { "Hide the help" } else { "What does this mean?" },
-                                aria_label: if open() { "Hide the help" } else { "What does this mean?" },
+                                aria_label: help_name,
                                 aria_expanded: open(),
                                 onclick: move |event| {
                                     event.stop_propagation();
@@ -698,14 +720,19 @@ pub fn SliderField(
     disabled: bool,
     /// Overrides the id derived from the label, where one label appears twice.
     id: Option<String>,
+    /// What a screen reader names it by, where the label alone leans on the
+    /// switch above it: "QSB fading depth" for Depth. The label otherwise.
+    #[props(into)]
+    long_label: Option<String>,
     onchange: EventHandler<f64>,
 ) -> Element {
     let pct = pct_between(value, min, max);
     let name = id.unwrap_or_else(|| control_id("slider", &label));
     let at_min = value <= min;
     let at_max = value >= max;
-    let less = format!("Decrease {label}");
-    let more = format!("Increase {label}");
+    let spoken = long_label.unwrap_or_else(|| label.clone());
+    let less = format!("Decrease {spoken}");
+    let more = format!("Increase {spoken}");
     rsx! {
         div { class: if disabled { "slider disabled" } else { "slider" },
             div { class: "slider-head",
@@ -729,7 +756,7 @@ pub fn SliderField(
                     input {
                         id: name.clone(),
                         r#type: "range",
-                        aria_label: "{label}",
+                        aria_label: "{spoken}",
                         // Read as it is shown — "every ~8 s", "S/N 38 dB" —
                         // rather than as the number the track runs on.
                         aria_valuetext: "{value_label}",
@@ -878,6 +905,10 @@ pub fn TextField(
 ///
 /// − and + show the value they leave in the box, over anything typed and not
 /// committed, even when the setting did not take the step.
+///
+/// A screen reader names the box, and − and +, by its label and its unit,
+/// "Answer timeout (seconds)", or by `long_label` where the label leans on
+/// what is around it.
 #[component]
 pub fn NumberField(
     #[props(into)] label: String,
@@ -889,9 +920,18 @@ pub fn NumberField(
     /// Overrides the id derived from the label, for fields whose label is not
     /// unique or not stable.
     id: Option<String>,
+    /// What a screen reader names it by, its unit among it, where the label
+    /// alone is not enough to tell it from another: "Character speed, min
+    /// (WPM)" for Min (WPM).
+    #[props(into)]
+    long_label: Option<String>,
     onchange: EventHandler<f64>,
 ) -> Element {
     let name = id.unwrap_or_else(|| control_id("number", &label));
+    let spoken = long_label.unwrap_or_else(|| match &unit {
+        Some(unit) => format!("{label} ({})", spoken_unit(unit)),
+        None => label.clone(),
+    });
     let draft = TextDraft::use_draft();
     // Drop what is typed, redraw the box, and hand `to` on if there is one.
     // − and + do this as well as a commit, because some typing is never
@@ -908,8 +948,8 @@ pub fn NumberField(
         }
     };
     let shown = draft.shown(|| value.to_string());
-    let less = format!("Decrease {label}");
-    let more = format!("Increase {label}");
+    let less = format!("Decrease {spoken}");
+    let more = format!("Increase {spoken}");
     rsx! {
         div { class: "field",
             label { r#for: "{name}", "{label}" }
@@ -926,6 +966,7 @@ pub fn NumberField(
                 input {
                     id: name.clone(),
                     r#type: "number",
+                    aria_label: "{spoken}",
                     inputmode: "decimal",
                     min: "{min}",
                     max: "{max}",
@@ -997,6 +1038,17 @@ pub fn LinkedRange(
     } else {
         format!("{} {unit}", range_label(min_value, max_value))
     };
+    // Named for the setting, as a screen reader meets every Min, Max and
+    // Fixed/Random on the page apart from the label above it: "Character
+    // speed, min (WPM)", and the toggle "Random character speed", pressed
+    // while it is.
+    let spoken = spoken_unit(unit);
+    let named = |end: &str| format!("{label}, {end} ({spoken})");
+    let mut setting = label.to_string();
+    if let Some(first) = setting.get_mut(..1) {
+        first.make_ascii_lowercase();
+    }
+    let toggle = format!("Random {setting}");
     rsx! {
         div { class: "range-field",
             div { class: "range-head",
@@ -1007,6 +1059,8 @@ pub fn LinkedRange(
                         id: control_id("link", label),
                         class: if linked { "link-toggle on" } else { "link-toggle" },
                         r#type: "button",
+                        aria_label: toggle,
+                        aria_pressed: if linked { "false" } else { "true" },
                         onclick: move |_| on_link.call(!linked),
                         Icon { name: if linked { IconName::Target } else { IconName::Shuffle } }
                         if linked { "Fixed" } else { "Random" }
@@ -1020,6 +1074,7 @@ pub fn LinkedRange(
                 NumberField {
                     label: format!("Value ({unit})"),
                     id: control_id("fixed", label),
+                    long_label: named("value"),
                     value: min_value,
                     min: min_bound,
                     max: max_bound,
@@ -1031,6 +1086,7 @@ pub fn LinkedRange(
                     NumberField {
                         label: format!("Min ({unit})"),
                         id: control_id("from", label),
+                        long_label: named("min"),
                         value: min_value,
                         min: min_bound,
                         max: max_bound,
@@ -1040,6 +1096,7 @@ pub fn LinkedRange(
                     NumberField {
                         label: format!("Max ({unit})"),
                         id: control_id("to", label),
+                        long_label: named("max"),
                         value: max_value,
                         min: min_bound,
                         max: max_bound,

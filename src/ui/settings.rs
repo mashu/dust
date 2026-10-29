@@ -313,7 +313,7 @@ fn AimFor(settings: Signal<TrainingSettings>, aim: Aim, note: String) -> Element
     rsx! {
         div { class: "field",
             span { class: "field-label", "Aim for" }
-            div { class: "segmented",
+            div { class: "segmented", role: "group", aria_label: "Aim for",
                 for each in Aim::ALL {
                     Seg {
                         label: aim_label(each),
@@ -469,7 +469,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
             }
             div { class: "field",
                 span { class: "field-label", "Key" }
-                div { class: "segmented",
+                div { class: "segmented", role: "group", aria_label: "Key",
                     for (mode, label) in KEYER_MODES {
                         Seg {
                             label,

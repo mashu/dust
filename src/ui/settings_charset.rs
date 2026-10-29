@@ -300,7 +300,7 @@ pub fn CharsetCard(
                     },
                 }
             }
-            div { class: "segmented charset-modes",
+            div { class: "segmented charset-modes", role: "group", aria_label: "Character set",
                 for (mode, label) in CHAR_SET_MODES {
                     Seg {
                         label,
@@ -321,7 +321,7 @@ pub fn CharsetCard(
             }
             if has_unlock_order {
                 div { class: "eyebrow", "Unlock order" }
-                div { class: "mode-pills",
+                div { class: "mode-pills", role: "group", aria_label: "Unlock order",
                     for choice in SEQUENCE_PRESETS
                         .iter()
                         .map(|preset| (SequenceChoice::Preset(preset.id), preset.name))
@@ -412,7 +412,7 @@ pub fn CharsetCard(
                 }
             } else if !callsigns {
                 div { class: "eyebrow", "Practice window" }
-                div { class: "mode-pills",
+                div { class: "mode-pills", role: "group", aria_label: "Practice window",
                     for (window, label, needs) in PRACTICE_WINDOWS {
                         if c.unlocked >= needs {
                             Seg {
@@ -461,7 +461,7 @@ fn ContestBody(
         .map_or_else(|| "A QSO".to_string(), |heard| heard_label(heard, hearing));
     rsx! {
         div { class: "eyebrow", "Contest" }
-        div { class: "mode-pills",
+        div { class: "mode-pills", role: "group", aria_label: "Contest",
             for kind in ContestKind::ALL {
                 Seg {
                     label: kind.label(),
@@ -524,7 +524,7 @@ fn PresetPicker(settings: Signal<TrainingSettings>, preset: Option<ContestPreset
     };
     rsx! {
         div { class: "eyebrow", "Preset" }
-        div { class: "mode-pills",
+        div { class: "mode-pills", role: "group", aria_label: "Preset",
             for each in ContestPreset::ALL {
                 Seg {
                     label: each.name(),
@@ -549,7 +549,7 @@ fn RunStylePicker(settings: Signal<TrainingSettings>, style: RunStyle, callers: 
     };
     rsx! {
         div { class: "eyebrow", "Run style" }
-        div { class: "mode-pills",
+        div { class: "mode-pills", role: "group", aria_label: "Run style",
             for (each, label) in RUN_STYLES {
                 Seg {
                     label,
@@ -578,7 +578,7 @@ fn TuCallPicker(settings: Signal<TrainingSettings>, tu_call: TuCall) -> Element 
     };
     rsx! {
         div { class: "eyebrow", "Your call in TU" }
-        div { class: "mode-pills",
+        div { class: "mode-pills", role: "group", aria_label: "Your call in TU",
             for (each, label) in TU_CALLS {
                 Seg {
                     label,

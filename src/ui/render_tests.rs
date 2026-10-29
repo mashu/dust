@@ -646,10 +646,38 @@ fn settings_renders_every_card() {
     // Every control says what it is to a screen reader: a number field's
     // label is tied to its input, and a step button names what it steps.
     assert!(html.contains("for=\"number-key-speed\""), "{html}");
-    assert!(html.contains("aria-label=\"Decrease Key speed\""));
+    assert!(html.contains("aria-label=\"Decrease Key speed (WPM)\""));
     assert!(html.contains("aria-label=\"Increase Rise time\""));
     assert!(html.contains("for=\"field-sequence-order\""));
     assert!(html.contains("aria-label=\"Rise time\""));
+    // Named by what it is, unit and all, and by the setting where its
+    // label leans on what is around it: two Min (WPM) are two names, each
+    // Fixed/Random and ⓘ is its card's, and each group of segments and
+    // each band slider says what it sets.
+    for named in [
+        r#"aria-label="Key speed (WPM)""#,
+        r#"aria-label="Answer timeout (seconds)""#,
+        r#"aria-label="Extra word spacing (times)""#,
+        r#"aria-label="Character speed, min (WPM)""#,
+        r#"aria-label="Character speed, max (WPM)""#,
+        r#"aria-label="Decrease Group size, min (characters)""#,
+        r#"aria-label="Random character speed" aria-pressed="true""#,
+        r#"aria-label="Random sends per group" aria-pressed="false""#,
+        r#"aria-label="Help on Speed""#,
+        r#"aria-label="Help on Band conditions""#,
+        r#"role="group" aria-label="Key""#,
+        r#"role="group" aria-label="Filter shape""#,
+        r#"role="group" aria-label="Character set""#,
+        r#"role="group" aria-label="Unlock order""#,
+        r#"aria-label="QSB fading depth""#,
+        r#"aria-label="Increase QSB fading rate""#,
+        r#"aria-label="QRN static intensity""#,
+        r#"aria-label="Band noise level""#,
+    ] {
+        assert!(html.contains(named), "no {named} in {html}");
+    }
+    assert!(!html.contains(r#"aria-label="What does this mean?""#));
+    assert_eq!(html.matches(r#"aria-label="Min (WPM)""#).count(), 0);
 }
 
 /// In Contest mode the Character set card shows the contest in place of an
@@ -677,7 +705,9 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
     for shown in [
         ">Character set<",
         "Contest · CQ WPX",
-        r#"<div class="eyebrow">Contest</div><div class="mode-pills">"#,
+        r#"<div class="eyebrow">Contest</div><div class="mode-pills" role="group" aria-label="Contest">"#,
+        r#"role="group" aria-label="Run style""#,
+        r#"role="group" aria-label="Caller habits""#,
         r#"id="contest-cq-wpx" class="pill active""#,
         "You send 5NN + serial\u{a0}· You\u{a0}copy\u{a0}NR",
         r#"<li class="qso-line you"><span class="qso-who tiny">You</span><span class="qso-sends"><span class="call">CQ DL1ABC TEST</span>"#,
