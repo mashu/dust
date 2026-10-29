@@ -1302,6 +1302,24 @@ fn an_effective_speed_above_the_characters_says_what_it_is_used_as() {
     });
 }
 
+/// The word space is a multiple of the standard one, which shortens it
+/// as well as lengthens it, and an answer timeout of 0 never moves on:
+/// each says so at its control and in the card's help.
+#[test]
+fn the_word_space_and_a_timeout_of_zero_say_what_they_do() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        assert!(ui.shows("number-word-space"));
+        assert!(ui.has("1× is standard, 2× twice as long, 0.5× half."));
+        assert!(ui.has("; at 0 it never does."));
+        ui.click("help-speed");
+        assert!(ui.has("more lengthens it, less shortens it, down to half"));
+        ui.click("help-session-shape");
+        assert!(ui.has("At 0 it never moves on by itself"));
+    });
+}
+
 /// A card's reset can be undone from the message it leaves: Your station's
 /// puts back the call that took typing, and a change made on another card
 /// in between stays. In Contest mode the Character set's reset puts the

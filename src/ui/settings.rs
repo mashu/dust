@@ -412,7 +412,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     "Time to read the last group before the next send. Zero keeps contest pace. Repeats of the same group stay a word space apart."
                 }
                 p { class: "muted hint small",
-                    "The answer timeout moves on from a group you have not started. Once you type, the group waits for you: it is checked when every character is in, or when you press Next or Enter."
+                    "The answer timeout moves on from a group you have not started; at 0 it never does. Once you type, the group waits for you: it is checked when every character is in, or when you press Next or Enter."
                 }
             }
             // A callsign or a word is as long as it is, so there is nothing to
@@ -682,13 +682,16 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 "How far the stations calling stray from a keyer — heavier or lighter elements, longer or shorter dahs, each operator sending their own way. At zero every station is a machine, which is what you want while a character is still new."
             }
             NumberField {
-                label: "Extra word spacing",
+                label: "Word space",
                 value: speed.extra_word_space,
                 min: EXTRA_WORD_SPACE_MIN,
                 max: EXTRA_WORD_SPACE_MAX,
                 step: 0.1,
                 unit: "×",
                 onchange: move |v| settings.write().playback.extra_word_space_multiplier = v,
+            }
+            p { id: "word-space-line", class: "muted hint small",
+                "Every gap between words and groups, times the standard seven units: 1× is standard, 2× twice as long, 0.5× half."
             }
             Switch {
                 title: "Tie effective speed to character speed",

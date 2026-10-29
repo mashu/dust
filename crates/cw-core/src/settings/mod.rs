@@ -26,7 +26,8 @@ pub const GROUP_REPEAT_MAX: u32 = 8;
 /// Speeds, in words a minute: character, effective and the paddles' own.
 pub const WPM_MIN: f64 = 5.0;
 pub const WPM_MAX: f64 = 80.0;
-/// How far the word space is stretched beyond seven units. Never under half:
+/// The word space, as a multiple of its standard seven units: 1 is the
+/// standard, above it longer and below it shorter. Never under half:
 /// three and a half units, still longer than the three between letters, or
 /// the gap between two groups would be shorter than one inside a group and
 /// the groups would run together.
@@ -348,6 +349,9 @@ pub struct PlaybackSettings {
     /// learning your copy speed as it goes ([`crate::speed`]). Off draws the
     /// speed evenly from the ranges. Older saves have no field and load off.
     pub adaptive_speed: bool,
+    /// Every word space, between groups and between the words of a send,
+    /// as a multiple of the standard seven units: 1 adds nothing, 0.5
+    /// halves it. Shown as Word space.
     pub extra_word_space_multiplier: f64,
     pub group_timeout: f64,
     /// Seconds to sit on the last group after it is sent, so the card can be

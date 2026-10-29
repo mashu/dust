@@ -657,7 +657,7 @@ fn settings_renders_every_card() {
     for named in [
         r#"aria-label="Key speed (WPM)""#,
         r#"aria-label="Answer timeout (seconds)""#,
-        r#"aria-label="Extra word spacing (times)""#,
+        r#"aria-label="Word space (times)""#,
         r#"aria-label="Character speed, min (WPM)""#,
         r#"aria-label="Character speed, max (WPM)""#,
         r#"aria-label="Decrease Group size, min (characters)""#,
