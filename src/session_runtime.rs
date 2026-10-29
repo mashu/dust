@@ -180,6 +180,13 @@ impl AnswerOutbox {
         outbox.waiting = Some((index, text));
     }
 
+    /// What group `index`'s box holds that is not handed over yet, if any.
+    pub fn waiting_for(self, index: usize) -> Option<String> {
+        let outbox = self.0.peek();
+        let (at, text) = outbox.waiting.as_ref()?;
+        (*at == index).then(|| text.clone())
+    }
+
     /// Whatever is waiting, now handed over.
     pub fn take(mut self) -> Option<TypedAnswer> {
         let mut outbox = self.0.write();

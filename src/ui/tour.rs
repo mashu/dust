@@ -351,34 +351,60 @@ impl RunPart {
 
 /// Type the group being answered into its box, a letter at a time, once the
 /// box opens: the session sends the group first.
+///
+/// Only what the box is missing: a letter typed there already, by the
+/// learner or by a Show me a pause cut short, is not typed again. Show me
+/// used to type the whole group after it, and the box read `NN9XF` for
+/// `N9XF`. A box holding something else is the learner's to put right.
 async fn copy_group(ctx: AppCtx, keys: PaddleKeys) {
-    let sent = loop {
-        let open = ctx
-            .runtime
+    // The group being answered, and what its box holds.
+    let answering = move || {
+        ctx.runtime
             .peek()
             .as_ref()
             .map(|session| match session.phase() {
-                SessionPhase::AwaitingAnswer { index } => {
-                    session.group(index).map(|group| group.sent().to_string())
-                }
+                SessionPhase::AwaitingAnswer { index } => session.group(index).map(|group| {
+                    let held = ctx
+                        .answer
+                        .waiting_for(index)
+                        .unwrap_or_else(|| group.input().to_string());
+                    (group.sent().to_string(), held)
+                }),
                 _ => None,
-            });
-        match open {
+            })
+    };
+    loop {
+        match answering() {
             // There is no session to answer in.
             None => return,
-            Some(Some(sent)) => break sent,
+            Some(Some(_)) => break,
             Some(None) => sleep_ms(POLL_MS).await,
         }
-    };
+    }
     // A moment to see the box open before it fills.
     sleep_ms(POINT_MS).await;
-    for letter in sent.chars() {
-        // A box closed meanwhile takes no more.
+    // A box closed meanwhile, or complete, takes no more.
+    while let Some(Some((sent, held))) = answering() {
+        let Some(letter) = next_letter(&sent, &held) else {
+            return;
+        };
         if !keys.type_letter(letter) {
             return;
         }
         sleep_ms(LETTER_MS).await;
     }
+}
+
+/// The letter of `sent` a box holding `held` takes next, if it holds the
+/// start of it and not all of it.
+fn next_letter(sent: &str, held: &str) -> Option<char> {
+    let mut want = sent.chars();
+    for typed in held.chars() {
+        if !want.next()?.eq_ignore_ascii_case(&typed) {
+            return None;
+        }
+    }
+    want.next()
 }
 
 /// Whether `step_move` is made, as the app stands now.
@@ -1191,7 +1217,8 @@ mod tests {
     use dioxus::prelude::ReadableExt;
 
     use super::{
-        CONTEST_STEPS, LETTER_MS, Move, POINT_MS, SHOWN_MS, STEPS, Seen, pointer_css, scroll_script,
+        CONTEST_STEPS, LETTER_MS, Move, POINT_MS, SHOWN_MS, STEPS, Seen, next_letter, pointer_css,
+        scroll_script,
     };
     use crate::audio::fake::{Call, Recorder};
     use crate::persist::Store;
@@ -1539,6 +1566,53 @@ mod tests {
             assert!(ui.run_until(budget, |ui| on_step(ui, 2)).await);
             assert!(ui.has("badge good"), "the group was not copied right");
         });
+    }
+
+    /// Show me cut short by a pause, and pressed again once resumed, types
+    /// only what the box is missing, and the group is copied right. It used
+    /// to type the whole group after the letter already there.
+    #[test]
+    fn show_me_again_types_only_what_the_box_is_missing() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(needs_everything());
+            ui.click("btn-guided-setup");
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.click("tour-show-me");
+            let first: String = sent.chars().take(1).collect();
+            assert!(
+                ui.run_until(u64::from(3 * POINT_MS), |ui| first_box(ui) == first)
+                    .await
+            );
+            ui.with_app(|ctx| {
+                crate::session_runtime::send_event(ctx, cw_core::SessionEvent::Pause)
+            });
+            ui.advance(u64::from(LETTER_MS) * 3).await;
+            ui.click("btn-resume");
+            ui.click("tour-show-me");
+            let budget = u64::from(POINT_MS + LETTER_MS) * (sent.chars().count() as u64 + 8);
+            assert!(
+                ui.run_until(budget, |ui| on_step(ui, 2)).await,
+                "{}",
+                ui.html()
+            );
+            assert!(ui.has("badge good"), "not copied right: {}", ui.html());
+        });
+    }
+
+    #[test]
+    fn show_me_types_the_letters_a_box_is_missing() {
+        assert_eq!(next_letter("N9XF", ""), Some('N'));
+        assert_eq!(next_letter("N9XF", "N"), Some('9'));
+        assert_eq!(next_letter("N9XF", "n9x"), Some('F'));
+        assert_eq!(next_letter("N9XF", "N9XF"), None, "complete");
+        assert_eq!(
+            next_letter("N9XF", "NX"),
+            None,
+            "the learner's to put right"
+        );
+        assert_eq!(next_letter("N9XF", "N9XFF"), None);
     }
 
     /// Next does a step that takes you somewhere on the way, so the next one
