@@ -30,7 +30,7 @@ use super::{MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
 use crate::time::mono_ms;
 use chain::Chain;
 use sidetone::Sidetone;
-use stream::MixerStream;
+use stream::{MixerStream, SendWatch};
 
 pub struct MorsePlayer {
     ctx: AudioContext,
@@ -70,6 +70,11 @@ struct Playing {
 /// audio away) freezes `current_time` while `setTimeout` keeps firing, and a
 /// send that is counted down on the wall clock would then be declared finished
 /// while the Morse has not been heard at all.
+///
+/// The clock runs on, too, while the page is too busy to keep the receiver
+/// rendered ahead of it, and the stream then skips what it should have
+/// played meanwhile: the stream's watch on the send says whether it skipped
+/// any of this one.
 struct WebSignal {
     ctx: AudioContext,
     ticket: Ticket,
@@ -77,6 +82,7 @@ struct WebSignal {
     /// Its lead on the clock, and the latency the browser reports, read as
     /// it started.
     timing: SendTiming,
+    watch: SendWatch,
 }
 
 impl PlaybackSignal for WebSignal {
@@ -100,8 +106,10 @@ impl PlaybackSignal for WebSignal {
                 self.started_at,
                 self.timing.latency_sec,
             )),
-            // Its clock says that, against the app's.
-            late: false,
+            // Its clock says how far behind the app's it fell, but not
+            // whether the stream kept up with that clock: one that fell
+            // behind it skipped some of the send, which went unheard.
+            late: self.watch.missed(),
         }
     }
 }
@@ -223,13 +231,22 @@ impl MorseBackend for MorsePlayer {
     /// its grace — which is what rebuilds the player and, failing that, tells
     /// the listener — rather than leaving the session parked on a promise
     /// that may never settle.
+    ///
+    /// Resumed whenever this player put it to sleep, not only when it reads
+    /// suspended: Safari and Firefox go on reading running for a moment
+    /// after a suspend is asked for, and a tap in that moment would be lost,
+    /// the suspend landing after it and the send's clock frozen, with no
+    /// gesture left to start it again on iOS. Nor only from suspended: iOS
+    /// reads interrupted after a call or Siri. A resume asked after the
+    /// suspend is carried out after it.
     fn resume_from_gesture(&mut self) {
         if !self.claimed_session {
             claim_playback_session();
             self.claimed_session = true;
         }
-        self.asleep.set(false);
-        if self.ctx.state() == AudioContextState::Suspended {
+        let asleep = self.asleep.replace(false);
+        let state = self.ctx.state();
+        if state != AudioContextState::Closed && (asleep || state != AudioContextState::Running) {
             let _ = self.ctx.resume();
         }
     }
@@ -284,11 +301,13 @@ impl MorseBackend for MorsePlayer {
             rate,
             self.fade_origin_sec + soonest + wait as f64 / sr,
         );
-        let mut waits = 0;
-        let made = self.stream.change_at(soonest, |mixer, swept| {
-            waits = mixer.start_at(voice, into, wait, swept);
+        let sound_sec = plan.sound_end_sec();
+        let (sound, watch) = self.stream.send_at(soonest, |mixer, swept| {
+            let waits = mixer.start_at(voice, into, wait, swept);
+            let starts = waits as f64 / sr + lookahead;
+            starts..starts + sound_sec
         });
-        let starts = made + waits as f64 / sr + lookahead;
+        let starts = sound.start;
         let timing = send_timing(starts - now, latency);
         self.playing = Some(Playing {
             heard: now_heard + timing.heard_after_sec(),
@@ -298,6 +317,7 @@ impl MorseBackend for MorsePlayer {
             ticket,
             started_at: starts,
             timing,
+            watch,
         }))
     }
 

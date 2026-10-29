@@ -334,6 +334,21 @@ pub mod fake {
         wait_ms: u32,
     }
 
+    impl FakeSignal {
+        /// How long its clock runs before it is heard: its wait, then its
+        /// latency.
+        fn held_ms(&self) -> u32 {
+            let latency_ms = (self.latency_sec * 1_000.0).round() as u32;
+            self.wait_ms.saturating_add(latency_ms)
+        }
+
+        /// How much of it has been heard, its clock having run `played`:
+        /// nothing until it is, as a real player counts it.
+        fn heard_ms(&self, played: u32) -> u32 {
+            played.saturating_sub(self.held_ms())
+        }
+    }
+
     impl PlaybackSignal for FakeSignal {
         fn timing(&self) -> SendTiming {
             SendTiming {
@@ -360,10 +375,11 @@ pub mod fake {
             }
             if self.recorder.page_hidden.get() {
                 // A backgrounded page: the clock stops where it is, and the
-                // scheduled tone is still waiting to be heard.
+                // scheduled tone is still waiting to be heard. What has been
+                // heard is counted as it is while the page is in view.
                 return WaitFlags {
                     suspended: true,
-                    played_ms: Some(self.played.get()),
+                    played_ms: Some(self.heard_ms(self.played.get())),
                     ..Default::default()
                 };
             }
@@ -381,16 +397,14 @@ pub mod fake {
                     // send takes as long as its plan says it does, from when
                     // it was to start, and is heard its latency after, as a
                     // real player counts it.
-                    let latency_ms = (self.latency_sec * 1_000.0).round() as u32;
-                    let held = self.wait_ms.saturating_add(latency_ms);
                     let played = self.played.get().saturating_add(crate::time::POLL_MS).min(
                         self.duration_ms
                             .saturating_add(wait::PLAYBACK_TAIL_MS)
-                            .saturating_add(held),
+                            .saturating_add(self.held_ms()),
                     );
                     self.played.set(played);
                     WaitFlags {
-                        played_ms: Some(played.saturating_sub(held)),
+                        played_ms: Some(self.heard_ms(played)),
                         ..Default::default()
                     }
                 }
@@ -509,5 +523,41 @@ mod tests {
         let start = wait.start();
         assert_eq!(start.char_wpm, plan.resolved_char_wpm);
         assert_eq!(start.effective_wpm, plan.resolved_effective_wpm);
+    }
+
+    /// The test player says how much of a send has been heard alike with
+    /// the page in view and out of it, as the browser's does: nothing while
+    /// it waits for its moment or is on its way to the ear, and, parked,
+    /// as much as had been heard when it was.
+    #[test]
+    fn the_test_player_counts_what_is_heard_alike_out_of_view() {
+        let recorder = Recorder::new();
+        let mut player = (recorder.factory())().expect("a player");
+        recorder.latency_sec.set(0.25);
+        let settings = TrainingSettings::default();
+        let voice = cw_core::resolve_station(&settings, &mut cw_core::SplitMix64::new(3));
+        let transmission = Transmission::alone("K", voice);
+        let plan = plan_transmission(&transmission, &settings);
+        // A quarter of a second's wait for its moment, and as long again
+        // on its way to the ear.
+        let signal = player
+            .start(&transmission, &plan, &settings, Some(0.5))
+            .expect("a send");
+        for _ in 0..3 {
+            assert_eq!(signal.poll().played_ms, Some(0), "in view, not yet heard");
+        }
+        recorder.set_page_hidden(true);
+        let parked = signal.poll();
+        assert!(parked.suspended);
+        assert_eq!(parked.played_ms, Some(0), "out of view, not yet heard");
+        recorder.set_page_hidden(false);
+        let heard = loop {
+            let played = signal.poll().played_ms.expect("a clock");
+            if played > 0 {
+                break played;
+            }
+        };
+        recorder.set_page_hidden(true);
+        assert_eq!(signal.poll().played_ms, Some(heard), "parked where it was");
     }
 }

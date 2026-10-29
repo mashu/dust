@@ -230,7 +230,9 @@ impl MorsePlayer {
     /// opened, for the next use to open on the new one: headphones plugged
     /// in or a headset connected mid-session, which a stream on Windows or
     /// macOS does not follow of itself. Asked at most once a
-    /// [`REOPEN_AFTER`], and never under a send, so none is cut off; the band
+    /// [`REOPEN_AFTER`], and never before every send has been heard to its
+    /// end, its last samples out of the speaker too, so none is cut off
+    /// and no waiter is left without word that its send was heard; the band
     /// and whatever else the mixer holds carry on in the new stream.
     fn follow_default(&mut self) {
         let due = self

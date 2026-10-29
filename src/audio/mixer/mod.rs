@@ -169,14 +169,17 @@ impl Mixer {
             && self.send.as_ref().is_none_or(|send| !send.is_sounding())
     }
 
-    /// Whether a send is still to be heard, or riding out its release: what
-    /// a stream moved to another device would cut off.
+    /// Whether a send is still to be heard to its end: waiting to start,
+    /// sounding, riding out its release, or played to its last sample and
+    /// not yet heard, that still in the look-ahead or on its way to the
+    /// speaker. What a stream moved to another device would cut off, and,
+    /// at another rate, drop with the waiter never told it was heard.
     #[cfg(feature = "native-audio")]
     pub fn is_sending(&self) -> bool {
         self.send
             .iter()
             .chain(&self.retiring)
-            .any(SendVoice::is_sounding)
+            .any(|send| !send.is_finished())
     }
 
     /// How long after it starts a send goes to the output, in seconds: the
@@ -370,14 +373,23 @@ impl Mixer {
         // On the UI thread, before the stream at the new rate starts.
         self.late
             .resize(late_room(self.sample_rate), SendSample::default());
-        self.late.fill(SendSample::default());
         self.late_at = 0;
         self.handed_over = None;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
         swept.receivers.extend(self.retune.take());
+        self.drop_sends(swept);
+    }
+
+    /// Every send out at once, and what of them is still waiting out the
+    /// look-ahead: cut, not ridden down, for a stream that starts again, or
+    /// one that has skipped on past where they had got to and whose output
+    /// was silent there already, where what is left of them would only
+    /// play late.
+    pub fn drop_sends(&mut self, swept: &mut Swept) {
         swept.sends.append(&mut self.retiring);
         swept.sends.extend(self.send.take());
+        self.late.fill(SendSample::default());
     }
 
     /// Take out what has finished playing, and the oldest of what is on its

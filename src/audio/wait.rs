@@ -64,7 +64,9 @@ pub struct WaitFlags {
     pub played_ms: Option<u32>,
     /// The backend found the sound fall behind the wall clock as it played,
     /// by more than [`LATE_MS`]: held up on its way. A backend with no
-    /// audio clock to report watches for that itself.
+    /// audio clock to report watches for that itself; one whose stream can
+    /// fall behind its own clock, and skip some of the sound, says so here
+    /// too, as that clock does not.
     pub late: bool,
 }
 
