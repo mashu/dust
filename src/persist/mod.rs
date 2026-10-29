@@ -706,6 +706,7 @@ pub(crate) mod tests {
         p.countdown_sec = 7;
         p.lock_input_during_group_playback = true;
         p.paddle_swap = true;
+        p.paddle_keys_by_place = false;
         p.keyer_mode = cw_core::KeyerMode::Ultimatic;
         p.keyer_wpm = 32.0;
         p.fist_variation = 0.6;
