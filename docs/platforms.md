@@ -250,6 +250,15 @@ and covers the audio-session code and cpal's CoreAudio backend.
 are unsigned (right-click → Open the first time). Windows needs WebView2,
 already present on typical Windows 10/11.
 
+On Linux, **Restore a backup** and **Load a text file** open the desktop's
+file chooser portal (`xdg-desktop-portal`, with a backend that chooses
+files: `-gtk`, `-gnome` or `-kde`), or `zenity` where there is none. Every
+desktop install has one or the other; a bare window manager may have
+neither, and then no chooser opens. Dioxus hands the app no file then, as
+for a chooser cancelled, so the button looks for either where the desktop
+keeps them (the XDG data folders, the `PATH`) and, finding neither, says
+what to install.
+
 **Launcher icon.** GNOME looks the icon up in the hicolor theme, and only in
 the sizes that theme lists. [`assets/icon.png`](../assets/icon.png) is scaled
 into those sizes under [`assets/linux/`](../assets/linux) by
