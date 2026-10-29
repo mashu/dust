@@ -789,7 +789,6 @@ pub(crate) mod tests {
         a.auto_adjust_above_threshold_count = 9;
         a.error_weight_strength = 0.9;
         a.char_sampling_coverage_strength = 0.9;
-        a.char_sampling_thompson = true;
         s.recognition = cw_core::RecognitionBands {
             fast_ms: 350,
             icr_ms: 550,

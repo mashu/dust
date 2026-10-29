@@ -108,7 +108,6 @@ impl TrainingSettings {
                 self.auto_level.error_weight_strength = d.auto_level.error_weight_strength;
                 self.auto_level.char_sampling_coverage_strength =
                     d.auto_level.char_sampling_coverage_strength;
-                self.auto_level.char_sampling_thompson = d.auto_level.char_sampling_thompson;
             }
             SettingsSection::Recognition => self.recognition = d.recognition,
             SettingsSection::Station => {

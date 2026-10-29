@@ -1443,7 +1443,7 @@ fn the_cards_there_is_least_call_for_start_folded_and_open_from_their_heads() {
         ui.click("nav-settings");
         for (card, held) in [
             ("recognition", "number-fast-under"),
-            ("character-sampling", "switch-thompson-sampling"),
+            ("character-sampling", "number-error-weight-strength"),
             ("display", "btn-check-display"),
             ("privacy", "privacy-link"),
             ("credits", "credit-link"),

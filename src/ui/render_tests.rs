@@ -2547,7 +2547,9 @@ mod interactions {
     }
 
     /// The Letters card says where each character stands, which way it is
-    /// going, and that two tries are too few to call M anything.
+    /// going, and that two tries are too few to call M anything. K's share
+    /// right fades its older sessions: 84%, not the 83% of its thirty tries
+    /// summed.
     #[test]
     fn letter_accuracy_says_where_each_stands_and_which_way_it_goes() {
         let ui = Ui::new(LettersHarness, ());
@@ -2558,13 +2560,13 @@ mod interactions {
         assert!(!ui.has(">Weak · "), "nothing is weak");
         let k = ui.input_tag("letter-k");
         assert!(k.contains("letter-row stat-row building"), "{k}");
-        assert!(k.contains("aria-label=\"K: 83% right of 30, likely"), "{k}");
+        assert!(k.contains("aria-label=\"K: 84% right of 30, likely"), "{k}");
         assert!(k.contains("up 50 points lately"), "{k}");
         assert!(ui.has(">↑ 50<"));
         assert!(ui.has("Building · 30 tries · likely "), "{}", ui.html());
         // The bar is as long as the share right, with a notch at the
         // Mastered line.
-        assert!(ui.has("width: 83.3%;"));
+        assert!(ui.has("width: 84.5%;"));
         assert!(ui.has("class=\"bar-mark\" style=\"left: 90.0%;\""));
         let m = ui.input_tag("letter-m");
         assert!(m.contains("letter-row stat-row finding-out"), "{m}");

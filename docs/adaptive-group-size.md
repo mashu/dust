@@ -60,7 +60,9 @@ $$
 
 Nothing new is stored. The belief is rebuilt from the session history when a
 session starts, the same way the character sampler's is, and faded once more
-so the last stored session counts as one session back. It is then updated
+so the last stored session counts as one session back. The sampler's belief
+in each character, and the Letters tab's mastery, fade the same way, though
+over every session that copied a character, whatever it practised. It is then updated
 after every answer during the session, a timed-out answer counting as a
 miss.
 

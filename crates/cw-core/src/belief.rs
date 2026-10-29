@@ -144,6 +144,29 @@ pub(crate) fn sessions_in_order(
     sessions
 }
 
+/// Every session that copied any character, oldest first, each with what
+/// its evidence is worth by now: the latest counts one, and each one before
+/// it [`SESSION_FADE`] as much as the one after it, half ten sessions back,
+/// as the span and the speed fade. Whatever character set it practised: a
+/// character is as hard to copy whichever of them sent it. A session that
+/// copied nothing is not one more session for the rest to fade behind.
+pub(crate) fn sessions_faded(history: &[SessionResult]) -> Vec<(&SessionResult, f64)> {
+    let mut sessions: Vec<&SessionResult> = history
+        .iter()
+        .filter(|session| !session.letter_accuracy().is_empty())
+        .collect();
+    sessions.sort_by_key(|session| session.timestamp);
+    let count = sessions.len();
+    sessions
+        .into_iter()
+        .enumerate()
+        .map(|(index, session)| {
+            let back = i32::try_from(count - 1 - index).unwrap_or(i32::MAX);
+            (session, SESSION_FADE.powi(back))
+        })
+        .collect()
+}
+
 /// Hits and misses counted per key — a length, a speed — so that a session
 /// costs one update per key it sent, not one per group. Keys keep the order
 /// they first came in.
@@ -221,6 +244,34 @@ mod tests {
         tally.add(3, 0.0, 1.0);
         tally.add(5, 0.5, 0.5);
         assert_eq!(tally.rows(), vec![(5, 1.5, 0.5), (3, 0.0, 1.0)]);
+    }
+
+    /// Every session that copied anything fades behind the ones after it,
+    /// whatever it practised, by its place in time rather than the order
+    /// it was stored in; one that copied nothing is no session at all.
+    #[test]
+    fn character_evidence_halves_every_ten_sessions_back() {
+        let session = |timestamp, mode, copied: &str| {
+            let mut session = SessionResult {
+                timestamp,
+                char_set_mode: mode,
+                ..SessionResult::empty_for_test()
+            };
+            session.tally.add(copied, copied);
+            session
+        };
+        let mut history: Vec<SessionResult> = (0..11)
+            .rev()
+            .map(|at| session(at, CharSetMode::Koch, "K"))
+            .collect();
+        history[3].char_set_mode = CharSetMode::Digits;
+        history.push(session(99, CharSetMode::Koch, ""));
+        let faded = sessions_faded(&history);
+        assert_eq!(faded.len(), 11);
+        assert_eq!(faded[10].0.timestamp, 10);
+        assert_eq!(faded[10].1, 1.0, "the latest counts in full");
+        assert!((faded[0].1 - 0.5).abs() < 1e-12, "ten back counts half");
+        assert!(faded.windows(2).all(|pair| pair[0].1 < pair[1].1));
     }
 
     #[test]

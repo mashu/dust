@@ -36,7 +36,7 @@ pub fn next_up(limit: f64) -> Element {
     let limit = pct(limit);
     rsx! {
         p {
-            "One row a character of your set. The bar is how often you get it wrong: the trainer's best guess from every time you have heard it, whatever set it was sent in."
+            "One row a character of your set. The bar is how often you get it wrong: the trainer's best guess from every time you have heard it, whatever set it was sent in, recent sessions counting more. A session ten sessions back counts half as much as your latest, so a weakness you put right long ago stops holding a character back, and one you have not heard for a while is less certain again."
         }
         dl { class: "help-terms",
             dt { "Under your {limit}" }
@@ -50,7 +50,7 @@ pub fn next_up(limit: f64) -> Element {
             {likely_and_notch(format!("Your {limit}: the line between under and over."))}
             dt { "Chance next" }
             dd {
-                "How likely the next group is to hold the character. The trainer sends the ones you miss more often, and the ones it is least sure of (Settings → Character sampling)."
+                "Its share of the characters a new session draws: of every hundred characters sent, about this many are it. The trainer sends the ones you miss more often, and the ones it has heard too little of to be sure of; within a session, the ones that have come up less than their share come round more too (Settings → Character sampling)."
             }
             dt { "Not heard yet" }
             dd { "In your set but never sent: nothing to draw of them yet." }
@@ -74,7 +74,7 @@ pub fn letters(bands: RecognitionBands) -> Element {
     let building = pct(BUILDING_MIN_ACCURACY);
     rsx! {
         p {
-            "Every character you have copied, over all your sessions. The bar is the share of the times it was sent that you copied it right."
+            "Every character you have copied, over all your sessions. The bar is the share of the times it was sent that you copied it right, recent sessions counting more: a session ten sessions back counts half as much as your latest, so a weakness you put right long ago stops holding it back. The tries are every time it was sent."
         }
         dl { class: "help-terms",
             dt { "Mastered" }
@@ -522,11 +522,11 @@ pub fn sampling() -> Element {
         p { "Which characters come round more often in your groups." }
         dl { class: "help-terms",
             dt { "Error-weight strength" }
-            dd { "How much more often the characters you miss are sent: at 3, one you miss half the time comes 2½ times as often as one you never miss. Zero sends them all alike." }
+            dd {
+                "How much more often the characters you miss are sent, and the ones the trainer is unsure of. Each is weighed by how often it believes the character goes wrong, plus one spread of that belief, so the less it has heard of a character the more it counts as missed. At 3, once it knows both well, one you miss half the time comes 2½ times as often as one you never miss; one never heard comes more than three times as often, until it has heard enough of it. Older sessions count for less, so a character not heard for a while comes round more again. Zero sends them all alike."
+            }
             dt { "Coverage strength" }
             dd { "Brings round the characters that have come up less than their share in this session, so none goes missing." }
-            dt { "Thompson sampling" }
-            dd { "Draws each character's error rate from what the trainer believes of it rather than its average, so the ones it is unsure of, new ones above all, come up more." }
         }
     }
 }

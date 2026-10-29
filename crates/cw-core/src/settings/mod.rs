@@ -585,7 +585,6 @@ pub struct AutoLevelSettings {
     pub auto_adjust_above_threshold_count: u32,
     pub error_weight_strength: f64,
     pub char_sampling_coverage_strength: f64,
-    pub char_sampling_thompson: bool,
 }
 
 impl Default for AutoLevelSettings {
@@ -598,7 +597,6 @@ impl Default for AutoLevelSettings {
             auto_adjust_above_threshold_count: 2,
             error_weight_strength: 3.0,
             char_sampling_coverage_strength: 1.0,
-            char_sampling_thompson: false,
         }
     }
 }
@@ -1771,7 +1769,6 @@ mod tests {
         s.auto_level.mixed_auto_level_next_axis = MixedAutoLevelAxis::Digits;
         s.auto_level.error_weight_strength = 0.9;
         s.auto_level.char_sampling_coverage_strength = 0.9;
-        s.auto_level.char_sampling_thompson = false;
         s.recognition = RecognitionBands {
             fast_ms: 300,
             icr_ms: 500,

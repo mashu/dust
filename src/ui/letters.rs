@@ -346,6 +346,7 @@ mod tests {
             accuracy_pct: accuracy * 100.0,
             total,
             correct,
+            weight: f64::from(total),
             status: if total < 5 {
                 MasteryStatus::FewTries
             } else if accuracy >= MASTERED_MIN_ACCURACY {
