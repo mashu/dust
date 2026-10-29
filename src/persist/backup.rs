@@ -115,10 +115,26 @@ pub fn backup_name(date: &str) -> String {
 pub struct Merged {
     /// The history with the backup's sessions in it, oldest first.
     pub sessions: Vec<SessionResult>,
-    /// The sessions of the backup it added.
-    pub added: Vec<SessionKey>,
-    /// The sessions of its own it filled in from the backup.
-    pub filled: Vec<SessionKey>,
+    /// The sessions of the backup it added, as the history now holds them,
+    /// oldest first.
+    pub added: Vec<SessionResult>,
+    /// The sessions of its own it filled in from the backup, oldest first.
+    pub filled: Vec<Filled>,
+}
+
+/// A session a restore filled in: as it was, and as it is now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Filled {
+    pub was: SessionResult,
+    pub now: SessionResult,
+}
+
+/// Where a session of a restored history came from.
+enum Came {
+    Here,
+    /// Here, and filled in from the backup: as it was before.
+    Filled(Box<SessionResult>),
+    Added,
 }
 
 /// `current` with every session of `restored` that it does not already
@@ -129,44 +145,63 @@ pub struct Merged {
 /// so are the per-character records ([`cw_core::CharTimes`]) of the same
 /// groups.
 pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -> Merged {
-    let mut sessions = current.to_vec();
+    let mut sessions: Vec<(SessionResult, Came)> = current
+        .iter()
+        .map(|session| (session.clone(), Came::Here))
+        .collect();
     let mut here: HashMap<SessionKey, usize> = HashMap::new();
-    for (at, session) in sessions.iter().enumerate() {
+    for (at, (session, _)) in sessions.iter().enumerate() {
         here.entry(SessionKey::of(session)).or_insert(at);
     }
-    let (mut added, mut filled) = (Vec::new(), Vec::new());
+    let mut added = false;
     for session in restored {
         let key = SessionKey::of(&session);
-        match here.get(&key).copied() {
-            Some(at) if sessions[at].contest.is_none() && session.contest.is_some() => {
-                sessions[at] = session;
-                filled.push(key);
-            }
-            Some(at) if dropped_char_times(&sessions[at], &session) => {
-                let kept = &mut sessions[at];
-                for (timing, restored) in kept.group_timings.iter_mut().zip(session.group_timings) {
-                    if timing.char_times.is_none() {
-                        timing.char_times = restored.char_times;
-                    }
+        let Some(at) = here.get(&key).copied() else {
+            here.insert(key, sessions.len());
+            sessions.push((session, Came::Added));
+            added = true;
+            continue;
+        };
+        let (kept, came) = &mut sessions[at];
+        let was = if kept.contest.is_none() && session.contest.is_some() {
+            std::mem::replace(kept, session)
+        } else if dropped_char_times(kept, &session) {
+            let was = kept.clone();
+            for (timing, restored) in kept.group_timings.iter_mut().zip(session.group_timings) {
+                if timing.char_times.is_none() {
+                    timing.char_times = restored.char_times;
                 }
-                filled.push(key);
             }
-            Some(_) => {}
-            None => {
-                here.insert(key.clone(), sessions.len());
-                sessions.push(session);
-                added.push(key);
-            }
+            was
+        } else {
+            continue;
+        };
+        // One filled in twice, or added and then filled in, is still what
+        // it was first.
+        if let Came::Here = came {
+            *came = Came::Filled(Box::new(was));
         }
     }
-    if !added.is_empty() {
-        sessions.sort_by_key(|session| session.timestamp);
+    if added {
+        sessions.sort_by_key(|(session, _)| session.timestamp);
     }
-    Merged {
-        sessions,
-        added,
-        filled,
+    let mut merged = Merged {
+        sessions: Vec::with_capacity(sessions.len()),
+        added: Vec::new(),
+        filled: Vec::new(),
+    };
+    for (session, came) in sessions {
+        match came {
+            Came::Here => {}
+            Came::Filled(was) => merged.filled.push(Filled {
+                was: *was,
+                now: session.clone(),
+            }),
+            Came::Added => merged.added.push(session.clone()),
+        }
+        merged.sessions.push(session);
     }
+    merged
 }
 
 /// Whether `restored`, the same groups as `kept`, holds per-character
@@ -263,13 +298,7 @@ mod tests {
             at(5, "2026-10-05"),
         ];
         let merged = merge_sessions(&current, restored);
-        assert_eq!(
-            merged.added,
-            [
-                SessionKey::of(&at(20, "2026-10-20")),
-                SessionKey::of(&at(5, "2026-10-05"))
-            ]
-        );
+        assert_eq!(merged.added, [at(5, "2026-10-05"), at(20, "2026-10-20")]);
         assert!(merged.filled.is_empty());
         let merged = merged.sessions;
         assert_eq!(
@@ -309,7 +338,15 @@ mod tests {
             added,
             filled,
         } = merge_sessions(&current, restored);
-        assert_eq!((added.len(), filled.len()), (1, 1));
+        assert_eq!(added, [run(40, true)]);
+        assert_eq!(
+            filled,
+            [Filled {
+                was: run(10, false),
+                now: run(10, true)
+            }],
+            "as it was, and as it is now"
+        );
         assert_eq!(
             merged.iter().map(|s| s.timestamp).collect::<Vec<_>>(),
             [10, 20, 30, 40]
@@ -322,6 +359,11 @@ mod tests {
             again.is_empty(),
             "a log already here is not filled in twice"
         );
+        // A backup holding the run twice, its log dropped from the first:
+        // added once, as it is filled in.
+        let twice = merge_sessions(&[], vec![run(10, false), run(10, true)]);
+        assert_eq!(twice.added, [run(10, true)]);
+        assert!(twice.filled.is_empty());
     }
 
     /// A session whose per-character records an older version dropped takes

@@ -29,11 +29,19 @@ pub struct MemoryStore {
     pub room: Cell<Option<usize>>,
     /// A history that could not be read is in the way of any save.
     pub held: Cell<bool>,
+    /// The history cannot be read for now, the way a file another program
+    /// has open cannot: a read finds none, and holds it until a read does.
+    pub unreadable: Cell<bool>,
+    /// The last read could not read the history.
+    held_by_read: Cell<bool>,
     last_backup: Cell<Option<u64>>,
     /// Every backup file handed over: its name and what it held.
     pub backup_files: RefCell<Vec<(String, String)>>,
     /// A build that cannot hand over a backup file, the way a phone's cannot.
     pub no_backups: Cell<bool>,
+    /// Backup files are handed over with no word of whether they were
+    /// kept, the way a browser's downloads are.
+    pub unconfirmed_backups: Cell<bool>,
     /// How many times the store was asked to keep its data.
     pub keep_asks: Cell<u32>,
     /// The session or run marked open, as a copy of the app that stopped
@@ -74,11 +82,15 @@ impl Store for MemoryStore {
     }
 
     fn read_sessions(&self) -> Option<Vec<SessionResult>> {
+        self.held_by_read.set(self.unreadable.get());
+        if self.unreadable.get() {
+            return None;
+        }
         self.sessions.borrow().clone()
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
-        if self.held.get() {
+        if self.held.get() || self.held_by_read.get() {
             return HistorySaved::Held;
         }
         let newest = newest(sessions);
@@ -130,6 +142,10 @@ impl Store for MemoryStore {
             .borrow_mut()
             .push((name.to_string(), contents.to_string()));
         saved_now(Ok(saved_as(&format!("{name}, in your downloads"))))
+    }
+
+    fn confirms_backups(&self) -> bool {
+        !self.unconfirmed_backups.get()
     }
 
     fn ask_to_keep(&self) {

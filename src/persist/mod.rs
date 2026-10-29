@@ -17,14 +17,14 @@ pub mod memory;
 #[cfg(feature = "web")]
 mod web;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
 use cw_core::{
-    AutoLevelCounters, AutoLevelProgress, CountersKey, SessionResult, TrainingSettings,
-    auto_level_progress,
+    AutoLevelCounters, AutoLevelProgress, CountersKey, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB,
+    SessionResult, TrainingSettings, auto_level_progress,
 };
 use serde::Deserialize;
 
@@ -56,6 +56,10 @@ pub trait Store {
     /// Every stored session that can still be read, oldest first; `None`
     /// when no history is stored, or none that can be read at all, which
     /// is not the same as one every session was deleted from.
+    ///
+    /// Each read also says whether a save may go over what is stored: a
+    /// history this read could not read, nor set aside, is held until a
+    /// later read can ([`HistorySaved::Held`]).
     fn read_sessions(&self) -> Option<Vec<SessionResult>>;
     /// Every stored session that can still be read, oldest first.
     fn load_sessions(&self) -> Vec<SessionResult> {
@@ -78,6 +82,13 @@ pub trait Store {
     /// on an iPhone. Says what became of it, in words for the user, or why
     /// it could not go.
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving;
+    /// Whether a backup file this store says it saved is known to be
+    /// saved, and so counts as the last backup. A browser hands a download
+    /// over and hears no more of it: blocked or turned down, it says
+    /// nothing.
+    fn confirms_backups(&self) -> bool {
+        true
+    }
     /// Ask the platform to keep what is stored rather than clear it when it
     /// needs room. Only a browser clears a store on its own, and it may ask
     /// the user first.
@@ -163,7 +174,8 @@ pub enum HistorySaved {
     #[cfg_attr(not(feature = "web"), allow(dead_code))]
     Squeezed { kept: usize, runs: bool },
     /// Not stored. The history already there could not be read, nor moved
-    /// out of the way, so it is kept as it is rather than written over.
+    /// out of the way, when it was last read, so it is kept as it is rather
+    /// than written over.
     Held,
     /// Not stored, for the reason given.
     Failed(String),
@@ -295,34 +307,94 @@ impl ReadHistory {
 }
 
 /// How many copies of what could not be read a browser keeps set aside, at
-/// most. Its room runs out well before.
+/// most: the newest. Its room runs out well before many more would fit.
 #[cfg(any(feature = "web", test))]
-const MAX_SET_ASIDE: usize = 20;
+const MAX_SET_ASIDE: usize = 5;
 
-/// Keep `raw`, what could not be read of a history, under the first of
-/// `key`, `key_2`, `key_3`… that is free: a copy set aside before is never
-/// written over, and one set aside already is not kept twice. Says whether
-/// it is kept. `get` reads a key, failing as `Err`; `set` writes one, and
-/// says whether it took.
+/// Where a browser sets aside what it could not read: its `localStorage`,
+/// or a test's stand-in for it.
 #[cfg(any(feature = "web", test))]
-fn keep_aside(
-    key: &str,
-    raw: &str,
-    get: impl Fn(&str) -> Result<Option<String>, ()>,
-    set: impl Fn(&str, &str) -> bool,
-) -> bool {
-    (1..=MAX_SET_ASIDE)
-        .map(|n| match n {
-            1 => key.to_string(),
-            n => format!("{key}_{n}"),
-        })
-        .find_map(|slot| match get(&slot) {
-            Ok(Some(kept)) if kept == raw => Some(true),
-            Ok(Some(_)) => None,
-            Ok(None) => Some(set(&slot, raw)),
-            Err(()) => Some(false),
-        })
-        .unwrap_or(false)
+trait Aside {
+    /// Every key it holds; `Err` when they cannot be listed.
+    fn keys(&self) -> Result<Vec<String>, ()>;
+    /// What it holds under `key`; `Err` when that cannot be read.
+    fn get(&self, key: &str) -> Result<Option<String>, ()>;
+    /// Hold `raw` under `key`, and say whether it took.
+    fn set(&self, key: &str, raw: &str) -> bool;
+    fn remove(&self, key: &str);
+}
+
+/// Which copy set aside under `prefix` `key` is, counting from one: the
+/// first is `prefix` itself, the ones after it `prefix_2`, `prefix_3`…
+#[cfg(any(feature = "web", test))]
+fn aside_number(prefix: &str, key: &str) -> Option<u64> {
+    match key.strip_prefix(prefix)? {
+        "" => Some(1),
+        rest => {
+            let digits = rest.strip_prefix('_')?;
+            let number = digits.parse().ok()?;
+            (digits.bytes().all(|b| b.is_ascii_digit()) && number > 1).then_some(number)
+        }
+    }
+}
+
+/// Keep `raw`, what could not be read of a history, set aside in `store`
+/// under `prefix`, and say whether it is kept. A copy set aside before is
+/// never written over, and one set aside already is not kept twice.
+///
+/// Each copy goes under the number after the newest, so the numbers say
+/// which is newer, and only the newest [`MAX_SET_ASIDE`] are kept. One that
+/// does not fit lets the oldest go, one at a time, until it does; if it
+/// does not fit even then, those go back as they were. Nothing reads a
+/// copy set aside back but a person, while a history that cannot be set
+/// aside holds back every session finished after it: so old copies give
+/// way to a new one, the oldest first.
+#[cfg(any(feature = "web", test))]
+fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
+    let Ok(keys) = store.keys() else {
+        return false;
+    };
+    let mut numbered: Vec<(u64, String)> = keys
+        .into_iter()
+        .filter_map(|key| Some((aside_number(prefix, &key)?, key)))
+        .collect();
+    numbered.sort_unstable();
+    let Some(next) = numbered
+        .last()
+        .map_or(Some(1), |(number, _)| number.checked_add(1))
+    else {
+        return false;
+    };
+    // Each copy already set aside, oldest first, and what it holds.
+    let mut older = Vec::with_capacity(numbered.len());
+    for (_, key) in numbered {
+        match store.get(&key) {
+            Ok(Some(kept)) if kept == raw => return true,
+            Ok(Some(kept)) => older.push((key, kept)),
+            Ok(None) => {}
+            Err(()) => return false,
+        }
+    }
+    let key = match next {
+        1 => prefix.to_string(),
+        n => format!("{prefix}_{n}"),
+    };
+    let mut gone = 0;
+    while !store.set(&key, raw) {
+        let Some((oldest, _)) = older.get(gone) else {
+            for (key, kept) in &older {
+                store.set(key, kept);
+            }
+            return false;
+        };
+        store.remove(oldest);
+        gone += 1;
+    }
+    let first_kept = older.len().saturating_sub(MAX_SET_ASIDE - 1).max(gone);
+    for (key, _) in &older[gone..first_kept] {
+        store.remove(key);
+    }
+    true
 }
 
 /// Load settings without throwing away everything for one bad field.
@@ -337,6 +409,7 @@ fn recover_settings(raw: &str) -> TrainingSettings {
         return TrainingSettings::default();
     };
     upgrade_receiver(&mut stored);
+    upgrade_agc_threshold(&mut stored);
     let stored = serde_json::Value::Object(stored);
     if let Ok(settings) = serde_json::from_value::<TrainingSettings>(stored.clone()) {
         return settings;
@@ -366,6 +439,36 @@ fn upgrade_receiver(stored: &mut serde_json::Map<String, serde_json::Value>) {
     if !stored.contains_key("filterWidthHz") {
         stored.remove("filterShape");
     }
+}
+
+/// A save from before the AGC threshold went may have one, `agcThresholdDb`.
+/// The AGC judges everything against its knee, so a threshold raised X dB
+/// is the RF gain backed off X dB, but for a tenth of that in volume: such
+/// a save comes back with its RF gain backed off as far, as far as the RF
+/// gain goes. A threshold taken down into the hiss has nothing to come back
+/// as, and nor has one under an AGC switched off, which it never moved.
+fn upgrade_agc_threshold(stored: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(threshold) = stored
+        .remove("agcThresholdDb")
+        .and_then(|threshold| threshold.as_f64())
+    else {
+        return;
+    };
+    let agc = stored
+        .get("agcEnabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    if !agc || threshold <= 0.0 {
+        return;
+    }
+    let rf = stored
+        .get("rfGainDb")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|db| db.is_finite())
+        .unwrap_or(RF_GAIN_MAX_DB)
+        .clamp(RF_GAIN_MIN_DB, RF_GAIN_MAX_DB);
+    let backed_off = (rf - threshold).round().max(RF_GAIN_MIN_DB);
+    stored.insert("rfGainDb".into(), serde_json::json!(backed_off));
 }
 
 /// Stored settings, as the app may use them.
@@ -439,54 +542,101 @@ impl SessionKey {
 /// and bring back the other. So every session added here is added, every
 /// one deleted here is deleted, and one changed here — filled in by a
 /// restore — is kept as it is here; whatever another copy added, deleted
-/// or changed stands. Sessions are known by their [`SessionKey`], and those
-/// alike in it by their order.
+/// or changed stands. Sessions are known as [`pair_sessions`] knows them.
 pub fn merge_history(
     base: &[SessionResult],
     ours: &[SessionResult],
     theirs: &[SessionResult],
 ) -> Vec<SessionResult> {
-    let base: HashMap<_, _> = keyed(base).collect();
-    let stored: HashMap<_, _> = keyed(theirs).collect();
-    let mut merged = Vec::with_capacity(theirs.len().max(ours.len()));
-    let mut here = HashSet::new();
-    for (key, session) in keyed(ours) {
-        let kept = match (base.get(&key), stored.get(&key)) {
-            // Added here.
-            (None, _) => Some(session),
-            // Deleted elsewhere.
-            (Some(_), None) => None,
-            // Changed here, or else as it is stored.
-            (Some(was), Some(stored)) => Some(if session == *was { *stored } else { session }),
-        };
-        merged.extend(kept.cloned());
-        here.insert(key);
+    fn each(sessions: &[SessionResult]) -> Vec<&SessionResult> {
+        sessions.iter().collect()
     }
+    let was_here = pair_sessions(&each(base), &each(ours));
+    let was_there = pair_sessions(&each(base), &each(theirs));
+    // Each session of `base` as it is stored now, if it still is.
+    let mut stored = vec![None; base.len()];
+    for (session, was) in theirs.iter().zip(&was_there) {
+        if let Some(was) = was {
+            stored[*was] = Some(session);
+        }
+    }
+    let mut merged = Vec::with_capacity(theirs.len().max(ours.len()));
+    let mut added_here = Vec::new();
+    for (session, was) in ours.iter().zip(&was_here) {
+        match was {
+            None => {
+                merged.push(session.clone());
+                added_here.push(session);
+            }
+            Some(was) => match stored[*was] {
+                // Deleted elsewhere.
+                None => {}
+                // Changed here, or else as it is stored.
+                Some(stored) if *session == base[*was] => merged.push(stored.clone()),
+                Some(_) => merged.push(session.clone()),
+            },
+        }
+    }
+    // Added elsewhere, unless it was added here too, as two copies
+    // restoring one backup each add the same session.
+    let added_there: Vec<&SessionResult> = theirs
+        .iter()
+        .zip(&was_there)
+        .filter(|(_, was)| was.is_none())
+        .map(|(session, _)| session)
+        .collect();
     let before = merged.len();
     merged.extend(
-        keyed(theirs)
-            .filter(|(key, _)| !here.contains(key) && !base.contains_key(key))
-            .map(|(_, session)| session.clone()),
+        added_there
+            .iter()
+            .zip(pair_sessions(&added_here, &added_there))
+            .filter(|(_, same)| same.is_none())
+            .map(|(session, _)| (*session).clone()),
     );
-    // Added elsewhere: in among the rest, by when each finished.
+    // In among the rest, by when each finished.
     if merged.len() > before {
         merged.sort_by_key(|session| session.timestamp);
     }
     merged
 }
 
-/// Each of `sessions` by its key, and which of those alike in it it is.
-fn keyed(
-    sessions: &[SessionResult],
-) -> impl Iterator<Item = ((SessionKey, usize), &SessionResult)> {
-    let mut seen: HashMap<SessionKey, usize> = HashMap::new();
-    sessions.iter().map(move |session| {
-        let key = SessionKey::of(session);
-        let alike = seen.entry(key.clone()).or_default();
-        let nth = *alike;
-        *alike += 1;
-        ((key, nth), session)
-    })
+/// Which of `from` each of `to` is, if any: the one with the same
+/// [`SessionKey`] and everything else the same, or failing that, the first
+/// with the same key still unclaimed.
+///
+/// Sessions alike in their key are told apart by what they hold before
+/// their order: one deleted from a copy would otherwise shift every one
+/// after it onto the session before, and a merge would keep one twice and
+/// lose another. Only one changed since, filled in by a restore, falls back
+/// to its order.
+pub fn pair_sessions(from: &[&SessionResult], to: &[&SessionResult]) -> Vec<Option<usize>> {
+    let mut by_key: HashMap<SessionKey, Vec<usize>> = HashMap::new();
+    for (at, session) in from.iter().enumerate() {
+        by_key.entry(SessionKey::of(session)).or_default().push(at);
+    }
+    let mut claimed = vec![false; from.len()];
+    let mut paired = vec![None; to.len()];
+    let alike: Vec<Option<&Vec<usize>>> = to
+        .iter()
+        .map(|session| by_key.get(&SessionKey::of(session)))
+        .collect();
+    // Those alike in everything first, then the rest by their order.
+    for whole in [true, false] {
+        for (at, session) in to.iter().enumerate() {
+            let Some(alike) = alike[at].filter(|_| paired[at].is_none()) else {
+                continue;
+            };
+            let found = alike
+                .iter()
+                .copied()
+                .find(|&was| !claimed[was] && (!whole || from[was] == *session));
+            if let Some(was) = found {
+                claimed[was] = true;
+                paired[at] = Some(was);
+            }
+        }
+    }
+    paired
 }
 
 /// The newest of `sessions` whose JSON fits in `budget` bytes, as one JSON
@@ -784,6 +934,34 @@ pub(crate) mod tests {
         assert_eq!(merged, [first]);
     }
 
+    /// Sessions alike in their key are told apart by what they hold, not
+    /// by where they sit: one deleted elsewhere does not move the others
+    /// up a place. Told apart by order, the first was taken for the one
+    /// deleted, the second came back twice and the third went.
+    #[test]
+    fn a_deletion_elsewhere_does_not_shift_sessions_alike() {
+        let alike = |accuracy| SessionResult { accuracy, ..at(1) };
+        let (first, second, third) = (alike(0.1), alike(0.2), alike(0.3));
+        let mut filled = second.clone();
+        filled.avg_response_ms = 700.0;
+        let base = [first.clone(), second.clone(), third.clone()];
+        let ours = [first, filled.clone(), third.clone()];
+        let theirs = [second, third.clone()];
+        assert_eq!(merge_history(&base, &ours, &theirs), [filled, third]);
+    }
+
+    /// The same session added on both sides is kept once, and two alike in
+    /// their key but not in what they hold are both kept.
+    #[test]
+    fn sessions_added_on_both_sides_are_kept_once() {
+        let mut other = at(7);
+        other.accuracy = 0.5;
+        assert_eq!(
+            merge_history(&[], &[at(7)], &[at(7), other.clone()]),
+            [at(7), other]
+        );
+    }
+
     pub(super) fn session(date: &str) -> SessionResult {
         SessionResult {
             date: date.to_string(),
@@ -838,37 +1016,147 @@ pub(crate) mod tests {
         assert_eq!(parse_sessions("[]"), Some(Vec::new()));
     }
 
+    /// A browser's store, as far as setting aside goes: `room` characters
+    /// in all, as a browser's quota has, and keys of other kinds beside.
+    struct Shelf {
+        held: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
+        room: std::cell::Cell<usize>,
+        unreadable: std::cell::Cell<bool>,
+    }
+
+    impl Shelf {
+        fn with_room(room: usize) -> Self {
+            let shelf = Self {
+                held: Default::default(),
+                room: std::cell::Cell::new(room),
+                unreadable: Default::default(),
+            };
+            shelf.set("history", "[]");
+            shelf
+        }
+
+        /// What is set aside, by key.
+        fn aside(&self) -> Vec<(String, String)> {
+            let held = self.held.borrow();
+            held.iter()
+                .filter(|(key, _)| key.starts_with("aside"))
+                .map(|(key, raw)| (key.clone(), raw.clone()))
+                .collect()
+        }
+    }
+
+    impl Aside for Shelf {
+        fn keys(&self) -> Result<Vec<String>, ()> {
+            if self.unreadable.get() {
+                return Err(());
+            }
+            Ok(self.held.borrow().keys().cloned().collect())
+        }
+
+        fn get(&self, key: &str) -> Result<Option<String>, ()> {
+            if self.unreadable.get() {
+                return Err(());
+            }
+            Ok(self.held.borrow().get(key).cloned())
+        }
+
+        fn set(&self, key: &str, raw: &str) -> bool {
+            let mut held = self.held.borrow_mut();
+            let used: usize = held
+                .iter()
+                .filter(|(held, _)| *held != key)
+                .map(|(_, raw)| raw.len())
+                .sum();
+            if used + raw.len() > self.room.get() {
+                return false;
+            }
+            held.insert(key.into(), raw.into());
+            true
+        }
+
+        fn remove(&self, key: &str) {
+            self.held.borrow_mut().remove(key);
+        }
+    }
+
+    fn shelved(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, raw)| (key.to_string(), raw.to_string()))
+            .collect()
+    }
+
     /// What could not be read is set aside under a key of its own: never
     /// over a copy set aside before, and never twice.
     #[test]
     fn what_could_not_be_read_is_set_aside_beside_what_was_before() {
-        let held = std::cell::RefCell::new(std::collections::BTreeMap::<String, String>::new());
-        let room = std::cell::Cell::new(true);
-        let get = |key: &str| Ok(held.borrow().get(key).cloned());
-        let set = |key: &str, raw: &str| {
-            room.get() && held.borrow_mut().insert(key.into(), raw.into()).is_none()
-        };
-        assert!(keep_aside("aside", "first", get, set));
-        assert!(keep_aside("aside", "second", get, set));
-        assert!(keep_aside("aside", "first", get, set), "kept already");
-        let kept = |key: &str| held.borrow().get(key).cloned();
-        assert_eq!(kept("aside").as_deref(), Some("first"));
-        assert_eq!(kept("aside_2").as_deref(), Some("second"));
-        assert_eq!(held.borrow().len(), 2);
-        // No room, or a store that cannot be read: not kept.
-        room.set(false);
-        assert!(!keep_aside("aside", "third", get, set));
-        assert!(!keep_aside("aside", "third", |_| Err(()), set));
-        room.set(true);
-        for n in 3..=MAX_SET_ASIDE {
-            assert!(keep_aside("aside", &n.to_string(), get, set));
-        }
-        assert!(!keep_aside("aside", "one too many", get, set));
-        assert_eq!(held.borrow().len(), MAX_SET_ASIDE);
+        let shelf = Shelf::with_room(usize::MAX);
+        assert!(keep_aside(&shelf, "aside", "first"));
+        assert!(keep_aside(&shelf, "aside", "second"));
+        assert!(keep_aside(&shelf, "aside", "first"), "kept already");
         assert_eq!(
-            kept("aside").as_deref(),
-            Some("first"),
-            "never written over"
+            shelf.aside(),
+            shelved(&[("aside", "first"), ("aside_2", "second")])
+        );
+        // A store that cannot be read: not kept, and nothing changed.
+        shelf.unreadable.set(true);
+        assert!(!keep_aside(&shelf, "aside", "third"));
+        shelf.unreadable.set(false);
+        assert_eq!(shelf.aside().len(), 2);
+        assert_eq!(aside_number("aside", "asidea"), None);
+        assert_eq!(aside_number("aside", "aside_1"), None);
+        assert_eq!(aside_number("aside", "aside_+3"), None);
+        assert_eq!(aside_number("aside", "aside_12"), Some(12));
+    }
+
+    /// Only the newest copies are kept. Every slot a browser had used to
+    /// stay full for good, and the next history that could not be read
+    /// could not be set aside, so nothing was saved over it again.
+    #[test]
+    fn only_the_newest_copies_set_aside_are_kept() {
+        let shelf = Shelf::with_room(usize::MAX);
+        // As twenty slots were filled before there was a limit.
+        shelf.set("aside", "1");
+        for n in 2..=20 {
+            shelf.set(&format!("aside_{n}"), &n.to_string());
+        }
+        assert!(keep_aside(&shelf, "aside", "new"));
+        assert_eq!(
+            shelf.aside(),
+            shelved(&[
+                ("aside_17", "17"),
+                ("aside_18", "18"),
+                ("aside_19", "19"),
+                ("aside_20", "20"),
+                ("aside_21", "new"),
+            ])
+        );
+        assert!(keep_aside(&shelf, "aside", "newer"));
+        assert_eq!(shelf.aside().len(), MAX_SET_ASIDE);
+        assert_eq!(
+            shelf.aside().last(),
+            Some(&("aside_22".into(), "newer".into()))
+        );
+    }
+
+    /// A copy that does not fit lets the oldest go until it does; one that
+    /// would not fit even then leaves every copy as it was.
+    #[test]
+    fn a_copy_set_aside_makes_room_by_letting_the_oldest_go() {
+        // The history's own room, and a little short of room for three.
+        let shelf = Shelf::with_room(2 + 4 + 4 + 5);
+        assert!(keep_aside(&shelf, "aside", "aaaa"));
+        assert!(keep_aside(&shelf, "aside", "bbbb"));
+        assert!(keep_aside(&shelf, "aside", "cccccc"), "room made");
+        assert_eq!(
+            shelf.aside(),
+            shelved(&[("aside_2", "bbbb"), ("aside_3", "cccccc")])
+        );
+        assert!(!keep_aside(&shelf, "aside", "far too long for it"));
+        assert_eq!(
+            shelf.aside(),
+            shelved(&[("aside_2", "bbbb"), ("aside_3", "cccccc")]),
+            "put back as they were"
         );
     }
 
@@ -1015,6 +1303,53 @@ pub(crate) mod tests {
         let back = recover_settings(&serde_json::to_string(&chosen).expect("serialize"));
         assert_eq!(back.band.filter_shape, cw_core::FilterShape::Sharp);
         assert_eq!(back.band.filter_width_hz, 400.0);
+    }
+
+    /// A save from before the AGC threshold went comes back with a raised
+    /// threshold as the RF gain backed off as far, which is how the AGC
+    /// heard it. A threshold taken down, or one under an AGC switched off,
+    /// is dropped. It is done once: the next save has no threshold.
+    #[test]
+    fn a_raised_agc_threshold_comes_back_as_rf_gain() {
+        let rf = |raw: &str| load_settings_from(raw).band.rf_gain_db;
+        let old = r#"{"agcThresholdDb":10,"rfGainDb":-5,"numGroups":7}"#;
+        assert_eq!(rf(old), -15.0);
+        assert_eq!(load_settings_from(old).curriculum.num_groups, 7);
+        assert_eq!(rf(r#"{"agcThresholdDb":12}"#), -12.0, "from full");
+        assert_eq!(
+            rf(r#"{"agcThresholdDb":25,"rfGainDb":-12}"#),
+            RF_GAIN_MIN_DB,
+            "as far as the RF gain goes"
+        );
+        assert_eq!(rf(r#"{"agcThresholdDb":-8,"rfGainDb":-5}"#), -5.0);
+        assert_eq!(
+            rf(r#"{"agcThresholdDb":10,"rfGainDb":-5,"agcEnabled":false}"#),
+            -5.0
+        );
+        assert_eq!(rf(r#"{"agcThresholdDb":"loud","rfGainDb":-5}"#), -5.0);
+
+        // Once: what is saved after it reads back as it was saved.
+        let upgraded = load_settings_from(old);
+        let saved = serde_json::to_string(&upgraded).expect("serialize");
+        assert!(!saved.contains("agcThresholdDb"));
+        assert_eq!(load_settings_from(&saved), upgraded);
+
+        // A backup reads its settings the same way.
+        let backup = backup::read_backup(&format!(
+            r#"{{"dustBackup":1,"settings":{old},"sessions":[]}}"#
+        ))
+        .expect("a backup");
+        assert_eq!(backup.settings.band.rf_gain_db, -15.0);
+
+        // And a merge with a copy that read the same old save keeps it,
+        // beside a change made here.
+        let mut ours = upgraded.clone();
+        ours.curriculum.num_groups = 9;
+        let merged = merge_settings(&upgraded, &ours, &load_settings_from(old));
+        assert_eq!(
+            (merged.band.rf_gain_db, merged.curriculum.num_groups),
+            (-15.0, 9)
+        );
     }
 
     #[test]
