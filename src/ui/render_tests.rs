@@ -21,7 +21,7 @@ use super::envelope::EnvelopeCard;
 use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
-use super::paddle::{PaddleKeys, PaddlePad, page_key, use_paddle_keys};
+use super::paddle::{PaddleKeys, PaddlePad, page_key, use_paddle_keys, window_key};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
@@ -54,6 +54,10 @@ fn Keyed(
     /// The keys right of P type, and only `[` and `]` are paddles.
     #[props(default)]
     typed: bool,
+    /// The root keys only what the desktop's window drops on Linux, the
+    /// window keying the rest.
+    #[props(default)]
+    on_linux: bool,
     children: Element,
 ) -> Element {
     // Owned by the root scope, as the shell's are.
@@ -79,6 +83,11 @@ fn Keyed(
         ))
     });
     let keys = use_paddle_keys(settings, screen, app);
+    let keys = if on_linux {
+        keys.keyed_as_on_linux()
+    } else {
+        keys
+    };
     rsx! {
         div {
             id: crate::ui::widgets::control_id("keyed", "root"),
@@ -3671,6 +3680,132 @@ mod interactions {
     }
 
     #[component]
+    fn WindowWordsHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                WindowWords {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// Buttons that hand the paddles what the desktop's window hears on
+    /// Linux: `]` pressed, and let go.
+    #[component]
+    fn WindowWords() -> Element {
+        let keys = use_context::<PaddleKeys>();
+        rsx! {
+            button {
+                id: control_id("btn", "window down"),
+                onclick: move |_| window_key(keys, "]", "BracketRight", true),
+            }
+            button {
+                id: control_id("btn", "window up"),
+                onclick: move |_| window_key(keys, "]", "BracketRight", false),
+            }
+        }
+    }
+
+    /// The window's every press of a paddle's key keys it, with no word of
+    /// the modifiers, which the window cannot tell: one let go in another
+    /// window can no longer have every press taken for a shortcut and
+    /// dropped. Its release opens the paddle again.
+    #[test]
+    fn the_window_keys_every_paddle_press_it_hears() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(WindowWordsHarness, ());
+            ui.click("btn-window-down");
+            ui.advance(100).await;
+            ui.click("btn-window-up");
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+            ui.click("btn-window-down");
+            ui.advance(100).await;
+            ui.click("btn-window-up");
+            ui.advance(1_000).await;
+            assert!(ui.has(">TT<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn LinuxPadHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings, on_linux: true,
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// On Linux the root keys only what the desktop's window drops: a dead
+    /// key on the brackets' own keys, as on a French keyboard's dit key,
+    /// keys its paddle, pressed and let go. A `]`, which the window keys,
+    /// the root keeps from the box but does not key a second time.
+    #[test]
+    fn on_linux_the_root_keys_only_what_the_window_drops() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(LinuxPadHarness, ());
+            let dah = Key::Character("]".into());
+            assert!(
+                !ui.press_key("keyed-root", dah.clone(), Code::BracketRight),
+                "the ] was left to the box"
+            );
+            ui.advance(100).await;
+            ui.release_key("keyed-root", dah, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(
+                ui.has(">· −<"),
+                "the root keyed the window's: {}",
+                ui.html()
+            );
+            assert!(
+                !ui.press_key("keyed-root", Key::Dead, Code::BracketLeft),
+                "the dead key was left to the box"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">E<"), "{}", ui.html());
+            // A key the page cannot name, on the dah key.
+            ui.press_key("keyed-root", Key::Unidentified, Code::BracketRight);
+            ui.advance(100).await;
+            ui.release_key("keyed-root", Key::Unidentified, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(ui.has(">ET<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn LinuxWindowHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings, on_linux: true,
+                WindowWords {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// On Linux a dead key on the dit key, which the window drops, and a
+    /// `]` the window hears key one squeeze between them: the dit let go
+    /// during its own element, the dah held into its own, an A.
+    #[test]
+    fn on_linux_the_root_and_the_window_key_a_squeeze_between_them() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(LinuxWindowHarness, ());
+            ui.press_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.click("btn-window-down");
+            let dah = Key::Character("]".into());
+            ui.press_key("keyed-root", dah.clone(), Code::BracketRight);
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.advance(120).await;
+            ui.click("btn-window-up");
+            ui.release_key("keyed-root", dah, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(ui.has(">A<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
     fn TypedPadHarness() -> Element {
         rsx! {
             Keyed { screen: Screen::Settings, typed: true,
@@ -3740,6 +3875,25 @@ mod interactions {
             ui.press_key("keyed-root", Key::Character("]".into()), Code::BracketRight);
             ui.advance(100).await;
             ui.click("btn-lose-focus");
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    /// A Mac sends no key release for a key let go while Command was down,
+    /// and on the desktop there it is the root that keys the paddles: so
+    /// Command let go opens them, the element sounding finishes, and the
+    /// pad hears a T rather than dahs on and on.
+    #[test]
+    fn letting_command_go_opens_the_paddles() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            ui.press_key("keyed-root", Key::Character("]".into()), Code::BracketRight);
+            ui.advance(100).await;
+            let command = dioxus::prelude::Modifiers::META;
+            ui.press_key_held("keyed-root", Key::Meta, Code::MetaLeft, command);
+            // The `]` let go now goes unheard.
+            ui.release_key("keyed-root", Key::Meta, Code::MetaLeft);
             ui.advance(1_000).await;
             assert!(ui.has(">T<"), "{}", ui.html());
         });
