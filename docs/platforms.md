@@ -15,10 +15,10 @@ as-is, with cpal routing it to AAudio through
 oboe's C++ with the NDK toolchain, which is why an NDK is needed and not just
 the SDK.
 
-The project `dx` generates needs three things put right, and `dx` 0.7 has a
+The project `dx` generates needs four things put right, and `dx` 0.7 has a
 setting for none of them. Every bundle command below, in CI as well, first
 installs a Gradle init hook, [`scripts/android-gradle-hook.sh`](../scripts/android-gradle-hook.sh),
-that does all three:
+that does all four:
 
 - **Launcher icon.** The icon is [`assets/icon.png`](../assets/icon.png).
   Android 8 and later show the adaptive icon packed in the app, and `dx`
@@ -44,6 +44,18 @@ that does all three:
   of the library the app ships. The script stops if that file is missing.
   Play reads it from the bundle. The hook still points the plugin at
   `ANDROID_NDK_HOME` (`ndkPath` and `ndkVersion`) as the plugin is applied.
+- **Configuration changes.** `dx`'s manifest has the activity handle only a
+  turn of the screen itself. For any other change Android recreates the
+  activity, and the webview with it, and the app ends: Dioxus has no window
+  left, and tao exits the process. Dark mode turned on, a keyboard or a
+  paddle adapter plugged in, the font or display size changed, a new
+  language, a foldable opened: each closed it, mid-session or not. The hook
+  rewrites the activity's `android:configChanges` in the generated manifest
+  to every change there is (`ANDROID_CONFIG_CHANGES`), and fails the build if
+  it finds none to rewrite. The webview lays itself out again for a new size
+  or density. The Auto theme follows dark mode switched on meanwhile only as
+  far as the webview passes the change on to the page; Light and Dark pin
+  it either way.
 
 The screen stays on through a session — the count down, every send and
 every answer — through the window's own keep-screen-on flag
