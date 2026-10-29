@@ -3568,11 +3568,25 @@ impl<S: CallSource> ContestMachine<S> {
     /// among them, and any QRM go on from where they were, as over a key
     /// ([`Self::cut`]), in a turn with nothing of yours in it, and each
     /// waits from the end of its send.
+    ///
+    /// With nothing of yours left to go out, your station is sending
+    /// nothing, and Esc stops nothing: the turn plays on as it is, the
+    /// sends in it never cut and every reply still to come on time, as
+    /// `AbortSend` touches no other station's send. MorseRunner's has the
+    /// callers listening answer garbage then too, of a message that never
+    /// sounded; Dust's do not (§15.1 of the design).
     fn stop_sending(&mut self, now: MonoMs) -> Vec<ContestEffect> {
+        let run_ms = self.run_ms(now);
+        let sending = self
+            .air
+            .as_ref()
+            .is_some_and(|air| self.yours_to_go(air, run_ms));
+        if !sending {
+            return Vec::new();
+        }
         let Some(mut air) = self.air.take() else {
             return Vec::new();
         };
-        let run_ms = self.run_ms(now);
         let mut effects = vec![ContestEffect::StopAudio];
         let unheard = air.unheard.take();
         // Where the message keyed last starts: parts carried on from an
@@ -3617,6 +3631,23 @@ impl<S: CallSource> ContestMachine<S> {
             effects.extend(self.play(going_on, None, Vec::new(), garbled, run_ms, now));
         }
         effects
+    }
+
+    /// Whether some of your message in `air` is still to go out at
+    /// `run_now`: a character of it sounding then, or yet to. None of a
+    /// turn of callers alone is.
+    fn yours_to_go(&self, air: &Air, run_now: u64) -> bool {
+        let Some(yours) = air
+            .turn
+            .segments
+            .iter()
+            .find(|segment| segment.who == Sender::You)
+        else {
+            return false;
+        };
+        let spans = char_spans(&yours.text, &self.settings, &yours.voice);
+        let at_sec = (run_now as f64 - air.heard_run() as f64) / 1_000.0 - yours.start_sec;
+        sounding_at(&spans, at_sec).is_some()
     }
 
     /// Esc cut your message short: each caller on the frequency that was
@@ -5601,6 +5632,7 @@ mod tests {
     }
 
     /// Esc: a call or exchange of yours not yet sent whole counts as not
+    /// sent. With your message out whole, Esc stops nothing, and both stay
     /// sent.
     #[test]
     fn esc_resets_c_and_n() {
@@ -5616,10 +5648,14 @@ mod tests {
             runtime.key(OpKey::Esm, "K5XYZ", "");
             runtime.now += after_ms.min((runtime.last_turn().duration_sec() * 1_000.0) as u64 - 1);
             let effects = runtime.key(OpKey::StopTx, "K5XYZ", "");
-            assert_eq!(effects[0], ContestEffect::StopAudio, "{after_ms} ms in");
             let state = view(&runtime).qso;
             assert_eq!(state.call_sent, call_sent, "{after_ms} ms in");
             assert_eq!(state.exchange_sent, exchange_sent, "{after_ms} ms in");
+            if exchange_sent {
+                assert!(effects.is_empty(), "{after_ms} ms in: {effects:?}");
+                continue;
+            }
+            assert_eq!(effects[0], ContestEffect::StopAudio, "{after_ms} ms in");
             // Nothing of yours goes on: only the callers, answering what
             // they heard of it or going on with what they were sending.
             let air = view(&runtime).air;
@@ -10505,10 +10541,11 @@ mod tests {
     /// (`MyStn.pas:108-116`): a CQ keyed over three callers and stopped
     /// half a second later, all three still sending, leaves each going on
     /// at once from where it was, in a turn with nothing of yours, and
-    /// waiting from the end of its send before it calls again. A second Esc
-    /// carries them on again from where they are. Esc used to silence all
-    /// three, and with nobody left listening to answer the garbage, the
-    /// frequency kept quiet for a whole reply timeout.
+    /// waiting from the end of its send before it calls again. A second
+    /// Esc, nothing of yours on the air, stops nothing: they go on as they
+    /// are. Esc used to silence all three, and with nobody left listening
+    /// to answer the garbage, the frequency kept quiet for a whole reply
+    /// timeout.
     #[test]
     fn esc_leaves_the_callers_you_keyed_over_sending() {
         let mut runtime = pileup_qsk(&["K5XYZ", "W7ABC", "G4ABC"], 3, 3);
@@ -10560,30 +10597,17 @@ mod tests {
                 .iter()
                 .all(|station| station.caller.state == CallerState::NeedQso)
         );
-        // Again, 0.3 s on: on from where they are.
-        runtime.now += 300;
-        let effects = runtime.key(OpKey::StopTx, "", "");
-        let again = played(&effects).expect("they go on again").clone();
-        for (station, rest) in (0..3).zip(&rests) {
-            let on = sent_by(&again, station)[0];
-            assert!(
-                rest.text.ends_with(&on.text),
-                "{} then {}",
-                rest.text,
-                on.text
-            );
-            let space = word_gap_sec(&runtime.machine.settings, &rest.voice);
-            assert!(
-                on.end_sec < rest.end_sec && on.end_sec >= rest.end_sec - 0.3 - space,
-                "station {station}: {:.3} s left of {:.3} s",
-                on.end_sec,
-                rest.end_sec
-            );
-        }
+        // Again, 0.3 s on: nothing of yours to stop, so they go on as they
+        // are.
+        runtime.run_to(runtime.now + 300);
+        assert!(runtime.key(OpKey::StopTx, "", "").is_empty());
+        assert_eq!(runtime.playing_id(), Some(going.id));
         // Each waits from the end of its send, then calls again.
         runtime.finish_turn();
-        for station in 0..3 {
-            let end = again.at_run_ms + whole_ms(sent_by(&again, station)[0].end_sec);
+        let heard = runtime.take_heard();
+        for (station, rest) in (0..3).zip(&rests) {
+            assert!(heard.contains(&rest.text), "station {station}: {heard:?}");
+            let end = going.at_run_ms + whole_ms(rest.end_sec);
             let deadline = runtime.machine.stations[station as usize]
                 .caller
                 .deadline
@@ -10594,15 +10618,20 @@ mod tests {
         assert!(!senders(&next).is_empty());
     }
 
-    /// Esc once your CQ is out stops nothing the callers send: those
-    /// already answering it go on from where they were, exactly as over F4
-    /// keyed at the same moment, and are heard; one whose reply was still
-    /// to begin never sent it, and calls on its timeout. Esc used to
-    /// silence the callers sending, and nothing came for over four seconds.
+    /// Esc once your CQ is out stops nothing, as MorseRunner's `AbortSend`
+    /// stops only your own station (`MyStn.pas:108-116`) and leaves a
+    /// station's reply to come (`DxStn.pas:235-237, 273-274`): the turn
+    /// plays on as it is, whether the replies have yet to begin or are
+    /// sounding, each heard as it would have been with no Esc at all. Esc
+    /// used to drop a reply yet to begin, which came only on its caller's
+    /// timeout, and to cut those sounding, each sent again from its
+    /// character sounding.
     #[test]
-    fn esc_after_your_message_leaves_the_replies_sending_as_a_key_does() {
+    fn esc_after_your_message_leaves_the_turn_playing() {
         let calls = ["K5XYZ", "W7ABC", "G4ABC"];
-        let answering = |runtime: &mut Runtime<ScriptCalls>| {
+        for into in [-0.05, 0.2] {
+            let mut runtime = pileup(&calls, 3, 3);
+            let mut alone = pileup(&calls, 3, 3);
             let cq = runtime.last_turn().clone();
             let first = cq
                 .segments
@@ -10610,93 +10639,58 @@ mod tests {
                 .filter(|segment| segment.who.is_caller())
                 .map(|segment| segment.start_sec)
                 .fold(f64::INFINITY, f64::min);
-            runtime.run_to(ms(first + 0.2));
-            cq
-        };
-        let mut keyed = pileup(&calls, 3, 3);
-        answering(&mut keyed);
-        let f4 = played(&keyed.key(OpKey::MyCall, "", ""))
-            .expect("your call")
-            .clone();
-        let mut runtime = pileup(&calls, 3, 3);
-        let cq = answering(&mut runtime);
-        let effects = runtime.key(OpKey::StopTx, "", "");
-        let going = played(&effects).expect("the replies go on").clone();
-        assert_eq!(yours(&going), "");
-        let carried = |turn: &Turn| -> Vec<Segment> {
-            turn.segments
-                .iter()
-                .filter(|segment| segment.who.is_caller() && segment.start_sec == 0.0)
-                .cloned()
-                .collect()
-        };
-        let rests = carried(&going);
-        assert!(!rests.is_empty());
-        assert_eq!(rests, carried(&f4), "as over F4");
-        for station in senders(&cq) {
-            if rests.iter().all(|rest| rest.who != Sender::Caller(station)) {
-                assert!(
-                    sent_by(&going, station)
-                        .iter()
-                        .all(|send| send.start_sec >= 1.5),
-                    "station {station} calls only on its timeout"
-                );
+            assert!(first + into > cq.your_end_sec().expect("your CQ"));
+            runtime.run_to(ms(first + into));
+            assert!(runtime.key(OpKey::StopTx, "", "").is_empty(), "{into}");
+            assert_eq!(runtime.playing_id(), Some(cq.id), "{into}");
+            runtime.finish_turn();
+            alone.finish_turn();
+            assert_eq!(runtime.take_heard(), alone.take_heard(), "{into}");
+            for station in senders(&cq) {
+                let send = sent_by(&cq, station)[0];
+                let ends = &runtime.machine.stations[station as usize].heard.call_ends;
+                assert_eq!(ends[0], cq.at_run_ms + whole_ms(send.end_sec), "{into}");
+                let unstopped = &alone.machine.stations[station as usize].heard.call_ends;
+                assert_eq!(ends, unstopped, "{into}");
             }
-        }
-        runtime.finish_turn();
-        let heard = runtime.take_heard();
-        for rest in &rests {
-            let Sender::Caller(station) = rest.who else {
-                unreachable!()
-            };
-            assert!(heard.contains(&rest.text), "{heard:?}");
-            let ends = &runtime.machine.stations[station as usize].heard.call_ends;
-            assert_eq!(ends, &[going.at_run_ms + whole_ms(rest.end_sec)]);
         }
     }
 
-    /// Esc with a single caller's reply sounding, your message out whole,
-    /// leaves the reply going on from where it was, as MorseRunner's Esc
-    /// stops only your own station. A single caller stops for a message
-    /// keyed over it, to hear it; Esc gives it nothing to hear. Its
-    /// exchange is heard as it ends and logged clean, no repeat charged.
-    /// Esc used to silence it, and the reply came again whole on its
-    /// timeout.
+    /// Esc with your message out whole leaves a single caller's reply
+    /// coming, still to begin or sounding, as MorseRunner's Esc stops only
+    /// your own station. A single caller stops for a message keyed over
+    /// it, to hear it; Esc gives it nothing to hear. Its exchange is heard
+    /// as it was to end and logged clean, no repeat charged. Esc used to
+    /// drop a reply yet to begin, which came some 2.6 s late on its
+    /// timeout and cost the station a silent timeout, and to cut one
+    /// sounding, sent again from its character sounding.
     #[test]
-    fn esc_leaves_a_single_callers_reply_sending() {
-        let mut runtime = runtime(&["K5XYZ"]);
-        runtime.finish_turn();
-        runtime.key(OpKey::Esm, "K5XYZ", "");
-        let turn = runtime.last_turn().clone();
-        let reply = sent_by(&turn, 0)[0].clone();
-        assert!(reply.start_sec > turn.your_end_sec().expect("your call"));
-        runtime.run_to(runtime.now + ms(reply.start_sec + 0.3));
-        let effects = runtime.key(OpKey::StopTx, "K5XYZ", "");
-        let going = played(&effects).expect("its reply goes on").clone();
-        assert_eq!(yours(&going), "");
-        let going_on = sent_by(&going, 0);
-        assert_eq!(going_on.len(), 1);
-        let rest = going_on[0].clone();
-        assert_eq!(rest.start_sec, 0.0);
-        assert!(
-            reply.text.ends_with(&rest.text) && rest.text.len() < reply.text.len(),
-            "{} then {}",
-            reply.text,
-            rest.text
-        );
-        // From where it was, as over a key.
-        let length = reply.end_sec - reply.start_sec;
-        let space = word_gap_sec(&runtime.machine.settings, &reply.voice);
-        assert!(rest.end_sec < length && rest.end_sec >= length - 0.3 - space);
-        runtime.finish_turn();
-        assert!(runtime.take_heard().contains(&rest.text));
-        let heard = &runtime.machine.stations[0].heard;
-        assert_eq!(heard.exch_ends, [going.at_run_ms + whole_ms(rest.end_sec)]);
-        runtime.key(OpKey::Esm, "K5XYZ", &serial(&reply.text));
-        runtime.finish_turn();
-        runtime.apply(ContestEvent::FinishNow);
-        assert_eq!(view(&runtime).clean, 1);
-        assert_eq!(sends(&runtime), [1, 1], "no repeat charged");
+    fn esc_after_your_message_leaves_a_single_callers_reply_coming() {
+        for into in [-0.05, 0.3] {
+            let mut runtime = runtime(&["K5XYZ"]);
+            runtime.finish_turn();
+            runtime.key(OpKey::Esm, "K5XYZ", "");
+            let turn = runtime.last_turn().clone();
+            let reply = sent_by(&turn, 0)[0].clone();
+            let your_end = turn.your_end_sec().expect("your call");
+            assert!(reply.start_sec + into > your_end, "{into}");
+            runtime.run_to(runtime.now + ms(reply.start_sec + into));
+            assert!(runtime.key(OpKey::StopTx, "K5XYZ", "").is_empty());
+            assert_eq!(runtime.playing_id(), Some(turn.id));
+            runtime.finish_turn();
+            assert!(runtime.take_heard().contains(&reply.text), "{into}");
+            let heard = &runtime.machine.stations[0].heard;
+            assert_eq!(
+                heard.exch_ends,
+                [turn.at_run_ms + whole_ms(reply.end_sec)],
+                "{into}"
+            );
+            runtime.key(OpKey::Esm, "K5XYZ", &serial(&reply.text));
+            runtime.finish_turn();
+            runtime.apply(ContestEvent::FinishNow);
+            assert_eq!(view(&runtime).clean, 1, "{into}");
+            assert_eq!(sends(&runtime), [1, 1], "{into}: no repeat charged");
+        }
     }
 
     /// Without full break-in a caller's rest that went out in part under
@@ -11754,13 +11748,53 @@ mod tests {
         assert_eq!(going_on[0].voice, first.voice);
     }
 
+    /// A run under rough habits from `seed` whose first CQ, after a second
+    /// of countdown, has QRM sending under it from its start.
+    fn qrm_under_the_first_cq(seed: u64) -> Runtime<ScriptCalls> {
+        let mut settings = run_settings(25.0);
+        settings.contest.contest_habits = CallerHabits::Rough;
+        settings.playback.countdown_sec = 1;
+        let mut runtime = Runtime::start(seed, settings, ScriptCalls::new(&["K5XYZ"]));
+        runtime
+            .machine
+            .qrm
+            .as_mut()
+            .expect("rough habits bring QRM")
+            .start_at(0);
+        runtime.run_to(1_000);
+        runtime
+    }
+
     /// Esc stops your station, not a station on your frequency that is not
-    /// calling you: QRM still sending goes on from where it was, as it does
-    /// over a key, alone in a turn of its own when nobody else is sending,
-    /// with your message out and the reply yet to begin.
+    /// calling you. Your message cut short, QRM still sending goes on from
+    /// where it was, as it does over a key, alone in a turn of its own
+    /// when nobody else is sending: here your first CQ goes back, and the
+    /// caller it brought with it. Your message out, Esc stops nothing, and
+    /// the QRM sends on in the turn as it was.
     #[test]
     fn qrm_goes_on_past_an_esc() {
-        let mut alone = 0;
+        for seed in 1..20 {
+            let mut runtime = qrm_under_the_first_cq(seed);
+            let cq = runtime.last_turn().clone();
+            assert_eq!(yours(&cq), "CQ DL1ABC TEST");
+            let first = qrm_in(&cq)[0].clone();
+            assert_eq!(first.start_sec, 0.0, "seed {seed}");
+            runtime.run_to(runtime.now + 800);
+            let effects = runtime.key(OpKey::StopTx, "", "");
+            let going = played(&effects).expect("the QRM goes on").clone();
+            assert_eq!(yours(&going), "", "seed {seed}");
+            assert!(senders(&going).is_empty(), "seed {seed}: it goes on alone");
+            let rest = qrm_in(&going)[0].clone();
+            assert_eq!(rest.start_sec, 0.0, "seed {seed}");
+            assert!(
+                first.text.ends_with(&rest.text) && rest.text.len() < first.text.len(),
+                "seed {seed}: {} then {}",
+                first.text,
+                rest.text
+            );
+            assert_eq!(rest.voice, first.voice);
+        }
+        let mut stopped = 0;
         for seed in 1..40 {
             let mut runtime = habits_runtime(seed, &["K5XYZ"], CallerHabits::Rough);
             runtime.finish_turn();
@@ -11780,21 +11814,11 @@ mod tests {
             // Your message out, the reply a tenth of a second away at the
             // soonest.
             runtime.run_to(runtime.now + ms(your_end + 0.05));
-            let effects = runtime.key(OpKey::StopTx, "K5XYZ", "");
-            let going = played(&effects).expect("the QRM goes on").clone();
-            assert_eq!(yours(&going), "");
-            let rest = qrm_in(&going)[0].clone();
-            assert_eq!(rest.start_sec, 0.0, "seed {seed}");
-            assert!(
-                first.text.ends_with(&rest.text) && rest.text.len() < first.text.len(),
-                "seed {seed}: {} then {}",
-                first.text,
-                rest.text
-            );
-            assert_eq!(rest.voice, first.voice);
-            alone += usize::from(senders(&going).is_empty());
+            assert!(runtime.key(OpKey::StopTx, "K5XYZ", "").is_empty());
+            assert_eq!(runtime.playing_id(), Some(turn.id), "seed {seed}");
+            stopped += 1;
         }
-        assert!(alone > 0, "no QRM went on alone");
+        assert!(stopped > 0, "no QRM outlasted your message");
     }
 
     /// QRM carried over your key, its rest timed from where it was heard,
