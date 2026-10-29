@@ -7,8 +7,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, newest_that_fit,
-    parse_sessions, read_settings_from, saved_now,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, keep_aside, newest,
+    newest_that_fit, read_history, read_settings_from, saved_now,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -196,17 +196,29 @@ impl Store for WebStore {
         let Ok(Some(raw)) = store.get_item(SESSIONS_KEY) else {
             return Vec::new();
         };
-        parse_sessions(&raw).unwrap_or_else(|| {
+        // Copies set aside go beside any set aside before, each under a key
+        // of its own, as far as the room goes.
+        let get = |key: &str| store.get_item(key).map_err(|_| ());
+        let set = |key: &str, raw: &str| store.set_item(key, raw).is_ok();
+        let Some(read) = read_history(&raw) else {
             // Keep the unreadable copy where the next save cannot reach it —
             // and only once it is safely there take it out of the way. A copy
             // that would not fit is no copy, and the original stays put.
-            if store.set_item(UNREADABLE_SESSIONS_KEY, &raw).is_ok() {
+            if keep_aside(UNREADABLE_SESSIONS_KEY, &raw, get, set) {
                 let _ = store.remove_item(SESSIONS_KEY);
             } else {
                 self.history_held.set(true);
             }
-            Vec::new()
-        })
+            return Vec::new();
+        };
+        // The sessions that do not read are set aside before the next save
+        // leaves them out; where they cannot be, nothing is saved over them.
+        if let Some(unread) = read.unread_json()
+            && !keep_aside(UNREADABLE_SESSIONS_KEY, &unread, get, set)
+        {
+            self.history_held.set(true);
+        }
+        read.sessions
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {

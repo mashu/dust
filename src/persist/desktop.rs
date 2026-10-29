@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, parse_sessions,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, read_history,
     read_settings_from,
 };
 
@@ -93,15 +93,47 @@ impl DesktopStore {
     /// it beside the new one to be recovered. If it cannot be moved, nothing
     /// is to be written over it.
     fn set_aside(&self, path: &Path) {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
-        let aside = self.root.join(format!("sessions.unreadable-{stamp}.json"));
+        let aside = self.root.join(aside_name(&self.root, "sessions"));
         if let Err(err) = fs::rename(path, &aside) {
             eprintln!("could not set aside an unreadable history: {err}");
             self.history_held.set(true);
         }
     }
+
+    /// Keep `unread`, the sessions of the history that could not be read, in
+    /// a file of their own beside it before the next save leaves them out —
+    /// unless a file set aside before holds them already. If they cannot be
+    /// kept, nothing is to be written over the history.
+    fn keep_aside(&self, unread: &[u8]) {
+        let kept = fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("sessions.unreadable-")
+                    && fs::read(entry.path()).is_ok_and(|kept| kept == unread)
+            });
+        if kept {
+            return;
+        }
+        if let Err(err) = self.write(&aside_name(&self.root, "sessions"), unread) {
+            eprintln!("could not set aside the sessions that could not be read: {err}");
+            self.history_held.set(true);
+        }
+    }
+}
+
+/// A name in `dir` no file has yet for one set aside from `stem`.json:
+/// `stem.unreadable-<seconds>.json`, or failing that with `-2`, `-3`… after
+/// it, so that one set aside before is never written over.
+fn aside_name(dir: &Path, stem: &str) -> String {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    free_name(dir, &format!("{stem}.unreadable-{stamp}.json"))
 }
 
 /// Write `name` in `dir` whole or not at all.
@@ -220,13 +252,14 @@ impl Store for DesktopStore {
                 return Vec::new();
             }
         };
-        match std::str::from_utf8(&raw).ok().and_then(parse_sessions) {
-            Some(sessions) => sessions,
-            None => {
-                self.set_aside(&path);
-                Vec::new()
-            }
+        let Some(read) = std::str::from_utf8(&raw).ok().and_then(read_history) else {
+            self.set_aside(&path);
+            return Vec::new();
+        };
+        if let Some(unread) = read.unread_json() {
+            self.keep_aside(unread.as_bytes());
         }
+        read.sessions
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
@@ -730,13 +763,15 @@ mod tests {
         assert_eq!(store.load_sessions().len(), 1);
 
         // JSON has no way to write a NaN, so such a session is written as null
-        // and dropped on the way back in rather than breaking the whole file.
+        // and dropped on the way back in rather than breaking the whole file:
+        // set aside, as any session that cannot be read is.
         let mut broken = session("2026-09-02");
         broken.accuracy = f64::NAN;
         store.save_sessions(&[broken, session("2026-09-03")]);
         let read = store.load_sessions();
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].date, "2026-09-03");
+        assert_eq!(set_aside(&dir).len(), 1);
 
         // A destination that cannot be replaced says so, and leaves no
         // scratch file behind.
@@ -746,7 +781,63 @@ mod tests {
             store.save_sessions(&[session("2026-09-04")]),
             HistorySaved::Failed(_)
         ));
-        assert_eq!(files(&dir), [SESSIONS]);
+        let mut left = files(&dir);
+        left.retain(|name| !name.starts_with("sessions.unreadable-"));
+        assert_eq!(left, [SESSIONS]);
+    }
+
+    /// What every file set aside from the history holds, oldest name first.
+    fn set_aside(dir: &TempDir) -> Vec<String> {
+        files(dir)
+            .into_iter()
+            .filter(|name| name.starts_with("sessions.unreadable-"))
+            .map(|name| fs::read_to_string(dir.0.join(name)).unwrap())
+            .collect()
+    }
+
+    /// Sessions that cannot be read are set aside before a save leaves them
+    /// out, once however often the history is read before it, and the rest
+    /// read as ever. They used to be dropped as they were read, and the
+    /// next save wrote the history without them.
+    #[test]
+    fn sessions_that_cannot_be_read_are_set_aside_before_a_save() {
+        let (dir, store) = store("unread");
+        fs::create_dir_all(&dir.0).unwrap();
+        let good = |date| serde_json::to_string(&session(date)).unwrap();
+        let raw = format!(
+            "[{},{{\"date\":\"nonsense\"}},{}]",
+            good("2026-09-01"),
+            good("2026-09-02")
+        );
+        fs::write(dir.0.join(SESSIONS), &raw).unwrap();
+
+        let read = store.load_sessions();
+        assert_eq!(read.len(), 2);
+        assert_eq!(set_aside(&dir), [r#"[{"date":"nonsense"}]"#]);
+        // Read again, as another copy opening would, before any save.
+        assert_eq!(DesktopStore::at(dir.0.clone()).load_sessions(), read);
+        assert_eq!(set_aside(&dir).len(), 1, "set aside once");
+
+        let mut more = read;
+        more.push(session("2026-09-03"));
+        assert_eq!(store.save_sessions(&more), HistorySaved::Stored { kept: 3 });
+        assert_eq!(store.load_sessions().len(), 3);
+        assert_eq!(set_aside(&dir), [r#"[{"date":"nonsense"}]"#]);
+    }
+
+    /// One history set aside is never written over by the next, however
+    /// soon after it that comes.
+    #[test]
+    fn a_history_set_aside_is_never_written_over_by_the_next() {
+        let (dir, store) = store("aside-twice");
+        fs::create_dir_all(&dir.0).unwrap();
+        for damaged in ["{ first", "{ second"] {
+            fs::write(dir.0.join(SESSIONS), damaged).unwrap();
+            assert!(store.load_sessions().is_empty());
+        }
+        let mut kept = set_aside(&dir);
+        kept.sort();
+        assert_eq!(kept, ["{ first", "{ second"]);
     }
 
     /// A backup goes into the backup folder, never over an earlier one, and

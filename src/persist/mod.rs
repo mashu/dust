@@ -25,6 +25,7 @@ use cw_core::{
     AutoLevelCounters, AutoLevelProgress, CountersKey, SessionResult, TrainingSettings,
     auto_level_progress,
 };
+use serde::Deserialize;
 
 /// How much history is kept: years of daily practice.
 pub const MAX_SESSIONS: usize = 500;
@@ -217,32 +218,97 @@ fn newest(sessions: &[SessionResult]) -> &[SessionResult] {
     &sessions[sessions.len().saturating_sub(MAX_SESSIONS)..]
 }
 
-/// Read a stored history, keeping every session that still parses.
+/// Read a stored history, keeping every session that still parses, and
+/// what is stored of every one that does not.
 ///
 /// `None` means the history as a whole is unreadable — not a list at all.
 /// That is different from an empty one: the caller has to set the stored copy
 /// aside before anything writes over it, or the first session finished after
-/// a bad write would replace years of history with itself.
+/// a bad write would replace years of history with itself. So too with the
+/// sessions that do not parse, which the next save would leave out.
 ///
 /// Every session is scored again as it is read, from what is stored of it, so
 /// the history is on one scale however the score has been worked out over the
 /// versions: sessions saved before speed counted read as they would score
 /// today.
-fn parse_sessions(raw: &str) -> Option<Vec<SessionResult>> {
+fn read_history(raw: &str) -> Option<ReadHistory> {
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
-    let mut sessions = match serde_json::from_str::<Vec<SessionResult>>(raw) {
-        Ok(sessions) => sessions,
-        Err(_) => serde_json::from_str::<Vec<serde_json::Value>>(raw)
-            .ok()?
-            .into_iter()
-            .filter_map(|value| serde_json::from_value(value).ok())
-            .collect(),
+    let (mut sessions, unread) = match serde_json::from_str::<Vec<SessionResult>>(raw) {
+        Ok(sessions) => (sessions, Vec::new()),
+        Err(_) => {
+            let (mut sessions, mut unread) = (Vec::new(), Vec::new());
+            for value in serde_json::from_str::<Vec<serde_json::Value>>(raw).ok()? {
+                match SessionResult::deserialize(&value) {
+                    Ok(session) => sessions.push(session),
+                    Err(_) => unread.push(value),
+                }
+            }
+            (sessions, unread)
+        }
     };
     for session in &mut sessions {
         session.score = session.points();
     }
-    Some(sessions)
+    Some(ReadHistory { sessions, unread })
+}
+
+/// The sessions of a stored history that still parse ([`read_history`]),
+/// where nothing is ever written over it: a backup file.
+fn parse_sessions(raw: &str) -> Option<Vec<SessionResult>> {
+    read_history(raw).map(|read| read.sessions)
+}
+
+/// A stored history as it was read ([`read_history`]).
+#[derive(Debug, PartialEq)]
+struct ReadHistory {
+    /// Every session that still parses, oldest first.
+    sessions: Vec<SessionResult>,
+    /// Every one that does not, as it is stored.
+    unread: Vec<serde_json::Value>,
+}
+
+impl ReadHistory {
+    /// The sessions that could not be read, as one JSON list to set aside;
+    /// none when every one could.
+    #[cfg(any(feature = "web", feature = "native-runtime", test))]
+    fn unread_json(&self) -> Option<String> {
+        if self.unread.is_empty() {
+            return None;
+        }
+        serde_json::to_string(&self.unread).ok()
+    }
+}
+
+/// How many copies of what could not be read a browser keeps set aside, at
+/// most. Its room runs out well before.
+#[cfg(any(feature = "web", test))]
+const MAX_SET_ASIDE: usize = 20;
+
+/// Keep `raw`, what could not be read of a history, under the first of
+/// `key`, `key_2`, `key_3`… that is free: a copy set aside before is never
+/// written over, and one set aside already is not kept twice. Says whether
+/// it is kept. `get` reads a key, failing as `Err`; `set` writes one, and
+/// says whether it took.
+#[cfg(any(feature = "web", test))]
+fn keep_aside(
+    key: &str,
+    raw: &str,
+    get: impl Fn(&str) -> Result<Option<String>, ()>,
+    set: impl Fn(&str, &str) -> bool,
+) -> bool {
+    (1..=MAX_SET_ASIDE)
+        .map(|n| match n {
+            1 => key.to_string(),
+            n => format!("{key}_{n}"),
+        })
+        .find_map(|slot| match get(&slot) {
+            Ok(Some(kept)) if kept == raw => Some(true),
+            Ok(Some(_)) => None,
+            Ok(None) => Some(set(&slot, raw)),
+            Err(()) => Some(false),
+        })
+        .unwrap_or(false)
 }
 
 /// Load settings without throwing away everything for one bad field.
@@ -612,6 +678,17 @@ pub(crate) mod tests {
         let recovered = parse_sessions(&raw).expect("a list");
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].date, "2026-09-01");
+        // What it dropped is kept as it was stored, to be set aside.
+        let read = read_history(&raw).expect("a list");
+        assert_eq!(read.unread, [serde_json::json!({ "date": "nonsense" })]);
+        assert_eq!(
+            read.unread_json().as_deref(),
+            Some(r#"[{"date":"nonsense"}]"#)
+        );
+        assert_eq!(
+            read_history(&format!("[{good}]")).unwrap().unread_json(),
+            None
+        );
         // A whole list reads in one go.
         let both = format!("[{good},{good}]");
         assert_eq!(parse_sessions(&both).map(|s| s.len()), Some(2));
@@ -620,6 +697,40 @@ pub(crate) mod tests {
         assert!(parse_sessions("{}").is_none());
         assert!(parse_sessions("").is_none());
         assert_eq!(parse_sessions("[]"), Some(Vec::new()));
+    }
+
+    /// What could not be read is set aside under a key of its own: never
+    /// over a copy set aside before, and never twice.
+    #[test]
+    fn what_could_not_be_read_is_set_aside_beside_what_was_before() {
+        let held = std::cell::RefCell::new(std::collections::BTreeMap::<String, String>::new());
+        let room = std::cell::Cell::new(true);
+        let get = |key: &str| Ok(held.borrow().get(key).cloned());
+        let set = |key: &str, raw: &str| {
+            room.get() && held.borrow_mut().insert(key.into(), raw.into()).is_none()
+        };
+        assert!(keep_aside("aside", "first", get, set));
+        assert!(keep_aside("aside", "second", get, set));
+        assert!(keep_aside("aside", "first", get, set), "kept already");
+        let kept = |key: &str| held.borrow().get(key).cloned();
+        assert_eq!(kept("aside").as_deref(), Some("first"));
+        assert_eq!(kept("aside_2").as_deref(), Some("second"));
+        assert_eq!(held.borrow().len(), 2);
+        // No room, or a store that cannot be read: not kept.
+        room.set(false);
+        assert!(!keep_aside("aside", "third", get, set));
+        assert!(!keep_aside("aside", "third", |_| Err(()), set));
+        room.set(true);
+        for n in 3..=MAX_SET_ASIDE {
+            assert!(keep_aside("aside", &n.to_string(), get, set));
+        }
+        assert!(!keep_aside("aside", "one too many", get, set));
+        assert_eq!(held.borrow().len(), MAX_SET_ASIDE);
+        assert_eq!(
+            kept("aside").as_deref(),
+            Some("first"),
+            "never written over"
+        );
     }
 
     /// A browser's history is capped by room. Large sessions — two hundred
