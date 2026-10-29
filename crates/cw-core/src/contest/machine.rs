@@ -540,6 +540,12 @@ impl Sounded {
             times,
         })
     }
+
+    /// When the last of it reached you, in run time.
+    fn heard_by(&self) -> u64 {
+        let last = self.ends.last().copied().unwrap_or(0);
+        self.from + u64::from(last) + u64::from(self.latency_ms)
+    }
 }
 
 /// A copy as a key read it: its text, and its keys, in run time.
@@ -686,6 +692,22 @@ impl Heard {
         self.exch_voice = now.exch_voice;
         self.call_shown = now.call_shown;
         self.exch_shown = now.exch_shown;
+    }
+
+    /// Forget what was heard of it after run time `run`, where the run's
+    /// clock holds: a turn whose sound failed gives the time since it first
+    /// started back as paused, and nothing heard may lie ahead of the
+    /// clock, or a copy would be timed from a moment yet to come.
+    fn forget_after(&mut self, run: u64) {
+        self.first = self.first.filter(|first| *first <= run);
+        self.call_ends.retain(|end| *end <= run);
+        self.exch_ends.retain(|end| *end <= run);
+        self.call_sounded = self
+            .call_sounded
+            .take()
+            .filter(|sounded| sounded.heard_by() <= run);
+        self.exch_sounded
+            .retain(|(_, sounded)| sounded.heard_by() <= run);
     }
 
     /// The repeats of its call and of its exchange you asked for and heard.
@@ -4375,12 +4397,13 @@ impl<S: CallSource> ContestMachine<S> {
     }
 
     /// The run pauses for `why`, its clock held at run time `run_ms` and the
-    /// turn that was on the air dealt with: a key after it says nothing of
-    /// a sound heard before it ([`Sends`]), and no timer runs. Pause and a
-    /// failed sound both come here.
+    /// turn that was on the air dealt with: nothing heard lies after it, a
+    /// key after it says nothing of a sound heard before it ([`Sends`]),
+    /// and no timer runs. Pause and a failed sound both come here.
     fn hold(&mut self, why: PauseWhy, run_ms: u64) {
         for station in &mut self.stations {
             let heard = &mut station.heard;
+            heard.forget_after(run_ms);
             heard.call_sends.paused(run_ms);
             heard.exch_sends.paused(run_ms);
         }
@@ -12334,6 +12357,62 @@ mod tests {
         runtime.apply(ContestEvent::FinishNow);
         let (result, _) = result(&runtime);
         assert_eq!(result.group_timings[0].char_times, None);
+    }
+
+    /// A failed turn gives the time since it first started back as paused,
+    /// and what was heard in that time with it: an exchange heard whole on
+    /// a retry lies ahead of the clock taken back, so the copy of it sent
+    /// again after Resume is timed from the send heard then, not cut to the
+    /// fastest a person types.
+    #[test]
+    fn nothing_heard_in_a_failed_turn_lies_ahead_of_the_clock() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        let turn = runtime.last_turn().clone();
+        let keyed = runtime.now;
+        runtime.sound_fails(turn.id);
+        runtime.run_to(keyed + 100);
+        // Tried again 2.5 s on, its exchange heard whole on the retry.
+        let retry = keyed + 2_500;
+        runtime.now = retry;
+        runtime.apply(ContestEvent::TurnStarted {
+            id: turn.id,
+            heard_from: MonoMs(retry),
+            output_from: MonoMs(retry),
+        });
+        let end = retry + whole_ms(sent_by(&turn, 0)[0].end_sec);
+        runtime.run_to(end);
+        assert_eq!(runtime.playing_id(), Some(turn.id), "still on the air");
+        assert_eq!(runtime.machine.stations[0].heard.exch_ends.len(), 1);
+        runtime.now = end + 100;
+        runtime.apply(ContestEvent::TurnFailed { id: turn.id });
+        assert!(paused_by_sound(&runtime));
+        let held = view(&runtime).run_ms(MonoMs(runtime.now));
+        let heard = &runtime.machine.stations[0].heard;
+        assert!(
+            heard
+                .exch_ends
+                .iter()
+                .chain(&heard.call_ends)
+                .chain(&heard.first)
+                .all(|at| *at <= held),
+            "{heard:?} past {held}"
+        );
+        runtime.now += 3_000;
+        runtime.apply(ContestEvent::Resume);
+        let again = next_turn(&mut runtime);
+        let nr = serial(replies(&again)[0]);
+        let end = runtime.now + whole_ms(sent_by(&again, 0)[0].end_sec);
+        runtime.run_to(end);
+        runtime.now = end + 800;
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
+        assert_eq!(kept(&result)[1], (nr.as_str(), nr.as_str(), 1));
+        assert_eq!(result.group_timings[1].time_to_complete_ms, 800.0);
     }
 
     /// With Show copy, what you copy may be read off the screen: nothing of
