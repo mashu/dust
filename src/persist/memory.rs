@@ -15,7 +15,8 @@ pub struct MemoryStore {
     theme: RefCell<String>,
     tutorial_done: Cell<bool>,
     settings: RefCell<Option<TrainingSettings>>,
-    sessions: RefCell<Vec<SessionResult>>,
+    /// The history, once one has been stored.
+    sessions: RefCell<Option<Vec<SessionResult>>>,
     counters: RefCell<BTreeMap<CountersKey, AutoLevelCounters>>,
     /// How many times the settings were written, for a test that cares how
     /// often that happens.
@@ -71,7 +72,7 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn load_sessions(&self) -> Vec<SessionResult> {
+    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
         self.sessions.borrow().clone()
     }
 
@@ -82,7 +83,7 @@ impl Store for MemoryStore {
         let newest = newest(sessions);
         let kept =
             &newest[newest.len() - self.room.get().unwrap_or(usize::MAX).min(newest.len())..];
-        *self.sessions.borrow_mut() = kept.to_vec();
+        *self.sessions.borrow_mut() = Some(kept.to_vec());
         if kept.len() < newest.len() {
             HistorySaved::Squeezed {
                 kept: kept.len(),

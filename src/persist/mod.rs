@@ -17,6 +17,7 @@ pub mod memory;
 #[cfg(feature = "web")]
 mod web;
 
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -52,8 +53,14 @@ pub trait Store {
     fn save_settings(&self, settings: &TrainingSettings) {
         let _ = self.write_settings(settings);
     }
+    /// Every stored session that can still be read, oldest first; `None`
+    /// when no history is stored, or none that can be read at all, which
+    /// is not the same as one every session was deleted from.
+    fn read_sessions(&self) -> Option<Vec<SessionResult>>;
     /// Every stored session that can still be read, oldest first.
-    fn load_sessions(&self) -> Vec<SessionResult>;
+    fn load_sessions(&self) -> Vec<SessionResult> {
+        self.read_sessions().unwrap_or_default()
+    }
     /// Store the newest of `sessions`, up to [`MAX_SESSIONS`].
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved;
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters;
@@ -405,6 +412,76 @@ pub fn merge_settings(
         .map_or_else(|_| ours.clone(), TrainingSettings::clamp)
 }
 
+/// What tells one session of the history from another: when it finished,
+/// and on what day.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SessionKey(u64, String);
+
+impl SessionKey {
+    pub fn of(session: &SessionResult) -> Self {
+        Self(session.timestamp, session.date.clone())
+    }
+}
+
+/// `theirs`, the history stored now, with what `ours` changed from `base`
+/// done to it.
+///
+/// `base` is the history as this copy of the app last read or wrote it.
+/// Another tab, window or copy may have stored sessions since, or deleted
+/// some, and a copy that wrote its whole history back would lose the one
+/// and bring back the other. So every session added here is added, every
+/// one deleted here is deleted, and one changed here — filled in by a
+/// restore — is kept as it is here; whatever another copy added, deleted
+/// or changed stands. Sessions are known by their [`SessionKey`], and those
+/// alike in it by their order.
+pub fn merge_history(
+    base: &[SessionResult],
+    ours: &[SessionResult],
+    theirs: &[SessionResult],
+) -> Vec<SessionResult> {
+    let base: HashMap<_, _> = keyed(base).collect();
+    let stored: HashMap<_, _> = keyed(theirs).collect();
+    let mut merged = Vec::with_capacity(theirs.len().max(ours.len()));
+    let mut here = HashSet::new();
+    for (key, session) in keyed(ours) {
+        let kept = match (base.get(&key), stored.get(&key)) {
+            // Added here.
+            (None, _) => Some(session),
+            // Deleted elsewhere.
+            (Some(_), None) => None,
+            // Changed here, or else as it is stored.
+            (Some(was), Some(stored)) => Some(if session == *was { *stored } else { session }),
+        };
+        merged.extend(kept.cloned());
+        here.insert(key);
+    }
+    let before = merged.len();
+    merged.extend(
+        keyed(theirs)
+            .filter(|(key, _)| !here.contains(key) && !base.contains_key(key))
+            .map(|(_, session)| session.clone()),
+    );
+    // Added elsewhere: in among the rest, by when each finished.
+    if merged.len() > before {
+        merged.sort_by_key(|session| session.timestamp);
+    }
+    merged
+}
+
+/// Each of `sessions` by its key, and which of those alike in it it is.
+fn keyed(
+    sessions: &[SessionResult],
+) -> impl Iterator<Item = ((SessionKey, usize), &SessionResult)> {
+    let mut seen: HashMap<SessionKey, usize> = HashMap::new();
+    sessions.iter().map(move |session| {
+        let key = SessionKey::of(session);
+        let alike = seen.entry(key.clone()).or_default();
+        let nth = *alike;
+        *alike += 1;
+        ((key, nth), session)
+    })
+}
+
 /// The newest of `sessions` whose JSON fits in `budget` bytes, as one JSON
 /// list, and how many it holds.
 ///
@@ -643,6 +720,62 @@ pub(crate) mod tests {
         let out = merge_settings(&contest, &on(CharSetMode::Koch), &theirs);
         assert_eq!(out.curriculum.char_set_mode, CharSetMode::Koch);
         assert_eq!(out.curriculum.num_groups, 9);
+    }
+
+    /// A session finished at `timestamp`, a day of its own.
+    fn at(timestamp: u64) -> SessionResult {
+        SessionResult {
+            timestamp,
+            ..session(&format!("2026-10-{timestamp:02}"))
+        }
+    }
+
+    fn stamps(sessions: &[SessionResult]) -> Vec<u64> {
+        sessions.iter().map(|session| session.timestamp).collect()
+    }
+
+    /// A history merge does to what is stored what this copy did, and keeps
+    /// what another copy did: each added, each deleted, in the order they
+    /// were practised.
+    #[test]
+    fn a_history_merge_keeps_what_another_copy_added_and_deleted() {
+        let base = [at(1), at(2), at(3)];
+        // Here 2 was deleted and 4 added; elsewhere 3 deleted and 5 added.
+        let ours = [at(1), at(3), at(4)];
+        let theirs = [at(1), at(2), at(5)];
+        assert_eq!(stamps(&merge_history(&base, &ours, &theirs)), [1, 4, 5]);
+        // Nothing stored elsewhere: this copy's history, as it is.
+        assert_eq!(merge_history(&base, &ours, &base), ours);
+        // Nothing changed here: what is stored, as it is.
+        assert_eq!(merge_history(&base, &base, &theirs), theirs);
+        // Both added the same session, restoring the same backup: once.
+        assert_eq!(stamps(&merge_history(&[], &[at(7)], &[at(7)])), [7]);
+    }
+
+    /// A session filled in on one side — a run's log put back by a restore —
+    /// is kept filled in, whichever side did it.
+    #[test]
+    fn a_history_merge_keeps_a_session_filled_in_on_either_side() {
+        let mut filled = at(1);
+        filled.accuracy = 0.5;
+        let merged = merge_history(&[at(1)], std::slice::from_ref(&filled), &[at(1)]);
+        assert_eq!(merged, [filled.clone()]);
+        let merged = merge_history(&[at(1)], &[at(1)], std::slice::from_ref(&filled));
+        assert_eq!(merged, [filled]);
+    }
+
+    /// Sessions alike in when and on what day they finished are told apart
+    /// by their order: deleting one leaves the other.
+    #[test]
+    fn a_history_merge_tells_sessions_alike_apart() {
+        let first = at(1);
+        let mut second = at(1);
+        second.accuracy = 0.5;
+        let both = [first.clone(), second.clone()];
+        let merged = merge_history(&both, std::slice::from_ref(&second), &both);
+        assert_eq!(merged, [second]);
+        let merged = merge_history(&both, &both, std::slice::from_ref(&first));
+        assert_eq!(merged, [first]);
     }
 
     pub(super) fn session(date: &str) -> SessionResult {

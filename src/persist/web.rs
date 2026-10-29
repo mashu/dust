@@ -189,13 +189,9 @@ impl Store for WebStore {
             .map_err(|_| "this browser's storage would not take them".into())
     }
 
-    fn load_sessions(&self) -> Vec<SessionResult> {
-        let Some(store) = storage() else {
-            return Vec::new();
-        };
-        let Ok(Some(raw)) = store.get_item(SESSIONS_KEY) else {
-            return Vec::new();
-        };
+    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
+        let store = storage()?;
+        let raw = store.get_item(SESSIONS_KEY).ok().flatten()?;
         // Copies set aside go beside any set aside before, each under a key
         // of its own, as far as the room goes.
         let get = |key: &str| store.get_item(key).map_err(|_| ());
@@ -209,7 +205,7 @@ impl Store for WebStore {
             } else {
                 self.history_held.set(true);
             }
-            return Vec::new();
+            return None;
         };
         // The sessions that do not read are set aside before the next save
         // leaves them out; where they cannot be, nothing is saved over them.
@@ -218,7 +214,7 @@ impl Store for WebStore {
         {
             self.history_held.set(true);
         }
-        read.sessions
+        Some(read.sessions)
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {

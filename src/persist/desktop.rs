@@ -240,26 +240,26 @@ impl Store for DesktopStore {
         self.write(SETTINGS, &raw).map_err(|err| err.to_string())
     }
 
-    fn load_sessions(&self) -> Vec<SessionResult> {
+    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
         let path = self.root.join(SESSIONS);
         let raw = match fs::read(&path) {
             Ok(raw) => raw,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
             Err(err) => {
                 // There and unreadable: not a history to start afresh over.
                 eprintln!("could not read the history: {err}");
                 self.history_held.set(true);
-                return Vec::new();
+                return None;
             }
         };
         let Some(read) = std::str::from_utf8(&raw).ok().and_then(read_history) else {
             self.set_aside(&path);
-            return Vec::new();
+            return None;
         };
         if let Some(unread) = read.unread_json() {
             self.keep_aside(unread.as_bytes());
         }
-        read.sessions
+        Some(read.sessions)
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
