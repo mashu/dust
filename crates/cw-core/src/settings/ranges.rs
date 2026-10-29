@@ -147,6 +147,29 @@ impl TrainingSettings {
         }
     }
 
+    /// The effective speeds the spacing is sent at, slowest and fastest,
+    /// where the range set reaches above the fastest character speed. A
+    /// station's spacing is never faster than its characters
+    /// ([`crate::timing::resolve_station`]), so whatever of the range is
+    /// above Character speed goes at Character speed, and is never heard as
+    /// set. None while the spacing is tied to the characters, or all of the
+    /// range can be heard.
+    pub fn effective_wpm_held(&self) -> Option<(f64, f64)> {
+        if self.playback.link_char_to_effective {
+            return None;
+        }
+        let top = |range: RangeValues| {
+            if range.linked {
+                range.min
+            } else {
+                range.max.max(range.min)
+            }
+        };
+        let fastest = top(self.range(RangeSetting::CharWpm));
+        let effective = self.range(RangeSetting::EffectiveWpm);
+        (top(effective) > fastest).then(|| (effective.min.min(fastest), fastest))
+    }
+
     /// Farnsworth off: effective speed simply mirrors character speed.
     pub fn sync_effective_to_char(&mut self) {
         if self.playback.link_char_to_effective {

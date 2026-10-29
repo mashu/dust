@@ -433,7 +433,7 @@ pub fn speed_settings() -> Element {
             dt { "Character speed" }
             dd { "How fast each character is sent, in words a minute. A range draws each group's speed from it." }
             dt { "Effective speed" }
-            dd { "Farnsworth: the characters stay fast and the gaps between them stretch, so the overall pace is slower." }
+            dd { "Farnsworth: the characters stay fast and the gaps between them stretch, so the overall pace is slower. The gaps are never faster than the characters: whatever is set above Character speed goes at Character speed, and the card says what it is used as." }
             dt { "Adapt speed to me" }
             dd { "Within the range: faster while you copy the characters, slower when you miss them." }
             dt { "Operator fists" }

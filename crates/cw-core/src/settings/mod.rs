@@ -1441,6 +1441,28 @@ mod tests {
         assert_eq!(s.playback.effective_wpm_min, 9.0);
     }
 
+    /// The spacing is never faster than the characters, so an effective
+    /// speed set above the fastest character speed is sent at that, which is
+    /// what the Speed card says it is used as; tied, or all of it under the
+    /// characters, it is heard as set.
+    #[test]
+    fn an_effective_speed_above_the_characters_is_held_to_them() {
+        let mut s = TrainingSettings::default();
+        assert_eq!(s.effective_wpm_held(), None, "tied");
+        s.playback.link_char_to_effective = false;
+        s.set_range_linked(RangeSetting::CharWpm, true);
+        s.set_range_min(RangeSetting::CharWpm, 20.0);
+        s.set_range_min(RangeSetting::EffectiveWpm, 25.0);
+        s.set_range_max(RangeSetting::EffectiveWpm, 35.0);
+        assert_eq!(s.effective_wpm_held(), Some((20.0, 20.0)));
+        assert!(!crate::speed::SpeedPath::of(&s).has_room());
+        s.set_range_min(RangeSetting::EffectiveWpm, 12.0);
+        assert_eq!(s.effective_wpm_held(), Some((12.0, 20.0)));
+        assert!(crate::speed::SpeedPath::of(&s).has_room());
+        s.set_range_max(RangeSetting::EffectiveWpm, 20.0);
+        assert_eq!(s.effective_wpm_held(), None);
+    }
+
     #[test]
     fn switching_the_character_set_resets_the_practice_window() {
         let mut s = TrainingSettings::default();

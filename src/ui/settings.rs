@@ -26,7 +26,7 @@ use crate::ui::settings_charset::CharsetCard;
 use crate::ui::settings_station::StationCard;
 use crate::ui::widgets::{
     CardHead, FoldPanel, Icon, IconName, NumberField, SectionReset, Seg, SettingsRange,
-    SliderField, Switch, control_id, db_share, html_bool, range_label, share_db,
+    SliderField, Switch, control_id, db_share, html_bool, pretty_number, range_label, share_db,
 };
 
 /// What an aim is called on screen.
@@ -527,16 +527,38 @@ struct Speed {
     aim: Aim,
     /// The ranges are a contest's callers'.
     contest: bool,
+    /// The effective speeds the spacing is sent at, where some of the range
+    /// set is above the fastest character speed and goes at that.
+    held: Option<(f64, f64)>,
+    /// The fastest character speed.
+    fastest_char: f64,
 }
 
 /// Why an adaptive speed switch does nothing with one speed set, naming
-/// only the ranges the card shows: tied, Effective speed is hidden.
-fn one_speed(tied: bool) -> &'static str {
-    if tied {
-        "Give Character speed a range to use this: one speed leaves nothing to adapt."
+/// only the ranges the card shows: tied, Effective speed is hidden. An
+/// effective speed held down to a single character speed is a range that
+/// leaves one speed all the same, and says so.
+fn one_speed(speed: &Speed) -> String {
+    if speed.tied {
+        "Give Character speed a range to use this: one speed leaves nothing to adapt.".to_string()
+    } else if speed.held.is_some() {
+        let fastest = pretty_number(speed.fastest_char);
+        format!(
+            "Effective speed is never faster than Character speed, so it is sent at {fastest}\u{a0}WPM and one speed is left: give Character speed a range, or Effective speed one under {fastest}\u{a0}WPM, to use this."
+        )
     } else {
-        "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt."
+        "Give Character speed or Effective speed a range to use this: one speed leaves nothing to adapt.".to_string()
     }
+}
+
+/// What an effective speed held down to the characters is used as, under
+/// its range: "Used as 20 WPM: the spacing is never faster than Character
+/// speed."
+fn held_note((slowest, fastest): (f64, f64)) -> String {
+    format!(
+        "Used as {}\u{a0}WPM: the spacing is never faster than Character speed.",
+        range_label(slowest, fastest)
+    )
 }
 
 #[component]
@@ -555,6 +577,12 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
             aim_here: aim_section(&all) == SettingsSection::Speed,
             aim: all.curriculum.aim,
             contest,
+            held: all.effective_wpm_held(),
+            fastest_char: if p.link_char_wpm {
+                p.char_wpm_min
+            } else {
+                p.char_wpm_max.max(p.char_wpm_min)
+            },
         }
     })();
     let note = if speed.contest {
@@ -592,6 +620,9 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                     step: 1.0,
                     hint: "Farnsworth: characters stay fast, the gaps between them stretch.",
                 }
+                if let Some(held) = speed.held {
+                    p { id: "effective-held", class: "muted hint small", "{held_note(held)}" }
+                }
             }
             if speed.contest {
                 p { class: "muted hint small",
@@ -601,8 +632,9 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                     title: "Adapt callers' speed to me",
                     description: if speed.room {
                         "New callers come faster while you copy calls and numbers clean, slower when you miss them; those already calling keep their speed. Your copy speed is under Stats."
+                            .to_string()
                     } else {
-                        one_speed(speed.tied)
+                        one_speed(&speed)
                     },
                     checked: speed.adaptive,
                     onchange: move |on| settings.write().contest.contest_adapt_speed = on,
@@ -612,8 +644,9 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                     title: "Adapt speed to me",
                     description: if speed.room {
                         "Within these speeds: faster while you copy the characters, slower when you miss them. Your copy speed is under Stats."
+                            .to_string()
                     } else {
-                        one_speed(speed.tied)
+                        one_speed(&speed)
                     },
                     checked: speed.adaptive,
                     onchange: move |on| settings.write().playback.adaptive_speed = on,

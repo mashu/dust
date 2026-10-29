@@ -1213,6 +1213,53 @@ fn the_callers_adaptive_speed_is_on_the_speed_card_in_contest_mode() {
     });
 }
 
+/// An effective speed set above the fastest character speed is sent at
+/// that, as the spacing is never faster than the characters. The card says
+/// what it is used as under its range, and the adapt switch why a range
+/// there leaves one speed, rather than asking for a range it has.
+#[test]
+fn an_effective_speed_above_the_characters_says_what_it_is_used_as() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.char_wpm_max = 20.0;
+        settings.playback.link_char_wpm = true;
+        settings.playback.link_char_to_effective = false;
+        settings.playback.effective_wpm_min = 25.0;
+        settings.playback.effective_wpm_max = 35.0;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(ui.has("25–35 WPM"), "the range as set");
+        let held = |ui: &Ui| {
+            ui.html()
+                .split("id=\"effective-held\"")
+                .nth(1)
+                .map(str::to_string)
+        };
+        assert!(
+            held(&ui).is_some_and(|line| line.contains(
+                ">Used as 20\u{a0}WPM: the spacing is never faster than Character speed.<"
+            )),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has(
+            "Effective speed is never faster than Character speed, so it is sent at 20\u{a0}WPM and one speed is left: give Character speed a range, or Effective speed one under 20\u{a0}WPM, to use this."
+        ));
+        assert!(!ui.has("Give Character speed or Effective speed a range"));
+
+        // Part of it under the characters is a range to adapt in, used up
+        // to them.
+        ui.commit("from-effective-speed", "12");
+        assert!(held(&ui).is_some_and(|line| line.contains(">Used as 12–20\u{a0}WPM")));
+        assert!(ui.has("Within these speeds: faster while you copy the characters"));
+
+        // All of it under them is heard as set, and nothing is said.
+        ui.commit("to-effective-speed", "18");
+        assert!(!ui.shows("effective-held"));
+    });
+}
+
 /// Your sending is on the Tone and volume card in Contest mode only, in
 /// decibels from the loudest down to off, at -3 dB until you set it; it
 /// is stored, a preset leaves it alone, and the card's reset puts it back.
