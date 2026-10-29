@@ -384,7 +384,8 @@ pub(super) struct Caller {
     /// before it has yours ([`LID_EARLY`]), and takes a partial while it
     /// calls as its call sent wrong.
     early: bool,
-    /// How many times it has sent its exchange.
+    /// How many times it has sent its exchange: counted as each is planned,
+    /// and taken back for one that never went out ([`Self::unsent`]).
     exchanges_sent: u32,
     /// It has had your exchange in this QSO, though it may have gone back
     /// to calling since: the exchange it sends when it takes yours again
@@ -1102,6 +1103,15 @@ impl Caller {
             CallerState::Done | CallerState::Gone => return None,
         };
         Some(said)
+    }
+
+    /// A reply it planned, `says`, never went out: cut before it began, or
+    /// lost with a failed sound. An exchange in it was not sent, so the next
+    /// goes as that one would have, with a word in front if it is the first.
+    pub(super) fn unsent(&mut self, says: Says) {
+        if matches!(says, Says::Exchange | Says::CorrectionAndExchange) {
+            self.exchanges_sent = self.exchanges_sent.saturating_sub(1);
+        }
     }
 
     /// Its exchange's tokens, once it has drawn them ([`Self::exchange`]).

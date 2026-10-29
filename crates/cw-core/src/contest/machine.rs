@@ -540,6 +540,12 @@ impl Sounded {
             times,
         })
     }
+
+    /// When the last of it reached you, in run time.
+    fn heard_by(&self) -> u64 {
+        let last = self.ends.last().copied().unwrap_or(0);
+        self.from + u64::from(last) + u64::from(self.latency_ms)
+    }
 }
 
 /// A copy as a key read it: its text, and its keys, in run time.
@@ -686,6 +692,22 @@ impl Heard {
         self.exch_voice = now.exch_voice;
         self.call_shown = now.call_shown;
         self.exch_shown = now.exch_shown;
+    }
+
+    /// Forget what was heard of it after run time `run`, where the run's
+    /// clock holds: a turn whose sound failed gives the time since it first
+    /// started back as paused, and nothing heard may lie ahead of the
+    /// clock, or a copy would be timed from a moment yet to come.
+    fn forget_after(&mut self, run: u64) {
+        self.first = self.first.filter(|first| *first <= run);
+        self.call_ends.retain(|end| *end <= run);
+        self.exch_ends.retain(|end| *end <= run);
+        self.call_sounded = self
+            .call_sounded
+            .take()
+            .filter(|sounded| sounded.heard_by() <= run);
+        self.exch_sounded
+            .retain(|(_, sounded)| sounded.heard_by() <= run);
     }
 
     /// The repeats of its call and of its exchange you asked for and heard.
@@ -943,6 +965,9 @@ struct Air {
     my_chars: Vec<(usize, f64)>,
     /// Its callers' segments, in order, and what each says.
     replies: Vec<(Replying, Says)>,
+    /// How many of `replies`, the first, go on from a turn keyed over:
+    /// what they send began to go out there.
+    carried: usize,
     /// What each of its segments sends, the whole of it, by its place among
     /// them: a rest carried on from an earlier turn is the rest of this,
     /// what Show copy shows once it ends.
@@ -2697,6 +2722,7 @@ impl<S: CallSource> ContestMachine<S> {
         // their start charged already, and send nothing more till they are
         // done.
         let mut busy = Vec::new();
+        let carried = mine.callers.len();
         for over in mine.callers {
             let station = over.reply.station;
             let caller = &self.stations[station].caller;
@@ -2833,6 +2859,7 @@ impl<S: CallSource> ContestMachine<S> {
             my_chars,
             counted,
             replies,
+            carried,
             texts,
             pending: mine.pending,
             checks_at_sec,
@@ -3008,6 +3035,12 @@ impl<S: CallSource> ContestMachine<S> {
         let at = splice.map_or(run_now, |splice| splice.run);
         self.count_heard(&mut air, Some(at), at, effects);
         self.give_way(at);
+        // A reply yet to begin goes no further: nothing in it was sent.
+        for ((reply, says), counted) in air.replies.iter().zip(&air.counted) {
+            if *counted == Counted::Nothing {
+                self.stations[reply.station].caller.unsent(*says);
+            }
+        }
         let heard_run = air.heard_run();
         let callers = if self.style == RunStyle::Pileup {
             self.overlapping(&air, at)
@@ -4359,22 +4392,39 @@ impl<S: CallSource> ContestMachine<S> {
                 }
             });
         self.cut_short.extend(again);
+        // Nor did anything it planned go out; a send carried on from a turn
+        // keyed over began there.
+        for (reply, says) in air.replies.iter().skip(air.carried) {
+            self.stations[reply.station].caller.unsent(*says);
+        }
         let mut effects = Vec::new();
         // Nothing of a send that failed was heard; the QSOs it logged stand.
         self.resolve(&air.pending, &mut effects);
-        self.timers = Timers::default();
+        self.hold(PauseWhy::Sound, run_ms);
         if self.time_up(now) {
             effects.extend(self.finish(now));
             return effects;
         }
-        self.phase = ContestPhase::Paused {
-            why: PauseWhy::Sound,
-        };
         effects.insert(0, ContestEffect::ReleaseAudio);
         effects.push(ContestEffect::Announce(
             "Sound stopped — Resume to carry on".to_string(),
         ));
         effects
+    }
+
+    /// The run pauses for `why`, its clock held at run time `run_ms` and the
+    /// turn that was on the air dealt with: nothing heard lies after it, a
+    /// key after it says nothing of a sound heard before it ([`Sends`]),
+    /// and no timer runs. Pause and a failed sound both come here.
+    fn hold(&mut self, why: PauseWhy, run_ms: u64) {
+        for station in &mut self.stations {
+            let heard = &mut station.heard;
+            heard.forget_after(run_ms);
+            heard.call_sends.paused(run_ms);
+            heard.exch_sends.paused(run_ms);
+        }
+        self.timers = Timers::default();
+        self.phase = ContestPhase::Paused { why };
     }
 
     fn pause(&mut self, why: PauseWhy, at: MonoMs, now: MonoMs) -> Vec<ContestEffect> {
@@ -4407,14 +4457,7 @@ impl<S: CallSource> ContestMachine<S> {
                     let carried = self.cut(air, run_ms, false, &mut effects);
                     self.resolve(&carried.pending, &mut effects);
                 }
-                // What reached you by the pause counted, a key after it says
-                // nothing of a sound heard before it.
-                for station in &mut self.stations {
-                    station.heard.call_sends.paused(run_ms);
-                    station.heard.exch_sends.paused(run_ms);
-                }
-                self.timers = Timers::default();
-                self.phase = ContestPhase::Paused { why };
+                self.hold(why, run_ms);
                 effects.push(ContestEffect::Announce("Paused".to_string()));
                 effects
             }
@@ -12299,6 +12342,135 @@ mod tests {
         // Nothing of its keys says how soon it was recognised, so nothing of
         // it is kept.
         assert_eq!(result.group_timings[0].char_times, None);
+    }
+
+    /// The sound failing pauses the run as Pause does: a key after Resume
+    /// says nothing of a call heard before the failure either.
+    #[test]
+    fn a_key_after_a_sound_failure_is_not_timed_for_a_call_heard_before_it() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        runtime.finish_turn();
+        assert!(runtime.machine.stations[0].heard.call_sounded.is_some());
+        runtime.key(OpKey::Cq, "", "");
+        let cq = runtime.last_turn().id;
+        runtime.sound_fails(cq);
+        runtime.run_to(runtime.now + 100);
+        assert_eq!(runtime.playing_id(), Some(cq), "still on the air");
+        runtime.apply(ContestEvent::TurnFailed { id: cq });
+        assert!(paused_by_sound(&runtime));
+        runtime.now += 60_000;
+        runtime.apply(ContestEvent::Resume);
+        runtime.now += 300;
+        runtime.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(typed(&[(EntryField::Call, "K5XYZ", runtime.now)])),
+        });
+        let nr = serial(replies(runtime.last_turn())[0]);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
+        assert_eq!(result.group_timings[0].char_times, None);
+    }
+
+    /// A failed turn gives the time since it first started back as paused,
+    /// and what was heard in that time with it: an exchange heard whole on
+    /// a retry lies ahead of the clock taken back, so the copy of it sent
+    /// again after Resume is timed from the send heard then, not cut to the
+    /// fastest a person types.
+    #[test]
+    fn nothing_heard_in_a_failed_turn_lies_ahead_of_the_clock() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", "");
+        let turn = runtime.last_turn().clone();
+        let keyed = runtime.now;
+        runtime.sound_fails(turn.id);
+        runtime.run_to(keyed + 100);
+        // Tried again 2.5 s on, its exchange heard whole on the retry.
+        let retry = keyed + 2_500;
+        runtime.now = retry;
+        runtime.apply(ContestEvent::TurnStarted {
+            id: turn.id,
+            heard_from: MonoMs(retry),
+            output_from: MonoMs(retry),
+        });
+        let end = retry + whole_ms(sent_by(&turn, 0)[0].end_sec);
+        runtime.run_to(end);
+        assert_eq!(runtime.playing_id(), Some(turn.id), "still on the air");
+        assert_eq!(runtime.machine.stations[0].heard.exch_ends.len(), 1);
+        runtime.now = end + 100;
+        runtime.apply(ContestEvent::TurnFailed { id: turn.id });
+        assert!(paused_by_sound(&runtime));
+        let held = view(&runtime).run_ms(MonoMs(runtime.now));
+        let heard = &runtime.machine.stations[0].heard;
+        assert!(
+            heard
+                .exch_ends
+                .iter()
+                .chain(&heard.call_ends)
+                .chain(&heard.first)
+                .all(|at| *at <= held),
+            "{heard:?} past {held}"
+        );
+        runtime.now += 3_000;
+        runtime.apply(ContestEvent::Resume);
+        let again = next_turn(&mut runtime);
+        let nr = serial(replies(&again)[0]);
+        let end = runtime.now + whole_ms(sent_by(&again, 0)[0].end_sec);
+        runtime.run_to(end);
+        runtime.now = end + 800;
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
+        assert_eq!(kept(&result)[1], (nr.as_str(), nr.as_str(), 1));
+        assert_eq!(result.group_timings[1].time_to_complete_ms, 800.0);
+    }
+
+    /// An exchange counts as sent once it is on its way: one a pause cut
+    /// before it began, or one lost with a failed sound, comes again after
+    /// Resume with a word in front, as it would have gone out.
+    #[test]
+    fn an_exchange_that_never_went_out_keeps_its_lead_word() {
+        let led = |runtime: &Runtime<ScriptCalls>, text: &str| {
+            let first = text.split_whitespace().next().unwrap_or_default();
+            runtime.machine.rules.their_lead.contains(&first)
+        };
+        // Paused before it began.
+        let mut paused = runtime(&["K5XYZ"]);
+        paused.finish_turn();
+        paused.key(OpKey::Esm, "K5XYZ", "");
+        let planned = replies(paused.last_turn())[0].to_string();
+        assert!(led(&paused, &planned), "{planned}");
+        paused.run_to(paused.now + 100);
+        paused.apply(ContestEvent::Pause {
+            why: PauseWhy::You,
+            at: MonoMs(paused.now),
+        });
+        paused.now += 3_000;
+        paused.apply(ContestEvent::Resume);
+        let again = next_turn(&mut paused);
+        assert!(led(&paused, replies(&again)[0]), "{:?}", replies(&again));
+
+        // Heard whole, then the sound failed.
+        let mut failed = runtime(&["K5XYZ"]);
+        failed.finish_turn();
+        failed.key(OpKey::Esm, "K5XYZ", "");
+        let turn = failed.last_turn().clone();
+        failed.sound_fails(turn.id);
+        let end = failed.now + whole_ms(sent_by(&turn, 0)[0].end_sec);
+        failed.run_to(end);
+        assert_eq!(failed.machine.stations[0].heard.exch_ends.len(), 1);
+        failed.now = end + 100;
+        failed.apply(ContestEvent::TurnFailed { id: turn.id });
+        failed.now += 3_000;
+        failed.apply(ContestEvent::Resume);
+        let again = next_turn(&mut failed);
+        assert!(led(&failed, replies(&again)[0]), "{:?}", replies(&again));
     }
 
     /// With Show copy, what you copy may be read off the screen: nothing of
