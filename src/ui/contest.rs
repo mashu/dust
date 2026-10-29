@@ -1128,6 +1128,9 @@ mod tests {
         ui.click("btn-start-training");
         ui.advance(8_000).await;
         let call = recorder.starts()[0].transcript.others[0].text.clone();
+        // Handed over with nothing on the air, so a key in the test is not
+        // lost on a caller calling again on its timeout.
+        assert!(ui.until_the_air_is_quiet(30_000).await);
         (ui, recorder, call)
     }
 
@@ -1245,6 +1248,8 @@ mod tests {
             // Nothing in the exchange is numbered: F12 asks AGN.
             assert!(ui.has("<kbd>F12</kbd>AGN</button>"), "{}", ui.html());
             ui.type_into("field-call", &call);
+            // A caller calling again on its timeout cannot hear you: wait.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.press_enter("field-call");
             assert!(ui.run_until(60_000, |ui| enter(ui).1 == "? Again").await);
             assert_eq!(enter(&ui).0, "Copy their report and name, then TU & log");
@@ -1266,6 +1271,8 @@ mod tests {
                 text_of(&ui, "run-line run-reads"),
                 format!("Reads as: RST {rst} · NAME {name}")
             );
+            // Not over its exchange sent again on its timeout.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.press_enter("field-exchange");
             let tu = recorder.starts().last().expect("TU").transcript.clone();
             assert_eq!(tu.text, format!("TU {name} 73 EE"));

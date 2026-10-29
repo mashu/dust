@@ -793,6 +793,29 @@ impl Ui {
         done(self)
     }
 
+    /// Run until nothing is on the air in the contest run, as an operator
+    /// waits for a caller to finish before sending: one still sending
+    /// cannot hear you. Whether it came to that.
+    pub async fn until_the_air_is_quiet(&mut self, budget_ms: u64) -> bool {
+        let quiet = |ui: &mut Self| {
+            ui.with_app(|ctx| {
+                ctx.contest
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|run| run.air.is_none())
+            })
+        };
+        let mut waited = 0;
+        while waited < budget_ms {
+            if quiet(self) {
+                return true;
+            }
+            self.advance(u64::from(POLL_MS)).await;
+            waited += u64::from(POLL_MS);
+        }
+        quiet(self)
+    }
+
     /// Run `f` on the app's state, the way one of its own callbacks does,
     /// then settle what it set off.
     pub fn with_app<T>(&mut self, f: impl FnOnce(AppCtx) -> T) -> T {

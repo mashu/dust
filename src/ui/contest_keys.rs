@@ -375,6 +375,9 @@ mod tests {
             let (mut ui, recorder) = Ui::app_with_settings(contest_settings());
             ui.click("btn-start-training");
             ui.advance(8_000).await;
+            // Each key once the caller has finished: sending, it cannot
+            // hear you.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             let sent = |recorder: &crate::audio::fake::Recorder| {
                 recorder
                     .starts()
@@ -386,10 +389,16 @@ mod tests {
             ui.with_app(|ctx| pressed(ctx, "F5"));
             assert_eq!(sent(&recorder).map(|turn| turn.text), Some(call.clone()));
             ui.advance(8_000).await;
+            // Each key once the caller has finished: sending, it cannot
+            // hear you.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.with_app(|ctx| pressed(ctx, "F2"));
             let exchange = sent(&recorder).expect("your exchange");
             assert_eq!(exchange.text, "5NN TT1");
             ui.advance(8_000).await;
+            // Each key once the caller has finished: sending, it cannot
+            // hear you.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             let serial = exchange.others[0]
                 .text
                 .split_whitespace()
@@ -408,12 +417,18 @@ mod tests {
             // The next caller, answering the TU: its call and your exchange
             // at once, and its exchange logged without sending.
             ui.advance(8_000).await;
+            // Each key once the caller has finished: sending, it cannot
+            // hear you.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             let next = tu.others[0].text.clone();
             ui.type_into("field-call", &next);
             ui.with_app(|ctx| pressed(ctx, ";"));
             let both = sent(&recorder).expect("call and exchange");
             assert_eq!(both.text, format!("{next} 5NN TT2"));
             ui.advance(8_000).await;
+            // Each key once the caller has finished: sending, it cannot
+            // hear you.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             let serial = both.others[0]
                 .text
                 .split_whitespace()
@@ -442,12 +457,18 @@ mod tests {
             // A third, closed with TU and nothing logged; Enter logs it.
             ui.with_app(|ctx| pressed(ctx, "F1"));
             ui.advance(8_000).await;
+            // Each key once the caller has finished: sending, it cannot
+            // hear you.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             let third = sent(&recorder).expect("CQ").others[0].text.clone();
             ui.type_into("field-call", &third);
             ui.with_app(|ctx| pressed(ctx, "Insert"));
             let both = sent(&recorder).expect("call and exchange");
             assert_eq!(both.text, format!("{third} 5NN TT3"));
             ui.advance(8_000).await;
+            // Each key once the caller has finished: sending, it cannot
+            // hear you.
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             let serial = both.others[0]
                 .text
                 .split_whitespace()
