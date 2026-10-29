@@ -294,11 +294,13 @@ gives it:
 | Web | `localStorage` for that exact origin (`https://mashu.github.io`, or `localhost:8080` while developing — the two are separate stores) |
 | Linux | `~/.local/share/dust/` (`$XDG_DATA_HOME`) |
 | Windows / macOS | the platform data dir `dirs` reports |
-| Android | `/data/data/<package>/files/dust/` — `dirs` has no `HOME` to work from, so the store resolves the package name from `/proc/self/cmdline` |
+| Android | `dust/` in the app's own files folder, which Android names for the user the app runs as: `/data/data/<package>/files/` for the phone's owner, `/data/user/<user>/<package>/files/` for a work profile, another user, Private Space or a cloned app. `dirs` has no `HOME` to work from, so the store asks Android (`Context.getFilesDir()`, over JNI), or failing that works it out from `/proc/self/cmdline` and the process's uid |
 | iOS | `Library/Application Support/dust/` inside the app container |
 
 `DUST_DATA_DIR` overrides the directory on every desktop and mobile build,
-which is what a portable install uses.
+which is what a portable install uses. A build with no data folder to be
+had keeps `dust/` in the temporary folder, never in whatever folder it was
+started in.
 
 A session or contest run is marked open while it runs, and the mark goes
 once it ends, stored or discarded. Each copy of the app marks its own, a

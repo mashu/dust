@@ -1,5 +1,6 @@
 //! Saving a backup file on Android, where the Files app and every other app
-//! can reach it: the shared Downloads folder.
+//! can reach it: the shared Downloads folder. And where the app keeps its
+//! own files ([`files_dir`]).
 //!
 //! From Android 10 an app adds a file to Downloads through the media store,
 //! without asking for any permission. Before that, writing there takes a
@@ -12,6 +13,47 @@ use std::path::PathBuf;
 
 use dioxus::mobile::wry::prelude::{JNIEnv, JObject, dispatch, jni};
 use jni::objects::{JString, JValue};
+
+/// The folder Android gives the app for its own files, as the user it runs
+/// as: `Context.getFilesDir()`. That is `/data/user/<user>/<package>/files`,
+/// `/data/data/<package>/files` for the phone's owner only; a work profile,
+/// another user, Private Space and a cloned app each have one of their own.
+/// None when Android cannot be asked.
+///
+/// The store opens as the app starts, on the app's own thread, and needs
+/// the answer there and then; so this asks the activity tao keeps for the
+/// app directly, with this thread attached to the VM for the call, rather
+/// than wait on the activity's thread.
+pub fn files_dir() -> Option<PathBuf> {
+    let android = ndk_context::android_context();
+    // Safety: tao hands ndk-context the VM, and a global reference to the
+    // activity, before the app's `main` runs, and the activity lives as
+    // long as the app does.
+    let vm = unsafe { jni::JavaVM::from_raw(android.vm().cast()) }.ok()?;
+    let mut env = vm.attach_current_thread().ok()?;
+    // Safety: the same global reference, used as the object it refers to.
+    let activity = unsafe { JObject::from_raw(android.context().cast()) };
+    // Every reference made on the way is let go of with the frame: a thread
+    // that stays attached keeps what it made otherwise.
+    let path = env.with_local_frame(4, |env| -> jni::errors::Result<String> {
+        let folder = env
+            .call_method(&activity, "getFilesDir", "()Ljava/io/File;", &[])?
+            .l()?;
+        if folder.is_null() {
+            return Err(jni::errors::Error::NullPtr("the app has no files folder"));
+        }
+        let path: JString = env
+            .call_method(&folder, "getAbsolutePath", "()Ljava/lang/String;", &[])?
+            .l()?
+            .into();
+        Ok(env.get_string(&path)?.into())
+    });
+    // A Java exception left pending would fail every JNI call after it.
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+    path.ok().map(PathBuf::from)
+}
 
 use super::BackupSaving;
 use super::desktop::{free_name, write_whole};
