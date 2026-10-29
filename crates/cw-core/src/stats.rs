@@ -14,8 +14,8 @@ use crate::recognition::{
 use crate::sampling::{
     CHAR_SAMPLING_PRIOR_ALPHA, CHAR_SAMPLING_PRIOR_BETA, CharSamplingConfig, CharSamplingState,
     adaptive_bounds, adapts_speed, belief_for, beta_posterior_mean_error,
-    compute_raw_sampling_weights, config_from_settings, generate_callsign_group,
-    generate_contest_call, generate_word_group, group_size_bounds, normalize_weights,
+    compute_raw_sampling_weights, config_from_settings, draw_chances, generate_callsign_group,
+    generate_contest_call, generate_word_group, group_size_bounds,
 };
 use crate::session::SessionResult;
 use crate::settings::{CharSetMode, TrainingSettings};
@@ -721,7 +721,10 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
         whole_group_character_shares(settings, &state, &config, &pool, &mut rng)
     } else {
         let weights = compute_raw_sampling_weights(&pool, &state, &config, &mut rng);
-        normalize_weights(&pool, &weights)
+        pool.iter()
+            .copied()
+            .zip(draw_chances(&pool, &weights, &config))
+            .collect()
     };
     let mut others: Vec<char> = state
         .beliefs
@@ -1482,6 +1485,77 @@ mod tests {
         let without = shares(sampling_rows(&settings, &[]));
         settings.auto_level.char_sampling_thompson = true;
         assert_eq!(shares(sampling_rows(&settings, &[])), without);
+    }
+
+    /// Mixed draws letters and digits by the share asked for before it
+    /// weighs one character against another, and the chances shown are the
+    /// ones it draws by: ten letters and two digits at 70% letters used to
+    /// show the digits at two in twelve while the sampler drew them three
+    /// times in ten. A digit missed often still leads its side.
+    #[test]
+    fn mixed_chances_shown_are_the_ones_drawn() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Mixed;
+        settings.curriculum.level = 9;
+        settings.curriculum.digits_level = 1;
+        settings.curriculum.mixed_letters_percent = 70;
+        settings.curriculum.min_group_size = 5;
+        settings.curriculum.max_group_size = 5;
+        // Coverage changes the weights as a session goes; the chances shown
+        // are a fresh session's.
+        settings.auto_level.char_sampling_coverage_strength = 0.0;
+        let settings = settings.clamp();
+        let pool = compute_char_pool(&settings);
+        assert_eq!(
+            (
+                pool.iter().filter(|c| !c.is_ascii_digit()).count(),
+                pool.iter().filter(|c| c.is_ascii_digit()).count()
+            ),
+            (10, 2)
+        );
+        let digit = *pool.iter().find(|c| c.is_ascii_digit()).expect("a digit");
+        let mut missed = SessionResult::empty_for_test();
+        missed.tally = CopyTally::of(&digit.to_string().repeat(8), "");
+        let history = [missed];
+
+        let rows = sampling_rows(&settings, &history);
+        let shown = |keep: &dyn Fn(char) -> bool| -> f64 {
+            rows.iter()
+                .filter(|row| keep(row.character))
+                .map(|row| row.sampling_prob)
+                .sum()
+        };
+        assert!((shown(&|c| c.is_ascii_digit()) - 0.3).abs() < 1e-9);
+        assert!((shown(&|_| true) - 1.0).abs() < 1e-9);
+
+        let mut drawn: BTreeMap<char, f64> = BTreeMap::new();
+        let mut sampler = crate::Sampler::new(&history, &settings, 7);
+        let groups = 4_000;
+        for _ in 0..groups {
+            let (group, _) = crate::machine::GroupSource::next_group(&mut sampler, &settings);
+            for c in group.chars() {
+                *drawn.entry(c).or_default() += 1.0 / f64::from(groups * 5);
+            }
+        }
+        for row in &rows {
+            let seen = drawn.get(&row.character).copied().unwrap_or(0.0);
+            assert!(
+                (row.sampling_prob - seen).abs() < 0.01,
+                "{}: shown {:.3}, drawn {seen:.3}",
+                row.character,
+                row.sampling_prob
+            );
+        }
+        let chance = |c: char| {
+            rows.iter()
+                .find(|row| row.character == c)
+                .map(|row| row.sampling_prob)
+        };
+        let other = *pool
+            .iter()
+            .rfind(|c| c.is_ascii_digit())
+            .expect("two digits");
+        assert!(chance(digit) > chance(other), "the digit missed comes more");
     }
 
     /// A character's history counts wherever it was practised: a K missed

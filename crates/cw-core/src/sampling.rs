@@ -402,39 +402,55 @@ pub fn compute_raw_sampling_weights(
     weights
 }
 
-pub fn normalize_weights(pool: &[char], weights: &BTreeMap<char, f64>) -> BTreeMap<char, f64> {
-    let total: f64 = pool
-        .iter()
-        .map(|c| weights.get(c).copied().unwrap_or(0.0))
-        .sum();
-    let mut out = BTreeMap::new();
-    if total <= 0.0 {
-        let uniform = if pool.is_empty() {
-            0.0
-        } else {
-            1.0 / pool.len() as f64
-        };
-        for c in pool {
-            out.insert(*c, uniform);
-        }
-        return out;
-    }
-    for c in pool {
-        out.insert(*c, weights.get(c).copied().unwrap_or(0.0) / total);
-    }
-    out
-}
-
-fn pick_from_pool(
+/// The chance each character of `pool` is the next one drawn, in the pool's
+/// order, from the sampler's `weights`: what the sampler draws from and what
+/// the Sampling tab shows, so the two cannot drift apart.
+///
+/// Mixed gives the letters and the digits the share of the draws asked for,
+/// when the pool holds both, and each character its weight's part of its
+/// own side's share: ten letters and two digits at 70% letters draw each
+/// digit 15% of the time, not one time in twelve. Anywhere else a character
+/// is drawn by its weight from the whole pool. A side whose weights come to
+/// nothing is drawn from evenly.
+pub(crate) fn draw_chances(
     pool: &[char],
     weights: &BTreeMap<char, f64>,
-    rng: &mut impl Rng,
-) -> Option<char> {
-    let weight_list: Vec<f64> = pool
-        .iter()
-        .map(|c| weights.get(c).copied().unwrap_or(1.0))
-        .collect();
-    weighted_random_pick(pool, &weight_list, rng)
+    config: &CharSamplingConfig,
+) -> Vec<f64> {
+    let is_digit = |c: &char| c.is_ascii_digit();
+    let both = pool.iter().any(is_digit) && !pool.iter().all(is_digit);
+    let letters_share = (config.char_set_mode == CharSetMode::Mixed && both)
+        .then(|| f64::from(config.mixed_letters_percent.min(100)) / 100.0);
+    let side = |c: &char| match letters_share {
+        Some(share) if is_digit(c) => (true, 1.0 - share),
+        Some(share) => (false, share),
+        None => (false, 1.0),
+    };
+    let weight = |c: &char| {
+        weights
+            .get(c)
+            .copied()
+            .filter(|w| w.is_finite() && *w > 0.0)
+            .unwrap_or(0.0)
+    };
+    // Each side's total weight and size, digits apart from the rest.
+    let mut totals = [(0.0, 0usize); 2];
+    for c in pool {
+        let total = &mut totals[usize::from(side(c).0)];
+        total.0 += weight(c);
+        total.1 += 1;
+    }
+    pool.iter()
+        .map(|c| {
+            let (digit, share) = side(c);
+            let (total, count) = totals[usize::from(digit)];
+            if total > 0.0 {
+                share * weight(c) / total
+            } else {
+                share / count.max(1) as f64
+            }
+        })
+        .collect()
 }
 
 pub fn sample_training_group(
@@ -444,22 +460,11 @@ pub fn sample_training_group(
     config: &CharSamplingConfig,
     rng: &mut impl Rng,
 ) -> String {
-    let raw_weights = compute_raw_sampling_weights(pool, state, config, rng);
-    // Mixed draws each character from the letters or the digits by the
-    // share asked for — when the pool holds both to draw from.
-    let (letters, digits): (Vec<char>, Vec<char>) = pool.iter().partition(|c| !c.is_ascii_digit());
-    let split =
-        (config.char_set_mode == CharSetMode::Mixed && !letters.is_empty() && !digits.is_empty())
-            .then(|| f64::from(config.mixed_letters_percent.min(100)) / 100.0);
-
+    let weights = compute_raw_sampling_weights(pool, state, config, rng);
+    let chances = draw_chances(pool, &weights, config);
     let mut group = String::with_capacity(group_size);
     for _ in 0..group_size {
-        let from = match split {
-            Some(letters_share) if rng.f64() < letters_share => &letters,
-            Some(_) => &digits,
-            None => pool,
-        };
-        group.extend(pick_from_pool(from, &raw_weights, rng));
+        group.extend(weighted_random_pick(pool, &chances, rng));
     }
     state.count_sent(&group);
     group
@@ -1281,20 +1286,48 @@ mod tests {
         assert_eq!(sample_beta(-1.0, -1.0, &mut rng), 0.5);
     }
 
+    /// Mixed gives letters and digits the share asked for, however many of
+    /// each the pool holds, and each character its weight's part of its
+    /// side: the chances the sampler draws from are the ones the Sampling
+    /// tab shows.
     #[test]
-    fn weights_normalise_to_one_or_fall_back_to_uniform() {
-        let pool = ['K', 'M', 'U'];
-        let mut weights = BTreeMap::new();
-        weights.insert('K', 1.0);
-        weights.insert('M', 3.0);
-        let normalized = normalize_weights(&pool, &weights);
-        assert!((normalized.values().sum::<f64>() - 1.0).abs() < 1e-9);
-        assert_eq!(normalized[&'U'], 0.0);
+    fn mixed_chances_give_each_side_its_share_whatever_the_pool() {
+        let pool: Vec<char> = "KMURESNAPT01".chars().collect();
+        let even: BTreeMap<char, f64> = pool.iter().map(|c| (*c, 1.0)).collect();
+        let chances = draw_chances(&pool, &even, &config(CharSetMode::Mixed, 70));
+        assert!((chances.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        for (c, chance) in pool.iter().zip(&chances) {
+            let expected = if c.is_ascii_digit() { 0.15 } else { 0.07 };
+            assert!((chance - expected).abs() < 1e-12, "{c}: {chance}");
+        }
+        // Within a side, by weight.
+        let mut heavy = even.clone();
+        heavy.insert('0', 3.0);
+        let chances = draw_chances(&pool, &heavy, &config(CharSetMode::Mixed, 70));
+        assert!((chances[10] - 0.225).abs() < 1e-12 && (chances[11] - 0.075).abs() < 1e-12);
+        assert!((chances[0] - 0.07).abs() < 1e-12, "the letters keep theirs");
 
-        // All-zero weights spread evenly rather than dividing by zero.
-        let zeroed = normalize_weights(&pool, &BTreeMap::new());
-        assert!(zeroed.values().all(|v| (*v - 1.0 / 3.0).abs() < 1e-9));
-        assert!(normalize_weights(&[], &BTreeMap::new()).is_empty());
+        // Outside Mixed, or with only one side in the pool, the whole pool
+        // is drawn from by weight.
+        let koch = draw_chances(&pool, &even, &config(CharSetMode::Koch, 70));
+        assert!(
+            koch.iter()
+                .all(|chance| (chance - 1.0 / 12.0).abs() < 1e-12)
+        );
+        let letters = draw_chances(&['K', 'M'], &even, &config(CharSetMode::Mixed, 70));
+        assert_eq!(letters, [0.5, 0.5]);
+        // A share of none draws nothing of that side.
+        let all_letters = draw_chances(&pool, &even, &config(CharSetMode::Mixed, 100));
+        assert_eq!(&all_letters[10..], [0.0, 0.0]);
+
+        // Weights that come to nothing, or are missing, are drawn evenly.
+        let none = draw_chances(
+            &['K', 'M', 'U'],
+            &BTreeMap::new(),
+            &config(CharSetMode::Koch, 70),
+        );
+        assert!(none.iter().all(|chance| (chance - 1.0 / 3.0).abs() < 1e-12));
+        assert!(draw_chances(&[], &even, &config(CharSetMode::Mixed, 70)).is_empty());
     }
 
     #[test]
@@ -1314,9 +1347,9 @@ mod tests {
         let pool = ['K', 'M', '0', '1'];
         let mut next = CharSamplingState::default();
         let config = config(CharSetMode::Mixed, 50);
-        // Draws below 0.5 pick letters, above pick digits. Each character costs
-        // two draws: one for the subset, one for the weighted pick.
-        let mut rng = ScriptedRng::new(&[0.1, 0.0, 0.9, 0.0]);
+        // Each character is a quarter of the draws: the lowest quarter is K,
+        // the highest 1.
+        let mut rng = ScriptedRng::new(&[0.1, 0.9]);
         let group = sample_training_group(&pool, 2, &mut next, &config, &mut rng);
         assert_eq!(group.chars().count(), 2);
         let mut chars = group.chars();
