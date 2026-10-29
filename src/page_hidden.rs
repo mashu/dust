@@ -1,7 +1,9 @@
 //! Hears the page go out of sight: a tab left, a phone locked, a window
 //! minimised. Whatever plays to the learner must not play on to nobody: a
-//! session of groups and a contest run pause, and Hear a QSO stops. And an edit to the settings
-//! still waiting to be stored is stored, as the page may never come back.
+//! session of groups and a contest run pause, and the band preview, the
+//! letters, a sample and Hear a QSO stop, and so does a phone's stream of
+//! groups. And an edit to the settings still waiting to be stored is
+//! stored, as the page may never come back.
 //!
 //! Each screen that listens keeps its listener on the page under a slot of
 //! its own, so that one screen taking its listener off, as it goes, never
@@ -10,7 +12,7 @@
 use dioxus::prelude::*;
 
 /// Where the run screen, and the Settings and Listen screens, which play
-/// Hear a QSO, keep their listeners on the page; the app itself, which
+/// the previews, keep their listeners on the page; the app itself, which
 /// stores the settings; and the paddles, which open when the page goes, as
 /// their key releases go with it.
 pub const RUN_HIDDEN: &str = "__dustRunHidden";
@@ -71,8 +73,33 @@ fn listen_visibility(slot: &'static str, on_hidden: Callback<()>) {
             });
         });
     }
+    // A test hides the page by hand ([`hide_page`]), and each listener
+    // hears it for as long as its screen is up.
     #[cfg(test)]
-    let _ = (slot, on_hidden);
+    {
+        let _ = slot;
+        use_hook(move || LISTENERS.with(|all| all.borrow_mut().push(on_hidden)));
+        use_drop(move || {
+            LISTENERS.with(|all| all.borrow_mut().retain(|heard| *heard != on_hidden));
+        });
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The listeners on the page a test runs.
+    static LISTENERS: std::cell::RefCell<Vec<Callback<()>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Send the page a test runs out of sight: every listener on it hears so,
+/// in the order they were put on.
+#[cfg(test)]
+pub fn hide_page() {
+    let listeners = LISTENERS.with(|all| all.borrow().clone());
+    for on_hidden in listeners {
+        on_hidden.call(());
+    }
 }
 
 /// A minimised window is never hidden as a page, so the desktop build asks

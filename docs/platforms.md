@@ -79,6 +79,13 @@ seconds is taken as a pause from where it began, before anything that waited
 out the gap is heard. No answer closes empty for it, and the time away is
 not answering time. The same holds on iOS.
 
+Whatever else plays stops out of sight, on every build: the band preview,
+the letters, a sample, Hear a QSO. The stream of groups stops too on a
+phone, where the system may freeze an app out of sight whole, and holds the
+screen on while it plays instead, as Hear a QSO does. On the desktop and in
+a browser it plays on, as it is there to be copied while you work in another
+program or tab ([below](#copying-while-you-work-in-other-programs)).
+
 The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
 Android devices will not open two at once.
