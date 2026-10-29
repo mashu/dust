@@ -3058,7 +3058,12 @@ impl<S: CallSource> ContestMachine<S> {
             }
         }
         let heard_run = air.heard_run();
-        let callers = self.overlapping(&air, at);
+        // Whether it has sounded by then: the player has said it started,
+        // or it plays on to the splice, as planned. Till the player says so
+        // it is timed from its key, but nothing of it has reached you, so
+        // nothing of it went out under your message.
+        let sounded = splice.is_some() || air.first_start.is_some();
+        let callers = self.overlapping(&air, at, sounded);
         let qrm = self.qrm_going_on(&air, at);
         let Air {
             turn,
@@ -3221,8 +3226,9 @@ impl<S: CallSource> ContestMachine<S> {
     /// A send some of which went out under your message, the receiver
     /// muted without full break-in, goes on unheard ([`Counted::Muted`]): a
     /// send heard in part is no send heard, even once its rest sounds with
-    /// nothing of yours going out, after an Esc.
-    fn overlapping(&self, air: &Air, run_now: u64) -> Vec<Overlapping> {
+    /// nothing of yours going out, after an Esc; none did of a turn that
+    /// has not `sounded` by `run_now` ([`Self::cut`]).
+    fn overlapping(&self, air: &Air, run_now: u64, sounded: bool) -> Vec<Overlapping> {
         let heard_run = air.heard_run();
         let qsk = self.settings.contest.contest_qsk;
         let callers = air
@@ -3256,7 +3262,7 @@ impl<S: CallSource> ContestMachine<S> {
                 // An exchange yet to reach you starts as far into what is
                 // left.
                 let counted = match *counted {
-                    _ if air.turn.muted(segment, qsk) => Counted::Muted,
+                    _ if sounded && air.turn.muted(segment, qsk) => Counted::Muted,
                     Counted::CallBegun { exchange_from } => Counted::CallBegun {
                         exchange_from: exchange_from.saturating_sub(from),
                     },
@@ -10711,7 +10717,7 @@ mod tests {
             runtime.key(OpKey::Again, "", "");
             let asked = runtime.last_turn().clone();
             assert_eq!(asked.muted(sent_by(&asked, 0)[0], qsk), !qsk);
-            runtime.now += 300;
+            runtime.run_to(runtime.now + 300);
             let effects = runtime.key(OpKey::StopTx, "", "");
             let going = played(&effects).expect("it goes on").clone();
             assert_eq!(yours(&going), "");
@@ -10728,6 +10734,35 @@ mod tests {
             };
             assert_eq!(ends, heard, "{qsk}");
         }
+    }
+
+    /// Esc a moment after a key, before the player has said the turn
+    /// started, finds nothing of it sounded, though the turn is timed from
+    /// the key till then: a caller's rest carried under your message never
+    /// went out under it, so without full break-in it goes on heard, shown
+    /// with Show copy and its call heard as it ends. It used to go on
+    /// unheard, as if the receiver had been muted for it.
+    #[test]
+    fn esc_before_the_turn_sounds_leaves_a_rest_heard() {
+        let mut settings = pileup_settings(1, 1);
+        settings.contest.contest_show_copy = true;
+        let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
+        let cq = runtime.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        runtime.run_to(ms(call.start_sec + 0.3));
+        runtime.key(OpKey::Again, "", "");
+        let asked = runtime.last_turn().clone();
+        assert!(asked.muted(sent_by(&asked, 0)[0], false));
+        // Its start not yet said.
+        runtime.now += 5;
+        let effects = runtime.key(OpKey::StopTx, "", "");
+        let going = played(&effects).expect("it goes on").clone();
+        assert_eq!(yours(&going), "");
+        let rest = sent_by(&going, 0)[0].clone();
+        assert_eq!(view(&runtime).shown.len(), 1);
+        runtime.finish_turn();
+        let ends = &runtime.machine.stations[0].heard.call_ends;
+        assert_eq!(ends, &[going.at_run_ms + whole_ms(rest.end_sec)]);
     }
 
     /// Once the station you work has gone, whatever call the fields still

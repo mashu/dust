@@ -1652,11 +1652,16 @@ spacing and no fist variation.
     spent all the same, a try on its timeout among it, as it was sent
     (`Counted::Muted`). Its rest going on after an Esc sounds, the gate
     open, but stays unheard, and Show copy shows nothing of it (as built,
-    2026-10-29; 5.2). Collisions are as they were for the callers: one
-    still sending at your key never hears you and goes on over you (4.3),
-    now unheard, and calls again a moment after you, which is heard. Every
-    reply comes after your message, a tenth of a second at least, so the
-    gate, open again 5 ms after your message ends, takes none of one.
+    2026-10-29; 5.2). A turn is timed from its key till the player says
+    it has started, but nothing of it has sounded till then, so an Esc in
+    that moment, a few milliseconds, finds nothing of a send carried under
+    your message gone out under it, and its rest is heard (as built,
+    2026-10-29, second Esc review). Collisions are as they were for the
+    callers: one still sending at your key never hears you and goes on
+    over you (4.3), now unheard, and calls again a moment after you, which
+    is heard. Every reply comes after your message, a tenth of a second at
+    least, so the gate, open again 5 ms after your message ends, takes none
+    of one.
   - With full break-in (`contestQsk`, §8) nothing is muted: the band and a
     caller sending across your message are heard through it, as every run
     was before 5a.
@@ -3905,7 +3910,9 @@ plus a mark); `scripts/callsign-prefixes.py` (zones and continents).
   reply is heard as with no Esc at all; a single caller's reply yet to
   begin or sounding comes on time, is heard as it was to end and logs
   clean with no repeat; QRM outlasting your message sends on in the turn;
-  and Esc leaves C and N set once your message is out.
+  Esc leaves C and N set once your message is out; and Esc before the
+  player says the turn started finds a rest carried under your message
+  never muted, and it is heard and shown.
 
 - from 5b: the keyer ends a word six dits of quiet after a letter's last
   element, a straight key's too, though its letter ends a dit sooner; a
