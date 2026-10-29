@@ -181,13 +181,12 @@ impl Store for WebStore {
         read_settings_from(&raw)
     }
 
-    fn save_settings(&self, settings: &TrainingSettings) {
-        let Some(store) = storage() else {
-            return;
-        };
-        if let Ok(raw) = serde_json::to_string(settings) {
-            let _ = store.set_item(SETTINGS_KEY, &raw);
-        }
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
+        let store = storage().ok_or("this browser has no storage for them")?;
+        let raw = serde_json::to_string(settings).map_err(|err| err.to_string())?;
+        store
+            .set_item(SETTINGS_KEY, &raw)
+            .map_err(|_| "this browser's storage would not take them".into())
     }
 
     fn load_sessions(&self) -> Vec<SessionResult> {

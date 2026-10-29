@@ -43,7 +43,14 @@ pub trait Store {
     fn load_settings(&self) -> TrainingSettings {
         self.read_settings().unwrap_or_default()
     }
-    fn save_settings(&self, settings: &TrainingSettings);
+    /// Store the settings, or say why they could not be stored.
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String>;
+    /// Store the settings, whatever becomes of them: how a test sets up
+    /// what a store holds.
+    #[cfg(test)]
+    fn save_settings(&self, settings: &TrainingSettings) {
+        let _ = self.write_settings(settings);
+    }
     /// Every stored session that can still be read, oldest first.
     fn load_sessions(&self) -> Vec<SessionResult>;
     /// Store the newest of `sessions`, up to [`MAX_SESSIONS`].

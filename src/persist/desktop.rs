@@ -202,11 +202,10 @@ impl Store for DesktopStore {
         read_settings_from(&fs::read_to_string(self.root.join(SETTINGS)).ok()?)
     }
 
-    fn save_settings(&self, settings: &TrainingSettings) {
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
         // Pretty, as the one file somebody might open and edit by hand.
-        if let Ok(raw) = serde_json::to_vec_pretty(settings) {
-            let _ = self.write(SETTINGS, &raw);
-        }
+        let raw = serde_json::to_vec_pretty(settings).map_err(|err| err.to_string())?;
+        self.write(SETTINGS, &raw).map_err(|err| err.to_string())
     }
 
     fn load_sessions(&self) -> Vec<SessionResult> {
@@ -600,6 +599,16 @@ mod tests {
         let moved = every_setting_moved();
         store.save_settings(&moved);
         assert_eq!(DesktopStore::at(dir.0.clone()).load_settings(), moved);
+    }
+
+    /// Settings that cannot be written say why, and leave what is there.
+    #[test]
+    fn settings_that_cannot_be_written_say_so() {
+        let (dir, store) = store("settings-unwritable");
+        fs::create_dir_all(dir.0.join(SETTINGS)).unwrap();
+        assert!(store.write_settings(&every_setting_moved()).is_err());
+        assert!(dir.0.join(SETTINGS).is_dir());
+        assert_eq!(files(&dir), [SETTINGS], "no scratch file left behind");
     }
 
     /// The history is the file that grows: written compact, it is about half

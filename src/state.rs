@@ -160,6 +160,9 @@ pub struct AppCtx {
     /// The settings as they were stored last, so that settings stored
     /// already are not stored again.
     stored_settings: CopyValue<TrainingSettings>,
+    /// The settings could not be stored, and the user has been told: not
+    /// again until they have been stored since.
+    settings_unsaved: CopyValue<bool>,
     app: CopyValue<AppState>,
 }
 
@@ -199,6 +202,7 @@ impl AppCtx {
                 trash: Signal::new(Vec::new()),
                 before_restore: Signal::new(None),
                 stored_settings,
+                settings_unsaved: CopyValue::new(false),
                 app: CopyValue::new(app),
             }
         })
@@ -258,6 +262,10 @@ impl AppCtx {
     /// this one last read or wrote them. Those are kept: only what changed
     /// here is laid over them, and whatever they changed is taken up here
     /// too, so a copy left open on old settings never puts them back.
+    ///
+    /// Settings the store would not take are kept here as they are, and
+    /// tried again the next time; the user is told once, not on every
+    /// change, until they have been stored.
     pub fn store_settings(self) -> TrainingSettings {
         let mut settings = self.settings;
         let ours = settings.peek().clone().clamp();
@@ -269,11 +277,33 @@ impl AppCtx {
             Some(theirs) => merge_settings(&base, &ours, theirs),
             None => ours.clone(),
         };
-        if elsewhere.as_ref().unwrap_or(&base) != &merged {
-            store.save_settings(&merged);
+        // What the store holds: what it held, unless the merge is written
+        // over it. Only that is the base of the next merge, or an edit the
+        // store refused would read next time as another copy's change, and
+        // be undone by it.
+        let mut held = elsewhere.unwrap_or(base);
+        let mut refused = None;
+        if held != merged {
+            match store.write_settings(&merged) {
+                Ok(()) => held = merged.clone(),
+                Err(why) => refused = Some(why),
+            }
         }
-        if base != merged {
-            stored.set(merged.clone());
+        if *stored.peek() != held {
+            stored.set(held);
+        }
+        let mut unsaved = self.settings_unsaved;
+        match refused {
+            Some(why) if !*unsaved.peek() => {
+                unsaved.set(true);
+                self.toasts.show(format!(
+                    "Your settings could not be saved: {}.",
+                    why.trim_end_matches('.')
+                ));
+            }
+            Some(_) => {}
+            None if *unsaved.peek() => unsaved.set(false),
+            None => {}
         }
         // Only what came from elsewhere: the settings screen leaves its
         // own values as typed until they are left.
@@ -656,7 +686,87 @@ impl Toasts {
 
 #[cfg(test)]
 mod tests {
-    use super::Screen;
+    use super::*;
+    use crate::persist::memory::MemoryStore;
+
+    /// A copy of the app — a tab, or a window — on `store`, which other
+    /// copies may share, opened on what it holds.
+    struct Tab {
+        dom: VirtualDom,
+        ctx: AppCtx,
+    }
+
+    impl Tab {
+        fn on(store: &Rc<MemoryStore>) -> Self {
+            let dom = VirtualDom::new(|| rsx! {});
+            let app = AppState::with(crate::audio::fake::Recorder::new().factory(), store.clone());
+            let ctx = dom.in_scope(ScopeId::ROOT, || {
+                AppCtx::new(app, store.load_settings(), store.load_sessions())
+            });
+            Self { dom, ctx }
+        }
+
+        /// Do `act` in this copy, the way one of its callbacks does.
+        fn act<T>(&self, act: impl FnOnce(AppCtx) -> T) -> T {
+            self.dom.in_scope(ScopeId::ROOT, || act(self.ctx))
+        }
+
+        fn toast(&self) -> Option<Toast> {
+            self.act(|ctx| ctx.toasts.current())
+        }
+    }
+
+    /// Settings the store would not take stay as they were set, and are
+    /// stored once it takes them again. The edit used to be taken as
+    /// stored all the same, so the old settings still in the store read as
+    /// another copy's change, and the next store put them back.
+    #[test]
+    fn settings_the_store_refused_are_kept_and_told_of_once() {
+        let store = Rc::new(MemoryStore::default());
+        let old = TrainingSettings::default();
+        store.save_settings(&old);
+        let copy = Tab::on(&store);
+        *store.settings_refused.borrow_mut() = Some("the disk is full".into());
+
+        copy.act(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = 9;
+            ctx.store_settings();
+        });
+        let told = copy.toast().expect("told");
+        assert_eq!(
+            told.text,
+            "Your settings could not be saved: the disk is full."
+        );
+        assert_eq!(store.load_settings(), old, "nothing was written");
+
+        // Every edit after it is refused too, and not told of again.
+        copy.act(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().band.steepness = 12.0;
+            ctx.store_settings();
+        });
+        assert_eq!(copy.toast(), Some(told.clone()), "told once");
+
+        // The store takes them again: both edits are stored, neither put
+        // back.
+        store.settings_refused.borrow_mut().take();
+        let stored = copy.act(AppCtx::store_settings);
+        assert_eq!(stored.curriculum.num_groups, 9);
+        assert_eq!(stored.band.steepness, 12.0);
+        assert_eq!(store.load_settings(), stored);
+        assert_eq!(copy.act(|ctx| ctx.settings.peek().clone()), stored);
+
+        // Stored since, so a store that refuses again is told of again.
+        *store.settings_refused.borrow_mut() = Some("the disk is full".into());
+        copy.act(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = 4;
+            ctx.store_settings();
+        });
+        assert_ne!(copy.toast(), Some(told), "told again");
+        assert_eq!(store.load_settings().curriculum.num_groups, 9);
+    }
 
     #[test]
     fn every_screen_has_its_own_key() {

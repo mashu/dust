@@ -20,6 +20,9 @@ pub struct MemoryStore {
     /// How many times the settings were written, for a test that cares how
     /// often that happens.
     pub settings_saves: Cell<u32>,
+    /// The settings cannot be written, for the reason given, the way a
+    /// full disk refuses them.
+    pub settings_refused: RefCell<Option<String>>,
     /// Room for only this many sessions, the way a full browser leaves it.
     pub room: Cell<Option<usize>>,
     /// A history that could not be read is in the way of any save.
@@ -59,9 +62,13 @@ impl Store for MemoryStore {
         self.settings.borrow().clone().map(TrainingSettings::clamp)
     }
 
-    fn save_settings(&self, settings: &TrainingSettings) {
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
+        if let Some(why) = self.settings_refused.borrow().clone() {
+            return Err(why);
+        }
         self.settings_saves.set(self.settings_saves.get() + 1);
         *self.settings.borrow_mut() = Some(settings.clone());
+        Ok(())
     }
 
     fn load_sessions(&self) -> Vec<SessionResult> {
