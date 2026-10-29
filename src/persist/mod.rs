@@ -83,9 +83,8 @@ pub trait Store {
     /// it could not go.
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving;
     /// Whether a backup file this store says it saved is known to be
-    /// saved, and so counts as the last backup. A browser hands a download
-    /// over and hears no more of it: blocked or turned down, it says
-    /// nothing.
+    /// saved. A browser hands a download over and hears no more of it:
+    /// blocked or turned down, it says nothing.
     fn confirms_backups(&self) -> bool {
         true
     }

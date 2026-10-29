@@ -317,14 +317,14 @@ impl Store for WebStore {
     }
 
     /// A browser says nothing of a download it blocks, or one the user
-    /// turns down, so the file is told of as handed over, not as saved,
-    /// and is not counted as the last backup ([`Store::confirms_backups`]).
+    /// turns down, so the file is told of as handed over, not as saved
+    /// ([`Store::confirms_backups`]).
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
         saved_now(
             download(name, contents)
                 .map(|()| {
                     format!(
-                        "Backup handed to your browser to save as {name}: look for it in your downloads. Browsers do not say whether they kept a download, so the Backup card does not count it."
+                        "Backup handed to your browser to save as {name}: look for it in your downloads."
                     )
                 })
                 .ok_or_else(|| "this browser would not hand over the file".into()),
