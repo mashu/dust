@@ -4362,19 +4362,30 @@ impl<S: CallSource> ContestMachine<S> {
         let mut effects = Vec::new();
         // Nothing of a send that failed was heard; the QSOs it logged stand.
         self.resolve(&air.pending, &mut effects);
-        self.timers = Timers::default();
+        self.hold(PauseWhy::Sound, run_ms);
         if self.time_up(now) {
             effects.extend(self.finish(now));
             return effects;
         }
-        self.phase = ContestPhase::Paused {
-            why: PauseWhy::Sound,
-        };
         effects.insert(0, ContestEffect::ReleaseAudio);
         effects.push(ContestEffect::Announce(
             "Sound stopped — Resume to carry on".to_string(),
         ));
         effects
+    }
+
+    /// The run pauses for `why`, its clock held at run time `run_ms` and the
+    /// turn that was on the air dealt with: a key after it says nothing of
+    /// a sound heard before it ([`Sends`]), and no timer runs. Pause and a
+    /// failed sound both come here.
+    fn hold(&mut self, why: PauseWhy, run_ms: u64) {
+        for station in &mut self.stations {
+            let heard = &mut station.heard;
+            heard.call_sends.paused(run_ms);
+            heard.exch_sends.paused(run_ms);
+        }
+        self.timers = Timers::default();
+        self.phase = ContestPhase::Paused { why };
     }
 
     fn pause(&mut self, why: PauseWhy, at: MonoMs, now: MonoMs) -> Vec<ContestEffect> {
@@ -4407,14 +4418,7 @@ impl<S: CallSource> ContestMachine<S> {
                     let carried = self.cut(air, run_ms, false, &mut effects);
                     self.resolve(&carried.pending, &mut effects);
                 }
-                // What reached you by the pause counted, a key after it says
-                // nothing of a sound heard before it.
-                for station in &mut self.stations {
-                    station.heard.call_sends.paused(run_ms);
-                    station.heard.exch_sends.paused(run_ms);
-                }
-                self.timers = Timers::default();
-                self.phase = ContestPhase::Paused { why };
+                self.hold(why, run_ms);
                 effects.push(ContestEffect::Announce("Paused".to_string()));
                 effects
             }
@@ -12298,6 +12302,37 @@ mod tests {
         let (result, _) = result(&runtime);
         // Nothing of its keys says how soon it was recognised, so nothing of
         // it is kept.
+        assert_eq!(result.group_timings[0].char_times, None);
+    }
+
+    /// The sound failing pauses the run as Pause does: a key after Resume
+    /// says nothing of a call heard before the failure either.
+    #[test]
+    fn a_key_after_a_sound_failure_is_not_timed_for_a_call_heard_before_it() {
+        let mut runtime = runtime(&["K5XYZ"]);
+        runtime.finish_turn();
+        assert!(runtime.machine.stations[0].heard.call_sounded.is_some());
+        runtime.key(OpKey::Cq, "", "");
+        let cq = runtime.last_turn().id;
+        runtime.sound_fails(cq);
+        runtime.run_to(runtime.now + 100);
+        assert_eq!(runtime.playing_id(), Some(cq), "still on the air");
+        runtime.apply(ContestEvent::TurnFailed { id: cq });
+        assert!(paused_by_sound(&runtime));
+        runtime.now += 60_000;
+        runtime.apply(ContestEvent::Resume);
+        runtime.now += 300;
+        runtime.apply(ContestEvent::Key {
+            key: OpKey::Esm,
+            fields: Box::new(typed(&[(EntryField::Call, "K5XYZ", runtime.now)])),
+        });
+        let nr = serial(replies(runtime.last_turn())[0]);
+        runtime.finish_turn();
+        runtime.key(OpKey::Esm, "K5XYZ", &nr);
+        runtime.finish_turn();
+        runtime.now += 1_000;
+        runtime.apply(ContestEvent::FinishNow);
+        let (result, _) = result(&runtime);
         assert_eq!(result.group_timings[0].char_times, None);
     }
 
