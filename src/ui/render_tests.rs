@@ -21,7 +21,7 @@ use super::envelope::EnvelopeCard;
 use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
-use super::paddle::{PaddleKeys, PaddlePad, page_key, use_paddle_keys};
+use super::paddle::{PaddleKeys, PaddlePad, page_key, use_paddle_keys, window_key};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
@@ -3667,6 +3667,54 @@ mod interactions {
             ui.click("btn-page-up");
             ui.advance(1_000).await;
             assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn WindowWordsHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                WindowWords {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// Buttons that hand the paddles what the desktop's window hears on
+    /// Linux: `]` pressed, and let go.
+    #[component]
+    fn WindowWords() -> Element {
+        let keys = use_context::<PaddleKeys>();
+        rsx! {
+            button {
+                id: control_id("btn", "window down"),
+                onclick: move |_| window_key(keys, "]", "BracketRight", true),
+            }
+            button {
+                id: control_id("btn", "window up"),
+                onclick: move |_| window_key(keys, "]", "BracketRight", false),
+            }
+        }
+    }
+
+    /// The window's every press of a paddle's key keys it, with no word of
+    /// the modifiers, which the window cannot tell: one let go in another
+    /// window can no longer have every press taken for a shortcut and
+    /// dropped. Its release opens the paddle again.
+    #[test]
+    fn the_window_keys_every_paddle_press_it_hears() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(WindowWordsHarness, ());
+            ui.click("btn-window-down");
+            ui.advance(100).await;
+            ui.click("btn-window-up");
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+            ui.click("btn-window-down");
+            ui.advance(100).await;
+            ui.click("btn-window-up");
+            ui.advance(1_000).await;
+            assert!(ui.has(">TT<"), "{}", ui.html());
         });
     }
 

@@ -602,18 +602,8 @@ impl PaddleKeys {
 /// and everywhere it opens them as it loses the focus.
 #[cfg(all(feature = "desktop", not(test)))]
 fn listen_native_paddles(keys: PaddleKeys) {
-    use std::cell::Cell;
-
-    // The modifiers held, which the window says when they change rather
-    // than with each key.
-    let held = use_hook(|| Rc::new(Cell::new(Held::default())));
-    let modifiers = Rc::clone(&held);
-    let dispatch = use_callback(move |(key, code, pressed): (String, String, bool)| {
-        if pressed {
-            keys.key_down(&key, &code, held.get(), false);
-        } else {
-            keys.key_up(&key, &code);
-        }
+    let heard = use_callback(move |(key, code, pressed): (String, String, bool)| {
+        window_key(keys, &key, &code, pressed);
     });
     dioxus::desktop::use_wry_event_handler(move |event, _| {
         use dioxus::desktop::tao::event::{ElementState, Event, WindowEvent};
@@ -626,14 +616,6 @@ fn listen_native_paddles(keys: PaddleKeys) {
             // the focus, so the paddles open with it.
             WindowEvent::Focused(false) => {
                 keys.release_all();
-                return;
-            }
-            WindowEvent::ModifiersChanged(state) => {
-                modifiers.set(Held {
-                    ctrl: state.control_key(),
-                    alt: state.alt_key(),
-                    meta: state.super_key(),
-                });
                 return;
             }
             // Where the root keys the paddles the window hears no keys, and
@@ -652,8 +634,8 @@ fn listen_native_paddles(keys: PaddleKeys) {
         };
         let code = key.physical_key.to_string();
         match key.state {
-            ElementState::Pressed => dispatch.call((typed.to_string(), code, true)),
-            ElementState::Released => dispatch.call((typed.to_string(), code, false)),
+            ElementState::Pressed => heard.call((typed.to_string(), code, true)),
+            ElementState::Released => heard.call((typed.to_string(), code, false)),
             _ => {}
         }
     });
@@ -661,6 +643,26 @@ fn listen_native_paddles(keys: PaddleKeys) {
 
 #[cfg(not(all(feature = "desktop", not(test))))]
 fn listen_native_paddles(_keys: PaddleKeys) {}
+
+/// A key the desktop's window heard, typing `key` at `code`, pressed or
+/// let go. A press of a paddle's key keys it whatever modifiers are held,
+/// for the window cannot say which are: tao on Linux tells of them only as
+/// a modifier's own key goes down or up in the window, and then of that
+/// key alone, so Ctrl held and Shift tapped read as nothing held, and a
+/// modifier let go in another window read as held for good. Alt+Tab away
+/// and back, and every press of a paddle was taken for a shortcut and
+/// dropped, while the root, which reads the modifiers each key was really
+/// pressed with, kept the key from the page. So only the root tells a
+/// shortcut, for the page: a bracket pressed with Ctrl or Alt is left to
+/// the page, which types nothing for it, and keys its paddle all the same.
+#[cfg(any(feature = "desktop", test))]
+pub(super) fn window_key(keys: PaddleKeys, key: &str, code: &str, pressed: bool) {
+    if pressed {
+        keys.key_down(key, code, Held::default(), false);
+    } else {
+        keys.key_up(key, code);
+    }
+}
 
 /// The browser delivers keys to whatever has focus, and with nothing focused
 /// — a page just loaded, a click on the background — that is the document
