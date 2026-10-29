@@ -61,12 +61,13 @@ pub fn show(window: &DesktopService, press: Press) -> bool {
     surface.show_window_menu(&mut event)
 }
 
+/// Elsewhere a right-click turns always on top over, from where the window
+/// says it is: a flag of the app's own outlived the window it was about, so
+/// a floating window opened again, never on top, took its first
+/// right-click to be taken off the top, and nothing seemed to happen.
 #[cfg(not(target_os = "linux"))]
 pub fn show(window: &DesktopService, _press: Press) -> bool {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    // One floating window at a time, so one flag is enough.
-    static ON_TOP: AtomicBool = AtomicBool::new(false);
-    let on_top = !ON_TOP.fetch_xor(true, Ordering::Relaxed);
-    window.window.set_always_on_top(on_top);
+    let on_top = window.window.is_always_on_top();
+    window.window.set_always_on_top(!on_top);
     true
 }
