@@ -683,6 +683,21 @@ mod tests {
         assert_eq!(DesktopStore::at(dir.0.clone()).load_settings(), moved);
     }
 
+    /// A settings file with the AGC threshold in it comes back with the RF
+    /// gain backed off as far, and stays so once it is written again.
+    #[test]
+    fn a_settings_file_with_an_agc_threshold_is_upgraded_once() {
+        let (dir, store) = store("agc-threshold");
+        fs::create_dir_all(&dir.0).unwrap();
+        let old = r#"{"agcThresholdDb":6,"rfGainDb":-4,"numGroups":7}"#;
+        fs::write(dir.0.join(SETTINGS), old).unwrap();
+        let read = store.read_settings().expect("settings");
+        assert_eq!(read.band.rf_gain_db, -10.0);
+        assert_eq!(read.curriculum.num_groups, 7);
+        store.save_settings(&read);
+        assert_eq!(store.read_settings(), Some(read));
+    }
+
     /// Settings that cannot be written say why, and leave what is there.
     #[test]
     fn settings_that_cannot_be_written_say_so() {

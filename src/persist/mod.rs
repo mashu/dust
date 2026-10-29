@@ -23,8 +23,8 @@ use std::pin::Pin;
 use std::rc::Rc;
 
 use cw_core::{
-    AutoLevelCounters, AutoLevelProgress, CountersKey, SessionResult, TrainingSettings,
-    auto_level_progress,
+    AutoLevelCounters, AutoLevelProgress, CountersKey, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB,
+    SessionResult, TrainingSettings, auto_level_progress,
 };
 use serde::Deserialize;
 
@@ -402,6 +402,7 @@ fn recover_settings(raw: &str) -> TrainingSettings {
         return TrainingSettings::default();
     };
     upgrade_receiver(&mut stored);
+    upgrade_agc_threshold(&mut stored);
     let stored = serde_json::Value::Object(stored);
     if let Ok(settings) = serde_json::from_value::<TrainingSettings>(stored.clone()) {
         return settings;
@@ -431,6 +432,36 @@ fn upgrade_receiver(stored: &mut serde_json::Map<String, serde_json::Value>) {
     if !stored.contains_key("filterWidthHz") {
         stored.remove("filterShape");
     }
+}
+
+/// A save from before the AGC threshold went may have one, `agcThresholdDb`.
+/// The AGC judges everything against its knee, so a threshold raised X dB
+/// is the RF gain backed off X dB, but for a tenth of that in volume: such
+/// a save comes back with its RF gain backed off as far, as far as the RF
+/// gain goes. A threshold taken down into the hiss has nothing to come back
+/// as, and nor has one under an AGC switched off, which it never moved.
+fn upgrade_agc_threshold(stored: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(threshold) = stored
+        .remove("agcThresholdDb")
+        .and_then(|threshold| threshold.as_f64())
+    else {
+        return;
+    };
+    let agc = stored
+        .get("agcEnabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    if !agc || threshold <= 0.0 {
+        return;
+    }
+    let rf = stored
+        .get("rfGainDb")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|db| db.is_finite())
+        .unwrap_or(RF_GAIN_MAX_DB)
+        .clamp(RF_GAIN_MIN_DB, RF_GAIN_MAX_DB);
+    let backed_off = (rf - threshold).round().max(RF_GAIN_MIN_DB);
+    stored.insert("rfGainDb".into(), serde_json::json!(backed_off));
 }
 
 /// Stored settings, as the app may use them.
@@ -1265,6 +1296,53 @@ pub(crate) mod tests {
         let back = recover_settings(&serde_json::to_string(&chosen).expect("serialize"));
         assert_eq!(back.band.filter_shape, cw_core::FilterShape::Sharp);
         assert_eq!(back.band.filter_width_hz, 400.0);
+    }
+
+    /// A save from before the AGC threshold went comes back with a raised
+    /// threshold as the RF gain backed off as far, which is how the AGC
+    /// heard it. A threshold taken down, or one under an AGC switched off,
+    /// is dropped. It is done once: the next save has no threshold.
+    #[test]
+    fn a_raised_agc_threshold_comes_back_as_rf_gain() {
+        let rf = |raw: &str| load_settings_from(raw).band.rf_gain_db;
+        let old = r#"{"agcThresholdDb":10,"rfGainDb":-5,"numGroups":7}"#;
+        assert_eq!(rf(old), -15.0);
+        assert_eq!(load_settings_from(old).curriculum.num_groups, 7);
+        assert_eq!(rf(r#"{"agcThresholdDb":12}"#), -12.0, "from full");
+        assert_eq!(
+            rf(r#"{"agcThresholdDb":25,"rfGainDb":-12}"#),
+            RF_GAIN_MIN_DB,
+            "as far as the RF gain goes"
+        );
+        assert_eq!(rf(r#"{"agcThresholdDb":-8,"rfGainDb":-5}"#), -5.0);
+        assert_eq!(
+            rf(r#"{"agcThresholdDb":10,"rfGainDb":-5,"agcEnabled":false}"#),
+            -5.0
+        );
+        assert_eq!(rf(r#"{"agcThresholdDb":"loud","rfGainDb":-5}"#), -5.0);
+
+        // Once: what is saved after it reads back as it was saved.
+        let upgraded = load_settings_from(old);
+        let saved = serde_json::to_string(&upgraded).expect("serialize");
+        assert!(!saved.contains("agcThresholdDb"));
+        assert_eq!(load_settings_from(&saved), upgraded);
+
+        // A backup reads its settings the same way.
+        let backup = backup::read_backup(&format!(
+            r#"{{"dustBackup":1,"settings":{old},"sessions":[]}}"#
+        ))
+        .expect("a backup");
+        assert_eq!(backup.settings.band.rf_gain_db, -15.0);
+
+        // And a merge with a copy that read the same old save keeps it,
+        // beside a change made here.
+        let mut ours = upgraded.clone();
+        ours.curriculum.num_groups = 9;
+        let merged = merge_settings(&upgraded, &ours, &load_settings_from(old));
+        assert_eq!(
+            (merged.band.rf_gain_db, merged.curriculum.num_groups),
+            (-15.0, 9)
+        );
     }
 
     #[test]
