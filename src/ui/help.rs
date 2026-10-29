@@ -382,7 +382,7 @@ pub fn character_set() -> Element {
             dt { "Words" }
             dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =." }
             dt { "Contest" }
-            dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange." }
+            dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange. A caller that is sending cannot hear you, one caller or a pile-up, as on the air: wait for it to finish before you send, and ask with ? (F7) if you missed it." }
             dt { "Unlock order" }
             dd { "The order new characters come in: LCWO, MorseMania, CW Academy, alphabetical, or your own." }
             dt { "Level" }

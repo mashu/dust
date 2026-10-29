@@ -1337,6 +1337,9 @@ struct Seen {
     exch: String,
     previous: String,
     heard: HabitsHeard,
+    /// What each station sent last, whole, to tell the rest of it carried
+    /// on over your key from a message of its own.
+    sent: Vec<(Sender, String)>,
 }
 
 /// What a contest soak run has heard of its callers' habits: numbers sent
@@ -1521,7 +1524,21 @@ fn check_contest_effects(
                     );
                     seen.heard.fumbled += u32::from(fumbled);
                     seen.heard.enn += u32::from(enn);
-                    let (call, exch) = match copy_of(&segment.text) {
+                    // The rest of a send carried on over your key is a
+                    // piece of what the station was sending, not a message
+                    // of its own: the tail of a call can read as a report
+                    // (`5NN` of R5NN).
+                    let last = seen.sent.iter_mut().find(|(who, _)| *who == segment.who);
+                    let rest = last.as_ref().is_some_and(|(_, whole)| {
+                        whole.len() > segment.text.len() && whole.ends_with(&segment.text)
+                    });
+                    match last {
+                        _ if rest => {}
+                        Some((_, whole)) => whole.clone_from(&segment.text),
+                        None => seen.sent.push((segment.who, segment.text.clone())),
+                    }
+                    let copied = if rest { None } else { copy_of(&segment.text) };
+                    let (call, exch) = match copied {
                         Some(Copied::Call(call)) => (Some(call), None),
                         Some(Copied::Correction(call, exch)) => {
                             // A correction carrying an exchange from a station

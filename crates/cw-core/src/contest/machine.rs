@@ -1091,10 +1091,9 @@ impl Air {
 }
 
 /// What a turn taken off the air leaves to send: the rest of your message
-/// and its parts, the log rows that wait on it, the callers still sending
-/// (a single caller you key over stops and hears you instead), and any QRM
-/// still sending, which never stops for you; and, for a continuation, where
-/// the next turn takes over from it.
+/// and its parts, the log rows that wait on it, the callers still sending,
+/// and any QRM still sending, which never stops for you; and, for a
+/// continuation, where the next turn takes over from it.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Carried {
     text: String,
@@ -1143,7 +1142,7 @@ struct Splice {
     lead_sec: f64,
 }
 
-/// A pile-up caller still sending when you key over it: it goes on from the
+/// A caller still sending when you key over it: it goes on from the
 /// character sounding then, sent again whole, as your own message does, so
 /// the two of you are heard over each other.
 #[derive(Clone, Debug, PartialEq)]
@@ -2125,8 +2124,8 @@ impl<S: CallSource> ContestMachine<S> {
     /// Send `message`: the callers hear it, a QSO is logged if it `logs`,
     /// and the turn with their replies goes out. A turn on the air gives
     /// way to it: your message carries on from the character sounding at
-    /// the key, and a single caller stops and hears you. A pile-up caller
-    /// still sending goes on over you and never hears it, but for a CQ, a
+    /// the key. A caller still sending, single or in a pile-up, goes on
+    /// over you and never hears it, but for a CQ, a
     /// TU or a NIL, which it hears from a fragment once it stops before
     /// your message ends ([`Self::deaf`]).
     fn send(
@@ -2144,15 +2143,13 @@ impl<S: CallSource> ContestMachine<S> {
         let serial = self.serial_sent();
         let number = self.serial;
         let mut effects = Vec::new();
-        let mut carried = match self.air.take() {
+        // A caller you talk over, single or in a pile-up, goes on with what
+        // it is sending and hears your message only as `deaf` says, as
+        // MorseRunner's callers do (`DxStn.pas:240-253`).
+        let carried = match self.air.take() {
             Some(air) => self.cut(air, run_ms, true, &mut effects),
             None => Carried::default(),
         };
-        // A single caller you talk over stops and hears you, kinder to a
-        // learner.
-        if self.style == RunStyle::Single {
-            carried.callers.clear();
-        }
         // Where the message keyed now starts among the turn's parts, after
         // the rest of one keyed earlier.
         let from = carried.parts.len();
@@ -2331,7 +2328,7 @@ impl<S: CallSource> ContestMachine<S> {
             .collect()
     }
 
-    /// The callers you keyed over in a pile-up, `callers`, that never heard
+    /// The callers you keyed over, `callers`, that never heard
     /// your message, ending `your_end` into its turn, being `deaf` to it,
     /// and are done before it is: having heard only its tail, each takes
     /// more patience and spends a try, as MorseRunner's callers do on
@@ -3139,9 +3136,8 @@ impl<S: CallSource> ContestMachine<S> {
     /// Anything else takes the turn off the air at once, and what is left
     /// of your message goes on from the character sounding then, sent again
     /// whole. The callers still sending then are carried too
-    /// ([`Self::overlapping`]): over a key in a pile-up, or past an Esc in
-    /// any run, they go on; a single caller you key over stops and hears
-    /// you ([`Self::send`]).
+    /// ([`Self::overlapping`]): over a key, or past an Esc, they go on, in
+    /// any run ([`Self::send`]).
     fn cut(
         &mut self,
         mut air: Air,
@@ -5679,8 +5675,9 @@ mod tests {
         assert_eq!(run.qsos[0].nr, 1);
     }
 
-    /// TU and log keyed while the station is still sending: the station
-    /// stops and hears it, and the QSO is checked once the TU is out.
+    /// TU and log keyed just before the station's reply ends: it stops before
+    /// your TU does and takes it from the fragment, as MorseRunner's
+    /// (`DxStn.pas:240-253`), and the QSO is checked once the TU is out.
     #[test]
     fn a_tu_keyed_during_replies_is_finished_and_checked() {
         let mut runtime = runtime(&["K5XYZ"]);
@@ -6671,10 +6668,12 @@ mod tests {
         result.group_timings.iter().map(|t| t.sends).collect()
     }
 
-    /// `?` keyed while their first exchange is still sounding asks for it
-    /// again, just as one keyed after it ends: each costs its send.
+    /// `?` keyed after their first exchange ends asks for it again, and
+    /// costs its send. One keyed while it is still sounding is lost on the
+    /// station, sending, as on MorseRunner's (`DxStn.pas:240-253`): it asks
+    /// for nothing, and costs nothing. It used to stop the station and ask.
     #[test]
-    fn asking_during_their_first_exchange_costs_its_send() {
+    fn asking_during_their_first_exchange_is_lost_on_them() {
         let asked = |into: Option<f64>| {
             let mut runtime = runtime(&["K5XYZ"]);
             runtime.finish_turn();
@@ -6696,8 +6695,8 @@ mod tests {
             (sends(&runtime), view(&runtime).log[0].asked)
         };
         assert_eq!(asked(None), (vec![1, 2], 1), "after its end");
-        assert_eq!(asked(Some(0.98)), (vec![1, 2], 1), "just before its end");
-        assert_eq!(asked(Some(0.5)), (vec![1, 2], 1), "halfway through");
+        assert_eq!(asked(Some(0.98)), (vec![1, 1], 0), "just before its end");
+        assert_eq!(asked(Some(0.5)), (vec![1, 1], 0), "halfway through");
     }
 
     /// The run keeps the repeats you asked for as the live log counts
@@ -8661,9 +8660,9 @@ mod tests {
     /// its exchange again, as it would had you sent nothing. One that
     /// stops before your TU ends takes it from the fragment and is done. A
     /// station putting its call right takes your TU even while it sends,
-    /// as MorseRunner's (`DxStn.pas:277-289`), and a single caller stops
-    /// for your TU and hears it, kinder to a learner. Every station you
-    /// keyed a TU over used to take it.
+    /// as MorseRunner's (`DxStn.pas:277-289`). A single caller is the same:
+    /// it used to stop for your TU and hear it. Every station you keyed a
+    /// TU over used to take it.
     #[test]
     fn the_station_sending_its_exchange_through_your_tu_is_not_done() {
         let working = |style: RunStyle| {
@@ -8705,12 +8704,19 @@ mod tests {
         let tu = runtime.last_turn().clone();
         assert!(sent_by(&tu, 0)[0].end_sec < tu.your_end_sec().expect("your TU"));
         assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Done);
-        // A single caller stops for it.
+        // A single caller sends on through it too, and is not done.
         let (mut runtime, exchange) = working(RunStyle::Single);
         runtime.run_to(runtime.now + ms(exchange.start_sec + 0.2));
         runtime.key(OpKey::TuAndLog, "K5XYZ", &nr);
-        assert!(sent_by(runtime.last_turn(), 0).is_empty(), "it stops");
-        assert_eq!(runtime.machine.stations[0].caller.state, CallerState::Done);
+        let tu = runtime.last_turn().clone();
+        let rest = sent_by(&tu, 0);
+        assert_eq!(rest.len(), 1, "it goes on");
+        assert!(rest[0].end_sec > tu.your_end_sec().expect("your TU"));
+        assert_eq!(
+            runtime.machine.stations[0].caller.state,
+            CallerState::NeedEnd,
+            "not done"
+        );
         // Putting its call right, it takes your TU while it sends.
         let fixing = (1..40)
             .map(|seed| {
@@ -8842,21 +8848,51 @@ mod tests {
         );
     }
 
-    /// A single caller you key over stops and hears you.
+    /// A single caller you key over goes on with its call and never hears
+    /// you, as MorseRunner's does (`DxStn.pas:240-253`): a `?` sent over
+    /// its call is lost on it, and it calls again only on its reply
+    /// timeout, its call whole. It used to stop and hear you; the `?` key
+    /// is there for once it has finished.
     #[test]
-    fn a_single_caller_keyed_over_stops_and_hears_you() {
+    fn a_single_caller_keyed_over_goes_on_and_misses_you() {
         let mut runtime = runtime(&["K5XYZ"]);
         let cq = runtime.last_turn().clone();
         let start = cq.segments[1].start_sec;
         runtime.run_to(runtime.now + ((start + 0.05) * 1_000.0) as u64);
         runtime.key(OpKey::Again, "", "");
-        let turn = runtime.last_turn();
-        let call = turn
-            .segments
-            .iter()
-            .find(|segment| segment.who == Sender::Caller(0))
-            .expect("it answers");
-        assert!(call.start_sec > turn.segments[0].end_sec, "after your `?`");
+        let turn = runtime.last_turn().clone();
+        let sends = sent_by(&turn, 0);
+        assert_eq!(sends.len(), 1, "it answers nothing in this turn");
+        let rest = sends[0];
+        assert_eq!(rest.start_sec, 0.0, "it goes on, over your `?`");
+        // From the character sounding at the key, sent again whole: here
+        // still its first.
+        assert!("K5XYZ".ends_with(&rest.text), "{}", rest.text);
+        assert!(
+            rest.end_sec > turn.segments[0].end_sec,
+            "still sending as your `?` ends"
+        );
+        let station = &runtime.machine.stations[0];
+        assert_eq!(
+            station.caller.state,
+            CallerState::NeedQso,
+            "it heard nothing"
+        );
+        // It calls again on its own timeout, its call whole.
+        let ends = runtime.now + ms(rest.end_sec);
+        let again = next_turn(&mut runtime);
+        assert_eq!(said_by(&again, 0), Some("K5XYZ"));
+        assert!(
+            again.at_run_ms >= ends + 1_500,
+            "on its timeout: {} after its send ended at {ends}",
+            again.at_run_ms
+        );
+        // Asked once it has finished, it hears the `?` and sends its call.
+        runtime.finish_turn();
+        runtime.key(OpKey::Again, "", "");
+        let asked = runtime.last_turn();
+        let call = sent_by(asked, 0)[0];
+        assert!(call.start_sec > asked.segments[0].end_sec, "after your `?`");
         assert_eq!(call.text, "K5XYZ", "whole");
     }
 
