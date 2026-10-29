@@ -208,7 +208,9 @@ The store listing privacy-policy URL is
 That page is [`docs/privacy.html`](privacy.html), copied into the Pages site
 on every deploy. Settings in the app links to the same URL. The page has to
 be live on `main` before Play review: a listing that points at it before the
-Pages workflow has published it will fail the check.
+Pages workflow has published it will fail the check. The Pages workflow
+deploys a push to `main` once its whole CI run has passed, so a change to the
+page goes live a CI run after it is merged.
 
 ## iOS
 
@@ -239,8 +241,12 @@ sideloaded apps at a time — the tools re-sign in place before it expires. A pa
 membership removes both limits and is the only route to TestFlight or the App
 Store.
 
-CI type-checks the simulator target on every PR, which needs no Apple account
-and covers the audio-session code and cpal's CoreAudio backend.
+CI lints the simulator target with Clippy on every PR, which needs no Apple
+account and covers the audio-session code and cpal's CoreAudio backend. The
+Android target is linted the same way, the `mobile` build with oboe's C++,
+and the desktop build on Windows and macOS as well as Linux, where it is
+also tested. The web app is built and its site checked as Pages would serve
+it.
 
 ## Desktop bundles
 
