@@ -361,6 +361,13 @@ impl AppCtx {
             }
             stored.set(theirs);
         }
+        // A backup another copy saved since is the last one here too, so a
+        // restore of an older one never takes the mark back past it.
+        let mut last_backup = self.last_backup;
+        let marked = store.last_backup();
+        if marked > *last_backup.peek() {
+            last_backup.set(marked);
+        }
     }
 
     /// Store the history as it is now. What the screens show is what the
@@ -1181,6 +1188,25 @@ mod tests {
         let backup = crate::persist::backup::read_backup(contents).expect("a backup");
         assert_eq!(days(&backup.sessions), [1, 2, 3]);
         assert_eq!(a.shown(), [1, 2, 3]);
+    }
+
+    /// A restore of a backup older than one another tab saved since leaves
+    /// the newer mark. The restore compared the backup's date with this
+    /// tab's stale mark, and took the store's back to the older one.
+    #[test]
+    fn a_restore_leaves_a_newer_backup_mark_from_another_tab() {
+        let store = holding([1, 2]);
+        let a = Tab::on(&store);
+        store.mark_backup(stamp(30));
+        a.act(|ctx| {
+            ctx.restore_backup(Backup {
+                saved_at: stamp(20),
+                settings: TrainingSettings::default(),
+                sessions: vec![day(1), day(2)],
+            })
+        });
+        assert_eq!(store.last_backup(), Some(stamp(30)));
+        assert_eq!(a.act(|ctx| *ctx.last_backup.peek()), Some(stamp(30)));
     }
 
     /// Undoing a restore says so when the store had room for only the
