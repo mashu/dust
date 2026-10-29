@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, saved_now,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, saved_as,
+    saved_now,
 };
 
 #[derive(Default)]
@@ -15,11 +16,15 @@ pub struct MemoryStore {
     theme: RefCell<String>,
     tutorial_done: Cell<bool>,
     settings: RefCell<Option<TrainingSettings>>,
-    sessions: RefCell<Vec<SessionResult>>,
+    /// The history, once one has been stored.
+    sessions: RefCell<Option<Vec<SessionResult>>>,
     counters: RefCell<BTreeMap<CountersKey, AutoLevelCounters>>,
     /// How many times the settings were written, for a test that cares how
     /// often that happens.
     pub settings_saves: Cell<u32>,
+    /// The settings cannot be written, for the reason given, the way a
+    /// full disk refuses them.
+    pub settings_refused: RefCell<Option<String>>,
     /// Room for only this many sessions, the way a full browser leaves it.
     pub room: Cell<Option<usize>>,
     /// A history that could not be read is in the way of any save.
@@ -59,12 +64,16 @@ impl Store for MemoryStore {
         self.settings.borrow().clone().map(TrainingSettings::clamp)
     }
 
-    fn save_settings(&self, settings: &TrainingSettings) {
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
+        if let Some(why) = self.settings_refused.borrow().clone() {
+            return Err(why);
+        }
         self.settings_saves.set(self.settings_saves.get() + 1);
         *self.settings.borrow_mut() = Some(settings.clone());
+        Ok(())
     }
 
-    fn load_sessions(&self) -> Vec<SessionResult> {
+    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
         self.sessions.borrow().clone()
     }
 
@@ -75,7 +84,7 @@ impl Store for MemoryStore {
         let newest = newest(sessions);
         let kept =
             &newest[newest.len() - self.room.get().unwrap_or(usize::MAX).min(newest.len())..];
-        *self.sessions.borrow_mut() = kept.to_vec();
+        *self.sessions.borrow_mut() = Some(kept.to_vec());
         if kept.len() < newest.len() {
             HistorySaved::Squeezed {
                 kept: kept.len(),
@@ -120,7 +129,7 @@ impl Store for MemoryStore {
         self.backup_files
             .borrow_mut()
             .push((name.to_string(), contents.to_string()));
-        saved_now(Ok(format!("{name}, in your downloads")))
+        saved_now(Ok(saved_as(&format!("{name}, in your downloads"))))
     }
 
     fn ask_to_keep(&self) {

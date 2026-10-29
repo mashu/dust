@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, parse_sessions,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, read_history,
     read_settings_from,
 };
 
@@ -76,15 +76,39 @@ impl DesktopStore {
         write_whole(&self.root, name, bytes)
     }
 
-    fn load_all_counters(&self) -> std::collections::BTreeMap<String, AutoLevelCounters> {
-        fs::read_to_string(self.root.join(COUNTERS))
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
+    /// Every counter stored that can be read, by what it counts.
+    fn load_all_counters(&self) -> Counters {
+        fs::read(self.root.join(COUNTERS))
+            .map(|raw| read_counters(&raw).0)
             .unwrap_or_default()
     }
 
-    fn save_all_counters(&self, counters: &std::collections::BTreeMap<String, AutoLevelCounters>) {
-        if let Ok(raw) = serde_json::to_vec_pretty(counters) {
+    /// Change the stored counters, read afresh just before they are
+    /// written, so that what another copy of the app stored meanwhile is
+    /// kept. Counters that cannot be read are set aside beside the file
+    /// first rather than written over; a file there that cannot be read at
+    /// all, or set aside, is left as it is.
+    fn update_counters(&self, change: impl FnOnce(&mut Counters)) {
+        let mut all = match fs::read(self.root.join(COUNTERS)) {
+            Ok(raw) => {
+                let (all, whole) = read_counters(&raw);
+                if !whole && let Err(err) = self.write(&aside_name(&self.root, "auto_adjust"), &raw)
+                {
+                    eprintln!(
+                        "could not set aside auto-level counters that could not be read: {err}"
+                    );
+                    return;
+                }
+                all
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Counters::new(),
+            Err(err) => {
+                eprintln!("could not read the auto-level counters: {err}");
+                return;
+            }
+        };
+        change(&mut all);
+        if let Ok(raw) = serde_json::to_vec_pretty(&all) {
             let _ = self.write(COUNTERS, &raw);
         }
     }
@@ -93,15 +117,65 @@ impl DesktopStore {
     /// it beside the new one to be recovered. If it cannot be moved, nothing
     /// is to be written over it.
     fn set_aside(&self, path: &Path) {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
-        let aside = self.root.join(format!("sessions.unreadable-{stamp}.json"));
+        let aside = self.root.join(aside_name(&self.root, "sessions"));
         if let Err(err) = fs::rename(path, &aside) {
             eprintln!("could not set aside an unreadable history: {err}");
             self.history_held.set(true);
         }
     }
+
+    /// Keep `unread`, the sessions of the history that could not be read, in
+    /// a file of their own beside it before the next save leaves them out —
+    /// unless a file set aside before holds them already. If they cannot be
+    /// kept, nothing is to be written over the history.
+    fn keep_aside(&self, unread: &[u8]) {
+        let kept = fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("sessions.unreadable-")
+                    && fs::read(entry.path()).is_ok_and(|kept| kept == unread)
+            });
+        if kept {
+            return;
+        }
+        if let Err(err) = self.write(&aside_name(&self.root, "sessions"), unread) {
+            eprintln!("could not set aside the sessions that could not be read: {err}");
+            self.history_held.set(true);
+        }
+    }
+}
+
+/// A name in `dir` no file has yet for one set aside from `stem`.json:
+/// `stem.unreadable-<seconds>.json`, or failing that with `-2`, `-3`… after
+/// it, so that one set aside before is never written over.
+fn aside_name(dir: &Path, stem: &str) -> String {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    free_name(dir, &format!("{stem}.unreadable-{stamp}.json"))
+}
+
+/// The auto-level counters, by what each counts ([`CountersKey`]).
+type Counters = std::collections::BTreeMap<String, AutoLevelCounters>;
+
+/// Stored counters, each that can still be read, and whether every one
+/// could: one bad entry costs that one alone.
+fn read_counters(raw: &[u8]) -> (Counters, bool) {
+    let Ok(serde_json::Value::Object(stored)) = serde_json::from_slice(raw) else {
+        return (Counters::new(), false);
+    };
+    let count = stored.len();
+    let read: Counters = stored
+        .into_iter()
+        .filter_map(|(key, value)| Some((key, serde_json::from_value(value).ok()?)))
+        .collect();
+    let whole = read.len() == count;
+    (read, whole)
 }
 
 /// Write `name` in `dir` whole or not at all.
@@ -202,32 +276,32 @@ impl Store for DesktopStore {
         read_settings_from(&fs::read_to_string(self.root.join(SETTINGS)).ok()?)
     }
 
-    fn save_settings(&self, settings: &TrainingSettings) {
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
         // Pretty, as the one file somebody might open and edit by hand.
-        if let Ok(raw) = serde_json::to_vec_pretty(settings) {
-            let _ = self.write(SETTINGS, &raw);
-        }
+        let raw = serde_json::to_vec_pretty(settings).map_err(|err| err.to_string())?;
+        self.write(SETTINGS, &raw).map_err(|err| err.to_string())
     }
 
-    fn load_sessions(&self) -> Vec<SessionResult> {
+    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
         let path = self.root.join(SESSIONS);
         let raw = match fs::read(&path) {
             Ok(raw) => raw,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Vec::new(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
             Err(err) => {
                 // There and unreadable: not a history to start afresh over.
                 eprintln!("could not read the history: {err}");
                 self.history_held.set(true);
-                return Vec::new();
+                return None;
             }
         };
-        match std::str::from_utf8(&raw).ok().and_then(parse_sessions) {
-            Some(sessions) => sessions,
-            None => {
-                self.set_aside(&path);
-                Vec::new()
-            }
+        let Some(read) = std::str::from_utf8(&raw).ok().and_then(read_history) else {
+            self.set_aside(&path);
+            return None;
+        };
+        if let Some(unread) = read.unread_json() {
+            self.keep_aside(unread.as_bytes());
         }
+        Some(read.sessions)
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
@@ -253,17 +327,17 @@ impl Store for DesktopStore {
     }
 
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters) {
-        let mut all = self.load_all_counters();
-        all.insert(key.as_str().to_string(), counters);
-        self.save_all_counters(&all);
+        self.update_counters(|all| {
+            all.insert(key.as_str().to_string(), counters);
+        });
     }
 
     fn clear_auto_counters(&self, keys: &[CountersKey]) {
-        let mut all = self.load_all_counters();
-        for key in keys {
-            all.remove(key.as_str());
-        }
-        self.save_all_counters(&all);
+        self.update_counters(|all| {
+            for key in keys {
+                all.remove(key.as_str());
+            }
+        });
     }
 
     fn last_backup(&self) -> Option<u64> {
@@ -282,9 +356,10 @@ impl Store for DesktopStore {
 
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
         #[cfg(all(target_os = "android", not(test)))]
-        return super::android::save_backup(name.to_string(), contents.to_string());
+        let saving = super::android::save_backup(name.to_string(), contents.to_string());
         #[cfg(not(all(target_os = "android", not(test))))]
-        super::saved_now(self.save_in_folder(name, contents))
+        let saving = super::saved_now(self.save_in_folder(name, contents));
+        Box::pin(async move { saving.await.map(|place| super::saved_as(&place)) })
     }
 
     /// Written unsynced: it is only a mark, and the first group waits on
@@ -602,6 +677,16 @@ mod tests {
         assert_eq!(DesktopStore::at(dir.0.clone()).load_settings(), moved);
     }
 
+    /// Settings that cannot be written say why, and leave what is there.
+    #[test]
+    fn settings_that_cannot_be_written_say_so() {
+        let (dir, store) = store("settings-unwritable");
+        fs::create_dir_all(dir.0.join(SETTINGS)).unwrap();
+        assert!(store.write_settings(&every_setting_moved()).is_err());
+        assert!(dir.0.join(SETTINGS).is_dir());
+        assert_eq!(files(&dir), [SETTINGS], "no scratch file left behind");
+    }
+
     /// The history is the file that grows: written compact, it is about half
     /// the size it was pretty-printed.
     #[test]
@@ -639,6 +724,82 @@ mod tests {
             AutoLevelCounters::default()
         );
         assert_eq!(store.load_theme(), "light");
+    }
+
+    /// Counters for each of `levels`, the settings they count, and what
+    /// they hold.
+    fn counted_at(levels: impl IntoIterator<Item = u32>) -> Vec<(CountersKey, AutoLevelCounters)> {
+        levels
+            .into_iter()
+            .map(|level| {
+                let mut settings = TrainingSettings::default();
+                settings.curriculum.level = level;
+                let counters = AutoLevelCounters {
+                    above: level,
+                    below: 1,
+                };
+                (CountersKey::of(&settings), counters)
+            })
+            .collect()
+    }
+
+    /// The counters set aside, by what each file holds.
+    fn counters_set_aside(dir: &TempDir) -> Vec<String> {
+        files(dir)
+            .into_iter()
+            .filter(|name| name.starts_with("auto_adjust.unreadable-"))
+            .map(|name| fs::read_to_string(dir.0.join(name)).unwrap())
+            .collect()
+    }
+
+    /// A counters file that cannot be read is set aside before the next
+    /// count is written, not written over by a file holding that count
+    /// alone; one unreadable entry costs that one alone.
+    #[test]
+    fn unreadable_counters_are_set_aside_rather_than_written_over() {
+        let (dir, store) = store("counters-unreadable");
+        fs::create_dir_all(&dir.0).unwrap();
+        fs::write(dir.0.join(COUNTERS), "{ not json").unwrap();
+        let counted = counted_at([3, 4, 5]);
+        store.save_auto_counters(&counted[0].0, counted[0].1);
+        assert_eq!(store.load_auto_counters(&counted[0].0), counted[0].1);
+        assert_eq!(counters_set_aside(&dir), ["{ not json"]);
+
+        let damaged = format!(
+            r#"{{"{}":{{"above":4,"below":1}},"{}":"nonsense"}}"#,
+            counted[1].0.as_str(),
+            counted[0].0.as_str()
+        );
+        fs::write(dir.0.join(COUNTERS), &damaged).unwrap();
+        store.save_auto_counters(&counted[2].0, counted[2].1);
+        assert_eq!(store.load_auto_counters(&counted[1].0), counted[1].1);
+        assert_eq!(store.load_auto_counters(&counted[2].0), counted[2].1);
+        assert_eq!(
+            store.load_auto_counters(&counted[0].0),
+            AutoLevelCounters::default()
+        );
+        let mut kept = counters_set_aside(&dir);
+        kept.sort();
+        assert_eq!(kept, ["{ not json".to_string(), damaged]);
+    }
+
+    /// Two copies of the app counting at once each keep the other's
+    /// counts: every count is read afresh just before it is written.
+    #[test]
+    fn counters_written_by_another_copy_are_kept() {
+        let (dir, first) = store("counters-shared");
+        let second = DesktopStore::at(dir.0.clone());
+        let counted = counted_at([3, 4]);
+        first.save_auto_counters(&counted[0].0, counted[0].1);
+        second.save_auto_counters(&counted[1].0, counted[1].1);
+        assert_eq!(first.load_auto_counters(&counted[0].0), counted[0].1);
+        assert_eq!(first.load_auto_counters(&counted[1].0), counted[1].1);
+        second.clear_auto_counters(std::slice::from_ref(&counted[0].0));
+        assert_eq!(
+            first.load_auto_counters(&counted[0].0),
+            AutoLevelCounters::default()
+        );
+        assert_eq!(first.load_auto_counters(&counted[1].0), counted[1].1);
     }
 
     #[test]
@@ -721,13 +882,15 @@ mod tests {
         assert_eq!(store.load_sessions().len(), 1);
 
         // JSON has no way to write a NaN, so such a session is written as null
-        // and dropped on the way back in rather than breaking the whole file.
+        // and dropped on the way back in rather than breaking the whole file:
+        // set aside, as any session that cannot be read is.
         let mut broken = session("2026-09-02");
         broken.accuracy = f64::NAN;
         store.save_sessions(&[broken, session("2026-09-03")]);
         let read = store.load_sessions();
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].date, "2026-09-03");
+        assert_eq!(set_aside(&dir).len(), 1);
 
         // A destination that cannot be replaced says so, and leaves no
         // scratch file behind.
@@ -737,7 +900,63 @@ mod tests {
             store.save_sessions(&[session("2026-09-04")]),
             HistorySaved::Failed(_)
         ));
-        assert_eq!(files(&dir), [SESSIONS]);
+        let mut left = files(&dir);
+        left.retain(|name| !name.starts_with("sessions.unreadable-"));
+        assert_eq!(left, [SESSIONS]);
+    }
+
+    /// What every file set aside from the history holds, oldest name first.
+    fn set_aside(dir: &TempDir) -> Vec<String> {
+        files(dir)
+            .into_iter()
+            .filter(|name| name.starts_with("sessions.unreadable-"))
+            .map(|name| fs::read_to_string(dir.0.join(name)).unwrap())
+            .collect()
+    }
+
+    /// Sessions that cannot be read are set aside before a save leaves them
+    /// out, once however often the history is read before it, and the rest
+    /// read as ever. They used to be dropped as they were read, and the
+    /// next save wrote the history without them.
+    #[test]
+    fn sessions_that_cannot_be_read_are_set_aside_before_a_save() {
+        let (dir, store) = store("unread");
+        fs::create_dir_all(&dir.0).unwrap();
+        let good = |date| serde_json::to_string(&session(date)).unwrap();
+        let raw = format!(
+            "[{},{{\"date\":\"nonsense\"}},{}]",
+            good("2026-09-01"),
+            good("2026-09-02")
+        );
+        fs::write(dir.0.join(SESSIONS), &raw).unwrap();
+
+        let read = store.load_sessions();
+        assert_eq!(read.len(), 2);
+        assert_eq!(set_aside(&dir), [r#"[{"date":"nonsense"}]"#]);
+        // Read again, as another copy opening would, before any save.
+        assert_eq!(DesktopStore::at(dir.0.clone()).load_sessions(), read);
+        assert_eq!(set_aside(&dir).len(), 1, "set aside once");
+
+        let mut more = read;
+        more.push(session("2026-09-03"));
+        assert_eq!(store.save_sessions(&more), HistorySaved::Stored { kept: 3 });
+        assert_eq!(store.load_sessions().len(), 3);
+        assert_eq!(set_aside(&dir), [r#"[{"date":"nonsense"}]"#]);
+    }
+
+    /// One history set aside is never written over by the next, however
+    /// soon after it that comes.
+    #[test]
+    fn a_history_set_aside_is_never_written_over_by_the_next() {
+        let (dir, store) = store("aside-twice");
+        fs::create_dir_all(&dir.0).unwrap();
+        for damaged in ["{ first", "{ second"] {
+            fs::write(dir.0.join(SESSIONS), damaged).unwrap();
+            assert!(store.load_sessions().is_empty());
+        }
+        let mut kept = set_aside(&dir);
+        kept.sort();
+        assert_eq!(kept, ["{ first", "{ second"]);
     }
 
     /// A backup goes into the backup folder, never over an earlier one, and

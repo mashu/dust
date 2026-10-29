@@ -106,21 +106,57 @@ fn into_downloads(
     if file.is_null() {
         return Err(jni::errors::Error::NullPtr("the media store made no file"));
     }
+    let written = write_into(env, &resolver, &file, bytes);
+    if written.is_err() {
+        // Nothing half written is left in Downloads. A Java exception the
+        // write left pending is cleared first: every call after it would
+        // fail too.
+        let _ = env.exception_clear();
+        let _ = env.call_method(
+            &resolver,
+            "delete",
+            "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I",
+            &[
+                JValue::Object(&file),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+            ],
+        );
+        let _ = env.exception_clear();
+    }
+    written
+}
+
+/// Write `bytes` into `file`, a file the media store made, and close it,
+/// written or not.
+fn write_into(
+    env: &mut JNIEnv,
+    resolver: &JObject,
+    file: &JObject,
+    bytes: &[u8],
+) -> jni::errors::Result<()> {
     let stream = env
         .call_method(
-            &resolver,
+            resolver,
             "openOutputStream",
             "(Landroid/net/Uri;)Ljava/io/OutputStream;",
-            &[JValue::Object(&file)],
+            &[JValue::Object(file)],
         )?
         .l()?;
     if stream.is_null() {
         return Err(jni::errors::Error::NullPtr("the file could not be opened"));
     }
-    let array = env.byte_array_from_slice(bytes)?;
-    env.call_method(&stream, "write", "([B)V", &[JValue::Object(&array)])?;
-    env.call_method(&stream, "close", "()V", &[])?;
-    Ok(())
+    let written = match env.byte_array_from_slice(bytes) {
+        Ok(array) => env
+            .call_method(&stream, "write", "([B)V", &[JValue::Object(&array)])
+            .map(drop),
+        Err(err) => Err(err),
+    };
+    if written.is_err() {
+        let _ = env.exception_clear();
+    }
+    let closed = env.call_method(&stream, "close", "()V", &[]).map(drop);
+    written.and(closed)
 }
 
 /// The app's own Downloads folder on the shared storage:

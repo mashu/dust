@@ -6,10 +6,12 @@
 //! parses is left out, a setting that no longer reads falls back to its
 //! default, and every session is scored the way sessions score today.
 
+use std::collections::HashMap;
+
 use cw_core::{SessionResult, TrainingSettings};
 use serde::Serialize;
 
-use super::{load_settings_from, parse_sessions};
+use super::{SessionKey, load_settings_from, parse_sessions};
 
 /// The key that marks a file as a backup, and the version of its layout.
 const MARK: &str = "dustBackup";
@@ -108,45 +110,63 @@ pub fn backup_name(date: &str) -> String {
     format!("dust-backup-{date}.json")
 }
 
+/// What a restore makes of the history ([`merge_sessions`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Merged {
+    /// The history with the backup's sessions in it, oldest first.
+    pub sessions: Vec<SessionResult>,
+    /// The sessions of the backup it added.
+    pub added: Vec<SessionKey>,
+    /// The sessions of its own it filled in from the backup.
+    pub filled: Vec<SessionKey>,
+}
+
 /// `current` with every session of `restored` that it does not already
-/// have, in the order they were practised, and how many that was; and how
-/// many of its own it filled in. A session is the same session if it
-/// finished at the same moment on the same day. A contest run whose log an
-/// older version dropped is filled in from a copy that kept it, and so are
-/// the per-character records ([`cw_core::CharTimes`]) of the same groups.
-pub fn merge_sessions(
-    current: &[SessionResult],
-    restored: Vec<SessionResult>,
-) -> (Vec<SessionResult>, usize, usize) {
-    let same =
-        |a: &SessionResult, b: &SessionResult| a.timestamp == b.timestamp && a.date == b.date;
-    let mut merged = current.to_vec();
-    let (mut added, mut filled) = (0, 0);
+/// have, in the order they were practised; which those were, and which of
+/// its own it filled in. A session is the same session if it finished at
+/// the same moment on the same day ([`SessionKey`]). A contest run whose
+/// log an older version dropped is filled in from a copy that kept it, and
+/// so are the per-character records ([`cw_core::CharTimes`]) of the same
+/// groups.
+pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -> Merged {
+    let mut sessions = current.to_vec();
+    let mut here: HashMap<SessionKey, usize> = HashMap::new();
+    for (at, session) in sessions.iter().enumerate() {
+        here.entry(SessionKey::of(session)).or_insert(at);
+    }
+    let (mut added, mut filled) = (Vec::new(), Vec::new());
     for session in restored {
-        match merged.iter_mut().find(|kept| same(kept, &session)) {
-            Some(kept) if kept.contest.is_none() && session.contest.is_some() => {
-                *kept = session;
-                filled += 1;
+        let key = SessionKey::of(&session);
+        match here.get(&key).copied() {
+            Some(at) if sessions[at].contest.is_none() && session.contest.is_some() => {
+                sessions[at] = session;
+                filled.push(key);
             }
-            Some(kept) if dropped_char_times(kept, &session) => {
+            Some(at) if dropped_char_times(&sessions[at], &session) => {
+                let kept = &mut sessions[at];
                 for (timing, restored) in kept.group_timings.iter_mut().zip(session.group_timings) {
                     if timing.char_times.is_none() {
                         timing.char_times = restored.char_times;
                     }
                 }
-                filled += 1;
+                filled.push(key);
             }
             Some(_) => {}
             None => {
-                merged.push(session);
-                added += 1;
+                here.insert(key.clone(), sessions.len());
+                sessions.push(session);
+                added.push(key);
             }
         }
     }
-    if added > 0 {
-        merged.sort_by_key(|session| session.timestamp);
+    if !added.is_empty() {
+        sessions.sort_by_key(|session| session.timestamp);
     }
-    (merged, added, filled)
+    Merged {
+        sessions,
+        added,
+        filled,
+    }
 }
 
 /// Whether `restored`, the same groups as `kept`, holds per-character
@@ -242,17 +262,28 @@ mod tests {
             at(30, "2026-10-30"),
             at(5, "2026-10-05"),
         ];
-        let (merged, added, filled) = merge_sessions(&current, restored);
-        assert_eq!((added, filled), (2, 0));
+        let merged = merge_sessions(&current, restored);
+        assert_eq!(
+            merged.added,
+            [
+                SessionKey::of(&at(20, "2026-10-20")),
+                SessionKey::of(&at(5, "2026-10-05"))
+            ]
+        );
+        assert!(merged.filled.is_empty());
+        let merged = merged.sessions;
         assert_eq!(
             merged.iter().map(|s| s.timestamp).collect::<Vec<_>>(),
             [5, 10, 20, 30],
             "in the order they were practised"
         );
-        let (again, none, nothing) = merge_sessions(&merged, merged.clone());
         assert_eq!(
-            (again, none, nothing),
-            (merged, 0, 0),
+            merge_sessions(&merged, merged.clone()),
+            Merged {
+                sessions: merged,
+                added: Vec::new(),
+                filled: Vec::new()
+            },
             "restoring twice does nothing"
         );
     }
@@ -273,8 +304,12 @@ mod tests {
         };
         let current = vec![run(10, false), at(20, "2026-10-20"), run(30, true)];
         let restored = vec![run(10, true), run(30, false), run(40, true)];
-        let (merged, added, filled) = merge_sessions(&current, restored);
-        assert_eq!((added, filled), (1, 1));
+        let Merged {
+            sessions: merged,
+            added,
+            filled,
+        } = merge_sessions(&current, restored);
+        assert_eq!((added.len(), filled.len()), (1, 1));
         assert_eq!(
             merged.iter().map(|s| s.timestamp).collect::<Vec<_>>(),
             [10, 20, 30, 40]
@@ -282,8 +317,11 @@ mod tests {
         assert!(merged[0].contest.is_some(), "filled in");
         assert!(merged[2].contest.is_some(), "kept");
         assert_eq!(merged[0].char_set_mode, cw_core::CharSetMode::Contest);
-        let (_, _, again) = merge_sessions(&merged, merged.clone());
-        assert_eq!(again, 0, "a log already here is not filled in twice");
+        let again = merge_sessions(&merged, merged.clone()).filled;
+        assert!(
+            again.is_empty(),
+            "a log already here is not filled in twice"
+        );
     }
 
     /// A session whose per-character records an older version dropped takes
@@ -305,12 +343,18 @@ mod tests {
             session.group_timings[1].char_times = kept.map(times);
             session
         };
-        let (merged, added, filled) = merge_sessions(&[session(None)], vec![session(Some(700))]);
-        assert_eq!((added, filled), (0, 1));
-        assert_eq!(merged[0].group_timings[1].char_times, Some(times(700)));
-        let (merged, _, filled) = merge_sessions(&merged, vec![session(Some(900))]);
-        assert_eq!(filled, 0, "its own kept");
-        assert_eq!(merged[0].group_timings[1].char_times, Some(times(700)));
+        let merged = merge_sessions(&[session(None)], vec![session(Some(700))]);
+        assert_eq!((merged.added.len(), merged.filled.len()), (0, 1));
+        assert_eq!(
+            merged.sessions[0].group_timings[1].char_times,
+            Some(times(700))
+        );
+        let merged = merge_sessions(&merged.sessions, vec![session(Some(900))]);
+        assert!(merged.filled.is_empty(), "its own kept");
+        assert_eq!(
+            merged.sessions[0].group_timings[1].char_times,
+            Some(times(700))
+        );
     }
 
     /// An assisted run, `contest:wpx:a`, read back from a backup is still a
@@ -332,9 +376,9 @@ mod tests {
         assert_eq!(read.char_set_mode, cw_core::CharSetMode::Contest);
         assert_eq!(read.contest_kind(), Some(cw_core::ContestKind::Wpx));
         assert!(read.assisted(), "by its mark");
-        let (merged, added, filled) = merge_sessions(&backup.sessions, vec![kept.clone()]);
-        assert_eq!((added, filled), (0, 1));
-        assert_eq!(merged[0], kept);
+        let merged = merge_sessions(&backup.sessions, vec![kept.clone()]);
+        assert_eq!((merged.added.len(), merged.filled.len()), (0, 1));
+        assert_eq!(merged.sessions[0], kept);
     }
 
     #[test]

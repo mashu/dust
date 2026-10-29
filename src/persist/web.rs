@@ -7,8 +7,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, newest_that_fit,
-    parse_sessions, read_settings_from, saved_now,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, keep_aside, newest,
+    newest_that_fit, read_history, read_settings_from, saved_now,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -181,33 +181,40 @@ impl Store for WebStore {
         read_settings_from(&raw)
     }
 
-    fn save_settings(&self, settings: &TrainingSettings) {
-        let Some(store) = storage() else {
-            return;
-        };
-        if let Ok(raw) = serde_json::to_string(settings) {
-            let _ = store.set_item(SETTINGS_KEY, &raw);
-        }
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
+        let store = storage().ok_or("this browser has no storage for them")?;
+        let raw = serde_json::to_string(settings).map_err(|err| err.to_string())?;
+        store
+            .set_item(SETTINGS_KEY, &raw)
+            .map_err(|_| "this browser's storage would not take them".into())
     }
 
-    fn load_sessions(&self) -> Vec<SessionResult> {
-        let Some(store) = storage() else {
-            return Vec::new();
-        };
-        let Ok(Some(raw)) = store.get_item(SESSIONS_KEY) else {
-            return Vec::new();
-        };
-        parse_sessions(&raw).unwrap_or_else(|| {
+    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
+        let store = storage()?;
+        let raw = store.get_item(SESSIONS_KEY).ok().flatten()?;
+        // Copies set aside go beside any set aside before, each under a key
+        // of its own, as far as the room goes.
+        let get = |key: &str| store.get_item(key).map_err(|_| ());
+        let set = |key: &str, raw: &str| store.set_item(key, raw).is_ok();
+        let Some(read) = read_history(&raw) else {
             // Keep the unreadable copy where the next save cannot reach it —
             // and only once it is safely there take it out of the way. A copy
             // that would not fit is no copy, and the original stays put.
-            if store.set_item(UNREADABLE_SESSIONS_KEY, &raw).is_ok() {
+            if keep_aside(UNREADABLE_SESSIONS_KEY, &raw, get, set) {
                 let _ = store.remove_item(SESSIONS_KEY);
             } else {
                 self.history_held.set(true);
             }
-            Vec::new()
-        })
+            return None;
+        };
+        // The sessions that do not read are set aside before the next save
+        // leaves them out; where they cannot be, nothing is saved over them.
+        if let Some(unread) = read.unread_json()
+            && !keep_aside(UNREADABLE_SESSIONS_KEY, &unread, get, set)
+        {
+            self.history_held.set(true);
+        }
+        Some(read.sessions)
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
@@ -281,10 +288,16 @@ impl Store for WebStore {
         true
     }
 
+    /// A browser says nothing of a download it blocks, or one the user
+    /// turns down, so the file is told of as handed over, not as saved.
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
         saved_now(
             download(name, contents)
-                .map(|()| format!("{name}, in your downloads"))
+                .map(|()| {
+                    format!(
+                        "Backup handed to your browser to save as {name}: look for it in your downloads."
+                    )
+                })
                 .ok_or_else(|| "this browser would not hand over the file".into()),
         )
     }
