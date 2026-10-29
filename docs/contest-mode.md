@@ -413,12 +413,13 @@ texts, your exchange, whether RST and a serial are part of it, the copied
 fields per side, which callers answer, and the scoring rule. A new contest
 is a row plus its data. In all of them you run (call CQ); callers send RST
 as `5NN` (`Station.pas:529`), prefilled 599 and never checked, as loggers
-do, except in Simple QSO; in pile-ups TU becomes `TU <your call>` every
-third QSO, as in MRCE's Pile-Up and WPX modes (`Contest.pas:468-474`), in
-a contest whose TU works as a CQ (not Simple QSO, whose TU greets the
-station by name and brings nobody), and as built after operator feedback
-(2026-10-22) every QSO or never if you choose (`contestTuCall`, §8), as
-MRCE's station ID rate is a setting (`StationIdRate`, `Ini.pas:259`); the
+do, except in Simple QSO; TU becomes `TU <your call>` in a contest whose
+TU works as a CQ (not Simple QSO, whose TU greets the station by name and
+brings nobody): as decided with the user on 2026-10-29, every QSO's, with
+one caller at a time or a pile-up, unless you choose every third QSO, as
+in MRCE's Pile-Up and WPX modes (`Contest.pas:468-474`), or never
+(`contestTuCall`, §8, §15.2 item 14), as MRCE's station ID rate is a
+setting (`StationIdRate`, `Ini.pas:259`); the
 callers call after your TU whether it signs or not, as MRCE's do
 (`Contest.pas:1000-1005` brings them on any TU), so a pile-up that never
 hears your call goes on as ever; and
@@ -437,7 +438,8 @@ kind replacing an earlier one (11.7).
 ### WPX (`wpx`), the default
 
 - **On the air.** `CQ DL1ABC TEST` (`Contest.pas:466`) · `K5XYZ` ·
-  `K5XYZ 5NN TT7` · `TU 5NN 214` · `TU`. They may also send `R 5NN 214`.
+  `K5XYZ 5NN TT7` · `TU 5NN 214` · `TU DL1ABC`. They may also send
+  `R 5NN 214`.
   Logged: K5XYZ, NR 214. Your serial starts at 1, padded to three digits and
   cut (`TT7`, `1N5`), as MRCE sends the user's (`Station.pas:482, 541-547`).
 - **Rules.** One point per QSO × different WPX prefixes. The real contest
@@ -2358,7 +2360,7 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
 | `myPower` | String | `100` | 1..=1500 (leading zeros dropped), `K`, `KW` or `1K` as written; else `100` | Station | 3 |
 | `contestHabits` | `easy` `real` `rough` | `easy` | forgiving | Band conditions | 4 (as built, 4a) |
 | `contestShowCopy` | bool | false | — | Session shape | 4 (as built, 4b) |
-| `contestTuCall` | `every` `third` `never` | `third` | forgiving | Character set | operator feedback |
+| `contestTuCall` | `every` `everyThird` `never` | `every` | forgiving; `third`, an older save's, reads as `every` | Character set | operator feedback; 2026-10-29 |
 | `contestAdaptSpeed` | bool | true | — (read back, anything but true or false is on) | Speed | adaptive callers' speed |
 | `myWpm` | u32 | 0 | 0 (the callers' middle) or 5..=80; read back, anything but a number is 0 | Speed | operator feedback |
 | `mySendingDb` | i32 | -9 | -60..=0 (-60 is off); read back, anything but a number is -9 | Tone and volume | operator feedback |
@@ -2392,21 +2394,26 @@ joins `ALL` (`settings/mod.rs:493-525`) and `reset_section`
   anything but true or false (a save edited by hand) is off and costs the
   rest of the save nothing; its card's reset turns it off; `clamp()` has
   nothing to bound, as for the habits; no preset touches it.
-- **Your call in TU** (as built after operator feedback, 2026-10-22). On
-  the contest card under the run style, in a pile-up only and only where
-  the contest's TU leaves it to you (`ContestRules::tu_call_chosen`: WPX,
+- **Your call in TU** (as built after operator feedback, 2026-10-22; every
+  QSO by default and a single caller's too since 2026-10-29). On the
+  contest card under the run style, with one caller at a time or a
+  pile-up, where the contest's TU leaves it to you
+  (`ContestRules::tu_call_chosen`: WPX,
   CQ WW, ARRL DX and Field Day; not the Sprint, whose TU always signs by
   its rules, nor Simple QSO, whose TU greets the station by name and
   brings nobody): "Your call in TU", with Every QSO, Every third and
   Never, and a line saying what each does. The card's example QSO, your
   first, signs its TU as that QSO would: "TU DL1ABC" with Every QSO, and
   plain "TU" otherwise (`ContestRules::tu_adds_call`, which the run's TU
-  follows too, through `Fill::tu_signed`). A single caller's TU never
-  signs, as MorseRunner's single calls never ID (its station ID is for its
-  Pile-Up and WPX modes, `Contest.pas:471`), so the control is not shown
-  for one and keeps its value meanwhile. Read back, a name this build does
-  not know is every third; its card's reset puts every third back; no
-  preset touches it.
+  follows too, through `Fill::tu_signed`). A single caller's TU signs as a
+  pile-up's does, though MorseRunner's single calls never ID (its station
+  ID is for its Pile-Up and WPX modes, `Contest.pas:471`): a run station
+  signs its TU on the air either way. Where the control is not shown (the
+  Sprint, Simple QSO) it keeps its value. Every third saves as
+  `everyThird`; `third`, which every save wrote while every third was the
+  default, chosen or not, reads as every QSO, once. Read back, a name
+  this build does not know is every QSO; its card's reset puts every QSO
+  back; no preset touches it.
 - **Your speed** (as built after operator feedback). On the Speed card in
   Contest mode, after the callers' ranges: "Your speed", in whole WPM,
   showing the callers' middle until you set one, rounded as the run bar
@@ -4258,7 +4265,7 @@ keying with the paddles, a contest level, and more contests.
 | Space in Exchange (operator feedback) | back to Call where the exchange has one item to type, or what is typed reads whole, is nothing or ends in a space; else the space before the next item | a space, always | MorseRunner's and N1MM's space bar toggles the fields, so a call is put right with one key; a longer exchange still needs its spaces, and none is typed only to be dropped |
 | Your sending (operator feedback) | a level of its own, off to the loudest in dB, -9 dB to start | a fixed monitor level | painfully loud against weak callers; -9 dB is level with an average caller as heard through the AGC |
 | The paddles' sidetone (operator feedback; audit 2026-10-27) | a level of its own, half the limiter's knee, in every mode, turned down with the volume | the volume floor; your sending, or capped at it in a run with a floor that keeps it heard | the paddles type into the log and never transmit; one paddle should sound the same in every mode, and following your sending off would key in silence. The volume floor set how far the stations stand over the noise, so it moved the paddles 7 to 13 dB with it; a rig's sidetone level is its own. At the defaults the paddles sound about 3 dB under your messages and 4 dB under an average caller (§5.3) |
-| Your call in TU (operator feedback) | every QSO, every third or never, in a pile-up, where the contest's TU leaves it; the callers call after every TU | every third, always | MorseRunner's station ID rate is a setting; its callers come on every TU, signed or not, so none waits for your call |
+| Your call in TU (operator feedback; 2026-10-29) | every QSO unless you choose every third or never, with one caller or a pile-up, where the contest's TU leaves it; the callers call after every TU | every third, always; a pile-up's only | MorseRunner's station ID rate is a setting; its callers come on every TU, signed or not, so none waits for your call; a run station signs its TU on the air, one caller at a time or not |
 | Callers' speed (2026-10-22) | each newcomer's drawn from the copy-speed belief within the Speed card's ranges, on as it ships, a switch of the contest's own; aiming at the Aim's share of characters right; QRS slowing from that speed | MorseRunner's keys alone; RufzXP's step up on a right call and down on a miss; group training's switch; a fixed contest target | the user asked for callers that speed up as calls are copied clean; Dust's speeds come from a posterior, so they move smoothly and as surely as the copies say; group training's switch stays off and its own; one aim for every adaptive feature, shown where it steers |
 | Presets and the callers' speed (2026-10-22) | leave the switch alone | each set it | a preset says how fast callers may come; how they are drawn within that is yours, and toggling it keeps the preset |
 | Assisted runs in the callers' belief (2026-10-22) | counted, as every session of the set is | left out | group training's belief is blind to sends; a copy kept when its text showed is what was heard by ear |
@@ -4335,6 +4342,7 @@ the design where it says so:
     QSO, whose TU is its own). A single caller's TU never signs, as before.
     Callers call after your TU whether it signs or not, as MorseRunner's
     do, so a pile-up that never hears your call goes on as ever (§3, §8).
+    Item 14 changes its default and takes it to a single caller.
 
 Decided with the user on 2026-10-22, who asked for callers that speed up
 as their calls are copied clean, as an option on by default:
@@ -4353,6 +4361,18 @@ as their calls are copied clean, as an option on by default:
     Off, callers' speeds are drawn evenly from the ranges as before. Phase
     5's adaptive caller speed, brought forward (§6.6, §8, §10, §14); how
     each copy counts towards it is in §6.6 and §15.1.
+
+Decided with the user on 2026-10-29, who found the card's example QSO
+ending on a bare `TU` where a run station sends `TU` and its call:
+
+14. Your TU signs with your call every QSO out of the box, with one caller
+    at a time as in a pile-up: "Your call in TU" starts at Every QSO and
+    is on the contest card for both run styles, Every third and Never
+    still there to choose. A save from before reads as Every QSO once,
+    since it wrote every third as `third` whether chosen or not; every
+    third chosen now saves as `everyThird`. The example QSO ends
+    `TU DL1ABC`. This replaces item 12's default, and its single caller
+    that never signs (§3, §8).
 
 ## 16. Risks
 

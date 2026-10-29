@@ -1814,7 +1814,7 @@ mod tests {
         s.contest.contest_flutter = true;
         s.contest.contest_minutes = 25;
         s.contest.contest_show_copy = true;
-        s.contest.contest_tu_call = crate::contest::TuCall::Every;
+        s.contest.contest_tu_call = crate::contest::TuCall::Third;
         s.contest.contest_adapt_speed = false;
         s.contest.my_wpm = 34;
         s.contest.my_sending_db = -21;
@@ -1937,7 +1937,7 @@ mod tests {
                 "{section:?}"
             );
             assert_eq!(
-                s.contest.contest_tu_call == crate::contest::TuCall::Third,
+                s.contest.contest_tu_call == crate::contest::TuCall::Every,
                 section == SettingsSection::CharacterSet,
                 "{section:?}"
             );
@@ -2016,7 +2016,7 @@ mod tests {
         assert_eq!(json["contestFlutter"], false);
         assert_eq!(json["contestMinutes"], 10);
         assert_eq!(json["contestShowCopy"], false);
-        assert_eq!(json["contestTuCall"], "third");
+        assert_eq!(json["contestTuCall"], "every");
         assert_eq!(json["contestAdaptSpeed"], true);
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -3);

@@ -2124,14 +2124,12 @@ impl<S: CallSource> ContestMachine<S> {
             my_section: &self.my_section,
             serial,
             his_name: &his_name,
-            // In a pile-up, a TU signs with your call as often as you
-            // choose, every third QSO unless you choose otherwise, where the
-            // contest's TU does not sign by its own rules.
-            tu_signed: self.rules.tu_adds_call(
-                self.style,
-                self.settings.contest.contest_tu_call,
-                number,
-            ),
+            // A TU signs with your call as often as you choose, every QSO
+            // unless you choose otherwise, where the contest's TU does not
+            // sign by its own rules.
+            tu_signed: self
+                .rules
+                .tu_adds_call(self.settings.contest.contest_tu_call, number),
         };
         for part in &message {
             let said = message_text(std::slice::from_ref(part), self.rules, self.side, &me);
@@ -4816,7 +4814,7 @@ mod tests {
         runtime.finish_turn();
         let effects = runtime.key(OpKey::Esm, "K5XYZ", &nr);
         let tu = played(&effects).expect("TU goes out").clone();
-        assert_eq!(yours(&tu), "TU");
+        assert_eq!(yours(&tu), "TU DL1ABC");
         assert_eq!(replies(&tu), ["W2AW"], "a TU brings the next caller");
         assert!(effects.contains(&ContestEffect::ClearFields));
         assert!(effects.contains(&ContestEffect::Focus(EntryField::Call)));
@@ -5160,7 +5158,7 @@ mod tests {
             let typed_at = view(&runtime).run_ms(MonoMs(runtime.now));
             runtime.key(OpKey::Esm, "K5XYZ", &nr);
             if with_exchange {
-                assert_eq!(yours(runtime.last_turn()), "K5XYZ TU");
+                assert_eq!(yours(runtime.last_turn()), "K5XYZ TU DL1ABC");
             }
             runtime.finish_turn();
             runtime.apply(ContestEvent::FinishNow);
@@ -5447,7 +5445,10 @@ mod tests {
         runtime.key(OpKey::HisCall, "K5XYZ", "");
         runtime.finish_turn();
         let effects = runtime.key(OpKey::Esm, "K5XYZ", "123");
-        assert_eq!(yours(played(&effects).expect("a turn")), "5NN TT1 TU");
+        assert_eq!(
+            yours(played(&effects).expect("a turn")),
+            "5NN TT1 TU DL1ABC"
+        );
         runtime.finish_turn();
         runtime.key(OpKey::Esm, "W2AW", "");
         assert_eq!(yours(runtime.last_turn()), "W2AW 5NN TT2");
@@ -5469,7 +5470,11 @@ mod tests {
         runtime.run_to(runtime.now + (reply.end_sec * 1_000.0) as u64 - 100);
         let effects = runtime.key(OpKey::TuAndLog, "K5XYZ", &serial(&reply.text));
         let tu = played(&effects).expect("TU goes out").clone();
-        assert_eq!(yours(&tu), "TU", "your message was over; only the TU goes");
+        assert_eq!(
+            yours(&tu),
+            "TU DL1ABC",
+            "your message was over; only the TU goes"
+        );
         assert_eq!(view(&runtime).log[0].status, RowStatus::Pending);
         runtime.finish_turn();
         assert_eq!(
@@ -5497,7 +5502,7 @@ mod tests {
         let exchange = to_its_exchange(&mut runtime);
         runtime.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
         let tu = runtime.last_turn().clone();
-        assert_eq!(yours(&tu), "TU");
+        assert_eq!(yours(&tu), "TU DL1ABC");
         // Keyed while the next caller is still calling, the TU long over.
         let call = &tu.segments[1];
         runtime.run_to(runtime.now + (call.end_sec * 1_000.0) as u64 - 20);
@@ -5514,7 +5519,7 @@ mod tests {
         let exchange = to_its_exchange(&mut early);
         early.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
         early.key(OpKey::Esm, "W2AW", "");
-        assert_eq!(yours(early.last_turn()), "U W2AW 5NN TT2");
+        assert_eq!(yours(early.last_turn()), "U DL1ABC W2AW 5NN TT2");
         assert_eq!(view(&early).log[0].status, RowStatus::Pending);
         early.finish_turn();
         assert_eq!(
@@ -6672,7 +6677,7 @@ mod tests {
             runtime.finish_turn();
             assert!(!view(&runtime).qso.corrected, "an answer, not a correction");
             runtime.key(OpKey::Esm, "K5XYZ", &nr);
-            assert_eq!(yours(runtime.last_turn()), "K5XYZ TU");
+            assert_eq!(yours(runtime.last_turn()), "K5XYZ TU DL1ABC");
             runtime.finish_turn();
             assert_eq!(view(&runtime).clean, 1);
             runtime.apply(ContestEvent::FinishNow);
@@ -6705,7 +6710,7 @@ mod tests {
         assert_eq!(replies(runtime.last_turn()), [fix.as_str()], "sent again");
         runtime.finish_turn();
         runtime.key(OpKey::Esm, "K5XYZ", &nr);
-        assert_eq!(yours(runtime.last_turn()), "K5XYZ TU");
+        assert_eq!(yours(runtime.last_turn()), "K5XYZ TU DL1ABC");
         runtime.finish_turn();
         runtime.apply(ContestEvent::FinishNow);
         assert_eq!(sends(&runtime), [1, 2]);
@@ -7392,7 +7397,7 @@ mod tests {
             runtime.key(key, "K5XYZ", &nr);
             if key != OpKey::LogOnly {
                 // Its call still counts as sent, as MorseRunner's does.
-                assert_eq!(yours(runtime.last_turn()), "TU", "{key:?}");
+                assert_eq!(yours(runtime.last_turn()), "TU DL1ABC", "{key:?}");
             }
             runtime.finish_turn();
             assert_eq!(
@@ -7441,7 +7446,7 @@ mod tests {
             assert_eq!(replies(runtime.last_turn()), ["G4ABC"], "{key:?}");
             runtime.finish_turn();
             runtime.key(key, "K5XYZ", &nr);
-            assert_eq!(yours(runtime.last_turn()), "TU", "{key:?}");
+            assert_eq!(yours(runtime.last_turn()), "TU DL1ABC", "{key:?}");
             assert_eq!(replies(runtime.last_turn()), ["G4ABC"], "{key:?}");
             runtime.finish_turn();
             runtime.key(OpKey::Esm, "G4ABC", "");
@@ -7748,7 +7753,7 @@ mod tests {
         let nr = serial(replies(&next_turn(&mut runtime))[0]);
         runtime.finish_turn();
         let effects = runtime.key(OpKey::Esm, "K5XYZ", &nr);
-        assert_eq!(yours(played(&effects).expect("TU goes out")), "TU");
+        assert_eq!(yours(played(&effects).expect("TU goes out")), "TU DL1ABC");
         runtime.finish_turn();
         assert_eq!(view(&runtime).clean, 1);
     }
@@ -8549,9 +8554,10 @@ mod tests {
         assert!((1..=20).contains(&missed), "{missed} of 60");
     }
 
-    /// In a pile-up, every third QSO's TU signs with your call.
+    /// Out of the box every QSO's TU signs with your call, in a pile-up and
+    /// with one caller at a time alike.
     #[test]
-    fn a_pile_up_tu_signs_with_your_call_every_third_qso() {
+    fn every_tu_signs_with_your_call_out_of_the_box() {
         let mut runtime = pileup(&[], 1, 1);
         let mut tus = Vec::new();
         for n in 0..6u32 {
@@ -8568,20 +8574,26 @@ mod tests {
                     .to_string(),
             );
         }
-        assert_eq!(tus, ["TU", "TU", "TU DL1ABC", "TU", "TU", "TU DL1ABC"]);
-        // A single caller's never does.
+        assert_eq!(tus, ["TU DL1ABC"; 6]);
+        // A single caller's does too.
         let mut single = self::runtime(&["K5XYZ", "W7ABC", "G4ABC"]);
         for (n, call) in ["K5XYZ", "W7ABC", "G4ABC"].into_iter().enumerate() {
             work_with_enter(&mut single, call, n as u32);
         }
-        assert!(single.turns.iter().all(|turn| yours(turn) != "TU DL1ABC"));
+        let tus: Vec<&str> = single
+            .turns
+            .iter()
+            .map(yours)
+            .filter(|text| text.starts_with("TU"))
+            .collect();
+        assert_eq!(tus, ["TU DL1ABC"; 3]);
     }
 
-    /// Your call signs a pile-up's TU as you choose: every QSO's, every
-    /// third's, or none; and the callers call after each TU, signed or not,
-    /// as MorseRunner's do. A single caller's TU never signs. (The Sprint's
-    /// signs every time by its rules, whatever is chosen: its row says so,
-    /// and the choice is not its, `tu_call_chosen`.)
+    /// Your call signs your TU as you choose, in a pile-up and with one
+    /// caller at a time alike: every QSO's, every third's, or none; and the
+    /// callers call after each TU, signed or not, as MorseRunner's do. (The
+    /// Sprint's signs every time by its rules, whatever is chosen: its row
+    /// says so, and the choice is not its, `tu_call_chosen`.)
     #[test]
     fn your_call_signs_the_tu_as_you_choose() {
         use crate::contest::TuCall;
@@ -8614,7 +8626,9 @@ mod tests {
         assert_eq!(tus(pileup, TuCall::Every), ["TU K1ABC"; 4]);
         assert_eq!(tus(pileup, TuCall::Third), ["TU", "TU", "TU K1ABC", "TU"]);
         assert_eq!(tus(pileup, TuCall::Never), ["TU"; 4]);
-        assert_eq!(tus(single, TuCall::Every), ["TU"; 4]);
+        assert_eq!(tus(single, TuCall::Every), ["TU K1ABC"; 4]);
+        assert_eq!(tus(single, TuCall::Third), ["TU", "TU", "TU K1ABC", "TU"]);
+        assert_eq!(tus(single, TuCall::Never), ["TU"; 4]);
     }
 
     /// Each caller fades on its own path, from its own point in the band's

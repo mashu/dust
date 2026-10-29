@@ -5,7 +5,7 @@ use super::data::places::{fold_labrador, w_ve};
 use super::exchange::{self, Field, cut_power, cut_serial, cut_zone};
 use super::serial::{SPRINT_SERIALS, SerialFit, WPX_SERIALS};
 use super::turn::Sender;
-use super::{ContestKind, RunStyle, TuCall};
+use super::{ContestKind, TuCall};
 use crate::callsign::{CallSpec, Countries};
 
 /// Your side of the ARRL DX contest, from your call: W/VE works only DX, and
@@ -578,20 +578,19 @@ impl ContestRules {
         self.tu.contains("{my}")
     }
 
-    /// Whether your TU signs with your call in a pile-up as you choose
-    /// ([`TuCall`]): a TU that brings the next caller and does not sign by
-    /// the contest's own rules. The Sprint's always signs, and Simple QSO's
-    /// greets the station by name and brings nobody.
+    /// Whether your TU signs with your call as you choose ([`TuCall`]): a
+    /// TU that brings the next caller and does not sign by the contest's
+    /// own rules. The Sprint's always signs, and Simple QSO's greets the
+    /// station by name and brings nobody.
     pub fn tu_call_chosen(&self) -> bool {
         self.tu_calls && !self.tu_signs()
     }
 
-    /// Whether the TU that closes your `number`th QSO in a run of `style`
-    /// adds your call, as [`Fill::tu_signed`] has it: in a pile-up, as often
-    /// as `choice` says, where the rules leave it to you. A single caller's
-    /// never does, as MorseRunner's single calls never sign.
-    pub fn tu_adds_call(&self, style: RunStyle, choice: TuCall, number: u32) -> bool {
-        style == RunStyle::Pileup && self.tu_call_chosen() && choice.signs(number)
+    /// Whether the TU that closes your `number`th QSO adds your call, as
+    /// [`Fill::tu_signed`] has it: as often as `choice` says, where the
+    /// rules leave it to you, with one caller at a time as in a pile-up.
+    pub fn tu_adds_call(&self, choice: TuCall, number: u32) -> bool {
+        self.tu_call_chosen() && choice.signs(number)
     }
 
     /// Whether callers send the report prefilled, never checked: a report
@@ -1286,9 +1285,9 @@ mod tests {
 
     /// Your call in TU is yours to choose in every contest whose TU works
     /// as a CQ and does not sign by its own rules: not the Sprint's, which
-    /// always signs, nor Simple QSO's, which brings nobody. Chosen, a
-    /// pile-up's TU adds it as often as you choose, and the TU sent, the
-    /// example's too, reads `TU K1ABC`; a single caller's never does.
+    /// always signs, nor Simple QSO's, which brings nobody. Chosen, your TU
+    /// adds it as often as you choose, and the TU sent, the example's too,
+    /// reads `TU K1ABC`.
     #[test]
     fn your_call_in_tu_is_chosen_where_the_rules_leave_it() {
         for kind in ContestKind::ALL {
@@ -1297,17 +1296,16 @@ mod tests {
             assert_eq!(rules.tu_call_chosen(), chosen, "{kind:?}");
             for number in 1..=3 {
                 assert_eq!(
-                    rules.tu_adds_call(RunStyle::Pileup, TuCall::Every, number),
+                    rules.tu_adds_call(TuCall::Every, number),
                     chosen,
                     "{kind:?}"
                 );
-                assert!(!rules.tu_adds_call(RunStyle::Single, TuCall::Every, number));
-                assert!(!rules.tu_adds_call(RunStyle::Pileup, TuCall::Never, number));
+                assert!(!rules.tu_adds_call(TuCall::Never, number));
             }
         }
         let rules = wpx();
-        assert!(!rules.tu_adds_call(RunStyle::Pileup, TuCall::Third, 2));
-        assert!(rules.tu_adds_call(RunStyle::Pileup, TuCall::Third, 3));
+        assert!(!rules.tu_adds_call(TuCall::Third, 2));
+        assert!(rules.tu_adds_call(TuCall::Third, 3));
         let signed = Fill {
             tu_signed: true,
             ..k1abc(7)

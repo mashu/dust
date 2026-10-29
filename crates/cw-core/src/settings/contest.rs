@@ -107,9 +107,9 @@ pub struct ContestSettings {
     /// on the board.
     #[serde(deserialize_with = "forgiving_off")]
     pub contest_show_copy: bool,
-    /// How often your TU signs with your call in a pile-up, where the
-    /// contest's TU does not sign by its own rules: every QSO, every third,
-    /// or never. Set on the contest card, with the run style.
+    /// How often your TU signs with your call, where the contest's TU does
+    /// not sign by its own rules: every QSO, every third, or never. Set on
+    /// the contest card, with the run style.
     pub contest_tu_call: TuCall,
     /// Each new caller's speed drawn from your copy speed in contests, within
     /// the Speed card's ranges: faster as you copy calls and numbers clean,
@@ -172,7 +172,7 @@ impl Default for ContestSettings {
             contest_flutter: false,
             contest_minutes: 10,
             contest_show_copy: false,
-            contest_tu_call: TuCall::Third,
+            contest_tu_call: TuCall::Every,
             contest_adapt_speed: true,
             my_wpm: 0,
             my_sending_db: MY_SENDING_DEFAULT_DB,
@@ -1122,7 +1122,7 @@ mod tests {
     /// Read back, your speed and your sending take any number, held to
     /// their ends later by the clamp, and anything else, a save edited by
     /// hand, as their defaults, costing the rest of the save nothing; your
-    /// call in TU reads a name this build does not know as every third.
+    /// call in TU reads a name this build does not know as every QSO.
     #[test]
     fn your_speed_sending_and_tu_call_read_back_forgiving() {
         let read = |json: serde_json::Value| -> ContestSettings {
@@ -1135,7 +1135,7 @@ mod tests {
                 missing.my_sending_db,
                 missing.contest_tu_call
             ),
-            (0, -3, TuCall::Third)
+            (0, -3, TuCall::Every)
         );
         assert_eq!(missing.my_call, "DL1ABC");
         let set = read(serde_json::json!({
@@ -1155,7 +1155,7 @@ mod tests {
         }));
         assert_eq!(
             (odd.my_wpm, odd.my_sending_db, odd.contest_tu_call),
-            (0, -3, TuCall::Third)
+            (0, -3, TuCall::Every)
         );
         assert_eq!(odd.my_call, "K1ABC", "the rest of the save is kept");
         let wild = read(serde_json::json!({ "myWpm": -4.6, "mySendingDb": 1e12 }));
@@ -1163,7 +1163,7 @@ mod tests {
         let rounded = read(serde_json::json!({ "myWpm": 29.6, "mySendingDb": -8.6 }));
         assert_eq!((rounded.my_wpm, rounded.my_sending_db), (30, -9));
         let json = serde_json::to_value(ContestSettings::default()).expect("serialize");
-        assert_eq!(json["contestTuCall"], "third");
+        assert_eq!(json["contestTuCall"], "every");
         assert_eq!(json["myWpm"], 0);
         assert_eq!(json["mySendingDb"], -3);
     }

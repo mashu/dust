@@ -671,7 +671,7 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
         r#"<li class="qso-line they"><span class="qso-who tiny">They</span><span class="qso-sends"><span class="call">K5XYZ</span>"#,
         ">K5XYZ 5NN TT1<",
         ">TU 5NN 214<",
-        ">TU<",
+        ">TU DL1ABC<",
         "Callsign tier (1–6)",
         ">Your station<",
         "Signing DL1ABC",
