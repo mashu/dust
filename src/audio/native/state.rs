@@ -81,6 +81,12 @@ impl Heartbeat {
         self.0.store(now_sec.to_bits(), Ordering::Relaxed);
     }
 
+    /// When the callback last ran.
+    #[cfg(test)]
+    pub fn last(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
+
     /// Whether, at `now_sec`, the callback has gone uncalled for longer than
     /// [`SILENT_AFTER_SEC`], however long since anything last looked.
     pub fn went_silent(&self, now_sec: f64) -> bool {

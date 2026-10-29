@@ -26,7 +26,7 @@ use super::epoch::{Epoch, Ticket};
 use super::mixer::{BandVoice, Mixer, SendVoice, fade_origin_sec};
 use super::shape::Gains;
 use super::wait::{heard_ms, send_timing};
-use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
+use super::{MorseBackend, PlaybackSignal, SendTiming, WaitFlags};
 use crate::time::mono_ms;
 use chain::Chain;
 use sidetone::Sidetone;
@@ -335,13 +335,6 @@ impl MorseBackend for MorsePlayer {
     fn set_live_tone(&mut self, tone: ToneRequest) {
         self.resume_from_gesture();
         let _ = self.sidetone.set(&self.ctx, &self.chain.sidetone_in, tone);
-    }
-
-    /// The mixer's own frames, each given up once the context has played
-    /// it: what the receiver put out, before the volume the graph plays it
-    /// at, as the native player meters it.
-    fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
-        self.stream.take_meter(into);
     }
 }
 

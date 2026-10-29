@@ -16,14 +16,11 @@
 //! moment.
 
 mod band;
-mod meter;
 #[cfg(feature = "native-audio")]
 mod output;
 mod send;
 #[cfg(feature = "native-audio")]
 mod sidetone;
-
-use std::sync::Arc;
 
 #[cfg(doc)]
 use cw_core::band::AGC_LOOKAHEAD_SEC;
@@ -33,8 +30,6 @@ use crate::audio::shape::{BAND_FADE_SEC, GATE_RAMP_SEC, Gains};
 
 pub use band::BandVoice;
 use band::Glide;
-pub use meter::Meter;
-use meter::Metering;
 #[cfg(feature = "native-audio")]
 pub use output::Output;
 #[cfg(all(test, feature = "native-audio"))]
@@ -92,8 +87,6 @@ pub struct Mixer {
     /// The receiver's audio stage, after its AGC: the roll-off below the
     /// note, on the band and the stations, not on your own message.
     audio: AudioHighPass,
-    /// What the receiver did, a frame at a time, for the level scope.
-    metering: Metering,
     /// What the sends played, waiting out the receiver's look-ahead: its AGC
     /// hears every sample as it comes, through the RF gain as it stands
     /// then, and everything is played that much later at the gain it has by
@@ -135,7 +128,6 @@ impl Mixer {
     pub fn new(sample_rate: u32) -> Self {
         Self {
             audio: AudioHighPass::new(sample_rate),
-            metering: Metering::new(Arc::new(Meter::new()), sample_rate),
             sample_rate: sample_rate.max(1),
             band: None,
             fading: Vec::with_capacity(FADING_BANDS + 1),
@@ -156,17 +148,6 @@ impl Mixer {
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
-    }
-
-    /// The meter the mixer writes its frames to, for the UI to read.
-    pub fn meter(&self) -> Arc<Meter> {
-        self.metering.meter()
-    }
-
-    /// How many samples into the meter's next frame it has played.
-    #[cfg(any(feature = "web", test))]
-    pub fn meter_phase(&self) -> usize {
-        self.metering.taken()
     }
 
     /// Whether it has nothing left to play: no band, none still fading out,
@@ -363,7 +344,6 @@ impl Mixer {
         self.gains = self.gains_asked;
         self.af = Glide::at(self.gains_asked.af);
         self.audio = AudioHighPass::new(self.sample_rate);
-        self.metering.restart(self.sample_rate);
         self.late_len = agc_lookahead_samples(self.sample_rate);
         // On the UI thread, before the stream at the new rate starts.
         self.late
@@ -435,11 +415,8 @@ impl Mixer {
             let send = std::mem::replace(&mut self.late[self.late_at], heard_now);
             self.late_at = (self.late_at + 1) % self.late_len;
             let mut background = 0.0;
-            // What reached the AGC, for the meter: the send alone, through
-            // the RF gain, with no band to meet it.
-            let mut input = coming.heard * now.rf;
-            // The gain the AGC's hang holds, for the meter, and what the send
-            // rides: the AGC's gain at the AF gain of the band riding it.
+            // What the send rides: the AGC's gain at the AF gain of the band
+            // riding it.
             // While one band hands over to the next, or to none, the send
             // eases from the one to the other with the fade, the two sized
             // alike for the strongest station, so it never steps.
@@ -448,7 +425,6 @@ impl Mixer {
                 let played = band.next(coming.heard, now.rf);
                 background += played.band;
                 current = Some(played);
-                input = current.as_ref().map_or(input, |played| played.input);
             }
             // What the send rides going out is the newest band still on the
             // air: one gone has no gain of its own to give, and one replaced
@@ -462,7 +438,7 @@ impl Mixer {
                     outgoing.get_or_insert(played);
                 }
             }
-            let (held, riding) = match (current, outgoing) {
+            let riding = match (current, outgoing) {
                 (Some(new), old) => {
                     let from = match &old {
                         Some(old) => old.gain * old.af,
@@ -476,18 +452,15 @@ impl Mixer {
                         self.handed_over = None;
                     }
                     let to = new.gain * new.af;
-                    (new.held, from + (to - from) * new.weight)
+                    from + (to - from) * new.weight
                 }
                 (None, Some(old)) => {
                     self.handed_over = None;
-                    (
-                        1.0 + (old.held - 1.0) * old.weight,
-                        alone + (old.gain * old.af - alone) * old.weight,
-                    )
+                    alone + (old.gain * old.af - alone) * old.weight
                 }
                 (None, None) => {
                     self.handed_over = None;
-                    (1.0, alone)
+                    alone
                 }
             };
             // Your own message comes in after the AGC: the receiver never
@@ -502,12 +475,8 @@ impl Mixer {
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
             let received = self.audio.process(background + heard);
-            // What the receiver puts out, for the meter, as a rig's audio
-            // scope reads it: before the volume, which only sets how loud
-            // you listen to it.
             let out = received * self.gate + send.dry;
             *slot += (out * now.volume) as f32;
-            self.metering.add(input, held, out);
         }
         self.audio.settle();
         // A send is heard the look-ahead after it was played, as well as the

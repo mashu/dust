@@ -1276,41 +1276,6 @@ mod tests {
         );
     }
 
-    /// With the threshold down at the hiss, the hiss after a loud station is
-    /// a far weaker signal than the one the hang was holding: it neither
-    /// keeps re-arming the hang nor holds the band where the station put it,
-    /// so by the end of the band preview's pause the band plays within a few
-    /// decibels of the same band with nobody on it. On eight bands, hiss for
-    /// hiss, none of them more than 6 dB down.
-    #[test]
-    fn after_a_loud_station_the_hiss_does_not_hold_the_band_down() {
-        for threshold in [-13.0, -14.0, -15.0, -16.0] {
-            let mut settings = TrainingSettings::default();
-            settings.band.side_tone_min = 600.0;
-            settings.band.side_tone_max = 600.0;
-            settings.band.qrn_enabled = false;
-            settings.band.qsb_enabled = false;
-            settings.band.agc_threshold_db = threshold;
-            let settings = settings.clamp();
-            let over = station(&settings, &["CQ CQ"], 1.0, 0.0);
-            let end = over.downs.last().unwrap().1;
-            let pause = |x: &[f32]| rms(&x[seconds(end + 0.65)..seconds(end + 0.95)]);
-            // The same band, hiss for hiss, with the station and without.
-            let mut backs: Vec<f64> = (1..=8)
-                .map(|seed| {
-                    let (heard, _) = ride_on(&settings, &over.samples, end + 1.0, seed);
-                    let (empty, _) = ride_on(&settings, &[], end + 1.0, seed);
-                    db(pause(&heard) / pause(&empty))
-                })
-                .collect();
-            backs.sort_by(f64::total_cmp);
-            assert!(
-                backs[backs.len() / 2] > -3.0 && backs[0] > -6.0,
-                "{threshold} dB: the band {backs:.1?} dB down at the end of the pause"
-            );
-        }
-    }
-
     /// The hang holds the band down for what stays over the knee, not for
     /// the static's crackle, which the limiter squashes and lets go of: an
     /// AGC lamp lit by the hang, as the level scope's is, lights for the odd

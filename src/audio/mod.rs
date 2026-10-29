@@ -33,44 +33,6 @@ use crate::time::mono_ms;
 /// session.
 pub const AUDIO_IS_SILENT: bool = cfg!(feature = "silent-audio");
 
-/// How long one meter frame covers: short enough to show a dit at the
-/// fastest speed as a dit, long enough that the scope is a few hundred
-/// points.
-pub const METER_FRAME_SEC: f64 = 0.01;
-
-/// What the receiver did over one short stretch, for the level scope: the
-/// loudest of what reached its AGC, the band and the Morse together through
-/// the filter; the gain the AGC's hang held, at its lowest, which a signal
-/// over the threshold sets and a crash squashed for an instant does not;
-/// and the loudest of what it put out, at full volume, before the volume
-/// you listen at and the limiter after it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MeterFrame {
-    pub input: f32,
-    pub held: f32,
-    pub output: f32,
-}
-
-impl MeterFrame {
-    /// Nothing heard and the AGC wide open: a stretch before anything is
-    /// metered, and what merging starts from.
-    pub const QUIET: Self = Self {
-        input: 0.0,
-        held: 1.0,
-        output: 0.0,
-    };
-
-    /// One frame for two stretches: the louder of their peaks, and the
-    /// lower of their gains.
-    pub fn merge(self, other: Self) -> Self {
-        Self {
-            input: self.input.max(other.input),
-            held: self.held.min(other.held),
-            output: self.output.max(other.output),
-        }
-    }
-}
-
 /// What the session runtime needs from a player. Object-safe on purpose: the
 /// runtime holds one boxed backend and tests put their own in its place.
 pub trait MorseBackend {
@@ -130,12 +92,6 @@ pub trait MorseBackend {
     /// stream so a squeeze is that lead late, not a stream start.
     fn set_live_tone(&mut self, tone: ToneRequest) {
         let _ = tone;
-    }
-
-    /// The receiver's meter frames since the last were taken, oldest first,
-    /// appended to `into`. None from a player with nothing to meter.
-    fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
-        let _ = into;
     }
 }
 
@@ -273,8 +229,6 @@ pub mod fake {
         /// How long after it starts each send says it reaches the ear: none,
         /// unless a test asks for some.
         pub latency_sec: Cell<f64>,
-        /// Meter frames for the level scope to take, as a test puts them.
-        pub meter: RefCell<Vec<MeterFrame>>,
         /// The output is asleep, as the native player's stream sleeps: until
         /// a band, a send or the sidetone wakes it.
         pub asleep: Cell<bool>,
@@ -517,10 +471,6 @@ pub mod fake {
                 .calls
                 .borrow_mut()
                 .push(Call::LiveTone(tone.on));
-        }
-
-        fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
-            into.append(&mut self.recorder.meter.borrow_mut());
         }
     }
 }

@@ -3293,7 +3293,6 @@ mod interactions {
         // does not make it look like one.
         assert!(ui.has(r#"<span class="slider-name">Filter width</span>"#));
         assert!(!ui.has("-6 dB") && !ui.has("−6 dB"));
-        assert!(ui.has("Its width is read between the points 6 dB down"));
         for (button, reading) in [
             ("more-slider-noise-level", 40),
             ("more-slider-noise-level", 39),
@@ -3310,35 +3309,27 @@ mod interactions {
         ui.click("less-slider-noise-level");
         assert!(ui.has("class=\"slider-value\">Off<"));
 
+        // The receiver's own controls are folded away under a line that
+        // says how they are set, and open from it.
+        assert!(!ui.has(r#"<span class="slider-name">RF gain</span>"#));
+        assert!(ui.has("Advanced receiver: AGC fast, RF gain full"));
+        ui.click("disclosure-advanced-receiver");
+        assert!(
+            ui.input_tag("disclosure-advanced-receiver")
+                .contains("open")
+        );
+
         // The RF gain starts at full and backs off a decibel a step.
         assert!(ui.has(r#"<span class="slider-name">RF gain</span>"#));
         assert!(ui.has(r#"<span class="slider-value">Full</span>"#));
         assert!(ui.input_tag("more-slider-rf-gain").contains("disabled"));
         ui.click("less-slider-rf-gain");
         assert!(ui.has("<span class=\"slider-value\">\u{2212}1 dB</span>"));
-
-        // The AGC's threshold starts where the band's own floor puts it and
-        // moves a decibel a step either way, down into the hiss as far as
-        // twenty; with the AGC off there is none to set, while the RF gain
-        // still turns the band down.
-        assert!(ui.has(r#"<span class="slider-name">AGC threshold</span>"#));
-        assert!(ui.has(r#"<span class="slider-value">0 dB</span>"#));
-        ui.click("more-slider-agc-threshold");
-        assert!(ui.has(r#"<span class="slider-value">+1 dB</span>"#));
-        // Three down from +1 is two under, where the RF gain is not.
-        for _ in 0..3 {
-            ui.click("less-slider-agc-threshold");
-        }
-        assert!(ui.has("<span class=\"slider-value\">\u{2212}2 dB</span>"));
-        ui.type_into("slider-agc-threshold", "-20");
-        assert!(ui.has("<span class=\"slider-value\">\u{2212}20 dB</span>"));
-        assert!(
-            ui.input_tag("less-slider-agc-threshold")
-                .contains("disabled")
-        );
+        assert!(ui.has("Advanced receiver: AGC fast, RF gain \u{2212}1 dB"));
 
         // The AGC's decay is Fast until you pick Slow, and is there only
-        // while the AGC is on.
+        // while the AGC is on. There is no threshold to set.
+        assert!(!ui.has("AGC threshold"));
         assert!(ui.has(r#"<span class="field-label">AGC decay</span>"#));
         assert!(ui.input_tag("seg-agc-fast").contains("seg active"));
         ui.click("seg-agc-slow");
@@ -3346,14 +3337,14 @@ mod interactions {
         assert!(!ui.input_tag("seg-agc-fast").contains("active"));
         ui.commit("switch-agc", "false");
         assert!(!ui.has("AGC decay"));
-        assert!(
-            ui.input_tag("more-slider-agc-threshold")
-                .contains("disabled")
-        );
-        assert!(ui.has("With the AGC off there is no threshold to set."));
         assert!(!ui.input_tag("less-slider-rf-gain").contains("disabled"));
         ui.click("less-slider-rf-gain");
         assert!(ui.has("<span class=\"slider-value\">\u{2212}2 dB</span>"));
+        assert!(ui.has("Advanced receiver: AGC off, RF gain \u{2212}2 dB"));
+
+        // And it folds away again.
+        ui.click("disclosure-advanced-receiver");
+        assert!(!ui.has(r#"<span class="slider-name">RF gain</span>"#));
     }
 
     #[test]
@@ -3362,13 +3353,7 @@ mod interactions {
         assert!(ui.has("Live preview"));
         assert!(!ui.has("QSB slowly fades"));
         // The old resonator model's controls are gone for good.
-        for gone in [
-            "Model gain",
-            "Wobble",
-            "Resonance Q",
-            "Whistle",
-            "Advanced receiver",
-        ] {
+        for gone in ["Model gain", "Wobble", "Resonance Q", "Whistle"] {
             assert!(!ui.has(gone), "{gone} should no longer be on the card");
         }
 

@@ -16,10 +16,8 @@
 //! nodes.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 
-use super::mixer::{Meter, Mixer, Swept};
-use super::{METER_FRAME_SEC, MeterFrame};
+use super::mixer::{Mixer, Swept};
 
 /// How long each stretch is: long enough that a browser busy for a moment
 /// has several queued, short enough that one remade is little work.
@@ -32,12 +30,7 @@ pub const STRETCH_SEC: f64 = 0.1;
 pub struct ReceiverStream<N> {
     /// The mixer as it stands at `next`.
     mixer: Mixer,
-    meter: Arc<Meter>,
-    /// Frames read off the meter so far, and those read in one stretch.
-    seen: usize,
-    read: Vec<MeterFrame>,
     sample_rate: f64,
-    frame_len: u64,
     stretch: usize,
     out: Vec<f32>,
     /// The clock's moment at sample 0.
@@ -45,8 +38,6 @@ pub struct ReceiverStream<N> {
     /// Where the next stretch starts.
     next: u64,
     queued: VecDeque<Queued<N>>,
-    /// The meter's frames, each with the sample it ends at, not yet taken.
-    frames: VecDeque<(u64, MeterFrame)>,
     /// Nothing to play: the mixer is quiet and its last stretch was
     /// silence, so none is rendered until something changes.
     idle: bool,
@@ -76,18 +67,13 @@ impl<N: Clone> ReceiverStream<N> {
         let sample_rate = f64::from(mixer.sample_rate());
         let stretch = ((STRETCH_SEC * sample_rate).round() as usize).max(128);
         Self {
-            meter: mixer.meter(),
             mixer,
-            seen: 0,
-            read: Vec::new(),
             sample_rate,
-            frame_len: ((METER_FRAME_SEC * sample_rate) as u64).max(1),
             stretch,
             out: vec![0.0; stretch],
             origin: now,
             next: 0,
             queued: VecDeque::new(),
-            frames: VecDeque::new(),
             idle: false,
         }
     }
@@ -114,13 +100,11 @@ impl<N: Clone> ReceiverStream<N> {
         while !self.idle && self.time(self.next) < until {
             let before = self.mixer.clone();
             let len = self.stretch;
-            self.render(len, true);
+            self.render(len);
             let node = match play(self.time(self.next), &self.out[..len]) {
                 Ok(node) => node,
                 Err(err) => {
-                    // Played back to where it was, the frames with it.
-                    let keep = self.next;
-                    self.frames.retain(|(ends, _)| *ends <= keep);
+                    // Played back to where it was.
                     self.mixer = before;
                     return Err(err);
                 }
@@ -153,12 +137,9 @@ impl<N: Clone> ReceiverStream<N> {
             let mut later = self.queued.split_off(k);
             let first = later.pop_front().expect("one at k");
             let cut = at.max(first.starts);
-            // Its frames from the cut on are made again; those before it
-            // stand, and playing up to it again makes them a second time.
-            self.frames.retain(|(ends, _)| *ends <= cut);
             self.mixer = first.before.clone();
             self.next = first.starts;
-            self.render((cut - first.starts) as usize, false);
+            self.render((cut - first.starts) as usize);
             self.next = cut;
             if cut > first.starts {
                 taken.push(Taken::StopAt(first.node.clone(), self.time(cut)));
@@ -179,32 +160,14 @@ impl<N: Clone> ReceiverStream<N> {
         (self.time(self.next), taken)
     }
 
-    /// The stretches over by `now`, let go of; and the meter's frames heard
-    /// longer ago than the meter keeps its own ([`Meter::KEPT`]), as its
-    /// ring lets them go, so that with no scope to read them none pile up.
+    /// The stretches over by `now`, let go of.
     pub fn played_by(&mut self, now: f64) -> Vec<N> {
         let now = self.sample_at(now);
         let mut over = Vec::new();
         while self.queued.front().is_some_and(|queued| queued.ends <= now) {
             over.extend(self.queued.pop_front().map(|queued| queued.node));
         }
-        let kept = self.frame_len * Meter::KEPT as u64;
-        while self
-            .frames
-            .front()
-            .is_some_and(|(ends, _)| ends + kept <= now)
-        {
-            self.frames.pop_front();
-        }
         over
-    }
-
-    /// The meter's frames heard by `now`, oldest first, onto `into`.
-    pub fn take_frames(&mut self, now: f64, into: &mut Vec<MeterFrame>) {
-        let now = self.sample_at(now);
-        while self.frames.front().is_some_and(|(ends, _)| *ends <= now) {
-            into.extend(self.frames.pop_front().map(|(_, frame)| frame));
-        }
     }
 
     /// Whether nothing is being rendered, there being nothing to hear.
@@ -227,29 +190,14 @@ impl<N: Clone> ReceiverStream<N> {
         }
     }
 
-    /// Run the mixer over `len` samples from `next` into `out`, and read
-    /// the frames it metered: kept, each with the sample it ends at, or,
-    /// played again, dropped.
-    fn render(&mut self, len: usize, keep_frames: bool) {
+    /// Run the mixer over `len` samples from `next` into `out`.
+    fn render(&mut self, len: usize) {
         if self.out.len() < len {
             self.out.resize(len, 0.0);
         }
         let out = &mut self.out[..len];
         out.fill(0.0);
         self.mixer.render(out, 0);
-        self.read.clear();
-        self.meter.read_since(&mut self.seen, &mut self.read);
-        if !keep_frames {
-            return;
-        }
-        // The last frame ended as many samples before the end as the meter
-        // has taken of the next.
-        let ends = self.next + len as u64 - (self.mixer.meter_phase() as u64).min(len as u64);
-        let count = self.read.len() as u64;
-        for (k, frame) in self.read.iter().enumerate() {
-            let at = ends - (count - 1 - k as u64) * self.frame_len;
-            self.frames.push_back((at, *frame));
-        }
     }
 }
 
@@ -332,32 +280,11 @@ mod tests {
         }
     }
 
-    /// The meter's frames are held for a reader only as long as the meter
-    /// keeps its own: a minute played with none taken, the scope not shown,
-    /// holds no more than that, and a reader then gets the newest of them.
-    #[test]
-    fn untaken_frames_are_let_go_as_the_meters_own_are() {
-        let settings = settings();
-        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
-        let mut browser = Browser::default();
-        for second in 1..=60 {
-            let now = f64::from(second);
-            let _ = stream.render_until(now - 1.0, now, |starts, samples| {
-                browser.play(starts, samples)
-            });
-            let _ = stream.played_by(now - 0.5);
-        }
-        let _ = stream.played_by(60.0);
-        let mut frames = Vec::new();
-        stream.take_frames(60.0, &mut frames);
-        assert_eq!(frames.len(), Meter::KEPT, "frames held for no one");
-    }
-
     /// A change made mid-stretch, the queue a good way ahead of it, plays
     /// exactly as the mixer would have played with the change made at that
     /// sample in the first place: the stretch it falls in played again to
     /// there as it was, no sample twice and none missing, and the rest made
-    /// anew. And the meter's frames come one a frame, in order, none twice.
+    /// anew.
     #[test]
     fn a_change_mid_stretch_plays_as_if_made_there() {
         let settings = settings();
@@ -396,14 +323,6 @@ mod tests {
             heard[cut..].iter().any(|s| *s != 0.0),
             "nothing after the change"
         );
-
-        let mut frames = Vec::new();
-        stream.take_frames(2.0, &mut frames);
-        let frame_len = (METER_FRAME_SEC * f64::from(SR)) as usize;
-        assert_eq!(frames.len(), total / frame_len, "a frame every frame");
-        let (mut seen, mut metered) = (0, Vec::new());
-        straight.meter().read_since(&mut seen, &mut metered);
-        assert_eq!(frames, metered, "the frames as the mixer metered them");
     }
 
     /// A change before anything is queued from its moment picks up there;

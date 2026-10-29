@@ -4,11 +4,10 @@
 //! practice screen's history, and a key in a training answer does not
 //! rebuild the shell.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 
-use cw_core::band::{agc_knee, loudest_station, remembered_agc_knee};
-use cw_core::{CharSetMode, SessionEvent, TrainingSettings, compute_char_pool};
+use cw_core::{CharSetMode, SessionEvent, compute_char_pool};
 use dioxus::prelude::*;
 
 use crate::page_hidden::{LISTEN_HIDDEN, SETTINGS_HIDDEN, use_page_hidden};
@@ -16,39 +15,27 @@ use crate::persist::auto_progress;
 use crate::playback;
 use crate::session_runtime::{TypedAnswer, send_event, start_session};
 use crate::state::{AppCtx, Finished, Screen, SessionPick};
-use crate::time::{local_date_string, sleep_ms};
+use crate::time::{local_date_string, mono_ms, sleep_ms};
 use crate::ui::backup::Backups;
 use crate::ui::contest::ContestRunView;
 use crate::ui::contest_results::NothingKept;
 use crate::ui::home::Home;
 use crate::ui::listen::ListenView;
 use crate::ui::results::ResultsView;
-use crate::ui::scope::{BandKnee, KneeHeard, knee_asked};
 use crate::ui::settings::SettingsView;
 use crate::ui::stats::StatsView;
 use crate::ui::training::{TrainingProgress, TrainingView, focused_box_open};
 
-/// How often the band follows the settings while it is being previewed:
-/// often enough to sound live, seldom enough that a slider dragged across
-/// the noise does not rebuild the band, and measure its AGC, every frame.
-pub(crate) const BAND_FOLLOW_MS: u32 = 80;
+/// How long the settings have to stay still, while the band is being
+/// previewed, before the band follows them: past the steps of a slider
+/// being dragged, so the band is rebuilt, and its AGC measured, once the
+/// drag pauses rather than on every step of it.
+pub(crate) const BAND_SETTLE_MS: u64 = 150;
 
-/// How many times a follow measures the AGC's knee before it takes the
-/// settings waiting: once for them, and again for a move that changed the
-/// band while it measured, but no more than this, so a slider dragged
-/// without a pause still has the band follow it.
-///
-/// Once in the browser, which measures on the page's own thread wherever it
-/// does: measuring again for a newer move takes no work off the page, as the
-/// band built for that move would measure the same knee on the same thread,
-/// and under a drag that moves through every measurement it only adds
-/// measurements of moves the drag has already left behind.
-pub(crate) const BAND_WARM_ROUNDS: usize = if cfg!(target_arch = "wasm32") { 1 } else { 3 };
-
-/// How long the settings screen's settings stay still, with no band playing,
-/// before what a band preview would be built from is measured ahead of it
-/// ([`use_band_warm`]): past a page drawn and a slider let go.
-pub(crate) const BAND_WARM_AFTER_MS: u32 = 400;
+/// The longest the band is left behind a slider that never pauses: it
+/// follows the settings as they stand this long after the first move it has
+/// not followed yet, so a long drag is still heard as it goes.
+pub(crate) const BAND_FOLLOW_MAX_MS: u64 = 600;
 
 /// The screen `screen` names.
 #[component]
@@ -120,7 +107,6 @@ fn SettingsRoute() -> Element {
     let on_play_sample = use_callback(move |text| playback::start_sample(ctx, text));
     let on_hear_qsos = use_callback(move |()| playback::start_qsos(ctx));
     use_band_follow(ctx);
-    use_band_warm(ctx);
     use_qsos_follow(ctx);
     use_qsos_stop_when_hidden(ctx, SETTINGS_HIDDEN);
     let preview = ctx.preview.read();
@@ -172,189 +158,50 @@ fn use_qsos_stop_when_hidden(ctx: AppCtx, slot: &'static str) {
     });
 }
 
-/// While the band preview runs, the band follows the settings: the latest
-/// of them, at most every [`BAND_FOLLOW_MS`].
-///
-/// Before a follow takes them, it measures the AGC's knee for the settings
-/// waiting ([`warm_agc_knee`]), so building the band finds it remembered
-/// rather than measuring it under the slider being dragged. The settings
-/// stay waiting meanwhile: a move made while the knee is measured joins
-/// them instead of starting a second follow, so there is only ever one on
-/// its way and the newest settings are still the last to land. A move that
-/// changed the band is measured in its turn before the follow takes it, up
-/// to [`BAND_WARM_ROUNDS`] measurements in all, so a slider being dragged
-/// finds its knee remembered too.
-///
-/// The level scope draws its line, and reads the threshold against the
-/// band's hiss, by the knee of the band that plays and the hiss it was
-/// measured against ([`BandKnee`]): each one measured, while the preview
-/// runs. Settings the
-/// follow took unmeasured, moved in every measurement, have theirs from the
-/// band built for them, which measured it with the AGC on; with it off they
-/// wait to be measured in their turn, as a move does. A preview stopped
-/// takes its knee with it.
+/// While the band preview runs, the band follows the settings once they
+/// settle ([`BAND_SETTLE_MS`]), and at least every [`BAND_FOLLOW_MAX_MS`]
+/// under a slider that never pauses. Building the band for new receiver
+/// settings measures its AGC, on the thread that draws in the browser, so it
+/// is done once a drag pauses, not under every step of it.
 fn use_band_follow(ctx: AppCtx) {
-    let latest = use_hook(|| Rc::new(RefCell::new(None::<TrainingSettings>)));
-    let BandKnee(mut band_knee) = use_context_provider(|| BandKnee(Signal::new(None)));
-    let mut give_knee = move |heard: KneeHeard| {
-        if *band_knee.peek() != Some(heard) {
-            band_knee.set(Some(heard));
-        }
-    };
+    let waiting = use_hook(|| Rc::new(Cell::new(Waiting::default())));
     use_effect(move || {
-        if !ctx.preview.read().is_band() {
-            // The next preview's scope waits for a knee of its own, not one
-            // of settings that may have moved since.
-            if band_knee.peek().is_some() {
-                band_knee.set(None);
-            }
+        let previewing = ctx.preview.read().is_band();
+        // Read to follow every move; the follow takes them as they stand.
+        let _ = ctx.settings.read();
+        let turn = waiting.get().turn.wrapping_add(1);
+        if !previewing {
+            // A stopped preview has no band to follow the settings with.
+            waiting.set(Waiting { since: None, turn });
             return;
         }
-        let settings = ctx.settings.read().clone().clamp();
-        if latest.borrow_mut().replace(settings).is_some() {
-            // A follow is already on its way, and will take these.
-            return;
-        }
-        let latest = latest.clone();
+        let now = mono_ms();
+        let since = waiting.get().since.unwrap_or(now);
+        waiting.set(Waiting {
+            since: Some(since),
+            turn,
+        });
+        let due = (now + BAND_SETTLE_MS).min(since + BAND_FOLLOW_MAX_MS);
+        let waiting = waiting.clone();
         spawn(async move {
-            loop {
-                // Every follow waits its turn, one for settings put back
-                // too, so a drag rebuilds the band at most this often.
-                sleep_ms(BAND_FOLLOW_MS).await;
-                // The band whose knee the scope was given last.
-                let mut measured = None;
-                for _ in 0..BAND_WARM_ROUNDS {
-                    // Copied out in a statement of its own: a borrow still
-                    // held over the await below is the one the next slider
-                    // move would panic on.
-                    let waiting = latest.borrow().clone();
-                    let Some(waiting) = waiting else {
-                        break;
-                    };
-                    let knee = warm_agc_knee(&waiting).await;
-                    // A stopped preview has no band left to build, so
-                    // nothing to measure for, and no scope to draw by it.
-                    if !ctx.preview.peek().is_band() {
-                        break;
-                    }
-                    if let Some(heard) = knee {
-                        give_knee(heard);
-                        measured = Some(waiting.band.clone());
-                    }
-                    // The knee is asked of the band settings alone, the
-                    // receiver being worked out from them too, so only a
-                    // move that changed them asks it anew.
-                    let moved =
-                        latest.borrow().as_ref().map(|newest| &newest.band) != Some(&waiting.band);
-                    if !moved {
-                        break;
-                    }
-                }
-                let settings = latest.borrow_mut().take();
-                // A preview stopped meanwhile stays silent.
-                let Some(settings) = settings.filter(|_| ctx.preview.peek().is_band()) else {
-                    return;
-                };
-                ctx.app().player.follow_band(&settings);
-                if measured.as_ref() == Some(&settings.band) {
-                    return;
-                }
-                let (on, receiver) = knee_asked(&settings);
-                if let Some(knee) = remembered_agc_knee(&on, &receiver) {
-                    give_knee(KneeHeard::of(&on, &receiver, knee));
-                    return;
-                }
-                if measured.is_none() {
-                    // The worker measuring failed: the scope waits for the
-                    // next move rather than drawing by another band's knee.
-                    if band_knee.peek().is_some() {
-                        band_knee.set(None);
-                    }
-                    return;
-                }
-                // Put back, with nothing awaited since they were taken, so
-                // no second follow starts: measured in the next follow, and
-                // taken again, which rebuilds nothing.
-                *latest.borrow_mut() = Some(settings);
+            sleep_ms(due.saturating_sub(now).try_into().unwrap_or(u32::MAX)).await;
+            // A newer move has a follow of its own coming, due no later.
+            if waiting.get().turn != turn || !ctx.preview.peek().is_band() {
+                return;
             }
+            waiting.set(Waiting { since: None, turn });
+            let settings = ctx.settings.peek().clone().clamp();
+            ctx.app().player.follow_band(&settings);
         });
     });
 }
 
-/// While the settings screen is open with no band playing, what pressing
-/// Preview would build the band from is measured once its settings have
-/// been still a moment ([`BAND_WARM_AFTER_MS`]): the AGC's knee and how loud
-/// the strongest station comes out ([`warm_agc_knee`]). Remembered, so the
-/// band starts the moment it is asked for rather than measuring them then;
-/// a preview playing has the band follow measure them instead.
-fn use_band_warm(ctx: AppCtx) {
-    let asked = use_hook(|| Rc::new(Cell::new(0u64)));
-    use_effect(move || {
-        let settings = ctx.settings.read().clone().clamp();
-        if ctx.preview.read().is_band() {
-            return;
-        }
-        let ask = asked.get().wrapping_add(1);
-        asked.set(ask);
-        let asked = asked.clone();
-        spawn(async move {
-            sleep_ms(BAND_WARM_AFTER_MS).await;
-            // Moved again, or the preview started: the newer ask measures.
-            if asked.get() == ask && !ctx.preview.peek().is_band() {
-                let _ = warm_agc_knee(&settings).await;
-            }
-        });
-    });
-}
-
-/// Measure the AGC knee a band built for `settings` would set, so that
-/// building it finds the answer remembered ([`agc_knee`]) instead of
-/// spending three seconds of band on it there and then.
-///
-/// It is the question both players ask of the settings a follow hands them:
-/// the band they describe, through the receiver they describe. The native
-/// player clamps them once more first, which moves nothing the knee is
-/// remembered by. The receiver is worked out here, on the thread that draws
-/// the band card: the card has just asked for the same one, and asking for
-/// it anywhere else would have the two keep forgetting each other's. Should
-/// the settings move after the follow's last measurement, the band measures
-/// its own knee, as it always did.
-///
-/// It is measured with the AGC on whether it is or not: one question either
-/// way, the knee being remembered by the floor and the receiver alone, and
-/// the one the level scope draws its line by, AGC on or off ([`BandKnee`]),
-/// so that the scope never measures it on the thread that draws.
-///
-/// And with it how loud the strongest station comes out of that receiver
-/// ([`loudest_station`]), which full volume is sized by whatever is on the
-/// band: a few milliseconds more, and asked of the knee just measured. The
-/// knee, with the hiss it was measured against, unless the worker measuring
-/// it failed.
-async fn warm_agc_knee(settings: &TrainingSettings) -> Option<KneeHeard> {
-    let (on, receiver) = knee_asked(settings);
-    let settings = settings.clone();
-    let measure = move || {
-        let heard = agc_knee(&on, &receiver).map(|knee| KneeHeard::of(&on, &receiver, knee));
-        loudest_station(&settings);
-        heard
-    };
-    // A worker measures it, and the slider is not held up at all. A worker
-    // that panicked has measured nothing, which leaves it to the band.
-    #[cfg(all(not(target_arch = "wasm32"), not(test)))]
-    {
-        tokio::task::spawn_blocking(measure).await.ok().flatten()
-    }
-    // The browser has the one thread. It measures here, then lets the page
-    // draw and take input before the band is built: two short tasks rather
-    // than one long one. Tests measure the same way: their clock is stepped
-    // by hand, and keeps stepping while a worker runs, so a worker's knee
-    // would land a different number of steps later every run.
-    #[cfg(any(target_arch = "wasm32", test))]
-    {
-        let heard = measure();
-        sleep_ms(1).await;
-        heard
-    }
+/// The settings moves the band has still to follow: since when, and which
+/// was the newest, so only the follow for it brings the band in line.
+#[derive(Clone, Copy, Default)]
+struct Waiting {
+    since: Option<u64>,
+    turn: u64,
 }
 
 #[component]

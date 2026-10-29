@@ -17,10 +17,10 @@ use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::ToneRequest;
 use super::mixer::{
-    BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept, clock_sec, fade_origin_sec,
+    BandVoice, Mixer, Output, SendVoice, SidetoneControl, Swept, clock_sec, fade_origin_sec,
 };
 use super::shape::Gains;
-use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming};
+use super::{MorseBackend, PlaybackSignal, SendTiming};
 use state::{Heartbeat, PlayerState, ToneSignal, moved_off_default};
 
 /// The furthest behind the callback the speaker is believed to be. A host
@@ -66,10 +66,6 @@ pub struct MorsePlayer {
     /// them only when they move: a callback that finds it held plays a
     /// buffer without it.
     gains: Gains,
-    /// The mixer's meter, read without its lock, and how many of its frames
-    /// have been taken.
-    meter: Arc<Meter>,
-    metered: usize,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -164,7 +160,6 @@ impl MorsePlayer {
         claim_volume_keys();
         let (device, supported) = default_output()?;
         let mixer = Mixer::new(supported.sample_rate().0);
-        let meter = mixer.meter();
         let mut player = Self {
             state: PlayerState::new(),
             mixer: Arc::new(Mutex::new(mixer)),
@@ -176,8 +171,6 @@ impl MorsePlayer {
             default_asked: None,
             heard_at: None,
             gains: Gains::UNITY,
-            meter,
-            metered: 0,
         };
         if let Err(err) = player.open(&device, &supported) {
             eprintln!("audio output: {err}");
@@ -445,10 +438,6 @@ impl MorseBackend for MorsePlayer {
     fn set_live_tone(&mut self, tone: ToneRequest) {
         self.sidetone.set(tone);
         self.ensure_output_unless_refused();
-    }
-
-    fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
-        self.meter.read_since(&mut self.metered, into);
     }
 }
 
@@ -718,29 +707,28 @@ mod device_tests {
         player.shutdown();
     }
 
-    /// Asleep, the stream is closed and calls back no more, so nothing is
-    /// metered, and the next sidetone opens it to play on.
+    /// Asleep, the stream is closed and calls back no more, and the next
+    /// sidetone opens it to play on.
     #[test]
     fn a_sleeping_stream_calls_back_no_more_until_it_is_woken() {
         let Some(mut player) = player() else {
             return;
         };
-        let metered = |player: &mut MorsePlayer, ms: u64| {
-            let mut frames = Vec::new();
-            player.take_meter(&mut frames);
+        // Whether the stream's callback ran over the next `ms`.
+        let called = |player: &MorsePlayer, ms: u64| {
+            let beat =
+                |player: &MorsePlayer| player.stream.as_ref().map(|open| open.heartbeat.last());
+            let before = beat(player);
             std::thread::sleep(Duration::from_millis(ms));
-            frames.clear();
-            player.take_meter(&mut frames);
-            frames.len()
+            before.is_some() && beat(player) > before
         };
-        assert!(metered(&mut player, 200) > 0, "the stream plays");
+        assert!(called(&player, 200), "the stream plays");
         player.shutdown();
         player.sleep();
-        assert!(player.stream.is_none());
-        assert_eq!(metered(&mut player, 300), 0, "metered asleep");
+        assert!(player.stream.is_none(), "asleep, it is closed");
         player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
         assert!(player.stream.is_some(), "the sidetone opened it");
-        assert!(metered(&mut player, 300) > 0, "woken, it plays");
+        assert!(called(&player, 300), "woken, it plays");
         player.shutdown();
     }
 

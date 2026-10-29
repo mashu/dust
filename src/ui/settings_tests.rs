@@ -1457,7 +1457,7 @@ fn the_cards_there_is_least_call_for_start_folded_and_open_from_their_heads() {
             "the head does not fold the card"
         );
         // The cards in daily use are open as they were.
-        assert!(ui.shows("slider-agc-threshold"), "the band card is open");
+        assert!(ui.shows("slider-filter-width"), "the band card is open");
     });
 }
 

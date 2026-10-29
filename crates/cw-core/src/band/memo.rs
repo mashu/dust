@@ -48,16 +48,6 @@ impl<K: Clone + PartialEq, V: Clone> LastAnswer<K, V> {
         answer
     }
 
-    /// The answer for `key` if it was the last asked, without ever working
-    /// one out: for what has to draw now, and can wait for a question asked
-    /// elsewhere to be answered.
-    pub fn remembered(&self, key: &K) -> Option<V> {
-        match &*self.slot() {
-            Some((last, answer)) if last == key => Some(answer.clone()),
-            _ => None,
-        }
-    }
-
     /// Nothing written here is ever left half-written — every write is one
     /// assignment — so a lock a panic poisoned is still a good one.
     fn slot(&self) -> MutexGuard<'_, Option<(K, V)>> {
@@ -88,10 +78,6 @@ mod tests {
         // NaN is one question, asked once.
         assert!(ask(f64::NAN).is_nan());
         assert!(ask(f64::NAN).is_nan());
-        assert_eq!(asked.get(), 4);
-        // Looking works nothing out, and finds only the last answer.
-        assert!(memo.remembered(&Exact(f64::NAN)).is_some_and(f64::is_nan));
-        assert_eq!(memo.remembered(&Exact(1.0)), None);
         assert_eq!(asked.get(), 4);
     }
 }

@@ -11,7 +11,6 @@ use web_sys::{
 };
 
 use super::{page_is_hidden, reported_latency};
-use crate::audio::MeterFrame;
 use crate::audio::mixer::{Mixer, Swept};
 use crate::audio::stream::{ReceiverStream, Taken};
 
@@ -112,13 +111,6 @@ impl MixerStream {
     /// Something of the mixer as it stands, at the end of what is rendered.
     pub fn read<R>(&self, read: impl FnOnce(&Mixer) -> R) -> R {
         read(self.state.borrow().stream.mixer())
-    }
-
-    /// The meter's frames heard since the last were taken, oldest first.
-    pub fn take_meter(&self, into: &mut Vec<MeterFrame>) {
-        let mut state = self.state.borrow_mut();
-        let now = state.ctx.current_time();
-        state.stream.take_frames(now, into);
     }
 
     /// Whether there is nothing left to hear, nor anything being rendered.

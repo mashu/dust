@@ -132,15 +132,11 @@ pub struct Played {
     pub band: f64,
     /// The receiver's gain, which the send rides.
     pub gain: f64,
-    /// The part of it the AGC's hang holds, for its meter.
-    pub held: f64,
     /// The AF gain it is played at, which the send rides too.
     pub af: f64,
     /// How much of the band is being played: one when steady, falling to
     /// nothing as it goes.
     pub weight: f64,
-    /// What reached the receiver's AGC, for its meter.
-    pub input: f64,
 }
 
 impl BandVoice {
@@ -262,10 +258,8 @@ impl BandVoice {
                 return Played {
                     band: 0.0,
                     gain: 1.0,
-                    held: 1.0,
                     af: self.af.target(),
                     weight: 0.0,
-                    input: send * rf,
                 };
             }
             Fade::Warming(0) => (0.0, Fade::In(0)),
@@ -280,20 +274,13 @@ impl BandVoice {
         };
         self.fade = fade;
         self.mixer.set_rf_gain(rf);
-        let Received {
-            band,
-            gain,
-            held,
-            input,
-        } = self.mixer.next(send);
+        let Received { band, gain, .. } = self.mixer.next(send);
         let af = self.af.next();
         Played {
             band: band * weight * af,
             gain,
-            held,
             af,
             weight,
-            input,
         }
     }
 }

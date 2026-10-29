@@ -425,7 +425,6 @@ pub(crate) mod tests {
         b.rf_gain_db = -12.0;
         b.agc_enabled = false;
         b.agc_decay = cw_core::AgcDecay::Slow;
-        b.agc_threshold_db = 12.0;
         b.filter_width_hz = 250.0;
         b.filter_shape = cw_core::FilterShape::Soft;
         b.stations_min = 2;
