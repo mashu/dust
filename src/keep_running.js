@@ -5,8 +5,12 @@
 // says that render is done. WebKitGTK stops animation frames for a window
 // that is minimised, covered or on another workspace, so the whole app
 // stopped with it: the band played on from its own thread, and no new group
-// was ever sent. Here a frame that does not come is stood in for by a timer,
-// and a hidden page does not wait for the frame at all.
+// was ever sent. Android's and iOS's webviews, the same renderer's, give a
+// page hidden behind another app or a locked screen no frames either, and a
+// render left waiting held back the page's own word that it had gone, so a
+// session's timers ran out before its pause could land. Here a frame that
+// does not come is stood in for by a timer, and a hidden page does not wait
+// for the frame at all.
 (() => {
   const frame = window.requestAnimationFrame.bind(window);
   const cancelFrame = window.cancelAnimationFrame.bind(window);

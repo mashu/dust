@@ -54,6 +54,19 @@ keyboard (`inputmode="none"`): the training screen has a keypad of its own, so
 nothing slides in over the groups. A keyboard plugged in or paired still types
 into the box.
 
+Out of sight — another app in front, the screen locked — a session or a
+contest run pauses, as it does in a browser tab, and Resume carries on. The
+webview gives a hidden page no animation frames, and Dioxus waits for each
+render to be drawn on one before it runs anything else, the pause the page
+asks for among it. The page's head stands a timer in for a frame that does
+not come ([`src/keep_running.js`](../src/keep_running.js), the desktop
+build's too), so the pause lands at once. A process the system freezes
+whole runs nothing until it thaws, and then its timers all come due at once:
+a session and a run each keep a heartbeat, and a gap in it of more than two
+seconds is taken as a pause from where it began, before anything that waited
+out the gap is heard. No answer closes empty for it, and the time away is
+not answering time. The same holds on iOS.
+
 The Morse, the band noise and static, and the paddle sidetone are mixed into
 one output stream, so there is no second stream for a device to refuse — some
 Android devices will not open two at once.
