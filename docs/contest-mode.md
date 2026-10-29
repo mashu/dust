@@ -906,8 +906,8 @@ exchange as your TU ends, is not done: it sends its exchange again on its
 timeout, and your QSO with it stays logged (as built, 2026-10-29, second
 Esc review; the station still sending used to take the fragment all the
 same and answer once done, a reading of `DxStn.pas:240-253` that missed
-its `State <> stSending`). A single caller you talk over stops and hears
-you all through, as below. Esc takes
+its `State <> stSending`). A single caller is no different (as below).
+Esc takes
 your message back, not the caller's rest: that goes on from where it was,
 as Esc stops only your station, and what of it had reached you stays heard
 (5.2). A missed exchange is not taken, so N stays false and Enter sends the
@@ -936,8 +936,14 @@ you work hearing another call is over its QSO as the table says. A single
 caller calls again on its timeout, and stays in its QSO when you send
 another call, kinder to a learner.
 
-A single caller you talk over stops and hears you, kinder to a learner.
-Esc gives it nothing to hear, so a reply it is sending goes on (5.2).
+A single caller you talk over goes on and hears you only as a pile-up
+caller does, as MRCE's (as built, 2026-10-29, after the round-4 review):
+a `?` keyed over its call or its exchange is lost on it, and it calls or
+sends again on its timeout; ask once it has finished, which is what the
+`?` key is for. It used to stop and hear you, kinder to a learner, but
+the air is not kind that way, and waiting for a station to finish before
+you send is the habit a run teaches. Esc gives it nothing to hear either,
+so a reply it is sending goes on (5.2).
 
 A caller hears each of your messages whole, in order, when you key it, and
 its reply is decided then (5.1); Esc takes back what had not gone out whole
@@ -1431,7 +1437,8 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   character at that moment, sent again whole, re-based to the
   continuation's start; with full break-in collisions stay audible, and
   without it they are muted under your message (5.3); a single caller
-  stops and hears you. As built (2a), they carry on under a CQ, TU or NIL
+  goes on just the same (4.3; it used to stop and hear you). As built
+  (2a), they carry on under a CQ, TU or NIL
   too, which those that stop before it ends hear from a fragment, and
   answer after you; those still sending as it ends hear none of it, but
   for a station putting its call right, which takes your TU (4.3); one
@@ -1499,9 +1506,9 @@ plan, and the test recorder keeps both, with the `Qsb` the send was given.
   it sends is charged again. Where Esc takes your message back, a caller
   still sending was deaf to it, or heard a CQ, TU or NIL from a fragment,
   which goes back with the rest, so it is as it was at the key: sending. A
-  single caller stops for a message keyed over it, to hear it (4.3); Esc
-  gives it nothing to hear, so a reply it is sending goes on and is heard
-  as it ends. Without full break-in, a send some of which went out under
+  single caller goes on under a message keyed over it, as a pile-up
+  caller does (4.3), and Esc gives it nothing to hear, so a reply it is
+  sending goes on and is heard as it ends. Without full break-in, a send some of which went out under
   your message stays unheard, though its rest sounds after the Esc, as a
   send heard in part is no send heard (5.3, `Counted::Muted`). Esc used to
   silence them all: a reply it cut came again whole on its timeout, three
@@ -4368,7 +4375,7 @@ keying with the paddles, a contest level, and more contests.
 | Fields logged before they were heard | a missed group each | no group | logging early with a guess must not raise accuracy, nor the board's points per group |
 | A send a pause you chose cut | owed on the caller's timeout | sent again a moment after Resume | a pause is no free `?`; a hidden page or failed sound is no choice, and does send it again |
 | Esc on your message | the callers listening answer what they heard as garbage, at once | silence for a reply timeout | MRCE's callers do (`AbortSend`); the quiet was thinking time MRCE never gives |
-| Esc and the stations still sending (2026-10-29) | your message cut short, they go on from where they were, as over a key, a single caller and QRM too, each waiting from the end of its send | silenced, each back on its timeout | MRCE's `AbortSend` stops only your station; a single caller stops for a message it can hear, and Esc sends none; silencing them took a reply being copied away and left the frequency quiet for a reply timeout |
+| Esc and the stations still sending (2026-10-29) | your message cut short, they go on from where they were, as over a key, a single caller and QRM too, each waiting from the end of its send | silenced, each back on its timeout | MRCE's `AbortSend` stops only your station; silencing them took a reply being copied away and left the frequency quiet for a reply timeout |
 | Esc with your message out whole, or none on the air (2026-10-29, second Esc review) | nothing changes: the turn plays on, its sends never cut, a reply yet to begin on time | the turn cut all the same: a reply yet to begin dropped, its caller back only on its timeout (2.6 s late in a probe, a silent timeout spent), the sends sounding started again from their character sounding | MRCE's `AbortSend` (`MyStn.pas:108-116`) touches no station but yours, and a station about to answer answers (`DxStn.pas:235-237, 273-274`); with nothing of yours sounding there is nothing to stop |
 | Esc with nothing of yours sounding: garbage (2026-10-29, second Esc review) | nobody copies it: the callers answer garbage only of a message Esc cut short | as MRCE: every caller listening, one about to answer among them, copies garbage and answers it, its reply timed afresh from the Esc | MRCE's `AbortSend` sets `msgGarbage` and fires `evMsgSent` whether or not anything of yours is sounding (`MyStn.pas:108-116`, `DxStn.pas:240-275`), so its callers react to a transmission that never happened: an artifact of ending every abort with the end-of-send event, and no intuitive behaviour to copy |
 | The station you work, waiting for your exchange, hears nothing from you | stops asking after 3 silent timeouts, stays, and takes it late; in any other worked state it leaves after 3 | leaving after 3 | MRCE's `osNeedNr` stays; a slow learner keeps the QSO. MRCE's others leave on the fourth; Dust keeps three |
@@ -4404,6 +4411,7 @@ keying with the paddles, a contest level, and more contests.
 | What the gate keys off (5a) | your message's span in the plan, from the turn's start to its end, your sending off or not | the dry tones | with your sending off there are no tones, and a rig transmits, and mutes, all the same |
 | A caller sending across your message, muted (5a) | unheard, the whole send: no copy, repeat, speed, Enter or Show copy, RX counting it from your message's end; its cost to its caller spent | its tail after your message counted | nothing you cannot hear may count as heard, and a call heard in part is no call heard |
 | A CQ, TU or NIL keyed over a pile-up caller (2026-10-29, second Esc review) | heard from a fragment only by a caller that stops sending before your message ends; one still sending as it ends hears none of it and calls again on its timeout, but for a station putting its call right, which takes your TU; so the station you work, sending its exchange through your TU, is not done and sends it again on its timeout | every caller keyed over taking it from a fragment and answering once done | MRCE's station takes note of your message only when it is not sending as your message ends (`DxStn.pas:240-253`), with that one exception for TU (`DxStn.pas:277-289`); a station transmitting through the whole of your message heard no fragment of it |
+| A single caller you key over (2026-10-29, after the round-4 review) | goes on with what it is sending and hears your message only as a pile-up caller does: a CQ, TU or NIL from a fragment if it stops before your message ends, nothing otherwise, so a `?` keyed over it is lost and it calls or sends again on its timeout | stopping to hear the whole of your message, kinder to a learner | MRCE's single caller is a station like any other, transmitting and so deaf while it sends (`DxStn.pas:240-253`); the `?` key asks once it has finished, and waiting for a station to finish is the habit a run should teach; one rule for single and pile-up runs |
 | QRM sending across your message, muted, going on past an Esc (2026-10-29, second Esc review) | unheard, as a caller's: Show copy shows none of it, the rest sounding after the Esc | its whole message shown once the rest ended | the receiver was muted for its start, so what Show copy shows was never heard whole; QRM follows the callers' rule, heard in part is not heard |
 | Flutter (5a) | a switch of its own on the Band card in Contest mode, three callers in ten at 3–33 Hz, half to three quarters deep, over the fading or alone; Contester turns it on | MorseRunner's: a quicker fading in place of a station's, full depth, only with QSB on | the switch does what it says, and no caller is fluttered out of hearing |
 | A continuation (5a) | a timed splice: the turn on the air plays out the character sounding, and any the player has begun, the next starts at the start of the next character, ridden over by then; with none left, half a word space after your message, the next message a word space after it | the next started at once from the character sounding, sent again whole; or started in the past, mid-character | no character twice and no gap; both players start a send at a moment ahead well, and your message is silent where they meet, so nothing clicks |
