@@ -390,6 +390,49 @@ mod tests {
             }
         }
     }
+
+    /// Bytes as standard base64, padded, as a data URI holds them.
+    fn base64(bytes: &[u8]) -> String {
+        const DIGITS: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut text = String::new();
+        for chunk in bytes.chunks(3) {
+            let word = chunk.iter().enumerate().fold(0u32, |word, (at, byte)| {
+                word | (u32::from(*byte) << (16 - 8 * at))
+            });
+            for at in 0..4 {
+                if at <= chunk.len() {
+                    text.push(char::from(DIGITS[((word >> (18 - 6 * at)) & 63) as usize]));
+                } else {
+                    text.push('=');
+                }
+            }
+        }
+        text
+    }
+
+    /// The web page carries its tab icon inline, the app's own at 32 and
+    /// 64 px. A project site lives under /<repo>/ on GitHub Pages, and a
+    /// browser with no icon linked asks for /favicon.ico at the root of the
+    /// domain, outside the site: a 404, and no icon.
+    /// scripts/render-linux-icons.py writes them in again with the rest.
+    #[test]
+    fn the_web_page_carries_the_apps_icon_inline() {
+        let page = include_str!("../index.html");
+        for (size, png) in [
+            (32, include_bytes!("../assets/linux/32x32.png").as_slice()),
+            (64, include_bytes!("../assets/linux/64x64.png").as_slice()),
+        ] {
+            let link = format!(
+                "<link rel=\"icon\" type=\"image/png\" sizes=\"{size}x{size}\" href=\"data:image/png;base64,{}\" />",
+                base64(png)
+            );
+            assert!(
+                page.contains(&link),
+                "index.html has no {size}×{size} icon, or an old one: run scripts/render-linux-icons.py"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
