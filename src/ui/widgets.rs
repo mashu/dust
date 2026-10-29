@@ -759,6 +759,112 @@ pub fn SliderField(
     }
 }
 
+/// What is typed into a box and not committed yet, held where nothing
+/// redraws for it: the rule every box the settings are typed into keeps.
+///
+/// A key does not redraw the box. Every redraw sends the box its `value`
+/// again, and on the desktop and phone builds that lands a frame later, over
+/// whatever was typed in the meantime: a box that redrew for every key lost
+/// keys typed quickly, a quick 120 coming out as 10 and `KMURESN` as
+/// `KMUREN`. So what is typed is held in a value nothing subscribes to, and
+/// the box redraws only when it is settled — committed, stepped, or taken by
+/// a button — or when what it is given changes. A redraw for any other
+/// reason shows the latest of what is typed rather than taking the box back.
+#[derive(Clone, Copy, PartialEq)]
+pub struct TextDraft {
+    /// The text being typed, until it is settled.
+    typed: CopyValue<Option<String>>,
+    /// Moved on by every settle. Reading it is what puts what the box is
+    /// given back in it afterwards, even when that did not move: 999 into a
+    /// field already at its top, or a list that kept nothing.
+    repaint: Signal<u64>,
+}
+
+impl TextDraft {
+    /// A draft for a box, held by the component that calls this.
+    pub fn use_draft() -> Self {
+        Self {
+            typed: use_hook(|| CopyValue::new(None)),
+            repaint: use_signal(|| 0),
+        }
+    }
+
+    /// What the box shows: what is typed, or else `value`. Reading it
+    /// redraws the caller on a settle, and never on a key.
+    pub fn shown(self, value: impl FnOnce() -> String) -> String {
+        let _ = self.repaint.read();
+        self.typed.peek().clone().unwrap_or_else(value)
+    }
+
+    /// A key: what the box holds now, kept without redrawing anything.
+    pub fn hold(mut self, text: String) {
+        self.typed.set(Some(text));
+    }
+
+    /// Drop what is typed and redraw the box, whether or not anything was:
+    /// what it is given goes back in, even when that did not change.
+    pub fn settle(mut self) {
+        self.typed.set(None);
+        self.repaint += 1;
+    }
+
+    /// What was typed and not kept yet, taken: from then on the box shows
+    /// what it is given, as it does once it is left. Nothing typed leaves
+    /// the box as it is.
+    pub fn take(mut self) -> Option<String> {
+        let typed = self.typed.write().take();
+        if typed.is_some() {
+            self.repaint += 1;
+        }
+        typed
+    }
+}
+
+/// A line of text typed in.
+///
+/// What is typed stays as typed until it is committed, on Enter or on
+/// leaving the box, or by a button given its `draft`, and only then is it
+/// kept as the setting keeps it ([`TextDraft`]). Each commit redraws the
+/// box, so it shows what was kept even when that is what it held already.
+#[component]
+pub fn TextField(
+    label: &'static str,
+    value: String,
+    #[props(default)] placeholder: Option<&'static str>,
+    /// The field's class: `field`, or a field of a width of its own.
+    #[props(default = "field")]
+    class: &'static str,
+    on_commit: EventHandler<String>,
+    /// Where something outside the field keeps what is typed in it, as
+    /// Home's Start does; otherwise the field holds its own.
+    #[props(default)]
+    draft: Option<TextDraft>,
+) -> Element {
+    let own = TextDraft::use_draft();
+    let draft = draft.unwrap_or(own);
+    let shown = draft.shown(|| value);
+    let id = control_id("field", label);
+    rsx! {
+        div { class,
+            label { r#for: "{id}", "{label}" }
+            input {
+                id,
+                class: "group-text",
+                value: "{shown}",
+                placeholder,
+                autocapitalize: "characters",
+                autocomplete: "off",
+                spellcheck: false,
+                oninput: move |e| draft.hold(e.value()),
+                onchange: move |e| {
+                    draft.settle();
+                    on_commit.call(e.value());
+                },
+            }
+        }
+    }
+}
+
 /// A number typed in, or stepped with − and +.
 ///
 /// What is typed stays in the box, and reaches `onchange` only once it is
@@ -767,11 +873,8 @@ pub fn SliderField(
 /// setting that took every key would take that too, which for one end of a
 /// range drags the other end down with it.
 ///
-/// A key does not redraw the field. Every redraw sends the box its `value`
-/// again, and on the desktop and phone builds that lands a frame later, over
-/// whatever was typed in the meantime: a quick 120 could come out as 10. So
-/// the field redraws only when it is committed or stepped, or when what it
-/// is given changes.
+/// A key does not redraw the field ([`TextDraft`]): it redraws only when it
+/// is committed or stepped, or when what it is given changes.
 ///
 /// − and + show the value they leave in the box, over anything typed and not
 /// committed, even when the setting did not take the step.
@@ -789,17 +892,7 @@ pub fn NumberField(
     onchange: EventHandler<f64>,
 ) -> Element {
     let name = id.unwrap_or_else(|| control_id("number", &label));
-    // The text being typed, until it is committed or stepped over. Nothing
-    // subscribes to it, so a key costs no redraw; a redraw for any other
-    // reason shows the latest of it rather than taking the box back to the
-    // value.
-    let mut typed = use_hook(|| CopyValue::new(None::<String>));
-    // Moved on by every commit and every step. Reading it here is what puts
-    // the value back in the box afterwards, even when the value itself did
-    // not move — 999 into a field already at its top, or a step the setting
-    // did not take.
-    let mut repaint = use_signal(|| 0u64);
-    let _ = repaint.read();
+    let draft = TextDraft::use_draft();
     // Drop what is typed, redraw the box, and hand `to` on if there is one.
     // − and + do this as well as a commit, because some typing is never
     // committed. Text put back the way it was has nothing to commit. A key
@@ -808,14 +901,13 @@ pub fn NumberField(
     // can keep the box focused through a tap on − or +. The text is still
     // held then, and a step that kept it would show it in place of the
     // number stepped to.
-    let mut settle = move |to: Option<f64>| {
-        typed.set(None);
-        repaint += 1;
+    let settle = move |to: Option<f64>| {
+        draft.settle();
         if let Some(v) = to {
             onchange.call(v);
         }
     };
-    let shown = typed.peek().clone().unwrap_or_else(|| value.to_string());
+    let shown = draft.shown(|| value.to_string());
     let less = format!("Decrease {label}");
     let more = format!("Increase {label}");
     rsx! {
@@ -839,7 +931,7 @@ pub fn NumberField(
                     max: "{max}",
                     step: "{step}",
                     value: "{shown}",
-                    oninput: move |e| typed.set(Some(e.value())),
+                    oninput: move |e| draft.hold(e.value()),
                     onchange: move |e| settle(parse_number_input(&e.value(), min, max)),
                 }
                 if let Some(unit) = unit {

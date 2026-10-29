@@ -14,7 +14,9 @@ use cw_core::{
 use dioxus::prelude::*;
 
 use crate::ui::help;
-use crate::ui::widgets::{CardHead, IconName, NumberField, SectionReset, control_id};
+use crate::ui::widgets::{
+    CardHead, IconName, NumberField, SectionReset, TextDraft, TextField, control_id,
+};
 
 /// What the callsign, name, state, zone and power fields are called, and so
 /// their ids.
@@ -131,43 +133,13 @@ fn call_reading(
     Some((format!("Reads as {}", parts.join("\u{a0}· ")), true))
 }
 
-/// What is typed into one of your station's fields and not kept yet, which
-/// the field shares with the buttons that keep the cursor in it: Home's
-/// Start and Listen, pressed with a call just typed, keep that call before
-/// they act, so that nothing above them changes under the finger between
-/// the press and the click.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) struct StationDraft {
-    typed: CopyValue<Option<String>>,
-    repaint: Signal<u64>,
-}
-
-impl StationDraft {
-    pub(crate) fn use_draft() -> Self {
-        Self {
-            typed: use_hook(|| CopyValue::new(None)),
-            repaint: use_signal(|| 0),
-        }
-    }
-
-    /// What was typed and not kept yet, taken: from then on the box shows
-    /// what the setting keeps, as it does once it is left.
-    pub(crate) fn take(mut self) -> Option<String> {
-        let typed = self.typed.write().take();
-        if typed.is_some() {
-            self.repaint += 1;
-        }
-        typed
-    }
-}
-
 /// Your callsign, typed in, kept as a call can be written: upper case,
 /// letters, digits and single slashes.
 #[component]
 pub(crate) fn CallField(
     value: String,
     on_commit: EventHandler<String>,
-    #[props(default)] draft: Option<StationDraft>,
+    #[props(default)] draft: Option<TextDraft>,
 ) -> Element {
     rsx! {
         StationText { label: CALL_LABEL, placeholder: "e.g. DL1ABC", value, on_commit, draft }
@@ -179,7 +151,7 @@ pub(crate) fn CallField(
 pub(crate) fn NameField(
     value: String,
     on_commit: EventHandler<String>,
-    #[props(default)] draft: Option<StationDraft>,
+    #[props(default)] draft: Option<TextDraft>,
 ) -> Element {
     rsx! {
         StationText { label: NAME_LABEL, placeholder: "e.g. MAT", value, on_commit, draft }
@@ -280,7 +252,7 @@ pub(crate) fn StateEntry(
     #[props(default)] missing: Option<String>,
     rejected: Option<String>,
     on_commit: EventHandler<String>,
-    #[props(default)] draft: Option<StationDraft>,
+    #[props(default)] draft: Option<TextDraft>,
 ) -> Element {
     rsx! {
         StationText {
@@ -294,45 +266,27 @@ pub(crate) fn StateEntry(
     }
 }
 
-/// One of your station's fields, typed in.
-///
-/// What is typed stays as typed until it is committed, on Enter or on
-/// leaving the box, or by a button given its `draft`, and only then is it
-/// kept as the setting keeps it. A key does not redraw the box, which on the
-/// desktop and phone builds would reach it a frame late, over what was typed
-/// since; each commit does, so the box shows what was kept even when that is
-/// what it held already.
+/// One of your station's fields, typed in ([`TextField`]), as wide as a
+/// call. Its `draft` is shared with the buttons that keep the cursor in it:
+/// Home's Start and Listen, pressed with a call just typed, keep that call
+/// before they act, so that nothing above them changes under the finger
+/// between the press and the click.
 #[component]
 fn StationText(
     label: &'static str,
     placeholder: &'static str,
     value: String,
     on_commit: EventHandler<String>,
-    draft: Option<StationDraft>,
+    draft: Option<TextDraft>,
 ) -> Element {
-    let own = StationDraft::use_draft();
-    let draft = draft.unwrap_or(own);
-    let mut typed = draft.typed;
-    let _ = draft.repaint.read();
-    let shown = typed.peek().clone().unwrap_or(value);
-    let id = control_id("field", label);
     rsx! {
-        div { class: "field call-field",
-            label { r#for: "{id}", "{label}" }
-            input {
-                id,
-                class: "group-text",
-                value: "{shown}",
-                placeholder,
-                autocapitalize: "characters",
-                autocomplete: "off",
-                spellcheck: false,
-                oninput: move |e| typed.set(Some(e.value())),
-                onchange: move |e| {
-                    draft.take();
-                    on_commit.call(e.value());
-                },
-            }
+        TextField {
+            label,
+            placeholder,
+            class: "field call-field",
+            value,
+            on_commit,
+            draft,
         }
     }
 }
@@ -440,7 +394,7 @@ fn ZoneReading(
 pub(crate) fn ZoneField(
     value: u32,
     on_commit: EventHandler<String>,
-    #[props(default)] draft: Option<StationDraft>,
+    #[props(default)] draft: Option<TextDraft>,
 ) -> Element {
     let shown = if value == 0 {
         String::new()
@@ -636,7 +590,7 @@ pub(crate) fn SectionEntry(
     #[props(default)] missing: Option<String>,
     rejected: Option<String>,
     on_commit: EventHandler<String>,
-    #[props(default)] draft: Option<StationDraft>,
+    #[props(default)] draft: Option<TextDraft>,
 ) -> Element {
     rsx! {
         StationText {

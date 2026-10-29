@@ -13,44 +13,13 @@ use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
 use crate::ui::widgets::{
-    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, control_id, range_label,
+    CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, TextDraft, TextField,
+    control_id, range_label,
 };
 
 /// The largest file read as a word list. The longest list kept is a few
 /// tens of kilobytes; anything near this is not a word list.
 const WORD_FILE_MAX_BYTES: u64 = 1_000_000;
-
-/// A list of characters, typed out.
-///
-/// What is typed stays as typed until it is committed — on Enter, or on
-/// leaving the field — and only then is it cleaned down to the characters
-/// that can be sent. Cleaned on every key, the box would move under the
-/// cursor whenever a key was dropped, and could never be emptied to start
-/// again: an empty unlock order is LCWO's, so clearing it would fill it
-/// straight back up.
-#[component]
-fn AlphabetField(label: &'static str, value: String, on_commit: EventHandler<String>) -> Element {
-    let mut typed = use_signal(|| None::<String>);
-    let shown = typed().unwrap_or(value);
-    let id = control_id("field", label);
-    rsx! {
-        div { class: "field",
-            label { r#for: "{id}", "{label}" }
-            input {
-                id,
-                class: "group-text",
-                value: "{shown}",
-                autocapitalize: "characters",
-                spellcheck: false,
-                oninput: move |e| typed.set(Some(e.value())),
-                onchange: move |e| {
-                    typed.set(None);
-                    on_commit.call(e.value());
-                },
-            }
-        }
-    }
-}
 
 /// The character sets, in the order the control offers them.
 pub(crate) const CHAR_SET_MODES: [(CharSetMode, &str); 6] = [
@@ -366,7 +335,12 @@ pub fn CharsetCard(
                         }
                     }
                 }
-                AlphabetField {
+                // Cleaned down to what can be sent once it is committed, and
+                // not before. Cleaned on every key, the box would move under
+                // the cursor whenever a key was dropped, and could never be
+                // emptied to start again: an empty unlock order is LCWO's, so
+                // clearing it would fill it straight back up.
+                TextField {
                     label: "Sequence order",
                     value: c.sequence.clone(),
                     on_commit: move |typed: String| settings.write().type_sequence(&typed),
@@ -702,28 +676,24 @@ fn take_word_file(
 ///
 /// What is typed stays as typed until it is committed, on leaving the box,
 /// and is then read as a list: upper-cased, each word once, what cannot be
-/// sent left out and said. A key does not redraw the box — on the desktop
-/// and phone builds a redraw reaches it a frame late, over what was typed
-/// since — so the count of what is being typed is drawn beside it instead.
+/// sent left out and said. A key does not redraw the box ([`TextDraft`]),
+/// so the count of what is being typed is drawn beside it instead.
 #[component]
 fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: bool) -> Element {
-    // The text being typed, until it is committed. Only the count reads it.
-    let mut draft = use_signal(|| None::<String>);
+    let draft = TextDraft::use_draft();
+    // The text being typed again, for the count under the box, which alone
+    // reads it: the box goes by the draft, which redraws nothing.
+    let mut counting = use_signal(|| None::<String>);
     let report = use_signal(|| None::<String>);
-    // Moved on by every commit, so the box shows the list again afterwards
-    // even when the list did not change: text that kept nothing goes.
-    let mut repaint = use_signal(|| 0u64);
-    let _ = repaint.read();
+    // Every commit puts the list back in the box, even when the list did not
+    // change: text that kept nothing goes.
     let mut settle = move || {
-        draft.set(None);
-        repaint += 1;
+        draft.settle();
+        counting.set(None);
     };
     // The starter list, unfolded.
     let mut show_list = use_signal(|| false);
-    let shown = draft
-        .peek()
-        .clone()
-        .unwrap_or_else(|| if own { words.join("\n") } else { String::new() });
+    let shown = draft.shown(|| if own { words.join("\n") } else { String::new() });
     rsx! {
         div { class: "eyebrow", "Your words" }
         textarea {
@@ -735,7 +705,10 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
             aria_label: "Your words, one to a line",
             autocapitalize: "characters",
             spellcheck: false,
-            oninput: move |e| draft.set(Some(e.value())),
+            oninput: move |e| {
+                draft.hold(e.value());
+                counting.set(Some(e.value()));
+            },
             onchange: move |e| {
                 settle();
                 take_list(settings, report, &e.value(), None);
@@ -768,7 +741,7 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
                 }
             }
         }
-        WordCount { draft, report, count: words.len(), own }
+        WordCount { typing: counting, report, count: words.len(), own }
         if !own {
             p { class: "muted hint",
                 "Until you add your own, Words sends a starter list of the abbreviations and Q-codes a contact is made of."
@@ -801,12 +774,12 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
 /// are.
 #[component]
 fn WordCount(
-    draft: Signal<Option<String>>,
+    typing: Signal<Option<String>>,
     report: Signal<Option<String>>,
     count: usize,
     own: bool,
 ) -> Element {
-    let line = match draft() {
+    let line = match typing() {
         Some(text) => format!(
             "{} — taken when you leave the box",
             list_report(&WordList::read(&text), None)

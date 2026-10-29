@@ -88,37 +88,44 @@ fn a_number_committed_out_of_bounds_shows_where_it_landed() {
     });
 }
 
-/// A number typed faster than the page draws is committed whole.
+/// Type `text` into `field` a key at a time, faster than the page draws, and
+/// give back what the box on screen holds at the end.
 ///
 /// On the desktop and phone builds a redraw reaches the box a frame after it
 /// was made, and it sends the box its `value` whether or not that changed. A
 /// field that redrew for every key wrote each key's text back over whatever
-/// had been typed since, and a quick 120 came out as 10. The harness draws
-/// at once, so this plays the webview's part, at its worst: every redraw
-/// lands a key late.
+/// had been typed since. The harness draws at once, so this plays the
+/// webview's part, at its worst: every redraw lands a key late.
+fn type_faster_than_the_page_draws(ui: &mut Ui, field: &str, text: &str) -> String {
+    let _ = ui.take_work();
+    // What the box on screen holds, and a redraw still on its way to it.
+    let mut screen = String::new();
+    let mut on_its_way: Option<String> = None;
+    for key in text.chars() {
+        screen.push(key);
+        ui.type_into(field, &screen);
+        if let Some(late) = on_its_way.take() {
+            screen = late;
+        }
+        if ui.take_work() > 0 {
+            on_its_way = Some(value_of(ui, field));
+        }
+    }
+    if let Some(late) = on_its_way {
+        screen = late;
+    }
+    screen
+}
+
+/// A number typed faster than the page draws is committed whole: a field
+/// that redrew for every key turned a quick 120 into 10.
 #[test]
 fn a_number_typed_faster_than_the_page_draws_is_committed_whole() {
     run(|| async {
         let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
         ui.click("nav-settings");
         let field = "number-groups-per-session";
-        let _ = ui.take_work();
-        // What the box on screen holds, and a redraw still on its way to it.
-        let mut screen = String::new();
-        let mut on_its_way: Option<String> = None;
-        for key in ['1', '2', '0'] {
-            screen.push(key);
-            ui.type_into(field, &screen);
-            if let Some(late) = on_its_way.take() {
-                screen = late;
-            }
-            if ui.take_work() > 0 {
-                on_its_way = Some(value_of(&ui, field));
-            }
-        }
-        if let Some(late) = on_its_way {
-            screen = late;
-        }
+        let screen = type_faster_than_the_page_draws(&mut ui, field, "120");
         assert_eq!(screen, "120");
         assert_eq!(
             ui.stored_settings().await.curriculum.num_groups,
@@ -128,6 +135,40 @@ fn a_number_typed_faster_than_the_page_draws_is_committed_whole() {
         ui.commit(field, &screen);
         assert_eq!(value_of(&ui, field), "120");
         assert_eq!(ui.stored_settings().await.curriculum.num_groups, 120);
+    });
+}
+
+/// An unlock order typed faster than the page draws is committed whole. Its
+/// box read what was typed as it drew, so every key redrew it, and a quick
+/// KMURESN came out as KMUREN.
+#[test]
+fn an_unlock_order_typed_faster_than_the_page_draws_is_committed_whole() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        let field = "field-sequence-order";
+        let screen = type_faster_than_the_page_draws(&mut ui, field, "KMURESN");
+        assert_eq!(screen, "KMURESN");
+        ui.commit(field, &screen);
+        assert_eq!(value_of(&ui, field), "KMURESN");
+        let stored = ui.stored_settings().await.curriculum.custom_sequence;
+        assert_eq!(stored.iter().collect::<String>(), "KMURESN");
+    });
+}
+
+/// A callsign typed faster than the page draws is committed whole, as every
+/// other box the settings are typed into is.
+#[test]
+fn a_callsign_typed_faster_than_the_page_draws_is_committed_whole() {
+    run(|| async {
+        let (mut ui, _recorder) = Ui::app_with_settings(crate::testing::contest_settings());
+        ui.click("nav-settings");
+        let field = "field-your-callsign";
+        let screen = type_faster_than_the_page_draws(&mut ui, field, "VP2E/DL1ABC");
+        assert_eq!(screen, "VP2E/DL1ABC");
+        ui.commit(field, &screen);
+        assert_eq!(value_of(&ui, field), "VP2E/DL1ABC");
+        assert_eq!(ui.stored_settings().await.contest.my_call, "VP2E/DL1ABC");
     });
 }
 
@@ -246,10 +287,13 @@ fn the_unlock_order_can_be_cleared_and_typed_again() {
         settings.curriculum.level = 20;
         let (mut ui, _recorder) = Ui::app_with_settings(settings);
         ui.click("nav-settings");
+        // Emptied and typed into, the box is left as typed: nothing is
+        // written back over it until it is committed.
+        let _ = ui.take_work();
         ui.type_into("field-sequence-order", "");
-        assert_eq!(value_of(&ui, "field-sequence-order"), "");
+        assert_eq!(ui.take_work(), 0, "the emptied box was written over");
         ui.type_into("field-sequence-order", "KM");
-        assert_eq!(value_of(&ui, "field-sequence-order"), "KM");
+        assert_eq!(ui.take_work(), 0, "typing wrote over the box");
         assert_eq!(value_of(&ui, "field-level"), "20", "nothing is read yet");
 
         let lcwo: String = cw_core::SEQUENCE_PRESETS[0].sequence.iter().collect();
