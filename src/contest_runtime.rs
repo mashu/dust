@@ -586,14 +586,23 @@ fn play_turn(ctx: AppCtx, lease: &Lease, turn: Turn) {
         let heard = lease.clone();
         // Each attempt, retries too: when its sound goes to the output, and
         // when it reaches the ear, the player's lead, any wait for its
-        // moment and latency after it starts; and whether it was held up on
-        // its way, however it ended.
+        // moment and latency after it starts; what of it went unheard, as
+        // soon as that is found, before anything heard after it counts; and
+        // whether it was held up on its way, however it ended.
         let news = move |news: SendNews<'_>| {
             let event = match news {
                 SendNews::Started(start) => ContestEvent::TurnStarted {
                     id,
                     heard_from: start.heard_at(),
                     output_from: start.output_at,
+                },
+                SendNews::Missed {
+                    from_sec,
+                    until_sec,
+                } => ContestEvent::TurnMissed {
+                    id,
+                    from_sec,
+                    until_sec,
                 },
                 SendNews::HeldUp => ContestEvent::TurnHeldUp { id },
             };
@@ -1144,6 +1153,38 @@ mod tests {
                     });
                     assert_eq!(start.plan.muted_until, muted, "{qsk}: {}", yours.text);
                 }
+            }
+        });
+    }
+
+    /// A turn its stream skipped some of, the page stalled, never reached
+    /// you there: the caller it skipped is not heard, so Show copy shows
+    /// nothing of it, and the run goes on with nothing said.
+    #[test]
+    fn a_caller_skipped_in_part_is_never_shown() {
+        run(|| async {
+            for skipped in [false, true] {
+                let mut settings = contest_settings();
+                settings.contest.contest_show_copy = true;
+                let mut h = Harness::with_settings(settings);
+                if skipped {
+                    h.recorder.skip_next.set(Some((1.0, 60.0)));
+                }
+                h.start_training();
+                assert!(h.run_until(20_000, quiet).await, "{skipped}");
+                let cq = &h.recorder.starts()[0].transcript;
+                assert!(
+                    !cq.others.is_empty(),
+                    "{skipped}: a caller in the CQ's turn"
+                );
+                assert!(
+                    cq.others[0].delay_sec > 1.0,
+                    "{skipped}: after the skip begins"
+                );
+                let shown = view(&h).map(|view| view.shown).unwrap_or_default();
+                assert_eq!(shown.len(), usize::from(!skipped), "{skipped}: {shown:?}");
+                assert_eq!(phase(&h), Some(ContestPhase::Running), "{skipped}");
+                assert_eq!(h.toast(), None, "{skipped}");
             }
         });
     }

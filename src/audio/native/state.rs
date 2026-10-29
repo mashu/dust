@@ -184,6 +184,9 @@ impl PlaybackSignal for ToneSignal {
             // itself whether it played late.
             played_ms: None,
             late: self.late.load(Ordering::Acquire),
+            // A native stream plays everything it is handed, late if it
+            // must, and skips nothing.
+            missed: None,
         }
     }
 }
@@ -312,6 +315,7 @@ mod tests {
                 suspended: false,
                 played_ms: None,
                 late: false,
+                missed: None,
             }
         );
 

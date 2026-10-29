@@ -158,6 +158,16 @@ pub enum ContestEvent {
     TurnHeldUp {
         id: u64,
     },
+    /// Some of a turn's sound went unheard, `from_sec` to `until_sec` into
+    /// it: the browser fell so far behind its audio clock that it skipped
+    /// it. Said as soon as it is found, before the turn ends, which is held
+    /// up as well. A caller's send any of which it skipped is heard no more
+    /// than one sent under your message is.
+    TurnMissed {
+        id: u64,
+        from_sec: f64,
+        until_sec: f64,
+    },
     /// A turn was stopped, or a newer one replaced it: always ignored.
     TurnCancelled {
         id: u64,
@@ -1476,6 +1486,17 @@ impl<S: CallSource> ContestMachine<S> {
                 self.untrust(id);
                 return Vec::new();
             }
+            ContestEvent::TurnMissed {
+                id,
+                from_sec,
+                until_sec,
+            } => {
+                self.untrust(id);
+                if self.on_air(id) {
+                    self.missed(from_sec, until_sec);
+                }
+                return Vec::new();
+            }
             _ => {}
         }
         // While the sound on the air may be being tried again, the limit is
@@ -1761,6 +1782,38 @@ impl<S: CallSource> ContestMachine<S> {
     fn untrust(&mut self, id: u64) {
         if !self.untrusted.contains(&id) {
             self.untrusted.push(id);
+        }
+    }
+
+    /// What of the turn on the air was skipped, `from_sec` to `until_sec`
+    /// into it, never reached you: a caller's send any of which it was is
+    /// not heard, nor will be, as one sent under your message is not
+    /// ([`Counted::Muted`]), a call or an exchange heard in part being none
+    /// heard. Nothing more of it counts, for Enter or a copy, Show copy
+    /// never shows it, and its station sends it again, when asked, as one
+    /// you never heard; what it costs its caller is spent all the same, as
+    /// it was sent. The news comes at the player's first look after the
+    /// stall, which the heard timer for anything in it, and the turn's end,
+    /// come after; what a key pressed in that moment counted stands.
+    fn missed(&mut self, from_sec: f64, until_sec: f64) {
+        let Some(air) = self.air.as_mut() else {
+            return;
+        };
+        let callers = air
+            .turn
+            .segments
+            .iter()
+            .filter(|segment| segment.who.is_caller());
+        for ((segment, (reply, _)), counted) in callers.zip(&air.replies).zip(&mut air.counted) {
+            if segment.end_sec <= from_sec || segment.start_sec >= until_sec {
+                continue;
+            }
+            // A call on its timeout costs it the try once it is on its way,
+            // heard or not, as counting it would have.
+            if *counted == Counted::Nothing && reply.on_time_out {
+                self.stations[reply.station].caller.wait_over();
+            }
+            *counted = Counted::Muted;
         }
     }
 
@@ -12853,6 +12906,62 @@ mod tests {
         );
         assert_eq!(kept.stored(&[]).1.char_times, Some(times));
         assert_eq!(kept.stored(&[3, 7]).1.char_times, None);
+    }
+
+    /// What of a turn a browser fallen behind its clock skipped never
+    /// reached you: a caller's send any of which it skipped is heard no
+    /// more than one sent under your message. Show copy never shows it, it
+    /// begins nothing for Enter or a copy, and asked for again it is the
+    /// first you hear of it, no repeat; nothing in the turn is timed. A
+    /// skip over your own CQ alone takes nothing of the call after it.
+    #[test]
+    fn a_callers_send_skipped_in_part_is_not_heard() {
+        for skipped in [false, true] {
+            for show_copy in [false, true] {
+                let mut settings = run_settings(25.0);
+                settings.contest.contest_show_copy = show_copy;
+                let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
+                let cq = runtime.last_turn().clone();
+                let call = sent_by(&cq, 0)[0].clone();
+                let (from_sec, until_sec) = if skipped {
+                    (call.start_sec + 0.1, call.start_sec + 0.3)
+                } else {
+                    (0.2, (0.6f64).min(call.start_sec))
+                };
+                let case = format!("skipped {skipped}, Show copy {show_copy}");
+                runtime.run_to(runtime.now + ms(until_sec) + 50);
+                assert_eq!(runtime.playing_id(), Some(cq.id), "{case}");
+                runtime.apply(ContestEvent::TurnMissed {
+                    id: cq.id,
+                    from_sec,
+                    until_sec,
+                });
+                runtime.finish_turn();
+                assert!(runtime.machine.untrusted.contains(&cq.id), "{case}");
+                let heard = &runtime.machine.stations[0].heard;
+                assert_eq!(heard.call_begun, !skipped, "{case}");
+                assert_eq!(heard.call_ends.is_empty(), skipped, "{case}");
+                let shown = view(&runtime).shown;
+                assert_eq!(shown.len(), usize::from(show_copy && !skipped), "{case}");
+                if show_copy {
+                    continue;
+                }
+                // Asked for, its call comes again, and is heard: a repeat
+                // only of a call heard before.
+                runtime.now += 500;
+                runtime.key(OpKey::Again, "", "");
+                assert_eq!(replies(runtime.last_turn()), ["K5XYZ"], "{case}");
+                runtime.finish_turn();
+                runtime.key(OpKey::Esm, "K5XYZ", "");
+                let exchange = replies(runtime.last_turn())[0].to_string();
+                runtime.finish_turn();
+                runtime.key(OpKey::Esm, "K5XYZ", &serial(&exchange));
+                runtime.finish_turn();
+                runtime.apply(ContestEvent::FinishNow);
+                let call_sends = if skipped { 1 } else { 2 };
+                assert_eq!(sends(&runtime), [call_sends, 1], "{case}");
+            }
+        }
     }
 
     /// A token is timed only from a send it is in once, as a word, with

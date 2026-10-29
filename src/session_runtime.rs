@@ -526,14 +526,16 @@ fn play(ctx: AppCtx, lease: &Lease, index: usize, text: String) {
     spawn_forever(async move {
         // The send's timeline, the moment its first sample goes out: what
         // its characters are timed from, and the speed it went at, however
-        // soon the group is answered; and whether it was held up on its
-        // way, however it ended.
+        // soon the group is answered; whether any of it went unheard, as
+        // soon as that is found; and whether it was held up on its way,
+        // however it ended.
         let news = |news: SendNews<'_>| {
             let event = match news {
                 SendNews::Started(start) => SessionEvent::PlaybackStarted {
                     index,
                     start: start.clone(),
                 },
+                SendNews::Missed { .. } => SessionEvent::PlaybackMissed { index },
                 SendNews::HeldUp => SessionEvent::PlaybackHeldUp { index },
             };
             dispatch(ctx, &lease, event);
@@ -1446,6 +1448,42 @@ mod tests {
             assert_eq!(h.screen(), Screen::Training);
             h.play_through(120_000).await;
             assert_eq!(h.screen(), Screen::Results);
+        });
+    }
+
+    /// A send its stream skipped some of, the page stalled for a while, is
+    /// no group heard: the group goes out again from the start once the
+    /// send ends, and only then is its answer waited for; nothing has gone
+    /// wrong, so nothing is said. A send only parked on its way, heard
+    /// whole, is answered as ever.
+    #[test]
+    fn a_group_heard_in_part_is_sent_again_before_it_is_answered() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.curriculum.num_groups = 1;
+            let mut h = Harness::with_settings(settings);
+            h.recorder.skip_next.set(Some((0.02, 0.06)));
+            h.start_training();
+            let sent = h.sent(0);
+            let mut answer_opened_early = false;
+            assert!(
+                h.run_until(10_000, |h| {
+                    answer_opened_early |= h.awaiting_answer().is_some();
+                    h.texts().len() == 2
+                })
+                .await,
+                "sent again"
+            );
+            assert!(
+                !answer_opened_early,
+                "the answer waited for the group heard whole"
+            );
+            assert_eq!(h.texts(), vec![sent; 2], "the same group, from the start");
+            assert!(h.run_until(5_000, |h| h.awaiting_answer() == Some(0)).await);
+            assert_eq!(h.toast(), None, "nothing has gone wrong");
+            h.play_through(30_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            assert_eq!(h.texts().len(), 2, "heard whole the second time");
         });
     }
 
