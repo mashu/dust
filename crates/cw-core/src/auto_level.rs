@@ -1,10 +1,52 @@
 //! Automatic level adjustment after a session.
+//!
+//! A session counts towards a new character when its characters were
+//! copied at the threshold or better, and towards setting the newest aside
+//! when they were not. The adaptive features hold that share steady by
+//! design, so with either on a session is judged on what it leaves free:
+//!
+//! - Adaptive group size holds the share of groups copied whole at its aim
+//!   by sending them shorter, and the characters it loses off their ends
+//!   are its to answer for. They are left out ([`judged_tally`]): what is
+//!   judged is the characters the speed could have changed, the ones you
+//!   reached. How well you recognise them is what the length leaves free.
+//! - Adaptive speed holds the share of characters right at its aim by
+//!   sending faster or slower, so in the middle of the speed range a session
+//!   says only how fast you copy, not whether you are ready for another
+//!   character, and counts neither way. Only once the speed is pressed
+//!   against an end of the range, and can go no further, does the share move
+//!   again, and the session is judged as one sent at a fixed speed is. Sent
+//!   at the top and at the threshold, you copy the characters you have at
+//!   the fastest speed you asked for, and a session counts towards a new
+//!   one. Sent at the bottom and short of it, even the slowest speed is too
+//!   fast for them, and it counts towards setting the newest aside; at the
+//!   bottom and at the threshold, the aim is beyond you at any speed the
+//!   range allows, and the threshold is what is left to go by. With one
+//!   speed set there is nothing to adapt, and the threshold is judged as it
+//!   always was.
+//!
+//! Judged on the session's own share instead, the adaptive features held it
+//! near 80%, under the 90% threshold by construction, and auto level only
+//! ever lowered the level.
 
+use std::borrow::Cow;
+
+use crate::alignment::CopyTally;
+use crate::sampling::{adaptive_bounds, adaptive_speed_path};
+use crate::score::copy_speed;
 use crate::session::{GroupSession, SessionResult};
 use crate::settings::{
     ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, CharSetMode, LevelAxis, MixedAutoLevelAxis,
     TrainingSettings,
 };
+use crate::speed::speed_tally;
+
+/// How near an end of the speed range, in log speed, a session's middle
+/// speed sits for adaptive speed to count as pressed against it: within
+/// about 5%. Pressed against the top, adaptive speed sends nearly every
+/// group within a few percent of it; anywhere it can still move, the middle
+/// of what it sends sits where you copy its aim.
+const AT_AN_END: f64 = 0.05;
 
 /// Where one run of auto-level counters is kept.
 ///
@@ -50,9 +92,13 @@ pub struct AutoLevelChange {
     pub axis: LevelAxis,
     pub from: u32,
     pub to: u32,
-    /// The session's accuracy, and the threshold it was held to, in percent.
+    /// The session's accuracy as auto level judges it ([`judged_tally`]),
+    /// and the threshold it was held to, in percent.
     pub accuracy_pct: f64,
     pub threshold_pct: f64,
+    /// While adaptive speed steers, the end of the speed range the session
+    /// was sent at, in WPM.
+    pub at_wpm: Option<f64>,
     /// Sessions above the threshold for a rise, below it for a fall.
     pub sessions: u32,
     /// In Mixed, the axis that moves next time the evidence does not say.
@@ -84,7 +130,7 @@ fn counts_toward_level(result: &SessionResult, settings: &TrainingSettings) -> b
 /// characters of it came up, or both cleared the bar the session as a whole
 /// missed — it takes turns, starting from the stored next axis.
 fn candidate_axes(
-    result: &SessionResult,
+    tally: &CopyTally,
     settings: &TrainingSettings,
     raise: bool,
     threshold_pct: f64,
@@ -100,8 +146,7 @@ fn candidate_axes(
         .collect();
     let earned = |axis: &MixedAutoLevelAxis| {
         let digits = *axis == MixedAutoLevelAxis::Digits;
-        result
-            .tally
+        tally
             .accuracy_where(|c| c.is_ascii_digit() == digits)
             .is_some_and(|accuracy| (accuracy * 100.0 >= threshold_pct) == raise)
     };
@@ -114,6 +159,105 @@ fn candidate_axes(
     chosen.into_iter().map(LevelAxis::from).collect()
 }
 
+/// What auto level judges a session's characters by: every one sent and
+/// every one typed that was not, as the session scored them, unless
+/// adaptive group size steers. Then a group's lost end is left out where the
+/// length answers for it, and what is judged is what the speed could have
+/// changed ([`speed_tally`]), the same characters adaptive speed learns
+/// from; a group with nothing typed counts as its first character missed.
+fn judged_tally<'a>(result: &'a SessionResult, settings: &TrainingSettings) -> Cow<'a, CopyTally> {
+    let Some((shortest, _)) = adaptive_bounds(settings) else {
+        return Cow::Borrowed(&result.tally);
+    };
+    let mut tally = CopyTally::default();
+    for group in &result.groups {
+        if group.received.trim().is_empty() {
+            // Nothing typed reached nothing, which is no session to level up
+            // on, whatever answers for it: its first character missed.
+            if let Some(first) = group.sent.chars().next() {
+                let entry = tally.sent.entry(first.to_ascii_uppercase()).or_default();
+                entry.total += 1;
+            }
+        } else if let Some(reached) = speed_tally(&group.sent, &group.received, Some(shortest)) {
+            tally.merge(&reached);
+        }
+    }
+    Cow::Owned(tally)
+}
+
+/// The copy speed the middle of `result`'s groups were sent at, in WPM:
+/// each group's own where it was measured, the session's otherwise.
+fn middle_speed(result: &SessionResult) -> f64 {
+    let mut speeds: Vec<f64> = (0..result.groups.len())
+        .map(|index| {
+            let timing = result.group_timings.get(index);
+            copy_speed(
+                timing
+                    .and_then(|timing| timing.char_wpm)
+                    .unwrap_or(result.char_wpm),
+                timing
+                    .and_then(|timing| timing.effective_wpm)
+                    .unwrap_or(result.effective_wpm),
+            )
+        })
+        .collect();
+    speeds.sort_by(f64::total_cmp);
+    speeds
+        .get(speeds.len() / 2)
+        .copied()
+        .unwrap_or_else(|| copy_speed(result.char_wpm, result.effective_wpm))
+}
+
+/// How a session counts towards its level's runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Verdict {
+    /// The share of characters right it was judged by, from 0 to 1.
+    accuracy: f64,
+    /// Towards a rise, towards a fall, or, while adaptive speed can still
+    /// move either way, neither.
+    raise: Option<bool>,
+    /// While adaptive speed steers, the end of the range it was pressed
+    /// against, in WPM.
+    at_wpm: Option<f64>,
+}
+
+/// How `result` counts under `settings`, held to `threshold_pct`: see the
+/// module's notes.
+fn verdict(result: &SessionResult, settings: &TrainingSettings, threshold_pct: f64) -> Verdict {
+    let accuracy = if adaptive_bounds(settings).is_some() {
+        judged_tally(result, settings).accuracy()
+    } else {
+        result.accuracy
+    };
+    let good = accuracy * 100.0 >= threshold_pct;
+    let Some(path) = adaptive_speed_path(settings) else {
+        return Verdict {
+            accuracy,
+            raise: Some(good),
+            at_wpm: None,
+        };
+    };
+    let (slowest, fastest) = path.bounds();
+    let middle = middle_speed(result).ln();
+    let (at_top, at_bottom) = (
+        middle >= fastest.ln() - AT_AN_END,
+        middle <= slowest.ln() + AT_AN_END,
+    );
+    // Pressed against an end, the speed can go no further, and the session
+    // is judged as one sent at a fixed speed is.
+    let (raise, at_wpm) = match (at_top, at_bottom) {
+        (false, false) => (None, None),
+        (true, true) => (Some(good), Some(if good { fastest } else { slowest })),
+        (true, false) => (Some(good), Some(fastest)),
+        (false, true) => (Some(good), Some(slowest)),
+    };
+    Verdict {
+        accuracy,
+        raise,
+        at_wpm,
+    }
+}
+
 /// Decide whether the session just finished moves a level. Counts it in
 /// `counters`, the run for the level it was at, and returns the change when
 /// the run is long enough and there is somewhere to move.
@@ -122,7 +266,8 @@ fn candidate_axes(
 /// a run up, a bad one a run down. The other run may already be long enough
 /// — its target was lowered since, or it was switched back on — and is left
 /// for a session of its own kind to complete: a session at 40% never raises
-/// the level, whatever went before it.
+/// the level, whatever went before it. While adaptive speed can still move,
+/// a session counts neither way ([`verdict`]).
 pub fn evaluate_auto_level(
     result: &SessionResult,
     settings: &TrainingSettings,
@@ -135,8 +280,9 @@ pub fn evaluate_auto_level(
         .auto_level
         .auto_adjust_threshold
         .clamp(ADJUST_THRESHOLD_MIN_PCT, ADJUST_THRESHOLD_MAX_PCT);
-    let accuracy_pct = result.accuracy * 100.0;
-    let raise = accuracy_pct >= threshold_pct;
+    let verdict = verdict(result, settings, threshold_pct);
+    let accuracy_pct = verdict.accuracy * 100.0;
+    let raise = verdict.raise?;
     // Counters come back from storage, so they are not trusted to be small.
     let (run, target) = if raise {
         counters.above = counters.above.saturating_add(1);
@@ -156,13 +302,18 @@ pub fn evaluate_auto_level(
     }
 
     let delta = if raise { 1 } else { -1 };
-    let moved = candidate_axes(result, settings, raise, threshold_pct)
-        .into_iter()
-        .find_map(|axis| {
-            let from = settings.level(axis);
-            let to = step_level(from, delta, axis.min_level(), settings.max_level(axis));
-            (to != from).then_some((axis, from, to))
-        });
+    let moved = candidate_axes(
+        &judged_tally(result, settings),
+        settings,
+        raise,
+        threshold_pct,
+    )
+    .into_iter()
+    .find_map(|axis| {
+        let from = settings.level(axis);
+        let to = step_level(from, delta, axis.min_level(), settings.max_level(axis));
+        (to != from).then_some((axis, from, to))
+    });
     let Some((axis, from, to)) = moved else {
         // Nowhere to go: the run is spent rather than kept pressing.
         if raise {
@@ -194,6 +345,7 @@ pub fn evaluate_auto_level(
         to,
         accuracy_pct,
         threshold_pct,
+        at_wpm: verdict.at_wpm,
         sessions: run,
         next_mixed_axis,
         counters_cleared: [CountersKey::of(settings), CountersKey::of(&after)],
@@ -220,6 +372,9 @@ pub struct AutoLevelProgress {
     pub below_disabled: bool,
     pub alternating_mixed: bool,
     pub next_mixed_axis: Option<MixedAutoLevelAxis>,
+    /// While adaptive speed steers, the slowest and fastest speed of its
+    /// range, in WPM: a session counts only once it is sent at one of them.
+    pub judged_at: Option<(f64, f64)>,
 }
 
 pub fn auto_level_progress(
@@ -261,7 +416,19 @@ pub fn auto_level_progress(
         below_disabled: below_target == 0,
         alternating_mixed: mixed,
         next_mixed_axis,
+        judged_at: adaptive_speed_path(settings).map(|path| path.bounds()),
     })
+}
+
+/// The share of characters right a session's accuracy has to reach for
+/// it to count towards a new character, in percent, when that is how it is
+/// judged: auto level is on and can level up, the character set has a level
+/// to move, and neither adaptive feature steers, so a session's own accuracy
+/// is what is held to it. What the Overview's accuracy chart marks.
+pub fn level_up_line(settings: &TrainingSettings) -> Option<f64> {
+    let progress = auto_level_progress(settings, AutoLevelCounters::default())?;
+    let as_scored = adaptive_bounds(settings).is_none() && progress.judged_at.is_none();
+    (!progress.above_disabled && as_scored).then_some(progress.threshold)
 }
 
 /// A session as it ends: scored, and what it does to the level.
@@ -766,6 +933,138 @@ mod tests {
         let mut other = koch.clone();
         other.curriculum.custom_sequence = vec!['A', 'B', 'C'];
         assert_ne!(CountersKey::of(&koch), CountersKey::of(&other));
+    }
+
+    /// A full session of KMRSU groups, each sent at `wpm` and answered as
+    /// `answers` has it, in turn.
+    fn sent_at(wpm: f64, answers: &[&str]) -> SessionResult {
+        let mut result = SessionResult::empty_for_test();
+        for index in 0..20 {
+            let received = answers[index % answers.len()];
+            result.tally.add("KMRSU", received);
+            result.groups.push(GroupResult {
+                sent: "KMRSU".into(),
+                received: received.into(),
+                correct: received == "KMRSU",
+            });
+            result.group_timings.push(crate::session::SessionTiming {
+                char_wpm: Some(wpm),
+                effective_wpm: Some(wpm),
+                ..Default::default()
+            });
+        }
+        result.accuracy = result.tally.accuracy();
+        result
+    }
+
+    fn adaptive_speed() -> TrainingSettings {
+        let mut settings = koch(5);
+        settings.playback.adaptive_speed = true;
+        settings.playback.link_char_to_effective = true;
+        settings.playback.char_wpm_min = 15.0;
+        settings.playback.char_wpm_max = 30.0;
+        settings.clamp()
+    }
+
+    /// While adaptive speed can still move, it holds the share right at its
+    /// aim, and a session there counts neither way, its counters untouched.
+    /// Pressed against an end of the range it is judged as a session at one
+    /// speed is: at the top and at the threshold, towards a new character;
+    /// at the bottom and short of it, towards setting the newest aside.
+    #[test]
+    fn with_adaptive_speed_a_session_counts_only_at_an_end_of_the_range() {
+        let settings = adaptive_speed();
+        let clean = ["KMRSU"];
+        let poor = ["KMRSU", "KXRXU"];
+        let mut counters = AutoLevelCounters::default();
+        for wpm in [17.0, 22.0, 27.0] {
+            for answers in [&clean[..], &poor[..]] {
+                let result = sent_at(wpm, answers);
+                assert_eq!(evaluate_auto_level(&result, &settings, &mut counters), None);
+            }
+        }
+        assert_eq!(counters, AutoLevelCounters::default(), "nothing counted");
+
+        let up = evaluate_auto_level(&sent_at(29.5, &clean), &settings, &mut counters)
+            .expect("at the top and clean");
+        assert!(up.raised());
+        assert_eq!(up.at_wpm, Some(30.0));
+        let down = evaluate_auto_level(&sent_at(15.2, &poor), &settings, &mut Default::default())
+            .expect("at the bottom and short");
+        assert!(!down.raised());
+        assert_eq!(down.at_wpm, Some(15.0));
+        // At the bottom and at the threshold, the threshold is what is left
+        // to go by; at the top and short of it, so it is.
+        let bottom_clean =
+            evaluate_auto_level(&sent_at(15.0, &clean), &settings, &mut Default::default());
+        assert_eq!(
+            bottom_clean.map(|change| (change.raised(), change.at_wpm)),
+            Some((true, Some(15.0)))
+        );
+        let top_short =
+            evaluate_auto_level(&sent_at(30.0, &poor), &settings, &mut Default::default());
+        assert_eq!(top_short.map(|change| change.raised()), Some(false));
+
+        // One speed set: nothing adapts, and the session is judged as ever.
+        let mut fixed = settings.clone();
+        fixed.playback.char_wpm_max = 15.0;
+        let fixed = fixed.clamp();
+        let change = evaluate_auto_level(&sent_at(15.0, &clean), &fixed, &mut Default::default());
+        assert_eq!(
+            change.map(|change| (change.raised(), change.at_wpm)),
+            Some((true, None))
+        );
+    }
+
+    /// With adaptive group size, the end of a group it can still send
+    /// shorter is the length's, and is left out of what a session is judged
+    /// on; the character copy broke off at, at the shortest length, and a
+    /// group with nothing typed are not.
+    #[test]
+    fn with_adaptive_group_size_lost_ends_are_left_out() {
+        let mut settings = koch(5);
+        settings.curriculum.adaptive_group_size = true;
+        settings.curriculum.min_group_size = 2;
+        settings.curriculum.max_group_size = 8;
+        // Every group of five copied clean as far as it was held: 60% as
+        // scored, all of it right as judged.
+        let cut = sent_at(20.0, &["KMR"]);
+        assert!((cut.accuracy - 0.6).abs() < 1e-9);
+        let change = evaluate_auto_level(&cut, &settings, &mut Default::default()).expect("up");
+        assert!(change.raised());
+        assert_eq!(change.accuracy_pct, 100.0);
+        // Without it, the same session is judged as scored.
+        let change = evaluate_auto_level(&cut, &koch(5), &mut Default::default()).expect("down");
+        assert!(!change.raised());
+        // A group with nothing typed reached nothing.
+        let blank = sent_at(20.0, &["KMRSU", ""]);
+        let change = evaluate_auto_level(&blank, &settings, &mut Default::default()).expect("down");
+        assert!((change.accuracy_pct - 100.0 * 5.0 / 6.0).abs() < 1e-9);
+        // At the shortest length the break is the speed's to answer for.
+        settings.curriculum.min_group_size = 5;
+        settings.curriculum.max_group_size = 8;
+        let change = evaluate_auto_level(&cut, &settings, &mut Default::default()).expect("down");
+        assert_eq!(change.accuracy_pct, 75.0);
+    }
+
+    /// The accuracy chart marks the threshold only where a session's own
+    /// accuracy is what is held to it.
+    #[test]
+    fn the_level_up_line_is_drawn_only_where_it_levels_you_up() {
+        let settings = TrainingSettings::default();
+        assert_eq!(level_up_line(&settings), Some(90.0));
+        let mut off = settings.clone();
+        off.auto_level.auto_adjust_level = false;
+        let mut never = settings.clone();
+        never.auto_level.auto_adjust_above_threshold_count = 0;
+        let mut words = settings.clone();
+        words.curriculum.char_set_mode = CharSetMode::Words;
+        let mut length = settings;
+        length.curriculum.adaptive_group_size = true;
+        let speed = adaptive_speed();
+        for settings in [off, never, words, length, speed] {
+            assert_eq!(level_up_line(&settings), None);
+        }
     }
 
     /// A session of `settings.curriculum.num_groups` groups, every one sent

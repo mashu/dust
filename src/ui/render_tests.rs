@@ -478,6 +478,7 @@ fn auto_level_card_shows_both_meters() {
                     below_disabled: false,
                     alternating_mixed: true,
                     next_mixed_axis: Some(MixedAutoLevelAxis::Letters),
+                    judged_at: None,
                 },
             }
         }
@@ -485,6 +486,34 @@ fn auto_level_card_shows_both_meters() {
     assert!(html.contains("Auto level"));
     assert!(html.contains("3/5"));
     assert!(html.contains("90% to pass"));
+    assert!(!html.contains("Adapt speed to me"));
+}
+
+/// With adaptive speed steering, the card says where a session counts.
+#[test]
+fn auto_level_card_says_where_adaptive_speed_counts() {
+    let html = render(|| {
+        rsx! {
+            AutoLevelCard {
+                progress: AutoLevelProgress {
+                    threshold: 90.0,
+                    above_count: 1,
+                    above_target: 2,
+                    below_count: 0,
+                    below_target: 1,
+                    above_disabled: false,
+                    below_disabled: false,
+                    alternating_mixed: false,
+                    next_mixed_axis: None,
+                    judged_at: Some((15.0, 30.0)),
+                },
+            }
+        }
+    });
+    assert!(html.contains("90% to pass"), "{html}");
+    assert!(html.contains(
+        "a session counts only once it comes at the top of your speed range, 30 WPM, or its bottom, 15 WPM. In between it counts neither way."
+    ));
 }
 
 #[test]
@@ -1351,6 +1380,42 @@ fn stats_renders_the_chart_with_one_session() {
         html.contains("<circle"),
         "a single session still draws its point"
     );
+}
+
+/// The chart marks the level-up threshold, and its chip says it, only where
+/// a session's own accuracy is what levels you up: not with auto level off
+/// or never levelling up, nor while adaptive speed judges sessions at the
+/// ends of its range.
+#[test]
+fn the_level_up_line_shows_only_where_it_is_what_levels_you_up() {
+    let overview = |settings: TrainingSettings| {
+        render_props(
+            StatsView,
+            StatsViewProps {
+                settings,
+                sessions: vec![session("2026-09-01", 0.85), session("2026-09-02", 0.95)],
+                on_delete: None,
+                backups: None,
+            },
+        )
+    };
+    let marked =
+        |html: &str| html.contains("Level up at 90%") && html.contains("stroke-dasharray=\"4 4\"");
+    let mut settings = TrainingSettings::default();
+    assert!(marked(&overview(settings.clone())));
+    settings.auto_level.auto_adjust_above_threshold_count = 0;
+    assert!(!marked(&overview(settings.clone())), "never levels up");
+    settings = TrainingSettings::default();
+    settings.auto_level.auto_adjust_level = false;
+    assert!(!marked(&overview(settings.clone())), "auto level off");
+    settings = TrainingSettings::default();
+    settings.playback.adaptive_speed = true;
+    let html = overview(settings);
+    assert!(
+        !html.contains("Level up at"),
+        "adaptive speed judges otherwise"
+    );
+    assert!(html.contains("Accuracy over time"));
 }
 
 #[test]
@@ -2752,7 +2817,9 @@ mod interactions {
         ui.click("help-what-comes-up-next");
         assert!(ui.has("class=\"help-note\""));
         assert!(ui.has(">Under your 10%<"), "{}", ui.html());
-        assert!(ui.has("a session levels up at 90% right (Settings → Auto level)"));
+        assert!(
+            ui.has("what your Auto level threshold of 90% right leaves (Settings → Auto level)")
+        );
         assert!(
             ui.input_tag("help-what-comes-up-next")
                 .contains("aria-expanded=true")

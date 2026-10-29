@@ -41,7 +41,7 @@ pub fn next_up(limit: f64) -> Element {
         dl { class: "help-terms",
             dt { "Under your {limit}" }
             dd {
-                "Green: wrong less than {limit} of the time. {limit} is what your Auto level threshold leaves: a session levels up at {pass} right (Settings → Auto level)."
+                "Green: wrong less than {limit} of the time. {limit} is what your Auto level threshold of {pass} right leaves (Settings → Auto level)."
             }
             dt { "Over it" }
             dd { "Copper: wrong more often than that. These hold your copy back: the ones to work on." }
@@ -228,16 +228,22 @@ pub fn bigram() -> Element {
     }
 }
 
-/// Accuracy over time, against the level-up threshold `pass`.
-pub fn accuracy_over_time(pass: f64) -> Element {
-    let pass = pct(pass);
+/// Accuracy over time, against the level-up threshold `pass` where a
+/// session's own accuracy is what levels you up.
+pub fn accuracy_over_time(pass: Option<f64>) -> Element {
     rsx! {
         p {
             "Each point is a session's accuracy, the share of the characters sent that you copied right, oldest on the left."
         }
-        dl { class: "help-terms",
-            dt { "The dashed green line" }
-            dd { "Your Auto level threshold, {pass}: a session over it counts towards the next level." }
+        if let Some(pass) = pass {
+            dl { class: "help-terms",
+                dt { "The dashed green line" }
+                dd { "Your Auto level threshold, {pct(pass)}: a session over it counts towards the next level." }
+            }
+        } else {
+            p {
+                "No threshold is marked: Auto level is off or never levels up, or an adaptive feature is on and judges sessions by more than this accuracy (Settings → Auto level)."
+            }
         }
     }
 }
@@ -508,6 +514,14 @@ pub fn auto_level() -> Element {
             dd { "Moves your level, how many characters are in play, by how your sessions go." }
             dt { "Accuracy threshold" }
             dd { "The share of characters right that counts a session as good. It is also the line What comes up next marks." }
+            dt { "With Adapt group size to me" }
+            dd {
+                "Groups are sent shorter until you copy them whole as often as Aim for asks, so the characters lost off the end of a group it can still shorten are left out: a session is judged on the characters you reached. A group with nothing typed counts as one character missed."
+            }
+            dt { "With Adapt speed to me" }
+            dd {
+                "The speed is moved to keep your characters right at your aim, so in the middle of your Character speed range a session counts neither way. Once it comes at the top or the bottom of the range, where the speed can go no further, it counts as a session at one speed does: up at the threshold or better, down below it. Set the top to the speed you are training for: a new character comes in once you copy the threshold there."
+            }
             dt { "Sessions above to level up" }
             dd { "How many good sessions it takes to unlock a new character. Zero never levels up." }
             dt { "Sessions below to level down" }

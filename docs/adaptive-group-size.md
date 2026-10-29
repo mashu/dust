@@ -214,9 +214,14 @@ These were settled with the proposed defaults and can be revisited:
    ([adaptive-speed.md](adaptive-speed.md)) moves the speed alongside, and
    learns from characters rather than whole groups, so the two do not pull
    against each other.
-3. **Auto level:** left as it was. Adaptive length keeps whole-group success
-   near the target, which can make level-ups come a little sooner. A new
-   character then shortens the groups until things settle.
+3. **Auto level:** judged on the characters you reached. Adaptive length
+   keeps whole-group success at its aim, which holds a session's own accuracy
+   under the threshold, and judged on it auto level only ever lowered the
+   level. With adaptive length on, the characters lost off the end of a group
+   it can still shorten are left out, and a session is judged on how well you
+   copied the rest: see [Auto level](adaptive-speed.md#auto-level), with the
+   simulation. A new character then shortens the groups until things
+   settle.
 4. **What counts as success:** the whole group, which is what a span means.
    Judging per character would separate "didn't know the letter" from "lost
    the group", at the cost of a second model.

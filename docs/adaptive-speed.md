@@ -250,6 +250,105 @@ with it fixed, a little slow.
 Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
 --ignored --nocapture`.
 
+## Auto level
+
+Auto level counts a session towards a new character when its characters
+were copied at the threshold (90% as it ships), and towards setting the
+newest aside when they were not. Both adaptive features hold that share
+steady by design. Adaptive speed keeps the characters it counts at its aim,
+94% at Balanced; adaptive group size keeps groups whole at its aim, 70%,
+losing the ends of the rest. A session's own accuracy, which counts every
+character lost off an end and every group left blank, then sits near 80%,
+under the threshold every time: judged on it, with either feature on, auto
+level only ever lowered the level, and a learner who copies 90% at 40 WPM
+went down to the first level as surely as one at 20.
+
+So with either feature on, a session is judged on what the features leave
+free (`auto_level.rs`):
+
+- **Group size adapting:** the characters lost off the end of a group it can
+  still send shorter are its to answer for, and are left out, as they are
+  for the speed (above); a group with nothing typed counts as one character
+  missed. What is judged is how well you copied the characters you reached,
+  which the length does not hold steady.
+- **Speed adapting:** wherever the speed can still move, it holds the share
+  at its aim, so a session there says how fast you copy, not whether you are
+  ready for another character, and counts neither way. Only once the speed
+  is pressed against an end of the Character speed range, the middle of the
+  session's groups within 5% of it, can it go no further, and the session is
+  judged as one sent at a fixed speed is. At the top and at the threshold,
+  you copy the characters you have at the fastest speed you asked for: a
+  session towards a new character. At the bottom and short of it, even the
+  slowest speed is too fast for them: a session towards setting the newest
+  aside. At the bottom and at the threshold, the aim is beyond you at any
+  speed the range allows, and the threshold is what is left to go by. The
+  top of the range is the speed you train for, the Koch way: after each new
+  character adaptive speed brings you back up to it, and the next comes once
+  you copy the threshold there. With one speed set nothing adapts, and the
+  threshold is judged as it always was.
+
+Home's Auto level card says where a session counts while adaptive speed
+steers, the toast that a level moved names the speed it moved at, and the
+Overview's accuracy chart marks the threshold only where a session's own
+accuracy is what it is held to.
+
+**Simulation.** The learners are the ones above, with a level to be ready
+for: each character has a copy speed of its own, a character just unlocked
+copied at half the learner's speed and coming up to it as it is heard (two
+thirds of the way in 25 hearings). They copy 90% at 20 WPM with a span of 7
+at the start, at level 10 (eleven characters known). The **improving** one
+gets 4% faster each session and learns every new character; the **stable**
+one holds steady and can learn no character past the eleven; the
+**struggling** one holds steady with four of the eleven beyond them. Auto
+level is as it ships: 90%, two sessions above to level up, one below to
+level down. Speed fixed at 15 WPM or adapting from 15 to 30; groups of two
+or three, or adapting from two to eight. 36 sessions of 20 groups, seeds 3,
+4 and 5 at each aim, Comfortable · Balanced · Stretch; "Before" judges every
+session on its own accuracy, as auto level did.
+
+| Learner | Adapting | Judged | Level after 12 sessions | after 36 | Mean level |
+| --- | --- | --- | --- | --- | --- |
+| improving | neither | | 10 12 14 · 10 12 14 · 10 12 14 | 17 20 26 · 17 20 26 · 17 20 26 | 14.6 |
+| | group size | before | 6 6 5 · 1 1 1 · 1 1 1 | 4 1 2 · 2 1 1 · 1 1 1 | 2.9 |
+| | | now | 14 14 13 · 16 16 16 · 16 16 14 | 26 26 25 · 28 28 28 · 28 28 26 | 18.2 |
+| | speed | before | 13 11 9 · 11 9 9 · 8 8 9 | 25 18 16 · 21 16 16 · 17 14 16 | 11.9 |
+| | | now | 10 10 9 · 10 10 10 · 10 10 10 | 14 15 15 · 16 14 13 · 18 15 15 | 11.2 |
+| | both | before | 4 2 5 · 1 5 1 · 1 1 1 | 3 1 1 · 1 2 1 · 1 1 1 | 2.7 |
+| | | now | 14 10 9 · 10 10 10 · 10 10 10 | 19 12 14 · 17 18 19 · 20 21 20 | 12.3 |
+| stable | neither | | 10 11 10 · 10 11 10 · 10 11 10 | 10 11 9 · 10 11 9 · 10 11 9 | 9.8 |
+| | group size | before | 3 9 9 · 1 1 1 · 1 1 1 | 1 6 2 · 2 1 1 · 1 1 1 | 3.5 |
+| | | now | 10 11 11 · 11 11 10 · 10 10 10 | 11 10 10 · 10 10 10 · 11 11 10 | 10.3 |
+| | speed | before | 10 8 9 · 9 8 9 · 1 6 4 | 11 10 8 · 9 8 7 · 1 2 1 | 6.8 |
+| | | now | 10 9 10 · 10 9 9 · 10 10 10 | 11 11 8 · 9 10 8 · 10 10 10 | 9.7 |
+| | both | before | 6 5 3 · 2 5 1 · 1 1 1 | 2 2 2 · 1 1 1 · 1 1 1 | 2.8 |
+| | | now | 11 10 11 · 10 10 10 · 10 10 10 | 10 10 11 · 10 10 10 · 10 10 10 | 10.0 |
+| struggling | neither | | 6 7 7 · 6 7 7 · 6 7 7 | 6 6 5 · 6 6 5 · 6 6 5 | 6.0 |
+| | group size | before | 6 5 6 · 2 3 3 · 3 3 2 | 1 1 3 · 1 2 2 · 1 1 1 | 3.3 |
+| | | now | 7 5 6 · 7 7 7 · 7 7 7 | 7 6 6 · 7 7 6 · 6 7 6 | 6.4 |
+| | speed | before | 7 5 5 · 7 5 5 · 7 5 5 | 7 7 4 · 7 6 4 · 5 2 2 | 5.4 |
+| | | now | 7 5 5 · 7 5 5 · 7 5 6 | 7 7 4 · 7 6 4 · 6 6 3 | 5.7 |
+| | both | before | 5 4 3 · 3 4 6 · 1 1 1 | 2 3 1 · 1 1 1 · 1 1 1 | 3.0 |
+| | | now | 7 6 5 · 7 6 6 · 7 6 7 | 7 6 7 · 7 6 6 · 6 6 6 | 6.4 |
+
+Judged as before, adaptive group size took every learner down towards the
+first level, the improving one too, and adaptive speed took the steady one
+down at Stretch. Judged now, the improving learner levels up whatever
+adapts, the stable one stays at its level, and the struggling one goes down
+to the seven characters it knows, give or take one. With the speed
+adapting, the improving learner's first new character waits until its
+speed reaches the top of the range, about the twelfth session. The steady
+learner wanders a level or two with nothing adapting as well: auto level as
+it ships lowers the level after a single session under the threshold, and
+these learners copy near it.
+
+The design notes' own learners, whose every character is as easy as the
+next, with both features on across 10–50 WPM over 40 sessions, went from
+level 10 to level 1 at every aim; they now stay at level 10, sent between
+the ends of the range.
+
+Reproduce with `cargo test -p cw-core --release auto_level_simulation --
+--ignored --nocapture`.
+
 ## Where it is in the code
 
 **cw-core**
@@ -289,6 +388,10 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
   switch of their own in the same section, `contestAdaptSpeed` (default
   `true`, `settings/contest.rs`), which `adaptive_speed_on` reads in
   Contest mode, for `adaptive_speed_path` and the Speed card alike.
+- `auto_level.rs`: `verdict`, how a session counts towards a level while
+  either feature steers, `judged_tally`, the characters it is judged by, and
+  `level_up_line`, where the accuracy chart marks the threshold.
+  `learner_sim.rs` holds the simulated learners and the table above.
 - `stats.rs`: `speed_history`, and `speed_forecast` for the Sampling card:
   round speeds across the range, with the chance of each and the share of
   characters copied right at it. With adaptive speed off the chances are the
@@ -317,9 +420,12 @@ Reproduce with `cargo test -p cw-core --release adaptive_speed_simulation --
   answer for it, and a blank says nothing while group size adapts; the
   history is read as the settings answer for lost ends; a learner who stops
   typing at a miss does not run the speed away, with group size adapting or
-  not; a simulated learner is found and copied near the target; a range too easy or too hard leans on the
-  right end; draws stay in the range whatever the generator does; the speed
-  settings are one line from slowest to fastest, Farnsworth included; history
+  not; a simulated learner is found and copied near the target; a range too
+  easy or too hard leans on the right end; draws stay in the range whatever
+  the generator does; the speed settings are one line from slowest to
+  fastest, Farnsworth included; auto level follows an improving, a stable
+  and a struggling learner with the speed and the length adapting or not,
+  where judged as before it lowered them; history
   is replayed in order, older sessions count less, other modes are ignored; a
   stricter aim is a slower speed; both features together settle without
   either running away; the machine keeps a chosen speed with its group and
