@@ -30,6 +30,7 @@ impl TrainingSettings {
                 self.playback.lock_input_during_group_playback =
                     d.playback.lock_input_during_group_playback;
                 self.playback.paddle_swap = d.playback.paddle_swap;
+                self.playback.paddle_keys_by_place = d.playback.paddle_keys_by_place;
                 self.playback.keyer_mode = d.playback.keyer_mode;
                 self.playback.keyer_wpm = d.playback.keyer_wpm;
                 self.contest.contest_minutes = d.contest.contest_minutes;
@@ -84,7 +85,6 @@ impl TrainingSettings {
                 self.band.rf_gain_db = d.band.rf_gain_db;
                 self.band.agc_enabled = d.band.agc_enabled;
                 self.band.agc_decay = d.band.agc_decay;
-                self.band.agc_threshold_db = d.band.agc_threshold_db;
                 self.band.filter_width_hz = d.band.filter_width_hz;
                 self.band.filter_shape = d.band.filter_shape;
                 self.band.stations_min = d.band.stations_min;

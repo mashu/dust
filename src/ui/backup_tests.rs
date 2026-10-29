@@ -96,6 +96,23 @@ fn the_card_says_when_a_backup_is_due() {
     });
 }
 
+/// A browser's download is only handed over, and the browser says nothing
+/// if it blocks it: the card tells of the last backup as handed to the
+/// browser, not as saved, and the reminder goes quiet all the same.
+#[test]
+fn a_download_is_told_of_as_handed_over() {
+    run(|| async {
+        let store = MemoryStore::default();
+        store.unconfirmed_backups.set(true);
+        let mut ui = open(store, &history(12));
+        assert!(ui.has("backup-card due"));
+        ui.click("btn-save-a-backup");
+        assert!(ui.has("Last handed to your browser"));
+        assert!(!ui.has("Last saved"));
+        assert!(!ui.has("backup-card due"));
+    });
+}
+
 /// A restore adds the sessions missing here and takes the backup's
 /// settings; Undo puts both back as they were.
 #[test]

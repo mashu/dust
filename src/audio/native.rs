@@ -17,10 +17,10 @@ use cw_core::{PlannedTransmission, TrainingSettings, Transmission};
 
 use super::ToneRequest;
 use super::mixer::{
-    BandVoice, Meter, Mixer, Output, SendVoice, SidetoneControl, Swept, clock_sec, fade_origin_sec,
+    BandVoice, Mixer, Output, SendVoice, SidetoneControl, Swept, clock_sec, fade_origin_sec,
 };
 use super::shape::Gains;
-use super::{MeterFrame, MorseBackend, PlaybackSignal, SendTiming};
+use super::{MorseBackend, PlaybackSignal, SendTiming};
 use state::{Heartbeat, PlayerState, ToneSignal, moved_off_default};
 
 /// The furthest behind the callback the speaker is believed to be. A host
@@ -66,10 +66,9 @@ pub struct MorsePlayer {
     /// them only when they move: a callback that finds it held plays a
     /// buffer without it.
     gains: Gains,
-    /// The mixer's meter, read without its lock, and how many of its frames
-    /// have been taken.
-    meter: Arc<Meter>,
-    metered: usize,
+    /// The device the mixer last heard the speaker's latency from: one the
+    /// stream reopens on with another name has it heard afresh.
+    latency_device: Option<String>,
 }
 
 /// An output stream, and its own word that it broke: unplugged headphones, a
@@ -164,7 +163,6 @@ impl MorsePlayer {
         claim_volume_keys();
         let (device, supported) = default_output()?;
         let mixer = Mixer::new(supported.sample_rate().0);
-        let meter = mixer.meter();
         let mut player = Self {
             state: PlayerState::new(),
             mixer: Arc::new(Mutex::new(mixer)),
@@ -176,8 +174,7 @@ impl MorsePlayer {
             default_asked: None,
             heard_at: None,
             gains: Gains::UNITY,
-            meter,
-            metered: 0,
+            latency_device: None,
         };
         if let Err(err) = player.open(&device, &supported) {
             eprintln!("audio output: {err}");
@@ -233,7 +230,9 @@ impl MorsePlayer {
     /// opened, for the next use to open on the new one: headphones plugged
     /// in or a headset connected mid-session, which a stream on Windows or
     /// macOS does not follow of itself. Asked at most once a
-    /// [`REOPEN_AFTER`], and never under a send, so none is cut off; the band
+    /// [`REOPEN_AFTER`], and never before every send has been heard to its
+    /// end, its last samples out of the speaker too, so none is cut off
+    /// and no waiter is left without word that its send was heard; the band
     /// and whatever else the mixer holds carry on in the new stream.
     fn follow_default(&mut self) {
         let due = self
@@ -280,6 +279,16 @@ impl MorsePlayer {
             // new one before it can play at the wrong pitch.
             self.with_mixer(|mixer, swept| mixer.clear(rate, swept));
             self.state.forget_band();
+        }
+        // Woken on the same device, the speaker is as far behind as it was;
+        // on another one, how far waits for its first callback. Forgotten
+        // before the stream starts, so that callback is never the one
+        // forgotten. A device that cannot say its name cannot be told from
+        // the last.
+        let name = device.name().ok();
+        if name.is_some() && name != self.latency_device {
+            self.mixer().forget_latency();
+            self.latency_device = name;
         }
         let open = open_stream(device, supported, &self.mixer, &self.sidetone)
             .inspect_err(|_| self.note_refusal())?;
@@ -362,12 +371,13 @@ impl MorseBackend for MorsePlayer {
         // the end of that statement, and the voice would be built — its
         // allocations and all — with the audio callback locked out of the
         // mixer.
-        let (rate, lookahead_sec, output_latency_sec) = {
+        let (rate, lookahead_sec, output_latency_sec, latency_heard) = {
             let mixer = self.mixer();
             (
                 mixer.sample_rate(),
                 mixer.lookahead_sec(),
                 mixer.output_latency_sec(),
+                mixer.latency_heard(),
             )
         };
         // How long after it starts a send is heard.
@@ -393,6 +403,12 @@ impl MorseBackend for MorsePlayer {
             self.fade_origin_sec + self.opened_at.elapsed().as_secs_f64() + wait_sec,
         );
         let (finished, late) = (voice.finished_flag(), voice.late_flag());
+        // An output that has not called back yet has not said how far behind
+        // it the speaker is, so when the send is heard is not known: it is
+        // not timed, as one held up on its way is not.
+        if !latency_heard {
+            late.store(true, Ordering::Release);
+        }
         let armed = self.state.arm();
         let mut waits = 0;
         self.with_mixer(|mixer, swept| {
@@ -445,10 +461,6 @@ impl MorseBackend for MorsePlayer {
     fn set_live_tone(&mut self, tone: ToneRequest) {
         self.sidetone.set(tone);
         self.ensure_output_unless_refused();
-    }
-
-    fn take_meter(&mut self, into: &mut Vec<MeterFrame>) {
-        self.meter.read_since(&mut self.metered, into);
     }
 }
 
@@ -718,29 +730,28 @@ mod device_tests {
         player.shutdown();
     }
 
-    /// Asleep, the stream is closed and calls back no more, so nothing is
-    /// metered, and the next sidetone opens it to play on.
+    /// Asleep, the stream is closed and calls back no more, and the next
+    /// sidetone opens it to play on.
     #[test]
     fn a_sleeping_stream_calls_back_no_more_until_it_is_woken() {
         let Some(mut player) = player() else {
             return;
         };
-        let metered = |player: &mut MorsePlayer, ms: u64| {
-            let mut frames = Vec::new();
-            player.take_meter(&mut frames);
+        // Whether the stream's callback ran over the next `ms`.
+        let called = |player: &MorsePlayer, ms: u64| {
+            let beat =
+                |player: &MorsePlayer| player.stream.as_ref().map(|open| open.heartbeat.last());
+            let before = beat(player);
             std::thread::sleep(Duration::from_millis(ms));
-            frames.clear();
-            player.take_meter(&mut frames);
-            frames.len()
+            before.is_some() && beat(player) > before
         };
-        assert!(metered(&mut player, 200) > 0, "the stream plays");
+        assert!(called(&player, 200), "the stream plays");
         player.shutdown();
         player.sleep();
-        assert!(player.stream.is_none());
-        assert_eq!(metered(&mut player, 300), 0, "metered asleep");
+        assert!(player.stream.is_none(), "asleep, it is closed");
         player.set_live_tone(ToneRequest::new(false, 600.0, 0.2));
         assert!(player.stream.is_some(), "the sidetone opened it");
-        assert!(metered(&mut player, 300) > 0, "woken, it plays");
+        assert!(called(&player, 300), "woken, it plays");
         player.shutdown();
     }
 

@@ -183,7 +183,7 @@ pub fn ResultsView(
                     ScoreRing { pct: acc_pct, value: format!("{acc_pct}%"), caption: "ACCURACY".to_string() }
                     div { class: "score-copy",
                         h2 { "Session complete" }
-                        p { class: "muted", style: "margin: 0;", "{verdict}" }
+                        p { class: "muted hint", "{verdict}" }
                     }
                 }
             }

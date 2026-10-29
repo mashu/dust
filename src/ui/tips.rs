@@ -39,7 +39,7 @@ pub fn TipsCarousel(tips: &'static [&'static str]) -> Element {
     rsx! {
         div { class: "tips",
             span { class: "tips-mark", "Tip" }
-            p { class: "muted", style: "margin: 0;", "{tip}" }
+            p { class: "muted hint", "{tip}" }
         }
     }
 }

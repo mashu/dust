@@ -554,7 +554,12 @@ pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> Generated
         call.country = country;
     } else if tier.portable && rng.f64() < portable_share {
         call.marker = if prefix.area_marker && rng.f64() < AREA_MARKER_SHARE {
-            Some(AREA_DIGITS[rng.usize_in(0, 9)])
+            // Another area than the call's own: W1AW at home signs no /1.
+            let away: Vec<&'static str> = AREA_DIGITS
+                .into_iter()
+                .filter(|area| !area.starts_with(digit))
+                .collect();
+            Some(away[rng.usize_in(0, away.len() - 1)])
         } else {
             pick_weighted(PORTABLE_MARKERS, rng).copied()
         };
@@ -567,8 +572,22 @@ pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> Generated
     call
 }
 
-/// A country to be operating in that is not `home` and that `countries`
-/// admits: the prefix signed first, and its country.
+/// The United Kingdom's entities and the Crown Dependencies, by the primary
+/// prefix the table keys them by, their M and 2 calls among them. One
+/// licence holds in all of them, and a station signs where it is with its
+/// call's own letter, not a host's: G3XYZ in Scotland is GM3XYZ, never
+/// GM/G3XYZ.
+const UK: [&str; 7] = ["G", "GM", "GW", "GI", "GD", "GU", "GJ"];
+
+/// Whether a station of `home` operating in `host` is at home: the same
+/// country, or two of the UK's.
+fn at_home(home: &str, host: &str) -> bool {
+    home == host || (UK.contains(&home) && UK.contains(&host))
+}
+
+/// A country to be operating in that is not `home`, nor one where `home`'s
+/// licence is a call of its own ([`at_home`]), and that `countries` admits:
+/// the prefix signed first, and its country.
 fn pick_host(
     home: &str,
     countries: Countries,
@@ -576,7 +595,7 @@ fn pick_host(
 ) -> Option<(&'static str, &'static str)> {
     let away: Vec<((&'static str, &'static str), f64)> = HOSTS
         .iter()
-        .filter(|(_, country, _)| *country != home && countries.admits(country))
+        .filter(|(_, country, _)| !at_home(home, country) && countries.admits(country))
         .map(|(prefix, country, weight)| ((*prefix, *country), *weight))
         .collect();
     pick_weighted(&away, rng).copied()
@@ -1098,8 +1117,9 @@ mod tests {
 
     /// Every call is one its country could have issued: real calls have its
     /// prefix, then its digit, then a suffix of its length; a station abroad
-    /// is not abroad at home; and only a country that marks call areas signs
-    /// one after the slash.
+    /// is not abroad at home, nor a UK call in another part of the UK; and
+    /// only a country that marks call areas signs one after the slash, and
+    /// never its own.
     #[test]
     fn every_call_is_one_its_country_could_issue() {
         for tier in CALLSIGN_TIER_MIN..=CALLSIGN_TIER_MAX {
@@ -1121,7 +1141,7 @@ mod tests {
                     assert!(
                         countries
                             .iter()
-                            .any(|country| country.country != *host_country),
+                            .any(|country| !at_home(country.country, host_country)),
                         "{call:?} is abroad at home"
                     );
                 }
@@ -1133,9 +1153,48 @@ mod tests {
                         "{call:?}: {} marks no call area",
                         parts.prefix
                     );
+                    assert!(
+                        !marker.starts_with(parts.separator),
+                        "{call:?} marks its own call area"
+                    );
                 }
             }
         }
+    }
+
+    /// A portable signs another call area than its own, every one of them
+    /// in time; and a UK call is never abroad in another part of the UK,
+    /// which its own letter says instead (GM3XYZ, not GM/G3XYZ), though it
+    /// is abroad elsewhere. Drawn from many seeds, as each draws few.
+    #[test]
+    fn a_call_is_abroad_only_where_its_licence_is_not_its_own() {
+        let mut areas = std::collections::BTreeSet::new();
+        let mut uk_abroad = 0;
+        for seed in 0..4_000u64 {
+            let mut rng = SplitMix64::new(seed);
+            let call = generate_call(CALLSIGN_TIER_MAX, CallSpec::default(), &mut rng);
+            let Some(parts) = parse_callsign(&call.text) else {
+                panic!("{:?}", call.text);
+            };
+            if let Some(area) = call
+                .marker
+                .filter(|marker| marker.chars().all(|c| c.is_ascii_digit()))
+            {
+                assert_ne!(Some(call.digit), area.chars().next(), "{:?}", call.text);
+                areas.insert(area);
+            }
+            let home = issuing(parts.prefix, parts.separator, parts.suffix.len());
+            if let Some(host) = call.host
+                && home.iter().all(|entry| UK.contains(&entry.country))
+            {
+                assert!(!UK.contains(&host), "{:?}", call.text);
+                uk_abroad += 1;
+            }
+        }
+        assert_eq!(areas.len(), AREA_DIGITS.len(), "{areas:?}");
+        assert!(uk_abroad > 0, "no UK call drawn abroad");
+        assert!(at_home("G", "GM") && at_home("GU", "GW") && at_home("DL", "DL"));
+        assert!(!at_home("G", "EI") && !at_home("EA", "EA8") && !at_home("GM", "DL"));
     }
 
     /// The table says what the regulators say, because real calls do.

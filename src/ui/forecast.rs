@@ -29,14 +29,23 @@ const NEAR: f64 = 0.10;
 /// or further under; in whole percents, as the row shows it, so that a row
 /// reading 94% is at an aim of 94%.
 fn standing(share: f64, aim: f64) -> &'static str {
-    let (share, aim) = ((share * 100.0).round(), (aim * 100.0).round());
-    if share >= aim {
+    if meets(share, aim) {
         "solid"
-    } else if share >= aim - NEAR * 100.0 {
+    } else if whole_percent(share) >= whole_percent(aim) - NEAR * 100.0 {
         "building"
     } else {
         "to-work-on"
     }
+}
+
+/// Whether a share copied is at or over `aim`, in the whole percents the
+/// rows show: what a row and the summary both go by.
+fn meets(share: f64, aim: f64) -> bool {
+    whole_percent(share) >= whole_percent(aim)
+}
+
+fn whole_percent(share: f64) -> f64 {
+    (share * 100.0).round()
 }
 
 /// The range a share is likely in: the middle of what its spread allows.
@@ -102,14 +111,15 @@ fn summary_row(label: String, text: String) -> Element {
 }
 
 /// The longest length of `rows` copied whole `aim` of the time or more,
-/// as the summary says it.
+/// as the summary says it: by [`meets`], so that it never says "not yet"
+/// of a row drawn at the aim.
 fn length_reach(lengths: &[(usize, f64)], aim: f64) -> String {
     let (Some((shortest, _)), Some((longest, _))) = (lengths.first(), lengths.last()) else {
         return String::new();
     };
     let reach = lengths
         .iter()
-        .take_while(|(_, whole)| *whole >= aim)
+        .take_while(|(_, whole)| meets(*whole, aim))
         .last()
         .map(|(length, _)| *length);
     match reach {
@@ -172,7 +182,7 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]
                 {summary_row("Across your range".to_string(), across)}
             }
             {legend(aim)}
-            p { class: "muted", style: "margin: 0;", "{note}" }
+            p { class: "muted hint", "{note}" }
             div { class: "stat-rows", role: "list",
                 for row in rows.iter() {
                     {
@@ -274,7 +284,7 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> El
                 {summary_row("Across your range".to_string(), across)}
             }
             {legend(aim)}
-            p { class: "muted", style: "margin: 0;", "{note}" }
+            p { class: "muted hint", "{note}" }
             div { class: "stat-rows", role: "list",
                 for row in rows.iter() {
                     {
@@ -361,5 +371,24 @@ mod tests {
             speed_reach(27.0, 18.0, 25.0),
             "about 27 WPM, over your range"
         );
+    }
+
+    /// The summary and the rows agree on what is at the aim: a length copied
+    /// whole 93.7% of the time reads 94%, solid at an aim of 94%, and the
+    /// summary reaches it. It used to say "not yet" under a solid row.
+    #[test]
+    fn the_summary_reaches_a_row_drawn_at_the_aim() {
+        let aim = 0.94;
+        assert_eq!(standing(0.937, aim), "solid");
+        assert_eq!(
+            length_reach(&[(2, 0.937)], aim),
+            "every length in your range, up to 2 characters"
+        );
+        assert_eq!(
+            length_reach(&[(2, 0.96), (3, 0.937), (4, 0.934)], aim),
+            "up to 3 characters"
+        );
+        assert_eq!(standing(0.934, aim), "building", "it reads 93%");
+        assert_eq!(length_reach(&[(2, 0.934)], aim), "not yet at 2 characters");
     }
 }

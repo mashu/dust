@@ -275,21 +275,28 @@ pub(crate) fn plan_morse_playback_at(
     let chars: Vec<char> = text.chars().collect();
     let last_morse_idx = chars.iter().enumerate().rev().find_map(|(i, raw)| {
         let ch = raw.to_ascii_uppercase();
-        (*raw != ' ' && morse_for(ch).is_some()).then_some(i)
+        (!raw.is_whitespace() && morse_for(ch).is_some()).then_some(i)
     });
     let mut current_time = 0.0;
     let mut events = Vec::new();
     let mut spans = Vec::new();
+    // Whitespace between two characters that sound is one word space, however
+    // much of it there is and of whatever kind; before the first or after the
+    // last it is nothing. Each span keeps its byte in the text as given.
+    let mut word_break = false;
 
     for ((i, raw), (at, _)) in chars.iter().enumerate().zip(text.char_indices()) {
-        if *raw == ' ' {
-            current_time += (word_space - char_space).max(0.0);
+        if raw.is_whitespace() {
+            word_break = !spans.is_empty();
             continue;
         }
         let ch = raw.to_ascii_uppercase();
         let Some(morse) = morse_for(ch) else {
             continue;
         };
+        if std::mem::take(&mut word_break) {
+            current_time += (word_space - char_space).max(0.0);
+        }
         let start_sec = current_time;
         let mut end_sec = current_time;
         let last_symbol = morse.chars().count().saturating_sub(1);
@@ -557,6 +564,44 @@ mod tests {
         let dot = dot_seconds(20.0);
         // A word space is seven dots where a character space is three.
         assert!((gap - 4.0 * dot).abs() < 1e-9, "gap was {gap}");
+    }
+
+    /// Whitespace before the first word or after the last sounds nothing, and
+    /// any run of it between two words, a tab or a line break as much as a
+    /// space, is one word space. Each character keeps its byte in the text.
+    #[test]
+    fn any_run_of_whitespace_between_words_is_one_word_space() {
+        let settings = fixed_speed(20.0);
+        let plan = |text: &str| planned(text, &settings, &mut Fixed(0.5));
+        let trimmed = plan("CQ DE");
+        let starts = |plan: &PlaybackPlan| -> Vec<f64> {
+            plan.events.iter().map(|tone| tone.start_sec).collect()
+        };
+        for text in [
+            "CQ DE ",
+            " CQ DE",
+            "CQ  DE",
+            "  CQ   DE  ",
+            "CQ\tDE",
+            "CQ\nDE",
+            "CQ \t\r\n DE",
+        ] {
+            let spaced = plan(text);
+            assert_eq!(spaced.duration_sec, trimmed.duration_sec, "{text:?}");
+            assert_eq!(starts(&spaced), starts(&trimmed), "{text:?}");
+            let ats: Vec<usize> = spaced.chars.iter().map(|span| span.at).collect();
+            let sounding: Vec<usize> = text
+                .char_indices()
+                .filter(|(_, c)| !c.is_whitespace())
+                .map(|(at, _)| at)
+                .collect();
+            assert_eq!(ats, sounding, "{text:?}");
+        }
+        // Nothing but whitespace plays nothing.
+        assert_eq!(plan(" \t ").duration_sec, 0.0);
+        // A trailing space leaves PARIS at forty-three dots.
+        let paris = plan("PARIS ").duration_sec / dot_seconds(20.0);
+        assert!((paris - 43.0).abs() < 1e-9, "PARIS took {paris} dots");
     }
 
     #[test]

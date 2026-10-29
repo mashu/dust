@@ -2,6 +2,7 @@
 //! shares.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -9,8 +10,11 @@ use cw_core::{ContestView, GroupSession, SessionResult, TrainingSettings};
 use dioxus::prelude::*;
 
 use crate::contest_runtime::ContestEntry;
-use crate::persist::backup::{Backup, backup_name, merge_sessions, write_backup};
-use crate::persist::{CutOff, HistorySaved, OpenSession, Store, merge_settings};
+use crate::persist::backup::{Backup, Filled, Merged, backup_name, merge_sessions, write_backup};
+use crate::persist::{
+    CutOff, HistorySaved, MAX_SESSIONS, OpenSession, SessionKey, Store, merge_history,
+    merge_settings, pair_sessions,
+};
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
 use crate::session_runtime::{AnswerOutbox, Live};
@@ -154,12 +158,17 @@ pub struct AppCtx {
     /// The sessions deleted last, each with where it sat, for Undo to put
     /// back.
     trash: Signal<Vec<(usize, SessionResult)>>,
-    /// The history and settings as they stood before the last restore, for
-    /// Undo to put back.
-    before_restore: Signal<Option<(Vec<SessionResult>, TrainingSettings)>>,
+    /// What the last restore changed, for Undo to put back.
+    before_restore: Signal<Option<Restored>>,
     /// The settings as they were stored last, so that settings stored
     /// already are not stored again.
     stored_settings: CopyValue<TrainingSettings>,
+    /// The history as it was stored last, by this copy or read from the
+    /// store: what tells the changes made here from another copy's.
+    stored_history: CopyValue<Vec<SessionResult>>,
+    /// The settings could not be stored, and the user has been told: not
+    /// again until they have been stored since.
+    settings_unsaved: CopyValue<bool>,
     app: CopyValue<AppState>,
 }
 
@@ -178,6 +187,7 @@ impl AppCtx {
         in_root(move || {
             let last_backup = app.store.last_backup();
             let stored_settings = CopyValue::new(settings.clone().clamp());
+            let stored_history = CopyValue::new(sessions.clone());
             Self {
                 screen: Signal::new(Screen::Home),
                 settings: Signal::new(settings),
@@ -199,6 +209,8 @@ impl AppCtx {
                 trash: Signal::new(Vec::new()),
                 before_restore: Signal::new(None),
                 stored_settings,
+                stored_history,
+                settings_unsaved: CopyValue::new(false),
                 app: CopyValue::new(app),
             }
         })
@@ -258,6 +270,10 @@ impl AppCtx {
     /// this one last read or wrote them. Those are kept: only what changed
     /// here is laid over them, and whatever they changed is taken up here
     /// too, so a copy left open on old settings never puts them back.
+    ///
+    /// Settings the store would not take are kept here as they are, and
+    /// tried again the next time; the user is told once, not on every
+    /// change, until they have been stored.
     pub fn store_settings(self) -> TrainingSettings {
         let mut settings = self.settings;
         let ours = settings.peek().clone().clamp();
@@ -269,11 +285,33 @@ impl AppCtx {
             Some(theirs) => merge_settings(&base, &ours, theirs),
             None => ours.clone(),
         };
-        if elsewhere.as_ref().unwrap_or(&base) != &merged {
-            store.save_settings(&merged);
+        // What the store holds: what it held, unless the merge is written
+        // over it. Only that is the base of the next merge, or an edit the
+        // store refused would read next time as another copy's change, and
+        // be undone by it.
+        let mut held = elsewhere.unwrap_or(base);
+        let mut refused = None;
+        if held != merged {
+            match store.write_settings(&merged) {
+                Ok(()) => held = merged.clone(),
+                Err(why) => refused = Some(why),
+            }
         }
-        if base != merged {
-            stored.set(merged.clone());
+        if *stored.peek() != held {
+            stored.set(held);
+        }
+        let mut unsaved = self.settings_unsaved;
+        match refused {
+            Some(why) if !*unsaved.peek() => {
+                unsaved.set(true);
+                self.toasts.show(format!(
+                    "Your settings could not be saved: {}.",
+                    why.trim_end_matches('.')
+                ));
+            }
+            Some(_) => {}
+            None if *unsaved.peek() => unsaved.set(false),
+            None => {}
         }
         // Only what came from elsewhere: the settings screen leaves its
         // own values as typed until they are left.
@@ -292,19 +330,84 @@ impl AppCtx {
         self.preview.set(Preview::Idle);
     }
 
+    /// Bring the history and the settings here in line with the store's,
+    /// writing nothing: whatever another tab, window or copy of the app
+    /// stored or deleted since this one last read or wrote them is taken
+    /// up, and whatever changed here and is not stored yet is kept on top,
+    /// to be stored as it would have been.
+    ///
+    /// A restore and a backup go by what the store holds, not by what this
+    /// copy last saw of it: a restore merged with a history another copy
+    /// has since deleted from takes a session it brings back for one
+    /// already here, and a backup of an old copy's history leaves out what
+    /// was stored since, though it counts as backed up.
+    fn sync_with_store(self) {
+        let store = self.app().store;
+        let (mut sessions, mut stored) = (self.sessions, self.stored_history);
+        if let Some(theirs) = store.read_sessions() {
+            let merged = merge_history(&stored.peek(), &sessions.peek(), &theirs);
+            if *sessions.peek() != merged {
+                sessions.set(merged);
+            }
+            stored.set(theirs);
+        }
+        let (mut settings, mut stored) = (self.settings, self.stored_settings);
+        if let Some(theirs) = store.read_settings()
+            && theirs != *stored.peek()
+        {
+            let merged = merge_settings(&stored.peek(), &settings.peek().clone().clamp(), &theirs);
+            if *settings.peek() != merged {
+                settings.set(merged);
+            }
+            stored.set(theirs);
+        }
+    }
+
     /// Store the history as it is now. What the screens show is what the
     /// store has: when it has room for only the newest, the rest go from
     /// here too.
+    ///
+    /// Another tab, window or copy of the app may have stored sessions since
+    /// this one last read or wrote the history, or deleted some. Those
+    /// stand: only what changed here is done to the history stored
+    /// ([`merge_history`]), and what is stored is shown here too. A store
+    /// that takes nothing leaves the history here as it was.
     pub fn store_history(self) -> HistorySaved {
+        self.store_history_counted().saved
+    }
+
+    /// As [`Self::store_history`], and what the store held before, and
+    /// which of the oldest sessions it let go, for want of room.
+    fn store_history_counted(self) -> HistoryStored {
         let mut sessions = self.sessions;
-        let saved = self.app().store.save_sessions(&sessions.peek());
-        if let Some(kept) = saved.kept() {
-            let extra = sessions.peek().len().saturating_sub(kept);
-            if extra > 0 {
-                sessions.write().drain(..extra);
-            }
+        let mut stored = self.stored_history;
+        let store = self.app().store;
+        let held = store.read_sessions();
+        let merged = match &held {
+            Some(theirs) => merge_history(&stored.peek(), &sessions.peek(), theirs),
+            // None stored yet, or none that can be read: nothing to keep.
+            None => sessions.peek().clone(),
+        };
+        let held = held.unwrap_or_default();
+        let saved = store.save_sessions(&merged);
+        let Some(count) = saved.kept() else {
+            return HistoryStored {
+                saved,
+                held,
+                let_go: Vec::new(),
+            };
+        };
+        let mut kept = merged;
+        let let_go = kept.drain(..kept.len().saturating_sub(count)).collect();
+        if *sessions.peek() != kept {
+            sessions.set(kept.clone());
         }
-        saved
+        stored.set(kept);
+        HistoryStored {
+            saved,
+            held,
+            let_go,
+        }
     }
 
     /// Take `picked` out of the history, and out of the store. Until another
@@ -375,20 +478,27 @@ impl AppCtx {
     }
 
     /// Hand the history and the settings to the user as a backup file, and
-    /// remember when, once it is saved. Saving goes on whichever screen is
-    /// up by then.
+    /// remember when, once it is handed over. Saving goes on whichever
+    /// screen is up by then.
+    ///
+    /// A browser says nothing of a download it blocks, or one the user
+    /// turns down, so there the backup card tells of the last one as handed
+    /// to the browser, not as saved ([`Store::confirms_backups`]). It quiets
+    /// the reminder all the same: the hand-over is all a browser ever says
+    /// of a download, and a reminder that never goes quiet is not read.
     pub fn save_backup(self) {
+        self.sync_with_store();
         let at = crate::time::now_ms();
         let contents = write_backup(&self.settings.peek(), &self.sessions.peek(), at);
         let name = backup_name(&crate::time::local_date_string());
         let saving = self.app().store.save_backup_file(&name, &contents);
         dioxus::core::spawn_forever(async move {
             match saving.await {
-                Ok(place) => {
+                Ok(said) => {
                     self.app().store.mark_backup(at);
                     let mut last_backup = self.last_backup;
                     last_backup.set(Some(at));
-                    self.toasts.show(format!("Backup saved as {place}."));
+                    self.toasts.show(said);
                 }
                 Err(why) => self
                     .toasts
@@ -402,37 +512,49 @@ impl AppCtx {
     /// both back as they were. A store that cannot take the history leaves
     /// everything as it was and says why.
     pub fn restore_backup(self, backup: Backup) {
+        self.sync_with_store();
         let mut sessions = self.sessions;
         let mut settings = self.settings;
         let before = (sessions.peek().clone(), settings.peek().clone());
-        let (merged, added, filled) = merge_sessions(&before.0, backup.sessions);
-        sessions.set(merged);
-        let saved = self.store_history();
-        if let Some(why) = why_not_stored(&saved) {
+        let backed_up = covers_up_to(&backup.sessions, &before.0, backup.saved_at);
+        let merged = merge_sessions(&before.0, backup.sessions);
+        sessions.set(merged.sessions.clone());
+        let stored = self.store_history_counted();
+        if let Some(why) = why_not_stored(&stored.saved) {
             sessions.set(before.0);
             self.toasts.show(format!("Nothing was restored: {why}."));
             return;
         }
+        let let_go = stored.let_go.len();
+        let restored = Restored::of(
+            &merged,
+            &stored.held,
+            stored.let_go,
+            &sessions.peek(),
+            before.1,
+        );
         // Stored by the app's settings effect.
         settings.set(backup.settings);
         let store = self.app().store;
-        // What the backup holds is backed up, as of when it was saved.
+        // What the backup holds is backed up, as of when it was saved; but
+        // only if that is all there was here by then. A backup from another
+        // device leaves this one's own sessions in no backup at all.
         let mut last_backup = self.last_backup;
-        if backup.saved_at > last_backup.peek().unwrap_or(0) {
+        if backed_up && backup.saved_at > last_backup.peek().unwrap_or(0) {
             store.mark_backup(backup.saved_at);
             last_backup.set(Some(backup.saved_at));
         }
         store.ask_to_keep();
-        let mut before_restore = self.before_restore;
-        before_restore.set(Some(before));
         let from = day_of(backup.saved_at)
             .filter(|_| backup.saved_at > 0)
             .map(|day| format!(" from {}", short_date(&day)))
             .unwrap_or_default();
+        let (added, filled) = (restored.added.len(), restored.filled.len());
         let mut text = match (added, filled) {
-            (0, 0) => {
+            (0, 0) if !restored.brought => {
                 format!("Restored your settings{from}. Every session in it was already here.")
             }
+            (0, 0) => format!("Restored your settings{from}."),
             (0, _) => format!(
                 "Filled in {} and restored your settings{from}.",
                 counted(filled, "session")
@@ -446,40 +568,70 @@ impl AppCtx {
                 counted(added, "session")
             ),
         };
-        if let Some(problem) = saved.problem() {
+        if let Some(problem) = stored.saved.problem() {
             text = format!("{text} {problem}");
+        } else if let_go > 0 {
+            let oldest = match let_go {
+                1 => "the oldest was".to_string(),
+                n => format!("the {n} oldest were"),
+            };
+            text = format!(
+                "{text} The history keeps only the newest {MAX_SESSIONS} sessions, so {oldest} let go."
+            );
         }
+        let mut before_restore = self.before_restore;
+        before_restore.set(Some(restored));
         self.toasts.show_with(text, ToastAction::UndoRestore);
     }
 
     /// Put the history and settings back as they were before the last
-    /// restore.
+    /// restore: what it added taken out, what it filled in as it was, and
+    /// what it let go for want of room back. Whatever else the history took
+    /// up since, here or in another copy of the app, stays: the undoing is
+    /// done to the history as it is now, and merged with the store's as any
+    /// change is.
     pub fn undo_restore(self) {
         let mut before_restore = self.before_restore;
-        let Some((before, settings_before)) = before_restore.write().take() else {
+        let Some(restored) = before_restore.write().take() else {
             return;
         };
         let mut sessions = self.sessions;
-        let restored = sessions.peek().clone();
-        sessions.set(before.clone());
+        let now = sessions.peek().clone();
+        sessions.set(restored.undone(&now));
         let saved = self.store_history();
         if let Some(why) = why_not_stored(&saved) {
-            sessions.set(restored);
-            before_restore.set(Some((before, settings_before)));
+            sessions.set(now);
+            before_restore.set(Some(restored));
             self.toasts
                 .show(format!("The restore could not be undone: {why}."));
             return;
         }
+        if let Some(problem) = saved.problem() {
+            self.toasts.show(problem);
+        }
         let mut settings = self.settings;
-        settings.set(settings_before);
+        settings.set(restored.settings);
     }
 
-    /// Put each of `taken` back where it sat, in the order they sat in.
+    /// Put each of `taken` back where it sat, in the order they sat in; or,
+    /// where the history has changed around that place since, where it
+    /// falls by when it finished.
     fn put_back(self, taken: Vec<(usize, SessionResult)>) {
         let mut sessions = self.sessions;
         let mut history = sessions.write();
         for (index, session) in taken {
             let at = index.min(history.len());
+            let fits = history[..at]
+                .last()
+                .is_none_or(|before| before.timestamp <= session.timestamp)
+                && history
+                    .get(at)
+                    .is_none_or(|after| session.timestamp <= after.timestamp);
+            let at = if fits {
+                at
+            } else {
+                history.partition_point(|kept| kept.timestamp <= session.timestamp)
+            };
             history.insert(at, session);
         }
     }
@@ -497,6 +649,133 @@ impl AppCtx {
         self.dialogue.set(None);
         self.screen.set(to);
     }
+}
+
+/// What a store of the history did ([`AppCtx::store_history_counted`]).
+struct HistoryStored {
+    saved: HistorySaved,
+    /// The history the store held just before, as far as it could be read.
+    held: Vec<SessionResult>,
+    /// The oldest sessions it let go, for want of room, oldest first.
+    let_go: Vec<SessionResult>,
+}
+
+/// What a restore changed ([`AppCtx::restore_backup`]), for Undo: no more
+/// than it changed, so that undoing it leaves whatever else the history
+/// took up, before it or since.
+struct Restored {
+    /// The sessions it added that the history kept, as it added them.
+    added: Vec<SessionResult>,
+    /// The sessions it filled in that the history kept.
+    filled: Vec<Filled>,
+    /// The sessions the history let go to make room for what it added.
+    let_go: Vec<SessionResult>,
+    /// Whether the backup held anything the history did not, kept or not.
+    brought: bool,
+    /// The settings before it.
+    settings: TrainingSettings,
+}
+
+impl Restored {
+    /// What a restore that made `merged` of the history changed, now that
+    /// the history is stored: it was `held` in the store just before, the
+    /// store let go `let_go` of the oldest, and it is `now`.
+    ///
+    /// A session another copy of the app had stored already, the same one
+    /// restored from the same backup, was not added by this restore, nor
+    /// was one filled in already: undoing this restore leaves them.
+    fn of(
+        merged: &Merged,
+        held: &[SessionResult],
+        let_go: Vec<SessionResult>,
+        now: &[SessionResult],
+        settings: TrainingSettings,
+    ) -> Self {
+        let keys = |sessions: &[SessionResult]| -> HashSet<SessionKey> {
+            sessions.iter().map(SessionKey::of).collect()
+        };
+        let (held_keys, kept) = (keys(held), keys(now));
+        let added: Vec<&SessionResult> = merged
+            .added
+            .iter()
+            .filter(|session| !held_keys.contains(&SessionKey::of(session)))
+            .collect();
+        let filled: Vec<&Filled> = merged
+            .filled
+            .iter()
+            .filter(|filled| !held.contains(&filled.now))
+            .collect();
+        let brought = !added.is_empty() || !filled.is_empty();
+        let from_backup: HashSet<SessionKey> = added
+            .iter()
+            .map(|session| SessionKey::of(session))
+            .collect();
+        Self {
+            added: added
+                .into_iter()
+                .filter(|session| kept.contains(&SessionKey::of(session)))
+                .cloned()
+                .collect(),
+            filled: filled
+                .into_iter()
+                .filter(|filled| kept.contains(&SessionKey::of(&filled.now)))
+                .cloned()
+                .collect(),
+            // One the restore filled in comes back as it was before it.
+            let_go: let_go
+                .into_iter()
+                .filter(|session| !from_backup.contains(&SessionKey::of(session)))
+                .map(|session| {
+                    merged
+                        .filled
+                        .iter()
+                        .find(|filled| filled.now == session)
+                        .map_or(session, |filled| filled.was.clone())
+                })
+                .collect(),
+            brought,
+            settings,
+        }
+    }
+
+    /// `now`, the history as it is, with this restore undone: what it
+    /// added taken out, what it filled in put back as it was unless it has
+    /// changed again since, and what it let go back where it falls by when
+    /// it finished.
+    fn undone(&self, now: &[SessionResult]) -> Vec<SessionResult> {
+        let gone: HashSet<usize> = pair_sessions(
+            &now.iter().collect::<Vec<_>>(),
+            &self.added.iter().collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .flatten()
+        .collect();
+        let mut undone: Vec<SessionResult> = now
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !gone.contains(at))
+            .map(|(_, session)| session.clone())
+            .collect();
+        for filled in &self.filled {
+            if let Some(session) = undone.iter_mut().find(|session| **session == filled.now) {
+                *session = filled.was.clone();
+            }
+        }
+        for session in &self.let_go {
+            let at = undone.partition_point(|kept| kept.timestamp <= session.timestamp);
+            undone.insert(at, session.clone());
+        }
+        undone
+    }
+}
+
+/// Whether `backup`, saved at `saved_at`, holds every one of `here` that
+/// had finished by then: only then is all there was backed up as of it.
+fn covers_up_to(backup: &[SessionResult], here: &[SessionResult], saved_at: u64) -> bool {
+    let held: HashSet<SessionKey> = backup.iter().map(SessionKey::of).collect();
+    here.iter()
+        .filter(|session| session.timestamp <= saved_at)
+        .all(|session| held.contains(&SessionKey::of(session)))
 }
 
 /// Why a history was not stored at all, in words that fit after "Nothing was
@@ -656,7 +935,555 @@ impl Toasts {
 
 #[cfg(test)]
 mod tests {
-    use super::Screen;
+    use super::*;
+    use crate::persist::memory::MemoryStore;
+
+    /// A copy of the app — a tab, or a window — on `store`, which other
+    /// copies may share, opened on what it holds.
+    struct Tab {
+        dom: VirtualDom,
+        ctx: AppCtx,
+    }
+
+    impl Tab {
+        fn on(store: &Rc<MemoryStore>) -> Self {
+            let dom = VirtualDom::new(|| rsx! {});
+            let app = AppState::with(crate::audio::fake::Recorder::new().factory(), store.clone());
+            let ctx = dom.in_scope(ScopeId::ROOT, || {
+                AppCtx::new(app, store.load_settings(), store.load_sessions())
+            });
+            Self { dom, ctx }
+        }
+
+        /// Do `act` in this copy, the way one of its callbacks does.
+        fn act<T>(&self, act: impl FnOnce(AppCtx) -> T) -> T {
+            self.dom.in_scope(ScopeId::ROOT, || act(self.ctx))
+        }
+
+        fn toast(&self) -> Option<Toast> {
+            self.act(|ctx| ctx.toasts.current())
+        }
+
+        /// Keep `session`, as a session finished here is kept.
+        fn finish(&self, session: SessionResult) {
+            self.act(|ctx| crate::session_runtime::keep_and_show(ctx, session));
+        }
+
+        /// Delete the session that finished on `day`.
+        fn delete(&self, day: u64) {
+            self.act(|ctx| {
+                let index = ctx
+                    .sessions
+                    .peek()
+                    .iter()
+                    .position(|session| session.timestamp == stamp(day))
+                    .expect("shown");
+                ctx.delete_sessions(&[SessionPick {
+                    index,
+                    timestamp: stamp(day),
+                }]);
+            });
+        }
+
+        /// The days of the sessions this copy shows.
+        fn shown(&self) -> Vec<u64> {
+            self.act(|ctx| days(&ctx.sessions.peek()))
+        }
+    }
+
+    fn stamp(day: u64) -> u64 {
+        day * 86_400_000
+    }
+
+    /// A session that finished on `day`, as the store keeps it.
+    fn day(day: u64) -> SessionResult {
+        SessionResult {
+            timestamp: stamp(day),
+            date: format!("2026-10-{day:02}"),
+            ..SessionResult::empty_for_test()
+        }
+    }
+
+    fn days(sessions: &[SessionResult]) -> Vec<u64> {
+        sessions
+            .iter()
+            .map(|session| session.timestamp / stamp(1))
+            .collect()
+    }
+
+    /// A store already holding a session for each of `held`.
+    fn holding(held: impl IntoIterator<Item = u64>) -> Rc<MemoryStore> {
+        let store = Rc::new(MemoryStore::default());
+        store.save_sessions(&held.into_iter().map(day).collect::<Vec<_>>());
+        store
+    }
+
+    /// Two tabs on one store each keep a session, and neither loses the
+    /// other's. Each wrote back the whole history it held, so the one that
+    /// stored last left out what the other had kept since it opened.
+    #[test]
+    fn a_session_kept_in_another_tab_is_not_lost() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(2));
+        a.finish(day(3));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        assert_eq!(a.shown(), [1, 2, 3], "taken up as it stored");
+        b.finish(day(4));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4]);
+        assert_eq!(b.shown(), [1, 2, 3, 4]);
+    }
+
+    /// A session deleted in one tab stays deleted when another stores, and
+    /// one deleted in each goes from both. One deleted used to come back the
+    /// next time a tab that still held it stored.
+    #[test]
+    fn a_session_deleted_in_another_tab_stays_deleted() {
+        let store = holding([1, 2, 3, 4]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.delete(2);
+        a.delete(4);
+        assert_eq!(days(&store.load_sessions()), [1, 3]);
+        assert_eq!(a.shown(), [1, 3]);
+        a.finish(day(5));
+        b.finish(day(6));
+        assert_eq!(days(&store.load_sessions()), [1, 3, 5, 6]);
+        assert_eq!(b.shown(), [1, 3, 5, 6]);
+    }
+
+    /// Undo puts back only what was deleted here, where it falls among
+    /// what another tab kept since.
+    #[test]
+    fn undo_puts_a_session_back_among_another_tabs() {
+        let store = holding([5, 6, 7]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        a.delete(6);
+        b.act(|ctx| {
+            ctx.restore_backup(Backup {
+                saved_at: 0,
+                settings: TrainingSettings::default(),
+                sessions: vec![day(1), day(2)],
+            })
+        });
+        b.finish(day(8));
+        // Taken up here: two sessions now sit where the sixth did.
+        a.finish(day(9));
+        assert_eq!(a.shown(), [1, 2, 5, 7, 8, 9]);
+        a.act(AppCtx::undo_delete);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 5, 6, 7, 8, 9]);
+        assert_eq!(a.shown(), [1, 2, 5, 6, 7, 8, 9]);
+    }
+
+    /// A restore, and its Undo, leave alone what another tab kept between
+    /// them.
+    #[test]
+    fn undoing_a_restore_keeps_what_another_tab_kept() {
+        let store = holding([3]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        a.act(|ctx| {
+            ctx.restore_backup(Backup {
+                saved_at: 0,
+                settings: TrainingSettings::default(),
+                sessions: vec![day(1), day(2)],
+            })
+        });
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        b.finish(day(4));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4]);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [3, 4]);
+        assert_eq!(a.shown(), [3, 4]);
+    }
+
+    /// A restore goes by what the store holds: a session another tab
+    /// deleted since this one last saw the history is restored, not taken
+    /// for one already here. It used to be found here, so not added, and
+    /// then dropped again as deleted elsewhere, with "Every session in it
+    /// was already here."
+    #[test]
+    fn a_restore_brings_back_what_another_tab_deleted() {
+        let store = holding([1, 2, 3]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.delete(2);
+        restore(&a, [1, 2, 3]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        assert_eq!(a.shown(), [1, 2, 3]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored 1 session and your settings."
+        );
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [1, 3]);
+    }
+
+    /// A restore takes the backup's settings whole, over what another tab
+    /// stored since: a value the backup shares with this tab's stale copy
+    /// used to read as unchanged here, and the other tab's stood.
+    #[test]
+    fn a_restore_takes_its_settings_over_another_tabs() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.act(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = 9;
+            ctx.store_settings();
+        });
+        let backup = TrainingSettings::default();
+        a.act(|ctx| {
+            ctx.restore_backup(Backup {
+                saved_at: 0,
+                settings: backup.clone(),
+                sessions: Vec::new(),
+            });
+            ctx.store_settings();
+        });
+        let stored = store.load_settings();
+        assert_eq!(
+            stored.curriculum.num_groups,
+            backup.clamp().curriculum.num_groups
+        );
+    }
+
+    /// A backup from another device, newer than every session here but
+    /// holding none of them, does not count them as backed up; one holding
+    /// all of them does. The reminder used to go quiet over sessions in no
+    /// backup at all.
+    #[test]
+    fn a_restore_marks_a_backup_only_over_what_it_holds() {
+        let store = holding(1..=12);
+        let a = Tab::on(&store);
+        let from_elsewhere = |sessions: Vec<SessionResult>| Backup {
+            saved_at: stamp(20),
+            settings: TrainingSettings::default(),
+            sessions,
+        };
+        a.act(|ctx| ctx.restore_backup(from_elsewhere(vec![day(15)])));
+        assert_eq!(store.last_backup(), None);
+        assert_eq!(a.act(|ctx| *ctx.last_backup.peek()), None);
+        // The 15 the first restore brought is here now too.
+        let all = (1..=12).chain([15]).map(day).collect();
+        a.act(|ctx| ctx.restore_backup(from_elsewhere(all)));
+        assert_eq!(store.last_backup(), Some(stamp(20)));
+    }
+
+    /// A backup holds what the store holds, sessions another tab finished
+    /// since this one last read the history among them. It used to hold
+    /// only what this tab had seen, while counting the rest as backed up.
+    #[test]
+    fn a_backup_holds_what_another_tab_stored() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(2));
+        b.finish(day(3));
+        a.act(AppCtx::save_backup);
+        let files = store.backup_files.borrow().clone();
+        let (_, contents) = files.last().expect("a backup file");
+        let backup = crate::persist::backup::read_backup(contents).expect("a backup");
+        assert_eq!(days(&backup.sessions), [1, 2, 3]);
+        assert_eq!(a.shown(), [1, 2, 3]);
+    }
+
+    /// Undoing a restore says so when the store had room for only the
+    /// newest of what it puts back, as undoing a delete does.
+    #[test]
+    fn undoing_a_restore_says_what_did_not_fit() {
+        let store = holding([3, 4]);
+        let a = Tab::on(&store);
+        restore(&a, [1, 2]);
+        store.room.set(Some(1));
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [4]);
+        let told = a.toast().expect("told").text;
+        assert!(told.contains("newest"), "{told}");
+    }
+
+    /// Restore the backup holding a session for each of `days`, in `tab`.
+    fn restore(tab: &Tab, days: impl IntoIterator<Item = u64>) {
+        let sessions = days.into_iter().map(day).collect();
+        tab.act(|ctx| {
+            ctx.restore_backup(Backup {
+                saved_at: 0,
+                settings: TrainingSettings::default(),
+                sessions,
+            })
+        });
+    }
+
+    /// A session another tab kept before the restore, which this tab had
+    /// not seen yet, stays when the restore is undone. Undo used to take
+    /// out everything the history held after the restore and not before
+    /// it, and the other tab's session was among that.
+    #[test]
+    fn undoing_a_restore_keeps_what_another_tab_kept_before_it() {
+        let store = holding([3]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(4));
+        restore(&a, [1, 2]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4]);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [3, 4]);
+        assert_eq!(a.shown(), [3, 4]);
+        b.finish(day(5));
+        assert_eq!(days(&store.load_sessions()), [3, 4, 5]);
+    }
+
+    /// A session another tab deleted before the restore stays deleted when
+    /// it is undone. Undo used to put back everything the history held
+    /// before the restore, and the deleted session was among that.
+    #[test]
+    fn undoing_a_restore_does_not_bring_back_what_another_tab_deleted() {
+        let store = holding([3, 4]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.delete(4);
+        restore(&a, [1, 2]);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [3]);
+        assert_eq!(a.shown(), [3]);
+        b.finish(day(5));
+        assert_eq!(days(&store.load_sessions()), [3, 5]);
+    }
+
+    /// Another tab restored the same backup first: the sessions were in
+    /// the store already, so this tab's restore added none of them, and
+    /// undoing it takes none out. Undoing the first takes them out.
+    #[test]
+    fn undoing_a_restore_leaves_what_another_tabs_restore_added() {
+        let store = holding([3]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        restore(&b, [1, 2]);
+        restore(&a, [1, 2]);
+        assert_eq!(
+            a.toast().expect("told").text,
+            "Restored your settings. Every session in it was already here."
+        );
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        b.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), [3]);
+    }
+
+    /// A restore whose sessions the history let go again, for want of
+    /// room, takes out on Undo only those it kept, and leaves what another
+    /// tab kept since. One that let go the history's own oldest sessions
+    /// to make room puts them back.
+    #[test]
+    fn undoing_a_restore_the_history_trimmed() {
+        let max = MAX_SESSIONS as u64;
+        // Five of the ten restored fit, and five go again.
+        let store = holding(11..=max + 5);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        restore(&a, 1..=10);
+        assert_eq!(
+            days(&store.load_sessions()),
+            (6..=max + 5).collect::<Vec<_>>()
+        );
+        b.finish(day(max + 6));
+        assert_eq!(
+            days(&store.load_sessions()),
+            (7..=max + 6).collect::<Vec<_>>()
+        );
+        a.act(AppCtx::undo_restore);
+        let stored = days(&store.load_sessions());
+        assert_eq!(stored, (11..=max + 6).collect::<Vec<_>>());
+        assert_eq!(a.shown(), stored);
+
+        // A full history, and a backup of newer sessions: the oldest five
+        // went to make room, and come back.
+        let store = holding(1..=max);
+        let a = Tab::on(&store);
+        restore(&a, max + 1..=max + 5);
+        assert_eq!(
+            days(&store.load_sessions()),
+            (6..=max + 5).collect::<Vec<_>>()
+        );
+        a.act(AppCtx::undo_restore);
+        assert_eq!(days(&store.load_sessions()), (1..=max).collect::<Vec<_>>());
+    }
+
+    /// A session a restore filled in goes back as it was on Undo, among
+    /// whatever another tab did meanwhile; one filled in already by another
+    /// tab's restore stays filled in.
+    #[test]
+    fn undoing_a_restore_puts_back_what_it_filled_in() {
+        let run = |log: bool| {
+            let mut run =
+                crate::testing::stored_run("2026-10-02", &[("K5XYZ", "214", "K5XYZ", "214")]);
+            run.timestamp = stamp(2);
+            if !log {
+                run.contest = None;
+            }
+            run
+        };
+        let restore_run = |tab: &Tab| {
+            tab.act(|ctx| {
+                ctx.restore_backup(Backup {
+                    saved_at: 0,
+                    settings: TrainingSettings::default(),
+                    sessions: vec![run(true)],
+                })
+            })
+        };
+        let store = Rc::new(MemoryStore::default());
+        store.save_sessions(&[day(1), run(false)]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(3));
+        restore_run(&a);
+        assert!(store.load_sessions()[1].contest.is_some(), "filled in");
+        a.act(AppCtx::undo_restore);
+        assert_eq!(store.load_sessions(), [day(1), run(false), day(3)]);
+
+        restore_run(&b);
+        restore_run(&a);
+        a.act(AppCtx::undo_restore);
+        assert_eq!(store.load_sessions(), [day(1), run(true), day(3)]);
+    }
+
+    /// A store that holds its history back, as one it could not read is,
+    /// takes nothing and changes nothing here; what was kept meanwhile is
+    /// stored once it takes the history again.
+    #[test]
+    fn a_held_history_takes_nothing_until_it_is_let_go() {
+        let store = holding([1, 2]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(3));
+        store.held.set(true);
+        a.finish(day(4));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3]);
+        assert_eq!(a.shown(), [1, 2, 4], "nothing taken up either");
+        store.held.set(false);
+        a.finish(day(5));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4, 5]);
+        assert_eq!(a.shown(), [1, 2, 3, 4, 5]);
+    }
+
+    /// A history that could not be read for a moment holds back only the
+    /// sessions kept meanwhile, and only until it reads again: then they
+    /// are stored, beside what another tab kept in the meantime.
+    #[test]
+    fn a_history_that_could_not_be_read_for_a_moment_holds_only_that_moment() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        store.unreadable.set(true);
+        a.finish(day(2));
+        assert_eq!(
+            a.act(|ctx| ctx.notices.peek().clone()),
+            [Notice::History(HistorySaved::Held.problem().expect("told"))]
+        );
+        store.unreadable.set(false);
+        b.finish(day(3));
+        assert_eq!(days(&store.load_sessions()), [1, 3]);
+        a.finish(day(4));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4]);
+        assert_eq!(a.shown(), [1, 2, 3, 4]);
+    }
+
+    /// A restore that takes the history past the newest it keeps counts
+    /// only the sessions that stayed, and says the oldest were let go. It
+    /// used to count every session it added, though the oldest went again
+    /// as they were stored.
+    #[test]
+    fn a_restore_counts_only_the_sessions_the_history_kept() {
+        let max = MAX_SESSIONS as u64;
+        let restore = |tab: &Tab| {
+            tab.act(|ctx| {
+                ctx.restore_backup(Backup {
+                    saved_at: 0,
+                    settings: TrainingSettings::default(),
+                    sessions: (1..=10).map(day).collect(),
+                })
+            });
+            tab.toast().expect("told").text
+        };
+
+        let store = holding(11..=max + 5);
+        let tab = Tab::on(&store);
+        assert_eq!(
+            restore(&tab),
+            format!(
+                "Restored 5 sessions and your settings. The history keeps only the newest {max} sessions, so the 5 oldest were let go."
+            )
+        );
+        let stored = days(&store.load_sessions());
+        assert_eq!(stored, (6..=max + 5).collect::<Vec<_>>());
+        assert_eq!(tab.shown(), stored);
+
+        // Every one of them older than the newest kept: none restored.
+        let store = holding(11..=max + 10);
+        let tab = Tab::on(&store);
+        assert_eq!(
+            restore(&tab),
+            format!(
+                "Restored your settings. The history keeps only the newest {max} sessions, so the 10 oldest were let go."
+            )
+        );
+        assert_eq!(store.load_sessions().len(), MAX_SESSIONS);
+    }
+
+    /// Between them, tabs keep the newest sessions the history has room for.
+    #[test]
+    fn tabs_keep_the_newest_sessions_between_them() {
+        let max = MAX_SESSIONS as u64;
+        let store = holding(1..=max);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        b.finish(day(max + 1));
+        a.finish(day(max + 2));
+        let stored = days(&store.load_sessions());
+        assert_eq!(stored, (3..=max + 2).collect::<Vec<_>>());
+        assert_eq!(a.shown(), stored);
+    }
+
+    /// Settings the store would not take stay as they were set, and are
+    /// stored once it takes them again. The edit used to be taken as
+    /// stored all the same, so the old settings still in the store read as
+    /// another copy's change, and the next store put them back.
+    #[test]
+    fn settings_the_store_refused_are_kept_and_told_of_once() {
+        let store = Rc::new(MemoryStore::default());
+        let old = TrainingSettings::default();
+        store.save_settings(&old);
+        let copy = Tab::on(&store);
+        *store.settings_refused.borrow_mut() = Some("the disk is full".into());
+
+        copy.act(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = 9;
+            ctx.store_settings();
+        });
+        let told = copy.toast().expect("told");
+        assert_eq!(
+            told.text,
+            "Your settings could not be saved: the disk is full."
+        );
+        assert_eq!(store.load_settings(), old, "nothing was written");
+
+        // Every edit after it is refused too, and not told of again.
+        copy.act(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().band.steepness = 12.0;
+            ctx.store_settings();
+        });
+        assert_eq!(copy.toast(), Some(told.clone()), "told once");
+
+        // The store takes them again: both edits are stored, neither put
+        // back.
+        store.settings_refused.borrow_mut().take();
+        let stored = copy.act(AppCtx::store_settings);
+        assert_eq!(stored.curriculum.num_groups, 9);
+        assert_eq!(stored.band.steepness, 12.0);
+        assert_eq!(store.load_settings(), stored);
+        assert_eq!(copy.act(|ctx| ctx.settings.peek().clone()), stored);
+
+        // Stored since, so a store that refuses again is told of again.
+        *store.settings_refused.borrow_mut() = Some("the disk is full".into());
+        copy.act(|ctx| {
+            let mut settings = ctx.settings;
+            settings.write().curriculum.num_groups = 4;
+            ctx.store_settings();
+        });
+        assert_ne!(copy.toast(), Some(told), "told again");
+        assert_eq!(store.load_settings().curriculum.num_groups, 9);
+    }
 
     #[test]
     fn every_screen_has_its_own_key() {

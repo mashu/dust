@@ -16,14 +16,11 @@
 //! moment.
 
 mod band;
-mod meter;
 #[cfg(feature = "native-audio")]
 mod output;
 mod send;
 #[cfg(feature = "native-audio")]
 mod sidetone;
-
-use std::sync::Arc;
 
 #[cfg(doc)]
 use cw_core::band::AGC_LOOKAHEAD_SEC;
@@ -33,8 +30,6 @@ use crate::audio::shape::{BAND_FADE_SEC, GATE_RAMP_SEC, Gains};
 
 pub use band::BandVoice;
 use band::Glide;
-pub use meter::Meter;
-use meter::Metering;
 #[cfg(feature = "native-audio")]
 pub use output::Output;
 #[cfg(all(test, feature = "native-audio"))]
@@ -52,8 +47,10 @@ const FADING_BANDS: usize = 8;
 /// release is a few milliseconds; sends are seconds apart.
 const RETIRING_SENDS: usize = 4;
 
-/// The highest rate the room for the look-ahead is made for up front. A
-/// stream opened higher has it grown before it starts.
+/// The highest rate the room for the look-ahead is made for up front, so a
+/// native stream reopened at another rate needs none made. A stream opened
+/// higher has it grown before it starts.
+#[cfg(feature = "native-audio")]
 const HIGHEST_RATE: u32 = 384_000;
 
 /// The band and the Morse, mixed. The UI hands it bands and sends under its
@@ -76,6 +73,9 @@ pub struct Mixer {
     /// How far behind the last callback the speaker was, in frames: how
     /// long a send started now waits to be heard.
     latency: usize,
+    /// Whether `latency` was heard from the output now open, rather than
+    /// kept from one before it or never heard at all.
+    latency_heard: bool,
     /// How open the receiver's output is: shut while you send without full
     /// break-in, moving between the two a straight line at a time, over
     /// [`GATE_RAMP_SEC`], so it never clicks.
@@ -92,8 +92,6 @@ pub struct Mixer {
     /// The receiver's audio stage, after its AGC: the roll-off below the
     /// note, on the band and the stations, not on your own message.
     audio: AudioHighPass,
-    /// What the receiver did, a frame at a time, for the level scope.
-    metering: Metering,
     /// What the sends played, waiting out the receiver's look-ahead: its AGC
     /// hears every sample as it comes, through the RF gain as it stands
     /// then, and everything is played that much later at the gain it has by
@@ -135,7 +133,6 @@ impl Mixer {
     pub fn new(sample_rate: u32) -> Self {
         Self {
             audio: AudioHighPass::new(sample_rate),
-            metering: Metering::new(Arc::new(Meter::new()), sample_rate),
             sample_rate: sample_rate.max(1),
             band: None,
             fading: Vec::with_capacity(FADING_BANDS + 1),
@@ -143,6 +140,7 @@ impl Mixer {
             send: None,
             retiring: Vec::with_capacity(RETIRING_SENDS + 1),
             latency: 0,
+            latency_heard: false,
             gate: 1.0,
             gains: Gains::UNITY,
             gains_asked: Gains::UNITY,
@@ -158,17 +156,6 @@ impl Mixer {
         self.sample_rate
     }
 
-    /// The meter the mixer writes its frames to, for the UI to read.
-    pub fn meter(&self) -> Arc<Meter> {
-        self.metering.meter()
-    }
-
-    /// How many samples into the meter's next frame it has played.
-    #[cfg(any(feature = "web", test))]
-    pub fn meter_phase(&self) -> usize {
-        self.metering.taken()
-    }
-
     /// Whether it has nothing left to play: no band, none still fading out,
     /// and no send sounding or riding out its release. What it plays then is
     /// silence, once the look-ahead has run out. Those gone are counted
@@ -182,14 +169,17 @@ impl Mixer {
             && self.send.as_ref().is_none_or(|send| !send.is_sounding())
     }
 
-    /// Whether a send is still to be heard, or riding out its release: what
-    /// a stream moved to another device would cut off.
+    /// Whether a send is still to be heard to its end: waiting to start,
+    /// sounding, riding out its release, or played to its last sample and
+    /// not yet heard, that still in the look-ahead or on its way to the
+    /// speaker. What a stream moved to another device would cut off, and,
+    /// at another rate, drop with the waiter never told it was heard.
     #[cfg(feature = "native-audio")]
     pub fn is_sending(&self) -> bool {
         self.send
             .iter()
             .chain(&self.retiring)
-            .any(SendVoice::is_sounding)
+            .any(|send| !send.is_finished())
     }
 
     /// How long after it starts a send goes to the output, in seconds: the
@@ -203,6 +193,21 @@ impl Mixer {
     #[cfg(feature = "native-audio")]
     pub fn output_latency_sec(&self) -> f64 {
         self.latency as f64 / f64::from(self.sample_rate)
+    }
+
+    /// Whether the output now open has said how far behind it the speaker
+    /// is: not until its first callback, after a device change.
+    #[cfg(feature = "native-audio")]
+    pub fn latency_heard(&self) -> bool {
+        self.latency_heard
+    }
+
+    /// The output is another one now: how far behind it the speaker is
+    /// waits to be heard from it.
+    #[cfg(feature = "native-audio")]
+    pub fn forget_latency(&mut self) {
+        self.latency = 0;
+        self.latency_heard = false;
     }
 
     /// Play at `gains` from here on, the band as it is: the AF gain it is
@@ -359,23 +364,32 @@ impl Mixer {
     #[cfg(feature = "native-audio")]
     pub fn clear(&mut self, sample_rate: u32, swept: &mut Swept) {
         self.sample_rate = sample_rate.max(1);
+        self.forget_latency();
         self.gate = 1.0;
         self.gains = self.gains_asked;
         self.af = Glide::at(self.gains_asked.af);
         self.audio = AudioHighPass::new(self.sample_rate);
-        self.metering.restart(self.sample_rate);
         self.late_len = agc_lookahead_samples(self.sample_rate);
         // On the UI thread, before the stream at the new rate starts.
         self.late
             .resize(late_room(self.sample_rate), SendSample::default());
-        self.late.fill(SendSample::default());
         self.late_at = 0;
         self.handed_over = None;
         swept.bands.append(&mut self.fading);
         swept.bands.extend(self.band.take());
         swept.receivers.extend(self.retune.take());
+        self.drop_sends(swept);
+    }
+
+    /// Every send out at once, and what of them is still waiting out the
+    /// look-ahead: cut, not ridden down, for a stream that starts again, or
+    /// one that has skipped on past where they had got to and whose output
+    /// was silent there already, where what is left of them would only
+    /// play late.
+    pub fn drop_sends(&mut self, swept: &mut Swept) {
         swept.sends.append(&mut self.retiring);
         swept.sends.extend(self.send.take());
+        self.late.fill(SendSample::default());
     }
 
     /// Take out what has finished playing, and the oldest of what is on its
@@ -405,6 +419,7 @@ impl Mixer {
     /// sample has been heard, not when it was played.
     pub fn render(&mut self, out: &mut [f32], latency: usize) {
         self.latency = latency;
+        self.latency_heard = true;
         self.start_retune();
         // The band's own traffic makes room for a pile-up while it calls.
         let callers = self.send.as_ref().map_or(0, SendVoice::callers_now);
@@ -435,11 +450,8 @@ impl Mixer {
             let send = std::mem::replace(&mut self.late[self.late_at], heard_now);
             self.late_at = (self.late_at + 1) % self.late_len;
             let mut background = 0.0;
-            // What reached the AGC, for the meter: the send alone, through
-            // the RF gain, with no band to meet it.
-            let mut input = coming.heard * now.rf;
-            // The gain the AGC's hang holds, for the meter, and what the send
-            // rides: the AGC's gain at the AF gain of the band riding it.
+            // What the send rides: the AGC's gain at the AF gain of the band
+            // riding it.
             // While one band hands over to the next, or to none, the send
             // eases from the one to the other with the fade, the two sized
             // alike for the strongest station, so it never steps.
@@ -448,7 +460,6 @@ impl Mixer {
                 let played = band.next(coming.heard, now.rf);
                 background += played.band;
                 current = Some(played);
-                input = current.as_ref().map_or(input, |played| played.input);
             }
             // What the send rides going out is the newest band still on the
             // air: one gone has no gain of its own to give, and one replaced
@@ -462,7 +473,7 @@ impl Mixer {
                     outgoing.get_or_insert(played);
                 }
             }
-            let (held, riding) = match (current, outgoing) {
+            let riding = match (current, outgoing) {
                 (Some(new), old) => {
                     let from = match &old {
                         Some(old) => old.gain * old.af,
@@ -476,18 +487,15 @@ impl Mixer {
                         self.handed_over = None;
                     }
                     let to = new.gain * new.af;
-                    (new.held, from + (to - from) * new.weight)
+                    from + (to - from) * new.weight
                 }
                 (None, Some(old)) => {
                     self.handed_over = None;
-                    (
-                        1.0 + (old.held - 1.0) * old.weight,
-                        alone + (old.gain * old.af - alone) * old.weight,
-                    )
+                    alone + (old.gain * old.af - alone) * old.weight
                 }
                 (None, None) => {
                     self.handed_over = None;
-                    (1.0, alone)
+                    alone
                 }
             };
             // Your own message comes in after the AGC: the receiver never
@@ -501,28 +509,35 @@ impl Mixer {
             // is never muted.
             let shut = if send.keyed { 0.0 } else { 1.0 };
             self.gate += (shut - self.gate).clamp(-gate_step, gate_step);
-            let received = self.audio.process(background + heard);
-            // What the receiver puts out, for the meter, as a rig's audio
-            // scope reads it: before the volume, which only sets how loud
-            // you listen to it.
+            // A sample that is not a number would stay in the high-pass for
+            // good and silence everything after it.
+            let into = background + heard;
+            let received = self
+                .audio
+                .process(if into.is_finite() { into } else { 0.0 });
             let out = received * self.gate + send.dry;
             *slot += (out * now.volume) as f32;
-            self.metering.add(input, held, out);
         }
         self.audio.settle();
         // A send is heard the look-ahead after it was played, as well as the
-        // speaker's own latency.
+        // speaker's own latency, which is counted from the start of this
+        // buffer: by the time the callback returns, only what was played a
+        // whole buffer before that has been heard.
         for send in self.send.iter().chain(&self.retiring) {
-            send.settle(latency + self.late_len);
+            send.settle(latency + self.late_len + out.len());
         }
     }
 }
 
-/// How much room the send's look-ahead is given at `sample_rate`: enough
-/// for the highest rate up front, so a stream reopened at another needs
-/// none made, and more for a higher one.
+/// How much room the send's look-ahead is given at `sample_rate`: natively,
+/// enough for the highest rate up front, so a stream reopened at another
+/// needs none made, and more for a higher one. The browser's rate never
+/// changes, and it copies the mixer for every stretch it renders ahead, so
+/// there it is the rate's own.
 fn late_room(sample_rate: u32) -> usize {
-    agc_lookahead_samples(sample_rate.max(HIGHEST_RATE))
+    #[cfg(feature = "native-audio")]
+    let sample_rate = sample_rate.max(HIGHEST_RATE);
+    agc_lookahead_samples(sample_rate)
 }
 
 #[cfg(all(test, feature = "native-audio"))]

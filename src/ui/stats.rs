@@ -389,7 +389,7 @@ fn OverviewTab(settings: TrainingSettings, sessions: Vec<SessionResult>) -> Elem
             if sessions.is_empty() {
                 div { class: "card",
                     CardHead { icon: IconName::Chart, title: "Nothing scored yet" }
-                    p { class: "muted", style: "margin: 0;",
+                    p { class: "muted hint",
                         "Finish a session to unlock accuracy over time, letter mastery and sampling weights."
                     }
                 }

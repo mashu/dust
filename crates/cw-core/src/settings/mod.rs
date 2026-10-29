@@ -362,6 +362,12 @@ pub struct PlaybackSettings {
     pub lock_input_during_group_playback: bool,
     /// `[` is dit and `]` is dah on a USB keyer. Set when the paddles are wired the other way.
     pub paddle_swap: bool,
+    /// The two keys right of P are the paddles, whatever the keyboard's
+    /// layout has them type: a USB paddle sends those keys, and on a German
+    /// layout they type `ü` and `+`. Off, they type what the layout says —
+    /// `+`, `/` or `=` where it puts one there — and only `[` and `]`
+    /// typed, however they are, key the paddles.
+    pub paddle_keys_by_place: bool,
     /// How the `[` / `]` paddles time elements. Iambic B unless chosen
     /// otherwise; older saves have no field and load at it too.
     pub keyer_mode: KeyerMode,
@@ -397,6 +403,7 @@ impl Default for PlaybackSettings {
             // be. Who chose either keeps it: only a new install starts here.
             lock_input_during_group_playback: false,
             paddle_swap: false,
+            paddle_keys_by_place: true,
             keyer_mode: KeyerMode::IambicB,
             keyer_wpm: 20.0,
             fist_variation: 0.35,
@@ -436,17 +443,9 @@ pub const PILEUP_SPREAD_MAX: f64 = 800.0;
 /// close in pitch, is simply masked rather than quiet.
 pub const PILEUP_LEVEL_MIN_DB: f64 = 3.0;
 pub const PILEUP_LEVEL_MAX_DB: f64 = 20.0;
-/// How far the AGC's threshold can be moved from where the band's own floor
-/// puts it, in decibels. At 0, out of the box, it is well clear of the
-/// band's own hiss; twenty under, the hiss works the AGC and comes up with
-/// the stations, as a rig's does with its threshold set into the noise;
-/// thirty over, the default station never reaches it.
-pub const AGC_THRESHOLD_MIN_DB: f64 = -20.0;
-pub const AGC_THRESHOLD_DEFAULT_DB: f64 = 0.0;
-pub const AGC_THRESHOLD_MAX_DB: f64 = 30.0;
 /// How far the receiver's RF gain backs off from full, in decibels. Thirty
-/// down, the default station reaches the AGC twenty under its threshold at
-/// 0 dB and the band's hiss is all but gone.
+/// down, the default station reaches the AGC twenty under its knee and the
+/// band's hiss is all but gone.
 pub const RF_GAIN_MIN_DB: f64 = -30.0;
 pub const RF_GAIN_MAX_DB: f64 = 0.0;
 
@@ -512,13 +511,6 @@ pub struct BandSettings {
     /// How fast the AGC lets the gain back up once a signal has gone. Older
     /// saves have no field and load at Fast, which is how the AGC ran.
     pub agc_decay: AgcDecay,
-    /// Where the AGC starts to turn signals down, in decibels from where the
-    /// band's own floor puts it ([`crate::band::receiver_knee`]): out of the
-    /// box 0, well clear of the band's own hiss, where older saves, which
-    /// have no field, load too; down into the hiss, or up over the weaker
-    /// stations. The volume follows it, so moving it changes how hard the
-    /// AGC works, not how loud the strongest station plays.
-    pub agc_threshold_db: f64,
     /// The receiver's selectivity: its width in hertz between its 6 dB
     /// points, the way a rig quotes a CW filter. Everything you hear goes
     /// through it — the Morse as much as the noise — so narrowing it does what
@@ -571,7 +563,6 @@ impl Default for BandSettings {
             rf_gain_db: RF_GAIN_MAX_DB,
             agc_enabled: true,
             agc_decay: AgcDecay::Fast,
-            agc_threshold_db: AGC_THRESHOLD_DEFAULT_DB,
             filter_width_hz: DEFAULT_FILTER_WIDTH_HZ,
             filter_shape: FilterShape::default(),
             stations_min: STATIONS_MIN,
@@ -1057,7 +1048,6 @@ mod tests {
         s.band.qsb_rate_hz = 9.0;
         s.band.qrn_level = 9.0;
         s.band.noise_level = 9.0;
-        s.band.agc_threshold_db = 900.0;
         s.band.rf_gain_db = 900.0;
         s.band.filter_width_hz = 90_000.0;
         s.auto_level.auto_adjust_threshold = 900.0;
@@ -1138,7 +1128,6 @@ mod tests {
             s.band.filter_width_hz = bad;
             s.band.pileup_spread_hz = bad;
             s.band.pileup_level_db = bad;
-            s.band.agc_threshold_db = bad;
             s.band.rf_gain_db = bad;
             s.auto_level.auto_adjust_threshold = bad;
             s.auto_level.error_weight_strength = bad;
@@ -1154,25 +1143,6 @@ mod tests {
             }
             assert_eq!(s.clone().clamp(), s, "and it still settles in one pass");
         }
-    }
-
-    /// The AGC's threshold goes down into the hiss as far as its range
-    /// does, and no further, and a drag rounded to "-0" is kept as 0, the
-    /// same threshold, not a move of it.
-    #[test]
-    fn the_agc_threshold_goes_down_into_the_hiss_and_no_further() {
-        let mut s = TrainingSettings::default();
-        assert_eq!(s.band.agc_threshold_db, AGC_THRESHOLD_DEFAULT_DB);
-        s.band.agc_threshold_db = -12.0;
-        assert_eq!(s.clone().clamp().band.agc_threshold_db, -12.0);
-        s.band.agc_threshold_db = -900.0;
-        assert_eq!(
-            s.clone().clamp().band.agc_threshold_db,
-            AGC_THRESHOLD_MIN_DB
-        );
-        s.band.agc_threshold_db = -0.0;
-        let kept = s.clamp().band.agc_threshold_db;
-        assert!(kept == 0.0 && kept.is_sign_positive(), "{kept}");
     }
 
     #[test]
@@ -1194,7 +1164,6 @@ mod tests {
         assert_eq!(s.band.steepness, 50.0);
         assert_eq!(s.band.envelope_smoothing, 1.0);
         assert_eq!(s.band.noise_level, 1.0);
-        assert_eq!(s.band.agc_threshold_db, AGC_THRESHOLD_MAX_DB);
         assert_eq!(s.band.rf_gain_db, RF_GAIN_MAX_DB);
         assert_eq!(s.band.filter_width_hz, FILTER_WIDTH_MAX);
         assert_eq!(s.playback.extra_word_space_multiplier, EXTRA_WORD_SPACE_MIN);
@@ -1765,6 +1734,7 @@ mod tests {
         s.playback.group_pause_sec = 6.0;
         s.playback.lock_input_during_group_playback = false;
         s.playback.paddle_swap = true;
+        s.playback.paddle_keys_by_place = false;
         s.playback.keyer_mode = KeyerMode::Ultimatic;
         s.playback.keyer_wpm = 32.0;
         s.playback.group_repeat_min = 2;
@@ -1786,7 +1756,6 @@ mod tests {
         s.band.noise_enabled = false;
         s.band.noise_level = 0.9;
         s.band.agc_enabled = false;
-        s.band.agc_threshold_db = 12.0;
         s.band.agc_decay = AgcDecay::Slow;
         s.band.rf_gain_db = -12.0;
         s.band.filter_width_hz = 250.0;

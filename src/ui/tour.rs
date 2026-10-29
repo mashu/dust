@@ -239,7 +239,13 @@ impl Move {
         match self {
             Self::Start => start_session(ctx),
             Self::Discard => abort_run(ctx),
-            Self::OpenSettings => ctx.go_to(Screen::Settings),
+            Self::OpenSettings => {
+                // Settings is not to be had while a session is going.
+                if ctx.session_running() {
+                    abort_run(ctx);
+                }
+                ctx.go_to(Screen::Settings);
+            }
             _ => {}
         }
     }
@@ -345,34 +351,60 @@ impl RunPart {
 
 /// Type the group being answered into its box, a letter at a time, once the
 /// box opens: the session sends the group first.
+///
+/// Only what the box is missing: a letter typed there already, by the
+/// learner or by a Show me a pause cut short, is not typed again. Show me
+/// used to type the whole group after it, and the box read `NN9XF` for
+/// `N9XF`. A box holding something else is the learner's to put right.
 async fn copy_group(ctx: AppCtx, keys: PaddleKeys) {
-    let sent = loop {
-        let open = ctx
-            .runtime
+    // The group being answered, and what its box holds.
+    let answering = move || {
+        ctx.runtime
             .peek()
             .as_ref()
             .map(|session| match session.phase() {
-                SessionPhase::AwaitingAnswer { index } => {
-                    session.group(index).map(|group| group.sent().to_string())
-                }
+                SessionPhase::AwaitingAnswer { index } => session.group(index).map(|group| {
+                    let held = ctx
+                        .answer
+                        .waiting_for(index)
+                        .unwrap_or_else(|| group.input().to_string());
+                    (group.sent().to_string(), held)
+                }),
                 _ => None,
-            });
-        match open {
+            })
+    };
+    loop {
+        match answering() {
             // There is no session to answer in.
             None => return,
-            Some(Some(sent)) => break sent,
+            Some(Some(_)) => break,
             Some(None) => sleep_ms(POLL_MS).await,
         }
-    };
+    }
     // A moment to see the box open before it fills.
     sleep_ms(POINT_MS).await;
-    for letter in sent.chars() {
-        // A box closed meanwhile takes no more.
+    // A box closed meanwhile, or complete, takes no more.
+    while let Some(Some((sent, held))) = answering() {
+        let Some(letter) = next_letter(&sent, &held) else {
+            return;
+        };
         if !keys.type_letter(letter) {
             return;
         }
         sleep_ms(LETTER_MS).await;
     }
+}
+
+/// The letter of `sent` a box holding `held` takes next, if it holds the
+/// start of it and not all of it.
+fn next_letter(sent: &str, held: &str) -> Option<char> {
+    let mut want = sent.chars();
+    for typed in held.chars() {
+        if !want.next()?.eq_ignore_ascii_case(&typed) {
+            return None;
+        }
+    }
+    want.next()
 }
 
 /// Whether `step_move` is made, as the app stands now.
@@ -815,8 +847,18 @@ fn first_launch(ctx: AppCtx) -> bool {
 /// undone, is done on the way: Next out of a session discards it, rather
 /// than leaving it running under a step that points at Settings. A run is
 /// the exception, left to the learner to start ([`Move::take_there`]).
+///
+/// A session or a run still going is discarded on the way to any step not
+/// on the training screen, however it came to be going: the screen that
+/// step is about cannot be reached while it is, and its nav is hidden.
 fn next(ctx: AppCtx, at: usize) {
     let now = ctx.tour.peek().unwrap_or_default();
+    let away = steps(now)
+        .get(at + 1)
+        .is_some_and(|step| step.screen != Some(Screen::Training));
+    if away && ctx.session_running() {
+        abort_run(ctx);
+    }
     if let Some(step) = steps(now).get(at).filter(|step| step.moves_on) {
         for step_move in step.moves.iter().copied() {
             if !made_now(ctx, step_move) {
@@ -906,16 +948,27 @@ pub fn TourDock() -> Element {
     });
 
     // Follow what the learner does: a session started, a group answered in
-    // it, the session left again. A step that moves on by itself does so
-    // when it is done there, and not when it is come back to done already.
+    // it, the session left again. Each session, or run, is followed from
+    // its start: one left before, without a group answered or before the
+    // guide got to Discard, ticks off nothing for the next, which is still
+    // to be left. A step that moves on by itself does so when it is done
+    // there, and not when it is come back to done already.
     let mut last = use_hook(|| CopyValue::new(None::<(usize, bool)>));
+    let mut on_training = use_hook(|| CopyValue::new(false));
     use_effect(move || {
         let (screen, answered, _) = (screen(), answered(), at());
+        // The training screen comes only with a session or a run starting.
+        let starting = screen == Screen::Training && !*on_training.peek();
+        on_training.set(screen == Screen::Training);
         let Some(before) = *tour.peek() else {
             last.set(None);
             return;
         };
         let mut now = before;
+        if starting {
+            now.answered = false;
+            now.left = false;
+        }
         now.started |= screen == Screen::Training;
         now.answered |= now.started && answered;
         now.left |= now.started && screen != Screen::Training;
@@ -1164,7 +1217,8 @@ mod tests {
     use dioxus::prelude::ReadableExt;
 
     use super::{
-        CONTEST_STEPS, LETTER_MS, Move, POINT_MS, SHOWN_MS, STEPS, Seen, pointer_css, scroll_script,
+        CONTEST_STEPS, LETTER_MS, Move, POINT_MS, SHOWN_MS, STEPS, Seen, next_letter, pointer_css,
+        scroll_script,
     };
     use crate::audio::fake::{Call, Recorder};
     use crate::persist::Store;
@@ -1514,6 +1568,53 @@ mod tests {
         });
     }
 
+    /// Show me cut short by a pause, and pressed again once resumed, types
+    /// only what the box is missing, and the group is copied right. It used
+    /// to type the whole group after the letter already there.
+    #[test]
+    fn show_me_again_types_only_what_the_box_is_missing() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(needs_everything());
+            ui.click("btn-guided-setup");
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.click("tour-show-me");
+            let first: String = sent.chars().take(1).collect();
+            assert!(
+                ui.run_until(u64::from(3 * POINT_MS), |ui| first_box(ui) == first)
+                    .await
+            );
+            ui.with_app(|ctx| {
+                crate::session_runtime::send_event(ctx, cw_core::SessionEvent::Pause)
+            });
+            ui.advance(u64::from(LETTER_MS) * 3).await;
+            ui.click("btn-resume");
+            ui.click("tour-show-me");
+            let budget = u64::from(POINT_MS + LETTER_MS) * (sent.chars().count() as u64 + 8);
+            assert!(
+                ui.run_until(budget, |ui| on_step(ui, 2)).await,
+                "{}",
+                ui.html()
+            );
+            assert!(ui.has("badge good"), "not copied right: {}", ui.html());
+        });
+    }
+
+    #[test]
+    fn show_me_types_the_letters_a_box_is_missing() {
+        assert_eq!(next_letter("N9XF", ""), Some('N'));
+        assert_eq!(next_letter("N9XF", "N"), Some('9'));
+        assert_eq!(next_letter("N9XF", "n9x"), Some('F'));
+        assert_eq!(next_letter("N9XF", "N9XF"), None, "complete");
+        assert_eq!(
+            next_letter("N9XF", "NX"),
+            None,
+            "the learner's to put right"
+        );
+        assert_eq!(next_letter("N9XF", "N9XFF"), None);
+    }
+
     /// Next does a step that takes you somewhere on the way, so the next one
     /// is on the screen it expects. Out of a session with nothing typed,
     /// Next on Discard discards it: the guide used to point at a Settings
@@ -1572,6 +1673,62 @@ mod tests {
             assert_eq!(ui.screen(), "results");
             assert!(on_step(&ui, 3), "{}", ui.html());
             assert!(ui.has("#nav-settings {"));
+        });
+    }
+
+    /// A session left without a group answered, then started again, is
+    /// followed afresh: its group answered moves the guide on to Discard
+    /// with Discard still to do, and Next there discards it. Leaving the
+    /// first used to tick Discard off for good, so Next went on to Settings
+    /// over the second, still running.
+    #[test]
+    fn a_session_started_again_is_followed_afresh() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(needs_everything());
+            ui.click("btn-guided-setup");
+            ui.click("btn-start-training");
+            assert!(on_step(&ui, 1));
+            ui.click("btn-discard");
+            ui.click("btn-discard-session");
+            assert_eq!(ui.screen(), "home");
+            assert!(on_step(&ui, 1), "{}", ui.html());
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().last().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(
+                ui.run_until(2_000, |ui| on_step(ui, 2)).await,
+                "{}",
+                ui.html()
+            );
+            assert_eq!(moves_made(&ui), 0, "Discard was ticked: {}", ui.html());
+            ui.click("tour-next");
+            assert_eq!(ui.screen(), "home", "Next left the session running");
+            assert!(on_step(&ui, 3), "{}", ui.html());
+            assert!(ui.store.load_sessions().is_empty(), "the session was kept");
+        });
+    }
+
+    /// A session started under a step that is not about it is discarded by
+    /// Next on the way to Settings, which it keeps out of reach: the guide
+    /// used to go on to the settings steps over the training screen.
+    #[test]
+    fn next_to_settings_discards_a_session_still_going() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(needs_everything());
+            ui.click("btn-guided-setup");
+            for _ in 0..3 {
+                ui.click("tour-next");
+            }
+            assert!(on_step(&ui, 3), "{}", ui.html());
+            assert_eq!(ui.screen(), "home");
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            assert!(on_step(&ui, 3), "{}", ui.html());
+            ui.click("tour-next");
+            assert_eq!(ui.screen(), "settings");
+            assert!(on_step(&ui, first_on_settings()), "{}", ui.html());
+            assert!(ui.store.load_sessions().is_empty(), "the session was kept");
         });
     }
 
@@ -1816,6 +1973,37 @@ mod tests {
             assert!(ui.store.load_sessions().is_empty(), "the run was kept");
             ui.click("tour-start-practising");
             assert!(!ui.shows("tour-next"));
+        });
+    }
+
+    /// A run ended before the guide got to Discard, then another started,
+    /// is followed afresh: Discard is still to do, and Next there discards
+    /// the run going. It used to be ticked off already, so Next went on
+    /// past it, and Start practising closed the guide over the run.
+    #[test]
+    fn a_run_started_again_is_followed_afresh() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(contest_settings());
+            ui.click("btn-guided-setup");
+            ui.click("btn-start-training");
+            assert!(on_contest_step(&ui, 1), "{}", ui.html());
+            ui.click("btn-end-run");
+            assert_ne!(ui.screen(), "training");
+            if ui.screen() != "home" {
+                ui.click("nav-practice");
+            }
+            ui.click("btn-start-training");
+            assert_eq!(ui.screen(), "training");
+            let discard = CONTEST_STEPS.len() - 2;
+            for _ in 1..discard {
+                ui.click("tour-next");
+            }
+            assert!(on_contest_step(&ui, discard), "{}", ui.html());
+            assert_eq!(moves_made(&ui), 0, "Discard was ticked: {}", ui.html());
+            ui.click("tour-next");
+            assert_eq!(ui.screen(), "home", "Next left the run going");
+            assert!(on_contest_step(&ui, discard + 1), "{}", ui.html());
+            assert!(ui.with_app(|ctx| ctx.contest.peek().is_none()));
         });
     }
 

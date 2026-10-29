@@ -243,7 +243,7 @@ pub fn ScoresTab(sessions: Vec<SessionResult>) -> Element {
                 {pills}
                 div { class: "card",
                     CardHead { icon: IconName::Medal, title }
-                    p { class: "muted", style: "margin: 0;", "{body}" }
+                    p { class: "muted hint", "{body}" }
                 }
                 if !assisted.is_empty() {
                     BoardList {

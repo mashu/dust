@@ -1,6 +1,6 @@
 //! Hears the page go out of sight: a tab left, a phone locked, a window
 //! minimised. Whatever plays to the learner must not play on to nobody: a
-//! contest run pauses, and Hear a QSO stops. And an edit to the settings
+//! session of groups and a contest run pause, and Hear a QSO stops. And an edit to the settings
 //! still waiting to be stored is stored, as the page may never come back.
 //!
 //! Each screen that listens keeps its listener on the page under a slot of
@@ -14,6 +14,7 @@ use dioxus::prelude::*;
 /// stores the settings; and the paddles, which open when the page goes, as
 /// their key releases go with it.
 pub const RUN_HIDDEN: &str = "__dustRunHidden";
+pub const SESSION_HIDDEN: &str = "__dustSessionHidden";
 pub const PADDLES_HIDDEN: &str = "__dustPaddlesHidden";
 pub const SETTINGS_HIDDEN: &str = "__dustSettingsHidden";
 pub const LISTEN_HIDDEN: &str = "__dustListenHidden";
@@ -122,7 +123,13 @@ mod tests {
         let on = script.find("addEventListener").expect("put on");
         assert!(off < on, "{script}");
         assert!(stop_watching(RUN_HIDDEN).contains("window.__dustRunHidden = null;"));
-        let slots = [RUN_HIDDEN, SETTINGS_HIDDEN, LISTEN_HIDDEN, APP_HIDDEN];
+        let slots = [
+            RUN_HIDDEN,
+            SESSION_HIDDEN,
+            SETTINGS_HIDDEN,
+            LISTEN_HIDDEN,
+            APP_HIDDEN,
+        ];
         for slot in slots {
             let script = visibility_script(slot);
             assert!(

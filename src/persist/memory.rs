@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, saved_now,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, saved_as,
+    saved_now,
 };
 
 #[derive(Default)]
@@ -15,20 +16,32 @@ pub struct MemoryStore {
     theme: RefCell<String>,
     tutorial_done: Cell<bool>,
     settings: RefCell<Option<TrainingSettings>>,
-    sessions: RefCell<Vec<SessionResult>>,
+    /// The history, once one has been stored.
+    sessions: RefCell<Option<Vec<SessionResult>>>,
     counters: RefCell<BTreeMap<CountersKey, AutoLevelCounters>>,
     /// How many times the settings were written, for a test that cares how
     /// often that happens.
     pub settings_saves: Cell<u32>,
+    /// The settings cannot be written, for the reason given, the way a
+    /// full disk refuses them.
+    pub settings_refused: RefCell<Option<String>>,
     /// Room for only this many sessions, the way a full browser leaves it.
     pub room: Cell<Option<usize>>,
     /// A history that could not be read is in the way of any save.
     pub held: Cell<bool>,
+    /// The history cannot be read for now, the way a file another program
+    /// has open cannot: a read finds none, and holds it until a read does.
+    pub unreadable: Cell<bool>,
+    /// The last read could not read the history.
+    held_by_read: Cell<bool>,
     last_backup: Cell<Option<u64>>,
     /// Every backup file handed over: its name and what it held.
     pub backup_files: RefCell<Vec<(String, String)>>,
     /// A build that cannot hand over a backup file, the way a phone's cannot.
     pub no_backups: Cell<bool>,
+    /// Backup files are handed over with no word of whether they were
+    /// kept, the way a browser's downloads are.
+    pub unconfirmed_backups: Cell<bool>,
     /// How many times the store was asked to keep its data.
     pub keep_asks: Cell<u32>,
     /// The session or run marked open, as a copy of the app that stopped
@@ -59,23 +72,31 @@ impl Store for MemoryStore {
         self.settings.borrow().clone().map(TrainingSettings::clamp)
     }
 
-    fn save_settings(&self, settings: &TrainingSettings) {
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
+        if let Some(why) = self.settings_refused.borrow().clone() {
+            return Err(why);
+        }
         self.settings_saves.set(self.settings_saves.get() + 1);
         *self.settings.borrow_mut() = Some(settings.clone());
+        Ok(())
     }
 
-    fn load_sessions(&self) -> Vec<SessionResult> {
+    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
+        self.held_by_read.set(self.unreadable.get());
+        if self.unreadable.get() {
+            return None;
+        }
         self.sessions.borrow().clone()
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
-        if self.held.get() {
+        if self.held.get() || self.held_by_read.get() {
             return HistorySaved::Held;
         }
         let newest = newest(sessions);
         let kept =
             &newest[newest.len() - self.room.get().unwrap_or(usize::MAX).min(newest.len())..];
-        *self.sessions.borrow_mut() = kept.to_vec();
+        *self.sessions.borrow_mut() = Some(kept.to_vec());
         if kept.len() < newest.len() {
             HistorySaved::Squeezed {
                 kept: kept.len(),
@@ -120,7 +141,11 @@ impl Store for MemoryStore {
         self.backup_files
             .borrow_mut()
             .push((name.to_string(), contents.to_string()));
-        saved_now(Ok(format!("{name}, in your downloads")))
+        saved_now(Ok(saved_as(&format!("{name}, in your downloads"))))
+    }
+
+    fn confirms_backups(&self) -> bool {
+        !self.unconfirmed_backups.get()
     }
 
     fn ask_to_keep(&self) {

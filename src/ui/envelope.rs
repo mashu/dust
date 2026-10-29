@@ -255,7 +255,7 @@ pub fn EnvelopeCard(
                     }
                 }
             }
-            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+            p { class: "muted hint small",
                 "Samples use your current tone, speed and band settings."
             }
         }

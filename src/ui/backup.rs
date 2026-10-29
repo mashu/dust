@@ -17,6 +17,9 @@ pub struct Backups {
     /// This build can hand over a backup file. One that cannot can still
     /// restore.
     pub can_save: bool,
+    /// A backup file this build hands over is known to be saved. A
+    /// browser's download is only handed over: it may block it unsaid.
+    pub confirmed: bool,
     pub on_save: EventHandler<()>,
     pub on_restore: EventHandler<Backup>,
 }
@@ -61,14 +64,20 @@ pub fn BackupCard(
     let Backups {
         last,
         can_save,
+        confirmed,
         on_save,
         on_restore,
     } = backups;
     let due = can_save && since >= BACKUP_DUE_AFTER;
     let last_day = last.and_then(day_of).map(|day| short_date(&day));
+    let saved = if confirmed {
+        "Last saved"
+    } else {
+        "Last handed to your browser"
+    };
     let status = match (&last_day, since) {
-        (Some(day), 0) => format!("Last saved {day} · nothing new since"),
-        (Some(day), _) => format!("Last saved {day} · {} since", counted(since, "session")),
+        (Some(day), 0) => format!("{saved} {day} · nothing new since"),
+        (Some(day), _) => format!("{saved} {day} · {} since", counted(since, "session")),
         (None, _) => "No backup yet".to_string(),
     };
     let note = if !can_save {

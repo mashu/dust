@@ -332,6 +332,30 @@ fn the_practice_pad_shows_what_was_keyed_until_settings_is_left() {
     });
 }
 
+/// The paddles swapped under a held `[` leave it keying the dit it closed:
+/// its next press, which tao on Linux does not mark as a repeat, reads as
+/// the dah but is a repeat, and its one release opens the dit. The pad
+/// hears an E, rather than dahs keyed on and on.
+#[test]
+fn swapping_the_paddles_under_a_held_key_leaves_none_down() {
+    run(|| async {
+        use dioxus::prelude::{Code, Key};
+        let (mut ui, _recorder) = Ui::app_with_settings(test_settings());
+        ui.click("nav-settings");
+        let bracket = Key::Character("[".into());
+        let on = "seg-iambic-a";
+        ui.press_key(on, bracket.clone(), Code::BracketLeft);
+        ui.advance(10).await;
+        ui.commit("switch-swap-and-paddles", "true");
+        assert!(ui.input_tag("switch-swap-and-paddles").contains("checked"));
+        ui.press_key(on, bracket.clone(), Code::BracketLeft);
+        ui.advance(10).await;
+        ui.release_key(on, bracket, Code::BracketLeft);
+        ui.advance(1_000).await;
+        assert!(ui.has(">E<"), "{}", ui.html());
+    });
+}
+
 /// A setting that moves redraws its own card, not the page. Every card used
 /// to read the whole of the settings, so one slider tick redrew all of them
 /// — about thirty mutations a tick, while being dragged.
@@ -1457,7 +1481,7 @@ fn the_cards_there_is_least_call_for_start_folded_and_open_from_their_heads() {
             "the head does not fold the card"
         );
         // The cards in daily use are open as they were.
-        assert!(ui.shows("slider-agc-threshold"), "the band card is open");
+        assert!(ui.shows("slider-filter-width"), "the band card is open");
     });
 }
 

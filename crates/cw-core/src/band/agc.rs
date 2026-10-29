@@ -10,9 +10,8 @@
 //!
 //! - Everything over the knee comes out within a few decibels of everything
 //!   else: a station 20 dB down plays nearly as loud as the strongest, and
-//!   only those under the knee keep their own level. The knee is the AGC's
-//!   threshold, and raising it lets more of them keep it; taken down into
-//!   the hiss, the hiss is over it too and comes up with them.
+//!   only those under the knee keep their own level. The knee sits clear of
+//!   the band's own hiss, so the hiss alone never works the AGC.
 //! - Under a keyed station the band's hiss sits a steady way down, as far as
 //!   the station stands over the knee, from the first element of the over to
 //!   the last. No swell at the start, no pumping between elements: the hang
@@ -37,25 +36,22 @@
 use super::dsp::db_to_gain;
 use crate::settings::AgcDecay;
 
-/// How far above the floor's own peaks the knee sits with the threshold at
-/// 0 dB: a level has to stand 2.2 times (about 7 dB) above the highest the
-/// hiss ordinarily reaches before the gain moves. The floor alone never gets
-/// there, so on an empty band the receiver leaves the noise exactly as the
-/// filter shaped it, until the threshold is taken down into it.
+/// How far above the floor's own peaks the knee sits: a level has to stand
+/// 2.2 times (about 7 dB) above the highest the hiss ordinarily reaches
+/// before the gain moves. The floor alone never gets there, so on an empty
+/// band the receiver leaves the noise exactly as the filter shaped it.
 pub const AGC_TRIGGER: f64 = 2.2;
 /// Decibels of gain reduction per decibel above the knee: a 10:1
 /// compressor, one decibel out for every ten in, as a rig's AGC holds its
 /// audio within a few decibels from S3 to S9 and over.
 ///
 /// The strongest station the band sends stands about 28 dB over the knee
-/// with the threshold at 0 dB and comes out under 3 dB over it; one 20 dB
-/// weaker comes out a decibel over it. Under the strongest the band's hiss
-/// ducks 25 dB. With the threshold all the way down it stands 48 over, and
-/// comes out under 5 over.
+/// and comes out under 3 dB over it; one 20 dB weaker comes out a decibel
+/// over it. Under the strongest the band's hiss ducks 25 dB.
 pub const AGC_SLOPE: f64 = 0.9;
-/// The most the gain ever comes down, in decibels: more than the 43 the
-/// strongest station needs with the threshold all the way down, with room
-/// left for a crash. A rig's AGC has a hundred or more.
+/// The most the gain ever comes down, in decibels: well over the 25 the
+/// strongest station needs, with room left for a crash. A rig's AGC has a
+/// hundred or more.
 pub const AGC_MAX_DUCK_DB: f64 = 60.0;
 /// Seconds for the gain to close on a level it has to duck to, in decibels:
 /// a station 28 dB over the knee is within a decibel of its gain in under
@@ -138,9 +134,7 @@ pub const AGC_PEAK_HOLD_SEC: f64 = 0.003;
 /// hang. MorseRunner's AGC is back 20-30 ms after a click; so is this one.
 pub const AGC_LIMIT_RELEASE_SEC: f64 = 0.02;
 /// The most the receiver lets through to its audio stage, in decibels over
-/// the knee: about three over where the law holds the strongest station
-/// with the threshold at 0 dB, and one over it with the threshold all the
-/// way down. A
+/// the knee: about three over where the law holds the strongest station. A
 /// crash comes and goes faster than the law rides it, and full volume lifts
 /// what the AGC plays as far as that station plays clean, so a crash let
 /// through as it came would drive the limiter flat.
@@ -186,9 +180,9 @@ const SETTLED_POWER: f64 = 1e-30;
 ///   [`AGC_OTHER_SIGNAL_DB`] weaker than the one holding it, and not that
 ///   one's own fading tail, is another one: it neither holds the gain where
 ///   it is nor lifts it, and once the hang has run out the gain recovers to
-///   where it wants it rather than to one. With the threshold down in the
-///   hiss, the hiss after a station does neither, and the band comes back
-///   to where the hiss holds it.
+///   where it wants it rather than to one. Were the knee down in the hiss,
+///   the hiss after a station would do neither, and the band would come
+///   back to where the hiss holds it.
 /// - **Limiter.** Anything above the knee pulls the gain down within
 ///   [`AGC_ATTACK_SEC`], but if it never qualified for the hang it lets go
 ///   again within [`AGC_LIMIT_RELEASE_SEC`]. A lightning stroke is squashed
@@ -492,6 +486,7 @@ impl Agc {
     /// The gain the hang is holding: what a signal that stood over the knee
     /// has set, without the instants the limiter or the ceiling squash a
     /// crash for. One while nothing has, and with the AGC off.
+    #[cfg(test)]
     pub fn held(&self) -> f64 {
         self.held
     }
@@ -737,7 +732,7 @@ mod tests {
         // The gain the native AGC settles at under a steady tone is that law,
         // whether the tone is in the band or is the send, and at either decay.
         let knee = 0.01;
-        // The strongest station with the threshold all the way down, too.
+        // And far over the knee, as no station on the band stands.
         for (over_db, decay) in [
             (3.0, AgcDecay::Fast),
             (10.0, AgcDecay::Slow),
@@ -1276,49 +1271,14 @@ mod tests {
         );
     }
 
-    /// With the threshold down at the hiss, the hiss after a loud station is
-    /// a far weaker signal than the one the hang was holding: it neither
-    /// keeps re-arming the hang nor holds the band where the station put it,
-    /// so by the end of the band preview's pause the band plays within a few
-    /// decibels of the same band with nobody on it. On eight bands, hiss for
-    /// hiss, none of them more than 6 dB down.
-    #[test]
-    fn after_a_loud_station_the_hiss_does_not_hold_the_band_down() {
-        for threshold in [-13.0, -14.0, -15.0, -16.0] {
-            let mut settings = TrainingSettings::default();
-            settings.band.side_tone_min = 600.0;
-            settings.band.side_tone_max = 600.0;
-            settings.band.qrn_enabled = false;
-            settings.band.qsb_enabled = false;
-            settings.band.agc_threshold_db = threshold;
-            let settings = settings.clamp();
-            let over = station(&settings, &["CQ CQ"], 1.0, 0.0);
-            let end = over.downs.last().unwrap().1;
-            let pause = |x: &[f32]| rms(&x[seconds(end + 0.65)..seconds(end + 0.95)]);
-            // The same band, hiss for hiss, with the station and without.
-            let mut backs: Vec<f64> = (1..=8)
-                .map(|seed| {
-                    let (heard, _) = ride_on(&settings, &over.samples, end + 1.0, seed);
-                    let (empty, _) = ride_on(&settings, &[], end + 1.0, seed);
-                    db(pause(&heard) / pause(&empty))
-                })
-                .collect();
-            backs.sort_by(f64::total_cmp);
-            assert!(
-                backs[backs.len() / 2] > -3.0 && backs[0] > -6.0,
-                "{threshold} dB: the band {backs:.1?} dB down at the end of the pause"
-            );
-        }
-    }
-
     /// The hang holds the band down for what stays over the knee, not for
     /// the static's crackle, which the limiter squashes and lets go of: an
-    /// AGC lamp lit by the hang, as the level scope's is, lights for the odd
-    /// long crash the AGC takes for a signal, as a rig's hang AGC does, where
-    /// one lit by the gain would flicker with every crackle. Read as the
-    /// scope reads it: a twentieth of a second of 10 ms frames, each at its
-    /// lowest, held a decibel or more down throughout. A minute of the
-    /// default band's light static, and of the hiss alone.
+    /// AGC lamp lit by the hang would light for the odd long crash the AGC
+    /// takes for a signal, as a rig's hang AGC does, where one lit by the
+    /// gain would flicker with every crackle. Read as such a lamp would read
+    /// it: a twentieth of a second of 10 ms frames, each at its lowest, held
+    /// a decibel or more down throughout. A minute of the default band's
+    /// light static, and of the hiss alone.
     #[test]
     fn the_static_alone_seldom_holds_the_band_down() {
         // How many times each would light the lamp, the hang and the gain.

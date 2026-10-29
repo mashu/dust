@@ -1,19 +1,18 @@
 use cw_core::band::{FilterDesign, NOISE_LEVEL_PER_DB, heard_snr_db};
 use cw_core::{
-    AGC_THRESHOLD_MAX_DB, AGC_THRESHOLD_MIN_DB, AgcDecay, BandSettings, CallerHabits, CharSetMode,
-    ContestRules, FILTER_WIDTH_MAX, FILTER_WIDTH_MIN, Field, FilterShape, PILEUP_LEVEL_MAX_DB,
-    PILEUP_LEVEL_MIN_DB, PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_DEPTH_MAX_DB, QSB_RATE_MAX_HZ,
-    QSB_RATE_MIN_HZ, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RunStyle, STATIONS_MAX,
-    STATIONS_MIN, SettingsSection, Side, TrainingSettings, filter_capacity,
+    AgcDecay, BandSettings, CallerHabits, CharSetMode, ContestRules, FILTER_WIDTH_MAX,
+    FILTER_WIDTH_MIN, Field, FilterShape, PILEUP_LEVEL_MAX_DB, PILEUP_LEVEL_MIN_DB,
+    PILEUP_SPREAD_MAX, PILEUP_SPREAD_MIN, QSB_DEPTH_MAX_DB, QSB_RATE_MAX_HZ, QSB_RATE_MIN_HZ,
+    RF_GAIN_MAX_DB, RF_GAIN_MIN_DB, RangeSetting, RunStyle, STATIONS_MAX, STATIONS_MIN,
+    SettingsSection, Side, TrainingSettings, filter_capacity,
 };
 use dioxus::prelude::*;
 
 use crate::ui::format::counted;
 use crate::ui::help;
-use crate::ui::scope::LevelScope;
 use crate::ui::widgets::{
-    CardHead, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch, control_id,
-    range_label,
+    CardHead, DISCLOSURE, Icon, IconName, SectionReset, Seg, SettingsRange, SliderField, Switch,
+    control_id, range_label,
 };
 
 /// The AGC's decays, in the order the control offers them.
@@ -159,6 +158,7 @@ pub fn BandConditionsCard(
     on_stop: EventHandler<()>,
 ) -> Element {
     let view = use_memo(move || Band::of(&settings.read()));
+    let mut advanced = use_signal(|| false);
     let view = view.read();
     let b = &view.band;
     // The copied station's, across the strengths it is drawn at, as heard
@@ -259,8 +259,8 @@ pub fn BandConditionsCard(
                 }
             }
             if previewing {
-                p { class: "muted", style: "margin: 0;",
-                    "Looping “CQ” loud, medium and weak in turn (0, \u{2212}10 and \u{2212}20 dB strength), a second apart, through the current mix. Move a slider and you hear the change."
+                p { class: "muted hint",
+                    "Looping “CQ” loud, medium and weak in turn (0, \u{2212}10 and \u{2212}20 dB strength), a second apart, through the current mix. Move a slider and you hear the change as soon as you pause."
                 }
             }
             div { class: "field-grid",
@@ -277,7 +277,7 @@ pub fn BandConditionsCard(
                 }
             }
             if let Some(widened) = widened {
-                p { id: "filter-widened", class: "muted", style: "margin: 0;", "{widened}" }
+                p { id: "filter-widened", class: "muted hint", "{widened}" }
             }
             div { class: "field",
                 span { class: "field-label", "Filter shape" }
@@ -292,8 +292,8 @@ pub fn BandConditionsCard(
                     }
                 }
             }
-            p { class: "muted", style: "margin: 0;",
-                "Everything you hear comes through this. Its width is read between the points 6 dB down, as a rig quotes a CW filter, and it costs a station on your pitch nothing: narrow it and less noise gets in, so the S/N of the band noise rises, while that station stays as strong. It rings longer, and a station off your pitch fades with it. Sharp: a modern DSP filter, flat with steep sides. Soft: rounded shoulders and gentler sides that barely ring, like a DSP rig's SOFT shape. Peaked: Sharp plus the rig's audio peak filter — a resonance at your pitch; stations off your pitch come out a few dB weaker."
+            p { class: "muted hint",
+                "Everything you hear comes through this filter. Narrow it and less noise gets in while a station on your pitch stays as strong; it rings a little longer. Sharp is a modern DSP filter, Soft barely rings, Peaked adds a resonance at your pitch."
             }
             SettingsRange {
                 settings,
@@ -306,12 +306,12 @@ pub fn BandConditionsCard(
                 hint: stations_hint,
             }
             if pileup {
-                p { id: "filter-fits", class: "muted", style: "margin: 0;",
+                p { id: "filter-fits", class: "muted hint",
                     "{fits}: they sit either side of your pitch, as far out as the spread, at least 60 Hz apart, and only where your filter passes them. Narrow it and fewer fit; the rest wait their turn."
                 }
             }
             if group_pileup {
-                p { class: "muted", style: "margin: 0;",
+                p { class: "muted hint",
                     "The others sit either side of the one you want, further out and a good way under it, and only ever where your filter passes them, out onto its skirts — copy the strongest, and narrow the filter until the rest drop away. A narrow filter leaves them little room, so it thins the pile-up: not everyone who calls gets through. Between groups the band carries on: other stations working each other at their own pitches and speeds, coming and going."
                 }
             }
@@ -355,7 +355,7 @@ pub fn BandConditionsCard(
                         }
                     }
                 }
-                p { id: "habits-line", class: "muted", style: "margin: 0;", "{line}" }
+                p { id: "habits-line", class: "muted hint", "{line}" }
             }
             Switch {
                 title: "QSB fading".to_string(),
@@ -427,65 +427,57 @@ pub fn BandConditionsCard(
                 disabled: !b.noise_enabled,
                 onchange: move |v| settings.write().band.noise_level = v,
             }
-            SliderField {
-                label: "RF gain".to_string(),
-                value_label: rf_gain_label(b.rf_gain_db),
-                value: b.rf_gain_db,
-                min: RF_GAIN_MIN_DB,
-                max: RF_GAIN_MAX_DB,
-                step: 1.0,
-                disabled: false,
-                onchange: move |v: f64| settings.write().band.rf_gain_db = v.round(),
+            // The receiver's own controls, which a learner never needs to
+            // touch: folded away under a line that says how they are set.
+            button {
+                id: control_id(DISCLOSURE, "advanced receiver"),
+                class: if advanced() { "link-toggle open" } else { "link-toggle" },
+                style: "align-self: flex-start;",
+                aria_expanded: if advanced() { "true" } else { "false" },
+                aria_controls: "advanced-receiver",
+                onclick: move |_| advanced.toggle(),
+                "Advanced receiver: {receiver_summary(b)}"
+                Icon { name: IconName::Chevron }
             }
-            p { id: "rf-gain-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                "Turns down everything reaching the receiver, ahead of the AGC: the noise, the static and every station. With the AGC on, the strong stations it was riding stay nearly as loud while the noise and the weak ones drop; with it off, the whole band gets quieter. The volume does not make it up."
-            }
-            Switch {
-                title: "AGC".to_string(),
-                description: "The receiver rides its gain, only ever turning it down: a station over its threshold loses nine decibels of every ten it stands over it, and the volume lifts the band back up, so strong and weak stations come out nearly as loud as each other. The hiss ducks under them and comes back between overs.".to_string(),
-                checked: b.agc_enabled,
-                onchange: move |on| settings.write().band.agc_enabled = on,
-            }
-            if b.agc_enabled {
-                div { class: "field",
-                    span { class: "field-label", "AGC decay" }
-                    div { class: "segmented",
-                        for (decay, label) in AGC_DECAYS {
-                            Seg {
-                                label,
-                                id: control_id("seg", &format!("agc {label}")),
-                                active: b.agc_decay == decay,
-                                onclick: move |_| settings.write().band.agc_decay = decay,
+            if advanced() {
+                div { id: "advanced-receiver", class: "stack-sm",
+                    SliderField {
+                        label: "RF gain".to_string(),
+                        value_label: rf_gain_label(b.rf_gain_db),
+                        value: b.rf_gain_db,
+                        min: RF_GAIN_MIN_DB,
+                        max: RF_GAIN_MAX_DB,
+                        step: 1.0,
+                        disabled: false,
+                        onchange: move |v: f64| settings.write().band.rf_gain_db = v.round(),
+                    }
+                    p { id: "rf-gain-line", class: "muted hint small",
+                        "Turns everything down ahead of the AGC. With the AGC on, strong stations stay nearly as loud while the hiss and weak ones drop."
+                    }
+                    Switch {
+                        title: "AGC".to_string(),
+                        description: "Evens out strong and weak stations, as a rig's AGC does; the hiss comes up between overs.".to_string(),
+                        checked: b.agc_enabled,
+                        onchange: move |on| settings.write().band.agc_enabled = on,
+                    }
+                    if b.agc_enabled {
+                        div { class: "field",
+                            span { class: "field-label", "AGC decay" }
+                            div { class: "segmented",
+                                for (decay, label) in AGC_DECAYS {
+                                    Seg {
+                                        label,
+                                        id: control_id("seg", &format!("agc {label}")),
+                                        active: b.agc_decay == decay,
+                                        onclick: move |_| settings.write().band.agc_decay = decay,
+                                    }
+                                }
                             }
                         }
+                        p { id: "agc-decay-line", class: "muted hint small",
+                            "How fast the band comes back after a signal: Fast by the next word, Slow over a second or so."
+                        }
                     }
-                }
-                p { id: "agc-decay-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                    "How fast the gain comes back once a signal has gone: Fast by the next word, Slow over a second or so, holding the band steady through an over."
-                }
-            }
-            SliderField {
-                label: "AGC threshold".to_string(),
-                value_label: threshold_label(b.agc_threshold_db),
-                value: b.agc_threshold_db,
-                min: AGC_THRESHOLD_MIN_DB,
-                max: AGC_THRESHOLD_MAX_DB,
-                step: 1.0,
-                disabled: !b.agc_enabled,
-                onchange: move |v: f64| settings.write().band.agc_threshold_db = v.round(),
-            }
-            p { id: "agc-threshold-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                if b.agc_enabled {
-                    "How strong a signal has to be before the AGC turns it down. At 0 dB it is well clear of the band's own hiss in the filter, 10 dB or more over it, more with heavy static, as the scope gives it: every station clear of the noise is evened out and those down in it keep their own level. Raise it and the AGC evens out fewer: a weak station under it drops back to its own level, and the hiss between overs gets quieter. Take it down into the hiss and the hiss works the AGC too, coming up between overs to within about 5 dB of the weakest station, or about 10 with the static on, whose crashes hold it down. The volume follows, so the strongest station stays as loud."
-                } else {
-                    "With the AGC off there is no threshold to set."
-                }
-            }
-            if previewing {
-                LevelScope { settings }
-            } else {
-                p { id: "scope-hint", class: "muted", style: "margin: 0; font-size: 0.8rem;",
-                    "Play the live preview to hear and watch it: CQ comes loud, medium and weak in turn, into the AGC at the top of the scope and out of it below. Over the dashed line they come out nearly level; under it they keep their own level."
                 }
             }
         }
@@ -501,17 +493,20 @@ fn rf_gain_label(db: f64) -> String {
     }
 }
 
-/// What the AGC's threshold reads as: "0 dB" where the band's own floor
-/// puts it, "+12 dB" raised over it, or "−12 dB" taken down into the hiss.
-fn threshold_label(db: f64) -> String {
-    let db = db.round();
-    if db > 0.0 {
-        format!("+{db:.0} dB")
-    } else if db < 0.0 {
-        format!("\u{2212}{:.0} dB", -db)
+/// How the folded receiver controls are set, in a few words: "AGC fast,
+/// RF gain full".
+fn receiver_summary(band: &BandSettings) -> String {
+    let agc = match (band.agc_enabled, band.agc_decay) {
+        (false, _) => "AGC off",
+        (true, AgcDecay::Fast) => "AGC fast",
+        (true, AgcDecay::Slow) => "AGC slow",
+    };
+    let rf = if band.rf_gain_db >= RF_GAIN_MAX_DB {
+        "RF gain full".to_string()
     } else {
-        "0 dB".to_string()
-    }
+        format!("RF gain {}", rf_gain_label(band.rf_gain_db))
+    };
+    format!("{agc}, {rf}")
 }
 
 #[cfg(test)]
@@ -544,14 +539,16 @@ mod tests {
         assert_eq!(qsb_rate_label(f64::NAN), "every ~33 s");
     }
 
-    /// The threshold reads in decibels from where the band's own floor puts
-    /// it, either way, with a true minus and never a "-0".
+    /// The folded receiver controls say how they are set on the line that
+    /// opens them.
     #[test]
-    fn the_threshold_reads_either_way_from_0_db() {
-        assert_eq!(threshold_label(0.0), "0 dB");
-        assert_eq!(threshold_label(-0.0), "0 dB");
-        assert_eq!(threshold_label(-0.4), "0 dB");
-        assert_eq!(threshold_label(12.0), "+12 dB");
-        assert_eq!(threshold_label(AGC_THRESHOLD_MIN_DB), "\u{2212}20 dB");
+    fn the_folded_receiver_says_how_it_is_set() {
+        let mut band = TrainingSettings::default().band;
+        assert_eq!(receiver_summary(&band), "AGC fast, RF gain full");
+        band.agc_decay = AgcDecay::Slow;
+        band.rf_gain_db = -12.0;
+        assert_eq!(receiver_summary(&band), "AGC slow, RF gain \u{2212}12 dB");
+        band.agc_enabled = false;
+        assert_eq!(receiver_summary(&band), "AGC off, RF gain \u{2212}12 dB");
     }
 }

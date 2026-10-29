@@ -7,8 +7,8 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, newest_that_fit,
-    parse_sessions, read_settings_from, saved_now,
+    Aside, BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, keep_aside,
+    newest, read_history, read_settings_from, saved_now, store_newest_that_fit,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -32,8 +32,9 @@ const HISTORY_BUDGET: usize = 3_000_000;
 
 #[derive(Default)]
 pub struct WebStore {
-    /// The stored history could not be read, nor copied out of the way, so
-    /// it is not to be written over.
+    /// The stored history could not be read, nor copied out of the way, the
+    /// last time it was read, so it is not to be written over until a read
+    /// says otherwise.
     history_held: Cell<bool>,
     /// The browser has been asked to keep the store, this visit.
     asked_to_keep: Cell<bool>,
@@ -44,6 +45,31 @@ pub struct WebStore {
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// `localStorage`, as what is set aside is kept in it ([`keep_aside`]).
+struct Shelf<'a>(&'a web_sys::Storage);
+
+impl Aside for Shelf<'_> {
+    fn keys(&self) -> Result<Vec<String>, ()> {
+        let count = self.0.length().map_err(|_| ())?;
+        (0..count)
+            .map(|at| self.0.key(at).map_err(|_| ()))
+            .filter_map(Result::transpose)
+            .collect()
+    }
+
+    fn get(&self, key: &str) -> Result<Option<String>, ()> {
+        self.0.get_item(key).map_err(|_| ())
+    }
+
+    fn set(&self, key: &str, raw: &str) -> bool {
+        self.0.set_item(key, raw).is_ok()
+    }
+
+    fn remove(&self, key: &str) {
+        let _ = self.0.remove_item(key);
+    }
 }
 
 /// Hold the Web Lock `name` until the function handed back is called; none
@@ -181,33 +207,42 @@ impl Store for WebStore {
         read_settings_from(&raw)
     }
 
-    fn save_settings(&self, settings: &TrainingSettings) {
-        let Some(store) = storage() else {
-            return;
-        };
-        if let Ok(raw) = serde_json::to_string(settings) {
-            let _ = store.set_item(SETTINGS_KEY, &raw);
-        }
+    fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
+        let store = storage().ok_or("this browser has no storage for them")?;
+        let raw = serde_json::to_string(settings).map_err(|err| err.to_string())?;
+        store
+            .set_item(SETTINGS_KEY, &raw)
+            .map_err(|_| "this browser's storage would not take them".into())
     }
 
-    fn load_sessions(&self) -> Vec<SessionResult> {
-        let Some(store) = storage() else {
-            return Vec::new();
-        };
-        let Ok(Some(raw)) = store.get_item(SESSIONS_KEY) else {
-            return Vec::new();
-        };
-        parse_sessions(&raw).unwrap_or_else(|| {
+    /// Whether the history is held is this read's to say, whatever the last
+    /// one said: a copy there was no room to set aside then may fit now.
+    fn read_sessions(&self) -> Option<Vec<SessionResult>> {
+        self.history_held.set(false);
+        let store = storage()?;
+        let raw = store.get_item(SESSIONS_KEY).ok().flatten()?;
+        // Copies set aside go beside any set aside before, each under a key
+        // of its own, as far as the room goes.
+        let aside = Shelf(&store);
+        let Some(read) = read_history(&raw) else {
             // Keep the unreadable copy where the next save cannot reach it —
             // and only once it is safely there take it out of the way. A copy
             // that would not fit is no copy, and the original stays put.
-            if store.set_item(UNREADABLE_SESSIONS_KEY, &raw).is_ok() {
+            if keep_aside(&aside, UNREADABLE_SESSIONS_KEY, &raw) {
                 let _ = store.remove_item(SESSIONS_KEY);
             } else {
                 self.history_held.set(true);
             }
-            Vec::new()
-        })
+            return None;
+        };
+        // The sessions that do not read are set aside before the next save
+        // leaves them out; where they cannot be, nothing is saved over them.
+        if let Some(unread) = read.unread_json()
+            && !keep_aside(&aside, UNREADABLE_SESSIONS_KEY, &unread)
+        {
+            self.history_held.set(true);
+        }
+        Some(read.sessions)
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
@@ -217,24 +252,9 @@ impl Store for WebStore {
         let Some(store) = storage() else {
             return HistorySaved::Failed("this browser has no storage for it.".into());
         };
-        let newest = newest(sessions);
-        // The newest that fit the budget; and if the browser has less room
-        // than that, the newest that fit in half as much, and so on.
-        let mut budget = HISTORY_BUDGET;
-        loop {
-            let (raw, kept) = newest_that_fit(newest, budget);
-            match store.set_item(SESSIONS_KEY, &raw) {
-                Ok(()) if kept < newest.len() => {
-                    let runs = newest.iter().any(|session| session.contest.is_some());
-                    return HistorySaved::Squeezed { kept, runs };
-                }
-                Ok(()) => return HistorySaved::Stored { kept },
-                Err(_) if kept > 1 => budget = raw.len() / 2,
-                Err(_) => {
-                    return HistorySaved::Failed("this browser's storage is full.".into());
-                }
-            }
-        }
+        store_newest_that_fit(newest(sessions), HISTORY_BUDGET, |raw| {
+            store.set_item(SESSIONS_KEY, raw).is_ok()
+        })
     }
 
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters {
@@ -281,12 +301,23 @@ impl Store for WebStore {
         true
     }
 
+    /// A browser says nothing of a download it blocks, or one the user
+    /// turns down, so the file is told of as handed over, not as saved
+    /// ([`Store::confirms_backups`]).
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
         saved_now(
             download(name, contents)
-                .map(|()| format!("{name}, in your downloads"))
+                .map(|()| {
+                    format!(
+                        "Backup handed to your browser to save as {name}: look for it in your downloads."
+                    )
+                })
                 .ok_or_else(|| "this browser would not hand over the file".into()),
         )
+    }
+
+    fn confirms_backups(&self) -> bool {
+        false
     }
 
     fn ask_to_keep(&self) {

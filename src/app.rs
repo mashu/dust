@@ -119,7 +119,7 @@ pub fn App() -> Element {
     let mut theme = use_signal(|| Theme::from_key(&ctx.app().store.load_theme()));
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
-    use_keep_awake(screen, ctx.contest, ctx.preview);
+    use_keep_awake(screen, ctx.runtime, ctx.contest, ctx.preview);
     // Each screen opens at its top, wherever the one before it was scrolled
     // to: a run started from the foot of its results would otherwise begin
     // with its clock and its fields out of sight.
@@ -137,6 +137,20 @@ pub fn App() -> Element {
                 toasts.dismiss(&shown);
             });
         }
+    });
+
+    // The page behind the app takes the theme too: index.html paints the
+    // saved one on <html> before the first frame, and its dark background
+    // would otherwise outlive a switch to light, showing on overscroll.
+    #[cfg(all(feature = "web", not(test)))]
+    use_effect(move || {
+        let script = format!(
+            r#"document.documentElement.setAttribute("data-theme", "{}");"#,
+            theme().key()
+        );
+        spawn(async move {
+            let _ = document::eval(&script).await;
+        });
     });
 
     let screen_now = screen();
@@ -298,9 +312,15 @@ fn use_stored_settings(ctx: AppCtx) {
         if screen == Screen::Training {
             return;
         }
-        let persist = settings.read().clone().clamp();
-        if screen != Screen::Settings && persist != *settings.peek() {
-            settings.set(persist);
+        if screen == Screen::Settings {
+            // Followed, not clamped: that waits for the store, once the edit
+            // has been still a moment, not every step of a slider.
+            let _ = settings.read();
+        } else {
+            let persist = settings.read().clone().clamp();
+            if persist != *settings.peek() {
+                settings.set(persist);
+            }
         }
         // Whatever edit was still waiting, this one replaces it.
         let edit = edits.get() + 1;
@@ -672,6 +692,34 @@ mod ui_tests {
             assert!(ui.has("Session complete"));
             assert!(ui.has("Clean copy"));
             assert_eq!(ui.store.load_sessions().len(), 1);
+        });
+    }
+
+    /// A session paused while the page was out of sight says so, takes no
+    /// typing, and goes on from Resume.
+    #[test]
+    fn a_paused_session_says_so_and_resumes_from_its_button() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(short_session());
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            ui.with_app(|ctx| {
+                crate::session_runtime::send_event(ctx, cw_core::SessionEvent::Pause)
+            });
+            assert!(ui.has("Paused while the page was out of sight."));
+            assert!(ui.has("Paused"));
+            let sent = recorder.texts().len();
+            ui.advance(30_000).await;
+            assert_eq!(recorder.texts().len(), sent, "sent while paused");
+            assert_eq!(ui.screen(), "training");
+            ui.click("btn-resume");
+            assert!(!ui.shows("btn-resume"));
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            assert_eq!(
+                recorder.texts().len(),
+                sent,
+                "a group heard in full is not sent again"
+            );
         });
     }
 
@@ -1744,80 +1792,71 @@ mod ui_tests {
         });
     }
 
-    /// With the AGC off the band measures no knee of its own, so a follow
-    /// that took a move unmeasured puts it back to be measured: that follow
-    /// waits its turn as any other does, and a slider dragged without a
-    /// pause still has the band follow it at most every BAND_FOLLOW_MS.
+    /// Dragging a band slider during the preview rebuilds the band once the
+    /// drag pauses, not on every step of it: each rebuild measures the
+    /// receiver's AGC, on the thread the slider is drawn on in a browser.
+    /// And the band ends on where the slider was left.
     #[test]
-    fn a_slider_dragged_with_the_agc_off_is_followed_at_most_so_often() {
+    fn the_band_follows_a_dragged_slider_once_it_pauses() {
         run(|| async {
-            let mut settings = with_receiver();
-            settings.band.agc_enabled = false;
-            let (mut ui, recorder) = Ui::app_with_settings(settings);
-            ui.click("nav-settings");
-            ui.click("btn-band-preview");
-            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
-            // Each send brings its band in line too: counted apart.
-            let follows = || bands(&recorder).len() - recorder.texts().len();
-            let (before, from) = (follows(), crate::time::mono_ms());
-            // A move at every step of the clock, so in every measurement.
-            for step in 0..400 {
-                let width = if step % 2 == 0 { "1910" } else { "1920" };
-                ui.type_into("slider-filter-width", width);
-                ui.advance(1).await;
-            }
-            let dragged_ms = crate::time::mono_ms() - from;
-            let followed = follows() - before;
-            let most = (dragged_ms / u64::from(crate::routes::BAND_FOLLOW_MS) + 1) as usize;
-            assert!(
-                (1..=most).contains(&followed),
-                "{followed} follows in {dragged_ms} ms of dragging, at most {most}"
-            );
-        });
-    }
-
-    /// Dragging a band slider during the preview moves the band a few times
-    /// a second, not on every frame: each move rebuilds the band and
-    /// measures its AGC, on the thread the slider is drawn on.
-    #[test]
-    fn the_band_follows_a_dragged_slider_without_rebuilding_every_frame() {
-        run(|| async {
-            let (mut ui, recorder) = Ui::app_with_settings(with_receiver());
-            ui.click("nav-settings");
-            ui.click("btn-band-preview");
-            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
-            let rebuilds = || {
-                recorder
-                    .calls()
-                    .iter()
-                    .filter(|call| matches!(call, crate::audio::fake::Call::Band(_)))
-                    .count()
-            };
-            let before = rebuilds();
+            let (mut ui, recorder) = previewing_the_band().await;
+            ui.advance(crate::routes::BAND_SETTLE_MS + 50).await;
+            let before = follows(&recorder);
             for step in 0..20 {
                 ui.type_into("slider-filter-width", &format!("{}", 300 + 10 * step));
                 ui.advance(16).await;
             }
-            ui.advance(200).await;
-            let followed = rebuilds() - before;
-            assert!(
-                (1..=6).contains(&followed),
-                "{followed} rebuilds for one drag"
-            );
-            // And it ends on where the slider was left.
-            let last = recorder
-                .calls()
-                .into_iter()
-                .rev()
-                .find_map(|call| match call {
-                    crate::audio::fake::Call::Band(key) => Some(key),
-                    _ => None,
-                });
-            let mut expected = with_receiver();
-            expected.band.filter_width_hz = 490.0;
             assert_eq!(
-                last,
-                Some(cw_core::band::BandKey::of(&expected.clamp().band))
+                follows(&recorder),
+                before,
+                "the band followed the drag before it paused"
+            );
+            ui.advance(crate::routes::BAND_SETTLE_MS).await;
+            assert_eq!(follows(&recorder), before + 1, "one follow for the drag");
+            assert_eq!(bands(&recorder).last(), Some(&band_with_width(490.0)));
+        });
+    }
+
+    /// A move of the volume alone builds nothing, and the band follows it
+    /// at once rather than once the slider pauses.
+    #[test]
+    fn a_volume_move_is_followed_at_once() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            ui.advance(crate::routes::BAND_SETTLE_MS + 50).await;
+            let before = follows(&recorder);
+            ui.type_into("slider-volume", "-6");
+            assert_eq!(follows(&recorder), before + 1, "the volume waited");
+            ui.type_into("slider-volume", "-9");
+            assert_eq!(follows(&recorder), before + 2);
+            // And a band move after it still waits for the pause.
+            ui.type_into("slider-filter-width", "400");
+            assert_eq!(follows(&recorder), before + 2);
+            ui.advance(crate::routes::BAND_SETTLE_MS + 10).await;
+            assert_eq!(follows(&recorder), before + 3);
+        });
+    }
+
+    /// A slider that never pauses still has the band follow it, at least
+    /// every BAND_FOLLOW_MAX_MS, so a long drag is heard as it goes.
+    #[test]
+    fn a_slider_that_never_pauses_is_still_followed() {
+        run(|| async {
+            let (mut ui, recorder) = previewing_the_band().await;
+            ui.advance(crate::routes::BAND_SETTLE_MS + 50).await;
+            let before = follows(&recorder);
+            let from = crate::time::mono_ms();
+            for step in 0..200 {
+                let width = if step % 2 == 0 { "1910" } else { "1920" };
+                ui.type_into("slider-filter-width", width);
+                ui.advance(10).await;
+            }
+            let dragged_ms = crate::time::mono_ms() - from;
+            let followed = follows(&recorder) - before;
+            let least = (dragged_ms / crate::routes::BAND_FOLLOW_MAX_MS) as usize;
+            assert!(
+                (least.max(1)..=least + 1).contains(&followed),
+                "{followed} follows in {dragged_ms} ms of dragging"
             );
         });
     }
@@ -1834,6 +1873,12 @@ mod ui_tests {
             .collect()
     }
 
+    /// How many times the band was brought in line with the settings other
+    /// than by a send: each send brings its band in line too.
+    fn follows(recorder: &crate::audio::fake::Recorder) -> usize {
+        bands(recorder).len() - recorder.texts().len()
+    }
+
     /// Start the band preview on the settings screen, and wait for its first
     /// call. The call takes most of a second, so for a while after this only
     /// a follow brings the band up.
@@ -1845,166 +1890,21 @@ mod ui_tests {
         (ui, recorder)
     }
 
-    /// While the band preview plays, the Band card's scope takes what the
-    /// player metered and reads it against the AGC's line; stopped, the
-    /// scope goes and says what it is for.
+    /// A move waits for the settings to settle before the band follows it,
+    /// so a stop can land in between. The band must not come back up behind
+    /// it.
     #[test]
-    fn the_level_scope_reads_the_receiver_while_the_band_plays() {
+    fn a_preview_stopped_before_its_band_follows_stays_silent() {
         run(|| async {
             let (mut ui, recorder) = previewing_the_band().await;
-            assert!(ui.shows("level-scope"), "{}", ui.html());
-            assert!(!ui.shows("scope-hint"));
-            let db = |db: f64| 10f64.powf(db / 20.0) as f32;
-            let line = crate::ui::scope::threshold(&with_receiver().clamp()) as f32;
-            recorder.meter.borrow_mut().extend(std::iter::repeat_n(
-                crate::audio::MeterFrame {
-                    input: line * db(9.0),
-                    held: db(-4.0),
-                    output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
-                },
-                60,
-            ));
-            ui.advance(120).await;
-            let settings = with_receiver().clamp();
-            assert!(
-                ui.has("takes 4 dB · 3 dB under the limiter"),
-                "{}",
-                ui.html()
-            );
-            assert!(ui.has("badge scope-lamp on"), "the lamp is lit");
-            assert!(
-                ui.has(&crate::ui::scope::rf_trace_step(&settings, 9.0)),
-                "drawn 9 dB over the line: {}",
-                ui.html()
-            );
-            let over = crate::ui::scope::over_hiss(&settings).expect("a band with hiss");
-            assert!(
-                ui.has(&format!("Threshold {over:.0} dB over the hiss")),
-                "{}",
-                ui.html()
-            );
-            let mark = crate::ui::scope::hiss_mark_at(&settings).expect("a band with hiss");
-            let html = ui.html();
-            let hiss_line = html
-                .split("class=\"scope-hiss\"")
-                .nth(1)
-                .and_then(|rest| rest.split('>').next())
-                .unwrap_or_default();
-            assert!(hiss_line.contains(&mark), "{mark} in {hiss_line:?}");
-            assert!(
-                recorder.meter.borrow().is_empty(),
-                "the scope took the frames"
-            );
-
-            ui.click("btn-band-stop");
-            assert!(!ui.shows("level-scope"));
-            assert!(ui.shows("scope-hint"));
-        });
-    }
-
-    /// A playing scope redraws only what moves, twenty times a second: its
-    /// two traces, its readout, its lamp and what it says to a screen
-    /// reader, at most five changes a poll however the band comes and goes.
-    #[test]
-    fn a_playing_scope_costs_at_most_five_changes_a_poll() {
-        run(|| async {
-            let (mut ui, recorder) = previewing_the_band().await;
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
-                .await;
-            let line = crate::ui::scope::threshold(&with_receiver().clamp()) as f32;
-            let _ = ui.take_work();
-            let mut drawn = 0;
-            for poll in 0..40 {
-                // A station over the line and gone again, the AGC taking it
-                // down and letting go, a poll each way.
-                let (input, held) = if poll % 4 < 2 {
-                    (line * 8.0, 0.25)
-                } else {
-                    (line * 0.1, 1.0)
-                };
-                recorder.meter.borrow_mut().extend(std::iter::repeat_n(
-                    crate::audio::MeterFrame {
-                        input,
-                        held,
-                        output: 0.2 + poll as f32 * 0.01,
-                    },
-                    5,
-                ));
-                ui.advance(50).await;
-                let work = ui.take_work();
-                assert!(work <= 5, "{work} changes in poll {poll}");
-                drawn += work;
-            }
-            assert!(drawn >= 2 * 40, "the scope drew {drawn} changes in all");
-        });
-    }
-
-    /// Dragging a control the AGC's knee hangs on measures no knee on the
-    /// thread that draws, which would be three seconds of band at every
-    /// step: the follow measures it once the drag pauses, and the scope's
-    /// line is that knee's from then on.
-    #[test]
-    fn dragging_the_filter_measures_no_knee_on_the_page() {
-        run(|| async {
-            let (mut ui, recorder) = previewing_the_band().await;
-            // Widths no other test asks the knee of: the memo it is kept in
-            // is the whole app's.
-            for width in (1_310..=1_400).step_by(10) {
-                ui.with_app(|ctx| {
-                    let mut settings = ctx.settings;
-                    settings.write().band.filter_width_hz = f64::from(width);
-                });
-            }
-            let settings = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
-            let receiver = cw_core::band::FilterDesign::from_settings(&settings);
-            assert_eq!(
-                cw_core::band::remembered_agc_knee(&settings.band, &receiver),
-                None,
-                "a knee was measured as the filter moved"
-            );
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
-                .await;
-            let db = |db: f64| 10f64.powf(db / 20.0) as f32;
-            let line = crate::ui::scope::threshold(&settings) as f32;
-            recorder.meter.borrow_mut().extend(std::iter::repeat_n(
-                crate::audio::MeterFrame {
-                    input: line * db(9.0),
-                    held: db(-4.0),
-                    output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
-                },
-                60,
-            ));
-            ui.advance(120).await;
-            assert!(
-                ui.has(&crate::ui::scope::rf_trace_step(&settings, 9.0)),
-                "the line is the new knee's: {}",
-                ui.html()
-            );
-        });
-    }
-
-    /// A follow measures the band's AGC before it takes the settings, so a
-    /// stop can land in between. The band must not come back up behind it.
-    #[test]
-    fn a_preview_stopped_while_its_band_follows_stays_silent() {
-        run(|| async {
-            let (mut ui, recorder) = previewing_the_band().await;
-            let before = bands(&recorder).len();
+            ui.advance(crate::routes::BAND_SETTLE_MS + 50).await;
+            let before = follows(&recorder);
             ui.type_into("slider-filter-width", "400");
-            // The step that wakes the follow is the last one: it measures
-            // the knee then, and lets the page have its turn before it takes
-            // the settings, which is where this leaves it.
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
-            assert_eq!(
-                bands(&recorder).len(),
-                before,
-                "the follow should still be measuring"
-            );
-
+            ui.advance(crate::routes::BAND_SETTLE_MS / 2).await;
             ui.click("btn-band-stop");
-            ui.advance(200).await;
+            ui.advance(crate::routes::BAND_FOLLOW_MAX_MS).await;
             assert_eq!(
-                bands(&recorder).len(),
+                follows(&recorder),
                 before,
                 "the band followed a stopped preview"
             );
@@ -2015,32 +1915,25 @@ mod ui_tests {
         });
     }
 
-    /// A move made while a follow measures the band's AGC joins the settings
-    /// that follow is about to take: it is neither left behind nor sent
-    /// after them in a second rebuild, and the band ends where the slider
-    /// was left.
+    /// A move made while the band waits to follow the one before joins it:
+    /// it is neither left behind nor sent after it in a second rebuild, and
+    /// the band ends where the slider was left.
     #[test]
-    fn a_move_made_while_the_band_follows_still_lands() {
+    fn a_move_made_while_the_band_waits_still_lands() {
         run(|| async {
             let (mut ui, recorder) = previewing_the_band().await;
-            let before = bands(&recorder).len();
+            ui.advance(crate::routes::BAND_SETTLE_MS + 50).await;
+            let before = follows(&recorder);
             ui.type_into("slider-filter-width", "400");
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
-            assert_eq!(
-                bands(&recorder).len(),
-                before,
-                "the follow should still be measuring"
-            );
-
+            ui.advance(crate::routes::BAND_SETTLE_MS / 2).await;
             ui.type_into("slider-filter-width", "600");
-            ui.advance(200).await;
-            let mut expected = with_receiver();
-            expected.band.filter_width_hz = 600.0;
+            ui.advance(crate::routes::BAND_SETTLE_MS * 2).await;
             assert_eq!(
-                bands(&recorder)[before..],
-                [cw_core::band::BandKey::of(&expected.clamp().band)],
+                follows(&recorder),
+                before + 1,
                 "the band should have followed the newest move, once"
             );
+            assert_eq!(bands(&recorder).last(), Some(&band_with_width(600.0)));
             assert!(recorder.band_running.get());
         });
     }
@@ -2050,196 +1943,6 @@ mod ui_tests {
         let mut settings = with_receiver();
         settings.band.filter_width_hz = width_hz;
         cw_core::band::BandKey::of(&settings.clamp().band)
-    }
-
-    /// A move made while a follow measures the band's AGC asks about a band
-    /// of its own, so the follow measures that one too before it takes it:
-    /// building the band then finds its knee remembered. The follow waits
-    /// for the second measurement, and still brings the band up once, on the
-    /// newest move.
-    #[test]
-    fn a_move_made_while_the_band_follows_is_measured_before_it_lands() {
-        run(|| async {
-            let (mut ui, recorder) = previewing_the_band().await;
-            let before = bands(&recorder).len();
-            ui.type_into("slider-filter-width", "400");
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
-            ui.type_into("slider-filter-width", "600");
-            // The step that ends the first measurement starts the second,
-            // which this leaves unfinished; the next one ends it.
-            ui.advance(1).await;
-            assert_eq!(
-                bands(&recorder).len(),
-                before,
-                "the follow took the newest move without measuring it"
-            );
-            ui.advance(1).await;
-            assert_eq!(
-                bands(&recorder)[before..],
-                [band_with_width(600.0)],
-                "the follow should take the newest move once it is measured"
-            );
-
-            ui.advance(200).await;
-            assert_eq!(
-                bands(&recorder)[before..],
-                [band_with_width(600.0)],
-                "the band should have followed the newest move, once"
-            );
-        });
-    }
-
-    /// A slider that moves through every measurement is measured again only
-    /// so often: then the follow takes the newest move as it stands, and the
-    /// band measures that knee itself, rather than the band never following.
-    #[test]
-    fn a_slider_moved_through_every_measurement_is_still_followed() {
-        run(|| async {
-            let (mut ui, recorder) = previewing_the_band().await;
-            let before = bands(&recorder).len();
-            let mut width_hz = 400.0;
-            ui.type_into("slider-filter-width", &format!("{width_hz}"));
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
-            for round in 1..=crate::routes::BAND_WARM_ROUNDS {
-                assert_eq!(
-                    bands(&recorder).len(),
-                    before,
-                    "the follow took a move before measurement {round} was done"
-                );
-                // Each step ends a measurement with a newer move waiting.
-                width_hz += 10.0;
-                ui.type_into("slider-filter-width", &format!("{width_hz}"));
-                ui.advance(1).await;
-            }
-            assert_eq!(
-                bands(&recorder)[before..],
-                [band_with_width(width_hz)],
-                "the follow should have taken the newest move after its last measurement"
-            );
-        });
-    }
-
-    /// The scope reads what the band hears at the AGC against the line of
-    /// the band that plays: a tone `over` dB over it, metered once the
-    /// scope next looks, what the scope says of it, and whether it draws
-    /// the tone that far over its line.
-    async fn scope_reads(
-        ui: &mut Ui,
-        recorder: &crate::audio::fake::Recorder,
-        settings: &TrainingSettings,
-        over: f64,
-    ) -> (String, bool) {
-        let db = |db: f64| 10f64.powf(db / 20.0) as f32;
-        let line = crate::ui::scope::threshold(settings) as f32;
-        recorder.meter.borrow_mut().extend(std::iter::repeat_n(
-            crate::audio::MeterFrame {
-                input: line * db(over),
-                held: 1.0,
-                output: cw_core::band::SOFT_LIMIT_KNEE as f32 * db(-3.0),
-            },
-            60,
-        ));
-        ui.advance(60).await;
-        let html = ui.html();
-        let said = html
-            .split("id=\"scope-reading\"")
-            .nth(1)
-            .and_then(|rest| rest.split_once('>'))
-            .and_then(|(_, text)| text.split('<').next())
-            .unwrap_or_default()
-            .to_string();
-        let drawn = html.contains(&crate::ui::scope::rf_trace_step(settings, over));
-        (said, drawn)
-    }
-
-    /// A slider moved in every measurement has the follow take its newest
-    /// move unmeasured. With the AGC off nothing else measures that move's
-    /// knee, and the scope must not draw on by the last one measured, a
-    /// filter several times wider: it is measured in its turn.
-    #[test]
-    fn the_scope_takes_the_knee_of_the_move_the_band_took() {
-        run(|| async {
-            let mut settings = with_receiver();
-            settings.band.agc_enabled = false;
-            settings.band.noise_level = 0.9;
-            let (mut ui, recorder) = Ui::app_with_settings(settings);
-            ui.click("nav-settings");
-            ui.click("btn-band-preview");
-            assert!(ui.run_until(20_000, |_| !recorder.texts().is_empty()).await);
-            // Widths no other test asks the knee of: the memo it is kept in
-            // is the whole app's.
-            ui.type_into("slider-filter-width", "1710");
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS)).await;
-            for width_hz in [1_720, 1_730, 610]
-                .iter()
-                .take(crate::routes::BAND_WARM_ROUNDS)
-            {
-                ui.type_into("slider-filter-width", &format!("{width_hz}"));
-                ui.advance(1).await;
-            }
-            ui.advance(200).await;
-            let taken = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
-            let mut wide = taken.clone();
-            wide.band.filter_width_hz = 1_720.0;
-            let apart = 20.0
-                * (crate::ui::scope::threshold(&wide) / crate::ui::scope::threshold(&taken))
-                    .log10();
-            assert!(apart > 1.5, "the two knees are {apart:.1} dB apart");
-            let (said, drawn) = scope_reads(&mut ui, &recorder, &taken, 9.0).await;
-            assert_eq!(said, "off · 3 dB under the limiter");
-            assert!(drawn, "drawn by the knee of the move taken: {}", ui.html());
-            assert!(
-                !ui.shows("scope-over-hiss"),
-                "a threshold figure with the AGC off"
-            );
-        });
-    }
-
-    /// A preview stopped takes its scope's knee with it: started again on
-    /// settings moved meanwhile, the scope waits for the knee of the band
-    /// now playing rather than reading by the old one.
-    #[test]
-    fn a_restarted_preview_waits_for_its_own_knee() {
-        run(|| async {
-            let (mut ui, recorder) = previewing_the_band().await;
-            // The first preview's scope has its knee.
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
-                .await;
-            let first = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
-            let (said, drawn) = scope_reads(&mut ui, &recorder, &first, 9.0).await;
-            assert_eq!(said, "idle · 3 dB under the limiter");
-            assert!(drawn, "{}", ui.html());
-            // Listened to 6 dB down, the same output has 6 dB more room.
-            ui.with_app(|ctx| {
-                let mut settings = ctx.settings;
-                settings.write().band.master_volume = 0.5;
-            });
-            let (said, _) = scope_reads(&mut ui, &recorder, &first, 9.0).await;
-            assert_eq!(said, "idle · 9 dB under the limiter");
-            ui.with_app(|ctx| {
-                let mut settings = ctx.settings;
-                settings.write().band.master_volume = 1.0;
-            });
-            // The follow those moves woke has its turn before the stop.
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
-                .await;
-            ui.click("btn-band-stop");
-            ui.with_app(|ctx| {
-                let mut settings = ctx.settings;
-                settings.write().band.filter_width_hz = 1_810.0;
-            });
-            ui.click("btn-band-preview");
-            assert!(ui.shows("level-scope"));
-            let settings = ui.with_app(|ctx| ctx.settings.peek().clone().clamp());
-            let (said, drawn) = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
-            assert_eq!(said, "Listening…", "read by the old knee");
-            assert!(!drawn, "drawn by the old knee");
-            ui.advance(u64::from(crate::routes::BAND_FOLLOW_MS) + 100)
-                .await;
-            let (said, drawn) = scope_reads(&mut ui, &recorder, &settings, 9.0).await;
-            assert_eq!(said, "idle · 3 dB under the limiter");
-            assert!(drawn, "{}", ui.html());
-        });
     }
 
     #[test]

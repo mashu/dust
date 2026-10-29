@@ -21,7 +21,7 @@ use super::envelope::EnvelopeCard;
 use super::heatmap::{StreakCard, StreakCardProps};
 use super::home::Home;
 use super::listen::ListenView;
-use super::paddle::{PaddlePad, use_paddle_keys};
+use super::paddle::{PaddleKeys, PaddlePad, page_key, use_paddle_keys, window_key};
 use super::results::ResultsView;
 use super::settings::SettingsView;
 use super::stats::{StatsView, StatsViewProps};
@@ -51,12 +51,20 @@ fn Keyed(
     screen: Screen,
     #[props(default)] keyer_mode: KeyerMode,
     #[props(default)] no_device: bool,
+    /// The keys right of P type, and only `[` and `]` are paddles.
+    #[props(default)]
+    typed: bool,
+    /// The root keys only what the desktop's window drops on Linux, the
+    /// window keying the rest.
+    #[props(default)]
+    on_linux: bool,
     children: Element,
 ) -> Element {
     // Owned by the root scope, as the shell's are.
     let settings = use_hook(|| {
         let mut settings = crate::testing::test_settings();
         settings.playback.keyer_mode = keyer_mode;
+        settings.playback.paddle_keys_by_place = !typed;
         in_root(|| Signal::new(settings))
     });
     let screen = use_hook(|| in_root(|| Signal::new(screen)));
@@ -75,6 +83,11 @@ fn Keyed(
         ))
     });
     let keys = use_paddle_keys(settings, screen, app);
+    let keys = if on_linux {
+        keys.keyed_as_on_linux()
+    } else {
+        keys
+    };
     rsx! {
         div {
             id: crate::ui::widgets::control_id("keyed", "root"),
@@ -703,13 +716,15 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
     // Contest's segment is the one chosen, and no alphabet's.
     for (mode, label) in crate::ui::settings_charset::CHAR_SET_MODES {
         let id = crate::ui::widgets::control_id("seg", label);
-        let class = if mode == CharSetMode::Contest {
-            "seg active"
+        let (class, pressed) = if mode == CharSetMode::Contest {
+            ("seg active", true)
         } else {
-            "seg"
+            ("seg", false)
         };
         assert!(
-            html.contains(&format!(r#"id="{id}" class="{class}">"#)),
+            html.contains(&format!(
+                r#"id="{id}" class="{class}" aria-pressed="{pressed}">"#
+            )),
             "{id} {html}"
         );
     }
@@ -1014,7 +1029,7 @@ fn arrl_dx_says_your_side_and_asks_for_what_it_sends() {
         "Contest · ARRL DX",
         r#"id="contest-arrl-dx" class="pill active""#,
         "You send 5NN + power\u{a0}· You\u{a0}copy\u{a0}ST",
-        r#"id="side-line" class="muted" style="margin: 0;">You are DX: you work US and Canada only<"#,
+        r#"id="side-line" class="muted hint">You are DX: you work US and Canada only<"#,
         "Simplified: one band, so a station and a multiplier each count once.",
         ">W7XYZ 5NN 1TT<",
         ">TU 5NN OR<",
@@ -3293,7 +3308,6 @@ mod interactions {
         // does not make it look like one.
         assert!(ui.has(r#"<span class="slider-name">Filter width</span>"#));
         assert!(!ui.has("-6 dB") && !ui.has("−6 dB"));
-        assert!(ui.has("Its width is read between the points 6 dB down"));
         for (button, reading) in [
             ("more-slider-noise-level", 40),
             ("more-slider-noise-level", 39),
@@ -3310,35 +3324,27 @@ mod interactions {
         ui.click("less-slider-noise-level");
         assert!(ui.has("class=\"slider-value\">Off<"));
 
+        // The receiver's own controls are folded away under a line that
+        // says how they are set, and open from it.
+        assert!(!ui.has(r#"<span class="slider-name">RF gain</span>"#));
+        assert!(ui.has("Advanced receiver: AGC fast, RF gain full"));
+        ui.click("disclosure-advanced-receiver");
+        assert!(
+            ui.input_tag("disclosure-advanced-receiver")
+                .contains("open")
+        );
+
         // The RF gain starts at full and backs off a decibel a step.
         assert!(ui.has(r#"<span class="slider-name">RF gain</span>"#));
         assert!(ui.has(r#"<span class="slider-value">Full</span>"#));
         assert!(ui.input_tag("more-slider-rf-gain").contains("disabled"));
         ui.click("less-slider-rf-gain");
         assert!(ui.has("<span class=\"slider-value\">\u{2212}1 dB</span>"));
-
-        // The AGC's threshold starts where the band's own floor puts it and
-        // moves a decibel a step either way, down into the hiss as far as
-        // twenty; with the AGC off there is none to set, while the RF gain
-        // still turns the band down.
-        assert!(ui.has(r#"<span class="slider-name">AGC threshold</span>"#));
-        assert!(ui.has(r#"<span class="slider-value">0 dB</span>"#));
-        ui.click("more-slider-agc-threshold");
-        assert!(ui.has(r#"<span class="slider-value">+1 dB</span>"#));
-        // Three down from +1 is two under, where the RF gain is not.
-        for _ in 0..3 {
-            ui.click("less-slider-agc-threshold");
-        }
-        assert!(ui.has("<span class=\"slider-value\">\u{2212}2 dB</span>"));
-        ui.type_into("slider-agc-threshold", "-20");
-        assert!(ui.has("<span class=\"slider-value\">\u{2212}20 dB</span>"));
-        assert!(
-            ui.input_tag("less-slider-agc-threshold")
-                .contains("disabled")
-        );
+        assert!(ui.has("Advanced receiver: AGC fast, RF gain \u{2212}1 dB"));
 
         // The AGC's decay is Fast until you pick Slow, and is there only
-        // while the AGC is on.
+        // while the AGC is on. There is no threshold to set.
+        assert!(!ui.has("AGC threshold"));
         assert!(ui.has(r#"<span class="field-label">AGC decay</span>"#));
         assert!(ui.input_tag("seg-agc-fast").contains("seg active"));
         ui.click("seg-agc-slow");
@@ -3346,14 +3352,14 @@ mod interactions {
         assert!(!ui.input_tag("seg-agc-fast").contains("active"));
         ui.commit("switch-agc", "false");
         assert!(!ui.has("AGC decay"));
-        assert!(
-            ui.input_tag("more-slider-agc-threshold")
-                .contains("disabled")
-        );
-        assert!(ui.has("With the AGC off there is no threshold to set."));
         assert!(!ui.input_tag("less-slider-rf-gain").contains("disabled"));
         ui.click("less-slider-rf-gain");
         assert!(ui.has("<span class=\"slider-value\">\u{2212}2 dB</span>"));
+        assert!(ui.has("Advanced receiver: AGC off, RF gain \u{2212}2 dB"));
+
+        // And it folds away again.
+        ui.click("disclosure-advanced-receiver");
+        assert!(!ui.has(r#"<span class="slider-name">RF gain</span>"#));
     }
 
     #[test]
@@ -3362,13 +3368,7 @@ mod interactions {
         assert!(ui.has("Live preview"));
         assert!(!ui.has("QSB slowly fades"));
         // The old resonator model's controls are gone for good.
-        for gone in [
-            "Model gain",
-            "Wobble",
-            "Resonance Q",
-            "Whistle",
-            "Advanced receiver",
-        ] {
+        for gone in ["Model gain", "Wobble", "Resonance Q", "Whistle"] {
             assert!(!ui.has(gone), "{gone} should no longer be on the card");
         }
 
@@ -3439,6 +3439,38 @@ mod interactions {
             }
         }
         assert!(ui.has("Band conditions"));
+    }
+
+    /// A screen reader hears what the eye sees: which segment is chosen, a
+    /// slider's value as it is shown, and a switch named by its title, its
+    /// description describing it.
+    #[test]
+    fn the_band_card_says_what_it_shows() {
+        let ui = Ui::new(BandHarness, BandHarnessProps { previewing: false });
+        assert!(
+            ui.input_tag("seg-filter-sharp")
+                .contains(r#"aria-pressed="true""#)
+        );
+        assert!(
+            ui.input_tag("seg-filter-soft")
+                .contains(r#"aria-pressed="false""#)
+        );
+        assert!(
+            ui.input_tag("slider-filter-width")
+                .contains(r#"aria-valuetext="300 Hz""#),
+            "{}",
+            ui.input_tag("slider-filter-width")
+        );
+        let switch = ui.input_tag("switch-qsb-fading");
+        assert!(
+            switch.contains(r#"aria-labelledby="switch-qsb-fading-title""#),
+            "{switch}"
+        );
+        assert!(
+            switch.contains(r#"aria-describedby="switch-qsb-fading-desc""#),
+            "{switch}"
+        );
+        assert!(ui.shows("switch-qsb-fading-title") && ui.shows("switch-qsb-fading-desc"));
     }
 
     #[test]
@@ -3581,6 +3613,258 @@ mod interactions {
         });
     }
 
+    /// A bracket typed with AltGr — `]` is AltGr+9 on a German keyboard, and
+    /// Windows holds AltGr as Ctrl and Alt — keys its paddle, and the key
+    /// opens it again let go after AltGr, as a 9: the dah stops, and the pad
+    /// hears a T rather than dahs on and on.
+    #[test]
+    fn a_paddle_typed_with_altgr_opens_when_altgr_goes_first() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let altgr = dioxus::prelude::Modifiers::CONTROL | dioxus::prelude::Modifiers::ALT;
+            assert!(
+                !ui.press_key_held(
+                    "keyed-root",
+                    Key::Character("]".into()),
+                    Code::Digit9,
+                    altgr
+                ),
+                "the ] was left to the box"
+            );
+            ui.advance(100).await;
+            ui.release_key("keyed-root", Key::Character("9".into()), Code::Digit9);
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn PageWordsHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                PageWords {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// Buttons that hand the paddles what the mobile page's script would:
+    /// `]` closed by AltGr+9, and the 9 let go.
+    #[component]
+    fn PageWords() -> Element {
+        let keys = use_context::<PaddleKeys>();
+        rsx! {
+            button {
+                id: control_id("btn", "page down"),
+                onclick: move |_| page_key(keys, "down", "]", "Digit9"),
+            }
+            button {
+                id: control_id("btn", "page up"),
+                onclick: move |_| page_key(keys, "up", "9", "Digit9"),
+            }
+        }
+    }
+
+    /// The mobile page's word of a key let go opens the paddle that key
+    /// closed, whatever it types by then.
+    #[test]
+    fn the_page_opens_the_paddle_its_key_closed() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PageWordsHarness, ());
+            ui.click("btn-page-down");
+            ui.advance(100).await;
+            ui.click("btn-page-up");
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn WindowWordsHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings,
+                WindowWords {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// Buttons that hand the paddles what the desktop's window hears on
+    /// Linux: `]` pressed, and let go.
+    #[component]
+    fn WindowWords() -> Element {
+        let keys = use_context::<PaddleKeys>();
+        rsx! {
+            button {
+                id: control_id("btn", "window down"),
+                onclick: move |_| window_key(keys, "]", "BracketRight", true),
+            }
+            button {
+                id: control_id("btn", "window up"),
+                onclick: move |_| window_key(keys, "]", "BracketRight", false),
+            }
+        }
+    }
+
+    /// The window's every press of a paddle's key keys it, with no word of
+    /// the modifiers, which the window cannot tell: one let go in another
+    /// window can no longer have every press taken for a shortcut and
+    /// dropped. Its release opens the paddle again.
+    #[test]
+    fn the_window_keys_every_paddle_press_it_hears() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(WindowWordsHarness, ());
+            ui.click("btn-window-down");
+            ui.advance(100).await;
+            ui.click("btn-window-up");
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+            ui.click("btn-window-down");
+            ui.advance(100).await;
+            ui.click("btn-window-up");
+            ui.advance(1_000).await;
+            assert!(ui.has(">TT<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn LinuxPadHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings, on_linux: true,
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// On Linux the root keys only what the desktop's window drops: a dead
+    /// key on the brackets' own keys, as on a French keyboard's dit key,
+    /// keys its paddle, pressed and let go. A `]`, which the window keys,
+    /// the root keeps from the box but does not key a second time.
+    #[test]
+    fn on_linux_the_root_keys_only_what_the_window_drops() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(LinuxPadHarness, ());
+            let dah = Key::Character("]".into());
+            assert!(
+                !ui.press_key("keyed-root", dah.clone(), Code::BracketRight),
+                "the ] was left to the box"
+            );
+            ui.advance(100).await;
+            ui.release_key("keyed-root", dah, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(
+                ui.has(">· −<"),
+                "the root keyed the window's: {}",
+                ui.html()
+            );
+            assert!(
+                !ui.press_key("keyed-root", Key::Dead, Code::BracketLeft),
+                "the dead key was left to the box"
+            );
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">E<"), "{}", ui.html());
+            // A key the page cannot name, on the dah key.
+            ui.press_key("keyed-root", Key::Unidentified, Code::BracketRight);
+            ui.advance(100).await;
+            ui.release_key("keyed-root", Key::Unidentified, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(ui.has(">ET<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn LinuxWindowHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings, on_linux: true,
+                WindowWords {}
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// On Linux a dead key on the dit key, which the window drops, and a
+    /// `]` the window hears key one squeeze between them: the dit let go
+    /// during its own element, the dah held into its own, an A.
+    #[test]
+    fn on_linux_the_root_and_the_window_key_a_squeeze_between_them() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(LinuxWindowHarness, ());
+            ui.press_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.click("btn-window-down");
+            let dah = Key::Character("]".into());
+            ui.press_key("keyed-root", dah.clone(), Code::BracketRight);
+            ui.advance(30).await;
+            ui.release_key("keyed-root", Key::Dead, Code::BracketLeft);
+            ui.advance(120).await;
+            ui.click("btn-window-up");
+            ui.release_key("keyed-root", dah, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(ui.has(">A<"), "{}", ui.html());
+        });
+    }
+
+    #[component]
+    fn TypedPadHarness() -> Element {
+        rsx! {
+            Keyed { screen: Screen::Settings, typed: true,
+                PaddlePad { mode: KeyerMode::IambicA }
+            }
+        }
+    }
+
+    /// The keys right of P are the paddles whatever they type, as a USB
+    /// paddle sends them on any layout: a German keyboard's `+` keys the
+    /// dah, kept from the box, and its dead accent the dit.
+    #[test]
+    fn a_bracket_key_typing_plus_is_the_paddle_by_place() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            let plus = Key::Character("+".into());
+            assert!(
+                !ui.press_key("keyed-root", plus.clone(), Code::BracketRight),
+                "the + was left to the box"
+            );
+            ui.advance(100).await;
+            ui.release_key("keyed-root", plus, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+            let dead = Key::Dead;
+            assert!(!ui.press_key("keyed-root", dead.clone(), Code::BracketLeft));
+            ui.advance(30).await;
+            ui.release_key("keyed-root", dead, Code::BracketLeft);
+            ui.advance(1_000).await;
+            assert!(ui.has(">TE<"), "{}", ui.html());
+        });
+    }
+
+    /// With the paddles off the keys right of P, those keys type: the `+`
+    /// goes to the box and keys nothing, and a `[`, however typed, is still
+    /// the dit.
+    #[test]
+    fn a_bracket_key_typing_plus_is_typed_when_not_by_place() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(TypedPadHarness, ());
+            let plus = Key::Character("+".into());
+            assert!(
+                ui.press_key("keyed-root", plus.clone(), Code::BracketRight),
+                "the + was kept from the box"
+            );
+            ui.advance(100).await;
+            ui.release_key("keyed-root", plus, Code::BracketRight);
+            ui.advance(1_000).await;
+            assert!(ui.has(">· −<"), "a paddle keyed: {}", ui.html());
+            let altgr = dioxus::prelude::Modifiers::CONTROL | dioxus::prelude::Modifiers::ALT;
+            let bracket = Key::Character("[".into());
+            assert!(!ui.press_key_held("keyed-root", bracket.clone(), Code::Digit8, altgr));
+            ui.advance(30).await;
+            ui.release_key("keyed-root", bracket, Code::Digit8);
+            ui.advance(1_000).await;
+            assert!(ui.has(">E<"), "{}", ui.html());
+        });
+    }
+
     /// The window losing the focus, or the page going, takes the key
     /// releases with it: the paddles open, the element sounding finishes,
     /// and the letter it ends is heard.
@@ -3591,6 +3875,25 @@ mod interactions {
             ui.press_key("keyed-root", Key::Character("]".into()), Code::BracketRight);
             ui.advance(100).await;
             ui.click("btn-lose-focus");
+            ui.advance(1_000).await;
+            assert!(ui.has(">T<"), "{}", ui.html());
+        });
+    }
+
+    /// A Mac sends no key release for a key let go while Command was down,
+    /// and on the desktop there it is the root that keys the paddles: so
+    /// Command let go opens them, the element sounding finishes, and the
+    /// pad hears a T rather than dahs on and on.
+    #[test]
+    fn letting_command_go_opens_the_paddles() {
+        crate::testing::run(|| async {
+            let mut ui = Ui::new(PaddlePadHarness, ());
+            ui.press_key("keyed-root", Key::Character("]".into()), Code::BracketRight);
+            ui.advance(100).await;
+            let command = dioxus::prelude::Modifiers::META;
+            ui.press_key_held("keyed-root", Key::Meta, Code::MetaLeft, command);
+            // The `]` let go now goes unheard.
+            ui.release_key("keyed-root", Key::Meta, Code::MetaLeft);
             ui.advance(1_000).await;
             assert!(ui.has(">T<"), "{}", ui.html());
         });

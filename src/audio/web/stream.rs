@@ -2,7 +2,8 @@
 //! into the graph a tenth of a second at a time ([`ReceiverStream`]).
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::ops::Range;
+use std::rc::{Rc, Weak};
 
 use gloo_timers::callback::Interval;
 use wasm_bindgen::JsCast;
@@ -11,9 +12,8 @@ use web_sys::{
 };
 
 use super::{page_is_hidden, reported_latency};
-use crate::audio::MeterFrame;
 use crate::audio::mixer::{Mixer, Swept};
-use crate::audio::stream::{ReceiverStream, Taken};
+use crate::audio::stream::{Missed, ReceiverStream, Taken};
 
 /// How far ahead of the audio clock the receiver is kept rendered. Enough to
 /// ride over a busy main thread; a change made sooner than this takes back
@@ -84,24 +84,33 @@ impl MixerStream {
     /// later. When it was made.
     pub fn change_at(&self, at: f64, change: impl FnOnce(&mut Mixer, &mut Swept)) -> f64 {
         let mut state = self.state.borrow_mut();
-        let at = at.max(state.soonest());
-        let (made, taken) = state.stream.change_at(at, change);
-        for taken in taken {
-            match taken {
-                Taken::StopAt(node, at) => {
-                    let _ = node
-                        .unchecked_ref::<AudioScheduledSourceNode>()
-                        .stop_with_when(at);
-                    state.stopped.push((node, at));
-                }
-                Taken::Never(node) => {
-                    let _ = node.unchecked_ref::<AudioScheduledSourceNode>().stop();
-                    let _ = node.disconnect();
-                }
-            }
-        }
+        let made = state.change_at(at, change);
         state.top_up(CHANGE_LEAD_SEC);
         made
+    }
+
+    /// Start a send with `start` as soon as it can be heard, or at `at`
+    /// should that be later: `start` puts it in the mixer and says when its
+    /// sound is, counted from the moment it is made. When its sound is on
+    /// the context's clock, and the stream's watch on it, kept from the
+    /// moment it is made: the top-up that follows can find the stream
+    /// fallen behind already.
+    pub fn send_at(
+        &self,
+        at: f64,
+        start: impl FnOnce(&mut Mixer, &mut Swept) -> Range<f64>,
+    ) -> (Range<f64>, SendWatch) {
+        let mut state = self.state.borrow_mut();
+        let mut sound = 0.0..0.0;
+        let made = state.change_at(at, |mixer, swept| sound = start(mixer, swept));
+        let sound = made + sound.start..made + sound.end;
+        let missed = state.stream.watch(sound.start, sound.end);
+        state.top_up(CHANGE_LEAD_SEC);
+        let watch = SendWatch {
+            state: Rc::downgrade(&self.state),
+            missed,
+        };
+        (sound, watch)
     }
 
     /// Make `change` as soon as it can be heard. When it was made.
@@ -114,16 +123,32 @@ impl MixerStream {
         read(self.state.borrow().stream.mixer())
     }
 
-    /// The meter's frames heard since the last were taken, oldest first.
-    pub fn take_meter(&self, into: &mut Vec<MeterFrame>) {
-        let mut state = self.state.borrow_mut();
-        let now = state.ctx.current_time();
-        state.stream.take_frames(now, into);
-    }
-
     /// Whether there is nothing left to hear, nor anything being rendered.
     pub fn is_idle(&self) -> bool {
         self.state.borrow().stream.is_idle()
+    }
+}
+
+/// The stream's watch on a send's sound, for its falling behind the clock
+/// across some of it, which then went unheard ([`ReceiverStream::watch`]).
+pub struct SendWatch {
+    state: Weak<RefCell<StreamState>>,
+    missed: Missed,
+}
+
+impl SendWatch {
+    /// Whether some of the send's sound went unheard. The stream is caught
+    /// up first, as a tick would: after a stall the send's clock has run on
+    /// past where the stream got to, and the tick that finds it may come
+    /// only after the send's waiter has read that clock and taken the send
+    /// for heard.
+    pub fn missed(&self) -> bool {
+        if let Some(state) = self.state.upgrade()
+            && let Ok(mut state) = state.try_borrow_mut()
+        {
+            state.catch_up();
+        }
+        self.missed.is_set()
     }
 }
 
@@ -132,12 +157,47 @@ impl StreamState {
         self.ctx.current_time() + reported_latency(&self.ctx, "baseLatency") + CHANGE_MARGIN_SEC
     }
 
+    /// Run the mixer on to the clock, should it have fallen behind it.
+    fn catch_up(&mut self) {
+        let soonest = self.soonest();
+        self.stream.catch_up_to(soonest);
+    }
+
+    /// Make `change` as soon as it can be heard, or at `at` should that be
+    /// later, taking back what was handed over from there on. When it was
+    /// made.
+    fn change_at(&mut self, at: f64, change: impl FnOnce(&mut Mixer, &mut Swept)) -> f64 {
+        // Caught up first: a change put at the clock read before catching
+        // up would land in what the catching up then runs on over unheard.
+        self.catch_up();
+        let at = at.max(self.soonest());
+        let (made, taken) = self.stream.change_at(at, change);
+        for taken in taken {
+            match taken {
+                Taken::StopAt(node, at) => {
+                    let _ = node
+                        .unchecked_ref::<AudioScheduledSourceNode>()
+                        .stop_with_when(at);
+                    self.stopped.push((node, at));
+                }
+                Taken::Never(node) => {
+                    let _ = node.unchecked_ref::<AudioScheduledSourceNode>().stop();
+                    let _ = node.disconnect();
+                }
+            }
+        }
+        made
+    }
+
     /// Render until the receiver runs `lead` ahead of the clock, and let go
     /// of what has played.
     fn top_up(&mut self, lead: f64) {
         if self.ctx.state() == AudioContextState::Closed {
             return;
         }
+        // Caught up before the clock is read: catching up takes time, and a
+        // stretch put at the moment read before it would start in the past.
+        self.catch_up();
         let now = self.ctx.current_time();
         let soonest = self.soonest();
         let (ctx, into) = (&self.ctx, &self.into);

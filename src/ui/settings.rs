@@ -261,6 +261,7 @@ struct SessionShape {
     keyer_mode: KeyerMode,
     keyer_wpm: f64,
     paddle_swap: bool,
+    paddle_keys_by_place: bool,
 }
 
 impl SessionShape {
@@ -285,6 +286,7 @@ impl SessionShape {
             keyer_mode: p.keyer_mode,
             keyer_wpm: p.keyer_wpm,
             paddle_swap: p.paddle_swap,
+            paddle_keys_by_place: p.paddle_keys_by_place,
         }
     }
 }
@@ -320,7 +322,7 @@ fn AimFor(settings: Signal<TrainingSettings>, aim: Aim, note: String) -> Element
                     }
                 }
             }
-            p { class: "muted", style: "margin: 0; font-size: 0.8rem;", "{note}" }
+            p { class: "muted hint small", "{note}" }
         }
     }
 }
@@ -399,7 +401,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
             if s.contest {
-                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                p { class: "muted hint small",
                     "A run of zero minutes lasts until you stop it, and ends at {CONTEST_MINUTES_MAX} all the same."
                 }
                 Switch {
@@ -409,10 +411,10 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     onchange: move |on| settings.write().contest.contest_show_copy = on,
                 }
             } else {
-                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                p { class: "muted hint small",
                     "Time to read the last group before the next send. Zero keeps contest pace. Repeats of the same group stay a word space apart."
                 }
-                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                p { class: "muted hint small",
                     "The answer timeout moves on from a group you have not started. Once you type, the group waits for you: it is checked when every character is in, or when you press Next or Enter."
                 }
             }
@@ -476,7 +478,7 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                         }
                     }
                 }
-                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                p { class: "muted hint small",
                     "{keyer_description(s.keyer_mode)}"
                 }
             }
@@ -497,6 +499,12 @@ fn SessionShapeCard(settings: Signal<TrainingSettings>) -> Element {
                     checked: s.paddle_swap,
                     onchange: move |on| settings.write().playback.paddle_swap = on,
                 }
+            }
+            Switch {
+                title: "Paddles on the keys right of P",
+                description: "The two keys right of P are the paddles, whatever your keyboard types on them, as a USB paddle needs. Turn this off to type what they type, such as + on a German keyboard; then only [ and ] key the paddles.",
+                checked: s.paddle_keys_by_place,
+                onchange: move |on| settings.write().playback.paddle_keys_by_place = on,
             }
         }
     }
@@ -586,7 +594,7 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 }
             }
             if speed.contest {
-                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                p { class: "muted hint small",
                     "Callers come at speeds drawn from these ranges."
                 }
                 Switch {
@@ -618,7 +626,7 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                     note: aim_note(speed.aim, false, true),
                 }
             } else if speed.adapts {
-                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                p { class: "muted hint small",
                     "{aim_note(speed.aim, false, true)} Aim for is set under Session shape, for group size and speed together."
                 }
             }
@@ -640,7 +648,7 @@ fn SpeedCard(settings: Signal<TrainingSettings>) -> Element {
                 disabled: false,
                 onchange: move |v| settings.write().playback.fist_variation = v,
             }
-            p { class: "muted", style: "margin: 0;",
+            p { class: "muted hint",
                 "How far the stations calling stray from a keyer — heavier or lighter elements, longer or shorter dahs, each operator sending their own way. At zero every station is a machine, which is what you want while a character is still new."
             }
             NumberField {
@@ -688,11 +696,11 @@ fn YourSpeed(settings: Signal<TrainingSettings>) -> Element {
             onchange: move |v: f64| settings.write().contest.my_wpm = v.round() as u32,
         }
         if my_wpm == 0 {
-            p { id: "your-speed-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+            p { id: "your-speed-line", class: "muted hint small",
                 "The middle of the callers' range until you set it. The run screen's − and + move it, and it is kept for the next run."
             }
         } else {
-            p { id: "your-speed-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+            p { id: "your-speed-line", class: "muted hint small",
                 "Yours from run to run: the run screen's − and + move it, and it is kept for the next run."
             }
             div {
@@ -780,7 +788,7 @@ fn SendingLevel(settings: Signal<TrainingSettings>) -> Element {
             disabled: false,
             onchange: move |v: f64| settings.write().contest.my_sending_db = v.round() as i32,
         }
-        p { id: "sending-line", class: "muted", style: "margin: 0; font-size: 0.8rem;",
+        p { id: "sending-line", class: "muted hint small",
             "Your own messages in a run, apart from the station strength above: 0 dB is the loudest, {start} about level with an average caller, and Off silent, the run keeping its time."
         }
     }
@@ -972,7 +980,7 @@ fn RecognitionCard(settings: Signal<TrainingSettings>) -> Element {
                         onchange: edge(RecognitionEdge::Slow),
                     }
                 }
-                p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+                p { class: "muted hint small",
                     "Green under {fast} ms, yellow (ICR) under {icr} ms, orange under {slow} ms, red from {slow} ms: the time from a character's sound going out to your speaker or headphones to your key."
                 }
             }

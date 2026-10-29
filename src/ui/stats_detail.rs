@@ -103,6 +103,95 @@ fn opens(row: &SessionHistoryRow) -> bool {
     matches!(row.log, Some(StoredLog::Read(_))) && row.contest.is_some()
 }
 
+/// What keys each row of the history by: when its session finished, which
+/// stays with it however the rows around it come and go, and how many
+/// before it finished at the same moment, should any.
+fn row_keys(rows: &[SessionHistoryRow]) -> Vec<String> {
+    let mut seen = std::collections::HashMap::<u64, usize>::new();
+    rows.iter()
+        .map(|row| {
+            let alike = seen.entry(row.timestamp).or_default();
+            *alike += 1;
+            format!("{}-{}", row.timestamp, *alike - 1)
+        })
+        .collect()
+}
+
+/// One session of the history: picked while choosing, otherwise opened to
+/// its results where it has them, and deleted from its own row.
+#[component]
+fn HistoryRow(
+    row: SessionHistoryRow,
+    selecting: bool,
+    chosen: Signal<BTreeSet<SessionPick>>,
+    confirming: Signal<bool>,
+    opened: Signal<Option<SessionPick>>,
+    on_delete: Option<EventHandler<Vec<SessionPick>>>,
+) -> Element {
+    let pick = SessionPick {
+        index: row.index,
+        timestamp: row.timestamp,
+    };
+    let is_chosen = chosen.read().contains(&pick);
+    let key = row.index.to_string();
+    // Spans, as a button that holds them may hold nothing else.
+    let when = rsx! {
+        span { class: "history-when",
+            span { class: "mono", "{row.date}" }
+            span { class: "history-sub", "{history_sub(&row)}" }
+        }
+        span { class: "history-acc",
+            span { class: "value", "{row.accuracy_pct.round()}%" }
+            span { class: "muted", "{row.score.round()} pts" }
+        }
+    };
+    if selecting {
+        return rsx! {
+            button {
+                id: control_id("history-pick", &key),
+                class: if is_chosen { "history-item selectable chosen" } else { "history-item selectable" },
+                role: "checkbox",
+                aria_checked: "{is_chosen}",
+                onclick: move |_| {
+                    let mut set = chosen.write();
+                    if !set.remove(&pick) {
+                        set.insert(pick);
+                    }
+                    confirming.set(false);
+                },
+                span { class: "history-check", Icon { name: IconName::Check } }
+                {when}
+            }
+        };
+    }
+    rsx! {
+        div { class: "history-item",
+            // Named by what it shows, as every other row is read.
+            if opens(&row) {
+                button {
+                    id: control_id("history-open", &key),
+                    class: "history-open",
+                    onclick: move |_| opened.set(Some(pick)),
+                    {when}
+                    span { class: "history-open-mark", Icon { name: IconName::Chevron } }
+                }
+            } else {
+                {when}
+            }
+            if let Some(on_delete) = on_delete {
+                button {
+                    id: control_id("history-delete", &key),
+                    class: "history-delete",
+                    title: "Delete this session",
+                    aria_label: "Delete the session of {row.date}",
+                    onclick: move |_| on_delete.call(vec![pick]),
+                    Icon { name: IconName::Trash }
+                }
+            }
+        }
+    }
+}
+
 /// Every session kept on this device, newest first.
 ///
 /// Given `on_delete`, sessions can be deleted: one from its own row, or
@@ -125,7 +214,7 @@ pub fn HistoryTab(
     let mut confirming = use_signal(|| false);
     let mut shown = use_signal(|| HISTORY_PAGE);
     // The run whose results are open, read again from its row.
-    let mut opened = use_opened_run();
+    let opened = use_opened_run();
     if let Some(results) = opened_results(&sessions, opened, "History") {
         return results;
     }
@@ -194,70 +283,15 @@ pub fn HistoryTab(
                 }
             } else {
                 div { class: "history-list",
-                    for row in rows.iter().take(shown()) {
-                        {
-                            let pick = SessionPick { index: row.index, timestamp: row.timestamp };
-                            let is_chosen = chosen.read().contains(&pick);
-                            let key = row.index.to_string();
-                            // Spans, as a button that holds them may hold
-                            // nothing else.
-                            let when = rsx! {
-                                span { class: "history-when",
-                                    span { class: "mono", "{row.date}" }
-                                    span { class: "history-sub", "{history_sub(row)}" }
-                                }
-                                span { class: "history-acc",
-                                    span { class: "value", "{row.accuracy_pct.round()}%" }
-                                    span { class: "muted", "{row.score.round()} pts" }
-                                }
-                            };
-                            if selecting_now {
-                                rsx! {
-                                    button {
-                                        id: control_id("history-pick", &key),
-                                        class: if is_chosen { "history-item selectable chosen" } else { "history-item selectable" },
-                                        role: "checkbox",
-                                        aria_checked: "{is_chosen}",
-                                        onclick: move |_| {
-                                            let mut set = chosen.write();
-                                            if !set.remove(&pick) {
-                                                set.insert(pick);
-                                            }
-                                            confirming.set(false);
-                                        },
-                                        span { class: "history-check", Icon { name: IconName::Check } }
-                                        {when}
-                                    }
-                                }
-                            } else {
-                                rsx! {
-                                    div { class: "history-item",
-                                        // Named by what it shows, as every
-                                        // other row is read.
-                                        if opens(row) {
-                                            button {
-                                                id: control_id("history-open", &key),
-                                                class: "history-open",
-                                                onclick: move |_| opened.set(Some(pick)),
-                                                {when}
-                                                span { class: "history-open-mark", Icon { name: IconName::Chevron } }
-                                            }
-                                        } else {
-                                            {when}
-                                        }
-                                        if let Some(on_delete) = on_delete {
-                                            button {
-                                                id: control_id("history-delete", &key),
-                                                class: "history-delete",
-                                                title: "Delete this session",
-                                                aria_label: "Delete the session of {row.date}",
-                                                onclick: move |_| on_delete.call(vec![pick]),
-                                                Icon { name: IconName::Trash }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                    for (row, key) in rows.iter().take(shown()).zip(row_keys(&rows)) {
+                        HistoryRow {
+                            key: "{key}",
+                            row: row.clone(),
+                            selecting: selecting_now,
+                            chosen,
+                            confirming,
+                            opened,
+                            on_delete,
                         }
                     }
                 }
@@ -331,5 +365,42 @@ pub fn HistoryTab(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod row_key_tests {
+    use super::*;
+
+    fn row(timestamp: u64, index: usize) -> SessionHistoryRow {
+        SessionHistoryRow {
+            date: "2026-10-29".into(),
+            accuracy_pct: 90.0,
+            score: 10.0,
+            groups: 10,
+            correct_groups: 9,
+            total_chars: 30,
+            timestamp,
+            mode: cw_core::CharSetMode::Koch,
+            contest: None,
+            log: None,
+            assisted: false,
+            index,
+        }
+    }
+
+    /// A row keeps its key however the rows around it come and go, and two
+    /// sessions that finished in the same millisecond have keys of their own.
+    #[test]
+    fn a_row_keeps_its_key_and_no_two_rows_share_one() {
+        let rows = [row(30, 2), row(20, 1), row(20, 0)];
+        assert_eq!(row_keys(&rows), ["30-0", "20-0", "20-1"]);
+        let after_a_delete = [row(20, 1), row(20, 0)];
+        assert_eq!(row_keys(&after_a_delete), ["20-0", "20-1"]);
+        let keys = row_keys(&[row(30, 1), row(10, 0)]);
+        assert_eq!(
+            keys[0], "30-0",
+            "the row above a deleted one is keyed as before"
+        );
     }
 }

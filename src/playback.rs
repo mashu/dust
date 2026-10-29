@@ -90,9 +90,8 @@ pub(crate) const BAND_PREVIEW_CALL: &str = "CQ";
 /// The pause between the band preview's calls: long enough for the AGC at
 /// Fast to let the band back after the loudest of them. Its hang and five of
 /// its release's time constants bring a 26 dB duck within a fifth of a
-/// decibel, so the hiss is heard coming back and the scope's lamp goes out a
-/// quarter of a second or so before the next call, which then starts on a
-/// gain of its own. At Slow the band is still held down at the end of it,
+/// decibel, so the hiss is heard coming back a quarter of a second or so
+/// before the next call, which then starts on a gain of its own. At Slow the band is still held down at the end of it,
 /// which is what Slow is.
 pub(crate) fn band_preview_gap_ms() -> u32 {
     let (hang, release) = agc_decay_sec(AgcDecay::Fast);
@@ -101,7 +100,7 @@ pub(crate) fn band_preview_gap_ms() -> u32 {
 
 /// The strengths the band preview calls at, in turn: loud, medium and weak,
 /// the full strength and a station 10 and 20 dB down, so the AGC can be
-/// heard evening them out and its threshold heard deciding which it does.
+/// heard evening them out, and the RF gain heard taking the weaker down.
 pub const BAND_PREVIEW_STRENGTHS: [f64; 3] = [VOLUME_MAX, 0.316_227_766_016_838, VOLUME_MIN];
 
 /// What the app is playing when no session is running.

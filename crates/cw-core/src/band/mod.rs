@@ -21,10 +21,9 @@
 //!    the AGC ([`crate::TrainingSettings::rf_gain`]), and the AGC rides the
 //!    gain: a steady few decibels down under a keyed station, back up in the
 //!    pauses, and only a moment's duck for a crash. Its knee is set from the
-//!    band's own floor ([`agc_knee`]) and moved by its threshold
-//!    ([`receiver_knee`]), down into the hiss or up over the weaker
-//!    stations. It listens [`AGC_LOOKAHEAD_SEC`] ahead of what it
-//!    plays, so its gain is down before the first element of an over is.
+//!    band's own floor ([`agc_knee`]), clear of the hiss. It listens
+//!    [`AGC_LOOKAHEAD_SEC`] ahead of what it plays, so its gain is down
+//!    before the first element of an over is.
 //! 4. The receiver's audio stage adds a very faint, wide hiss of its own
 //!    ([`AudioFloor`]), after the filter and the AGC, so the band is never
 //!    quite silent outside the passband — as no real receiver is.
@@ -68,10 +67,7 @@ pub use filter::{
     FilterDesign, MAX_RECEIVER_SECTIONS, MAX_RECEIVER_WIDTH_HZ, ReceiverFilter, Section, Sections,
 };
 pub use key::{BandChange, BandKey};
-pub use knee::{
-    agc_knee, band_hiss_rms, receiver_knee, remembered_agc_knee, threshold_factor,
-    threshold_over_hiss_db,
-};
+pub use knee::agc_knee;
 pub use loudness::{full_volume_gain, loudest_station};
 pub use noise::AudioFloor;
 pub use output::{
@@ -117,13 +113,14 @@ pub struct Received {
     /// gain for everything it hears, so a crash ducks the station you are
     /// copying with the noise.
     pub gain: f64,
-    /// The part of that gain the AGC's hang holds: what a signal that stood
-    /// over the threshold has set, which a crash it only squashes for an
-    /// instant leaves alone. What an AGC lamp lights by.
+    /// The part of that gain the AGC's hang holds, which a crash it only
+    /// squashes for an instant leaves alone: what the tests read an AGC lamp
+    /// by.
+    #[cfg(test)]
     pub held: f64,
     /// What reached the AGC: the band and the send together, through the
     /// filter and the RF gain, before the AGC's, as it arrived rather than
-    /// the look-ahead late. What a level meter on the receiver reads.
+    /// the look-ahead late.
     pub input: f64,
 }
 
@@ -150,7 +147,7 @@ impl Receiver {
     fn through(sample_rate: u32, band: &BandSettings, design: &FilterDesign) -> Self {
         Self {
             filter: ReceiverFilter::new(sample_rate, design),
-            agc: match receiver_knee(band, design) {
+            agc: match agc_knee(band, design) {
                 Some(knee) => Agc::new(sample_rate, knee, band.agc_decay),
                 None => Agc::off(sample_rate),
             },
@@ -228,6 +225,7 @@ impl BandMixer {
         Received {
             band: ridden + self.audio_floor.next_sample(),
             gain: self.agc.gain(),
+            #[cfg(test)]
             held: self.agc.held(),
             input,
         }

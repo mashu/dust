@@ -132,6 +132,12 @@ pub enum SessionPhase {
     AwaitingAnswer {
         index: usize,
     },
+    /// Put on hold while nobody can hear it — the page out of sight — until
+    /// it is resumed, with group `index` the one it goes on with. Nothing is
+    /// sent, nothing can be typed and no answer window runs meanwhile.
+    Paused {
+        index: usize,
+    },
     Finished,
     Aborted,
 }
@@ -175,6 +181,10 @@ pub struct Group {
     repeats: u32,
     /// Sends already finished for this group.
     plays_done: u32,
+    /// Its answer was complete when the session was paused. It stands as
+    /// it was timed, unless it is changed after the pause: keys either
+    /// side of a pause cannot be timed against one send.
+    paused_complete: bool,
 }
 
 impl Group {
@@ -192,6 +202,7 @@ impl Group {
             planned_wpm: None,
             repeats: 1,
             plays_done: 0,
+            paused_complete: false,
         }
     }
 
@@ -264,15 +275,30 @@ pub struct SessionView {
     /// The current group is being sent, or is between two of its sends.
     pub playing: bool,
     pub locked: bool,
-    /// Seconds left before the first group is sent, while the session
-    /// counts down to it.
+    /// Seconds left before the next group is sent, while the session counts
+    /// down to it.
     pub countdown: Option<u32>,
+    /// Which group a count down leads to.
+    pub countdown_to: CountdownTo,
+    /// The session is on hold until it is resumed.
+    pub paused: bool,
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
     pub repeat_done: u32,
     /// The speed the session chose for the current group, when it chooses
     /// one: adaptive speed does.
     pub speed: Option<ChosenSpeed>,
+}
+
+/// Which group a count down leads to, as the training screen says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CountdownTo {
+    /// The session's first group.
+    First,
+    /// A group not heard yet, after a pause between two groups.
+    Next,
+    /// A group heard in part before a pause, sent again.
+    Again,
 }
 
 /// The speed the session chose for a group, as the training screen shows it.
@@ -292,6 +318,9 @@ pub struct GroupSession {
     groups: Vec<Group>,
     current_group: usize,
     focused_group: usize,
+    /// The group a count down leads to: the first, or the one a paused
+    /// session goes on with.
+    countdown_to: usize,
     settings: TrainingSettings,
 }
 
@@ -307,6 +336,7 @@ impl GroupSession {
             groups: vec![Group::blank(); num_groups.max(1)],
             current_group: 0,
             focused_group: 0,
+            countdown_to: 0,
             settings,
         }
     }
@@ -346,7 +376,12 @@ impl GroupSession {
     /// sent at all.
     pub fn input_locked(&self, index: usize) -> bool {
         let sending = self.settings.playback.lock_input_during_group_playback && self.playing();
-        (sending || self.countdown().is_some()) && index == self.current_group
+        (sending || self.countdown().is_some() || self.paused()) && index == self.current_group
+    }
+
+    /// Whether the session is on hold until it is resumed.
+    pub fn paused(&self) -> bool {
+        matches!(self.phase, SessionPhase::Paused { .. })
     }
 
     /// Seconds left before the first group, while the session counts down.
@@ -375,6 +410,8 @@ impl GroupSession {
             playing: self.playing(),
             locked: self.input_locked(self.current_group),
             countdown: self.countdown(),
+            countdown_to: self.countdown_to(),
+            paused: self.paused(),
             repeat_total: current.map_or(1, |g| g.repeats.max(1)),
             repeat_done: current.map_or(0, |g| g.plays_done),
             speed: self.chosen_speed(self.current_group),
@@ -463,6 +500,50 @@ impl GroupSession {
         self.groups.get(index)?.planned_wpm
     }
 
+    /// A count down now leads to group `index`.
+    pub(crate) fn set_countdown_to(&mut self, index: usize) {
+        self.countdown_to = index;
+    }
+
+    /// Which group the count down leads to: one heard in part before a pause
+    /// is sent again.
+    fn countdown_to(&self) -> CountdownTo {
+        match self.groups.get(self.countdown_to) {
+            Some(group) if group.sounding.is_some() => CountdownTo::Again,
+            _ if self.countdown_to == 0 => CountdownTo::First,
+            _ => CountdownTo::Next,
+        }
+    }
+
+    /// Group `index` was paused for `ms` with its answer open: the answer
+    /// is timed from the group's end as if the pause had not been, and keys
+    /// typed either side of the pause cannot be timed against its
+    /// characters. An answer already complete when it paused is timed as it
+    /// stands.
+    pub(crate) fn note_paused(&mut self, index: usize, ms: u64) {
+        let Some(group) = self.groups.get_mut(index) else {
+            return;
+        };
+        if group.confirmed() {
+            return;
+        }
+        group.end_at = group.end_at.map(|end| end.plus(ms));
+        match &mut group.answer_at {
+            // Complete already: moved on with the end, so it stands as
+            // timed, and an answer corrected after the pause is timed from
+            // the end of the send less the pause, as one not complete is.
+            Some(answer) => {
+                *answer = answer.plus(ms);
+                group.paused_complete = true;
+            }
+            None => {
+                if let Some(sounding) = &mut group.sounding {
+                    sounding.trusted = false;
+                }
+            }
+        }
+    }
+
     pub(crate) fn begin_group(&mut self, index: usize, now: MonoMs) {
         let Some(group) = self.groups.get_mut(index) else {
             return;
@@ -541,7 +622,14 @@ impl GroupSession {
         if let Some(group) = self.groups.get_mut(index)
             && !group.confirmed()
         {
-            group.input = normalize_answer(&group.sent, typed);
+            let input = normalize_answer(&group.sent, typed);
+            if group.paused_complete
+                && input != group.input
+                && let Some(sounding) = &mut group.sounding
+            {
+                sounding.trusted = false;
+            }
+            group.input = input;
             let length = group.input.chars().count();
             group.keys = keys.fitted(length);
         }

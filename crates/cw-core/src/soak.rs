@@ -351,7 +351,7 @@ fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -
     let text: String = (0..rng.usize_in(0, 12))
         .map(|_| KEYS[rng.usize_in(0, KEYS.len() - 1)])
         .collect();
-    match rng.usize_in(0, 8) {
+    match rng.usize_in(0, 10) {
         0 if rng.f64() < 0.2 => SessionEvent::PlaybackHeldUp { index },
         0 => SessionEvent::PlaybackEnded {
             index,
@@ -379,6 +379,9 @@ fn random_event(rng: &mut SplitMix64, now: u64, groups: usize, timers: &[u64]) -
             index,
             start: random_start(rng, now),
         },
+        // The page going out of sight and coming back, at any moment.
+        8 => SessionEvent::Pause,
+        9 => SessionEvent::Resume,
         _ => SessionEvent::Abort,
     }
 }
@@ -445,6 +448,8 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
         // Where the current group's characters were last said to end, for
         // keys that follow them.
         let mut ends: Vec<MonoMs> = Vec::new();
+        // A session resumed from a pause counts down mid-session.
+        let mut resumed = false;
         for step in 0..200 {
             check_effects(&effects, groups, seed, step);
             timers.extend(effects.iter().filter_map(|effect| match effect {
@@ -466,7 +471,28 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 }
             }
             let answered = machine.session().any_confirmed();
+            let was_paused = matches!(machine.phase(), SessionPhase::Paused { .. });
             effects = machine.apply(event.clone(), MonoMs(now));
+            resumed |= was_paused && event == SessionEvent::Resume;
+            // A pause lets the audio go and starts nothing; once paused,
+            // nothing but Resume, End session or Discard does anything.
+            if event == SessionEvent::Pause && !was_paused && !was_terminal {
+                assert!(
+                    effects.is_empty() || effects == [SessionEffect::ReleaseAudio],
+                    "seed {seed} step {step}: a pause did {effects:?}"
+                );
+            }
+            if was_paused
+                && !matches!(
+                    event,
+                    SessionEvent::Resume | SessionEvent::FinishNow | SessionEvent::Abort
+                )
+            {
+                assert!(
+                    effects.is_empty(),
+                    "seed {seed} step {step}: {event:?} moved a paused session: {effects:?}"
+                );
+            }
             if was_terminal {
                 assert!(
                     effects.is_empty(),
@@ -514,8 +540,22 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
             }
             if let SessionPhase::Countdown { remaining } = machine.phase() {
                 assert!(
-                    remaining >= 1 && !machine.session().any_confirmed(),
+                    remaining >= 1 && (resumed || !machine.session().any_confirmed()),
                     "seed {seed} step {step}: counting down from {remaining} mid-session"
+                );
+            }
+            if let SessionPhase::Paused { index } = machine.phase() {
+                assert!(
+                    index < groups
+                        && machine
+                            .session()
+                            .group(index)
+                            .is_some_and(|g| !g.confirmed() && !g.sent().is_empty()),
+                    "seed {seed} step {step}: paused on group {index}, which is answered or empty"
+                );
+                assert!(
+                    machine.session().view().locked,
+                    "seed {seed} step {step}: typing into a paused session"
                 );
             }
             if let SessionPhase::InterGroupGap { next } = machine.phase() {
@@ -778,6 +818,7 @@ fn check_effects(effects: &[SessionEffect], groups: usize, seed: u64, step: usiz
                 assert!(*ms > 0, "seed {seed} step {step}: a zero-length timer");
             }
             SessionEffect::StopAudio
+            | SessionEffect::ReleaseAudio
             | SessionEffect::PersistAndShowResults
             | SessionEffect::AbortToHome => {}
         }

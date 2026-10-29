@@ -257,7 +257,12 @@ impl Charset {
             window: current_practice_window(settings),
             pool: compute_char_pool(settings),
             tier_examples,
-            words: settings.words().into_iter().map(str::to_string).collect(),
+            // Only Words shows them, and every settings write comes here.
+            words: if c.char_set_mode == CharSetMode::Words {
+                settings.words().into_iter().map(str::to_string).collect()
+            } else {
+                Vec::new()
+            },
             own_words: settings.has_own_words(),
         }
     }
@@ -428,7 +433,7 @@ pub fn CharsetCard(
                     // A few of endless calls, not the lot.
                     span { class: "muted", aria_label: "and more", "…" }
                 }
-                p { class: "muted", style: "margin: 0;",
+                p { class: "muted hint",
                     "Every tier keeps what the ones below it send, so moving up only adds. Prefixes are real allocations, weighted the way you hear them."
                 }
             } else if !callsigns {
@@ -495,14 +500,14 @@ fn ContestBody(
         }
         // What you copy keeps to one piece, after the dot where a narrow
         // line breaks.
-        p { class: "muted", style: "margin: 0;",
+        p { class: "muted hint",
             "You send {contest.sends}\u{a0}· You\u{a0}copy\u{a0}{contest.copies}"
         }
         if let Some(side_note) = &contest.side_note {
-            p { id: "side-line", class: "muted", style: "margin: 0;", "{side_note}" }
+            p { id: "side-line", class: "muted hint", "{side_note}" }
         }
         if let Some(simplified) = contest.simplified {
-            p { class: "muted", style: "margin: 0;", "{simplified}" }
+            p { class: "muted hint", "{simplified}" }
         }
         QsoHead { label: eyebrow,
             if hearing {
@@ -556,7 +561,7 @@ fn PresetPicker(settings: Signal<TrainingSettings>, preset: Option<ContestPreset
                 }
             }
         }
-        p { id: "preset-line", class: "muted", style: "margin: 0;", "{line}" }
+        p { id: "preset-line", class: "muted hint", "{line}" }
     }
 }
 
@@ -581,7 +586,7 @@ fn RunStylePicker(settings: Signal<TrainingSettings>, style: RunStyle, callers: 
                 }
             }
         }
-        p { id: "run-style-line", class: "muted", style: "margin: 0;", "{line}" }
+        p { id: "run-style-line", class: "muted hint", "{line}" }
     }
 }
 
@@ -610,7 +615,7 @@ fn TuCallPicker(settings: Signal<TrainingSettings>, tu_call: TuCall) -> Element 
                 }
             }
         }
-        p { id: "tu-call-line", class: "muted", style: "margin: 0;", "{line}" }
+        p { id: "tu-call-line", class: "muted hint", "{line}" }
     }
 }
 
@@ -765,7 +770,7 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
         }
         WordCount { draft, report, count: words.len(), own }
         if !own {
-            p { class: "muted", style: "margin: 0;",
+            p { class: "muted hint",
                 "Until you add your own, Words sends a starter list of the abbreviations and Q-codes a contact is made of."
             }
             // How many words is the summary; the list itself is there to

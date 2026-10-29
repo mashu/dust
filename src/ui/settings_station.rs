@@ -835,7 +835,7 @@ pub fn StationCard(settings: Signal<TrainingSettings>) -> Element {
                 zone_by: s.zone_by,
                 unset: s.missing.clone(),
             }
-            p { class: "muted", style: "margin: 0;",
+            p { class: "muted hint",
                 "No licence yet? Make up a call from your country's prefix, a digit and two or three letters. Stored on this device only."
             }
             if let Some(name) = s.my_name.clone() {
