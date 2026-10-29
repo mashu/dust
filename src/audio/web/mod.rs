@@ -109,7 +109,7 @@ impl PlaybackSignal for WebSignal {
             // Its clock says how far behind the app's it fell, but not
             // whether the stream kept up with that clock: one that fell
             // behind it skipped some of the send, which went unheard.
-            late: self.watch.missed(),
+            late: self.watch.missed().is_some(),
         }
     }
 }
