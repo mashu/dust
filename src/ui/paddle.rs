@@ -728,7 +728,7 @@ pub fn PaddlePad(mode: KeyerMode) -> Element {
             id: control_id("paddle", "practice"),
             class: "paddle-practice",
             tabindex: "0",
-            p { class: "muted", style: "margin: 0; font-size: 0.8rem;",
+            p { class: "muted hint small",
                 "{hint} The sidetone plays here, not only in training."
             }
             p {

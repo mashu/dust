@@ -703,13 +703,15 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
     // Contest's segment is the one chosen, and no alphabet's.
     for (mode, label) in crate::ui::settings_charset::CHAR_SET_MODES {
         let id = crate::ui::widgets::control_id("seg", label);
-        let class = if mode == CharSetMode::Contest {
-            "seg active"
+        let (class, pressed) = if mode == CharSetMode::Contest {
+            ("seg active", true)
         } else {
-            "seg"
+            ("seg", false)
         };
         assert!(
-            html.contains(&format!(r#"id="{id}" class="{class}">"#)),
+            html.contains(&format!(
+                r#"id="{id}" class="{class}" aria-pressed="{pressed}">"#
+            )),
             "{id} {html}"
         );
     }
@@ -1014,7 +1016,7 @@ fn arrl_dx_says_your_side_and_asks_for_what_it_sends() {
         "Contest · ARRL DX",
         r#"id="contest-arrl-dx" class="pill active""#,
         "You send 5NN + power\u{a0}· You\u{a0}copy\u{a0}ST",
-        r#"id="side-line" class="muted" style="margin: 0;">You are DX: you work US and Canada only<"#,
+        r#"id="side-line" class="muted hint">You are DX: you work US and Canada only<"#,
         "Simplified: one band, so a station and a multiplier each count once.",
         ">W7XYZ 5NN 1TT<",
         ">TU 5NN OR<",
@@ -3424,6 +3426,38 @@ mod interactions {
             }
         }
         assert!(ui.has("Band conditions"));
+    }
+
+    /// A screen reader hears what the eye sees: which segment is chosen, a
+    /// slider's value as it is shown, and a switch named by its title, its
+    /// description describing it.
+    #[test]
+    fn the_band_card_says_what_it_shows() {
+        let ui = Ui::new(BandHarness, BandHarnessProps { previewing: false });
+        assert!(
+            ui.input_tag("seg-filter-sharp")
+                .contains(r#"aria-pressed="true""#)
+        );
+        assert!(
+            ui.input_tag("seg-filter-soft")
+                .contains(r#"aria-pressed="false""#)
+        );
+        assert!(
+            ui.input_tag("slider-filter-width")
+                .contains(r#"aria-valuetext="300 Hz""#),
+            "{}",
+            ui.input_tag("slider-filter-width")
+        );
+        let switch = ui.input_tag("switch-qsb-fading");
+        assert!(
+            switch.contains(r#"aria-labelledby="switch-qsb-fading-title""#),
+            "{switch}"
+        );
+        assert!(
+            switch.contains(r#"aria-describedby="switch-qsb-fading-desc""#),
+            "{switch}"
+        );
+        assert!(ui.shows("switch-qsb-fading-title") && ui.shows("switch-qsb-fading-desc"));
     }
 
     #[test]

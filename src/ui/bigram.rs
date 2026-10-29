@@ -186,7 +186,7 @@ pub fn hardest_pairs_card(heat: &BigramHeatmap) -> Element {
                 help: help::hardest_pairs(),
             }
             if heat.hardest.is_empty() {
-                p { class: "muted", style: "margin: 0;",
+                p { class: "muted hint",
                     "None stands out yet. A pair is listed once it has been heard {HARD_PAIR_MIN_TRIES} times, missed more than once, and goes wrong more often than its second character does overall."
                 }
             } else {
@@ -297,7 +297,7 @@ pub fn BigramCard(heat: ReadSignal<BigramHeatmap>) -> Element {
                     }
                 }
             }
-            p { class: "muted", style: "margin: 0;",
+            p { class: "muted hint",
                 "Rows are the character before ({GROUP_START_BIGRAM_TOKEN} = start of group), columns the one after. Darker means more errors; an empty square is a pair not heard yet."
             }
             PairGrid {

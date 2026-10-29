@@ -558,7 +558,7 @@ pub fn Home(
                         title: "First contest",
                         note: format!("{} · {}", level.summary, hero.who_calls),
                     }
-                    p { class: "muted", style: "margin: 0;",
+                    p { class: "muted hint",
                         {hero.asks.map_or("Press Start contest; Enter sends what the QSO needs next.", StationAsk::first_step)}
                     }
                 }
@@ -569,7 +569,7 @@ pub fn Home(
                         title: "First session",
                         note: format!("{pool_len} characters are in the pool right now."),
                     }
-                    p { class: "muted", style: "margin: 0;",
+                    p { class: "muted hint",
                         if words {
                             "Type the word you hear — the trainer scores every character of it."
                         } else {

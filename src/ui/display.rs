@@ -371,7 +371,7 @@ pub fn DisplayCard() -> Element {
                 fold: open,
             }
             FoldPanel { title: "Display", open,
-                p { id: "display-drawn", class: "muted", style: "margin: 0;",
+                p { id: "display-drawn", class: "muted hint",
                     if let Some(looked) = looked() {
                         "{drawn_text(&looked)}"
                     } else if looking() {

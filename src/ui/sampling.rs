@@ -281,7 +281,7 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
                 }
             }
             if drawn.is_empty() && unheard.is_empty() {
-                p { class: "muted", style: "margin: 0;", "Pool is empty." }
+                p { class: "muted hint", "Pool is empty." }
             } else {
                 div { class: "err-summary",
                     if !to_work_on.is_empty() {
@@ -333,7 +333,7 @@ pub fn NextUpCard(settings: TrainingSettings, sessions: Vec<SessionResult>) -> E
             }
             if !others.is_empty() {
                 div { class: "tiny", style: "margin-top: 0.6rem;", "Not in the current set" }
-                p { class: "muted", style: "margin: 0;",
+                p { class: "muted hint",
                     "Practised before, and not drawn now. What you learned of them is kept, and counts again when they come back."
                 }
                 div { class: "stat-rows", role: "list",

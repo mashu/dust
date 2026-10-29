@@ -172,7 +172,7 @@ pub fn group_length_card(settings: &TrainingSettings, sessions: &[SessionResult]
                 {summary_row("Across your range".to_string(), across)}
             }
             {legend(aim)}
-            p { class: "muted", style: "margin: 0;", "{note}" }
+            p { class: "muted hint", "{note}" }
             div { class: "stat-rows", role: "list",
                 for row in rows.iter() {
                     {
@@ -274,7 +274,7 @@ pub fn speed_card(settings: &TrainingSettings, sessions: &[SessionResult]) -> El
                 {summary_row("Across your range".to_string(), across)}
             }
             {legend(aim)}
-            p { class: "muted", style: "margin: 0;", "{note}" }
+            p { class: "muted hint", "{note}" }
             div { class: "stat-rows", role: "list",
                 for row in rows.iter() {
                     {

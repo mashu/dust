@@ -76,6 +76,9 @@ fn HomeRoute() -> Element {
         let mut settings = ctx.settings;
         settings.write().contest.set_my_section(&typed);
     });
+    // Read from the store, a file on desktop and phones: once for each
+    // move of the settings, not on every redraw of the screen.
+    let progress = use_memo(move || auto_progress(&*ctx.app().store, &ctx.settings.read()));
     let settings = ctx.settings.read();
     // Every session counts, whatever character set it was recorded with.
     let sessions = ctx.sessions.read();
@@ -87,7 +90,7 @@ fn HomeRoute() -> Element {
             pool: compute_char_pool(&settings).into_iter().collect::<String>(),
             sessions: sessions.clone(),
             today: local_date_string(),
-            auto_progress: auto_progress(&*ctx.app().store, &settings),
+            auto_progress: progress(),
             on_start,
             on_listen,
             on_call,

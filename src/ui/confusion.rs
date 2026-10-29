@@ -90,7 +90,7 @@ pub fn confusions_card(rows: &[ConfusionEntry]) -> Element {
                 help: help::confusions(),
             }
             if rows.is_empty() {
-                p { class: "muted", style: "margin: 0;", "No substitution errors yet." }
+                p { class: "muted hint", "No substitution errors yet." }
             }
             div { class: "confusions",
                 for row in full.iter() {

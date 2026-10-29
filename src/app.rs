@@ -139,6 +139,20 @@ pub fn App() -> Element {
         }
     });
 
+    // The page behind the app takes the theme too: index.html paints the
+    // saved one on <html> before the first frame, and its dark background
+    // would otherwise outlive a switch to light, showing on overscroll.
+    #[cfg(all(feature = "web", not(test)))]
+    use_effect(move || {
+        let script = format!(
+            r#"document.documentElement.setAttribute("data-theme", "{}");"#,
+            theme().key()
+        );
+        spawn(async move {
+            let _ = document::eval(&script).await;
+        });
+    });
+
     let screen_now = screen();
     let show_nav = screen_now != Screen::Training;
     let shell_class = if show_nav { "shell has-nav" } else { "shell" };

@@ -643,6 +643,9 @@ pub fn Seg(
         button {
             id: id.unwrap_or_else(|| control_id(kind, &label)),
             class,
+            // Which one is chosen, said to a screen reader as the look says
+            // it to the eye.
+            aria_pressed: if active { "true" } else { "false" },
             onclick: move |_| onclick.call(()),
             "{label}"
         }
@@ -656,19 +659,26 @@ pub fn Switch(
     checked: bool,
     onchange: EventHandler<bool>,
 ) -> Element {
+    let id = control_id("switch", &title);
+    // Named by its title alone, and described by the rest: the whole label
+    // read out as its name was a sentence or two for every switch.
+    let (title_id, desc_id) = (format!("{id}-title"), format!("{id}-desc"));
+    let described = description.is_some().then(|| desc_id.clone());
     rsx! {
         label { class: "switch-row",
             div { class: "switch-copy",
-                div { class: "switch-title", "{title}" }
+                div { id: "{title_id}", class: "switch-title", "{title}" }
                 if let Some(text) = description {
-                    p { class: "switch-desc", "{text}" }
+                    p { id: "{desc_id}", class: "switch-desc", "{text}" }
                 }
             }
             span { class: if checked { "switch on" } else { "switch" },
                 input {
-                    id: control_id("switch", &title),
+                    id,
                     r#type: "checkbox",
                     checked,
+                    aria_labelledby: title_id,
+                    aria_describedby: described,
                     onchange: move |e| onchange.call(e.checked()),
                 }
                 i {}
@@ -720,6 +730,9 @@ pub fn SliderField(
                         id: name.clone(),
                         r#type: "range",
                         aria_label: "{label}",
+                        // Read as it is shown — "every ~8 s", "S/N 38 dB" —
+                        // rather than as the number the track runs on.
+                        aria_valuetext: "{value_label}",
                         min: "{min}",
                         max: "{max}",
                         step: "{step}",
@@ -944,7 +957,7 @@ pub fn LinkedRange(
                 }
             }
             if let Some(hint) = hint {
-                p { class: "muted", style: "margin: 0; font-size: 0.8rem;", "{hint}" }
+                p { class: "muted hint small", "{hint}" }
             }
         }
     }

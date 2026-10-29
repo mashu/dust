@@ -214,6 +214,7 @@ pub fn HistoryTab(
                             if selecting_now {
                                 rsx! {
                                     button {
+                                        key: "{row.timestamp}",
                                         id: control_id("history-pick", &key),
                                         class: if is_chosen { "history-item selectable chosen" } else { "history-item selectable" },
                                         role: "checkbox",
@@ -231,7 +232,7 @@ pub fn HistoryTab(
                                 }
                             } else {
                                 rsx! {
-                                    div { class: "history-item",
+                                    div { key: "{row.timestamp}", class: "history-item",
                                         // Named by what it shows, as every
                                         // other row is read.
                                         if opens(row) {
