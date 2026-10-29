@@ -965,6 +965,9 @@ struct Air {
     my_chars: Vec<(usize, f64)>,
     /// Its callers' segments, in order, and what each says.
     replies: Vec<(Replying, Says)>,
+    /// How many of `replies`, the first, go on from a turn keyed over:
+    /// what they send began to go out there.
+    carried: usize,
     /// What each of its segments sends, the whole of it, by its place among
     /// them: a rest carried on from an earlier turn is the rest of this,
     /// what Show copy shows once it ends.
@@ -2719,6 +2722,7 @@ impl<S: CallSource> ContestMachine<S> {
         // their start charged already, and send nothing more till they are
         // done.
         let mut busy = Vec::new();
+        let carried = mine.callers.len();
         for over in mine.callers {
             let station = over.reply.station;
             let caller = &self.stations[station].caller;
@@ -2855,6 +2859,7 @@ impl<S: CallSource> ContestMachine<S> {
             my_chars,
             counted,
             replies,
+            carried,
             texts,
             pending: mine.pending,
             checks_at_sec,
@@ -3030,6 +3035,12 @@ impl<S: CallSource> ContestMachine<S> {
         let at = splice.map_or(run_now, |splice| splice.run);
         self.count_heard(&mut air, Some(at), at, effects);
         self.give_way(at);
+        // A reply yet to begin goes no further: nothing in it was sent.
+        for ((reply, says), counted) in air.replies.iter().zip(&air.counted) {
+            if *counted == Counted::Nothing {
+                self.stations[reply.station].caller.unsent(*says);
+            }
+        }
         let heard_run = air.heard_run();
         let callers = if self.style == RunStyle::Pileup {
             self.overlapping(&air, at)
@@ -4381,6 +4392,11 @@ impl<S: CallSource> ContestMachine<S> {
                 }
             });
         self.cut_short.extend(again);
+        // Nor did anything it planned go out; a send carried on from a turn
+        // keyed over began there.
+        for (reply, says) in air.replies.iter().skip(air.carried) {
+            self.stations[reply.station].caller.unsent(*says);
+        }
         let mut effects = Vec::new();
         // Nothing of a send that failed was heard; the QSOs it logged stand.
         self.resolve(&air.pending, &mut effects);
@@ -12413,6 +12429,48 @@ mod tests {
         let (result, _) = result(&runtime);
         assert_eq!(kept(&result)[1], (nr.as_str(), nr.as_str(), 1));
         assert_eq!(result.group_timings[1].time_to_complete_ms, 800.0);
+    }
+
+    /// An exchange counts as sent once it is on its way: one a pause cut
+    /// before it began, or one lost with a failed sound, comes again after
+    /// Resume with a word in front, as it would have gone out.
+    #[test]
+    fn an_exchange_that_never_went_out_keeps_its_lead_word() {
+        let led = |runtime: &Runtime<ScriptCalls>, text: &str| {
+            let first = text.split_whitespace().next().unwrap_or_default();
+            runtime.machine.rules.their_lead.contains(&first)
+        };
+        // Paused before it began.
+        let mut paused = runtime(&["K5XYZ"]);
+        paused.finish_turn();
+        paused.key(OpKey::Esm, "K5XYZ", "");
+        let planned = replies(paused.last_turn())[0].to_string();
+        assert!(led(&paused, &planned), "{planned}");
+        paused.run_to(paused.now + 100);
+        paused.apply(ContestEvent::Pause {
+            why: PauseWhy::You,
+            at: MonoMs(paused.now),
+        });
+        paused.now += 3_000;
+        paused.apply(ContestEvent::Resume);
+        let again = next_turn(&mut paused);
+        assert!(led(&paused, replies(&again)[0]), "{:?}", replies(&again));
+
+        // Heard whole, then the sound failed.
+        let mut failed = runtime(&["K5XYZ"]);
+        failed.finish_turn();
+        failed.key(OpKey::Esm, "K5XYZ", "");
+        let turn = failed.last_turn().clone();
+        failed.sound_fails(turn.id);
+        let end = failed.now + whole_ms(sent_by(&turn, 0)[0].end_sec);
+        failed.run_to(end);
+        assert_eq!(failed.machine.stations[0].heard.exch_ends.len(), 1);
+        failed.now = end + 100;
+        failed.apply(ContestEvent::TurnFailed { id: turn.id });
+        failed.now += 3_000;
+        failed.apply(ContestEvent::Resume);
+        let again = next_turn(&mut failed);
+        assert!(led(&failed, replies(&again)[0]), "{:?}", replies(&again));
     }
 
     /// With Show copy, what you copy may be read off the screen: nothing of
