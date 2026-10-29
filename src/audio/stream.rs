@@ -14,8 +14,15 @@
 //! the receiver's filter and AGC, the mute while you send, the fades and the
 //! fading are then the native player's own, not an imitation of them in
 //! nodes.
+//!
+//! A stream that falls behind the clock — a page busy for a while — skips
+//! what it should have played meanwhile, and a send whose sound it skipped
+//! is told so ([`ReceiverStream::watch`]): its own clock ran on regardless,
+//! and would say it was heard.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::rc::{Rc, Weak};
 
 use super::mixer::{Mixer, Swept};
 
@@ -26,7 +33,8 @@ pub const STRETCH_SEC: f64 = 0.1;
 /// The most of a stall the mixer is run on over unheard, to keep its time
 /// with the clock's ([`ReceiverStream::catch_up_to`]): the length of a
 /// send or so, which the page makes up in a few tens of milliseconds even
-/// in a browser on a phone. A longer stall is skipped beyond it.
+/// in a browser on a phone. A longer stall is not made up at all: the
+/// sends in flight are dropped rather than played that much late.
 const CATCH_UP_MOST_SEC: f64 = 2.0;
 
 /// The mixer, run ahead of a clock: what it has rendered, still to play,
@@ -47,6 +55,29 @@ pub struct ReceiverStream<N> {
     /// Nothing to play: the mixer is quiet and its last stretch was
     /// silence, so none is rendered until something changes.
     idle: bool,
+    /// The sends whose sound is watched for being skipped, while anything
+    /// still listens for it.
+    watched: Vec<Watched>,
+}
+
+/// A send's sound, from the sample it starts at to the one it ends at, and
+/// where to say that the stream skipped some of it.
+struct Watched {
+    starts: u64,
+    ends: u64,
+    missed: Weak<Cell<bool>>,
+}
+
+/// A send's word that the stream skipped some of its sound, falling behind
+/// the clock while it played or waited to ([`ReceiverStream::watch`]).
+#[derive(Clone, Debug, Default)]
+pub struct Missed(Rc<Cell<bool>>);
+
+impl Missed {
+    /// Whether some of the send's sound was skipped.
+    pub fn is_set(&self) -> bool {
+        self.0.get()
+    }
 }
 
 /// A stretch handed over, from sample `starts` to `ends`, and the mixer as
@@ -81,6 +112,7 @@ impl<N: Clone> ReceiverStream<N> {
             next: 0,
             queued: VecDeque::new(),
             idle: false,
+            watched: Vec::new(),
         }
     }
 
@@ -184,27 +216,66 @@ impl<N: Clone> ReceiverStream<N> {
         self.catch_up(self.sample_at(soonest));
     }
 
+    /// Watch a send's sound, from `starts` to `ends` on the clock, for the
+    /// stream skipping any of it from now on ([`Self::catch_up`]).
+    pub fn watch(&mut self, starts: f64, ends: f64) -> Missed {
+        let missed = Missed::default();
+        self.watched
+            .retain(|watched| watched.missed.strong_count() > 0);
+        self.watched.push(Watched {
+            starts: self.sample_at(starts),
+            ends: self.sample_at(ends),
+            missed: Rc::downgrade(&missed.0),
+        });
+        missed
+    }
+
     /// Fallen behind `soonest` — a long task, a hidden page — the stream
     /// picks up from there rather than playing into the past all at once.
     /// What should have played meanwhile is lost, but the mixer is run on
     /// over it unheard, so everything after it plays when it was meant to,
-    /// and a send's own clock still says when it is heard. A stall longer
-    /// than [`CATCH_UP_MOST_SEC`] is skipped over beyond that, rather than
-    /// stall the page again making it up.
+    /// and a send's own clock still says when it is heard; a send whose
+    /// sound was in it is told it went unheard. A stall longer than
+    /// [`CATCH_UP_MOST_SEC`] is not made up, rather than stall the page
+    /// again making it up: the sends in flight, which would play on that
+    /// much late, are dropped, and are told so whatever of them was still
+    /// to come; the band picks up where it was.
     fn catch_up(&mut self, soonest: u64) {
         if self.next >= soonest {
             return;
         }
         if !self.idle {
             let most = (CATCH_UP_MOST_SEC * self.sample_rate) as u64;
-            let mut left = (soonest - self.next).min(most) as usize;
-            while left > 0 {
-                let len = left.min(self.stretch);
-                self.render(len);
-                left -= len;
+            if soonest - self.next <= most {
+                let mut left = (soonest - self.next) as usize;
+                while left > 0 {
+                    let len = left.min(self.stretch);
+                    self.render(len);
+                    left -= len;
+                }
+                self.skipped(self.next, soonest);
+            } else {
+                let mut swept = Swept::new();
+                self.mixer.drop_sends(&mut swept);
+                drop(swept);
+                self.skipped(self.next, u64::MAX);
             }
         }
         self.next = soonest;
+    }
+
+    /// Nothing was heard from sample `from` to `until`: every send watched
+    /// whose sound falls in it is told so.
+    fn skipped(&mut self, from: u64, until: u64) {
+        self.watched.retain(|watched| {
+            let Some(missed) = watched.missed.upgrade() else {
+                return false;
+            };
+            if watched.starts < until && watched.ends > from {
+                missed.set(true);
+            }
+            true
+        });
     }
 
     /// Whether nothing is being rendered, there being nothing to hear.
@@ -244,7 +315,10 @@ mod tests {
     use crate::audio::mixer::{BandVoice, SendVoice};
     use crate::audio::shape::Gains;
     use cw_core::band::FilterDesign;
-    use cw_core::{SplitMix64, TrainingSettings, Transmission, plan_transmission, resolve_station};
+    use cw_core::{
+        PlannedTransmission, SplitMix64, TrainingSettings, Transmission, plan_transmission,
+        resolve_station,
+    };
 
     const SR: u32 = 16_000;
 
@@ -254,11 +328,14 @@ mod tests {
         settings
     }
 
-    fn send(settings: &TrainingSettings, text: &str, at_sec: f64) -> SendVoice {
+    fn plan(settings: &TrainingSettings, text: &str) -> PlannedTransmission {
         let voice = resolve_station(settings, &mut SplitMix64::new(5));
-        let plan = plan_transmission(&Transmission::alone(text, voice), settings);
+        plan_transmission(&Transmission::alone(text, voice), settings)
+    }
+
+    fn send(settings: &TrainingSettings, text: &str, at_sec: f64) -> SendVoice {
         let receiver = FilterDesign::from_settings(settings);
-        SendVoice::new(&plan, &receiver, None, SR, at_sec)
+        SendVoice::new(&plan(settings, text), &receiver, None, SR, at_sec)
     }
 
     fn mixer(settings: &TrainingSettings) -> Mixer {
@@ -349,8 +426,8 @@ mod tests {
     /// Caught up to the clock before anything is scheduled, as the browser
     /// does, a stream picks up from the clock as it stands after catching
     /// up, which has moved on meanwhile, and still plays there what the
-    /// mixer plays there; a stall longer than it catches up over is skipped
-    /// beyond that.
+    /// mixer plays there; the time it took catching up is skipped as the
+    /// stall before it was.
     #[test]
     fn a_stream_caught_up_first_plays_on_from_the_clock_after() {
         let settings = settings();
@@ -380,6 +457,135 @@ mod tests {
                 .all(|s| *s == 0.0),
             "the stall was played"
         );
+    }
+
+    /// The sample nearest `seconds` in.
+    fn at(seconds: f64) -> usize {
+        (seconds * f64::from(SR)).round() as usize
+    }
+
+    /// The furthest a waveform swings from nothing.
+    fn loudest(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0, |a, s| a.max(s.abs()))
+    }
+
+    /// A stall the stream makes up still loses what should have played in
+    /// it: a send whose sound was there is told it went unheard, though its
+    /// clock ran on and would say it was heard on time. One heard out before
+    /// the stall, and one that starts after it, are not.
+    #[test]
+    fn a_send_in_a_stall_is_told_it_went_unheard() {
+        let settings = settings();
+        let mut stream = ReceiverStream::new(mixer(&settings), 0.0);
+        let lookahead = stream.mixer().lookahead_sec();
+        let sound = plan(&settings, "TEST").sound_end_sec();
+        assert!(sound > 1.0, "TEST sounds across the stall: {sound}");
+        let test = stream.watch(lookahead, lookahead + sound);
+        let before = stream.watch(0.0, 0.25);
+        let after = stream.watch(1.6, 1.9);
+        let mut browser = Browser::default();
+        stream
+            .render_until(0.0, 0.3, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        assert!(!test.is_set(), "all of it heard so far");
+        stream.catch_up_to(1.5);
+        stream
+            .render_until(1.5, 2.0, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        assert!(test.is_set(), "a second of TEST went unheard");
+        assert!(!before.is_set(), "heard out before the stall");
+        assert!(!after.is_set(), "starts after the stall");
+    }
+
+    /// A stall longer than the stream makes up leaves nothing in flight to
+    /// play behind the clock. Run on over only part of the stall, a send
+    /// would play the rest of it that much late, for good, and its clock
+    /// would say it was over before its last element sounded; it is
+    /// dropped instead, and told it went unheard.
+    #[test]
+    fn a_long_stall_leaves_nothing_to_play_behind_the_clock() {
+        let settings = settings();
+        let mut alone = Mixer::new(SR);
+        let mut swept = Swept::new();
+        alone.start(send(&settings, "TEST TEST", 0.0), &mut swept);
+        drop(swept);
+        let mut stream = ReceiverStream::new(alone, 0.0);
+        let lookahead = stream.mixer().lookahead_sec();
+        let sound = plan(&settings, "TEST TEST").sound_end_sec();
+        assert!(sound > 2.5, "TEST TEST outlasts a stall made up: {sound}");
+        let test = stream.watch(lookahead, lookahead + sound);
+        let mut browser = Browser::default();
+        stream
+            .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        stream.catch_up_to(4.0);
+        assert!(test.is_set(), "TEST TEST went unheard from the stall on");
+        stream
+            .render_until(4.0, 6.0, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        let heard = browser.heard(at(6.0));
+        assert!(loudest(&heard[..at(0.5)]) > 0.1, "heard before the stall");
+        // The receiver's audio stage rings down for a moment from where
+        // it was.
+        let after = loudest(&heard[at(4.05)..]);
+        assert!(
+            after < 1e-6,
+            "TEST TEST played on behind the clock: {after}"
+        );
+        assert!(stream.is_idle(), "nothing left to play");
+    }
+
+    /// A send waiting through a long stall to start, a contest's
+    /// continuation, would start that much late as well: it is dropped
+    /// and told so. A send made after the stall plays when it was made
+    /// to, and is not told anything.
+    #[test]
+    fn a_long_stall_drops_a_send_waiting_through_it_and_not_one_made_after() {
+        let settings = settings();
+        let lookahead = Mixer::new(SR).lookahead_sec();
+        let dit = plan(&settings, "E").sound_end_sec();
+        let mut waiting = Mixer::new(SR);
+        let mut swept = Swept::new();
+        waiting.start_at(send(&settings, "E", 5.0), None, at(5.0), &mut swept);
+        let mut stream = ReceiverStream::new(waiting, 0.0);
+        let waited = stream.watch(5.0 + lookahead, 5.0 + lookahead + dit);
+        let mut browser = Browser::default();
+        stream
+            .render_until(0.0, 0.5, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        stream.catch_up_to(4.0);
+        assert!(waited.is_set(), "it would have started late");
+        stream
+            .render_until(4.0, 8.0, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        let heard = browser.heard(at(8.0));
+        let late = loudest(&heard[at(4.0)..]);
+        assert!(late == 0.0, "the dit played behind the clock: {late}");
+
+        let (made, _) = stream.change_at(8.0, |mixer, swept| {
+            mixer.start(send(&settings, "E", 8.0), swept);
+        });
+        assert_eq!(made, 8.0);
+        let fresh = stream.watch(made + lookahead, made + lookahead + dit);
+        stream
+            .render_until(8.0, 9.0, |starts, samples| browser.play(starts, samples))
+            .expect("played");
+        assert!(!fresh.is_set(), "made after the stall");
+        let heard = browser.heard(at(9.0));
+        // A stretch at a time, as the stream renders it, so it settles
+        // to silence where the stream does.
+        let mut straight = Mixer::new(SR);
+        straight.start(send(&settings, "E", 8.0), &mut swept);
+        let mut expected = vec![0.0f32; at(1.0)];
+        for stretch in expected.chunks_mut(at(STRETCH_SEC)) {
+            straight.render(stretch, 0);
+        }
+        assert!(loudest(&expected) > 0.1, "the dit sounds");
+        let first_off = heard[at(8.0)..]
+            .iter()
+            .zip(&expected)
+            .position(|(a, b)| a != b);
+        assert_eq!(first_off, None, "the dit made after the stall, on time");
     }
 
     /// A change made mid-stretch, the queue a good way ahead of it, plays
