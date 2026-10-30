@@ -329,7 +329,7 @@ pub fn board(ranking: Ranking) -> Element {
             }
             dt { "Contest runs" }
             dd {
-                "Under Contest, each contest has a board of its own, ranked by its own measure: the verified score, of what was logged clean, among runs set to the same length; or the QSOs logged clean an hour, fair between lengths. A run goes on once it ran {runs} minutes or more and logged a QSO clean."
+                "Under Contest, each contest has a board of its own, ranked by its own measure: the verified score, of what was logged clean, among runs set to the same length; or the QSOs logged clean an hour, fair between lengths. A run goes on once it ran {runs} minutes or more and logged a QSO clean. Its QSOs are every one it logged, as History counts them: a NIL, one not in the station's log, is among them and is never clean."
             }
             dt { "Assisted" }
             dd { "A run with Show copy on: listed greyed, never placed, and kept out of the record and the form." }

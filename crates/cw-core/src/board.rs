@@ -82,7 +82,9 @@ pub struct BoardEntry {
     pub mode: CharSetMode,
     /// The contest a run was of, when this build knows it.
     pub contest: Option<ContestKind>,
-    /// The QSOs a run logged, and those logged clean, where its log reads.
+    /// The QSOs a run logged, NILs among them, and those logged clean,
+    /// where its log reads: as History and the run's results count them
+    /// ([`crate::RunSummary`]).
     pub qsos: Option<usize>,
     pub clean: Option<usize>,
     /// The length a run was set to, in seconds, where its log reads.
@@ -261,6 +263,7 @@ pub fn score_board(sessions: &[SessionResult], of: BoardOf, ranking: Ranking) ->
 /// Session `index`, `session`, on the board at `place`, ranked by `rating`.
 fn entry(place: usize, index: usize, session: &SessionResult, rating: f64) -> BoardEntry {
     let run = session.contest_run();
+    let summary = run.as_ref().and_then(|run| run.summary(&session.groups));
     BoardEntry {
         place,
         index,
@@ -274,10 +277,8 @@ fn entry(place: usize, index: usize, session: &SessionResult, rating: f64) -> Bo
         groups: session.groups.len(),
         mode: session.char_set_mode,
         contest: session.contest_kind(),
-        qsos: run
-            .as_ref()
-            .map(|run| run.qsos.iter().filter(|qso| qso.k.is_empty()).count()),
-        clean: run.as_ref().and_then(|run| run.clean_qsos(&session.groups)),
+        qsos: summary.as_ref().map(|summary| summary.qsos),
+        clean: summary.as_ref().map(|summary| summary.clean),
         limit_s: run.as_ref().map(|run| run.limit_s),
     }
 }
@@ -1096,6 +1097,40 @@ mod tests {
         assert_eq!(
             board_modes(&[short, koch(4, 50.0)]),
             [CharSetMode::Koch, CharSetMode::Contest]
+        );
+    }
+
+    /// A run's row counts its QSOs as History and its results do: every one
+    /// logged, a NIL among them — a QSO logged that the station has no
+    /// record of — and of those, the ones logged clean, which a NIL never is.
+    #[test]
+    fn a_rows_qsos_count_a_nil_as_history_does() {
+        use crate::contest::bot::script::Habit;
+        let mut run = worked_run(3, 5, Habit::Perfect, false, 1);
+        let summary = |run: &SessionResult| {
+            run.contest_run()
+                .and_then(|log| log.summary(&run.groups))
+                .expect("a log that reads")
+        };
+        let before = summary(&run);
+        let log = run.contest.as_mut().expect("a log");
+        let qsos = log.0["qsos"].as_array_mut().expect("its QSOs");
+        let at = qsos.last().and_then(|qso| qso["t"].as_u64()).unwrap_or(0);
+        qsos.push(serde_json::json!({
+            "t": at + 1, "h": at, "g": 1, "nr": qsos.len() + 1, "k": "nil", "l": ["12"],
+        }));
+        run.groups.push(GroupResult {
+            sent: "W1AW".into(),
+            received: "W1AQ".into(),
+            correct: false,
+        });
+        run.group_timings.push(SessionTiming::default());
+        let after = summary(&run);
+        assert_eq!((after.qsos, after.clean), (before.qsos + 1, before.clean));
+        let board = score_board(&[run], BoardOf::All, Ranking::PerGroup);
+        assert_eq!(
+            (board[0].qsos, board[0].clean),
+            (Some(after.qsos), Some(after.clean))
         );
     }
 
