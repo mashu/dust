@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::check::{QsoCheck, QsoError, QsoText, check_qso};
 use super::exchange::Field;
 use super::rules::{ContestRules, Side};
-use super::score::{ContestScore, MyStation, Rates, ScoredQso, contest_score};
+use super::score::{ContestScore, MyStation, Placed, Rates, ScoredQso, contest_score};
 use super::{ContestKind, RunStyle};
 use crate::alignment::CopyTally;
 use crate::score::{calculate_total_chars, compute_average_response_ms};
@@ -101,9 +101,16 @@ pub struct QsoRecord {
     /// Empty when logged; `nil` or `lost` otherwise.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub k: String,
-    /// The station's country, for multipliers.
+    /// The station's country, as it was drawn.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub c: String,
+    /// Where the call you logged placed its station when you logged it, as
+    /// the score counts it: its country and its continent, by the call
+    /// table's keys, each empty where Dust could not place it. Kept, as the
+    /// facts about you are, because the tables that place a call change; a
+    /// run from a build that did not keep it is placed by this build's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lp: Vec<String>,
     /// The exchange you logged, a token for each of the run's fields: a
     /// NIL's always, and otherwise where no group holds it: a QSO's whose
     /// exchange never reached you (its field groups are misses), whose
@@ -139,6 +146,26 @@ fn is_zero(n: &u32) -> bool {
 }
 
 impl QsoRecord {
+    /// What [`Self::lp`] keeps of where `call`, logged, places its station.
+    pub(crate) fn place_of(call: &str) -> Vec<String> {
+        let placed = Placed::of(call);
+        [placed.country, placed.continent]
+            .map(|fact| fact.unwrap_or_default().to_string())
+            .to_vec()
+    }
+
+    /// Where the call logged placed its station when it was logged, where
+    /// the record keeps it.
+    fn placed(&self) -> Option<Placed<'_>> {
+        let [country, continent, ..] = self.lp.as_slice() else {
+            return None;
+        };
+        Some(Placed {
+            country: Some(country.as_str()).filter(|fact| !fact.is_empty()),
+            continent: Some(continent.as_str()).filter(|fact| !fact.is_empty()),
+        })
+    }
+
     /// Whether the first of the QSO's groups is the station's call. It is,
     /// unless the QSO owns none or an earlier QSO holds the station's copy;
     /// its field groups follow.
@@ -358,18 +385,20 @@ impl ContestRun {
 
     /// The run's contest score, worked out again from its log and its
     /// session's `groups`, as it was while it ran: every logged QSO checked
-    /// against what its station sent, which its groups hold. None for a
-    /// contest without a score, or groups that are not this run's.
+    /// against what its station sent, which its groups hold, and its call
+    /// placed where it was placed when logged. None for a contest without a
+    /// score, or groups that are not this run's.
     pub fn score(&self, groups: &[GroupResult]) -> Option<ContestScore> {
         let scoring = self.rules()?.scoring?;
         let logged = self.checks(groups)?;
         let scored: Vec<ScoredQso<'_>> = logged
             .iter()
-            .map(|(at_ms, typed, check)| ScoredQso {
-                at_ms: *at_ms,
+            .map(|(qso, typed, check)| ScoredQso {
+                at_ms: qso.t,
                 call: &typed.call,
                 fields: &typed.fields,
                 check,
+                placed: qso.placed().unwrap_or_else(|| Placed::of(&typed.call)),
             })
             .collect();
         Some(contest_score(&scoring, &self.me(), &scored, self.run_ms))
@@ -531,16 +560,19 @@ impl ContestRun {
         Some(errors)
     }
 
-    /// Each logged QSO, checked as it was while the run went on: when it
-    /// was logged, the call and exchange as logged, and the check.
-    fn checks(&self, groups: &[GroupResult]) -> Option<Vec<(u64, QsoText, QsoCheck)>> {
+    /// Each logged QSO, checked as it was while the run went on: its
+    /// record, the call and exchange as logged, and the check.
+    fn checks<'a>(
+        &'a self,
+        groups: &'a [GroupResult],
+    ) -> Option<Vec<(&'a QsoRecord, QsoText, QsoCheck)>> {
         let walked = self.walk(groups)?;
         Some(
             walked
                 .into_iter()
                 .filter_map(|walked| {
                     let (typed, check) = walked.logged?;
-                    Some((walked.qso.t, typed, check))
+                    Some((walked.qso, typed, check))
                 })
                 .collect(),
         )
@@ -705,6 +737,7 @@ mod tests {
             nr,
             k: String::new(),
             c: String::new(),
+            lp: Vec::new(),
             l: Vec::new(),
             lc: String::new(),
             s: Vec::new(),
@@ -1158,6 +1191,49 @@ mod tests {
         assert_eq!(stored.log(&groups[1..], &timings), None);
         assert_eq!(stored.errors(&groups[1..]), None);
         assert_eq!(stored.summary(&groups[1..]), None);
+    }
+
+    /// A stored QSO scores where its call was placed when it was logged,
+    /// whatever this build's tables say of the call now; one kept by a
+    /// build that kept no placement is placed by this build's.
+    #[test]
+    fn a_stored_qso_scores_where_its_call_was_placed_when_logged() {
+        let mut stored = ContestRun {
+            kind: "cqww".into(),
+            fields: vec!["zn".into()],
+            ..run()
+        };
+        stored.qsos = vec![
+            // Placed in France when logged, on your continent: a point,
+            // and France.
+            QsoRecord {
+                lp: vec!["F".into(), "EU".into()],
+                ..qso(30_000, 2, 0)
+            },
+            // Placed now: your own country, no points.
+            qso(60_000, 2, 0),
+        ];
+        let groups = [
+            group("DL2ABC", "DL2ABC"),
+            group("14", "14"),
+            group("DL3XYZ", "DL3XYZ"),
+            group("14", "14"),
+        ];
+        let score = stored.score(&groups).expect("CQ WW scores");
+        // Zone 14, France and Germany.
+        assert_eq!(
+            score.verified,
+            Tally {
+                qso_points: 1,
+                mults: 3,
+                score: 3
+            }
+        );
+        // Kept as written, and read back.
+        let written = ContestLog::from(&stored);
+        assert_eq!(written.0["qsos"][0]["lp"], json!(["F", "EU"]));
+        assert!(written.0["qsos"][1].get("lp").is_none());
+        assert_eq!(written.run(4), Some(stored));
     }
 
     /// A station worked again and logged with its call busted counts once,

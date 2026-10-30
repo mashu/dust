@@ -10,15 +10,16 @@
 //! What a QSO is worth, and what it counts for, can turn on where you are:
 //! CQ WW's points on your country and continent, ARRL DX's points and
 //! multipliers on your side ([`MyStation`]). A call logged is placed where
-//! it is at home ([`home_country`]); one Dust cannot place is worth a CQ WW
-//! point and no country, as MorseRunner leaves a call its list cannot
-//! place at its default point (`Log.pas:724`), and one on your own side of
-//! ARRL DX is worth nothing, as the contest has W/VE work only DX.
+//! it is at home, as it was placed when it was logged where the log keeps
+//! that ([`Placed`]); one Dust cannot place is worth a CQ WW point and no
+//! country, as MorseRunner leaves a call its list cannot place at its
+//! default point (`Log.pas:724`), and one on your own side of ARRL DX is
+//! worth nothing, as the contest has W/VE work only DX.
 
 use std::collections::BTreeSet;
 
 use super::check::QsoCheck;
-use super::data::places::{DX, fold_labrador, home_country, w_ve, w_ve_place};
+use super::data::places::{DX, fold_labrador, home_country, w_ve_country, w_ve_place};
 use super::data::zones::home_continent;
 use super::exchange::Field;
 use super::rules::{Multiplier, Points, Scoring, Side};
@@ -36,6 +37,40 @@ pub struct MyStation<'a> {
     pub continent: &'a str,
 }
 
+/// Where a logged call places its station, as the score counts it: its
+/// country and continent by the call table's keys, none where Dust cannot
+/// place it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Placed<'a> {
+    pub country: Option<&'a str>,
+    pub continent: Option<&'a str>,
+}
+
+impl Placed<'static> {
+    /// Where `call` places its station by this build's tables: where it is
+    /// at home ([`home_country`]), on its prefix's continent
+    /// ([`home_continent`]).
+    pub fn of(call: &str) -> Self {
+        Self {
+            country: home_country(call),
+            continent: home_continent(call),
+        }
+    }
+}
+
+impl Placed<'_> {
+    /// Its side, as the ARRL DX contest has them: W/VE at home in the USA or
+    /// Canada, and DX anywhere else or nowhere Dust can place, as
+    /// [`Side::of_call`] reads a call.
+    fn side(&self) -> Side {
+        if self.country.is_some_and(w_ve_country) {
+            Side::WVe
+        } else {
+            Side::Dx
+        }
+    }
+}
+
 /// One logged QSO, as the score reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScoredQso<'a> {
@@ -46,6 +81,8 @@ pub struct ScoredQso<'a> {
     /// The exchange as you logged it, each field's token or value.
     pub fields: &'a [(Field, String)],
     pub check: &'a QsoCheck,
+    /// Where the call as logged places its station.
+    pub placed: Placed<'a>,
 }
 
 impl ScoredQso<'_> {
@@ -65,7 +102,8 @@ impl ScoredQso<'_> {
     /// is, where nothing multiplies the points, as in Field Day. Nothing for
     /// what counts for none.
     fn multipliers(&self, multiplier: Multiplier) -> Vec<String> {
-        let country = || home_country(self.call).map(str::to_string);
+        let country = || self.placed.country.map(str::to_string);
+        let w_ve = self.placed.side() == Side::WVe;
         match multiplier {
             Multiplier::WpxPrefix => wpx_prefix(self.call).into_iter().collect(),
             Multiplier::Place => self
@@ -76,10 +114,10 @@ impl ScoredQso<'_> {
                 .collect(),
             Multiplier::WVePlace => self
                 .logged(Field::St)
-                .filter(|place| w_ve_place(place) && w_ve(self.call))
+                .filter(|place| w_ve_place(place) && w_ve)
                 .into_iter()
                 .collect(),
-            Multiplier::Country => country().filter(|_| !w_ve(self.call)).into_iter().collect(),
+            Multiplier::Country => country().filter(|_| !w_ve).into_iter().collect(),
             Multiplier::ZoneAndCountry => self
                 .logged(Field::Zn)
                 .map(|zone| format!("zone {zone}"))
@@ -96,7 +134,7 @@ impl ScoredQso<'_> {
     fn points(&self, points: Points, me: &MyStation<'_>) -> u32 {
         match points {
             Points::Each(each) => each,
-            Points::OtherSide(each) if Side::of_call(self.call) != me.side => each,
+            Points::OtherSide(each) if self.placed.side() != me.side => each,
             Points::OtherSide(_) => 0,
             Points::ByDistance => self.distance_points(me),
         }
@@ -109,13 +147,13 @@ impl ScoredQso<'_> {
     /// MorseRunner's default for a call it cannot place (`Log.pas:724`,
     /// `CqWW.pas:258-275`).
     fn distance_points(&self, me: &MyStation<'_>) -> u32 {
-        let Some(country) = home_country(self.call) else {
+        let Some(country) = self.placed.country else {
             return 1;
         };
         if country == me.country {
             return 0;
         }
-        match home_continent(self.call) {
+        match self.placed.continent {
             Some(continent) if continent == me.continent && continent == "NA" => 2,
             Some(continent) if continent == me.continent => 1,
             _ => 3,
@@ -303,6 +341,7 @@ mod tests {
             call,
             fields,
             check,
+            placed: Placed::of(call),
         }
     }
 
@@ -434,11 +473,15 @@ mod tests {
         for scoring in [wpx(), sprint(), cqww(), arrl_dx(), field_day()] {
             for _ in 0..500 {
                 let log: Vec<ScoredQso<'_>> = (0..rng.usize_in(0, 12))
-                    .map(|i| ScoredQso {
-                        at_ms: i as u64 * 40_000,
-                        call: calls[rng.usize_in(0, calls.len() - 1)],
-                        fields: &places[rng.usize_in(0, places.len() - 1)],
-                        check: &checks[rng.usize_in(0, checks.len() - 1)],
+                    .map(|i| {
+                        let call = calls[rng.usize_in(0, calls.len() - 1)];
+                        ScoredQso {
+                            at_ms: i as u64 * 40_000,
+                            call,
+                            fields: &places[rng.usize_in(0, places.len() - 1)],
+                            check: &checks[rng.usize_in(0, checks.len() - 1)],
+                            placed: Placed::of(call),
+                        }
                     })
                     .collect();
                 let score = contest_score(&scoring, &K1, &log, 600_000);
@@ -475,6 +518,7 @@ mod tests {
             call,
             fields,
             check,
+            placed: Placed::of(call),
         };
         let log = [
             at(20_000, "N5KGS", &nm, &clean),

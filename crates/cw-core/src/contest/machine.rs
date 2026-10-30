@@ -4319,6 +4319,7 @@ impl<S: CallSource> ContestMachine<S> {
                 nr,
                 k: String::new(),
                 c: station.caller.call.country.to_string(),
+                lp: QsoRecord::place_of(&logged.call),
                 l,
                 lc,
                 s,
@@ -4440,6 +4441,7 @@ impl<S: CallSource> ContestMachine<S> {
                 nr,
                 k: NIL.to_string(),
                 c: String::new(),
+                lp: QsoRecord::place_of(&logged.call),
                 l: rules
                     .copied(side)
                     .iter()
@@ -4504,6 +4506,7 @@ impl<S: CallSource> ContestMachine<S> {
                 nr,
                 k: LOST.to_string(),
                 c: station.caller.call.country.to_string(),
+                lp: Vec::new(),
                 l: Vec::new(),
                 lc: String::new(),
                 s: Vec::new(),
@@ -7653,6 +7656,9 @@ mod tests {
             .map(|qso| (qso.k.as_str(), qso.c.as_str()))
             .collect();
         assert_eq!(kinds, [("lost", "K"), ("", "G")]);
+        // The QSO logged keeps where its call was placed, for the score.
+        assert!(run.qsos[0].lp.is_empty());
+        assert_eq!(run.qsos[1].lp, ["G", "EU"]);
         assert_eq!(result.groups[0].received, "K5XYZ");
         assert_eq!(view(&moved_on).clean, 1);
     }

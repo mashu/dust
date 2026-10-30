@@ -332,6 +332,7 @@ mod tests {
             nr: 1,
             k: String::new(),
             c: String::new(),
+            lp: Vec::new(),
             l: Vec::new(),
             lc: String::new(),
             s: Vec::new(),

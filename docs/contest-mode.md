@@ -2728,7 +2728,9 @@ pub struct QsoRecord {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub k: String,      // "" logged, "nil", or "lost"
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub c: String,      // the station's country key, for multipliers
+    pub c: String,      // the station's country key, as drawn
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lp: Vec<String>, // where the call logged placed its station when logged: [country, continent], "" for none
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub l: Vec<String>, // the exchange you logged, a token a field: a NIL's, or where no group holds it
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2744,8 +2746,12 @@ pub struct QsoRecord {
 
 Your callsign and exchange are not stored in a run: no score needs them.
 Checks, dupes, points, multipliers and rates are worked out on read, as
-`score` is. `a` is kept because the groups' `sends` count only the repeats
-charged to the copy, and the results show the `?×n` the run showed. `v`
+`score` is, each QSO's call placed where `lp` says it was placed when it
+was logged, kept as the facts about you are, because the call tables
+change; a run from a build before `lp` is placed by the tables of the
+build that reads it. `a` is kept because the groups' `sends` count only
+the repeats charged to the copy, and the results show the `?×n` the run
+showed. `v`
 rises only for a change an older reader would misread; a key that later
 phases add with a default does not raise it.
 
