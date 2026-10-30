@@ -1193,14 +1193,26 @@ mod tests {
                 ui.advance(8_000).await;
                 let call = recorder.starts()[0].transcript.others[0].text.clone();
                 ui.type_into("field-call", &call);
+                // Each key once the caller has finished: sending, it cannot
+                // hear you.
+                assert!(ui.until_the_air_is_quiet(30_000).await);
                 ui.press_enter("field-call");
                 ui.advance(8_000).await;
-                let starts = recorder.starts();
-                assert_eq!(starts.len(), 2, "your call and exchange, and its own");
-                let exchange = starts[1].transcript.others[0].text.clone();
+                let exchange = recorder
+                    .starts()
+                    .iter()
+                    .find(|start| start.transcript.text.starts_with(&call))
+                    .expect("your call and exchange, and its own")
+                    .transcript
+                    .others[0]
+                    .text
+                    .clone();
                 let serial = exchange.split_whitespace().last().unwrap_or_default();
                 ui.type_into("field-exchange", serial);
+                assert!(ui.until_the_air_is_quiet(30_000).await);
+                let starts = recorder.starts().len();
                 ui.press_enter("field-exchange");
+                assert_eq!(recorder.starts().len(), starts + 1, "your TU");
                 assert_eq!(text_of(&ui, "log-call"), call);
                 assert_eq!(text_of(&ui, "log-fields"), serial);
                 assert_eq!(text_of(&ui, "log-check"), "…", "the TU is on the air");
@@ -1325,6 +1337,8 @@ mod tests {
             ui.html()
         );
         ui.type_into("field-call", &his);
+        // Once it has finished calling: sending, it cannot hear you.
+        assert!(ui.until_the_air_is_quiet(30_000).await);
         ui.press_enter("field-call");
         ui.advance(300).await;
         // What is still to go: their call from the character sounding, as
@@ -1364,6 +1378,8 @@ mod tests {
             .filter_map(|part| part.split(' ').next())
             .collect();
         assert_eq!(read_as, fields, "{kind:?}: {read}");
+        // Not over its exchange sent again on its timeout.
+        assert!(ui.until_the_air_is_quiet(30_000).await);
         ui.press_enter("field-exchange");
         assert!(
             ui.run_until(15_000, |ui| text_of(ui, "log-check") == "clean")
@@ -1803,6 +1819,7 @@ mod tests {
                 .unwrap_or_default()
                 .to_string();
             ui.type_into("field-exchange", &serial);
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.press_enter("field-exchange");
             ui.advance(8_000).await;
             assert!(!ui.has("field-tag-b4"), "nothing typed is a dupe");
@@ -2804,6 +2821,7 @@ mod tests {
             let answer = recorder.starts()[0].transcript.others[0].text.clone();
             let call = answer.split_whitespace().nth(2).unwrap_or_default();
             ui.type_into("field-call", call);
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.press_enter("field-call");
             ui.advance(300).await;
             let tx = text_of(&ui, "run-line run-tx");
@@ -2854,6 +2872,7 @@ mod tests {
             );
             assert!(ui.has(">Exchange · NR NAME ST</label>"), "{}", ui.html());
             ui.type_into("field-call", call);
+            assert!(ui.until_the_air_is_quiet(30_000).await);
             ui.press_enter("field-call");
             ui.advance(300).await;
             let tx = text_of(&ui, "run-line run-tx");
