@@ -4,10 +4,10 @@
 
 use dioxus::prelude::*;
 
-use crate::persist::CutOff;
+use crate::persist::{CutOff, SetAside};
 use crate::state::{AppCtx, Notice};
 use crate::time::local_date_string;
-use crate::ui::format::{clock, day_of, short_date};
+use crate::ui::format::{clock, counted, day_of, short_date};
 use crate::ui::widgets::{Icon, IconName, control_id};
 
 #[component]
@@ -64,6 +64,53 @@ fn notice_text(notice: &Notice) -> String {
             }
         }
         Notice::History(problem) => problem.clone(),
+        Notice::SetAside(set_aside) => set_aside_text(set_aside),
+    }
+}
+
+/// What was set aside as it could not be read, and how to have it back:
+/// from the copy, where the user can reach it, or else from a backup.
+fn set_aside_text(set_aside: &SetAside) -> String {
+    match set_aside {
+        SetAside::Settings { kept } => {
+            let back = match kept {
+                Some(file) => format!(
+                    "The file was kept as {file}: with Dust closed, mend it and put it back as settings.json, or restore a backup."
+                ),
+                None => "Restore a backup to put yours back.".into(),
+            };
+            format!("Your settings could not be read, so Dust opened with its defaults. {back}")
+        }
+        SetAside::History { kept } => {
+            let back = match kept {
+                Some(file) => format!(
+                    "It was kept as {file}. Restore a backup, or that file once it is mended, to put your sessions back."
+                ),
+                None => "Restore a backup to put your sessions back.".into(),
+            };
+            format!(
+                "Your history could not be read, so Dust set it aside and started a new one. {back}"
+            )
+        }
+        SetAside::Sessions { count, kept } => {
+            let (were, them) = if *count == 1 {
+                ("it was", "it")
+            } else {
+                ("they were", "them")
+            };
+            let back = match kept {
+                Some(file) => format!(
+                    "{were} set aside as {file}. Restoring that file in a Dust that reads {them} puts {them} back."
+                ),
+                None => format!(
+                    "{were} set aside. A backup restored in a Dust that reads {them} puts {them} back."
+                ),
+            };
+            format!(
+                "{} in your history could not be read, perhaps saved by a newer Dust, so {back}",
+                counted(*count, "session")
+            )
+        }
     }
 }
 
@@ -106,6 +153,37 @@ mod tests {
         assert_eq!(
             notice_text(&Notice::CutOff(CutOff::Unread)),
             "Your last session was cut off: Dust closed while it ran, so it was not kept."
+        );
+    }
+
+    /// What was set aside says so, and how to have it back: from the copy,
+    /// where it can be reached, or else from a backup.
+    #[test]
+    fn what_was_set_aside_says_how_to_have_it_back() {
+        let text = |set_aside| notice_text(&Notice::SetAside(set_aside));
+        assert_eq!(
+            text(SetAside::Settings {
+                kept: Some("/d/settings.unreadable-9.json".into())
+            }),
+            "Your settings could not be read, so Dust opened with its defaults. The file was kept as /d/settings.unreadable-9.json: with Dust closed, mend it and put it back as settings.json, or restore a backup."
+        );
+        assert_eq!(
+            text(SetAside::History { kept: None }),
+            "Your history could not be read, so Dust set it aside and started a new one. Restore a backup to put your sessions back."
+        );
+        assert_eq!(
+            text(SetAside::Sessions {
+                count: 3,
+                kept: Some("/d/sessions.unreadable-9.json".into())
+            }),
+            "3 sessions in your history could not be read, perhaps saved by a newer Dust, so they were set aside as /d/sessions.unreadable-9.json. Restoring that file in a Dust that reads them puts them back."
+        );
+        assert_eq!(
+            text(SetAside::Sessions {
+                count: 1,
+                kept: None
+            }),
+            "1 session in your history could not be read, perhaps saved by a newer Dust, so it was set aside. A backup restored in a Dust that reads it puts it back."
         );
     }
 

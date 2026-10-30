@@ -30,7 +30,8 @@ pub struct Backup {
     /// When it was saved, in milliseconds since the epoch; zero if it does
     /// not say.
     pub saved_at: u64,
-    pub settings: TrainingSettings,
+    /// None where it holds no settings: a history on its own.
+    pub settings: Option<TrainingSettings>,
     /// Oldest first.
     pub sessions: Vec<SessionResult>,
 }
@@ -67,6 +68,8 @@ pub enum NotRestored {
     NotABackup,
     /// It says it is one, but its sessions cannot be read.
     Unreadable,
+    /// A history on its own, none of whose sessions this version reads.
+    NoSessions,
 }
 
 impl NotRestored {
@@ -74,23 +77,40 @@ impl NotRestored {
         match self {
             Self::NotABackup => "is not a Dust backup",
             Self::Unreadable => "is a Dust backup whose sessions cannot be read",
+            Self::NoSessions => "holds no session this version of Dust can read",
         }
     }
 }
 
-/// Read a backup file.
+/// Read a backup file: a backup Dust saved, or a history on its own, a
+/// list of sessions as the store keeps them.
+///
+/// A history on its own is what the store sets aside when it cannot read
+/// all of it ([`super::SetAside`]): restored once it is mended, or in a
+/// later version that reads what this one could not, it puts its sessions
+/// back. It holds no settings, and none are taken from it.
 pub fn read_backup(raw: &str) -> Result<Backup, NotRestored> {
-    let Ok(serde_json::Value::Object(file)) = serde_json::from_str(raw) else {
-        return Err(NotRestored::NotABackup);
+    let file = match serde_json::from_str(raw) {
+        Ok(serde_json::Value::Object(file)) => file,
+        Ok(serde_json::Value::Array(_)) => {
+            let sessions = parse_sessions(raw).unwrap_or_default();
+            if sessions.is_empty() {
+                return Err(NotRestored::NoSessions);
+            }
+            return Ok(Backup {
+                saved_at: 0,
+                settings: None,
+                sessions,
+            });
+        }
+        _ => return Err(NotRestored::NotABackup),
     };
     if !file.get(MARK).is_some_and(serde_json::Value::is_u64) {
         return Err(NotRestored::NotABackup);
     }
     let settings = file
         .get("settings")
-        .map_or_else(TrainingSettings::default, |settings| {
-            load_settings_from(&settings.to_string())
-        });
+        .map(|settings| load_settings_from(&settings.to_string()));
     let sessions = file
         .get("sessions")
         .and_then(|sessions| parse_sessions(&sessions.to_string()))
@@ -183,7 +203,23 @@ pub fn merge_sessions(current: &[SessionResult], restored: Vec<SessionResult>) -
         }
     }
     if added {
-        sessions.sort_by_key(|(session, _)| session.timestamp);
+        // In among the sessions here, each before the first that finished
+        // after it; those here keep their order, the order they were
+        // stored in. Sorted whole, one a clock set back stamped went to the
+        // front, the first the history lets go for want of room.
+        let (mut new, before): (Vec<_>, Vec<_>) = sessions
+            .into_iter()
+            .partition(|(_, came)| matches!(came, Came::Added));
+        new.sort_by_key(|(session, _)| session.timestamp);
+        let mut new = new.into_iter().peekable();
+        sessions = Vec::with_capacity(before.len() + new.len());
+        for kept in before {
+            while let Some(added) = new.next_if(|(added, _)| added.timestamp < kept.0.timestamp) {
+                sessions.push(added);
+            }
+            sessions.push(kept);
+        }
+        sessions.extend(new);
     }
     let mut merged = Merged {
         sessions: Vec::with_capacity(sessions.len()),
@@ -249,7 +285,7 @@ mod tests {
         let raw = write_backup(&settings, &sessions, 1_790_000_000_000);
         let backup = read_backup(&raw).expect("a backup");
         assert_eq!(backup.saved_at, 1_790_000_000_000);
-        assert_eq!(backup.settings, settings.clamp());
+        assert_eq!(backup.settings, Some(settings.clamp()));
         assert_eq!(backup.sessions.len(), 2);
         assert_eq!(backup.sessions[1].date, "2026-10-02");
     }
@@ -257,7 +293,12 @@ mod tests {
     #[test]
     fn only_a_backup_is_read_as_one() {
         assert_eq!(read_backup("not json"), Err(NotRestored::NotABackup));
-        assert_eq!(read_backup("[]"), Err(NotRestored::NotABackup));
+        assert_eq!(read_backup("7"), Err(NotRestored::NotABackup));
+        assert_eq!(read_backup("[]"), Err(NotRestored::NoSessions));
+        assert_eq!(
+            read_backup(r#"[{"date":"broken"}]"#),
+            Err(NotRestored::NoSessions)
+        );
         // A settings file is JSON, but not a backup.
         let settings = serde_json::to_string(&TrainingSettings::default()).unwrap();
         assert_eq!(read_backup(&settings), Err(NotRestored::NotABackup));
@@ -281,11 +322,28 @@ mod tests {
                 "sessions":[{good},{{"date":"broken"}}]}}"#
         );
         let backup = read_backup(&raw).expect("a backup");
-        assert_eq!(backup.settings.curriculum.level, 9);
+        assert_eq!(backup.settings.map(|s| s.curriculum.level), Some(9));
         assert_eq!(backup.sessions.len(), 1);
         assert_eq!(backup.saved_at, 0, "it does not say when");
         // A newer layout is still read for what it has.
         assert!(read_backup(r#"{"dustBackup":7,"sessions":[]}"#).is_ok());
+    }
+
+    /// A history on its own — the store's, or what it set aside as it could
+    /// not read it, mended since or read by a later version — restores its
+    /// sessions, and holds no settings to take. One the store set aside
+    /// could not be restored before: it is no backup.
+    #[test]
+    fn a_history_on_its_own_restores_its_sessions() {
+        let good = serde_json::to_string(&at(5, "2026-10-05")).unwrap();
+        let raw = format!(r#"[{good},{{"date":"broken"}}]"#);
+        let backup = read_backup(&raw).expect("a history");
+        assert_eq!(backup.sessions.len(), 1);
+        assert_eq!(backup.sessions[0].date, "2026-10-05");
+        assert_eq!((backup.settings, backup.saved_at), (None, 0));
+        // A backup with no settings in it takes none either.
+        let backup = read_backup(r#"{"dustBackup":1,"sessions":[]}"#).expect("a backup");
+        assert_eq!(backup.settings, None);
     }
 
     #[test]
@@ -315,6 +373,25 @@ mod tests {
             },
             "restoring twice does nothing"
         );
+    }
+
+    /// A restore puts each session it adds before the first here that
+    /// finished after it, and leaves those here in the order they were
+    /// stored: one a clock set back stamped stays last, rather than go to
+    /// the front, the first the history lets go when it has no room.
+    #[test]
+    fn restoring_leaves_the_sessions_here_in_their_order() {
+        let current = vec![at(10, "a"), at(20, "b"), at(5, "c")];
+        let merged = merge_sessions(&current, vec![at(15, "d"), at(1, "e")]);
+        assert_eq!(
+            merged
+                .sessions
+                .iter()
+                .map(|s| s.timestamp)
+                .collect::<Vec<_>>(),
+            [1, 10, 15, 20, 5]
+        );
+        assert_eq!(merged.added, [at(1, "e"), at(15, "d")]);
     }
 
     /// A run whose log an older version dropped takes it back from a copy

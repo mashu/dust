@@ -1,12 +1,39 @@
 //! How settings are written to a save, and read back from one, older ones
 //! included.
 
-use serde::{Deserialize, Serialize, Serializer};
+use std::collections::HashSet;
+use std::sync::OnceLock;
+
+use serde::de::{self, DeserializeOwned, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
 
 use super::{
     AutoLevelSettings, BandSettings, CharSetMode, ContestSettings, CurriculumSettings,
     PlaybackSettings, PracticeWindow, RecognitionBands, TrainingSettings,
 };
+
+/// Keys earlier builds wrote that no build reads any more. They are let go
+/// of as a save is read, so that only what a later build wrote is carried
+/// along ([`TrainingSettings::unread`]).
+const RETIRED: &[&str] = &[
+    "agcThresholdDb",
+    "charSamplingThompson",
+    "filterBandwidthHz",
+    "qrmLevel",
+    "qrmProfile",
+    "receiverBackgroundGain",
+    "receiverBackgroundOffsetModDepthHz",
+    "receiverBackgroundResonance",
+    "receiverLevel",
+    "receiverProfile",
+];
+
+/// How much of a save this build does not read it carries along, at most,
+/// in bytes of JSON: a later build's new settings many times over, while a
+/// file that is no save at all, a backup made to be large, cannot swell the
+/// settings past what a browser would store.
+const UNREAD_MAX_BYTES: usize = 16_384;
 
 /// Settings as they are written: every section flattened into one object,
 /// and Contest written as Callsigns with `contestActive` beside it, a key
@@ -14,6 +41,9 @@ use super::{
 /// Callsigns at the same tier rather than failing the whole save, and its
 /// next save drops Your station: settings, which a backup holds, not
 /// training data.
+///
+/// What a save held that this build does not read goes back after the rest,
+/// as it came ([`TrainingSettings::unread`]).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsOnDisk<'a> {
@@ -31,6 +61,23 @@ struct SettingsOnDisk<'a> {
     contest: &'a ContestSettings,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     contest_active: bool,
+    #[serde(flatten)]
+    unread: Unread<'a>,
+}
+
+/// The keys a save held that this build does not read, as they are written
+/// back: never one this build reads, which the sections above write.
+struct Unread<'a>(&'a Map<String, Value>);
+
+impl Serialize for Unread<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let read = TrainingSettings::read_keys();
+        serializer.collect_map(
+            self.0
+                .iter()
+                .filter(|(key, _)| !read.contains(key.as_str())),
+        )
+    }
 }
 
 impl Serialize for TrainingSettings {
@@ -43,6 +90,7 @@ impl Serialize for TrainingSettings {
             recognition: &self.recognition,
             contest: &self.contest,
             contest_active: self.curriculum.char_set_mode == CharSetMode::Contest,
+            unread: Unread(&self.unread),
         }
         .serialize(serializer)
     }
@@ -54,13 +102,16 @@ impl Serialize for TrainingSettings {
 /// The legacy keys come first. A flattened section takes the keys it knows
 /// as it reads them, so `practiceWindow` and `charSetMode` are read here,
 /// as options, before the curriculum's own non-optional fields could see
-/// them.
+/// them; and so is `stationsOpenedByPileup`, before the contest section's.
+/// Whatever no section takes is left for `unread`, last.
 #[derive(Deserialize)]
 struct SettingsSave {
     #[serde(flatten)]
     window: WindowSave,
     #[serde(flatten)]
     char_set: CharSetSave,
+    #[serde(flatten)]
+    pileup: PileupSave,
     #[serde(flatten)]
     curriculum: CurriculumSettings,
     #[serde(flatten)]
@@ -73,6 +124,121 @@ struct SettingsSave {
     recognition: RecognitionBands,
     #[serde(flatten)]
     contest: ContestSettings,
+    #[serde(flatten)]
+    unread: Map<String, Value>,
+}
+
+/// Before the stations a pile-up opened were kept in mind, a save had no
+/// `stationsOpenedByPileup`. It is read here as whatever it holds, so that
+/// a save without it is told from one that says no.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct PileupSave {
+    #[serde(deserialize_with = "present")]
+    stations_opened_by_pileup: Option<Value>,
+}
+
+/// A value that is there, whatever it is: null too.
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+impl TrainingSettings {
+    /// Every key a save is read by: each section's own, and every older
+    /// name it still reads. A key outside them is one a later build wrote,
+    /// carried along ([`Self::unread`]), or one no build reads any more.
+    pub fn read_keys() -> &'static HashSet<&'static str> {
+        static KEYS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+        KEYS.get_or_init(|| {
+            let mut keys = HashSet::new();
+            names_of::<WindowSave>(&mut keys);
+            names_of::<CharSetSave>(&mut keys);
+            names_of::<PileupSave>(&mut keys);
+            names_of::<CurriculumSettings>(&mut keys);
+            names_of::<PlaybackSettings>(&mut keys);
+            names_of::<BandSettings>(&mut keys);
+            names_of::<AutoLevelSettings>(&mut keys);
+            names_of::<RecognitionBands>(&mut keys);
+            names_of::<ContestSettings>(&mut keys);
+            keys
+        })
+    }
+}
+
+impl TrainingSettings {
+    /// Take `here`'s settings of the device in place of these, restored
+    /// from a backup, and say whether any of them differed. They are set for
+    /// the device rather than for the training: how loud it plays, and how
+    /// its keyboard and paddles key, which a backup from a phone has no say
+    /// in on a computer.
+    pub fn keep_device_settings(&mut self, here: &Self) -> bool {
+        let device = |settings: &Self| {
+            (
+                settings.band.master_volume,
+                settings.playback.paddle_swap,
+                settings.playback.paddle_keys_by_place,
+            )
+        };
+        let differed = device(self) != device(here);
+        self.band.master_volume = here.band.master_volume;
+        self.playback.paddle_swap = here.playback.paddle_swap;
+        self.playback.paddle_keys_by_place = here.playback.paddle_keys_by_place;
+        differed
+    }
+}
+
+/// Add the names `T` is read by to `keys`, aliases among them.
+fn names_of<T: DeserializeOwned>(keys: &mut HashSet<&'static str>) {
+    let _ = T::deserialize(Names(keys));
+}
+
+/// A deserializer that reads nothing, and notes the names a struct asks it
+/// for: its fields', aliases included.
+struct Names<'a>(&'a mut HashSet<&'static str>);
+
+impl<'de> Deserializer<'de> for Names<'_> {
+    type Error = de::value::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+        Err(de::Error::custom("only names are read"))
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _: &'static str,
+        fields: &'static [&'static str],
+        _: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.0.extend(fields);
+        Err(de::Error::custom("only names are read"))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map enum identifier ignored_any
+    }
+}
+
+/// What of `unread` a save carries along: nothing earlier builds wrote that
+/// no build reads any more, and of the rest, in the order of their keys, as
+/// much as fits [`UNREAD_MAX_BYTES`].
+fn carried(mut unread: Map<String, Value>) -> Map<String, Value> {
+    let mut room = UNREAD_MAX_BYTES;
+    unread.retain(|key, value| {
+        if RETIRED.contains(&key.as_str()) {
+            return false;
+        }
+        // The key quoted, its colon and the comma after it, and its value.
+        let size =
+            serde_json::to_string(value).map_or(usize::MAX, |json| key.len() + json.len() + 4);
+        let fits = size <= room;
+        if fits {
+            room -= size;
+        }
+        fits
+    });
+    unread
 }
 
 /// Before the practice window was named, a save kept the first and last
@@ -114,6 +280,7 @@ impl From<SettingsSave> for TrainingSettings {
             auto_level: save.auto_level,
             recognition: save.recognition,
             contest: save.contest,
+            unread: carried(save.unread),
         };
         match save.char_set.char_set_mode {
             Some(ModeSave::Today(CharSetMode::Callsign)) if save.char_set.contest_active => {
@@ -145,6 +312,11 @@ impl From<SettingsSave> for TrainingSettings {
             }
             (None, _, _) => PracticeWindow::All,
         };
+        match save.pileup.stations_opened_by_pileup {
+            // Anything but true reads as off, as the contest section reads it.
+            Some(flag) => settings.contest.stations_opened_by_pileup = flag == Value::Bool(true),
+            None => settings.upgrade_stations_opened_by_pileup(),
+        }
         settings
     }
 }
@@ -560,5 +732,149 @@ mod tests {
         let saved = serde_json::to_value(&settings).expect("settings write");
         assert!(saved.get("charSamplingThompson").is_none(), "{saved}");
         assert!(saved.get("errorWeightStrength").is_some());
+    }
+
+    /// A setting a later build added is kept as it was read and written
+    /// back with the rest, so a copy of an older build left open does not
+    /// strip it from the save. It used to be dropped as it was read.
+    #[test]
+    fn a_setting_a_later_build_added_is_written_back() {
+        let later = serde_json::json!({ "steps": [1, 2.5], "mode": "x" });
+        let settings = load(serde_json::json!({ "laterSetting": later, "level": 7 }));
+        assert_eq!(settings.curriculum.level, 7);
+        assert_eq!(settings.unread.get("laterSetting"), Some(&later));
+        let saved = serde_json::to_value(&settings).expect("settings write");
+        assert_eq!(saved["laterSetting"], later);
+        assert_eq!(saved["level"], 7);
+        assert_eq!(load(saved), settings, "the same, read again");
+        // A key this build reads is never written twice, whatever is
+        // carried along under its name.
+        let mut odd = settings;
+        odd.unread.insert("level".into(), serde_json::json!(99));
+        let written = serde_json::to_string(&odd).expect("settings write");
+        assert_eq!(written.matches("\"level\"").count(), 1, "{written}");
+        assert_eq!(
+            load(serde_json::from_str(&written).unwrap())
+                .curriculum
+                .level,
+            7
+        );
+    }
+
+    /// What is carried along is what a later build could have written: no
+    /// key an earlier build wrote and none reads, and nothing past a few
+    /// kilobytes, so a file made to be large cannot swell the settings.
+    #[test]
+    fn only_so_much_of_a_save_is_carried_along() {
+        let settings = load(serde_json::json!({
+            "qrmLevel": 0.5,
+            "huge": "x".repeat(UNREAD_MAX_BYTES),
+            "small": 1,
+        }));
+        assert_eq!(
+            settings.unread.keys().collect::<Vec<_>>(),
+            ["small"],
+            "{:?}",
+            settings.unread.keys()
+        );
+    }
+
+    /// Every key a save writes is one it is read by, and so is every older
+    /// name it still reads: the keys recovering a save tries one at a time.
+    #[test]
+    fn every_key_a_save_is_read_by_is_known() {
+        let read = TrainingSettings::read_keys();
+        let mut contest = TrainingSettings::default();
+        contest.curriculum.char_set_mode = CharSetMode::Contest;
+        let written = serde_json::to_value(&contest).expect("settings write");
+        for key in written.as_object().expect("an object").keys() {
+            assert!(read.contains(key.as_str()), "{key}");
+        }
+        for older in [
+            "kochLevel",
+            "autoAdjustKoch",
+            "qrmEnabled",
+            "receiverEnabled",
+            "slidingWindowStart",
+            "slidingWindowEnd",
+            "customSet",
+            "stationsOpenedByPileup",
+        ] {
+            assert!(read.contains(older), "{older}");
+        }
+        assert!(!read.contains("laterSetting"));
+        for retired in RETIRED {
+            assert!(!read.contains(retired), "{retired} is read after all");
+        }
+    }
+
+    /// A restore keeps this device's volume and paddle keys and takes the
+    /// rest, the level among them, and says whether the device's differed.
+    #[test]
+    fn a_restore_keeps_the_settings_of_the_device() {
+        let mut here = TrainingSettings::default();
+        here.band.master_volume = 0.3;
+        here.playback.paddle_swap = true;
+        let mut restored = TrainingSettings::default();
+        restored.curriculum.level = 14;
+        restored.playback.paddle_keys_by_place = false;
+        assert!(restored.keep_device_settings(&here));
+        assert_eq!(restored.curriculum.level, 14);
+        assert_eq!(restored.band.master_volume, 0.3);
+        assert!(restored.playback.paddle_swap);
+        assert!(restored.playback.paddle_keys_by_place);
+        assert!(!restored.clone().keep_device_settings(&here), "the same");
+    }
+
+    /// A save from before the stations a pile-up opened were kept in mind,
+    /// on Pile-up with the range a pile-up opens, is taken for one it
+    /// opened: kept open in Contest, so a single caller closes it again,
+    /// and one station again in any other mode. Such a save used to keep
+    /// one to three stations in every Koch session after.
+    #[test]
+    fn a_range_a_pileup_opened_before_it_was_kept_in_mind_is_put_back() {
+        let older = |mode: &str, contest: bool| {
+            load(serde_json::json!({
+                "charSetMode": mode, "contestActive": contest,
+                "contestStyle": "pileup", "stationsMin": 1, "stationsMax": 3,
+            }))
+        };
+        let mut run = older("callsign", true);
+        assert_eq!(run.curriculum.char_set_mode, CharSetMode::Contest);
+        assert!(run.contest.stations_opened_by_pileup);
+        assert_eq!((run.band.stations_min, run.band.stations_max), (1, 3));
+        run.set_contest_style(crate::contest::RunStyle::Single);
+        assert_eq!((run.band.stations_min, run.band.stations_max), (1, 1));
+
+        let koch = older("koch", false);
+        assert!(!koch.contest.stations_opened_by_pileup);
+        assert_eq!((koch.band.stations_min, koch.band.stations_max), (1, 1));
+        let written = serde_json::to_value(&koch).expect("settings write");
+        assert_eq!(load(written), koch, "once: the next save says so");
+
+        // A save that says, either way, is read as it says; one on a single
+        // caller, or with a range of its own, is left as it is.
+        let said = load(serde_json::json!({
+            "charSetMode": "koch", "contestStyle": "pileup",
+            "stationsMin": 1, "stationsMax": 3, "stationsOpenedByPileup": false,
+        }));
+        assert_eq!(
+            (
+                said.band.stations_max,
+                said.contest.stations_opened_by_pileup
+            ),
+            (3, false)
+        );
+        let single = load(serde_json::json!({
+            "charSetMode": "koch", "stationsMin": 1, "stationsMax": 3,
+        }));
+        assert_eq!(single.band.stations_max, 3);
+        let own = load(serde_json::json!({
+            "charSetMode": "koch", "contestStyle": "pileup", "stationsMin": 1, "stationsMax": 4,
+        }));
+        assert_eq!(
+            (own.band.stations_max, own.contest.stations_opened_by_pileup),
+            (4, false)
+        );
     }
 }

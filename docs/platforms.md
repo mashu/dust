@@ -357,18 +357,33 @@ rather than take a tab still running for one cut off.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
-`dust_last_backup`, `dust_open_session_*`) and
+`dust_last_backup`, `dust_open_session_*`, `dust_deleted`) and
 file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
 that field. A settings file from before the AGC threshold went comes back
 with a threshold raised under the AGC as the RF gain backed off as far, which
-is how the AGC heard it. A history that
+is how the AGC heard it. A setting a later build added, which this one does
+not read, is kept and written back with the rest, as are the keys a later
+build added to a session, a group, its timing or a counter: a copy of this
+build left open beside a newer one never strips them. A history that
 cannot be read at all is set aside beside the new one rather than written over,
 and if it cannot even be moved, nothing is saved over it until a later read
 of it reads, or sets it aside: a file another program had open for a moment
-holds back no more than the saves made meanwhile. A browser keeps the newest
-five copies it set aside, `dust_sessions_unreadable`, `_2`, `_3`…, and lets
-the oldest go first when a new one needs the room.
+holds back no more than the saves made meanwhile. Sessions that cannot be
+read are set aside the same way, and so are settings that do not read at all,
+a `settings.json` edited by hand and left with a stray comma say, before the
+defaults the app opens with are written over them: `settings.unreadable-*.json`
+beside it, or `dust_settings_unreadable` in a browser. The app says what it set
+aside, once, and how to have it back. A set-aside history is a list of
+sessions, which **Restore a backup** reads too: mended, or in a later version
+that reads what this one could not, it puts its sessions back and leaves the
+settings alone. On a computer the notice names the file; on a phone or in a
+browser the copy stays in the app's own store, out of reach, and a backup is
+the way back. A browser keeps the newest five copies it set aside,
+`dust_sessions_unreadable`, `_2`, `_3`…, and lets the oldest go first when a
+new one needs the room; a copy with no room beside what it is set aside from
+is moved into that room instead, so a large history that cannot be read never
+holds back every save after it.
 
 From contest mode on, a mode added later is written under the name of the
 older mode closest to it, plus a mark only newer builds read, so older builds
@@ -399,8 +414,19 @@ card:
   - iOS puts it in the app's Documents folder, which the Info.plist keys in
     `Dioxus.toml` (`UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace`)
     show in the Files app under On My iPhone, Dust.
+
+  The app's own folders, on iOS and on Android before 10, are deleted with
+  the app, and the backup in them with the store it backs up: such a file is
+  no backup until it is moved out. There the message after saving says so,
+  and how (with the Files app, to iCloud Drive or another app; with a file
+  manager), the card tells of the last one as saved in Dust's folder, and
+  its note says to move each one out to keep it safe.
 - **Restore a backup** adds the sessions in the file that are not here yet
-  and takes its settings, level included. Undo, in the message that follows,
+  and takes its settings, level included, all but this device's own: its
+  volume, and how its keyboard and paddles key (**Swap [ and ] paddles**,
+  **Paddles on the keys right of P**), which a backup from a phone has no
+  say in on a computer; the card says so before, and the message after, when they
+  differed. Undo, in the message that follows,
   puts both back as they were: what the restore added taken out, what it
   filled in as it was, and what the history let go to make room for it back,
   while whatever another window kept or deleted meanwhile stands. A file that is not a backup, or far too large
@@ -412,7 +438,9 @@ card:
   stands out. When the last one was saved is kept under `dust_last_backup`,
   or in `last_backup.txt`. A restored backup counts as the last one only when
   it holds every session here that had finished by the time it was saved: one
-  from another device leaves this one's own sessions in no backup. A browser never says whether it kept a download,
+  from another device leaves this one's own sessions in no backup. A mark
+  later than now, left by a clock set ahead, counts as made now, so the
+  sessions after it are counted once the clock is right. A browser never says whether it kept a download,
   so the web app's card says the last backup was handed to the browser, not
   saved.
 
@@ -428,7 +456,9 @@ storage (`navigator.storage.persist()`) rather than clear it to make room.
 Chrome decides by itself; Firefox asks once. That guards against the browser,
 not against someone clearing the site's data: only a backup does.
 
-The history keeps your newest 500 sessions. A browser also gives each site only
+The history keeps your newest 500 sessions, newest as they were stored, in
+the order they finished, whatever the clock said: a session stamped by a clock
+set back is not the first to go. A browser also gives each site only
 a few megabytes; should the history outgrow that — hundreds of sessions of
 hundreds of groups, or long contest runs, which take more room — the newest
 that fit are kept, and the app says so.
@@ -439,6 +469,18 @@ more. Every deletion can be undone from the message that follows it, for a
 few seconds. Deleting a session takes it out of every stat, the calendar,
 the streak and the score board, and out of what the sampler learns from; the
 level you have reached stays where it is.
+
+Two windows or tabs on one store each store what changed in them, laid over
+what the other stored. They store without a lock between them, so one can
+write over a session the other stored a moment before; that window's next
+store puts it back. A session is taken for deleted only when it was deleted
+by hand: each deletion is remembered for 90 days, the newest thousand, in
+`deleted.json`, or `dust_deleted` in a browser, and so is taken out again
+wherever another window still holds it. Undo, or a restore that brings the
+session back, forgets it. A session the history let go for want of room is
+kept by a window that still holds it, and let go again as it stores. A
+deletion made by a build from before this, which remembered none, can come
+back from a window that still held the session.
 
 **Stats → Scores** is the score board: the sessions kept on this device,
 ranked by what they earned a group, with gold, silver and bronze for the top

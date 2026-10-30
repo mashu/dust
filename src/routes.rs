@@ -248,6 +248,7 @@ fn StatsRoute() -> Element {
                 last: *ctx.last_backup.read(),
                 can_save: ctx.app().store.saves_backups(),
                 confirmed: ctx.app().store.confirms_backups(),
+                inside_app: ctx.app().store.backups_inside_app(),
                 on_save: EventHandler::new(move |()| ctx.save_backup()),
                 on_restore: EventHandler::new(move |backup| ctx.restore_backup(backup)),
             },

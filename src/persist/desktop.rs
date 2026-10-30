@@ -9,14 +9,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, read_history,
-    read_settings_from,
+    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SETTINGS_HELD,
+    SetAside, Store, newest, over_stored, read_history, read_settings_from,
 };
 
 const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
 const SETTINGS: &str = "settings.json";
 const SESSIONS: &str = "sessions.json";
+/// The sessions deleted by hand ([`Deleted`]).
+const DELETED: &str = "deleted.json";
 const COUNTERS: &str = "auto_adjust.json";
 const LAST_BACKUP: &str = "last_backup.txt";
 /// The sessions and runs marked open ([`Store::mark_open`]): each copy of
@@ -32,10 +34,17 @@ pub struct DesktopStore {
     root: PathBuf,
     /// Where backup files go, when there is anywhere the user can reach.
     backup_folder: Option<PathBuf>,
+    /// How the user moves a backup file out of the app, where it is saved
+    /// inside it ([`Store::backups_inside_app`]).
+    backups_inside: Option<&'static str>,
     /// The stored history could not be read, nor moved out of the way, the
     /// last time it was read, so it is not to be written over until a read
     /// says otherwise.
     history_held: Cell<bool>,
+    /// The same, of the settings.
+    settings_held: Cell<bool>,
+    /// What reads set aside, not yet told of ([`Store::take_set_aside`]).
+    set_aside: RefCell<Vec<SetAside>>,
     /// This copy's mark, while its session is marked open.
     open_held: RefCell<Option<HeldMark>>,
 }
@@ -50,6 +59,7 @@ impl DesktopStore {
     pub fn new() -> Self {
         Self {
             backup_folder: backup_folder(),
+            backups_inside: backups_inside_app(),
             ..Self::at(data_dir())
         }
     }
@@ -59,7 +69,10 @@ impl DesktopStore {
         Self {
             root: root.into(),
             backup_folder: None,
+            backups_inside: None,
             history_held: Cell::new(false),
+            settings_held: Cell::new(false),
+            set_aside: RefCell::new(Vec::new()),
             open_held: RefCell::new(None),
         }
     }
@@ -90,7 +103,7 @@ impl DesktopStore {
     /// first rather than written over; a file there that cannot be read at
     /// all, or set aside, is left as it is.
     fn update_counters(&self, change: impl FnOnce(&mut Counters)) {
-        let mut all = match fs::read(self.root.join(COUNTERS)) {
+        let (mut all, mut stored) = match fs::read(self.root.join(COUNTERS)) {
             Ok(raw) => {
                 let (all, whole) = read_counters(&raw);
                 if !whole && let Err(err) = self.write(&aside_name(&self.root, "auto_adjust"), &raw)
@@ -100,36 +113,59 @@ impl DesktopStore {
                     );
                     return;
                 }
-                all
+                let stored: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_slice(&raw).unwrap_or_default();
+                (all, stored)
             }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Counters::new(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                (Counters::new(), serde_json::Map::new())
+            }
             Err(err) => {
                 eprintln!("could not read the auto-level counters: {err}");
                 return;
             }
         };
         change(&mut all);
-        if let Ok(raw) = serde_json::to_vec_pretty(&all) {
+        // Each over what it held, so what a later build added to it stays.
+        let written: serde_json::Map<String, serde_json::Value> = all
+            .into_iter()
+            .filter_map(|(key, counters)| {
+                let value = over_stored(serde_json::to_value(counters).ok()?, stored.remove(&key));
+                Some((key, value))
+            })
+            .collect();
+        if let Ok(raw) = serde_json::to_vec_pretty(&written) {
             let _ = self.write(COUNTERS, &raw);
         }
     }
 
-    /// Move an unreadable history out of the way of the next save, keeping
-    /// it beside the new one to be recovered. If it cannot be moved, nothing
-    /// is to be written over it.
-    fn set_aside(&self, path: &Path) {
-        let aside = self.root.join(aside_name(&self.root, "sessions"));
-        if let Err(err) = fs::rename(path, &aside) {
-            eprintln!("could not set aside an unreadable history: {err}");
-            self.history_held.set(true);
+    /// Move a file that cannot be read, `stem`.json at `path`, out of the
+    /// way of the next save, keeping it beside the new one to be recovered,
+    /// and say where it went: nowhere, when it could not be moved.
+    fn set_aside(&self, path: &Path, stem: &str) -> Option<String> {
+        let name = aside_name(&self.root, stem);
+        match fs::rename(path, self.root.join(&name)) {
+            Ok(()) => Some(name),
+            Err(err) => {
+                eprintln!("could not set aside {stem}.json, which could not be read: {err}");
+                None
+            }
         }
     }
 
-    /// Keep `unread`, the sessions of the history that could not be read, in
-    /// a file of their own beside it before the next save leaves them out —
-    /// unless a file set aside before holds them already. If they cannot be
-    /// kept, nothing is to be written over the history.
-    fn keep_aside(&self, unread: &[u8]) {
+    /// Where the user can find `name`, a file of the store's, in words for
+    /// them: on a computer. A phone keeps the store inside the app, where no
+    /// file manager reaches.
+    fn shown(&self, name: &str) -> Option<String> {
+        let reachable = !cfg!(any(target_os = "android", target_os = "ios"));
+        reachable.then(|| self.root.join(name).display().to_string())
+    }
+
+    /// Keep `unread`, the `count` sessions of the history that could not be
+    /// read, in a file of their own beside it before the next save leaves
+    /// them out — unless a file set aside before holds them already. If they
+    /// cannot be kept, nothing is to be written over the history.
+    fn keep_aside(&self, unread: &[u8], count: usize) {
         let kept = fs::read_dir(&self.root)
             .into_iter()
             .flatten()
@@ -144,9 +180,16 @@ impl DesktopStore {
         if kept {
             return;
         }
-        if let Err(err) = self.write(&aside_name(&self.root, "sessions"), unread) {
-            eprintln!("could not set aside the sessions that could not be read: {err}");
-            self.history_held.set(true);
+        let name = aside_name(&self.root, "sessions");
+        match self.write(&name, unread) {
+            Ok(()) => self.set_aside.borrow_mut().push(SetAside::Sessions {
+                count,
+                kept: self.shown(&name),
+            }),
+            Err(err) => {
+                eprintln!("could not set aside the sessions that could not be read: {err}");
+                self.history_held.set(true);
+            }
         }
     }
 }
@@ -225,6 +268,20 @@ fn backup_folder() -> Option<PathBuf> {
         .or_else(dirs::home_dir)
 }
 
+/// How the user moves a backup file out of the app, where this build saves
+/// it inside the app ([`Store::backups_inside_app`]): with the Files app on
+/// an iPhone, a file manager on Android before 10.
+fn backups_inside_app() -> Option<&'static str> {
+    if cfg!(target_os = "ios") {
+        return Some("with the Files app, to iCloud Drive or another app,");
+    }
+    #[cfg(all(target_os = "android", not(test)))]
+    if super::android::backups_inside_app() {
+        return Some("with a file manager, to Download say,");
+    }
+    None
+}
+
 /// `name` in `folder`, or, if a file is already called that, the first of
 /// `name-2`, `name-3` and so on that is free: an earlier backup is never
 /// written over.
@@ -273,11 +330,38 @@ impl Store for DesktopStore {
         let _ = self.write(TUTORIAL, b"done");
     }
 
+    /// A settings file that does not read at all, edited by hand and left
+    /// with a stray comma say, is set aside before the defaults the app goes
+    /// on with are written over it; until it is, nothing is. It used to read
+    /// as no settings at all, and the first change made went over it.
     fn read_settings(&self) -> Option<TrainingSettings> {
-        read_settings_from(&fs::read_to_string(self.root.join(SETTINGS)).ok()?)
+        self.settings_held.set(false);
+        let path = self.root.join(SETTINGS);
+        let raw = match fs::read(&path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
+            Err(err) => {
+                eprintln!("could not read the settings: {err}");
+                self.settings_held.set(true);
+                return None;
+            }
+        };
+        let settings = std::str::from_utf8(&raw).ok().and_then(read_settings_from);
+        if settings.is_none() {
+            match self.set_aside(&path, "settings") {
+                Some(name) => self.set_aside.borrow_mut().push(SetAside::Settings {
+                    kept: self.shown(&name),
+                }),
+                None => self.settings_held.set(true),
+            }
+        }
+        settings
     }
 
     fn write_settings(&self, settings: &TrainingSettings) -> Result<(), String> {
+        if self.settings_held.get() {
+            return Err(SETTINGS_HELD.into());
+        }
         // Pretty, as the one file somebody might open and edit by hand.
         let raw = serde_json::to_vec_pretty(settings).map_err(|err| err.to_string())?;
         self.write(SETTINGS, &raw).map_err(|err| err.to_string())
@@ -301,13 +385,37 @@ impl Store for DesktopStore {
             }
         };
         let Some(read) = std::str::from_utf8(&raw).ok().and_then(read_history) else {
-            self.set_aside(&path);
+            match self.set_aside(&path, "sessions") {
+                Some(name) => self.set_aside.borrow_mut().push(SetAside::History {
+                    kept: self.shown(&name),
+                }),
+                None => self.history_held.set(true),
+            }
             return None;
         };
         if let Some(unread) = read.unread_json() {
-            self.keep_aside(unread.as_bytes());
+            self.keep_aside(unread.as_bytes(), read.unread.len());
         }
         Some(read.sessions)
+    }
+
+    fn take_set_aside(&self) -> Vec<SetAside> {
+        std::mem::take(&mut self.set_aside.borrow_mut())
+    }
+
+    /// None, where the file cannot be read: a deletion forgotten costs a
+    /// session deleted coming back, never one kept going.
+    fn read_deleted(&self) -> Vec<Deleted> {
+        fs::read(self.root.join(DELETED))
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_deleted(&self, deleted: &[Deleted]) {
+        if let Ok(raw) = serde_json::to_vec(deleted) {
+            let _ = self.write(DELETED, &raw);
+        }
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
@@ -358,6 +466,10 @@ impl Store for DesktopStore {
 
     fn saves_backups(&self) -> bool {
         cfg!(all(target_os = "android", not(test))) || self.backup_folder.is_some()
+    }
+
+    fn backups_inside_app(&self) -> Option<&'static str> {
+        self.backups_inside
     }
 
     fn save_backup_file(&self, name: &str, contents: &str) -> BackupSaving {
@@ -781,6 +893,40 @@ mod tests {
         assert_eq!(store.read_settings(), Some(read));
     }
 
+    /// A settings file that does not read at all, edited by hand and left
+    /// with a stray comma, is set aside before anything is written over it,
+    /// and the app is told where, once. It used to read as no settings at
+    /// all, and the first change made went over it.
+    #[test]
+    fn a_settings_file_that_does_not_read_is_set_aside_before_a_write() {
+        let (dir, store) = store("settings-unreadable");
+        fs::create_dir_all(&dir.0).unwrap();
+        let edited = "{\n  \"level\": 12,\n}";
+        fs::write(dir.0.join(SETTINGS), edited).unwrap();
+        assert_eq!(store.read_settings(), None);
+        let told = store.take_set_aside();
+        let [SetAside::Settings { kept: Some(kept) }] = told.as_slice() else {
+            panic!("{told:?}");
+        };
+        assert!(kept.contains("settings.unreadable-"), "{kept}");
+        assert_eq!(fs::read_to_string(kept).unwrap(), edited);
+        assert_eq!(store.read_settings(), None, "a first launch now");
+        assert!(store.take_set_aside().is_empty(), "told of once");
+        store.save_settings(&every_setting_moved());
+        assert_eq!(store.load_settings(), every_setting_moved());
+        assert_eq!(fs::read_to_string(kept).unwrap(), edited, "kept as it was");
+    }
+
+    /// Settings that cannot be read at all are never written over.
+    #[test]
+    fn settings_that_cannot_be_read_are_never_written_over() {
+        let (dir, store) = store("settings-held");
+        fs::create_dir_all(dir.0.join(SETTINGS)).unwrap();
+        assert_eq!(store.read_settings(), None);
+        assert!(store.write_settings(&every_setting_moved()).is_err());
+        assert!(dir.0.join(SETTINGS).is_dir());
+    }
+
     /// Settings that cannot be written say why, and leave what is there.
     #[test]
     fn settings_that_cannot_be_written_say_so() {
@@ -906,6 +1052,56 @@ mod tests {
         assert_eq!(first.load_auto_counters(&counted[1].0), counted[1].1);
     }
 
+    /// What a later build added to a counter, or to a stored session,
+    /// stays when this build writes the file again. Each was written back
+    /// as this build reads it, without whatever else it held.
+    #[test]
+    fn what_a_later_build_added_stays_through_a_write() {
+        let (dir, store) = store("later-keys");
+        fs::create_dir_all(&dir.0).unwrap();
+        let counted = counted_at([3, 4]);
+        let held = format!(
+            r#"{{"{}":{{"above":1,"below":0,"laterKey":[1]}}}}"#,
+            counted[0].0.as_str()
+        );
+        fs::write(dir.0.join(COUNTERS), held).unwrap();
+        store.save_auto_counters(&counted[0].0, counted[0].1);
+        store.save_auto_counters(&counted[1].0, counted[1].1);
+        let held: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.0.join(COUNTERS)).unwrap()).unwrap();
+        assert_eq!(
+            held[counted[0].0.as_str()]["laterKey"],
+            serde_json::json!([1])
+        );
+        assert_eq!(store.load_auto_counters(&counted[0].0), counted[0].1);
+
+        let mut later = serde_json::to_value(session("2026-09-01")).unwrap();
+        later["laterKey"] = serde_json::json!("kept");
+        fs::write(dir.0.join(SESSIONS), format!("[{later}]")).unwrap();
+        let mut history = store.load_sessions();
+        history.push(session("2026-09-02"));
+        store.save_sessions(&history);
+        let held: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.0.join(SESSIONS)).unwrap()).unwrap();
+        assert_eq!(held[0]["laterKey"], "kept");
+        assert_eq!(store.load_sessions().len(), 2);
+    }
+
+    /// The sessions deleted by hand are remembered, what a later build
+    /// added to each along with them; a file that cannot be read remembers
+    /// none, which costs a deleted session coming back, never one kept.
+    #[test]
+    fn the_sessions_deleted_are_remembered() {
+        let (dir, store) = store("deleted");
+        assert!(store.read_deleted().is_empty());
+        let mut gone = Deleted::of(&session("2026-09-01"), 7);
+        gone.unread.insert("laterKey".into(), serde_json::json!(1));
+        store.save_deleted(std::slice::from_ref(&gone));
+        assert_eq!(DesktopStore::at(dir.0.clone()).read_deleted(), [gone]);
+        fs::write(dir.0.join(DELETED), "[{").unwrap();
+        assert!(store.read_deleted().is_empty());
+    }
+
     #[test]
     fn a_theme_file_with_stray_whitespace_still_reads() {
         let (dir, store) = store("theme");
@@ -941,11 +1137,17 @@ mod tests {
         fs::write(dir.0.join(SESSIONS), damaged).unwrap();
 
         assert!(store.load_sessions().is_empty());
+        let told = store.take_set_aside();
+        let [SetAside::History { kept: Some(told) }] = told.as_slice() else {
+            panic!("{told:?}");
+        };
+        assert_eq!(fs::read_to_string(told).unwrap(), damaged);
         assert_eq!(
             store.save_sessions(&[session("2026-09-02")]),
             HistorySaved::Stored { kept: 1 }
         );
         assert_eq!(store.load_sessions().len(), 1);
+        assert!(store.take_set_aside().is_empty(), "told of once");
 
         let kept: Vec<String> = files(&dir)
             .into_iter()
@@ -1077,9 +1279,18 @@ mod tests {
         let read = store.load_sessions();
         assert_eq!(read.len(), 2);
         assert_eq!(set_aside(&dir), [r#"[{"date":"nonsense"}]"#]);
+        assert!(matches!(
+            store.take_set_aside().as_slice(),
+            [SetAside::Sessions {
+                count: 1,
+                kept: Some(_)
+            }]
+        ));
         // Read again, as another copy opening would, before any save.
-        assert_eq!(DesktopStore::at(dir.0.clone()).load_sessions(), read);
+        let another = DesktopStore::at(dir.0.clone());
+        assert_eq!(another.load_sessions(), read);
         assert_eq!(set_aside(&dir).len(), 1, "set aside once");
+        assert!(another.take_set_aside().is_empty(), "and told of once");
 
         let mut more = read;
         more.push(session("2026-09-03"));

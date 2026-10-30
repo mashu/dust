@@ -99,7 +99,8 @@ pub use sampling::{
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
     Answered, ChosenSpeed, CountdownTo, Group, GroupResult, GroupSession, MonoMs, SendStart,
-    SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, answer_length_matches,
+    SessionId, SessionPhase, SessionResult, SessionTiming, SessionView, UnreadKeys,
+    answer_length_matches,
 };
 pub use settings::{
     ADJUST_COUNT_MAX, ADJUST_THRESHOLD_MAX_PCT, ADJUST_THRESHOLD_MIN_PCT, AgcDecay, Aim,

@@ -63,7 +63,7 @@ fn a_backup_is_saved_with_everything_and_remembered() {
         );
         let backup = read_backup(contents).expect("a backup");
         assert_eq!(backup.sessions.len(), 5);
-        assert_eq!(backup.settings, test_settings().clamp());
+        assert_eq!(backup.settings, Some(test_settings().clamp()));
         assert_eq!(ui.store.last_backup(), Some(backup.saved_at));
         assert!(ui.has(&format!("Backup saved as {name}, in your downloads.")));
         assert!(ui.has("nothing new since"));
@@ -93,6 +93,36 @@ fn the_card_says_when_a_backup_is_due() {
         let ui = open(store, &history(12));
         assert!(ui.has("backup-card due"));
         assert!(ui.has("11 sessions since your last backup"));
+    });
+}
+
+/// Where a backup file is saved inside the app, as on an iPhone, it goes
+/// with the app until it is moved out: the message and the card say so,
+/// and how. It used to count as safe, the card saying nothing new since.
+#[test]
+fn a_backup_kept_inside_the_app_says_to_move_it_out() {
+    run(|| async {
+        let store = MemoryStore::default();
+        store.backups_inside.set(Some("with the Files app,"));
+        let mut ui = open(store, &history(12));
+        assert!(ui.has(
+            "12 sessions and no backup yet. Save one and move it out of Dust&#39;s folder with the Files app, to keep them safe"
+        ));
+        ui.click("btn-save-a-backup");
+        assert!(
+            ui.has("It goes if Dust is deleted: move it out with the Files app, to keep it."),
+            "{}",
+            ui.html()
+        );
+        assert!(
+            ui.has("in Dust&#39;s folder · nothing new since"),
+            "{}",
+            ui.html()
+        );
+        assert!(ui.has(
+            "A backup file is saved in Dust&#39;s own folder, which goes if Dust is deleted: move each one out with the Files app, to keep your history and settings safe."
+        ));
+        assert!(!ui.has("backup-card due"));
     });
 }
 
@@ -151,6 +181,41 @@ fn a_restore_puts_back_what_is_missing_and_can_be_undone() {
             ui.store.load_settings().curriculum.level,
             test_settings().curriculum.level
         );
+    });
+}
+
+/// The card says what a restore does; a restore takes the backup's
+/// settings, the level among them, but keeps this device's volume and
+/// paddle keys, and says so. The card said it put back whatever was missing
+/// here, and a restore set a computer's volume and paddles as a phone had
+/// them.
+#[test]
+fn a_restore_keeps_this_devices_volume_and_paddle_keys() {
+    run(|| async {
+        let all = history(2);
+        let mut ui = open(MemoryStore::default(), &all[1..]);
+        assert!(
+            ui.has("Restoring one adds the sessions missing here and takes its settings, level included, though not this device&#39;s volume and paddle keys."),
+            "{}",
+            ui.html()
+        );
+        let here = test_settings().clamp();
+        let mut saved = test_settings();
+        saved.curriculum.level = 9;
+        saved.band.master_volume = here.band.master_volume / 2.0;
+        saved.playback.paddle_swap = !here.playback.paddle_swap;
+        let file = write_backup(&saved, &all, 0);
+        ui.choose_file("file-backup", "dust-backup.json", &file, file.len() as u64);
+        ui.advance(20).await;
+        assert!(
+            ui.has("Restored 1 session and your settings, keeping this device&#39;s volume and paddle keys."),
+            "{}",
+            ui.html()
+        );
+        let stored = ui.store.load_settings();
+        assert_eq!(stored.curriculum.level, 9);
+        assert_eq!(stored.band.master_volume, here.band.master_volume);
+        assert_eq!(stored.playback.paddle_swap, here.playback.paddle_swap);
     });
 }
 

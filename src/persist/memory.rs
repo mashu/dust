@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, saved_as,
-    saved_now,
+    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SetAside, Store,
+    newest, saved_as, saved_now,
 };
 
 #[derive(Default)]
@@ -34,6 +34,10 @@ pub struct MemoryStore {
     pub unreadable: Cell<bool>,
     /// The last read could not read the history.
     held_by_read: Cell<bool>,
+    /// What reads set aside, as they could not read it, not yet told of.
+    pub set_aside: RefCell<Vec<SetAside>>,
+    /// The sessions deleted by hand.
+    pub deleted: RefCell<Vec<Deleted>>,
     last_backup: Cell<Option<u64>>,
     /// Every backup file handed over: its name and what it held.
     pub backup_files: RefCell<Vec<(String, String)>>,
@@ -42,6 +46,9 @@ pub struct MemoryStore {
     /// Backup files are handed over with no word of whether they were
     /// kept, the way a browser's downloads are.
     pub unconfirmed_backups: Cell<bool>,
+    /// Backup files are kept inside the app, the way an iPhone keeps them,
+    /// and moved out as this says.
+    pub backups_inside: Cell<Option<&'static str>>,
     /// How many times the store was asked to keep its data.
     pub keep_asks: Cell<u32>,
     /// The session or run marked open, as a copy of the app that stopped
@@ -87,6 +94,18 @@ impl Store for MemoryStore {
             return None;
         }
         self.sessions.borrow().clone()
+    }
+
+    fn take_set_aside(&self) -> Vec<SetAside> {
+        std::mem::take(&mut self.set_aside.borrow_mut())
+    }
+
+    fn read_deleted(&self) -> Vec<Deleted> {
+        self.deleted.borrow().clone()
+    }
+
+    fn save_deleted(&self, deleted: &[Deleted]) {
+        *self.deleted.borrow_mut() = deleted.to_vec();
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
@@ -146,6 +165,10 @@ impl Store for MemoryStore {
 
     fn confirms_backups(&self) -> bool {
         !self.unconfirmed_backups.get()
+    }
+
+    fn backups_inside_app(&self) -> Option<&'static str> {
+        self.backups_inside.get()
     }
 
     fn ask_to_keep(&self) {

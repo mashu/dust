@@ -17,7 +17,7 @@ pub mod memory;
 #[cfg(feature = "web")]
 mod web;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -40,6 +40,10 @@ pub trait Store {
     fn mark_tutorial_done(&self);
     /// The stored settings, clamped; `None` when nothing stored reads as
     /// settings at all: a first launch, or a store that cannot be read.
+    ///
+    /// Settings stored that do not read at all are set aside first
+    /// ([`Store::take_set_aside`]), and until they are, held: written over
+    /// by nothing.
     fn read_settings(&self) -> Option<TrainingSettings>;
     /// The stored settings, clamped; defaults for whatever could not be read.
     fn load_settings(&self) -> TrainingSettings {
@@ -67,14 +71,24 @@ pub trait Store {
     }
     /// Store the newest of `sessions`, up to [`MAX_SESSIONS`].
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved;
+    /// The sessions deleted by hand that the store remembers ([`Deleted`]);
+    /// none where it remembers none, as a store from before it did.
+    fn read_deleted(&self) -> Vec<Deleted>;
+    /// Remember `deleted` as the sessions deleted by hand, in place of what
+    /// was remembered.
+    fn save_deleted(&self, deleted: &[Deleted]);
+    /// What reading the store has set aside, as it could not read it, since
+    /// this was last asked: taken, so the user is told of each once.
+    fn take_set_aside(&self) -> Vec<SetAside> {
+        Vec::new()
+    }
     fn load_auto_counters(&self, key: &CountersKey) -> AutoLevelCounters;
     fn save_auto_counters(&self, key: &CountersKey, counters: AutoLevelCounters);
     fn clear_auto_counters(&self, keys: &[CountersKey]);
     /// When a backup was last saved, in milliseconds since the epoch.
     fn last_backup(&self) -> Option<u64>;
     fn mark_backup(&self, at: u64);
-    /// Whether this build can hand the user a backup file: an app on a
-    /// phone has nowhere outside itself to put one.
+    /// Whether this build can hand the user a backup file at all.
     fn saves_backups(&self) -> bool;
     /// Hand `contents` to the user as a file called `name`, outside the
     /// store, somewhere they can reach it: a download in a browser, a file
@@ -87,6 +101,15 @@ pub trait Store {
     /// blocked or turned down, it says nothing.
     fn confirms_backups(&self) -> bool {
         true
+    }
+    /// Whether a backup file this store saves is kept inside the app, and
+    /// deleted with it, until the user moves it out: and if so, how they
+    /// do, in words that follow "move it out". An iPhone keeps it in the
+    /// app's own Documents, and Android before 10 in the app's own folder
+    /// on the shared storage; a backup there is no backup against deleting
+    /// the app.
+    fn backups_inside_app(&self) -> Option<&'static str> {
+        None
     }
     /// Ask the platform to keep what is stored rather than clear it when it
     /// needs room. Only a browser clears a store on its own, and it may ask
@@ -140,6 +163,20 @@ impl CutOff {
     }
 }
 
+/// What a read set aside, as it could not read it, beside what it was
+/// written over by ([`Store::take_set_aside`]). `kept` is where the copy is,
+/// where the user can reach it: a file on a computer; nowhere they can on
+/// a phone or in a browser, where it stays in the app's own store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetAside {
+    /// The settings, whole: the app went on with its defaults.
+    Settings { kept: Option<String> },
+    /// The history, whole: the app went on without one.
+    History { kept: Option<String> },
+    /// `count` sessions of the history: the app went on without them.
+    Sessions { count: usize, kept: Option<String> },
+}
+
 /// The sessions cut off, being looked for: already, or still, where only the
 /// platform can tell which copies are running, as in a browser.
 pub type CutOffTaking = Pin<Box<dyn Future<Output = Option<CutOff>>>>;
@@ -159,6 +196,12 @@ fn saved_now(result: Result<String, String>) -> BackupSaving {
 fn saved_as(place: &str) -> String {
     format!("Backup saved as {place}.")
 }
+
+/// Why settings were not stored: those stored could not be read, nor set
+/// aside, when they were last read, so they are kept as they are rather
+/// than written over. In words that follow "could not be saved:".
+#[cfg(any(feature = "web", feature = "native-runtime"))]
+const SETTINGS_HELD: &str = "the settings stored could not be read, so they were left as they are";
 
 /// What became of a history handed to [`Store::save_sessions`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -337,21 +380,33 @@ fn aside_number(prefix: &str, key: &str) -> Option<u64> {
     }
 }
 
-/// Keep `raw`, what could not be read of a history, set aside in `store`
-/// under `prefix`, and say whether it is kept. A copy set aside before is
-/// never written over, and one set aside already is not kept twice.
+/// What became of a copy of what could not be read, set aside.
+#[cfg(any(feature = "web", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kept {
+    /// Set aside now.
+    Now,
+    /// Set aside before: the same copy is kept already.
+    Already,
+    /// Not kept.
+    Not,
+}
+
+/// Keep `raw`, what could not be read, set aside in `store` under
+/// `prefix`, and say whether it is kept. A copy set aside before is never
+/// written over, and one set aside already is not kept twice.
 ///
 /// Each copy goes under the number after the newest, so the numbers say
 /// which is newer, and only the newest [`MAX_SET_ASIDE`] are kept. One that
 /// does not fit lets the oldest go, one at a time, until it does; if it
-/// does not fit even then, those go back as they were. Nothing reads a
-/// copy set aside back but a person, while a history that cannot be set
+/// does not fit even then, those go back as they were. A copy set aside is
+/// there for a person to recover from, while a history that cannot be set
 /// aside holds back every session finished after it: so old copies give
 /// way to a new one, the oldest first.
 #[cfg(any(feature = "web", test))]
-fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
+fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> Kept {
     let Ok(keys) = store.keys() else {
-        return false;
+        return Kept::Not;
     };
     let mut numbered: Vec<(u64, String)> = keys
         .into_iter()
@@ -362,16 +417,16 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
         .last()
         .map_or(Some(1), |(number, _)| number.checked_add(1))
     else {
-        return false;
+        return Kept::Not;
     };
     // Each copy already set aside, oldest first, and what it holds.
     let mut older = Vec::with_capacity(numbered.len());
     for (_, key) in numbered {
         match store.get(&key) {
-            Ok(Some(kept)) if kept == raw => return true,
+            Ok(Some(kept)) if kept == raw => return Kept::Already,
             Ok(Some(kept)) => older.push((key, kept)),
             Ok(None) => {}
-            Err(()) => return false,
+            Err(()) => return Kept::Not,
         }
     }
     let key = match next {
@@ -384,7 +439,7 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
             for (key, kept) in &older {
                 store.set(key, kept);
             }
-            return false;
+            return Kept::Not;
         };
         store.remove(oldest);
         gone += 1;
@@ -393,7 +448,67 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
     for (key, _) in &older[gone..first_kept] {
         store.remove(key);
     }
-    true
+    Kept::Now
+}
+
+/// Set `unread`, what could not be read of `raw`, stored under `key`, aside
+/// under `prefix` before anything writes over it, and say whether it is
+/// kept. `rest` is what `key` is to hold once it is: the sessions that
+/// could be read, or nothing, when none of `raw` could be.
+///
+/// A copy goes beside what is stored, if there is room for it. If there is
+/// not, it is moved: `key` gives up its room first, holding only `rest`,
+/// and the copy goes into the room that frees; should even that fail, `key`
+/// is put back as it was. A history too large to copy beside itself used
+/// to be held instead, for as long as the browser kept it, and every
+/// session finished after it went unsaved.
+#[cfg(any(feature = "web", test))]
+fn set_aside_from(
+    store: &impl Aside,
+    key: &str,
+    raw: &str,
+    prefix: &str,
+    unread: &str,
+    rest: Option<&str>,
+) -> Kept {
+    let kept = keep_aside(store, prefix, unread);
+    if kept != Kept::Not {
+        if rest.is_none() {
+            store.remove(key);
+        }
+        return kept;
+    }
+    let room = match rest {
+        Some(rest) => store.set(key, rest),
+        None => {
+            store.remove(key);
+            true
+        }
+    };
+    let moved = if room {
+        keep_aside(store, prefix, unread)
+    } else {
+        Kept::Not
+    };
+    if moved == Kept::Not {
+        store.set(key, raw);
+    }
+    moved
+}
+
+/// `written`, a record as this build writes it, laid over `stored`, the
+/// same record as it was stored: whatever a later build added to it stays.
+#[cfg(any(feature = "web", feature = "native-runtime"))]
+fn over_stored(written: serde_json::Value, stored: Option<serde_json::Value>) -> serde_json::Value {
+    match (written, stored) {
+        (serde_json::Value::Object(mut written), Some(serde_json::Value::Object(stored))) => {
+            for (key, value) in stored {
+                written.entry(key).or_insert(value);
+            }
+            serde_json::Value::Object(written)
+        }
+        (written, _) => written,
+    }
 }
 
 /// Load settings without throwing away everything for one bad field.
@@ -402,6 +517,13 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
 /// field whose type changed between versions — and the user would silently get
 /// factory settings back. So fall back to applying the stored keys one at a
 /// time and keeping the ones that still deserialize.
+///
+/// Only a key this build reads can fail to, so only those are tried one at a
+/// time: a few dozen, however large the save. Every other key is carried along
+/// as it is ([`TrainingSettings::unread`]), and goes in with the rest at the
+/// end. Each key used to be tried on top of every key kept before it, which
+/// took time in the square of their number: a file of tens of thousands of
+/// keys, a backup made that way, held the app up for minutes.
 fn recover_settings(raw: &str) -> TrainingSettings {
     let Ok(serde_json::Value::Object(mut stored)) = serde_json::from_str::<serde_json::Value>(raw)
     else {
@@ -409,24 +531,23 @@ fn recover_settings(raw: &str) -> TrainingSettings {
     };
     upgrade_receiver(&mut stored);
     upgrade_agc_threshold(&mut stored);
-    let stored = serde_json::Value::Object(stored);
-    if let Ok(settings) = serde_json::from_value::<TrainingSettings>(stored.clone()) {
+    if let Ok(settings) = TrainingSettings::deserialize(&stored) {
         return settings;
     }
-    let serde_json::Value::Object(stored) = stored else {
-        return TrainingSettings::default();
-    };
+    let read = TrainingSettings::read_keys();
+    let (tried, carried): (Vec<_>, Vec<_>) = stored
+        .into_iter()
+        .partition(|(key, _)| read.contains(key.as_str()));
     let mut kept = serde_json::Map::new();
-    for (key, value) in stored {
-        let mut candidate = kept.clone();
-        candidate.insert(key, value);
-        if serde_json::from_value::<TrainingSettings>(serde_json::Value::Object(candidate.clone()))
-            .is_ok()
-        {
-            kept = candidate;
+    for (key, value) in tried {
+        kept.insert(key.clone(), value);
+        if TrainingSettings::deserialize(&kept).is_err() {
+            kept.remove(&key);
         }
     }
-    serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default()
+    let settings = TrainingSettings::deserialize(&kept).unwrap_or_default();
+    kept.extend(carried);
+    TrainingSettings::deserialize(&kept).unwrap_or(settings)
 }
 
 /// A save from before the receiver was quoted by its 6 dB width has no
@@ -532,6 +653,57 @@ impl SessionKey {
     }
 }
 
+/// A session deleted by hand, as the store remembers it, by its
+/// [`SessionKey`]: what tells a session another copy of the app deleted
+/// from one it never stored, or lost in passing ([`merge_history`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deleted {
+    pub timestamp: u64,
+    pub date: String,
+    /// When it was deleted, in milliseconds since the epoch.
+    pub at: u64,
+    /// What a later build added to it, carried along.
+    #[serde(flatten)]
+    pub unread: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Deleted {
+    /// `session`, deleted `at`.
+    pub fn of(session: &SessionResult, at: u64) -> Self {
+        Self {
+            timestamp: session.timestamp,
+            date: session.date.clone(),
+            at,
+            unread: serde_json::Map::new(),
+        }
+    }
+
+    pub fn key(&self) -> SessionKey {
+        SessionKey(self.timestamp, self.date.clone())
+    }
+}
+
+/// How long a deletion is remembered: well past the time a copy of the app
+/// left open on the history from before it is likely to store again.
+const DELETED_KEPT_MS: u64 = 90 * 86_400_000;
+
+/// How many deletions are remembered, at most: the newest. Two whole
+/// histories deleted.
+const MAX_DELETED: usize = 2 * MAX_SESSIONS;
+
+/// `deleted`, oldest first, less what is no longer worth remembering at
+/// `now`: deletions older than [`DELETED_KEPT_MS`], and all but the newest
+/// [`MAX_DELETED`]. One stamped later than now, by a clock set ahead, is
+/// let go by count alone. A copy that still holds a session whose deletion
+/// is let go puts it back the next time it stores, rather than lose one.
+pub fn prune_deleted(mut deleted: Vec<Deleted>, now: u64) -> Vec<Deleted> {
+    deleted.retain(|gone| gone.at.saturating_add(DELETED_KEPT_MS) >= now);
+    let over = deleted.len().saturating_sub(MAX_DELETED);
+    deleted.drain(..over);
+    deleted
+}
+
 /// `theirs`, the history stored now, with what `ours` changed from `base`
 /// done to it.
 ///
@@ -542,61 +714,101 @@ impl SessionKey {
 /// one deleted here is deleted, and one changed here — filled in by a
 /// restore — is kept as it is here; whatever another copy added, deleted
 /// or changed stands. Sessions are known as [`pair_sessions`] knows them.
+///
+/// A session is deleted elsewhere only if `deleted`, the sessions deleted
+/// by hand ([`Deleted`]), holds it: one missing from the store alone is
+/// kept. Copies store without a lock between them, so one can write over
+/// what another stored a moment before, from a history it read before
+/// that: a session the first copy kept then is missing from the store,
+/// and used to be taken for one deleted elsewhere and lost for good. A
+/// session stored, or put back, elsewhere and deleted by hand is dropped
+/// for the same reason; one the store let go for want of room is neither,
+/// kept, and let go again as the history is stored.
+///
+/// The history keeps the order sessions were stored in, which is the
+/// order they finished in, whatever the clock said: the store lets go of
+/// the first when it has no room, so a session stamped by a clock set back
+/// must not move to the front.
 pub fn merge_history(
     base: &[SessionResult],
     ours: &[SessionResult],
     theirs: &[SessionResult],
+    deleted: &HashSet<SessionKey>,
 ) -> Vec<SessionResult> {
     fn each(sessions: &[SessionResult]) -> Vec<&SessionResult> {
         sessions.iter().collect()
     }
     let was_here = pair_sessions(&each(base), &each(ours));
     let was_there = pair_sessions(&each(base), &each(theirs));
-    // Each session of `base` as it is stored now, if it still is.
+    // Each session of `base` as it is stored now, if it still is, and where.
     let mut stored = vec![None; base.len()];
-    for (session, was) in theirs.iter().zip(&was_there) {
+    for (there, (session, was)) in theirs.iter().zip(&was_there).enumerate() {
         if let Some(was) = was {
-            stored[*was] = Some(session);
+            stored[*was] = Some((there, session));
         }
     }
-    let mut merged = Vec::with_capacity(theirs.len().max(ours.len()));
+    // Each session kept, and where the store has it, if it does.
+    let mut merged: Vec<(SessionResult, Option<usize>)> =
+        Vec::with_capacity(theirs.len().max(ours.len()));
+    // Each session added here, and where it is kept.
     let mut added_here = Vec::new();
     for (session, was) in ours.iter().zip(&was_here) {
         match was {
             None => {
-                merged.push(session.clone());
-                added_here.push(session);
+                added_here.push((merged.len(), session));
+                merged.push((session.clone(), None));
             }
             Some(was) => match stored[*was] {
                 // Deleted elsewhere.
-                None => {}
+                None if deleted.contains(&SessionKey::of(session)) => {}
+                // Missing from the store, and not deleted: lost there.
+                None => merged.push((session.clone(), None)),
                 // Changed here, or else as it is stored.
-                Some(stored) if *session == base[*was] => merged.push(stored.clone()),
-                Some(_) => merged.push(session.clone()),
+                Some((there, stored)) if *session == base[*was] => {
+                    merged.push((stored.clone(), Some(there)));
+                }
+                Some((there, _)) => merged.push((session.clone(), Some(there))),
             },
         }
     }
-    // Added elsewhere, unless it was added here too, as two copies
-    // restoring one backup each add the same session.
-    let added_there: Vec<&SessionResult> = theirs
+    // Added elsewhere, unless deleted by hand, or added here too, as two
+    // copies restoring one backup each add the same session.
+    let added_there: Vec<(usize, &SessionResult)> = theirs
         .iter()
+        .enumerate()
         .zip(&was_there)
-        .filter(|(_, was)| was.is_none())
-        .map(|(session, _)| session)
+        .filter(|((_, session), was)| was.is_none() && !deleted.contains(&SessionKey::of(session)))
+        .map(|(added, _)| added)
         .collect();
-    let before = merged.len();
-    merged.extend(
-        added_there
-            .iter()
-            .zip(pair_sessions(&added_here, &added_there))
-            .filter(|(_, same)| same.is_none())
-            .map(|(session, _)| (*session).clone()),
-    );
-    // In among the rest, by when each finished.
-    if merged.len() > before {
-        merged.sort_by_key(|session| session.timestamp);
+    let here: Vec<&SessionResult> = added_here.iter().map(|(_, session)| *session).collect();
+    let there: Vec<&SessionResult> = added_there.iter().map(|(_, session)| *session).collect();
+    let mut new = Vec::new();
+    for (&(at, session), same) in added_there.iter().zip(pair_sessions(&here, &there)) {
+        match same {
+            // Kept here already: where the store has it too.
+            Some(same) => merged[added_here[same].0].1 = Some(at),
+            None => new.push((at, session)),
+        }
     }
-    merged
+    // Each where the store has it: after the session it follows there, and
+    // in among what this copy added since by when it finished. Sorted by
+    // when each finished, a session a clock set back stamped went to the
+    // front, and was the first the history let go.
+    let mut new = new.into_iter().peekable();
+    let mut after = 0;
+    for (at, session) in theirs.iter().enumerate() {
+        if let Some(kept) = merged.iter().position(|(_, there)| *there == Some(at)) {
+            after = kept + 1;
+        } else if let Some((_, added)) = new.next_if(|(added, _)| *added == at) {
+            let place = merged[after..]
+                .iter()
+                .position(|(kept, _)| kept.timestamp > session.timestamp)
+                .map_or(merged.len(), |later| after + later);
+            merged.insert(place, (added.clone(), Some(at)));
+            after = place + 1;
+        }
+    }
+    merged.into_iter().map(|(session, _)| session).collect()
 }
 
 /// Which of `from` each of `to` is, if any: the one with the same
@@ -869,7 +1081,7 @@ pub(crate) mod tests {
         let pretty = serde_json::to_string_pretty(&moved).expect("serialize");
         assert_eq!(load_settings_from(&pretty), moved);
         let backup = backup::read_backup(&backup::write_backup(&moved, &[], 1)).expect("a backup");
-        assert_eq!(backup.settings, moved);
+        assert_eq!(backup.settings, Some(moved));
     }
 
     /// A merge keeps what is stored, and lays over it only what this copy
@@ -933,6 +1145,23 @@ pub(crate) mod tests {
         sessions.iter().map(|session| session.timestamp).collect()
     }
 
+    /// The sessions of `stamps` as deleted by hand.
+    fn deleted(stamps: &[u64]) -> HashSet<SessionKey> {
+        stamps
+            .iter()
+            .map(|&stamp| SessionKey::of(&at(stamp)))
+            .collect()
+    }
+
+    /// A merge with nothing deleted by hand.
+    fn merged(
+        base: &[SessionResult],
+        ours: &[SessionResult],
+        theirs: &[SessionResult],
+    ) -> Vec<SessionResult> {
+        merge_history(base, ours, theirs, &HashSet::new())
+    }
+
     /// A history merge does to what is stored what this copy did, and keeps
     /// what another copy did: each added, each deleted, in the order they
     /// were practised.
@@ -942,13 +1171,50 @@ pub(crate) mod tests {
         // Here 2 was deleted and 4 added; elsewhere 3 deleted and 5 added.
         let ours = [at(1), at(3), at(4)];
         let theirs = [at(1), at(2), at(5)];
-        assert_eq!(stamps(&merge_history(&base, &ours, &theirs)), [1, 4, 5]);
+        let gone = deleted(&[2, 3]);
+        assert_eq!(
+            stamps(&merge_history(&base, &ours, &theirs, &gone)),
+            [1, 4, 5]
+        );
         // Nothing stored elsewhere: this copy's history, as it is.
-        assert_eq!(merge_history(&base, &ours, &base), ours);
+        assert_eq!(merge_history(&base, &ours, &base, &gone), ours);
         // Nothing changed here: what is stored, as it is.
-        assert_eq!(merge_history(&base, &base, &theirs), theirs);
+        assert_eq!(merge_history(&base, &base, &theirs, &gone), theirs);
         // Both added the same session, restoring the same backup: once.
-        assert_eq!(stamps(&merge_history(&[], &[at(7)], &[at(7)])), [7]);
+        assert_eq!(stamps(&merged(&[], &[at(7)], &[at(7)])), [7]);
+    }
+
+    /// A session missing from the store, but deleted by nobody, is kept:
+    /// another copy wrote over the store from a history it read before the
+    /// session was stored. It used to be taken for one deleted elsewhere,
+    /// and lost for good. One deleted by hand that such a write brought back
+    /// goes again.
+    #[test]
+    fn a_session_lost_from_the_store_is_not_taken_for_one_deleted() {
+        let base = [at(1), at(2)];
+        let ours = [at(1), at(2), at(4)];
+        // Another copy, which read the history before 2 was stored, wrote
+        // it over with 3 of its own.
+        let theirs = [at(1), at(3)];
+        assert_eq!(stamps(&merged(&base, &ours, &theirs)), [1, 2, 3, 4]);
+        // 1 was deleted here before; the other copy's write brought it back.
+        let theirs = [at(1), at(2), at(3)];
+        let merged_now = merge_history(&[at(2)], &[at(2)], &theirs, &deleted(&[1]));
+        assert_eq!(stamps(&merged_now), [2, 3]);
+    }
+
+    /// A session another copy stored, stamped by a clock set back, stays
+    /// where the store has it, after what it followed there, and what this
+    /// copy adds goes after it. Sorted by its stamp, it went to the front,
+    /// the first session the history lets go when it has no room.
+    #[test]
+    fn a_session_a_clock_set_back_stamped_keeps_its_place() {
+        let base = [at(10), at(20)];
+        let merged_now = merged(&base, &[at(10), at(20), at(30)], &[at(10), at(20), at(5)]);
+        assert_eq!(stamps(&merged_now), [10, 20, 5, 30]);
+        // Added elsewhere before the first session here: first.
+        let merged_now = merged(&base, &base, &[at(7), at(10), at(20)]);
+        assert_eq!(stamps(&merged_now), [7, 10, 20]);
     }
 
     /// A session filled in on one side — a run's log put back by a restore —
@@ -957,10 +1223,10 @@ pub(crate) mod tests {
     fn a_history_merge_keeps_a_session_filled_in_on_either_side() {
         let mut filled = at(1);
         filled.accuracy = 0.5;
-        let merged = merge_history(&[at(1)], std::slice::from_ref(&filled), &[at(1)]);
-        assert_eq!(merged, [filled.clone()]);
-        let merged = merge_history(&[at(1)], &[at(1)], std::slice::from_ref(&filled));
-        assert_eq!(merged, [filled]);
+        let merged_here = merged(&[at(1)], std::slice::from_ref(&filled), &[at(1)]);
+        assert_eq!(merged_here, [filled.clone()]);
+        let merged_there = merged(&[at(1)], &[at(1)], std::slice::from_ref(&filled));
+        assert_eq!(merged_there, [filled]);
     }
 
     /// Sessions alike in when and on what day they finished are told apart
@@ -971,9 +1237,10 @@ pub(crate) mod tests {
         let mut second = at(1);
         second.accuracy = 0.5;
         let both = [first.clone(), second.clone()];
-        let merged = merge_history(&both, std::slice::from_ref(&second), &both);
+        let gone = deleted(&[1]);
+        let merged = merge_history(&both, std::slice::from_ref(&second), &both, &gone);
         assert_eq!(merged, [second]);
-        let merged = merge_history(&both, &both, std::slice::from_ref(&first));
+        let merged = merge_history(&both, &both, std::slice::from_ref(&first), &gone);
         assert_eq!(merged, [first]);
     }
 
@@ -990,7 +1257,10 @@ pub(crate) mod tests {
         let base = [first.clone(), second.clone(), third.clone()];
         let ours = [first, filled.clone(), third.clone()];
         let theirs = [second, third.clone()];
-        assert_eq!(merge_history(&base, &ours, &theirs), [filled, third]);
+        assert_eq!(
+            merge_history(&base, &ours, &theirs, &deleted(&[1])),
+            [filled, third]
+        );
     }
 
     /// The same session added on both sides is kept once, and two alike in
@@ -1000,9 +1270,35 @@ pub(crate) mod tests {
         let mut other = at(7);
         other.accuracy = 0.5;
         assert_eq!(
-            merge_history(&[], &[at(7)], &[at(7), other.clone()]),
+            merged(&[], &[at(7)], &[at(7), other.clone()]),
             [at(7), other]
         );
+    }
+
+    /// Deletions are remembered for a while and so many, the newest; one a
+    /// clock set ahead stamped is let go by count alone.
+    #[test]
+    fn deletions_are_remembered_for_a_while() {
+        let day = 86_400_000;
+        let now = 200 * day;
+        let gone = |at| Deleted::of(&at_stamp(at), at);
+        let kept = prune_deleted(
+            vec![gone(now - 100 * day), gone(now - day), gone(now + day)],
+            now,
+        );
+        assert_eq!(kept, [gone(now - day), gone(now + day)]);
+        let many: Vec<Deleted> = (0..MAX_DELETED as u64 + 3).map(|n| gone(now - n)).collect();
+        let kept = prune_deleted(many.clone(), now);
+        assert_eq!(kept.len(), MAX_DELETED);
+        assert_eq!(kept.first(), many.get(3), "the oldest go");
+    }
+
+    /// A session finished at `timestamp`, by its stamp alone.
+    fn at_stamp(timestamp: u64) -> SessionResult {
+        SessionResult {
+            timestamp,
+            ..session("2026-10-01")
+        }
     }
 
     pub(super) fn session(date: &str) -> SessionResult {
@@ -1134,16 +1430,16 @@ pub(crate) mod tests {
     #[test]
     fn what_could_not_be_read_is_set_aside_beside_what_was_before() {
         let shelf = Shelf::with_room(usize::MAX);
-        assert!(keep_aside(&shelf, "aside", "first"));
-        assert!(keep_aside(&shelf, "aside", "second"));
-        assert!(keep_aside(&shelf, "aside", "first"), "kept already");
+        assert_eq!(keep_aside(&shelf, "aside", "first"), Kept::Now);
+        assert_eq!(keep_aside(&shelf, "aside", "second"), Kept::Now);
+        assert_eq!(keep_aside(&shelf, "aside", "first"), Kept::Already);
         assert_eq!(
             shelf.aside(),
             shelved(&[("aside", "first"), ("aside_2", "second")])
         );
         // A store that cannot be read: not kept, and nothing changed.
         shelf.unreadable.set(true);
-        assert!(!keep_aside(&shelf, "aside", "third"));
+        assert_eq!(keep_aside(&shelf, "aside", "third"), Kept::Not);
         shelf.unreadable.set(false);
         assert_eq!(shelf.aside().len(), 2);
         assert_eq!(aside_number("aside", "asidea"), None);
@@ -1163,7 +1459,7 @@ pub(crate) mod tests {
         for n in 2..=20 {
             shelf.set(&format!("aside_{n}"), &n.to_string());
         }
-        assert!(keep_aside(&shelf, "aside", "new"));
+        assert_eq!(keep_aside(&shelf, "aside", "new"), Kept::Now);
         assert_eq!(
             shelf.aside(),
             shelved(&[
@@ -1174,7 +1470,7 @@ pub(crate) mod tests {
                 ("aside_21", "new"),
             ])
         );
-        assert!(keep_aside(&shelf, "aside", "newer"));
+        assert_eq!(keep_aside(&shelf, "aside", "newer"), Kept::Now);
         assert_eq!(shelf.aside().len(), MAX_SET_ASIDE);
         assert_eq!(
             shelf.aside().last(),
@@ -1188,19 +1484,67 @@ pub(crate) mod tests {
     fn a_copy_set_aside_makes_room_by_letting_the_oldest_go() {
         // The history's own room, and a little short of room for three.
         let shelf = Shelf::with_room(2 + 4 + 4 + 5);
-        assert!(keep_aside(&shelf, "aside", "aaaa"));
-        assert!(keep_aside(&shelf, "aside", "bbbb"));
-        assert!(keep_aside(&shelf, "aside", "cccccc"), "room made");
+        assert_eq!(keep_aside(&shelf, "aside", "aaaa"), Kept::Now);
+        assert_eq!(keep_aside(&shelf, "aside", "bbbb"), Kept::Now);
+        assert_eq!(
+            keep_aside(&shelf, "aside", "cccccc"),
+            Kept::Now,
+            "room made"
+        );
         assert_eq!(
             shelf.aside(),
             shelved(&[("aside_2", "bbbb"), ("aside_3", "cccccc")])
         );
-        assert!(!keep_aside(&shelf, "aside", "far too long for it"));
+        assert_eq!(
+            keep_aside(&shelf, "aside", "far too long for it"),
+            Kept::Not
+        );
         assert_eq!(
             shelf.aside(),
             shelved(&[("aside_2", "bbbb"), ("aside_3", "cccccc")]),
             "put back as they were"
         );
+    }
+
+    /// A history too large to copy beside itself is moved aside into its
+    /// own room; one only some of whose sessions could not be read keeps
+    /// the rest. It used to be held instead, for as long as the browser
+    /// kept it, and every session finished after it went unsaved.
+    #[test]
+    fn a_history_too_large_to_copy_beside_itself_is_moved_aside() {
+        let (raw, unread, rest) = ("r".repeat(100), "u".repeat(60), "g".repeat(40));
+        // Room for the history and a little more, never for it twice.
+        let shelf = Shelf::with_room(150);
+        shelf.set("history", &raw);
+        let kept = set_aside_from(&shelf, "history", &raw, "aside", &raw, None);
+        assert_eq!(kept, Kept::Now);
+        assert_eq!(shelf.aside(), shelved(&[("aside", raw.as_str())]));
+        assert_eq!(shelf.get("history"), Ok(None), "out of the way of a save");
+
+        let shelf = Shelf::with_room(150);
+        shelf.set("history", &raw);
+        let kept = set_aside_from(&shelf, "history", &raw, "aside", &unread, Some(&rest));
+        assert_eq!(kept, Kept::Now);
+        assert_eq!(shelf.aside(), shelved(&[("aside", unread.as_str())]));
+        assert_eq!(shelf.get("history"), Ok(Some(rest.clone())));
+
+        // With room to copy, the history stays as it is until a save.
+        let shelf = Shelf::with_room(usize::MAX);
+        shelf.set("history", &raw);
+        let kept = set_aside_from(&shelf, "history", &raw, "aside", &unread, Some(&rest));
+        assert_eq!(kept, Kept::Now);
+        assert_eq!(shelf.get("history"), Ok(Some(raw.clone())));
+        let again = set_aside_from(&shelf, "history", &raw, "aside", &unread, Some(&rest));
+        assert_eq!(again, Kept::Already, "not twice");
+
+        // Where nothing can be set aside, the history is put back as it was.
+        let shelf = Shelf::with_room(150);
+        shelf.set("history", &raw);
+        shelf.unreadable.set(true);
+        let kept = set_aside_from(&shelf, "history", &raw, "aside", &raw, None);
+        assert_eq!(kept, Kept::Not);
+        shelf.unreadable.set(false);
+        assert_eq!(shelf.get("history"), Ok(Some(raw)));
     }
 
     /// A browser's history is capped by room. Large sessions — two hundred
@@ -1370,6 +1714,35 @@ pub(crate) mod tests {
         );
     }
 
+    /// Recovering a save takes time in proportion to its size. One bad value
+    /// among a hundred thousand keys no build reads, as in a file made to
+    /// hang the app, used to be tried key by key over all those kept before
+    /// it: over an hour. What no build reads is carried along only so far.
+    #[test]
+    fn a_save_made_to_be_large_is_recovered_quickly() {
+        let mut stored = serde_json::Map::new();
+        for n in 0..100_000 {
+            stored.insert(format!("filler{n}"), serde_json::json!(n));
+        }
+        stored.insert("groupTimeout".into(), serde_json::json!("nonsense"));
+        stored.insert("numGroups".into(), serde_json::json!(7));
+        let raw = serde_json::to_string(&stored).expect("serialize");
+        let started = std::time::Instant::now();
+        let settings = recover_settings(&raw);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+        assert_eq!(settings.curriculum.num_groups, 7);
+        assert_eq!(
+            settings.playback.group_timeout,
+            TrainingSettings::default().playback.group_timeout
+        );
+        let written = serde_json::to_string(&settings).expect("serialize").len();
+        let fresh = serde_json::to_string(&TrainingSettings::default())
+            .expect("serialize")
+            .len();
+        assert!(written < fresh + 20_000, "{written}");
+    }
+
     /// Saves from before the receiver rework all name the old sharp filter,
     /// because every save stores its shape: they come back on today's
     /// receiver. A save made since, which chose sharp, keeps it.
@@ -1427,7 +1800,7 @@ pub(crate) mod tests {
             r#"{{"dustBackup":1,"settings":{old},"sessions":[]}}"#
         ))
         .expect("a backup");
-        assert_eq!(backup.settings.band.rf_gain_db, -15.0);
+        assert_eq!(backup.settings.map(|s| s.band.rf_gain_db), Some(-15.0));
 
         // And a merge with a copy that read the same old save keeps it,
         // beside a change made here.
