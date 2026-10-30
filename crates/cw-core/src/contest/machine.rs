@@ -940,6 +940,9 @@ struct Unheard {
     from: usize,
     /// The callers it was keyed over, still sending, who never heard it.
     deaf: Vec<usize>,
+    /// Whether it was the message that told you a station missed it: taken
+    /// back, it told of nothing, and the next one missed says so.
+    told_unheard: bool,
     /// The fields it was keyed with, and the Call field as it read them.
     fields: Fields,
     call: CallRead,
@@ -2229,6 +2232,7 @@ impl<S: CallSource> ContestMachine<S> {
             qso: Some(self.qso.clone()),
             from,
             deaf: deaf.clone(),
+            told_unheard: false,
             fields: fields.clone(),
             call: call.clone(),
             lost_from: 0,
@@ -2281,6 +2285,7 @@ impl<S: CallSource> ContestMachine<S> {
             && let Some(name) = self.unheard_by(&message, &fields.call, worked, &deaf)
         {
             self.told_unheard = true;
+            before.told_unheard = true;
             let (hint, more) = unheard_hint(&name);
             effects.push(ContestEffect::Announce(hint + &more));
             self.qso.unheard_by = name;
@@ -3880,6 +3885,9 @@ impl<S: CallSource> ContestMachine<S> {
         }
         self.working = unheard.working;
         self.thanked = unheard.thanked;
+        if unheard.told_unheard {
+            self.told_unheard = false;
+        }
         let notes = unheard.qso.is_some();
         if let Some(qso) = unheard.qso {
             let (taken, corrected) = (self.qso.call_taken, self.qso.corrected);
@@ -9079,6 +9087,23 @@ mod tests {
         let effects = runtime.key(OpKey::Esm, "K5XYZ", "");
         assert!(said(&effects).is_empty(), "{effects:?}");
         assert_eq!(hint(&runtime), "Enter sends their call and your exchange");
+        // A message taken back with Esc told of nothing: the next one the
+        // station misses says so.
+        let mut runtime = self::runtime(&["K5XYZ"]);
+        let cq = runtime.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        runtime.run_to(runtime.now + ms(call.start_sec + 0.05));
+        assert_eq!(said(&runtime.key(OpKey::Esm, "K5XYZ", "")), [notice]);
+        runtime.key(OpKey::StopTx, "K5XYZ", "");
+        assert_eq!(view(&runtime).qso.unheard_by, "", "taken back with it");
+        let turn = runtime.last_turn().clone();
+        let again = sent_by(&turn, 0)
+            .into_iter()
+            .next_back()
+            .expect("it calls again")
+            .clone();
+        runtime.run_to(runtime.now + ms(again.start_sec + 0.05));
+        assert_eq!(said(&runtime.key(OpKey::Esm, "K5XYZ", "")), [notice]);
         // Your CQ over a single caller still calling, or a pile-up's.
         for style in [RunStyle::Single, RunStyle::Pileup] {
             let mut runtime = slow_caller(style, 1);
