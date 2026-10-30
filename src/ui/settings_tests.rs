@@ -817,16 +817,20 @@ fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
         let stored = ui.stored_settings().await;
         assert_eq!(stored.curriculum.word_list, ["PARIS", "CODEX", "73"]);
 
-        // Emptying the box goes back to the starter words.
+        // Emptying the box goes back to the starter words, as a message
+        // says, which offers Undo.
         ui.commit("field-word-list", "  \n");
-        assert_eq!(word_report(&ui), "Back to the starter words.");
+        assert!(ui.has("Back to the starter words"), "{}", ui.html());
+        assert!(ui.shows("toast-undo"));
+        assert_eq!(word_report(&ui), "");
         assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
     });
 }
 
 /// A text file loads as the words, and says what it came to; Starter words
-/// puts the starter list back.
+/// puts the starter list back, and Undo the words again: the box shows
+/// them, and the line under it counts them.
 #[test]
 fn a_text_file_loads_as_the_words() {
     run(|| async {
@@ -842,8 +846,19 @@ fn a_text_file_loads_as_the_words() {
         );
 
         ui.click("btn-starter-words");
-        assert_eq!(word_report(&ui), "Back to the starter words.");
+        assert!(ui.has("Back to the starter words"), "{}", ui.html());
+        assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
+
+        ui.click("toast-undo");
+        assert!(!ui.shows("toast-undo"));
+        assert_eq!(value_of(&ui, "field-word-list"), "CQ\nDE\nTEST");
+        assert_eq!(word_report(&ui), "3 words");
+        assert!(ui.has("Your own words, sent whole · 3 words"));
+        assert_eq!(
+            ui.stored_settings().await.curriculum.word_list,
+            ["CQ", "DE", "TEST"]
+        );
     });
 }
 

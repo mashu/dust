@@ -278,6 +278,7 @@ pub fn App() -> Element {
                                         ToastAction::UndoDelete => ctx.undo_delete(),
                                         ToastAction::UndoRestore => ctx.undo_restore(),
                                         ToastAction::PutCardBack => ctx.undo_reset(),
+                                        ToastAction::PutWordsBack => ctx.undo_starter_words(),
                                     }
                                     toasts.dismiss(&toast);
                                 },

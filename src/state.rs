@@ -163,6 +163,9 @@ pub struct AppCtx {
     /// The settings card reset last, and the settings before it, for Undo
     /// to put back.
     before_reset: Signal<Option<(SettingsSection, TrainingSettings)>>,
+    /// The learner's own words the starter words took the place of last,
+    /// for Undo to put back.
+    before_starter_words: Signal<Option<Vec<String>>>,
     /// The settings as they were stored last, so that settings stored
     /// already are not stored again.
     stored_settings: CopyValue<TrainingSettings>,
@@ -212,6 +215,7 @@ impl AppCtx {
                 trash: Signal::new(Vec::new()),
                 before_restore: Signal::new(None),
                 before_reset: Signal::new(None),
+                before_starter_words: Signal::new(None),
                 stored_settings,
                 stored_history,
                 settings_unsaved: CopyValue::new(false),
@@ -655,6 +659,32 @@ impl AppCtx {
         settings.write().restore_section(section, &before);
     }
 
+    /// Send the starter words in place of the learner's own, which Undo
+    /// puts back: a list can be long, pasted in from elsewhere, and one
+    /// press should not cost it. With none of their own there is nothing to
+    /// undo, and nothing is said.
+    pub fn starter_words(self) {
+        let mut settings = self.settings;
+        if !settings.peek().has_own_words() {
+            return;
+        }
+        let words = std::mem::take(&mut settings.write().curriculum.word_list);
+        let mut before = self.before_starter_words;
+        before.set(Some(words));
+        self.toasts
+            .show_with("Back to the starter words", ToastAction::PutWordsBack);
+    }
+
+    /// Put back the words the starter words took the place of last.
+    pub fn undo_starter_words(self) {
+        let mut before = self.before_starter_words;
+        let Some(words) = before.write().take() else {
+            return;
+        };
+        let mut settings = self.settings;
+        settings.write().curriculum.word_list = words;
+    }
+
     /// Put each of `taken` back where it sat, in the order they sat in; or,
     /// where the history has changed around that place since, where it
     /// falls by when it finished.
@@ -902,12 +932,14 @@ pub enum ToastAction {
     UndoRestore,
     /// Put the settings card reset last back as it was.
     PutCardBack,
+    /// Put back the learner's own words, in place of the starter words.
+    PutWordsBack,
 }
 
 impl ToastAction {
     pub fn label(self) -> &'static str {
         match self {
-            Self::UndoDelete | Self::UndoRestore | Self::PutCardBack => "Undo",
+            Self::UndoDelete | Self::UndoRestore | Self::PutCardBack | Self::PutWordsBack => "Undo",
         }
     }
 }
