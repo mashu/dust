@@ -839,9 +839,6 @@ pub enum Notice {
     /// The app stopped with it running: closed, crashed, killed or rebuilt.
     /// It was not kept.
     CutOff(CutOff),
-    /// Its sound stopped and could not be brought back, for the reason
-    /// given, with groups `answered` by then or none.
-    SoundStopped { why: String, answered: bool },
     /// The history could not take it, or let older sessions go to make
     /// room: the store's own words.
     History(String),

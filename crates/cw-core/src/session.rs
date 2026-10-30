@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::alignment::{CopyTally, LetterAccuracy};
-use crate::contest::{CONTEST_MARK, ContestLog};
+use crate::contest::{CONTEST_MARK, ContestLog, PauseWhy};
 use crate::level::LEVEL_MIN;
 use crate::recognition::{CharTimes, Keys, answer_chars, lenient_char_times};
 use crate::score::{
@@ -132,11 +132,13 @@ pub enum SessionPhase {
     AwaitingAnswer {
         index: usize,
     },
-    /// Put on hold while nobody can hear it — the page out of sight — until
-    /// it is resumed, with group `index` the one it goes on with. Nothing is
-    /// sent, nothing can be typed and no answer window runs meanwhile.
+    /// Put on hold while nobody can hear it — the page out of sight, or its
+    /// sound stopped, `why` — until it is resumed, with group `index` the
+    /// one it goes on with. Nothing is sent, nothing can be typed and no
+    /// answer window runs meanwhile.
     Paused {
         index: usize,
+        why: PauseWhy,
     },
     Finished,
     Aborted,
@@ -282,6 +284,9 @@ pub struct SessionView {
     pub countdown_to: CountdownTo,
     /// The session is on hold until it is resumed.
     pub paused: bool,
+    /// It is on hold because its sound stopped, not because the page went
+    /// out of sight.
+    pub sound_stopped: bool,
     /// Planned sends for the group being played, and how many are done.
     pub repeat_total: u32,
     pub repeat_done: u32,
@@ -412,6 +417,13 @@ impl GroupSession {
             countdown: self.countdown(),
             countdown_to: self.countdown_to(),
             paused: self.paused(),
+            sound_stopped: matches!(
+                self.phase,
+                SessionPhase::Paused {
+                    why: PauseWhy::Sound,
+                    ..
+                }
+            ),
             repeat_total: current.map_or(1, |g| g.repeats.max(1)),
             repeat_done: current.map_or(0, |g| g.plays_done),
             speed: self.chosen_speed(self.current_group),

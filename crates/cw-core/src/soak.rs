@@ -520,7 +520,8 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                 );
             }
             // Once a group is answered, only Discard leaves without keeping
-            // the session: a send stopped or failed, or End session, keeps it.
+            // the session: End session keeps it, and a send stopped or
+            // failed pauses it.
             if answered && event != SessionEvent::Abort {
                 assert!(
                     !effects.contains(&SessionEffect::AbortToHome),
@@ -548,7 +549,7 @@ fn no_run_of_events_can_put_a_session_somewhere_impossible() {
                     "seed {seed} step {step}: counting down from {remaining} mid-session"
                 );
             }
-            if let SessionPhase::Paused { index } = machine.phase() {
+            if let SessionPhase::Paused { index, .. } = machine.phase() {
                 assert!(
                     index < groups
                         && machine

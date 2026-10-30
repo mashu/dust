@@ -51,18 +51,6 @@ fn notice_text(notice: &Notice) -> String {
         Notice::CutOff(CutOff::Unread) => {
             "Your last session was cut off: Dust closed while it ran, so it was not kept.".into()
         }
-        Notice::SoundStopped { why, answered } => {
-            let why = why.trim_end_matches('.');
-            if *answered {
-                format!(
-                    "The session ended early because its sound stopped: {why}. The groups you answered were scored."
-                )
-            } else {
-                format!(
-                    "The session ended before any group was answered, because its sound stopped: {why}."
-                )
-            }
-        }
         Notice::History(problem) => problem.clone(),
     }
 }
@@ -106,26 +94,6 @@ mod tests {
         assert_eq!(
             notice_text(&Notice::CutOff(CutOff::Unread)),
             "Your last session was cut off: Dust closed while it ran, so it was not kept."
-        );
-    }
-
-    #[test]
-    fn a_session_its_sound_stopped_says_why_and_whether_any_was_answered() {
-        let answered = notice_text(&Notice::SoundStopped {
-            why: "Audio playback stalled.".into(),
-            answered: true,
-        });
-        assert_eq!(
-            answered,
-            "The session ended early because its sound stopped: Audio playback stalled. The groups you answered were scored."
-        );
-        let none = notice_text(&Notice::SoundStopped {
-            why: "Audio stream: device is gone".into(),
-            answered: false,
-        });
-        assert_eq!(
-            none,
-            "The session ended before any group was answered, because its sound stopped: Audio stream: device is gone."
         );
     }
 }

@@ -724,6 +724,28 @@ mod ui_tests {
         });
     }
 
+    /// A session whose sound stopped says that, not that the page went,
+    /// and goes on from Resume once the sound is back.
+    #[test]
+    fn a_session_whose_sound_stopped_says_so_and_resumes_from_its_button() {
+        run(|| async {
+            let (mut ui, recorder) = Ui::app_with_settings(short_session());
+            recorder.set(crate::audio::fake::Behaviour::FailMidSend);
+            ui.click("btn-start-training");
+            assert!(
+                ui.run_until(30_000, |ui| ui.has("Sound stopped — Resume to carry on."))
+                    .await,
+                "{}",
+                ui.html()
+            );
+            assert!(!ui.has("out of sight"));
+            assert_eq!(ui.screen(), "training");
+            recorder.set(crate::audio::fake::Behaviour::Play);
+            ui.click("btn-resume");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+        });
+    }
+
     #[test]
     fn a_group_locks_while_it_plays_then_unlocks() {
         run(|| async {
