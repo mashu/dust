@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::alignment::CopyTally;
 use crate::auto_level::judged_copy;
-use crate::belief::{SESSION_FADE, sessions_faded};
+use crate::belief::{FADE_HORIZON, SESSION_FADE, sessions_faded};
 use crate::callsign::{CallSpec, GeneratedCall, generate_call};
 use crate::contest::{CallSource, Side};
 use crate::machine::GroupSource;
@@ -50,10 +50,17 @@ impl CharSamplingState {
     /// speed: a session ten sessions back counts half as much as the latest
     /// ([`sessions_faded`]). A weakness put right long ago stops drawing the
     /// character more often, and a character not heard for a while is less
-    /// certain again.
+    /// certain again. Only the newest [`FADE_HORIZON`] sessions are read:
+    /// one further back counts for nothing that shows.
     pub fn from_history(history: &[SessionResult]) -> Self {
+        Self::from_newest(history, FADE_HORIZON)
+    }
+
+    /// [`Self::from_history`], from the newest `newest` sessions that copied
+    /// anything.
+    fn from_newest(history: &[SessionResult], newest: usize) -> Self {
         let mut state = Self::default();
-        for (_, letters, worth) in sessions_faded(history) {
+        for (_, letters, worth) in sessions_faded(history, newest) {
             for (character, stats) in letters.iter() {
                 let belief = state.beliefs.entry(*character).or_default();
                 belief.alpha += worth * f64::from(stats.correct);
@@ -67,7 +74,13 @@ impl CharSamplingState {
     /// session older, so the last session counts for a little less than
     /// the one about to be sent, as the span's and the speed's do.
     pub fn for_session(history: &[SessionResult]) -> Self {
-        let mut state = Self::from_history(history);
+        Self::for_newest(history, FADE_HORIZON)
+    }
+
+    /// [`Self::for_session`], from the newest `newest` sessions that copied
+    /// anything.
+    fn for_newest(history: &[SessionResult], newest: usize) -> Self {
+        let mut state = Self::from_newest(history, newest);
         for belief in state.beliefs.values_mut() {
             belief.alpha = CHAR_SAMPLING_PRIOR_ALPHA
                 + (belief.alpha - CHAR_SAMPLING_PRIOR_ALPHA) * SESSION_FADE;
@@ -95,9 +108,9 @@ impl CharSamplingState {
 
 /// What a [`Sampler`] starts from: what the history says of each
 /// character, of your copy span and of your copy speed, as a new session
-/// sees it. Building it replays the history, too much to do inside a tap
-/// on a slow phone, so the app builds it ahead, keeps it until the history
-/// changes, and starts each sampler from a copy.
+/// sees it. Building it replays the newest [`FADE_HORIZON`] sessions, too
+/// much to do inside a tap on a slow phone, so the app builds it ahead,
+/// keeps it until the history changes, and starts each sampler from a copy.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SamplerPrior {
     state: CharSamplingState,
@@ -1892,6 +1905,120 @@ mod tests {
             assert!(
                 (&rebuilt.span, &rebuilt.speed) != (&prior.span, &prior.speed),
                 "the prior does not read what moved: {moved:?}"
+            );
+        }
+    }
+
+    /// Two thousand sessions of simulated learners ([`crate::learner_sim`]),
+    /// every way of adapting among them: a struggling learner's first and
+    /// an improving one's after, so the oldest say what the newest do not.
+    /// Some of them are another character set's, and they are stored out of
+    /// the order they were practised in.
+    fn long_history() -> Vec<SessionResult> {
+        use crate::learner_sim::{Adapting, IMPROVING, Judged, STRUGGLING, practise};
+        let mut history: Vec<SessionResult> = (0..80u64)
+            .flat_map(|run| {
+                let learner = if run < 64 { STRUGGLING } else { IMPROVING };
+                let adapting = Adapting::ALL[run as usize % Adapting::ALL.len()];
+                practise(learner, adapting, Aim::Balanced, Judged::Now, 25, run).1
+            })
+            .collect();
+        for (at, session) in history.iter_mut().enumerate() {
+            session.timestamp = at as u64 + 1;
+            if at % 7 == 3 {
+                session.char_set_mode = CharSetMode::Digits;
+            }
+        }
+        history.rotate_left(1_300);
+        history
+    }
+
+    /// The prior the newest `newest` sessions that count build.
+    fn prior_from_newest(
+        history: &[SessionResult],
+        settings: &TrainingSettings,
+        newest: usize,
+    ) -> SamplerPrior {
+        SamplerPrior {
+            state: CharSamplingState::for_newest(history, newest),
+            span: SpanBelief::for_newest(history, settings, newest),
+            speed: SpeedBelief::for_newest(history, settings, newest),
+            built_for: PriorSettings::of(settings),
+        }
+    }
+
+    /// The largest gap between two priors' figures: each character's
+    /// belief, one never heard on the flat prior, the span and its forecast,
+    /// and the copy speed and how much is copied at it.
+    fn furthest_apart(a: &SamplerPrior, b: &SamplerPrior) -> f64 {
+        let heard: std::collections::BTreeSet<char> = a
+            .state
+            .beliefs
+            .keys()
+            .chain(b.state.beliefs.keys())
+            .copied()
+            .collect();
+        let characters = heard.into_iter().flat_map(|character| {
+            let (a, b) = (
+                belief_for(&a.state, character),
+                belief_for(&b.state, character),
+            );
+            [a.alpha - b.alpha, a.beta - b.beta]
+        });
+        let (span_a, span_b) = (a.span.estimate(), b.span.estimate());
+        let forecasts = a
+            .span
+            .forecast(2, 8, Some(0.7))
+            .into_iter()
+            .zip(b.span.forecast(2, 8, Some(0.7)))
+            .flat_map(|(a, b)| {
+                [
+                    a.drawn - b.drawn,
+                    a.whole - b.whole,
+                    a.whole_sd - b.whole_sd,
+                ]
+            });
+        let speeds = [0.5, 0.9].into_iter().flat_map(|rate| {
+            let (a, b) = (a.speed.estimate(rate), b.speed.estimate(rate));
+            [a.mean - b.mean, a.sd - b.sd]
+        });
+        let copied = [12.0, 20.0, 30.0].into_iter().flat_map(|wpm| {
+            let (a, b) = (a.speed.right_at(wpm), b.speed.right_at(wpm));
+            [a.mean - b.mean, a.sd - b.sd]
+        });
+        characters
+            .chain([span_a.mean - span_b.mean, span_a.sd - span_b.sd])
+            .chain(forecasts)
+            .chain(speeds)
+            .chain(copied)
+            .fold(0.0, |furthest: f64, gap| furthest.max(gap.abs()))
+    }
+
+    /// Replaying only the newest [`FADE_HORIZON`] sessions finds what
+    /// replaying the whole history finds, to well within anything shown:
+    /// what it leaves out is too far back to count. Each character's
+    /// belief, the span and the speed alike, and so every group and speed a
+    /// sampler draws from them. Fewer sessions would not do: forty leave out
+    /// what still counts.
+    #[test]
+    fn a_bounded_replay_matches_the_whole_history() {
+        use crate::learner_sim::Adapting;
+        let history = long_history();
+        assert_eq!(history.len(), 2_000);
+        for adapting in [Adapting::Neither, Adapting::Both] {
+            let settings = adapting.settings(Aim::Balanced);
+            let bounded = SamplerPrior::from_history(&history, &settings);
+            let whole = prior_from_newest(&history, &settings, usize::MAX);
+            let gap = furthest_apart(&bounded, &whole);
+            assert!(gap < 1e-9, "{adapting:?}: {gap:e} apart");
+            assert!(
+                furthest_apart(&prior_from_newest(&history, &settings, 40), &whole) > 1e-3,
+                "{adapting:?}: the oldest sessions say nothing the newest do not"
+            );
+            assert_eq!(
+                draws(Sampler::from_prior(bounded, &settings, 5), &settings, 200),
+                draws(Sampler::from_prior(whole, &settings, 5), &settings, 200),
+                "{adapting:?}"
             );
         }
     }

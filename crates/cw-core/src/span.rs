@@ -24,7 +24,8 @@ use std::sync::OnceLock;
 use crate::aim::{self, Leaning, Spread};
 use crate::alignment::CopyTally;
 use crate::belief::{
-    Estimate, EstimatePoint, FirstGuess, GridBelief, Tally, joined, range_of, sessions_in_order,
+    Estimate, EstimatePoint, FADE_HORIZON, FirstGuess, GridBelief, Tally, joined, range_of,
+    sessions_in_order,
 };
 use crate::rng::Rng;
 use crate::session::SessionResult;
@@ -114,16 +115,38 @@ impl SpanBelief {
     }
 
     /// The belief the history leaves for `settings`, its first guess the
-    /// middle of the group size range.
+    /// middle of the group size range. Only the newest [`FADE_HORIZON`]
+    /// sessions that count are replayed: one further back counts for
+    /// nothing that shows.
     pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
-        Self::replay(history, settings, FirstGuess::Settings, |_, _, _| {})
+        Self::from_newest(history, settings, FADE_HORIZON)
+    }
+
+    /// [`Self::from_history`], from the newest `newest` sessions that count.
+    fn from_newest(history: &[SessionResult], settings: &TrainingSettings, newest: usize) -> Self {
+        Self::replay(
+            history,
+            settings,
+            FirstGuess::Settings,
+            newest,
+            |_, _, _| {},
+        )
     }
 
     /// The belief a new session starts from: the history's, with all of it
     /// one session older, so the last session counts for a little less than
     /// the one about to be sent.
     pub fn for_session(history: &[SessionResult], settings: &TrainingSettings) -> Self {
-        let mut span = Self::from_history(history, settings);
+        Self::for_newest(history, settings, FADE_HORIZON)
+    }
+
+    /// [`Self::for_session`], from the newest `newest` sessions that count.
+    pub(crate) fn for_newest(
+        history: &[SessionResult],
+        settings: &TrainingSettings,
+        newest: usize,
+    ) -> Self {
+        let mut span = Self::from_newest(history, settings, newest);
         span.belief.fade();
         span
     }
@@ -140,6 +163,7 @@ impl SpanBelief {
             history,
             settings,
             FirstGuess::FirstSession,
+            usize::MAX,
             |session, span, lengths| {
                 sent = joined(sent, lengths);
                 if let Some(sent) = sent {
@@ -154,20 +178,22 @@ impl SpanBelief {
         points
     }
 
-    /// Learn from the history in the order it was practised, its first
-    /// guess as `first` says, telling `after` where the belief stands after
-    /// each session and the shortest and longest group it sent. Only
-    /// sessions of the character set `settings` trains count: a callsign is
-    /// as long as it is, and digits are not held the way letters are.
+    /// Learn from the newest `newest` sessions of the history, in the order
+    /// they were practised, its first guess as `first` says, telling `after`
+    /// where the belief stands after each session and the shortest and
+    /// longest group it sent. Only sessions of the character set `settings`
+    /// trains count: a callsign is as long as it is, and digits are not held
+    /// the way letters are.
     fn replay(
         history: &[SessionResult],
         settings: &TrainingSettings,
         first: FirstGuess,
+        newest: usize,
         mut after: impl FnMut(&SessionResult, &Self, Option<(f64, f64)>),
     ) -> Self {
         let mode = settings.curriculum.char_set_mode;
         let sessions = if mode.draws_characters() {
-            sessions_in_order(history, mode)
+            sessions_in_order(history, mode, newest)
         } else {
             Vec::new()
         };

@@ -44,8 +44,8 @@ use std::sync::OnceLock;
 use crate::aim::{self, Leaning, Spread};
 use crate::alignment::{CopyTally, align_group, align_holding};
 use crate::belief::{
-    Estimate, EstimatePoint, FirstGuess, GridBelief, Tally, joined, pick_index, range_of,
-    sessions_in_order,
+    Estimate, EstimatePoint, FADE_HORIZON, FirstGuess, GridBelief, Tally, joined, pick_index,
+    range_of, sessions_in_order,
 };
 use crate::callsign::parse_callsign;
 use crate::contest::{Field, GroupCopy};
@@ -442,15 +442,37 @@ impl SpeedBelief {
     }
 
     /// The belief the history leaves for `settings`, its first guess the
-    /// middle of the speeds they allow.
+    /// middle of the speeds they allow. Only the newest [`FADE_HORIZON`]
+    /// sessions that count are replayed: one further back counts for
+    /// nothing that shows.
     pub fn from_history(history: &[SessionResult], settings: &TrainingSettings) -> Self {
-        Self::replay(history, settings, FirstGuess::Settings, |_, _, _| {})
+        Self::from_newest(history, settings, FADE_HORIZON)
+    }
+
+    /// [`Self::from_history`], from the newest `newest` sessions that count.
+    fn from_newest(history: &[SessionResult], settings: &TrainingSettings, newest: usize) -> Self {
+        Self::replay(
+            history,
+            settings,
+            FirstGuess::Settings,
+            newest,
+            |_, _, _| {},
+        )
     }
 
     /// The belief a new session starts from: the history's, all of it one
     /// session older.
     pub fn for_session(history: &[SessionResult], settings: &TrainingSettings) -> Self {
-        let mut speed = Self::from_history(history, settings);
+        Self::for_newest(history, settings, FADE_HORIZON)
+    }
+
+    /// [`Self::for_session`], from the newest `newest` sessions that count.
+    pub(crate) fn for_newest(
+        history: &[SessionResult],
+        settings: &TrainingSettings,
+        newest: usize,
+    ) -> Self {
+        let mut speed = Self::from_newest(history, settings, newest);
         speed.belief.fade();
         speed
     }
@@ -471,6 +493,7 @@ impl SpeedBelief {
             history,
             settings,
             FirstGuess::FirstSession,
+            usize::MAX,
             |session, speed, speeds| {
                 sent = joined(sent, speeds);
                 if let Some(sent) = sent {
@@ -485,25 +508,27 @@ impl SpeedBelief {
         points
     }
 
-    /// Learn from the history in the order it was practised, its first
-    /// guess as `first` says, telling `after` where the belief stands after
-    /// each session and the slowest and fastest speed the session said
-    /// anything at. Only sessions of the character set `settings` trains
-    /// count: a callsign at 30 WPM is not a two-letter Koch group at 30 WPM.
-    /// Groups cut short are read as `settings` would read them now: their
-    /// lost ends the length's while group size adapts and the group could be
-    /// shorter ([`speed_tally`]).
+    /// Learn from the newest `newest` sessions of the history, in the order
+    /// they were practised, its first guess as `first` says, telling `after`
+    /// where the belief stands after each session and the slowest and
+    /// fastest speed the session said anything at. Only sessions of the
+    /// character set `settings` trains count: a callsign at 30 WPM is not a
+    /// two-letter Koch group at 30 WPM. Groups cut short are read as
+    /// `settings` would read them now: their lost ends the length's while
+    /// group size adapts and the group could be shorter ([`speed_tally`]).
     fn replay(
         history: &[SessionResult],
         settings: &TrainingSettings,
         first: FirstGuess,
+        newest: usize,
         mut after: impl FnMut(&SessionResult, &Self, Option<(f64, f64)>),
     ) -> Self {
         let floor = crate::sampling::adaptive_bounds(settings).map(|(shortest, _)| shortest);
-        let sessions: Vec<_> = sessions_in_order(history, settings.curriculum.char_set_mode)
-            .into_iter()
-            .map(|session| (session, session_evidence(session, floor)))
-            .collect();
+        let sessions: Vec<_> =
+            sessions_in_order(history, settings.curriculum.char_set_mode, newest)
+                .into_iter()
+                .map(|session| (session, session_evidence(session, floor)))
+                .collect();
         let first_sent = match first {
             FirstGuess::Settings => None,
             FirstGuess::FirstSession => sessions.iter().find_map(|(_, (_, sent))| *sent),

@@ -54,7 +54,10 @@ $$
 - **History weights $\omega_i$:** before each session, all earlier evidence is
   multiplied by $0.5^{1/10}$, so a session ten sessions back counts half as
   much. Groups in the current session count 1. The estimate follows you as
-  you improve instead of being anchored by your first week.
+  you improve instead of being anchored by your first week. Only the newest
+  400 sessions that count are read: one further back counts $0.5^{40}$, about
+  a millionth of a millionth, which no figure shows, so a longer history
+  costs a session start nothing more.
 - **Which sessions count:** only sessions in the same character-set mode
   that have groups to read. Callsign mode is excluded, because a callsign's
   length comes from its structure, not a draw. A session with no groups
