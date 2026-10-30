@@ -59,6 +59,14 @@ pub enum MasteryStatus {
 pub const RECENT_TRIES: u32 = 20;
 /// The fewest tries before them for there to be an earlier to compare with.
 const EARLIER_MIN_TRIES: u32 = 10;
+/// How many of the tries before the recent ones count as earlier: whole
+/// sessions, newest first, until there are this many. What was put right
+/// long before is not what changed lately.
+pub const EARLIER_TRIES: u32 = 100;
+/// How many times its noise recent accuracy has to stand from earlier to be
+/// a change: a two-proportion test's standard error, chance alone moving a
+/// steady character that far about once in a hundred.
+const LATELY_SPREADS: f64 = 2.58;
 #[derive(Clone, Debug, PartialEq)]
 pub struct CharacterDiagnostic {
     pub letter: char,
@@ -75,10 +83,13 @@ pub struct CharacterDiagnostic {
     pub weight: f64,
     pub status: MasteryStatus,
     /// Accuracy over the latest sessions that hold [`RECENT_TRIES`] tries of
-    /// it, and over the tries before them, in percent: which way it is going.
-    /// None until there are enough of both.
+    /// it, and over the sessions before them that hold [`EARLIER_TRIES`], in
+    /// percent: which way it is going. None until there are enough of both.
     pub recent_pct: Option<f64>,
     pub earlier_pct: Option<f64>,
+    /// How many tries each was read from; none without them.
+    pub recent_tries: u32,
+    pub earlier_tries: u32,
     /// How soon you type it after its sound went out, in milliseconds: the
     /// median of its latest [`RECOGNITION_WINDOW`] timed tries, once any is
     /// ([`crate::recognise`] says which are).
@@ -113,6 +124,21 @@ impl CharacterDiagnostic {
             },
             None => Recognition::Untimed,
         }
+    }
+
+    /// How far recent accuracy moved from earlier, in points, when it moved
+    /// further than chance would over the tries each was read from; none
+    /// when it did not, or while there is no trend to read.
+    pub fn moved_lately(&self) -> Option<f64> {
+        let (recent, earlier) = (self.recent_pct? / 100.0, self.earlier_pct? / 100.0);
+        let (new, old) = (f64::from(self.recent_tries), f64::from(self.earlier_tries));
+        if new <= 0.0 || old <= 0.0 {
+            return None;
+        }
+        let right = (recent * new + earlier * old) / (new + old);
+        let noise = (right * (1.0 - right) * (1.0 / new + 1.0 / old)).sqrt();
+        let moved = recent - earlier;
+        (moved.abs() > LATELY_SPREADS * noise).then_some(100.0 * moved)
     }
 
     /// The range its accuracy is likely in ([`rate_interval`]), from its
@@ -480,7 +506,7 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
             let accuracy01 = tally.rate();
             let status = classify_mastery(accuracy01, tally.total);
             let letter = tally.letter;
-            let (recent_pct, earlier_pct) = trend(tally.by_session);
+            let (recent, earlier) = trend(tally.by_session).unzip();
             let (recognition_tries, latest) = recognised.remove(&letter).unwrap_or_default();
             let recognition_ms = median(&latest);
             CharacterDiagnostic {
@@ -490,8 +516,10 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
                 correct: tally.correct,
                 weight: tally.faded_total,
                 status,
-                recent_pct,
-                earlier_pct,
+                recent_pct: recent.map(|(pct, _)| pct),
+                earlier_pct: earlier.map(|(pct, _)| pct),
+                recent_tries: recent.map_or(0, |(_, tries)| tries),
+                earlier_tries: earlier.map_or(0, |(_, tries)| tries),
                 recognition_ms,
                 recognition_tries,
             }
@@ -514,27 +542,26 @@ pub fn character_diagnostics(sessions: &[SessionResult]) -> Vec<CharacterDiagnos
 }
 
 /// A character's accuracy over its latest sessions that hold
-/// [`RECENT_TRIES`] tries, and over the tries before them, in percent, from
-/// its tallies by session as (when, correct, tries). None for either until
-/// there are enough of both.
-fn trend(mut sessions: Vec<(u64, u32, u32)>) -> (Option<f64>, Option<f64>) {
+/// [`RECENT_TRIES`] tries, and over the sessions before them that hold
+/// [`EARLIER_TRIES`], in percent, each with its tries, from its tallies by
+/// session as (when, correct, tries). None until there are enough of both.
+fn trend(mut sessions: Vec<(u64, u32, u32)>) -> Option<((f64, u32), (f64, u32))> {
     sessions.sort_by_key(|(when, _, _)| std::cmp::Reverse(*when));
     let (mut recent, mut earlier) = ((0u32, 0u32), (0u32, 0u32));
     for (_, correct, tries) in sessions {
         let into = if recent.1 < RECENT_TRIES {
             &mut recent
-        } else {
+        } else if earlier.1 < EARLIER_TRIES {
             &mut earlier
+        } else {
+            break;
         };
         into.0 += correct;
         into.1 += tries;
     }
-    let pct = |(correct, tries): (u32, u32)| 100.0 * f64::from(correct) / f64::from(tries);
-    if recent.1 >= RECENT_TRIES && earlier.1 >= EARLIER_MIN_TRIES {
-        (Some(pct(recent)), Some(pct(earlier)))
-    } else {
-        (None, None)
-    }
+    let pct = |(correct, tries): (u32, u32)| (100.0 * f64::from(correct) / f64::from(tries), tries);
+    (recent.1 >= RECENT_TRIES && earlier.1 >= EARLIER_MIN_TRIES)
+        .then(|| (pct(recent), pct(earlier)))
 }
 
 /// What the mistakes screen shows: which characters are taken for which,
@@ -1548,7 +1575,8 @@ mod tests {
     }
 
     /// A character's recent tries are its latest sessions' until there are
-    /// twenty, and its earlier ones the rest; both are needed for a trend.
+    /// twenty, and its earlier ones those before them; both are needed for a
+    /// trend.
     #[test]
     fn a_character_knows_which_way_it_is_going() {
         // Ten tries of K a session: an early run half right, then clean.
@@ -1568,12 +1596,83 @@ mod tests {
         let now = k(&sessions);
         assert_eq!(now.recent_pct, Some(100.0));
         assert_eq!(now.earlier_pct, Some(50.0));
+        assert_eq!((now.recent_tries, now.earlier_tries), (20, 10));
         // Twenty tries in all: recent, and nothing earlier to compare with.
         let young = k(&sessions[1..]);
         assert_eq!((young.recent_pct, young.earlier_pct), (None, None));
         // The likely range takes in what was measured.
         let (low, high) = now.accuracy_interval(0.8);
         assert!(low < now.accuracy_pct / 100.0 && now.accuracy_pct / 100.0 < high);
+        // From half right to clean over ten and twenty tries is a move.
+        assert_eq!(now.moved_lately(), Some(50.0));
+    }
+
+    /// A character copied right a steady nine times in ten is almost never
+    /// said to have moved lately; one put right long ago is not said to be
+    /// improving still; one that has slipped is said to be going down.
+    #[test]
+    fn a_steady_character_is_almost_never_said_to_move_lately() {
+        use crate::rng::{Rng, SplitMix64};
+        const LETTERS: [char; 15] = [
+            'K', 'M', 'U', 'R', 'E', 'S', 'N', 'A', 'P', 'T', 'L', 'W', 'I', 'J', 'Z',
+        ];
+        let mut rng = SplitMix64::new(65);
+        let (mut rows, mut moved) = (0, 0);
+        for _ in 0..20 {
+            let sessions: Vec<SessionResult> = (0..40)
+                .map(|timestamp| {
+                    let groups: Vec<(String, String)> = (0..20)
+                        .map(|_| {
+                            let sent: String =
+                                (0..3).map(|_| LETTERS[rng.usize_in(0, 14)]).collect();
+                            let received = sent
+                                .chars()
+                                .map(|ch| if rng.f64() < 0.9 { ch } else { '5' })
+                                .collect();
+                            (sent, received)
+                        })
+                        .collect();
+                    let groups: Vec<(&str, &str)> = groups
+                        .iter()
+                        .map(|(sent, received)| (sent.as_str(), received.as_str()))
+                        .collect();
+                    plain("2026-09-01", timestamp, &groups)
+                })
+                .collect();
+            for letter in character_diagnostics(&sessions) {
+                rows += 1;
+                moved += u32::from(letter.moved_lately().is_some());
+            }
+        }
+        assert!(moved * 100 <= rows * 3, "{moved} of {rows} rows moved");
+        // Ten sessions of ten tries of K: `wrong` of them missed in each.
+        let k = |missed: &[usize]| {
+            let sessions: Vec<SessionResult> = missed
+                .iter()
+                .enumerate()
+                .map(|(at, wrong)| {
+                    let groups: Vec<(&str, &str)> = (0..10)
+                        .map(|n| if n < *wrong { ("K", "X") } else { ("K", "K") })
+                        .collect();
+                    plain("2026-09-01", at as u64, &groups)
+                })
+                .collect();
+            character_diagnostics(&sessions)
+                .into_iter()
+                .find(|d| d.letter == 'K')
+                .expect("K")
+        };
+        // Four at 60%, then thirty at 95%: put right long ago.
+        let mut righted = vec![4; 10];
+        righted.extend([0, 1].repeat(15));
+        let righted = k(&righted);
+        assert_eq!(righted.earlier_tries, EARLIER_TRIES);
+        assert_eq!(righted.moved_lately(), None, "{righted:?}");
+        // Twenty at 95%, then two at 60%: slipping now.
+        let mut slipped = [0, 1].repeat(10);
+        slipped.extend([4, 4]);
+        let slipped = k(&slipped).moved_lately().expect("a move");
+        assert!((slipped + 35.0).abs() < 1e-9, "{slipped}");
     }
 
     #[test]

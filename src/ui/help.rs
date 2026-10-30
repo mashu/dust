@@ -3,10 +3,10 @@
 //! and its help reads as one text.
 
 use cw_core::{
-    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, ENDURANCE_MIN_SESSIONS,
-    FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS, MASTERED_MIN_ACCURACY,
-    MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES, RECOGNITION_MAX_MS,
-    RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
+    BOARD_MIN_GROUPS, BOARD_RUN_MIN_S, BUILDING_MIN_ACCURACY, DROP_POINTS, EARLIER_TRIES,
+    ENDURANCE_MIN_SESSIONS, FORM_SESSIONS, GROUPS_A_STRETCH, HARD_PAIR_MIN_TRIES, KEEPING_UP_MS,
+    MASTERED_MIN_ACCURACY, MASTERED_MIN_ATTEMPTS, MINUTES_A_STRETCH, REACTION_MIN_MS, RECENT_TRIES,
+    RECOGNITION_MAX_MS, RECOGNITION_MIN_TRIES, RECOGNITION_WINDOW, Ranking, RecognitionBands,
 };
 use dioxus::prelude::*;
 
@@ -86,9 +86,9 @@ pub fn letters(bands: RecognitionBands) -> Element {
             dt { "Few tries" }
             dd { "Grey, dashed: sent fewer than {MASTERED_MIN_ATTEMPTS} times, too few to call." }
             {likely_and_notch(format!("The Mastered line, {mastered}."))}
-            dt { "↑ 8 lately" }
+            dt { "↑ 30 lately" }
             dd {
-                "Your last {RECENT_TRIES} tries of it against the ones before, in points: up in green, down in copper, shown from 5 points either way."
+                "Your last {RECENT_TRIES} tries of it against the {EARLIER_TRIES} or so before them, in points: up in green, down in copper, shown only when the move is more than chance would make over that many tries."
             }
             dt { "Recognised in" }
             dd {
