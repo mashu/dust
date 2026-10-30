@@ -17,7 +17,7 @@ pub mod memory;
 #[cfg(feature = "web")]
 mod web;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -71,6 +71,12 @@ pub trait Store {
     }
     /// Store the newest of `sessions`, up to [`MAX_SESSIONS`].
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved;
+    /// The sessions deleted by hand that the store remembers ([`Deleted`]);
+    /// none where it remembers none, as a store from before it did.
+    fn read_deleted(&self) -> Vec<Deleted>;
+    /// Remember `deleted` as the sessions deleted by hand, in place of what
+    /// was remembered.
+    fn save_deleted(&self, deleted: &[Deleted]);
     /// What reading the store has set aside, as it could not read it, since
     /// this was last asked: taken, so the user is told of each once.
     fn take_set_aside(&self) -> Vec<SetAside> {
@@ -639,6 +645,57 @@ impl SessionKey {
     }
 }
 
+/// A session deleted by hand, as the store remembers it, by its
+/// [`SessionKey`]: what tells a session another copy of the app deleted
+/// from one it never stored, or lost in passing ([`merge_history`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deleted {
+    pub timestamp: u64,
+    pub date: String,
+    /// When it was deleted, in milliseconds since the epoch.
+    pub at: u64,
+    /// What a later build added to it, carried along.
+    #[serde(flatten)]
+    pub unread: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Deleted {
+    /// `session`, deleted `at`.
+    pub fn of(session: &SessionResult, at: u64) -> Self {
+        Self {
+            timestamp: session.timestamp,
+            date: session.date.clone(),
+            at,
+            unread: serde_json::Map::new(),
+        }
+    }
+
+    pub fn key(&self) -> SessionKey {
+        SessionKey(self.timestamp, self.date.clone())
+    }
+}
+
+/// How long a deletion is remembered: well past the time a copy of the app
+/// left open on the history from before it is likely to store again.
+const DELETED_KEPT_MS: u64 = 90 * 86_400_000;
+
+/// How many deletions are remembered, at most: the newest. Two whole
+/// histories deleted.
+const MAX_DELETED: usize = 2 * MAX_SESSIONS;
+
+/// `deleted`, oldest first, less what is no longer worth remembering at
+/// `now`: deletions older than [`DELETED_KEPT_MS`], and all but the newest
+/// [`MAX_DELETED`]. One stamped later than now, by a clock set ahead, is
+/// let go by count alone. A copy that still holds a session whose deletion
+/// is let go puts it back the next time it stores, rather than lose one.
+pub fn prune_deleted(mut deleted: Vec<Deleted>, now: u64) -> Vec<Deleted> {
+    deleted.retain(|gone| gone.at.saturating_add(DELETED_KEPT_MS) >= now);
+    let over = deleted.len().saturating_sub(MAX_DELETED);
+    deleted.drain(..over);
+    deleted
+}
+
 /// `theirs`, the history stored now, with what `ours` changed from `base`
 /// done to it.
 ///
@@ -649,10 +706,21 @@ impl SessionKey {
 /// one deleted here is deleted, and one changed here — filled in by a
 /// restore — is kept as it is here; whatever another copy added, deleted
 /// or changed stands. Sessions are known as [`pair_sessions`] knows them.
+///
+/// A session is deleted elsewhere only if `deleted`, the sessions deleted
+/// by hand ([`Deleted`]), holds it: one missing from the store alone is
+/// kept. Copies store without a lock between them, so one can write over
+/// what another stored a moment before, from a history it read before
+/// that: a session the first copy kept then is missing from the store,
+/// and used to be taken for one deleted elsewhere and lost for good. A
+/// session stored, or put back, elsewhere and deleted by hand is dropped
+/// for the same reason; one the store let go for want of room is neither,
+/// kept, and let go again as the history is stored.
 pub fn merge_history(
     base: &[SessionResult],
     ours: &[SessionResult],
     theirs: &[SessionResult],
+    deleted: &HashSet<SessionKey>,
 ) -> Vec<SessionResult> {
     fn each(sessions: &[SessionResult]) -> Vec<&SessionResult> {
         sessions.iter().collect()
@@ -676,7 +744,9 @@ pub fn merge_history(
             }
             Some(was) => match stored[*was] {
                 // Deleted elsewhere.
-                None => {}
+                None if deleted.contains(&SessionKey::of(session)) => {}
+                // Missing from the store, and not deleted: lost there.
+                None => merged.push(session.clone()),
                 // Changed here, or else as it is stored.
                 Some(stored) if *session == base[*was] => merged.push(stored.clone()),
                 Some(_) => merged.push(session.clone()),
@@ -688,7 +758,7 @@ pub fn merge_history(
     let added_there: Vec<&SessionResult> = theirs
         .iter()
         .zip(&was_there)
-        .filter(|(_, was)| was.is_none())
+        .filter(|(session, was)| was.is_none() && !deleted.contains(&SessionKey::of(session)))
         .map(|(session, _)| session)
         .collect();
     let before = merged.len();
@@ -1040,6 +1110,23 @@ pub(crate) mod tests {
         sessions.iter().map(|session| session.timestamp).collect()
     }
 
+    /// The sessions of `stamps` as deleted by hand.
+    fn deleted(stamps: &[u64]) -> HashSet<SessionKey> {
+        stamps
+            .iter()
+            .map(|&stamp| SessionKey::of(&at(stamp)))
+            .collect()
+    }
+
+    /// A merge with nothing deleted by hand.
+    fn merged(
+        base: &[SessionResult],
+        ours: &[SessionResult],
+        theirs: &[SessionResult],
+    ) -> Vec<SessionResult> {
+        merge_history(base, ours, theirs, &HashSet::new())
+    }
+
     /// A history merge does to what is stored what this copy did, and keeps
     /// what another copy did: each added, each deleted, in the order they
     /// were practised.
@@ -1049,13 +1136,36 @@ pub(crate) mod tests {
         // Here 2 was deleted and 4 added; elsewhere 3 deleted and 5 added.
         let ours = [at(1), at(3), at(4)];
         let theirs = [at(1), at(2), at(5)];
-        assert_eq!(stamps(&merge_history(&base, &ours, &theirs)), [1, 4, 5]);
+        let gone = deleted(&[2, 3]);
+        assert_eq!(
+            stamps(&merge_history(&base, &ours, &theirs, &gone)),
+            [1, 4, 5]
+        );
         // Nothing stored elsewhere: this copy's history, as it is.
-        assert_eq!(merge_history(&base, &ours, &base), ours);
+        assert_eq!(merge_history(&base, &ours, &base, &gone), ours);
         // Nothing changed here: what is stored, as it is.
-        assert_eq!(merge_history(&base, &base, &theirs), theirs);
+        assert_eq!(merge_history(&base, &base, &theirs, &gone), theirs);
         // Both added the same session, restoring the same backup: once.
-        assert_eq!(stamps(&merge_history(&[], &[at(7)], &[at(7)])), [7]);
+        assert_eq!(stamps(&merged(&[], &[at(7)], &[at(7)])), [7]);
+    }
+
+    /// A session missing from the store, but deleted by nobody, is kept:
+    /// another copy wrote over the store from a history it read before the
+    /// session was stored. It used to be taken for one deleted elsewhere,
+    /// and lost for good. One deleted by hand that such a write brought back
+    /// goes again.
+    #[test]
+    fn a_session_lost_from_the_store_is_not_taken_for_one_deleted() {
+        let base = [at(1), at(2)];
+        let ours = [at(1), at(2), at(4)];
+        // Another copy, which read the history before 2 was stored, wrote
+        // it over with 3 of its own.
+        let theirs = [at(1), at(3)];
+        assert_eq!(stamps(&merged(&base, &ours, &theirs)), [1, 2, 3, 4]);
+        // 1 was deleted here before; the other copy's write brought it back.
+        let theirs = [at(1), at(2), at(3)];
+        let merged_now = merge_history(&[at(2)], &[at(2)], &theirs, &deleted(&[1]));
+        assert_eq!(stamps(&merged_now), [2, 3]);
     }
 
     /// A session filled in on one side — a run's log put back by a restore —
@@ -1064,10 +1174,10 @@ pub(crate) mod tests {
     fn a_history_merge_keeps_a_session_filled_in_on_either_side() {
         let mut filled = at(1);
         filled.accuracy = 0.5;
-        let merged = merge_history(&[at(1)], std::slice::from_ref(&filled), &[at(1)]);
-        assert_eq!(merged, [filled.clone()]);
-        let merged = merge_history(&[at(1)], &[at(1)], std::slice::from_ref(&filled));
-        assert_eq!(merged, [filled]);
+        let merged_here = merged(&[at(1)], std::slice::from_ref(&filled), &[at(1)]);
+        assert_eq!(merged_here, [filled.clone()]);
+        let merged_there = merged(&[at(1)], &[at(1)], std::slice::from_ref(&filled));
+        assert_eq!(merged_there, [filled]);
     }
 
     /// Sessions alike in when and on what day they finished are told apart
@@ -1078,9 +1188,10 @@ pub(crate) mod tests {
         let mut second = at(1);
         second.accuracy = 0.5;
         let both = [first.clone(), second.clone()];
-        let merged = merge_history(&both, std::slice::from_ref(&second), &both);
+        let gone = deleted(&[1]);
+        let merged = merge_history(&both, std::slice::from_ref(&second), &both, &gone);
         assert_eq!(merged, [second]);
-        let merged = merge_history(&both, &both, std::slice::from_ref(&first));
+        let merged = merge_history(&both, &both, std::slice::from_ref(&first), &gone);
         assert_eq!(merged, [first]);
     }
 
@@ -1097,7 +1208,10 @@ pub(crate) mod tests {
         let base = [first.clone(), second.clone(), third.clone()];
         let ours = [first, filled.clone(), third.clone()];
         let theirs = [second, third.clone()];
-        assert_eq!(merge_history(&base, &ours, &theirs), [filled, third]);
+        assert_eq!(
+            merge_history(&base, &ours, &theirs, &deleted(&[1])),
+            [filled, third]
+        );
     }
 
     /// The same session added on both sides is kept once, and two alike in
@@ -1107,9 +1221,35 @@ pub(crate) mod tests {
         let mut other = at(7);
         other.accuracy = 0.5;
         assert_eq!(
-            merge_history(&[], &[at(7)], &[at(7), other.clone()]),
+            merged(&[], &[at(7)], &[at(7), other.clone()]),
             [at(7), other]
         );
+    }
+
+    /// Deletions are remembered for a while and so many, the newest; one a
+    /// clock set ahead stamped is let go by count alone.
+    #[test]
+    fn deletions_are_remembered_for_a_while() {
+        let day = 86_400_000;
+        let now = 200 * day;
+        let gone = |at| Deleted::of(&at_stamp(at), at);
+        let kept = prune_deleted(
+            vec![gone(now - 100 * day), gone(now - day), gone(now + day)],
+            now,
+        );
+        assert_eq!(kept, [gone(now - day), gone(now + day)]);
+        let many: Vec<Deleted> = (0..MAX_DELETED as u64 + 3).map(|n| gone(now - n)).collect();
+        let kept = prune_deleted(many.clone(), now);
+        assert_eq!(kept.len(), MAX_DELETED);
+        assert_eq!(kept.first(), many.get(3), "the oldest go");
+    }
+
+    /// A session finished at `timestamp`, by its stamp alone.
+    fn at_stamp(timestamp: u64) -> SessionResult {
+        SessionResult {
+            timestamp,
+            ..session("2026-10-01")
+        }
     }
 
     pub(super) fn session(date: &str) -> SessionResult {

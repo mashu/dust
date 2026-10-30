@@ -357,7 +357,7 @@ rather than take a tab still running for one cut off.
 
 Updating the app does not clear any of it. The storage keys (`dust_settings`,
 `dust_sessions`, `dust_auto_adjust_*`, `dust_theme`, `dust_tutorial_done`,
-`dust_last_backup`, `dust_open_session_*`) and
+`dust_last_backup`, `dust_open_session_*`, `dust_deleted`) and
 file names are not versioned, and settings files from older builds still load
 — new fields fall back to their defaults, and one unreadable field costs only
 that field. A settings file from before the AGC threshold went comes back
@@ -454,6 +454,18 @@ more. Every deletion can be undone from the message that follows it, for a
 few seconds. Deleting a session takes it out of every stat, the calendar,
 the streak and the score board, and out of what the sampler learns from; the
 level you have reached stays where it is.
+
+Two windows or tabs on one store each store what changed in them, laid over
+what the other stored. They store without a lock between them, so one can
+write over a session the other stored a moment before; that window's next
+store puts it back. A session is taken for deleted only when it was deleted
+by hand: each deletion is remembered for 90 days, the newest thousand, in
+`deleted.json`, or `dust_deleted` in a browser, and so is taken out again
+wherever another window still holds it. Undo, or a restore that brings the
+session back, forgets it. A session the history let go for want of room is
+kept by a window that still holds it, and let go again as it stores. A
+deletion made by a build from before this, which remembered none, can come
+back from a window that still held the session.
 
 **Stats → Scores** is the score board: the sessions kept on this device,
 ranked by what they earned a group, with gold, silver and bronze for the top

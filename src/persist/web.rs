@@ -7,9 +7,9 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
 use super::{
-    Aside, BackupSaving, CutOff, CutOffTaking, HistorySaved, Kept, OpenSession, SETTINGS_HELD,
-    SetAside, Store, newest, over_stored, read_history, read_settings_from, saved_now,
-    set_aside_from, store_newest_that_fit,
+    Aside, BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, Kept, OpenSession,
+    SETTINGS_HELD, SetAside, Store, newest, over_stored, read_history, read_settings_from,
+    saved_now, set_aside_from, store_newest_that_fit,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -18,6 +18,8 @@ const SETTINGS_KEY: &str = "dust_settings";
 const UNREADABLE_SETTINGS_KEY: &str = "dust_settings_unreadable";
 const SESSIONS_KEY: &str = "dust_sessions";
 const UNREADABLE_SESSIONS_KEY: &str = "dust_sessions_unreadable";
+/// The sessions deleted by hand ([`Deleted`]).
+const DELETED_KEY: &str = "dust_deleted";
 const AUTO_PREFIX: &str = "dust_auto_adjust_";
 const LAST_BACKUP_KEY: &str = "dust_last_backup";
 /// The sessions and runs marked open ([`Store::mark_open`]): each page's
@@ -339,6 +341,21 @@ impl Store for WebStore {
 
     fn take_set_aside(&self) -> Vec<SetAside> {
         std::mem::take(&mut self.set_aside.borrow_mut())
+    }
+
+    /// None, where they cannot be read: a deletion forgotten costs a
+    /// session deleted coming back, never one kept going.
+    fn read_deleted(&self) -> Vec<Deleted> {
+        storage()
+            .and_then(|store| store.get_item(DELETED_KEY).ok().flatten())
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_deleted(&self, deleted: &[Deleted]) {
+        if let (Some(store), Ok(raw)) = (storage(), serde_json::to_string(deleted)) {
+            let _ = store.set_item(DELETED_KEY, &raw);
+        }
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {

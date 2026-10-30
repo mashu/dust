@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SetAside, Store, newest,
-    saved_as, saved_now,
+    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SetAside, Store,
+    newest, saved_as, saved_now,
 };
 
 #[derive(Default)]
@@ -36,6 +36,8 @@ pub struct MemoryStore {
     held_by_read: Cell<bool>,
     /// What reads set aside, as they could not read it, not yet told of.
     pub set_aside: RefCell<Vec<SetAside>>,
+    /// The sessions deleted by hand.
+    pub deleted: RefCell<Vec<Deleted>>,
     last_backup: Cell<Option<u64>>,
     /// Every backup file handed over: its name and what it held.
     pub backup_files: RefCell<Vec<(String, String)>>,
@@ -93,6 +95,14 @@ impl Store for MemoryStore {
 
     fn take_set_aside(&self) -> Vec<SetAside> {
         std::mem::take(&mut self.set_aside.borrow_mut())
+    }
+
+    fn read_deleted(&self) -> Vec<Deleted> {
+        self.deleted.borrow().clone()
+    }
+
+    fn save_deleted(&self, deleted: &[Deleted]) {
+        *self.deleted.borrow_mut() = deleted.to_vec();
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {

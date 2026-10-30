@@ -12,8 +12,8 @@ use dioxus::prelude::*;
 use crate::contest_runtime::ContestEntry;
 use crate::persist::backup::{Backup, Filled, Merged, backup_name, merge_sessions, write_backup};
 use crate::persist::{
-    CutOff, HistorySaved, MAX_SESSIONS, OpenSession, SessionKey, SetAside, Store, merge_history,
-    merge_settings, pair_sessions,
+    CutOff, Deleted, HistorySaved, MAX_SESSIONS, OpenSession, SessionKey, SetAside, Store,
+    merge_history, merge_settings, pair_sessions, prune_deleted,
 };
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
@@ -367,7 +367,12 @@ impl AppCtx {
         let settings_read = store.read_settings();
         self.tell_of_set_aside();
         if let Some(theirs) = read {
-            let merged = merge_history(&stored.peek(), &sessions.peek(), &theirs);
+            let merged = merge_history(
+                &stored.peek(),
+                &sessions.peek(),
+                &theirs,
+                &deleted_keys(&*store),
+            );
             if *sessions.peek() != merged {
                 sessions.set(merged);
             }
@@ -414,7 +419,12 @@ impl AppCtx {
         let held = store.read_sessions();
         self.tell_of_set_aside();
         let merged = match &held {
-            Some(theirs) => merge_history(&stored.peek(), &sessions.peek(), theirs),
+            Some(theirs) => merge_history(
+                &stored.peek(),
+                &sessions.peek(),
+                theirs,
+                &deleted_keys(&*store),
+            ),
             // None stored yet, or none that can be read: nothing to keep.
             None => sessions.peek().clone(),
         };
@@ -467,8 +477,11 @@ impl AppCtx {
         }
         taken.reverse();
         let count = taken.len();
+        let gone: Vec<SessionResult> = taken.iter().map(|(_, session)| session.clone()).collect();
+        let noted = self.note_deleted(&gone, true);
         let saved = self.store_history();
         if let Some(why) = why_not_stored(&saved) {
+            self.app().store.save_deleted(&noted);
             self.put_back(taken);
             self.toasts.show(format!("Nothing was deleted: {why}."));
             return;
@@ -495,9 +508,12 @@ impl AppCtx {
         }
         let mut sessions = self.sessions;
         let before = sessions.peek().clone();
+        let back: Vec<SessionResult> = taken.iter().map(|(_, session)| session.clone()).collect();
+        let noted = self.note_deleted(&back, false);
         self.put_back(taken.clone());
         let saved = self.store_history();
         if let Some(why) = why_not_stored(&saved) {
+            self.app().store.save_deleted(&noted);
             sessions.set(before);
             trash.set(taken);
             self.toasts
@@ -551,9 +567,12 @@ impl AppCtx {
         );
         let backed_up = covers_up_to(&backup.sessions, &before.0, backup.saved_at);
         let merged = merge_sessions(&before.0, backup.sessions);
+        // What it adds was deleted by hand, maybe; it is wanted back now.
+        let noted = self.note_deleted(&merged.added, false);
         sessions.set(merged.sessions.clone());
         let stored = self.store_history_counted();
         if let Some(why) = why_not_stored(&stored.saved) {
+            self.app().store.save_deleted(&noted);
             sessions.set(before.0);
             self.toasts.show(format!("Nothing was restored: {why}."));
             return;
@@ -641,9 +660,11 @@ impl AppCtx {
         };
         let mut sessions = self.sessions;
         let now = sessions.peek().clone();
+        let noted = self.note_deleted(&restored.added, true);
         sessions.set(restored.undone(&now));
         let saved = self.store_history();
         if let Some(why) = why_not_stored(&saved) {
+            self.app().store.save_deleted(&noted);
             sessions.set(now);
             before_restore.set(Some(restored));
             self.toasts
@@ -690,6 +711,35 @@ impl AppCtx {
         settings.write().restore_section(section, &before);
     }
 
+    /// Remember `sessions` as deleted by hand, or, `deleted` false, as not:
+    /// put back. What is remembered is read afresh just before, so that what
+    /// another copy deleted meanwhile is kept, and what was remembered
+    /// before is given back, for a change the history does not take to be
+    /// undone with.
+    ///
+    /// Only what is deleted by hand is remembered: a session missing from
+    /// the store for any other reason, another copy's write over it or want
+    /// of room, is kept ([`merge_history`]).
+    fn note_deleted(self, sessions: &[SessionResult], deleted: bool) -> Vec<Deleted> {
+        let store = self.app().store;
+        let before = store.read_deleted();
+        let keys: HashSet<SessionKey> = sessions.iter().map(SessionKey::of).collect();
+        let now = crate::time::now_ms();
+        let mut noted: Vec<Deleted> = before
+            .iter()
+            .filter(|gone| !keys.contains(&gone.key()))
+            .cloned()
+            .collect();
+        if deleted {
+            noted.extend(sessions.iter().map(|session| Deleted::of(session, now)));
+        }
+        let noted = prune_deleted(noted, now);
+        if noted != before {
+            store.save_deleted(&noted);
+        }
+        before
+    }
+
     /// Put each of `taken` back where it sat, in the order they sat in; or,
     /// where the history has changed around that place since, where it
     /// falls by when it finished.
@@ -726,6 +776,11 @@ impl AppCtx {
         self.dialogue.set(None);
         self.screen.set(to);
     }
+}
+
+/// The sessions `store` remembers as deleted by hand.
+fn deleted_keys(store: &dyn Store) -> HashSet<SessionKey> {
+    store.read_deleted().iter().map(Deleted::key).collect()
 }
 
 /// What a store of the history did ([`AppCtx::store_history_counted`]).
@@ -1130,6 +1185,67 @@ mod tests {
         b.finish(day(6));
         assert_eq!(days(&store.load_sessions()), [1, 3, 5, 6]);
         assert_eq!(b.shown(), [1, 3, 5, 6]);
+    }
+
+    /// A session one tab stored, which another tab wrote over in the moment
+    /// between its read of the history and its write, comes back with the
+    /// first tab's next store: missing from the store, it is not taken for
+    /// one deleted. It used to be dropped as deleted elsewhere, and lost
+    /// from every tab for good.
+    #[test]
+    fn a_session_another_tab_wrote_over_is_not_lost() {
+        let store = holding([1]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        // b reads the history, a stores a session, and b writes what it
+        // made of its read over it: the lost update two tabs can make.
+        let read = store.load_sessions();
+        a.finish(day(2));
+        store.save_sessions(&[read, vec![day(3)]].concat());
+        assert_eq!(days(&store.load_sessions()), [1, 3], "lost for now");
+        a.finish(day(4));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4]);
+        assert_eq!(a.shown(), [1, 2, 3, 4]);
+        // Deleted by hand, it stays gone though a stale write brings it back
+        // to the store, and goes from every tab.
+        b.delete(1);
+        store.save_sessions(&[day(1), day(2), day(3), day(4)]);
+        b.finish(day(5));
+        assert_eq!(days(&store.load_sessions()), [2, 3, 4, 5]);
+        a.finish(day(6));
+        assert_eq!(days(&store.load_sessions()), [2, 3, 4, 5, 6]);
+        assert_eq!(a.shown(), [2, 3, 4, 5, 6]);
+        // Put back with Undo, it is wanted again, everywhere.
+        b.act(AppCtx::undo_delete);
+        a.finish(day(7));
+        assert_eq!(days(&store.load_sessions()), [1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    /// Sessions the store let go for want of room are not taken for ones
+    /// deleted by hand, nor the other way round: between them, tabs keep the
+    /// newest that fit, and a session deleted stays deleted.
+    #[test]
+    fn sessions_let_go_for_room_are_not_taken_for_ones_deleted() {
+        let store = holding([1, 2, 3]);
+        let (a, b) = (Tab::on(&store), Tab::on(&store));
+        store.room.set(Some(3));
+        b.finish(day(4));
+        assert_eq!(days(&store.load_sessions()), [2, 3, 4]);
+        a.finish(day(5));
+        assert_eq!(days(&store.load_sessions()), [3, 4, 5]);
+        assert_eq!(a.shown(), [3, 4, 5]);
+        a.delete(4);
+        b.finish(day(6));
+        assert_eq!(days(&store.load_sessions()), [3, 5, 6], "4 stays deleted");
+        assert_eq!(b.shown(), [3, 5, 6]);
+        assert_eq!(
+            store
+                .read_deleted()
+                .iter()
+                .map(|gone| gone.timestamp)
+                .collect::<Vec<_>>(),
+            [stamp(4)],
+            "only what was deleted by hand is remembered"
+        );
     }
 
     /// Undo puts back only what was deleted here, where it falls among

@@ -9,14 +9,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, SETTINGS_HELD, SetAside, Store,
-    newest, over_stored, read_history, read_settings_from,
+    BackupSaving, CutOff, CutOffTaking, Deleted, HistorySaved, OpenSession, SETTINGS_HELD,
+    SetAside, Store, newest, over_stored, read_history, read_settings_from,
 };
 
 const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
 const SETTINGS: &str = "settings.json";
 const SESSIONS: &str = "sessions.json";
+/// The sessions deleted by hand ([`Deleted`]).
+const DELETED: &str = "deleted.json";
 const COUNTERS: &str = "auto_adjust.json";
 const LAST_BACKUP: &str = "last_backup.txt";
 /// The sessions and runs marked open ([`Store::mark_open`]): each copy of
@@ -380,6 +382,21 @@ impl Store for DesktopStore {
 
     fn take_set_aside(&self) -> Vec<SetAside> {
         std::mem::take(&mut self.set_aside.borrow_mut())
+    }
+
+    /// None, where the file cannot be read: a deletion forgotten costs a
+    /// session deleted coming back, never one kept going.
+    fn read_deleted(&self) -> Vec<Deleted> {
+        fs::read(self.root.join(DELETED))
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_deleted(&self, deleted: &[Deleted]) {
+        if let Ok(raw) = serde_json::to_vec(deleted) {
+            let _ = self.write(DELETED, &raw);
+        }
     }
 
     fn save_sessions(&self, sessions: &[SessionResult]) -> HistorySaved {
@@ -1045,6 +1062,21 @@ mod tests {
             serde_json::from_slice(&fs::read(dir.0.join(SESSIONS)).unwrap()).unwrap();
         assert_eq!(held[0]["laterKey"], "kept");
         assert_eq!(store.load_sessions().len(), 2);
+    }
+
+    /// The sessions deleted by hand are remembered, what a later build
+    /// added to each along with them; a file that cannot be read remembers
+    /// none, which costs a deleted session coming back, never one kept.
+    #[test]
+    fn the_sessions_deleted_are_remembered() {
+        let (dir, store) = store("deleted");
+        assert!(store.read_deleted().is_empty());
+        let mut gone = Deleted::of(&session("2026-09-01"), 7);
+        gone.unread.insert("laterKey".into(), serde_json::json!(1));
+        store.save_deleted(std::slice::from_ref(&gone));
+        assert_eq!(DesktopStore::at(dir.0.clone()).read_deleted(), [gone]);
+        fs::write(dir.0.join(DELETED), "[{").unwrap();
+        assert!(store.read_deleted().is_empty());
     }
 
     #[test]
