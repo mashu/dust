@@ -2386,6 +2386,33 @@ mod tests {
         });
     }
 
+    /// A Dvorak's `?`, Shift on the dit key, keys the dit into Call while
+    /// the paddles are on the keys right of P by place, as they ship: the E
+    /// lands there, and a message says how to type the `?` of a partial
+    /// call instead, with no word of a keypad, which has none to tap.
+    #[test]
+    fn a_question_mark_keyed_by_place_says_how_to_type_it() {
+        run(|| async {
+            let (mut ui, _recorder) = Ui::app_with_settings(paddled(cw_core::ContestKind::Wpx));
+            ui.click("btn-start-training");
+            let question = Key::Character("?".into());
+            let shift = Modifiers::SHIFT;
+            ui.press_key_held("field-call", question.clone(), Code::BracketLeft, shift);
+            ui.advance(20).await;
+            ui.release_key_held("field-call", question, Code::BracketLeft, shift);
+            ui.advance(3 * DIT_MS).await;
+            let call = ui.with_app(|ctx| ctx.entry.shown(EntryField::Call));
+            assert_eq!(call, "E");
+            let told = ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text));
+            let told = told.unwrap_or_default();
+            assert!(
+                told.contains("To type ?, turn off Paddles on the keys right of P"),
+                "{told}"
+            );
+            assert!(!told.contains("keypad"), "{told}");
+        });
+    }
+
     /// A Space pressed by hand while the paddles wait out a word space, on
     /// the keyboard, the key bar or the keypad's ␣ Field, ends their word:
     /// the cursor moves once, as pressed, and the word space does not move

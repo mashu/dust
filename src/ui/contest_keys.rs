@@ -48,7 +48,9 @@ enum Known {
     /// By the character it types, Shift held or not: `+` takes Shift on
     /// many a keyboard, `;` on others. A key the paddles sit on, `[` or
     /// `]`, stays theirs whatever it types, while the paddles are on those
-    /// keys by place ([`cw_core::PlaybackSettings::paddle_keys_by_place`]).
+    /// keys by place ([`cw_core::PlaybackSettings::paddle_keys_by_place`])
+    /// and the key is not typed in a field the paddles key nothing into
+    /// ([`crate::ui::paddle::TypedField`]), as the paddles read it.
     Typed(&'static str),
     /// Enter, with Shift, Ctrl or Alt held.
     HeldEnter,
@@ -152,7 +154,8 @@ fn listed(kind: fn(Known) -> Option<&'static str>) -> String {
 /// once. Ctrl and the Command key make a shortcut of any other key, and
 /// Shift of any but a character, so those are passed by. A listener left by
 /// a run before is taken off first. `by_place`, a character typed on the
-/// keys the paddles sit on is the paddles' (a German keyboard's `+`).
+/// keys the paddles sit on is the paddles' (a German keyboard's `+`), but
+/// in a field they key nothing into.
 fn keys_script(by_place: bool) -> String {
     format!(
         r#"{STOP_LISTENING}
@@ -160,6 +163,7 @@ const alone = new Set({alone});
 const withAlt = new Set({alt});
 const typed = new Set({typed});
 const paddlesByPlace = {by_place};
+const typedField = (e) => Boolean(e.target && e.target.closest && e.target.closest("[data-typed]"));
 const name = (e) => {{
     if (e.code === "Enter" || e.code === "NumpadEnter") {{
         return e.shiftKey || e.ctrlKey || e.altKey ? "{HELD_ENTER}" : null;
@@ -170,7 +174,7 @@ const name = (e) => {{
     if (e.altKey) {{
         return withAlt.has(e.code) ? "Alt+" + e.code : null;
     }}
-    if (typed.has(e.key) && !(paddlesByPlace && e.code.startsWith("Bracket"))) {{
+    if (typed.has(e.key) && !(paddlesByPlace && e.code.startsWith("Bracket") && !typedField(e))) {{
         return e.key;
     }}
     return !e.shiftKey && alone.has(e.code) ? e.code : null;
@@ -336,11 +340,19 @@ mod tests {
             "{script}"
         );
         // A character the paddles' keys type is still the paddles', while
-        // they are on those keys by place.
+        // they are on those keys by place, but in a field they key nothing
+        // into, as the paddles read it.
         assert!(
             script.contains(
-                r#"typed.has(e.key) && !(paddlesByPlace && e.code.startsWith("Bracket"))"#
-            )
+                r#"typed.has(e.key) && !(paddlesByPlace && e.code.startsWith("Bracket") && !typedField(e))"#
+            ),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                r#"const typedField = (e) => Boolean(e.target && e.target.closest && e.target.closest("[data-typed]"));"#
+            ),
+            "{script}"
         );
         assert!(script.contains("const paddlesByPlace = true;"));
         assert!(keys_script(false).contains("const paddlesByPlace = false;"));

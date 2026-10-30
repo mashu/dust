@@ -94,6 +94,24 @@ fn random_opens_every_fixed_value_into_a_range() {
     });
 }
 
+/// Sends per group says what the box does while a group is sent again, as
+/// Lock typing while sending has it: off, as it ships, you type along from
+/// the first send; on, the box opens once the last has gone.
+#[test]
+fn sends_per_group_says_when_you_can_type_as_the_lock_has_it() {
+    run(|| async {
+        let mut settings = test_settings();
+        settings.playback.lock_input_during_group_playback = false;
+        let (mut ui, _recorder) = Ui::app_with_settings(settings);
+        ui.click("nav-settings");
+        assert!(ui.has("type along from the first send"), "{}", ui.html());
+        assert!(!ui.has("before the answer box opens"));
+        ui.commit("switch-lock-typing-while-sending", "true");
+        assert!(ui.has("before the answer box opens"));
+        assert!(!ui.has("type along from the first send"));
+    });
+}
+
 /// A number committed past what the field allows comes back as the most it
 /// allows, even when that is what the setting already was. Until then the
 /// 999 is the box's own: nothing is written over it while it is typed.
@@ -842,6 +860,41 @@ fn pasted_words_are_counted_as_typed_and_taken_on_leaving_the_box() {
         assert_eq!(word_report(&ui), "");
         assert!(ui.has("Starter words, sent whole · 80 words"));
         assert!(ui.stored_settings().await.curriculum.word_list.is_empty());
+    });
+}
+
+/// The paddles are on the keys right of P by place, as they ship, but in
+/// the boxes they key nothing into those keys type: the starter words' `+`
+/// and `=` in the word list, on a German keyboard or a Dvorak, and a
+/// Dvorak's `/` in the unlock order. Out of the box, they are the paddles
+/// again, and kept from the page.
+#[test]
+fn the_keys_right_of_p_type_in_the_word_list_and_the_unlock_order() {
+    run(|| async {
+        use dioxus::prelude::{Code, Key};
+        // Whether the page left the key to type.
+        let press = |ui: &mut Ui, at: &str, typed: &str, code: Code| {
+            let key = Key::Character(typed.into());
+            let left = ui.press_key(at, key.clone(), code);
+            ui.release_key(at, key, code);
+            left
+        };
+        let (mut ui, _recorder) = on_words();
+        assert!(ui.stored_settings().await.playback.paddle_keys_by_place);
+        let words = "field-word-list";
+        ui.focus(words);
+        assert!(press(&mut ui, words, "+", Code::BracketRight), "+ kept");
+        assert!(press(&mut ui, words, "=", Code::BracketRight), "= kept");
+        ui.blur(words);
+        assert!(!press(&mut ui, words, "+", Code::BracketRight));
+        ui.advance(1_000).await;
+
+        ui.click("seg-koch");
+        let order = "field-sequence-order";
+        ui.focus(order);
+        assert!(press(&mut ui, order, "/", Code::BracketLeft), "/ kept");
+        ui.blur(order);
+        assert!(!press(&mut ui, order, "/", Code::BracketLeft));
     });
 }
 

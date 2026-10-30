@@ -13,6 +13,7 @@ use crate::ui::file_pick::{ChosenFile, FileButton};
 use crate::ui::format::counted;
 use crate::ui::hear_qso::{HeardDialogue, QsoHead, QsoLines, heard_label};
 use crate::ui::help;
+use crate::ui::paddle::use_typed_field;
 use crate::ui::widgets::{
     CardHead, DISCLOSURE, Icon, IconName, NumberField, SectionReset, Seg, TextDraft, TextField,
     control_id, range_label, whole,
@@ -695,11 +696,15 @@ fn take_word_file(
 /// What is typed stays as typed until it is committed, on leaving the box,
 /// and is then read as a list: upper-cased, each word once, what cannot be
 /// sent left out and said. A key does not redraw the box ([`TextDraft`]),
-/// so the count of what is being typed is drawn beside it instead.
+/// so the count of what is being typed is drawn beside it instead. The
+/// paddles key nothing into it, so the keys right of P type there: the
+/// starter list's `+` and `=` on any keyboard
+/// ([`crate::ui::paddle::TypedField`]).
 #[component]
 fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: bool) -> Element {
     let app = try_use_context::<AppCtx>();
     let draft = TextDraft::use_draft();
+    let typed = use_typed_field();
     // The text being typed again, for the count under the box, which alone
     // reads it: the box goes by the draft, which redraws nothing.
     let mut counting = use_signal(|| None::<String>);
@@ -724,6 +729,9 @@ fn WordListEditor(settings: Signal<TrainingSettings>, words: Vec<String>, own: b
             aria_label: "Your words, one to a line",
             autocapitalize: "characters",
             spellcheck: false,
+            "data-typed": "true",
+            onfocus: move |_| typed.focus(),
+            onblur: move |_| typed.blur(),
             oninput: move |e| {
                 draft.hold(e.value());
                 counting.set(Some(e.value()));

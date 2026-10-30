@@ -722,7 +722,7 @@ pub fn TrainingView(
     } else if playing {
         "Listen, or type along."
     } else if live {
-        "Type what you heard — no rush."
+        "Type what you heard."
     } else {
         "Next group on its way."
     };

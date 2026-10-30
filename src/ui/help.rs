@@ -403,7 +403,7 @@ pub fn character_set() -> Element {
             dt { "Callsigns" }
             dd { "Real callsigns, as they are heard on the air. The tier sets how hard they come; each keeps what the ones below send." }
             dt { "Words" }
-            dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =." }
+            dd { "Whole words, from the starter list or your own, one to a line. The starter list's prosigns are sent as the one sign each is, run together: + for AR and = for BT, typed as + and =. Where your keyboard has + or = on the keys right of P, those keys are the paddles in the answer box: turn off Paddles on the keys right of P (Session shape) to type them there." }
             dt { "Contest" }
             dd { "A contest run in place of groups: callers answer your CQ and you log their call and exchange. A caller that is sending cannot hear you, one caller or a pile-up, as on the air: wait for it to finish before you send, and ask with ? (F7) if you missed it." }
             dt { "Unlock order" }
@@ -445,7 +445,7 @@ pub fn session_shape() -> Element {
             dd { "How hard adapting pushes: Comfortable keeps copy mostly clean, Stretch pushes to where you miss often." }
             dt { "Sends per group" }
             dd {
-                "How many times each group is sent before the answer box opens, a word space apart. Each send after the first that you hear, typing along or not, halves what the group scores."
+                "How many times each group is sent, a word space apart. Type along from the first send; with Lock typing while sending on, the box opens after the last. Each send after the first that you hear, typing along or not, halves what the group scores."
             }
             dt { "Lock typing while sending" }
             dd {

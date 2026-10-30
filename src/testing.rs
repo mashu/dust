@@ -958,9 +958,9 @@ impl Ui {
         let element = self.element(id);
         let payload: std::rc::Rc<dyn std::any::Any> =
             std::rc::Rc::new(dioxus::html::PlatformEventData::new(data));
-        // As a browser has it: entering, leaving and focus are told to the
-        // element alone, not to those around it.
-        let bubbles = !matches!(event, "pointerenter" | "pointerleave" | "focus");
+        // As a browser has it: entering, leaving, focus and its loss are
+        // told to the element alone, not to those around it.
+        let bubbles = !matches!(event, "pointerenter" | "pointerleave" | "focus" | "blur");
         let delivered = dioxus::core::Event::new(payload, bubbles);
         self.dom
             .runtime()
@@ -1106,6 +1106,16 @@ impl Ui {
     pub fn focus(&mut self, id: &str) {
         self.fire(
             "focus",
+            id,
+            Box::new(dioxus::html::SerializedFocusData::default()),
+        );
+    }
+
+    /// Take the cursor from the field with this id, the way a click
+    /// elsewhere or Tab out of it does.
+    pub fn blur(&mut self, id: &str) {
+        self.fire(
+            "blur",
             id,
             Box::new(dioxus::html::SerializedFocusData::default()),
         );
