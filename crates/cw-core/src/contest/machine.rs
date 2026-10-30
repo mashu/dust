@@ -32,6 +32,7 @@ use super::data::places::home_country;
 use super::data::zones::home_continent;
 use super::esm::{
     EntryField, Fields, MessagePart, QsoState, call_copied, esm, loggable, message_text,
+    unheard_hint,
 };
 use super::exchange::Field;
 use super::parse::{Reading, normalize_call, parse_exchange};
@@ -1273,6 +1274,9 @@ pub struct ContestMachine<S> {
     /// The turns whose sound nothing can be timed from: tried again, or
     /// played late.
     untrusted: Vec<u64>,
+    /// The hint has said this run that a station still sending never heard
+    /// you ([`QsoState::unheard_by`]): it says so once.
+    told_unheard: bool,
 }
 
 impl<S: CallSource> ContestMachine<S> {
@@ -1341,6 +1345,7 @@ impl<S: CallSource> ContestMachine<S> {
             ended: None,
             shown_last: Vec::new(),
             untrusted: Vec::new(),
+            told_unheard: false,
         };
         let effects = if countdown == 0 {
             machine.begin_run(now)
@@ -1963,6 +1968,8 @@ impl<S: CallSource> ContestMachine<S> {
         if key == OpKey::StopTx {
             return self.stop_sending(now);
         }
+        // The hint's word on the message before goes with the next key.
+        self.qso.unheard_by.clear();
         let mut effects = Vec::new();
         // What of the turn on the air has reached you counts first: Enter
         // decides on what you have heard, whether or not another caller is
@@ -2271,6 +2278,18 @@ impl<S: CallSource> ContestMachine<S> {
         if logs {
             pending.push(self.log(fields, call, run_ms, now));
         }
+        // The first time in a run that the station a message was for never
+        // heard it, still sending, the hint says so: on the air only its
+        // sending again tells you, and waiting for a station to finish is
+        // the habit a run teaches.
+        if !self.told_unheard
+            && let Some(name) = self.unheard_by(&message, &fields.call, worked, &deaf)
+        {
+            self.told_unheard = true;
+            let (hint, more) = unheard_hint(&name);
+            effects.push(ContestEffect::Announce(hint + &more));
+            self.qso.unheard_by = name;
+        }
         if self.brings_callers(&message) {
             // Their first call: nothing to time it from, nothing asked.
             let sounding: Vec<usize> = carried
@@ -2335,6 +2354,44 @@ impl<S: CallSource> ContestMachine<S> {
             })
             .map(|over| over.reply.station)
             .collect()
+    }
+
+    /// The station `message` was for that never heard it, being one of the
+    /// `deaf` still sending, and still on the frequency: the station you
+    /// worked as you keyed it, `worked`, a single caller, or one whose call
+    /// the message or the Call field, `typed`, holds, a slip and all. None
+    /// for a pile-up caller only calling, as your message was for another.
+    /// Named by the call you had for it, whole; else "The station".
+    fn unheard_by(
+        &self,
+        message: &[MessagePart],
+        typed: &str,
+        worked: Option<usize>,
+        deaf: &[usize],
+    ) -> Option<String> {
+        let typed = normalize_call(typed);
+        let calls: Vec<&str> = message
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::HisCall(call) => Some(call.as_str()),
+                _ => None,
+            })
+            .chain(std::iter::once(typed.as_str()))
+            .filter(|call| !call.contains('?') && parse_callsign(call).is_some())
+            .collect();
+        let named = |index: usize| {
+            let own = &self.stations[index].caller.call.text;
+            calls
+                .iter()
+                .find(|call| matches!(match_call(call, own), CallMatch::Exact | CallMatch::Close))
+        };
+        let index = deaf.iter().copied().find(|index| {
+            self.stations[*index].caller.state.active()
+                && (self.style == RunStyle::Single
+                    || worked == Some(*index)
+                    || named(*index).is_some())
+        })?;
+        Some(named(index).map_or_else(|| "The station".to_string(), |call| (*call).to_string()))
     }
 
     /// The callers you keyed over, `callers`, that never heard
@@ -5129,7 +5186,7 @@ mod tests {
         let mut runtime = Runtime::start(1, settings, ScriptCalls::new(&["K5XYZ"]));
         let cq = runtime.last_turn().clone();
         assert_eq!(yours(&cq), "CQ CQ DE DL1ABC DL1ABC K");
-        assert_eq!(replies(&cq), ["DL1ABC DE K5XYZ K5XYZ K"]);
+        assert_eq!(replies(&cq), ["DL1ABC DE K5XYZ K"]);
         runtime.finish_turn();
         let effects = runtime.key(OpKey::Esm, "K5XYZ", "");
         assert!(effects.contains(&ContestEffect::Focus(EntryField::Exchange)));
@@ -5195,7 +5252,7 @@ mod tests {
         runtime.key(OpKey::Esm, "", "");
         let next = runtime.last_turn().clone();
         assert_eq!(yours(&next), "CQ CQ DE DL1ABC DL1ABC K");
-        assert_eq!(replies(&next), ["DL1ABC DE W2AW W2AW K"]);
+        assert_eq!(replies(&next), ["DL1ABC DE W2AW K"]);
         assert!(!view(&runtime).qso.nobody_calling, "the CQ brings one");
         runtime.now += 1_000;
         runtime.apply(ContestEvent::FinishNow);
@@ -8967,6 +9024,78 @@ mod tests {
         let call = sent_by(asked, 0)[0];
         assert!(call.start_sec > asked.segments[0].end_sec, "after your `?`");
         assert_eq!(call.text, "K5XYZ", "whole");
+    }
+
+    /// The first time in a run that the station a message was for never
+    /// hears it, still sending, the hint says so till the next key, by the
+    /// call you had for it, and a screen reader is told; Enter does as ever.
+    /// Keyed over again, nothing more is said that run. A single caller
+    /// still calling through your CQ is the station it was for, unnamed
+    /// with the Call field empty; a pile-up caller only calling is not.
+    /// Nothing used to say it, and a learner keying early went round and
+    /// round with a caller that never heard.
+    #[test]
+    fn a_station_still_sending_that_missed_you_is_said_once_a_run() {
+        let said = |effects: &[ContestEffect]| -> Vec<String> {
+            effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    ContestEffect::Announce(said) if said.contains("did not hear") => {
+                        Some(said.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let hint = |runtime: &Runtime<ScriptCalls>| {
+            let fields = Fields {
+                call: "K5XYZ".into(),
+                ..Fields::default()
+            };
+            let enter = esm(&view(runtime).qso, &fields, &RULES[0], Side::Dx);
+            assert_eq!(enter.label, "Send K5XYZ + exch", "Enter does as ever");
+            enter.hint + &enter.hint_more
+        };
+        let notice = "K5XYZ was still sending and did not hear you: wait for it to finish";
+        let mut runtime = runtime(&["K5XYZ"]);
+        let cq = runtime.last_turn().clone();
+        let call = sent_by(&cq, 0)[0].clone();
+        runtime.run_to(runtime.now + ms(call.start_sec + 0.05));
+        let effects = runtime.key(OpKey::Esm, "K5XYZ", "");
+        assert_eq!(said(&effects), [notice]);
+        assert_eq!(hint(&runtime), notice);
+        // It calls again after your message, and keyed over again, nothing
+        // more is said.
+        let turn = runtime.last_turn().clone();
+        let again = sent_by(&turn, 0)
+            .into_iter()
+            .find(|send| send.start_sec > 0.0)
+            .expect("it calls again")
+            .clone();
+        assert_eq!(again.text, "K5XYZ");
+        runtime.run_to(runtime.now + ms(again.start_sec + 0.05));
+        let effects = runtime.key(OpKey::Esm, "K5XYZ", "");
+        assert!(said(&effects).is_empty(), "{effects:?}");
+        assert_eq!(hint(&runtime), "Enter sends their call and your exchange");
+        // Your CQ over a single caller still calling, or a pile-up's.
+        for style in [RunStyle::Single, RunStyle::Pileup] {
+            let mut runtime = slow_caller(style, 1);
+            let cq = runtime.last_turn().clone();
+            let call = sent_by(&cq, 0)[0].clone();
+            runtime.run_to(ms(call.start_sec + 0.2));
+            let effects = runtime.key(OpKey::Cq, "", "");
+            let turn = runtime.last_turn();
+            assert!(sent_by(turn, 0)[0].end_sec > turn.your_end_sec().expect("your CQ"));
+            let single = style == RunStyle::Single;
+            let notice =
+                "The station was still sending and did not hear you: wait for it to finish";
+            assert_eq!(
+                said(&effects),
+                single.then_some(notice).into_iter().collect::<Vec<_>>()
+            );
+            let unheard = &view(&runtime).qso.unheard_by;
+            assert_eq!(unheard.is_empty(), !single, "{style:?}");
+        }
     }
 
     /// A pile-up caller that answered every CQ before you worked it is

@@ -208,7 +208,8 @@ fn callers_text(turn: &Turn, into: f64, qsk: bool) -> Vec<String> {
 /// What a listener copies from a caller's text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Copied<'a> {
-    /// A caller calling: its call alone, or `DL1ABC DE K5XYZ K5XYZ K`.
+    /// A caller calling: its call alone, or `DL1ABC DE K5XYZ K`, its call
+    /// sent once or twice.
     Call(&'a str),
     /// A call put right, `DE K5XYZ` or `K5XYZ K5XYZ`, with the station's
     /// exchange where it sends it after: `DE K5XYZ 5NN 214`.
@@ -230,6 +231,7 @@ pub(crate) fn copy_of(text: &str) -> Option<Copied<'_>> {
             Some(Copied::Correction(one, None))
         }
         [call] if parse_callsign(call).is_some() => Some(Copied::Call(call)),
+        [_, "DE", call, "K"] => Some(Copied::Call(call)),
         [_, "DE", call, again, "K"] if call == again => Some(Copied::Call(call)),
         // The call put right, then the exchange.
         ["DE", call, rest @ ..] => {
@@ -1320,10 +1322,9 @@ mod tests {
     #[test]
     fn a_listener_copies_calls_and_exchanges() {
         assert_eq!(copy_of("K5XYZ"), Some(Copied::Call("K5XYZ")));
-        assert_eq!(
-            copy_of("DL1ABC DE K5XYZ K5XYZ K"),
-            Some(Copied::Call("K5XYZ"))
-        );
+        for call in ["DL1ABC DE K5XYZ K", "DL1ABC DE K5XYZ K5XYZ K"] {
+            assert_eq!(copy_of(call), Some(Copied::Call("K5XYZ")));
+        }
         assert_eq!(copy_of("DE K5XYZ"), Some(Copied::Correction("K5XYZ", None)));
         assert_eq!(
             copy_of("K5XYZ K5XYZ"),

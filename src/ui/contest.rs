@@ -1255,7 +1255,7 @@ mod tests {
                 .nth(2)
                 .unwrap_or_default()
                 .to_string();
-            assert_eq!(answer, format!("DL1ABC DE {call} {call} K"));
+            assert_eq!(answer, format!("DL1ABC DE {call} K"));
             assert!(ui.has("Exchange · RST NAME"));
             // Nothing in the exchange is numbered: F12 asks AGN.
             assert!(ui.has("<kbd>F12</kbd>AGN</button>"), "{}", ui.html());

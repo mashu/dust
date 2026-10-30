@@ -1454,9 +1454,9 @@ mod tests {
         assert_eq!(caller.state, CallerState::Done);
     }
 
-    /// In an everyday QSO a caller calls you by your call and its own
-    /// twice, sends a report and a name of its own, signs off once after
-    /// your TU, and takes no TU for a CQ.
+    /// In an everyday QSO a caller calls you by your call and its own, sends
+    /// a report and a name of its own, signs off once after your TU, and
+    /// takes no TU for a CQ.
     #[test]
     fn a_simple_qso_caller_sends_an_everyday_qsos_lines() {
         let rules = ContestKind::SimpleQso.rules();
@@ -1478,7 +1478,7 @@ mod tests {
         assert!(caller.hear(&[Cq], &[]).replies);
         assert_eq!(
             caller.reply(rules, Side::Dx, "DL1ABC", 0),
-            Some(("DL1ABC DE K5XYZ K5XYZ K".to_string(), Says::Call))
+            Some(("DL1ABC DE K5XYZ K".to_string(), Says::Call))
         );
         caller.hear(&[call("K5XYZ"), Exchange], &[]);
         let (text, says) = caller.reply(rules, Side::Dx, "DL1ABC", 0).expect("a reply");

@@ -568,7 +568,7 @@ const CONTEST_STEPS: &[Step] = &[
     },
     Step {
         title: "TX and RX",
-        text: "TX is what is still to go of your message; RX counts the stations sending. What they send is yours to copy by ear, unless Show copy is on.",
+        text: "TX is what is still to go of your message; RX counts the stations sending. A station still sending cannot hear you, so wait for it to finish. What they send is yours to copy by ear, unless Show copy is on.",
         moves: &[],
         shows: Some(RunPart::Air),
         screen: Some(Screen::Training),
