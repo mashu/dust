@@ -38,6 +38,11 @@ pub trait Store {
     /// itself on a first launch only.
     fn tutorial_done(&self) -> bool;
     fn mark_tutorial_done(&self);
+    /// Whether the learner has been told that the keys right of P are the
+    /// paddles, a character they type having keyed one: told once on this
+    /// install, as a USB paddle keys through them every day.
+    fn told_of_paddle_keys(&self) -> bool;
+    fn mark_told_of_paddle_keys(&self);
     /// The stored settings, clamped; `None` when nothing stored reads as
     /// settings at all: a first launch, or a store that cannot be read.
     ///

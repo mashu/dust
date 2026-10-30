@@ -313,7 +313,7 @@ fn by_place_hint(typed: char, group_box: bool) -> String {
         ""
     };
     format!(
-        "That {typed} keyed a paddle: the keys right of P are the paddles. To type {typed}, turn off Paddles on the keys right of P under Settings → Session shape{keypad}."
+        "That {typed} keyed a paddle: the keys right of P are the paddles. To type {typed}, turn off Paddles on the keys right of P under Settings → Session shape{keypad}. A USB paddle that keys through them needs it on."
     )
 }
 
@@ -360,7 +360,7 @@ pub struct PaddleKeys {
     /// Where the app's messages go, to say why a key right of P keyed a
     /// paddle into a box: none for a screen drawn on its own.
     toasts: Option<Toasts>,
-    /// Whether that has been said since the app opened.
+    /// Whether that has been said on this install ([`crate::persist::Store::told_of_paddle_keys`]).
     told_by_place: CopyValue<bool>,
 }
 
@@ -375,6 +375,7 @@ pub fn use_paddle_keys(
     let mut keys = use_context_provider(|| {
         in_root(|| {
             let playback = &settings.peek().playback;
+            let told_by_place = app.store.told_of_paddle_keys();
             PaddleKeys {
                 keyer: CopyValue::new(Keyer::new(playback.keyer_mode, playback.keyer_wpm)),
                 contacts: CopyValue::new(Contacts::default()),
@@ -388,7 +389,7 @@ pub fn use_paddle_keys(
                 root: ROOT_KEYS,
                 typed_field: CopyValue::new(None),
                 toasts,
-                told_by_place: CopyValue::new(false),
+                told_by_place: CopyValue::new(told_by_place),
             }
         })
     });
@@ -502,8 +503,8 @@ impl PaddleKeys {
     }
 
     /// A key right of P typing `typed`, a character Dust sends, has keyed a
-    /// paddle: if that keys into a box, the first time since the app opened,
-    /// say why a letter lands there and how to type `typed` instead. A
+    /// paddle: if that keys into a box, the first time on this install, say
+    /// why a letter lands there and how to type `typed` instead. A
     /// learner who meant it would otherwise find only a dit or a dah's letter
     /// in its place.
     fn tell_by_place(self, typed: char) {
@@ -516,6 +517,7 @@ impl PaddleKeys {
         }
         if let Some(toasts) = self.toasts {
             told.set(true);
+            self.app.peek().store.mark_told_of_paddle_keys();
             // A run's fields take a word space; a group's box has none.
             toasts.show_long(by_place_hint(typed, answer.space.is_none()));
         }

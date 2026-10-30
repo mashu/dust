@@ -1440,6 +1440,35 @@ mod ui_tests {
             ui.advance(100).await;
             dah(&mut ui, "+", false);
             assert_eq!(toast(&mut ui), None, "said once");
+            assert!(ui.store.told_of_paddle_keys(), "and remembered");
+        });
+    }
+
+    /// Told once on this install, it is not told again at the next launch:
+    /// a USB paddle keys through those keys every day.
+    #[test]
+    fn a_character_keyed_by_place_is_not_told_of_again_at_the_next_launch() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.curriculum.min_group_size = 3;
+            settings.curriculum.max_group_size = 3;
+            let store = std::rc::Rc::new(MemoryStore::default());
+            store.save_settings(&settings);
+            store.mark_tutorial_done();
+            store.told_of_paddle_keys.set(true);
+            let (mut ui, _recorder) = Ui::launch(store);
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let plus = Key::Character("+".into());
+            ui.press_key("group-input-0", plus.clone(), Code::BracketRight);
+            ui.advance(100).await;
+            ui.release_key("group-input-0", plus, Code::BracketRight);
+            ui.advance(600).await;
+            assert!(box_shows(&ui, "T"), "{}", ui.input_tag("group-input-0"));
+            assert_eq!(
+                ui.with_app(|ctx| ctx.toasts.current().map(|toast| toast.text)),
+                None
+            );
         });
     }
 

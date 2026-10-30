@@ -15,6 +15,7 @@ use super::{
 pub struct MemoryStore {
     theme: RefCell<String>,
     tutorial_done: Cell<bool>,
+    pub told_of_paddle_keys: Cell<bool>,
     settings: RefCell<Option<TrainingSettings>>,
     /// The history, once one has been stored.
     sessions: RefCell<Option<Vec<SessionResult>>>,
@@ -73,6 +74,14 @@ impl Store for MemoryStore {
 
     fn mark_tutorial_done(&self) {
         self.tutorial_done.set(true);
+    }
+
+    fn told_of_paddle_keys(&self) -> bool {
+        self.told_of_paddle_keys.get()
+    }
+
+    fn mark_told_of_paddle_keys(&self) {
+        self.told_of_paddle_keys.set(true);
     }
 
     fn read_settings(&self) -> Option<TrainingSettings> {

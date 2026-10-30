@@ -15,6 +15,7 @@ use super::{
 
 const THEME: &str = "theme.txt";
 const TUTORIAL: &str = "tutorial_done.txt";
+const TOLD_OF_PADDLE_KEYS: &str = "told_of_paddle_keys.txt";
 const SETTINGS: &str = "settings.json";
 const SESSIONS: &str = "sessions.json";
 /// The sessions deleted by hand ([`Deleted`]).
@@ -328,6 +329,14 @@ impl Store for DesktopStore {
 
     fn mark_tutorial_done(&self) {
         let _ = self.write(TUTORIAL, b"done");
+    }
+
+    fn told_of_paddle_keys(&self) -> bool {
+        self.root.join(TOLD_OF_PADDLE_KEYS).exists()
+    }
+
+    fn mark_told_of_paddle_keys(&self) {
+        let _ = self.write(TOLD_OF_PADDLE_KEYS, b"told");
     }
 
     /// A settings file that does not read at all, edited by hand and left
