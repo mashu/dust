@@ -394,6 +394,7 @@ fn TrainingRoute() -> Element {
                 locked: view.locked,
                 repeat_total: view.repeat_total,
                 repeat_done: view.repeat_done,
+                again: view.again,
                 countdown: view.countdown,
                 countdown_to: view.countdown_to,
                 paused: view.paused,

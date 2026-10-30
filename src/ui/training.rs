@@ -610,6 +610,10 @@ pub fn TrainingView(
     locked: bool,
     repeat_total: u32,
     repeat_done: u32,
+    /// The current group is being sent again, some of a send of it having
+    /// gone unheard.
+    #[props(default)]
+    again: bool,
     /// Seconds left before the next group, while the session counts down.
     countdown: Option<u32>,
     /// Which group the count down leads to.
@@ -725,6 +729,10 @@ pub fn TrainingView(
             CountdownTo::Next => "Get ready — the next group is coming.",
             CountdownTo::Again => "Get ready — the group is coming again.",
         }
+    } else if again {
+        // Sent again with no count down and the box as it was: the line
+        // only says why the same group is heard once more.
+        "Part of it did not play — once more."
     } else if playing && locked && untimed_while_locked {
         "Listen — typing locked, so not timed."
     } else if playing && locked {
