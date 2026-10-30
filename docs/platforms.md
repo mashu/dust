@@ -313,9 +313,15 @@ it.
 `target/dx/dust/release/linux/` and friends. Desktop is the system webview
 (WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS). The Linux
 `.deb` names the packages it needs (WebKitGTK 4.1, GTK 3, ALSA and the
-rest), so `apt install ./dust-….deb` brings them in. macOS builds
-are unsigned (right-click → Open the first time). Windows needs WebView2,
-already present on typical Windows 10/11.
+rest), so `apt install ./dust-….deb` brings them in. Windows needs
+WebView2, already present on typical Windows 10/11.
+
+macOS builds are unsigned, so macOS will not open Dust the first time. On
+macOS 15 and later, go to System Settings → Privacy & Security, choose
+**Open Anyway** beside the message about Dust, and confirm. On macOS 14
+and earlier, Control-click the app and choose **Open**. If macOS says
+instead that Dust is damaged, run
+`xattr -dr com.apple.quarantine /Applications/Dust.app` and open it again.
 
 On Linux, **Restore a backup** and **Load a text file** open the desktop's
 file chooser portal (`xdg-desktop-portal`, with a backend that chooses
