@@ -1086,6 +1086,82 @@ mod tests {
         });
     }
 
+    /// Typed whole only once the group had been sent, the box open, its
+    /// first key 400 ms after the group ended: nothing is timed, but what
+    /// was keyed is kept, and says how late the first key came.
+    #[test]
+    fn typing_after_the_group_keeps_how_late_its_first_key_came() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.lock_input_during_group_playback = false;
+            settings.curriculum.min_group_size = 3;
+            settings.curriculum.max_group_size = 3;
+            let mut h = Harness::with_settings(settings);
+            h.start_training();
+            assert!(
+                h.run_until(4_000, |h| !h.recorder.starts().is_empty())
+                    .await
+            );
+            let started = h.recorder.starts()[0].clone();
+            let end = started
+                .plan
+                .wanted
+                .chars
+                .last()
+                .map(|span| started.at.0 + (span.end_sec * 1_000.0).round() as u64)
+                .expect("a character");
+            let sent = h.sent(0);
+            for typed in 1..=sent.chars().count() {
+                let key = end + 400 + 150 * (typed as u64 - 1);
+                h.advance(key.saturating_sub(mono_ms())).await;
+                let text: String = sent.chars().take(typed).collect();
+                h.ctx.answer.hold(0, text, Some(MonoMs(mono_ms())));
+            }
+            h.send(SessionEvent::Confirm);
+            let session = h.ctx.runtime.peek().clone().expect("the session");
+            let result = session.result(0, "2026-10-30".into());
+            let (group, timing) = (&result.groups[0], &result.group_timings[0]);
+            let times = timing.char_times.as_ref().expect("its keys kept");
+            assert_eq!(
+                cw_core::recognise(&group.sent, &group.received, times),
+                [None, None, None]
+            );
+            // The harness's clock moves in steps, so a key may land a few
+            // milliseconds after the moment it was due.
+            let late = cw_core::first_key_late_ms(times).expect("a first key");
+            assert!(
+                (400..=400 + i64::from(crate::time::POLL_MS)).contains(&late),
+                "{late} ms: {times:?}"
+            );
+            let untimed = cw_core::session_untimed(&result);
+            assert_eq!(untimed.first_key_late_ms, Some(late as f64));
+            assert_eq!(untimed.held_up, 0);
+        });
+    }
+
+    /// Every send held up on its way: no group is timed, and each says
+    /// why.
+    #[test]
+    fn a_send_held_up_on_its_way_leaves_its_group_untimed_and_says_why() {
+        run(|| async {
+            let mut settings = test_settings();
+            settings.playback.lock_input_during_group_playback = false;
+            let mut h = Harness::with_settings(settings);
+            h.recorder.set(Behaviour::Late);
+            h.start_training();
+            assert!(h.run_until(4_000, |h| h.awaiting_answer() == Some(0)).await);
+            let sent = h.sent(0);
+            h.ctx.answer.hold(0, sent, Some(MonoMs(mono_ms())));
+            h.send(SessionEvent::Confirm);
+            let session = h.ctx.runtime.peek().clone().expect("the session");
+            let timing = &session.result(0, "2026-10-30".into()).group_timings[0];
+            assert_eq!(
+                (timing.char_times.clone(), timing.untimed),
+                (None, Some(cw_core::Untimed::HeldUp))
+            );
+        });
+    }
+
     /// A character typed as soon as it is heard is timed from where it
     /// finished sounding, as the audio plan has it, gone to the output, to
     /// its key in the box: one-character groups, which a box shut while

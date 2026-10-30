@@ -548,8 +548,13 @@ impl Ticket<'_> {
             })
             .await;
         // Heard out or stopped, a send held up on its way says so: what of
-        // it was heard went out late. One that failed is sent again.
+        // it was heard went out late. One that failed is sent again. A
+        // terminal is told too: on the screen, a group held up only goes
+        // untimed.
         if waited.held_up && waited.outcome != PlaybackOutcome::Failed {
+            eprintln!(
+                "audio output: a send was held up on its way, so its characters are not timed from it"
+            );
             on_news(SendNews::HeldUp);
         }
         match waited.outcome {

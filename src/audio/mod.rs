@@ -186,6 +186,10 @@ pub mod fake {
         FailMidSend,
         /// Starts and never gets anywhere: a stalled audio clock.
         Stall,
+        /// Plays for its full length and finishes, but is found held up on
+        /// its way, as a native stream whose callbacks fell behind the wall
+        /// clock finds it.
+        Late,
     }
 
     /// One send as the player was handed it: what it plays, the fading it
@@ -413,6 +417,7 @@ pub mod fake {
                     let heard_ms = self.heard_ms(played);
                     WaitFlags {
                         played_ms: Some(heard_ms),
+                        late: self.recorder.behaviour() == Behaviour::Late,
                         missed: self
                             .skipped
                             .filter(|(from, _)| f64::from(heard_ms) >= from * 1_000.0),

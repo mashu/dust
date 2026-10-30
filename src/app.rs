@@ -731,6 +731,39 @@ mod ui_tests {
         });
     }
 
+    /// Sends the audio held up on their way are not timed, and the results
+    /// say that is the audio, not your typing, rather than tell you to key
+    /// along.
+    #[test]
+    fn a_session_whose_sends_were_held_up_says_so() {
+        run(|| async {
+            let mut settings = short_session();
+            settings.playback.lock_input_during_group_playback = false;
+            let (mut ui, recorder) = Ui::app_with_settings(settings);
+            recorder.set(crate::audio::fake::Behaviour::Late);
+            ui.click("btn-start-training");
+            assert!(ui.run_until(5_000, |ui| ui.has("Your turn")).await);
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
+            let kept = ui.store.load_sessions();
+            assert!(
+                kept[0]
+                    .group_timings
+                    .iter()
+                    .all(|timing| timing.untimed == Some(cw_core::Untimed::HeldUp)),
+                "{:?}",
+                kept[0].group_timings
+            );
+            assert!(
+                ui.has("the sound was held up on its way in every group"),
+                "{}",
+                ui.html()
+            );
+            assert!(!ui.has("key each character"), "{}", ui.html());
+        });
+    }
+
     /// A session paused while the page was out of sight says so, takes no
     /// typing, and goes on from Resume.
     #[test]

@@ -65,7 +65,10 @@ A send says it was held up as soon as that is known, whether it was heard
 out or stopped by an answer (`SendNews::HeldUp`). The web player reads that
 from its audio clock against the app's; the native player, which has no
 clock to report, from what each send has played against the wall clock at
-every callback. Keys after a group's second send began are `null`: it was
+every callback. A send held up is also said on standard error (`audio
+output: a send was held up on its way…`), which a desktop build started
+from a terminal shows: on the screen the group only goes untimed, and the
+results say why. Keys after a group's second send began are `null`: it was
 heard twice. A contest call or exchange token keeps the same record (see
 Contest, below). The record is read leniently: a shape this build does not
 know reads as untimed, never as a lost session.
