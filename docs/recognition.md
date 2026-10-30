@@ -133,7 +133,7 @@ A caller's call, or an exchange token, is timed the same way, in run time:
 
 - its character ends come from the turn's own plan (the core plans every
   segment), from when its segment's sound went to the output (the turn's
-  `TurnStarted::output_from`);
+  `output_from`, from `ContestEvent::TurnStarted`);
 - its keys come from the field's key log (`Fields::call_keys`,
   `Fields::exch_keys`), each converted to run time at the key, so a pause or
   an Esc in between cannot move them; a token's are its word's in the
