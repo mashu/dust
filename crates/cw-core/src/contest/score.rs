@@ -682,6 +682,10 @@ mod tests {
             ("TA1ABC", "DL2ABC", 1),
             ("TA2ABC", "TA1XYZ", 0),
             ("TA1ABC", "TA2XYZ", 0),
+            // VP2 is three countries, told apart by the letter after it.
+            ("VP2E/K1ABC", "VP2MAB", 2),
+            ("VP2E/K1ABC", "VP2EAB", 0),
+            ("VP2E/K1ABC", "VP2VAB", 2),
         ] {
             assert_eq!(points(&me(mine), call), worth, "{call} from {mine}");
         }

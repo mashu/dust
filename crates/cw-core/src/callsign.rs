@@ -317,9 +317,27 @@ const fn country(
     }
 }
 
+/// The countries that share a prefix and its digit and are told apart by
+/// the letter after the digit, as cty.dat and MorseRunner's list tell them
+/// (`DXCC.LIST`): the VP2 of the Leeward Islands is Anguilla's VP2E,
+/// Montserrat's VP2M and the British Virgin Islands' VP2V. The table counts
+/// calls by their prefix and digit, so the letter is read here.
+const BY_LETTER: [(&str, char, &str); 3] = [
+    ("VP2", 'E', "VP2E"),
+    ("VP2", 'M', "VP2M"),
+    ("VP2", 'V', "VP2V"),
+];
+
+/// The facts about the countries [`BY_LETTER`] places a call in that the
+/// table holds too few calls of to list, as cty.dat gives them.
+const BY_LETTER_ONLY: [Country; 1] = [country("VP2V", "British Virgin Islands", 8, "NA")];
+
 /// The table's facts about the country `key`, if it is one of its.
 fn country_row(key: &str) -> Option<&'static Country> {
-    COUNTRIES.iter().find(|country| country.key == key)
+    COUNTRIES
+        .iter()
+        .chain(&BY_LETTER_ONLY)
+        .find(|country| country.key == key)
 }
 
 /// What the country `key`, a DXCC primary prefix as [`country_of`] reads
@@ -523,7 +541,8 @@ const AREA_DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9
 /// what the station is. With the default spec it is drawn exactly as
 /// [`generate_callsign`] draws one, draw for draw. Its country is the one
 /// [`country_of`] reads off it, so the two never disagree where the table
-/// gives one prefix and digit to two countries (`R9`, `VP2`).
+/// gives one prefix and digit to two countries (`R9`); where a letter after
+/// the digit tells them apart ([`BY_LETTER`]), the suffix starts with it.
 pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> GeneratedCall {
     let tier = tier_at(tier);
     let countries = spec.countries.for_one_call(rng);
@@ -536,8 +555,13 @@ pub fn generate_call(tier: u32, spec: CallSpec, rng: &mut impl Rng) -> Generated
         host: None,
         marker: None,
     };
-    for _ in 0..suffix_len(tier, prefix, digit, spec.contest, rng) {
-        call.text.push(LETTERS[rng.usize_in(0, LETTERS.len() - 1)]);
+    let letter = BY_LETTER
+        .iter()
+        .find(|(shared, _, country)| *shared == call.text && *country == prefix.country)
+        .map(|(_, letter, _)| *letter);
+    for at in 0..suffix_len(tier, prefix, digit, spec.contest, rng) {
+        let drawn = LETTERS[rng.usize_in(0, LETTERS.len() - 1)];
+        call.text.push(letter.filter(|_| at == 0).unwrap_or(drawn));
     }
     let (portable_share, abroad_share) = if spec.contest {
         (CONTEST_PORTABLE_SHARE, CONTEST_ABROAD_SHARE)
@@ -742,6 +766,19 @@ impl<'a> CallsignParts<'a> {
             .filter(|marker| !MODIFIERS.contains(marker) && self.area_digit().is_none()))
     }
 
+    /// The letter after the digit of where the station says it is: its
+    /// host's (the `E` of `VP2E/K1ABC`), or else its call's own (the `E` of
+    /// `VP2EAB`). None for a host that ends at its digit, or has none.
+    fn letter(&self) -> Option<char> {
+        match self.place() {
+            Some(place) => {
+                let digit = place.rfind(|c: char| c.is_ascii_digit())?;
+                place[digit + 1..].chars().next()
+            }
+            None => self.suffix.chars().next(),
+        }
+    }
+
     /// The call-area digit after the slash: the `4` of `W1AW/4`.
     fn area_digit(&self) -> Option<char> {
         let marker = self.portable?;
@@ -819,10 +856,20 @@ pub fn wpx_prefix(call: &str) -> Option<String> {
 /// it (`K`, `DL`, `UA9`), or `None` if it is not a call or the table cannot
 /// place it: its prefix is not in the table, or is one that countries share
 /// by a digit none of them has (`VP8`). A station abroad is in its host's
-/// country.
+/// country. Where countries share a prefix and digit but not the letter
+/// after it ([`BY_LETTER`]), the letter says which: `VP2EAB` and
+/// `VP2E/K1ABC` are Anguilla, and a letter none of them has is none.
 pub fn country_of(call: &str) -> Option<&'static str> {
-    let area = call_area(call)?;
+    let parts = parse_callsign(call)?;
+    let area = parts.area();
     let text: String = area.prefix.chars().chain(area.digit).collect();
+    if BY_LETTER.iter().any(|(shared, _, _)| *shared == text) {
+        let letter = parts.letter();
+        return BY_LETTER
+            .iter()
+            .find(|(shared, at, _)| *shared == text && Some(*at) == letter)
+            .map(|(_, _, country)| *country);
+    }
     country_by_prefix(&text)
 }
 
@@ -1418,6 +1465,12 @@ mod tests {
         assert_eq!(zone_in("DL", "BY0"), Some(14));
         assert_eq!(continent_in("DL", "TA1"), Some("EU"));
         assert_eq!(continent_in("JA", "TA1"), Some("AS"));
+        // The British Virgin Islands, placed by VP2V's letter alone.
+        assert_eq!(country_name("VP2V"), Some("British Virgin Islands"));
+        assert_eq!(
+            (zone_in("VP2V", "VP2"), continent_in("VP2V", "VP2")),
+            (Some(8), Some("NA"))
+        );
         assert_eq!(country_name("XX"), None);
         assert_eq!(continent_in("XX", "XX1"), None);
         assert_eq!(zone_in("XX", "XX1"), None);
@@ -1527,6 +1580,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Anguilla's and Montserrat's calls are drawn with the letter that
+    /// tells them apart after VP2, VP2E and VP2M, and read back as their own
+    /// countries, never one for the other.
+    #[test]
+    fn a_vp2_call_is_drawn_with_its_countrys_letter() {
+        let mut rng = SplitMix64::new(0x0F2E);
+        let mut seen = Vec::new();
+        for _ in 0..400_000 {
+            let call = generate_call(6, CallSpec::contest(Countries::NotWVe), &mut rng);
+            if !call.text.starts_with("VP2") {
+                continue;
+            }
+            assert!(call.text.starts_with(call.country), "{call:?}");
+            assert_eq!(country_of(&call.text), Some(call.country), "{call:?}");
+            if !seen.contains(&call.country) {
+                seen.push(call.country);
+            }
+            if seen.len() == 2 {
+                return;
+            }
+        }
+        panic!("only {seen:?} drawn");
     }
 
     /// A spec keeps to its countries, by what the generator says and by what
@@ -1735,6 +1812,12 @@ mod tests {
             ("G3XYZ/VP2M", "VP2M"),
             // A digit the table has not seen, after a prefix one country has.
             ("KG3ABC", "K"),
+            // VP2 goes by the letter after its digit, a host's too.
+            ("VP2EAB", "VP2E"),
+            ("VP2MAB", "VP2M"),
+            ("VP2VAB", "VP2V"),
+            ("VP2E/K1ABC", "VP2E"),
+            ("K1ABC/VP2V", "VP2V"),
         ];
         for (call, country) in cases {
             assert_eq!(country_of(call), Some(country), "{call}");
@@ -1746,6 +1829,10 @@ mod tests {
             "3B8ABC", "", "W1", "K5?", "C31AB", "CY0AA", "CY9AA", "VP8AB", "E51AB", "FG5AB",
             "GD4AB", "MD0AB", "NL7AB", "WL7AB",
         ] {
+            assert_eq!(country_of(unknown), None, "{unknown:?}");
+        }
+        // Nor is a VP2 call whose letter names none of VP2's countries.
+        for unknown in ["VP2XAB", "VP2/K1ABC"] {
             assert_eq!(country_of(unknown), None, "{unknown:?}");
         }
     }

@@ -3094,6 +3094,11 @@ files written by scripts, each naming its source and year.
   the table has not seen still places a prefix only one country has (`KG3`
   is K); a prefix the table lacks, or a shared one with such a digit, is
   `None` (`C31`, `NL7`, `VP8`), never a country that only shares a letter.
+  VP2 goes by the letter after its digit, as cty.dat and MRCE's `DXCC.LIST`
+  have it: VP2E Anguilla, VP2M Montserrat, VP2V the British Virgin Islands
+  (whose facts are kept by hand, as the table has too few of its calls),
+  any other letter `None`; the generator starts a VP2 call's suffix with
+  its country's letter.
   The generator labels each call with the country `country_of` reads off it,
   so the two agree. `wpx_prefix` reads its WPX prefix: up to the last digit
   (`9A1AA` → `9A1`); a digit marker replaces the digit (`W1XYZ/4` → `W4`);
