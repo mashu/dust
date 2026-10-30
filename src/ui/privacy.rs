@@ -71,7 +71,8 @@ impl Platform {
                 "On Android all of this is kept in storage that only the app can read. If backup \
                  is on in Android settings, Android copies it to your Google account, as it does \
                  for most apps, and puts it back on a new phone or when Dust is installed again. \
-                 Uninstalling the app deletes it from the phone, but not that copy."
+                 Uninstalling the app deletes it from the phone, but not that copy. Turning backup \
+                 off in Android settings stops it."
             }
             Self::Ios => {
                 "On an iPhone all of this is kept in storage that only the app can read. iCloud \
@@ -210,6 +211,7 @@ mod tests {
                     says("copies it to your Google account");
                     says("when Dust is installed again");
                     says("but not that copy");
+                    says("Turning backup off in Android settings stops it");
                 }
                 Platform::Ios => {
                     says("iCloud Backup");

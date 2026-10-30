@@ -145,7 +145,8 @@
           read. If backup is on in Android settings, Android copies it to your
           Google account, as it does for most apps, and puts it back on a new
           phone or when Dust is installed again. Uninstalling the app deletes
-          it from the phone, but not that copy.
+          it from the phone, but not that copy. Turning backup off in Android
+          settings stops it.
           This is Android’s own backup, not a feature of Dust: the copy is in
           your Google account, the developer never receives it, and Google
           holds it under
@@ -172,7 +173,8 @@
           sites keep.
           A browser keeps storage for a whole site, not for each page under
           it, and every project the developer publishes on GitHub Pages is a
-          page under mashu.github.io. Only the developer can publish there.
+          page under mashu.github.io. Only the developer’s GitHub repositories
+          can publish there, and whatever a page there loads shares its access.
           Dust keeps everything under names that begin with
           <code>dust_</code>, and never touches anything else the site keeps.
           The room the browser gives the site is shared too: where other
@@ -301,9 +303,10 @@
         </li>
         <li>
           <strong>Web.</strong> Delete all the sessions under Stats, History,
-          and clear Your station. That leaves only the practice settings and
-          the app’s own counters and marks, none of which say who you are, and
-          touches no other site.
+          and clear Your station. That leaves the practice settings, the app’s
+          own counters and marks, none of which say who you are, and any copy
+          of a history Dust could not read and set aside, and touches no other
+          site.
           Clearing the site data for <code>https://mashu.github.io</code> in
           your browser’s settings deletes everything Dust keeps there, along
           with what any other site at mashu.github.io keeps.
