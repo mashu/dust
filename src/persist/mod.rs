@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 use cw_core::{
     AutoLevelCounters, AutoLevelProgress, CountersKey, RF_GAIN_MAX_DB, RF_GAIN_MIN_DB,
-    SessionResult, TrainingSettings, auto_level_progress,
+    SessionResult, TrainingSettings, auto_level_progress, settle_clock_ahead,
 };
 use serde::Deserialize;
 
@@ -255,7 +255,9 @@ fn newest(sessions: &[SessionResult]) -> &[SessionResult] {
 /// Every session is scored again as it is read, from what is stored of it, so
 /// the history is on one scale however the score has been worked out over the
 /// versions: sessions saved before speed counted read as they would score
-/// today.
+/// today. One stamped after now, finished while the clock was set ahead, is
+/// read as finished just after the latest that was not, on its day
+/// ([`settle_clock_ahead`]), and is stored so at the next save.
 fn read_history(raw: &str) -> Option<ReadHistory> {
     // Almost always the whole list reads; only when it does not is it worth
     // reading again a session at a time to keep the ones that do.
@@ -275,6 +277,7 @@ fn read_history(raw: &str) -> Option<ReadHistory> {
     for session in &mut sessions {
         session.score = session.points();
     }
+    settle_clock_ahead(&mut sessions, crate::time::now_ms());
     Some(ReadHistory { sessions, unread })
 }
 
@@ -1230,6 +1233,21 @@ pub(crate) mod tests {
         let back = parse_sessions(&raw).expect("a list");
         assert_eq!(back[0].score, stored.points());
         assert!(back[0].score > 1.0, "{}", back[0].score);
+    }
+
+    /// A session finished with the clock set ahead reads as finished just
+    /// after the latest one that was not, on its day: not the latest until
+    /// its date comes, and never a day of practice of its own.
+    #[test]
+    fn a_session_stamped_ahead_of_the_clock_reads_after_the_latest() {
+        let ahead = SessionResult {
+            timestamp: crate::time::now_ms() + 365 * 86_400_000,
+            ..session("2099-10-30")
+        };
+        let raw = serde_json::to_string(&[at(1), ahead, at(2)]).unwrap();
+        let back = parse_sessions(&raw).expect("a list");
+        assert_eq!(stamps(&back), [1, 2, 3]);
+        assert_eq!(back[2].date, at(2).date);
     }
 
     /// A contest run a later version wrote reads as a run, and goes back to

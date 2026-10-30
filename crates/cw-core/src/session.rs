@@ -1004,6 +1004,41 @@ impl SessionResult {
     }
 }
 
+/// Settle the sessions of a history that were stamped later than `now`:
+/// finished while the clock was set ahead. Left as they are, one stamped a
+/// year ahead would be the latest session until that day came, after every
+/// one finished since, and would then count as practice on a day nobody
+/// practised. So each is taken as finished just after the latest session
+/// that was not, on that session's day, in the order they were stamped;
+/// the history stays oldest first. With no session finished by `now`
+/// there is nothing to put them after, and they are left as stamped.
+///
+/// It goes by the history alone, so every reading of one history settles
+/// it alike, and a history settled and stored again reads as it was.
+pub fn settle_clock_ahead(sessions: &mut [SessionResult], now: u64) {
+    let Some((at, day)) = sessions
+        .iter()
+        .filter(|session| session.timestamp <= now)
+        .max_by_key(|session| session.timestamp)
+        .map(|latest| (latest.timestamp, latest.date.clone()))
+    else {
+        return;
+    };
+    let mut ahead: Vec<&mut SessionResult> = sessions
+        .iter_mut()
+        .filter(|session| session.timestamp > now)
+        .collect();
+    if ahead.is_empty() {
+        return;
+    }
+    ahead.sort_by_key(|session| session.timestamp);
+    for (after, session) in (1..).zip(ahead) {
+        session.timestamp = at.saturating_add(after);
+        session.date.clone_from(&day);
+    }
+    sessions.sort_by_key(|session| session.timestamp);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1794,5 +1829,45 @@ mod tests {
         assert_eq!(MonoMs(1_500).since(MonoMs(1_000)), 500);
         assert_eq!(MonoMs(1_000).since(MonoMs(1_500)), 0);
         assert_eq!(MonoMs(u64::MAX).plus(5), MonoMs(u64::MAX));
+    }
+
+    /// A session stamped ahead of the clock is taken as finished just
+    /// after the latest one that was not, on its day, keeping its place
+    /// among any others stamped ahead; with nothing to put it after it is
+    /// left as stamped, and a settled history settles to itself.
+    #[test]
+    fn a_session_stamped_ahead_of_the_clock_settles_after_the_latest() {
+        let at = |timestamp: u64, date: &str| SessionResult {
+            timestamp,
+            date: date.into(),
+            ..SessionResult::empty_for_test()
+        };
+        let now = 1_000;
+        let mut history = vec![
+            at(100, "2026-10-28"),
+            at(50_000, "2027-10-30"),
+            at(400, "2026-10-29"),
+            at(40_000, "2027-10-29"),
+        ];
+        settle_clock_ahead(&mut history, now);
+        let read: Vec<(u64, &str)> = history
+            .iter()
+            .map(|session| (session.timestamp, session.date.as_str()))
+            .collect();
+        assert_eq!(
+            read,
+            [
+                (100, "2026-10-28"),
+                (400, "2026-10-29"),
+                (401, "2026-10-29"),
+                (402, "2026-10-29"),
+            ]
+        );
+        let settled = history.clone();
+        settle_clock_ahead(&mut history, now + 5);
+        assert_eq!(history, settled);
+        let mut all_ahead = vec![at(5_000, "2027-01-01")];
+        settle_clock_ahead(&mut all_ahead, now);
+        assert_eq!(all_ahead[0].timestamp, 5_000);
     }
 }
