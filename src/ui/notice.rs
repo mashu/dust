@@ -46,22 +46,15 @@ fn notice_text(notice: &Notice) -> String {
             let when = started(open.started_at)
                 .map(|when| format!(" {when}"))
                 .unwrap_or_default();
-            format!("Your {what}{when} was cut off: Dust closed while it ran, so it was not kept.")
+            let kept = match (open.so_far.is_some(), open.run) {
+                (false, _) => ", so it was not kept.",
+                (true, false) => ". The groups you had answered were kept.",
+                (true, true) => ". The QSOs you had logged were kept.",
+            };
+            format!("Your {what}{when} was cut off: Dust closed while it ran{kept}")
         }
         Notice::CutOff(CutOff::Unread) => {
             "Your last session was cut off: Dust closed while it ran, so it was not kept.".into()
-        }
-        Notice::SoundStopped { why, answered } => {
-            let why = why.trim_end_matches('.');
-            if *answered {
-                format!(
-                    "The session ended early because its sound stopped: {why}. The groups you answered were scored."
-                )
-            } else {
-                format!(
-                    "The session ended before any group was answered, because its sound stopped: {why}."
-                )
-            }
         }
         Notice::History(problem) => problem.clone(),
         Notice::SetAside(set_aside) => set_aside_text(set_aside),
@@ -136,6 +129,7 @@ mod tests {
         let text = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
             started_at: at,
             run: false,
+            so_far: None,
         })));
         let time = clock(at).expect("a time today");
         assert_eq!(
@@ -147,6 +141,7 @@ mod tests {
         let run = notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
             started_at: at - 3 * 86_400_000,
             run: true,
+            so_far: None,
         })));
         assert!(run.starts_with("Your contest run started "), "{run}");
         assert!(run.contains(" at "), "{run}");
@@ -187,23 +182,32 @@ mod tests {
         );
     }
 
+    /// One whose mark held what it had done by then says that was kept.
     #[test]
-    fn a_session_its_sound_stopped_says_why_and_whether_any_was_answered() {
-        let answered = notice_text(&Notice::SoundStopped {
-            why: "Audio playback stalled.".into(),
-            answered: true,
-        });
+    fn a_cut_off_session_kept_so_far_says_so() {
+        let at = crate::time::now_ms();
+        let time = clock(at).expect("a time today");
+        let kept = |run| {
+            notice_text(&Notice::CutOff(CutOff::Marked(OpenSession {
+                started_at: at,
+                run,
+                so_far: Some(Box::new(crate::persist::SoFar {
+                    result: cw_core::SessionResult::empty_for_test(),
+                    settings: None,
+                })),
+            })))
+        };
         assert_eq!(
-            answered,
-            "The session ended early because its sound stopped: Audio playback stalled. The groups you answered were scored."
+            kept(false),
+            format!(
+                "Your session started at {time} was cut off: Dust closed while it ran. The groups you had answered were kept."
+            )
         );
-        let none = notice_text(&Notice::SoundStopped {
-            why: "Audio stream: device is gone".into(),
-            answered: false,
-        });
         assert_eq!(
-            none,
-            "The session ended before any group was answered, because its sound stopped: Audio stream: device is gone."
+            kept(true),
+            format!(
+                "Your contest run started at {time} was cut off: Dust closed while it ran. The QSOs you had logged were kept."
+            )
         );
     }
 }

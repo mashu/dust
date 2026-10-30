@@ -373,9 +373,17 @@ copy that stops lets go of its lock, however it stops: closed, crashed,
 killed, reloaded, or rebuilt under `dx serve`. So a mark nobody holds was cut
 off, and the app says so, once, on the screen it opens on, or once the
 session it starts next is over, if the window that was running it stopped
-meanwhile. A mark another window still holds is left to it. On desktop and
+meanwhile. A mark another window still holds is left to it. Each group
+answered, and each QSO logged, puts in the mark what Exit would keep were
+it pressed then; the history itself is written only once the session ends.
+A session cut off is kept from its mark as Exit would have kept it, in the
+history and towards its level's run, and the app says that it was. Closing
+the desktop window, or leaving or reloading the page, ends a session there
+and then as Exit does, so nothing is left to find, and stores the settings
+with it, a level it earned included. On desktop and
 mobile the marks are `open/<id>.json`, each beside the `open/<id>.lock` its
-copy holds; one a power cut left empty still says a session was cut off. A
+copy holds, and each written whole, under another name first; one a power
+cut left empty still says a session was cut off. A
 lock file is locked under another name first and only then renamed into
 place, so a copy looking for marks never finds one unheld that is about to
 be held. In a browser they are `dust_open_session_<id>` in `localStorage`,

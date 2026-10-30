@@ -359,6 +359,7 @@ fn TrainingRoute() -> Element {
                 countdown: view.countdown,
                 countdown_to: view.countdown_to,
                 paused: view.paused,
+                sound_stopped: view.sound_stopped,
                 speed: view.speed,
                 answer: ctx.answer,
                 on_change,

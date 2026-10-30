@@ -17,6 +17,7 @@ use cw_core::{
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
+use crate::persist::{OpenSession, SoFar};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::session_runtime::{Live, keep_and_show};
@@ -46,6 +47,8 @@ pub struct LiveContest {
     /// The local day it started: the day it counts towards, though it may
     /// end after midnight.
     started_on: String,
+    /// How it is marked open, for what it has done to be added to.
+    mark: OpenSession,
 }
 
 /// The run's Call and Exchange fields, as typed.
@@ -308,6 +311,7 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
     announced.set(None);
     view.set(Some(machine.view()));
     screen.set(Screen::Training);
+    let mark = ctx.mark_running(true);
     *app.session.borrow_mut() = Some(Live::Contest(Box::new(LiveContest {
         machine,
         sound,
@@ -315,8 +319,8 @@ pub fn start_run(ctx: AppCtx, settings: TrainingSettings) {
         last_tick: None,
         unsaid: Vec::new(),
         started_on: local_date_string(),
+        mark,
     })));
-    ctx.mark_running(true);
     run_effects(ctx, &lease, effects);
 }
 
@@ -431,6 +435,19 @@ impl LiveContest {
         self.last_tick
             .filter(|tick| now.since(*tick) > HEARTBEAT_GAP_MS)
     }
+
+    /// What the run would keep were it ended at `now`, as End run keeps it,
+    /// worked out on a copy of it: none while it has worked nobody.
+    fn so_far(&self, now: MonoMs) -> Option<SoFar> {
+        let mut ended = self.machine.clone();
+        let effects = ended.apply(ContestEvent::FinishNow, now);
+        effects
+            .contains(&ContestEffect::PersistAndShowResults)
+            .then(|| SoFar {
+                result: ended.result(now_ms(), self.started_on.clone()),
+                settings: None,
+            })
+    }
 }
 
 /// The run's hold on the audio, while a run is live.
@@ -463,7 +480,7 @@ fn dispatch(ctx: AppCtx, lease: &Lease, event: ContestEvent) {
 fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
     let mut view = ctx.contest;
     let app = ctx.app();
-    let (lease, effects) = {
+    let (lease, effects, so_far) = {
         let mut slot = app.session.borrow_mut();
         let Some(Live::Contest(live)) = slot.as_mut() else {
             return;
@@ -485,11 +502,23 @@ fn apply(ctx: AppCtx, event: Option<ContestEvent>) {
         // that sends nothing — and publishing it anyway would redraw the
         // screen for it.
         let shown = live.machine.view();
+        // A QSO logged, or its check shown, the run going on: what it would
+        // keep now goes with its mark, should the app stop under it.
+        let logged = view
+            .peek()
+            .as_ref()
+            .is_some_and(|before| before.log != shown.log);
+        let so_far = (logged && !live.machine.is_terminal())
+            .then(|| live.so_far(now).map(|so_far| (live.mark.clone(), so_far)))
+            .flatten();
         if view.peek().as_ref() != Some(&shown) {
             view.set(Some(shown));
         }
-        (live.lease.clone(), effects)
+        (live.lease.clone(), effects, so_far)
     };
+    if let Some((mark, so_far)) = so_far {
+        ctx.mark_so_far(&mark, so_far);
+    }
     run_effects(ctx, &lease, effects);
 }
 
@@ -1050,20 +1079,60 @@ mod tests {
         run(|| async {
             let mut h = Harness::with_settings(contest_settings());
             h.start_training();
-            let open = h.store.open.get().expect("marked open");
+            let open = h.store.open().expect("marked open");
             assert!(open.run);
             let ctx = h.ctx;
             h.in_app(|| crate::session_runtime::abort_run(ctx));
             h.pump();
             assert_eq!(h.screen(), Screen::Home);
-            assert_eq!(h.store.open.get(), None, "discarded");
+            assert_eq!(h.store.open(), None, "discarded");
 
             h.start_training();
-            assert!(h.store.open.get().is_some());
+            assert!(h.store.open().is_some());
             h.in_app(|| crate::session_runtime::finish_run(ctx));
             h.pump();
             assert_ne!(h.screen(), Screen::Training);
-            assert_eq!(h.store.open.get(), None, "ended");
+            assert_eq!(h.store.open(), None, "ended");
+        });
+    }
+
+    /// A run the app stops under, with no End run — a crash, the phone
+    /// taking the app back — keeps what End run would
+    /// have kept as of its last QSO logged: each QSO goes with its mark as
+    /// it is logged, never into the history mid-run, and the next launch
+    /// keeps the run and says so.
+    #[test]
+    fn a_run_the_app_stops_under_keeps_its_qsos() {
+        run(|| async {
+            let mut h = Harness::with_settings(contest_settings());
+            h.store.mark_tutorial_done();
+            h.start_training();
+            work(&mut h, 120_000, Some(2)).await;
+            assert_eq!(view(&h).map(|view| view.qsos), Some(2));
+            let logged = |h: &Harness| {
+                let so_far = h.store.open().and_then(|open| open.so_far)?;
+                let log = so_far.result.contest?;
+                log.0["qsos"].as_array().map(Vec::len)
+            };
+            assert!(
+                h.run_until(15_000, |h| logged(h) == Some(2)).await,
+                "{:?}",
+                logged(&h)
+            );
+            assert!(h.store.load_sessions().is_empty(), "stored mid-run");
+
+            let (mut ui, _recorder) = crate::testing::Ui::launch(h.store.clone());
+            ui.advance(20).await;
+            let kept = h.store.load_sessions();
+            assert_eq!(kept.len(), 1, "the run was kept");
+            let log = kept[0].contest.as_ref().expect("its log");
+            assert_eq!(log.0["qsos"].as_array().map(Vec::len), Some(2));
+            assert!(
+                ui.has("Dust closed while it ran. The QSOs you had logged were kept."),
+                "{}",
+                ui.html()
+            );
+            assert_eq!(h.store.open(), None);
         });
     }
 

@@ -6,6 +6,7 @@
 //! the sampler learns from each answer. The runtime only plays, waits, and
 //! reports back.
 
+use crate::contest::PauseWhy;
 use crate::recognition::Keys;
 use crate::session::{
     Answered, GroupSession, MonoMs, SendStart, SessionId, SessionPhase, answer_length_matches,
@@ -61,8 +62,10 @@ pub enum SessionEvent {
     PlaybackMissed {
         index: usize,
     },
-    /// The send stopped before it finished — cancelled from outside, or the
-    /// audio failed. Either way the session ends with what it has scored.
+    /// The send stopped before it finished — the audio failed after every
+    /// retry, or something stopped it from outside. Either way the session
+    /// pauses, as a run does: its sound comes back from the tap on Resume,
+    /// which sends the group again from the start.
     PlaybackStopped {
         index: usize,
     },
@@ -324,8 +327,7 @@ impl<S: GroupSource> SessionMachine<S> {
                 if self.playing_index() != Some(index) {
                     return Vec::new();
                 }
-                // Keep whatever was scored rather than dropping it.
-                self.end(self.session.any_confirmed())
+                self.pause(PauseWhy::Sound, now)
             }
             SessionEvent::PlaybackStarted { index, start } => {
                 if self.playing_index() == Some(index) {
@@ -358,7 +360,7 @@ impl<S: GroupSource> SessionMachine<S> {
             SessionEvent::Input { index, text, keys } => self.input(index, &text, &keys, now),
             SessionEvent::Confirm if self.confirm_too_soon(now) => Vec::new(),
             SessionEvent::Confirm => self.confirm_current(now),
-            SessionEvent::Pause => self.pause(now),
+            SessionEvent::Pause => self.pause(PauseWhy::Hidden, now),
             SessionEvent::Resume => self.resume(now),
             SessionEvent::TimerFired { id } => self.timer_fired(id, now),
             SessionEvent::FinishNow => self.finish_now(now),
@@ -622,12 +624,12 @@ impl<S: GroupSource> SessionMachine<S> {
         !typed && started.is_some_and(|start| now.since(start) < EMPTY_CONFIRM_GUARD_MS)
     }
 
-    /// Hold the session where it is: the sound and the band stopped, every
-    /// timer let go. A group answered in full, its auto-confirm still
-    /// waiting, needs no sending again: it is confirmed once resumed. A send
-    /// cut short counts as heard once its first character had sounded,
-    /// unless some of it had gone unheard.
-    fn pause(&mut self, now: MonoMs) -> Vec<SessionEffect> {
+    /// Hold the session where it is, for `why`: the sound and the band
+    /// stopped, every timer let go. A group answered in full, its
+    /// auto-confirm still waiting, needs no sending again: it is confirmed
+    /// once resumed. A send cut short counts as heard once its first
+    /// character had sounded, unless some of it had gone unheard.
+    fn pause(&mut self, why: PauseWhy, now: MonoMs) -> Vec<SessionEffect> {
         let complete = self.auto_confirm.as_ref().map(|pending| pending.index);
         let resume = match self.phase() {
             SessionPhase::Countdown { .. } => Resume::Send(self.countdown_to),
@@ -649,7 +651,7 @@ impl<S: GroupSource> SessionMachine<S> {
         self.session.cut_send(index, now);
         self.cancel_timers();
         self.resume = Some((resume, now));
-        self.set_phase(SessionPhase::Paused { index });
+        self.set_phase(SessionPhase::Paused { index, why });
         vec![SessionEffect::ReleaseAudio]
     }
 
@@ -951,7 +953,13 @@ mod tests {
 
         let effects = m.apply(SessionEvent::Pause, MonoMs(2_600));
         assert_eq!(effects, vec![SessionEffect::ReleaseAudio]);
-        assert_eq!(m.phase(), SessionPhase::Paused { index: 0 });
+        assert_eq!(
+            m.phase(),
+            SessionPhase::Paused {
+                index: 0,
+                why: PauseWhy::Hidden
+            }
+        );
         let view = m.session().view();
         assert!(view.paused && view.locked && !view.playing);
         // Held: nothing it was waiting on moves it, nothing can be typed,
@@ -988,7 +996,13 @@ mod tests {
         let window = play_out(&mut m, 0, MonoMs(500));
         assert_eq!(m.phase(), SessionPhase::AwaitingAnswer { index: 0 });
         let _ = m.apply(SessionEvent::Pause, MonoMs(600));
-        assert_eq!(m.phase(), SessionPhase::Paused { index: 0 });
+        assert_eq!(
+            m.phase(),
+            SessionPhase::Paused {
+                index: 0,
+                why: PauseWhy::Hidden
+            }
+        );
         assert!(fire(&mut m, &window, 20_000).is_empty());
         let fresh = m.apply(SessionEvent::Resume, MonoMs(30_000));
         assert_eq!(m.phase(), SessionPhase::AwaitingAnswer { index: 0 });
@@ -1008,7 +1022,13 @@ mod tests {
         let _ = m.apply(SessionEvent::Confirm, MonoMs(700));
         assert_eq!(m.phase(), SessionPhase::InterGroupGap { next: 1 });
         let _ = m.apply(SessionEvent::Pause, MonoMs(800));
-        assert_eq!(m.phase(), SessionPhase::Paused { index: 1 });
+        assert_eq!(
+            m.phase(),
+            SessionPhase::Paused {
+                index: 1,
+                why: PauseWhy::Hidden
+            }
+        );
         let effects = m.apply(SessionEvent::Resume, MonoMs(9_000));
         assert_eq!(
             effects,
@@ -1164,7 +1184,13 @@ mod tests {
         let mut m = start_with(settings(2, false, 10.0), script(&["KM", "UK"], 1));
         let _ = m.apply(typed(0, "KM"), MonoMs(300));
         let _ = m.apply(SessionEvent::Pause, MonoMs(400));
-        assert_eq!(m.phase(), SessionPhase::Paused { index: 0 });
+        assert_eq!(
+            m.phase(),
+            SessionPhase::Paused {
+                index: 0,
+                why: PauseWhy::Hidden
+            }
+        );
         let auto = m.apply(SessionEvent::Resume, MonoMs(9_000));
         assert_eq!(timer(&auto).1, AUTO_CONFIRM_DELAY_MS);
         assert!(!auto.iter().any(|e| matches!(e, SessionEffect::Play { .. })));
@@ -1774,26 +1800,54 @@ mod tests {
         );
     }
 
+    /// A send that stops before its end — its sound failed — pauses the
+    /// session, as a run is paused, rather than end it: nothing answered is
+    /// thrown away, and Resume sends the group again from the start. It
+    /// says why it is paused, so the screen does not blame a hidden page.
     #[test]
-    fn a_send_stopping_ends_the_session_keeping_what_was_scored() {
-        // Nothing answered yet: nothing to keep.
+    fn a_send_stopping_pauses_the_session_and_resume_sends_it_again() {
+        // Nothing answered yet: nothing is thrown away either.
         let mut m = machine();
         let effects = m.apply(SessionEvent::PlaybackStopped { index: 0 }, MonoMs(10));
-        assert_eq!(m.phase(), SessionPhase::Aborted);
+        assert_eq!(effects, vec![SessionEffect::ReleaseAudio]);
+        assert_eq!(
+            m.phase(),
+            SessionPhase::Paused {
+                index: 0,
+                why: PauseWhy::Sound
+            }
+        );
+        let view = m.session().view();
+        assert!(view.paused && view.sound_stopped && view.locked);
+        let effects = m.apply(SessionEvent::Resume, MonoMs(5_000));
         assert_eq!(
             effects,
-            vec![SessionEffect::StopAudio, SessionEffect::AbortToHome]
+            vec![SessionEffect::Play {
+                index: 0,
+                text: "KM".into()
+            }]
         );
+        assert!(!m.session().view().sound_stopped);
 
-        // One group answered: the session is kept.
+        // One group answered: the next one stopping holds the session on it.
         let mut m = machine();
         let _ = play_out(&mut m, 0, MonoMs(200));
         let gap = m.apply(SessionEvent::Confirm, MonoMs(300));
         let _ = fire(&mut m, &gap, 800);
         assert!(matches!(m.phase(), SessionPhase::Playing { index: 1 }));
         let effects = m.apply(SessionEvent::PlaybackStopped { index: 1 }, MonoMs(900));
-        assert_eq!(m.phase(), SessionPhase::Finished);
-        assert!(effects.contains(&SessionEffect::PersistAndShowResults));
+        assert_eq!(effects, vec![SessionEffect::ReleaseAudio]);
+        assert_eq!(
+            m.phase(),
+            SessionPhase::Paused {
+                index: 1,
+                why: PauseWhy::Sound
+            }
+        );
+        assert!(m.session().any_confirmed());
+        // Hidden as well, it is still the sound that holds it.
+        assert!(m.apply(SessionEvent::Pause, MonoMs(950)).is_empty());
+        assert!(m.session().view().sound_stopped);
     }
 
     #[test]

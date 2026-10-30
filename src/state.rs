@@ -12,12 +12,12 @@ use dioxus::prelude::*;
 use crate::contest_runtime::ContestEntry;
 use crate::persist::backup::{Backup, Filled, Merged, backup_name, merge_sessions, write_backup};
 use crate::persist::{
-    CutOff, Deleted, HistorySaved, MAX_SESSIONS, OpenSession, SessionKey, SetAside, Store,
+    CutOff, Deleted, HistorySaved, MAX_SESSIONS, OpenSession, SessionKey, SetAside, SoFar, Store,
     merge_history, merge_settings, pair_sessions, prune_deleted,
 };
 use crate::playback::Preview;
 use crate::player::{AudioError, BackendFactory, Player};
-use crate::session_runtime::{AnswerOutbox, Live};
+use crate::session_runtime::{AnswerOutbox, Live, keep_cut_off};
 use crate::ui::format::{counted, day_of, short_date};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,15 +232,30 @@ impl AppCtx {
 
     /// A session (`run` false) or a contest run now has the app: marked open
     /// until it ends, so that one the app stops under is told of when it
-    /// next opens. Whatever the last one left to say is put away.
-    pub fn mark_running(mut self, run: bool) {
+    /// next opens. Whatever the last one left to say is put away. The mark
+    /// is handed back, for what the session does to be added to it
+    /// ([`Self::mark_so_far`]).
+    pub fn mark_running(mut self, run: bool) -> OpenSession {
         self.notices.set(Vec::new());
         // Another window's session may have been cut off since this one
         // opened, while it was still running: told of once this one is over.
         self.tell_of_cut_off();
-        self.app().store.mark_open(Some(OpenSession {
+        let open = OpenSession {
             started_at: crate::time::now_ms(),
             run,
+            so_far: None,
+        };
+        self.app().store.mark_open(Some(open.clone()));
+        open
+    }
+
+    /// The session or run marked `open` would keep `so_far` were it ended
+    /// now: held with its mark, as the history is stored only once it ends,
+    /// so that the app stopping under it keeps it all the same.
+    pub fn mark_so_far(self, open: &OpenSession, so_far: SoFar) {
+        self.app().store.mark_open(Some(OpenSession {
+            so_far: Some(Box::new(so_far)),
+            ..open.clone()
         }));
     }
 
@@ -252,16 +267,20 @@ impl AppCtx {
 
     /// Tell of any session or run a copy of the app stopped under, once the
     /// store has looked: at once on a computer or a phone, a moment later
-    /// in a browser.
+    /// in a browser. What each had done by then is kept, as Exit would have
+    /// kept it.
     pub fn tell_of_cut_off(self) {
         let looking = self.app().store.take_cut_off();
         let mut notices = self.notices;
         // In the root scope: the press that starts a session leaves the
         // screen it was made on.
         dioxus::core::spawn_forever(async move {
-            if let Some(cut) = looking.await {
+            let cut = looking.await;
+            let kept: Vec<SoFar> = cut.iter().filter_map(CutOff::so_far).cloned().collect();
+            if let Some(cut) = CutOff::newest(cut) {
                 notices.write().push(Notice::CutOff(cut));
             }
+            keep_cut_off(self, kept);
         });
     }
 
@@ -993,11 +1012,8 @@ fn why_not_stored(saved: &HistorySaved) -> Option<String> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
     /// The app stopped with it running: closed, crashed, killed or rebuilt.
-    /// It was not kept.
+    /// What it had done by then was kept, if its mark held any.
     CutOff(CutOff),
-    /// Its sound stopped and could not be brought back, for the reason
-    /// given, with groups `answered` by then or none.
-    SoundStopped { why: String, answered: bool },
     /// The history could not take it, or let older sessions go to make
     /// room: the store's own words.
     History(String),

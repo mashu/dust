@@ -53,7 +53,7 @@ pub struct MemoryStore {
     pub keep_asks: Cell<u32>,
     /// The session or run marked open, as a copy of the app that stopped
     /// leaves it for the next.
-    pub open: Cell<Option<OpenSession>>,
+    marked: RefCell<Option<OpenSession>>,
     /// Another copy of the app is running the session marked open.
     pub open_elsewhere: Cell<bool>,
 }
@@ -176,15 +176,22 @@ impl Store for MemoryStore {
     }
 
     fn mark_open(&self, open: Option<OpenSession>) {
-        self.open.set(open);
+        *self.marked.borrow_mut() = open;
     }
 
     fn take_cut_off(&self) -> CutOffTaking {
         let cut = if self.open_elsewhere.get() {
             None
         } else {
-            self.open.take().map(CutOff::Marked)
+            self.marked.take().map(CutOff::Marked)
         };
-        Box::pin(std::future::ready(cut))
+        Box::pin(std::future::ready(cut.into_iter().collect()))
+    }
+}
+
+impl MemoryStore {
+    /// The session or run marked open, if any.
+    pub fn open(&self) -> Option<OpenSession> {
+        self.marked.borrow().clone()
     }
 }

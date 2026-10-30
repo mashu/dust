@@ -57,10 +57,10 @@ use crate::speed::tells_speed;
 use crate::timing::CharSpan;
 use crate::timing::{SEND_RELEASE_SEC, StationVoice};
 
-/// Why a run is paused.
+/// Why a run, or a session of groups, is paused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PauseWhy {
-    /// You paused it.
+    /// You paused it. A session of groups has no Pause of its own.
     You,
     /// The page was hidden or the phone locked. It never resumes by itself.
     Hidden,

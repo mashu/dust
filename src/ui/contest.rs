@@ -2642,6 +2642,27 @@ mod tests {
         });
     }
 
+    /// The app closed mid-run ends the run as End run does, and stores your
+    /// speed there and then: the window is gone before the app's settings
+    /// effect would have stored it.
+    #[test]
+    fn your_speed_is_stored_as_the_app_closes_mid_run() {
+        run(|| async {
+            let (mut ui, _recorder, _call) = first_caller().await;
+            ui.tap("more-wpm");
+            assert!(ui.has(r#"run-wpm-value">32<"#), "{}", ui.html());
+            let store = ui.store.clone();
+            // Read as the close is heard, before anything else of the app
+            // runs.
+            let stored = ui.with_app(|_| {
+                crate::page_closed::close_app();
+                store.load_settings().contest.my_wpm
+            });
+            assert_eq!(stored, 32);
+            assert_eq!(ui.screen(), "results");
+        });
+    }
+
     fn view(phase: ContestPhase, clock: Option<RunClock>) -> ContestView {
         ContestView {
             phase,

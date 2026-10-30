@@ -615,10 +615,13 @@ pub fn TrainingView(
     /// Which group the count down leads to.
     #[props(default = CountdownTo::First)]
     countdown_to: CountdownTo,
-    /// The session is on hold, the page having gone out of sight, until
-    /// Resume.
+    /// The session is on hold until Resume.
     #[props(default)]
     paused: bool,
+    /// It is on hold because its sound stopped, rather than the page going
+    /// out of sight.
+    #[props(default)]
+    sound_stopped: bool,
     /// The speed adaptive speed chose for the current group, if it chose.
     #[props(default)]
     speed: Option<ChosenSpeed>,
@@ -704,7 +707,9 @@ pub fn TrainingView(
     // say, beside the paddles, not something to read with a group to copy.
     // Each fits one line of a narrow phone, so the groups below never move
     // as it changes.
-    let hint = if paused {
+    let hint = if paused && sound_stopped {
+        "Sound stopped — Resume to carry on."
+    } else if paused {
         "Paused while the page was out of sight."
     } else if countdown.is_some() {
         match countdown_to {
