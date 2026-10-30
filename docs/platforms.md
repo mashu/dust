@@ -79,6 +79,19 @@ seconds is taken as a pause from where it began, before anything that waited
 out the gap is heard. No answer closes empty for it, and the time away is
 not answering time. The same holds on iOS.
 
+Back goes back through the app's screens: from Stats, Settings, Listen or
+a session's results to Practice, and out of a session or a contest run the
+way Exit leaves it, keeping what was answered. At Practice it leaves the
+app. The app moves between its screens by itself, so while it is away from
+Practice it keeps one entry of its own on the webview's history, which
+wry's activity goes back through before it hands Back to Android
+([`src/system_back.rs`](../src/system_back.rs)). Without it Back left the
+app from any screen, and Android 7 to 11, which close an app on Back, took
+a session under way with it. A browser's Back does the same in the web
+app. On Android 16 Back never reaches an app built for it, as Dust is: the
+system puts the app behind instead, which pauses a session as any time out
+of sight does.
+
 Whatever else plays stops out of sight, on every build: the band preview,
 the letters, a sample, Hear a QSO. The stream of groups stops too on a
 phone, where the system may freeze an app out of sight whole, and holds the

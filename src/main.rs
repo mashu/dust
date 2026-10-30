@@ -30,6 +30,9 @@ mod player;
 mod routes;
 mod session_runtime;
 mod state;
+// A phone's Back and a browser's; tests press it on a page of their own.
+#[cfg(any(test, feature = "web", target_os = "android"))]
+mod system_back;
 #[cfg(test)]
 mod testing;
 mod theme;

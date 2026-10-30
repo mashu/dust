@@ -120,6 +120,10 @@ pub fn App() -> Element {
     let paddle = use_paddle_keys(settings, screen, Rc::new(ctx.app()));
     use_stored_settings(ctx);
     use_keep_awake(screen, ctx.runtime, ctx.contest, ctx.preview);
+    // Back on a phone, or in a browser, goes back through the app's screens
+    // rather than out of it (src/system_back.rs).
+    #[cfg(any(test, feature = "web", target_os = "android"))]
+    crate::system_back::use_system_back(ctx);
     // Each screen opens at its top, wherever the one before it was scrolled
     // to: a run started from the foot of its results would otherwise begin
     // with its clock and its fields out of sight.
