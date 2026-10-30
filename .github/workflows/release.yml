@@ -9,6 +9,10 @@
 # cancelled run shows as a failed release, so only the push is listened for.
 # A tag made in the GitHub UI can be built with Run workflow.
 #
+# Only a commit whose CI passed on a push to main is released: the bundles
+# below run no tests of their own. A tag pushed while that CI run is still
+# going waits for it.
+#
 # GitHub-hosted runners produce Linux, Windows, and macOS desktop bundles
 # (each on its native OS). The web app is deployed separately to GitHub Pages.
 
@@ -47,6 +51,11 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.ref_type == 'tag' && startsWith(github.ref_name, 'v'))
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      # To read the CI runs of the commit.
+      actions: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
@@ -106,6 +115,35 @@ jobs:
           fi
           echo "version=${cargo_version}" >> "$GITHUB_OUTPUT"
           echo "Releasing version ${cargo_version}"
+
+      - name: Check that CI passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          while :; do
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&head_sha=${sha}" \
+              --jq '[.workflow_runs[] | .conclusion // "running"] | join(" ")')"
+            case " ${runs} " in
+              *" success "*)
+                echo "CI passed on ${sha}"
+                break
+                ;;
+              "  ")
+                echo "No CI run for a push of ${sha}: tag a commit on main, once its CI has passed."
+                exit 1
+                ;;
+              *" running "*)
+                echo "CI on ${sha} is still running; waiting for it"
+                sleep 60
+                ;;
+              *)
+                echo "CI on ${sha} did not pass (${runs}): release a commit whose CI did."
+                exit 1
+                ;;
+            esac
+          done
 
   build:
     name: Build ${{ matrix.name }}
