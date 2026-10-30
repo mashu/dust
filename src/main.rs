@@ -21,6 +21,8 @@ mod contest_runtime;
 mod keep_awake;
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 mod linux_webview;
+#[cfg(feature = "desktop")]
+mod menus;
 mod page_hidden;
 mod persist;
 mod playback;
@@ -46,6 +48,7 @@ pub(crate) const KEEP_RUNNING_JS: &str = include_str!("keep_running.js");
 fn themed_document_head() -> String {
     let mut head = String::from("<script>");
     head.push_str(KEEP_RUNNING_JS);
+    head.push_str(menus::FIELD_MENU_JS);
     head.push_str("</script><style>");
     head.push_str(crate::app::STYLESHEET);
     head.push_str("</style>");
@@ -115,6 +118,15 @@ mod tests {
         assert!(head.contains("document.hidden"));
     }
 
+    /// A field keeps its own context menu, with Paste, in a release build
+    /// as in a debug one: the script that lets it is in the page's head.
+    #[test]
+    fn the_desktop_head_lets_a_field_keep_its_context_menu() {
+        let head = super::themed_document_head();
+        let script = &head[..head.find("</script>").expect("a script first")];
+        assert!(script.contains(crate::menus::FIELD_MENU_JS));
+    }
+
     /// On Linux the paper scrolls with the page instead of being composited
     /// as a fixed layer. The override has the same specificity as the
     /// stylesheet's `html` rule, so it only wins by coming after it.
@@ -157,7 +169,8 @@ fn launch_desktop() {
                 // Its own way would turn the graphics card off for every
                 // Wayland session (src/linux_webview.rs).
                 .with_disable_dma_buf_on_wayland(false)
-                .with_menu(None)
+                // The Mac's, with Edit; none elsewhere (src/menus.rs).
+                .with_menu(menus::menu_bar())
                 .with_background_color((243, 234, 217, 255))
                 .with_custom_head(themed_document_head())
                 .with_window(
