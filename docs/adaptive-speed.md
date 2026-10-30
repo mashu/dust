@@ -127,7 +127,8 @@ as log weights.
   Stats shows starts from the middle of what its first session sent
   instead, so a change to the settings does not redraw the past.
 - **History weights $\omega_i$:** as for the span, earlier evidence fades by
-  $0.5^{1/10}$ a session.
+  $0.5^{1/10}$ a session, and only the newest 400 sessions that count are
+  read.
 - **Which sessions count:** only sessions in the same character-set mode. A
   callsign at 30 WPM is not a two-letter Koch group at 30 WPM. Their groups
   are read as the settings now read them: a lost end is the length's while

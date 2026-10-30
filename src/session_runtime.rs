@@ -310,7 +310,6 @@ pub fn start_session(ctx: AppCtx) {
         mut screen,
         mut runtime,
         mut settings,
-        sessions,
         toasts,
         mut preview,
         ..
@@ -342,7 +341,7 @@ pub fn start_session(ctx: AppCtx) {
     };
     // Each session draws from a sampler of its own, seeded afresh.
     ctx.answer.clear();
-    let sampler = Sampler::new(&sessions.peek(), &fitted, seed_rng());
+    let sampler = ctx.sampler(&fitted, seed_rng());
     let now = MonoMs(mono_ms());
     let (machine, effects) =
         SessionMachine::start(SessionId::new(lease.turn()), now, fitted, sampler);
@@ -848,6 +847,8 @@ pub fn keep_and_show(ctx: AppCtx, finished: SessionResult) {
     }
     result.set(Some(Finished::Kept(Box::new(finished))));
     screen.set(Screen::Results);
+    // Again starts from a history one session longer.
+    ctx.warm_sampler();
 }
 
 #[cfg(test)]
@@ -870,6 +871,27 @@ mod tests {
                 Self::Contest(live) => live.lease(),
             }
         }
+    }
+
+    /// A session kept has the prior the next one starts from built once
+    /// the results are up, so the tap on Again replays no history: only a
+    /// first session with nothing built ahead of it does.
+    #[test]
+    fn again_starts_from_the_prior_built_once_the_session_was_kept() {
+        run(|| async {
+            let mut h = Harness::new();
+            let built = || crate::testing::take_renders("SamplerPrior");
+            built();
+            h.start_training();
+            assert_eq!(built(), 1, "nothing built it ahead");
+            h.play_through(60_000).await;
+            assert_eq!(h.screen(), Screen::Results);
+            h.advance(u64::from(crate::time::POLL_MS) * 2).await;
+            assert_eq!(built(), 1, "built for the history it was kept in");
+            h.start_training();
+            assert_eq!(h.screen(), Screen::Training);
+            assert_eq!(built(), 0, "Again started from it");
+        });
     }
 
     /// A whole session, answered correctly, ends on the results screen with the

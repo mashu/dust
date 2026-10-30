@@ -572,10 +572,12 @@ impl LetterTally {
 }
 
 /// Each character's tallies in `sessions`, in the order of its character.
+/// Every session is read, however far back: its tries are counted in full
+/// too.
 fn letter_tallies(sessions: &[SessionResult]) -> Vec<LetterTally> {
     let mut tallies: BTreeMap<char, LetterTally> = BTreeMap::new();
-    for (session, worth) in sessions_faded(sessions) {
-        for (letter, stats) in session.letter_accuracy().iter() {
+    for (session, letters, worth) in sessions_faded(sessions, usize::MAX) {
+        for (letter, stats) in letters.iter() {
             let tally = tallies.entry(*letter).or_default();
             tally.letter = *letter;
             tally.correct += stats.correct;
@@ -947,8 +949,13 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
             .zip(draw_chances(&pool, &weights, &config))
             .collect()
     };
-    let mut others: Vec<char> = state
-        .beliefs
+    let tries: BTreeMap<char, u32> = letter_tallies(sessions)
+        .into_iter()
+        .map(|tally| (tally.letter, tally.total))
+        .collect();
+    // Every character ever heard, from the tallies, which read every
+    // session: the beliefs read only the newest.
+    let mut others: Vec<char> = tries
         .keys()
         .copied()
         .filter(|character| !pool.contains(character))
@@ -958,10 +965,6 @@ pub fn sampling_rows(settings: &TrainingSettings, sessions: &[SessionResult]) ->
         let unlocked = LCWO_SEQUENCE.iter().position(|each| each == character);
         (unlocked.unwrap_or(usize::MAX), *character)
     });
-    let tries: BTreeMap<char, u32> = letter_tallies(sessions)
-        .into_iter()
-        .map(|tally| (tally.letter, tally.total))
-        .collect();
     let row = |character: char, drawn_now: bool| {
         let belief = belief_for(&state, character);
         SamplingRow {
@@ -1226,6 +1229,47 @@ mod tests {
         assert_eq!((m.correct, m.total), (0, 1));
         let k = diag.iter().find(|d| d.letter == 'K').expect("K row");
         assert_eq!((k.correct, k.total), (1, 1));
+    }
+
+    /// A session whose lengths adapted has its groups aligned again to be
+    /// read ([`SessionResult::letter_accuracy`]): once each for the
+    /// mastered count, the Letters card and the sampler's beliefs, not
+    /// once to find whether it copied anything and again to count it.
+    #[test]
+    fn a_history_is_aligned_once_a_group_to_read_its_characters() {
+        use crate::alignment::HELD_ALIGNMENTS;
+        let copies = [("KMRS", "KMR"), ("KM", "KX")].repeat(4);
+        let history: Vec<SessionResult> = (0..6)
+            .map(|at| {
+                let mut adaptive = plain("2026-09-01", at, &copies);
+                adaptive.length_floor = Some(2);
+                adaptive
+            })
+            .collect();
+        let groups = history.len() * copies.len();
+        let aligned = |read: &dyn Fn()| {
+            HELD_ALIGNMENTS.set(0);
+            read();
+            HELD_ALIGNMENTS.get()
+        };
+        assert_eq!(
+            aligned(&|| {
+                mastered_count(&history);
+            }),
+            groups
+        );
+        assert_eq!(
+            aligned(&|| {
+                character_diagnostics(&history);
+            }),
+            groups
+        );
+        assert_eq!(
+            aligned(&|| {
+                CharSamplingState::from_history(&history);
+            }),
+            groups
+        );
     }
 
     #[test]
@@ -2153,6 +2197,37 @@ mod tests {
         assert!(others.iter().all(|row| row.sampling_prob == 0.0));
         assert!(others[1].p_error > 0.8, "Q is mostly missed");
         assert!(rows.iter().take_while(|row| row.drawn_now).count() == drawn.len());
+    }
+
+    /// A character heard only longer ago than the beliefs read back is
+    /// listed all the same, with every try it had: its belief is back on
+    /// the flat prior, as near as anything shows.
+    #[test]
+    fn a_character_heard_only_long_ago_is_still_listed() {
+        let mut settings = TrainingSettings::default();
+        settings.curriculum.char_set_mode = CharSetMode::Koch;
+        settings.curriculum.level = 1;
+        let mut long_ago = session();
+        long_ago.tally.sent.insert(
+            'Q',
+            LetterAccuracy {
+                correct: 2,
+                total: 10,
+            },
+        );
+        let since = (2..=crate::belief::FADE_HORIZON as u64 + 1).map(|timestamp| SessionResult {
+            timestamp,
+            ..session()
+        });
+        let history: Vec<SessionResult> = std::iter::once(long_ago).chain(since).collect();
+        let rows = sampling_rows(&settings, &history);
+        let q = rows
+            .iter()
+            .find(|row| row.character == 'Q')
+            .expect("Q is listed");
+        assert_eq!(q.tries, 10);
+        assert!(!q.drawn_now);
+        assert!((q.p_error - 0.5).abs() < 1e-9, "{q:?}");
     }
 
     /// Picking another unlock order — the guided setup does — keeps what the

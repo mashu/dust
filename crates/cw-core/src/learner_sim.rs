@@ -180,7 +180,7 @@ impl Adapting {
     /// Koch at the starting level, auto level as it ships. Speed fixed at
     /// 15 WPM, or adapting from 15 to 30; groups of two or three, or
     /// adapting from two to eight.
-    fn settings(self, aim: Aim) -> TrainingSettings {
+    pub(crate) fn settings(self, aim: Aim) -> TrainingSettings {
         let mut settings = TrainingSettings::default();
         settings.curriculum.char_set_mode = CharSetMode::Koch;
         settings.curriculum.level = START;

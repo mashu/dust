@@ -54,7 +54,10 @@ $$
 - **History weights $\omega_i$:** before each session, all earlier evidence is
   multiplied by $0.5^{1/10}$, so a session ten sessions back counts half as
   much. Groups in the current session count 1. The estimate follows you as
-  you improve instead of being anchored by your first week.
+  you improve instead of being anchored by your first week. Only the newest
+  400 sessions that count are read: one further back counts $0.5^{40}$, about
+  a millionth of a millionth, which no figure shows, so a longer history
+  costs a session start nothing more.
 - **Which sessions count:** only sessions in the same character-set mode
   that have groups to read. Callsign mode is excluded, because a callsign's
   length comes from its structure, not a draw. A session with no groups
@@ -66,7 +69,9 @@ so the last stored session counts as one session back. The sampler's belief
 in each character, and the Letters tab's mastery, fade the same way, though
 over every session that copied a character, whatever it practised. It is then updated
 after every answer during the session, a timed-out answer counting as a
-miss.
+miss. The app rebuilds all three ahead of the tap that starts a session,
+once the practice or Listen screen is drawn and once a session is kept, and
+keeps them until the history, or a setting they read, changes.
 
 **Choosing the next length.**
 

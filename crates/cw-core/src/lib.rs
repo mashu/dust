@@ -96,8 +96,8 @@ pub use recognition::{
 };
 pub use rng::{Rng, SplitMix64};
 pub use sampling::{
-    CharSamplingState, Sampler, adaptive_speed_on, adapts_group_size, adapts_speed, aim_section,
-    generate_training_group,
+    CharSamplingState, Sampler, SamplerPrior, adaptive_speed_on, adapts_group_size, adapts_speed,
+    aim_section, generate_training_group,
 };
 pub use sequences::{PresetId, SEQUENCE_PRESETS, SequenceChoice, SequencePreset};
 pub use session::{
