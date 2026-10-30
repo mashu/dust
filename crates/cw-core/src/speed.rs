@@ -344,6 +344,15 @@ impl SpeedPath {
         )
     }
 
+    /// The character speed and the spacing's pace at its slowest corner and
+    /// at its fastest, in WPM: its ends as the speed settings put them.
+    pub fn ends(&self) -> ((f64, f64), (f64, f64)) {
+        (
+            (self.char_wpm.0, self.effective_wpm.0),
+            (self.char_wpm.1, self.effective_wpm.1),
+        )
+    }
+
     /// Whether there is more than one speed on it.
     pub fn has_room(&self) -> bool {
         let (low, high) = self.bounds();

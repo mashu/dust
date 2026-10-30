@@ -99,8 +99,9 @@ pub struct AutoLevelChange {
     pub accuracy_pct: f64,
     pub threshold_pct: f64,
     /// While adaptive speed steers, the end of the speed range the session
-    /// was sent at, in WPM.
-    pub at_wpm: Option<f64>,
+    /// was sent at: its character and effective speed, in WPM, as the speed
+    /// settings put it.
+    pub at_wpm: Option<(f64, f64)>,
     /// Sessions above the threshold for a rise, below it for a fall.
     pub sessions: u32,
     /// In Mixed, the axis that moves next time the evidence does not say.
@@ -262,8 +263,8 @@ struct Verdict<'a> {
     /// move either way, neither.
     raise: Option<bool>,
     /// While adaptive speed steers, the end of the range it was pressed
-    /// against, in WPM.
-    at_wpm: Option<f64>,
+    /// against: its character and effective speed, in WPM.
+    at_wpm: Option<(f64, f64)>,
 }
 
 /// How `result` counts under `settings`, held to `threshold_pct`: see the
@@ -289,6 +290,7 @@ fn verdict<'a>(
         };
     };
     let (slowest, fastest) = path.bounds();
+    let (bottom_end, top_end) = path.ends();
     let top = judged_at_end(result, settings, |speed| speed >= fastest.ln() - AT_AN_END);
     let bottom = judged_at_end(result, settings, |speed| speed <= slowest.ln() + AT_AN_END);
     // Pressed against an end, the speed can go no further, and the session
@@ -297,10 +299,10 @@ fn verdict<'a>(
     // top, falls at the bottom, and counts neither way when it is short at
     // the top but at the threshold at the bottom.
     let at_end = match (top, bottom) {
-        (Some(top), _) if good(top.accuracy()) => Some((top, fastest)),
-        (_, Some(bottom)) if !good(bottom.accuracy()) => Some((bottom, slowest)),
-        (Some(top), None) => Some((top, fastest)),
-        (None, Some(bottom)) => Some((bottom, slowest)),
+        (Some(top), _) if good(top.accuracy()) => Some((top, top_end)),
+        (_, Some(bottom)) if !good(bottom.accuracy()) => Some((bottom, bottom_end)),
+        (Some(top), None) => Some((top, top_end)),
+        (None, Some(bottom)) => Some((bottom, bottom_end)),
         _ => None,
     };
     let Some((judged, end)) = at_end else {
@@ -430,9 +432,14 @@ pub struct AutoLevelProgress {
     pub below_disabled: bool,
     pub alternating_mixed: bool,
     pub next_mixed_axis: Option<MixedAutoLevelAxis>,
-    /// While adaptive speed steers, the slowest and fastest speed of its
-    /// range, in WPM: a session counts only once it is sent at one of them.
-    pub judged_at: Option<(f64, f64)>,
+    /// While adaptive speed steers, the slowest and fastest end of its
+    /// range, each its character and effective speed in WPM, as the speed
+    /// settings put them: a session counts only once it is sent at one of
+    /// them.
+    pub judged_at: Option<((f64, f64), (f64, f64))>,
+    /// Adaptive group size steers, and a session is judged on the
+    /// characters you reached, not as it was scored ([`judged_copy`]).
+    pub judged_on_reached: bool,
 }
 
 pub fn auto_level_progress(
@@ -474,7 +481,8 @@ pub fn auto_level_progress(
         below_disabled: below_target == 0,
         alternating_mixed: mixed,
         next_mixed_axis,
-        judged_at: adaptive_speed_path(settings).map(|path| path.bounds()),
+        judged_at: adaptive_speed_path(settings).map(|path| path.ends()),
+        judged_on_reached: adaptive_bounds(settings).is_some(),
     })
 }
 
@@ -485,7 +493,7 @@ pub fn auto_level_progress(
 /// is what is held to it. What the Overview's accuracy chart marks.
 pub fn level_up_line(settings: &TrainingSettings) -> Option<f64> {
     let progress = auto_level_progress(settings, AutoLevelCounters::default())?;
-    let as_scored = adaptive_bounds(settings).is_none() && progress.judged_at.is_none();
+    let as_scored = !progress.judged_on_reached && progress.judged_at.is_none();
     (!progress.above_disabled && as_scored).then_some(progress.threshold)
 }
 
@@ -1046,18 +1054,18 @@ mod tests {
         let up = evaluate_auto_level(&sent_at(29.5, &clean), &settings, &mut counters)
             .expect("at the top and clean");
         assert!(up.raised());
-        assert_eq!(up.at_wpm, Some(30.0));
+        assert_eq!(up.at_wpm, Some((30.0, 30.0)));
         let down = evaluate_auto_level(&sent_at(15.2, &poor), &settings, &mut Default::default())
             .expect("at the bottom and short");
         assert!(!down.raised());
-        assert_eq!(down.at_wpm, Some(15.0));
+        assert_eq!(down.at_wpm, Some((15.0, 15.0)));
         // At the bottom and at the threshold, the threshold is what is left
         // to go by; at the top and short of it, so it is.
         let bottom_clean =
             evaluate_auto_level(&sent_at(15.0, &clean), &settings, &mut Default::default());
         assert_eq!(
             bottom_clean.map(|change| (change.raised(), change.at_wpm)),
-            Some((true, Some(15.0)))
+            Some((true, Some((15.0, 15.0))))
         );
         let top_short =
             evaluate_auto_level(&sent_at(30.0, &poor), &settings, &mut Default::default());
@@ -1113,7 +1121,7 @@ mod tests {
             .expect("at the bottom and at the threshold");
         assert!(change.raised());
         assert_eq!(change.accuracy_pct, 100.0);
-        assert_eq!(change.at_wpm, Some(15.0));
+        assert_eq!(change.at_wpm, Some((15.0, 15.0)));
 
         let top = sent_across(&[(22.0, "KMRSU", 10), (29.5, "KXRSU", 10)]);
         assert!((top.accuracy - 0.9).abs() < 1e-9);
@@ -1121,13 +1129,35 @@ mod tests {
             .expect("at the top and short");
         assert!(!change.raised());
         assert_eq!(change.accuracy_pct, 80.0);
-        assert_eq!(change.at_wpm, Some(30.0));
+        assert_eq!(change.at_wpm, Some((30.0, 30.0)));
 
         // Twelve groups count as a session, but seven at the bottom do not.
         let few = sent_across(&[(15.0, "KMRSU", 7), (22.0, "KMRSU", 5)]);
         let mut counters = AutoLevelCounters::default();
         assert_eq!(evaluate_auto_level(&few, &settings, &mut counters), None);
         assert_eq!(counters, AutoLevelCounters::default(), "nothing counted");
+    }
+
+    /// Under Farnsworth, the end a session was sent at is named as the
+    /// speed settings put it, the character speed and the effective speed,
+    /// not as the copy speed they make together, which no setting shows.
+    #[test]
+    fn the_end_a_session_was_sent_at_is_named_as_the_settings_put_it() {
+        let mut settings = adaptive_speed();
+        settings.playback.link_char_to_effective = false;
+        settings.playback.char_wpm_min = 20.0;
+        settings.playback.char_wpm_max = 20.0;
+        settings.playback.effective_wpm_min = 8.0;
+        settings.playback.effective_wpm_max = 15.0;
+        let settings = settings.clamp();
+        let mut result = sent_at(20.0, &["KMRSU"]);
+        for timing in &mut result.group_timings {
+            timing.effective_wpm = Some(15.0);
+        }
+        let change = evaluate_auto_level(&result, &settings, &mut Default::default()).expect("up");
+        assert_eq!(change.at_wpm, Some((20.0, 15.0)));
+        let progress = auto_level_progress(&settings, Default::default()).expect("progress");
+        assert_eq!(progress.judged_at, Some(((20.0, 8.0), (20.0, 15.0))));
     }
 
     /// With adaptive group size, the end of a group it can still send
@@ -1159,6 +1189,11 @@ mod tests {
         settings.curriculum.max_group_size = 8;
         let change = evaluate_auto_level(&cut, &settings, &mut Default::default()).expect("down");
         assert_eq!(change.accuracy_pct, 75.0);
+        // And Home's card says a session is judged so.
+        let progress = auto_level_progress(&settings, Default::default()).expect("progress");
+        assert!(progress.judged_on_reached);
+        let progress = auto_level_progress(&koch(5), Default::default()).expect("progress");
+        assert!(!progress.judged_on_reached);
     }
 
     /// The accuracy chart marks the threshold only where a session's own
