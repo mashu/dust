@@ -402,6 +402,13 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
 /// field whose type changed between versions — and the user would silently get
 /// factory settings back. So fall back to applying the stored keys one at a
 /// time and keeping the ones that still deserialize.
+///
+/// Only a key this build reads can fail to, so only those are tried one at a
+/// time: a few dozen, however large the save. Every other key is carried along
+/// as it is ([`TrainingSettings::unread`]), and goes in with the rest at the
+/// end. Each key used to be tried on top of every key kept before it, which
+/// took time in the square of their number: a file of tens of thousands of
+/// keys, a backup made that way, held the app up for minutes.
 fn recover_settings(raw: &str) -> TrainingSettings {
     let Ok(serde_json::Value::Object(mut stored)) = serde_json::from_str::<serde_json::Value>(raw)
     else {
@@ -409,24 +416,23 @@ fn recover_settings(raw: &str) -> TrainingSettings {
     };
     upgrade_receiver(&mut stored);
     upgrade_agc_threshold(&mut stored);
-    let stored = serde_json::Value::Object(stored);
-    if let Ok(settings) = serde_json::from_value::<TrainingSettings>(stored.clone()) {
+    if let Ok(settings) = TrainingSettings::deserialize(&stored) {
         return settings;
     }
-    let serde_json::Value::Object(stored) = stored else {
-        return TrainingSettings::default();
-    };
+    let read = TrainingSettings::read_keys();
+    let (tried, carried): (Vec<_>, Vec<_>) = stored
+        .into_iter()
+        .partition(|(key, _)| read.contains(key.as_str()));
     let mut kept = serde_json::Map::new();
-    for (key, value) in stored {
-        let mut candidate = kept.clone();
-        candidate.insert(key, value);
-        if serde_json::from_value::<TrainingSettings>(serde_json::Value::Object(candidate.clone()))
-            .is_ok()
-        {
-            kept = candidate;
+    for (key, value) in tried {
+        kept.insert(key.clone(), value);
+        if TrainingSettings::deserialize(&kept).is_err() {
+            kept.remove(&key);
         }
     }
-    serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default()
+    let settings = TrainingSettings::deserialize(&kept).unwrap_or_default();
+    kept.extend(carried);
+    TrainingSettings::deserialize(&kept).unwrap_or(settings)
 }
 
 /// A save from before the receiver was quoted by its 6 dB width has no
@@ -1368,6 +1374,35 @@ pub(crate) mod tests {
             recovered.playback.group_timeout,
             TrainingSettings::default().playback.group_timeout
         );
+    }
+
+    /// Recovering a save takes time in proportion to its size. One bad value
+    /// among a hundred thousand keys no build reads, as in a file made to
+    /// hang the app, used to be tried key by key over all those kept before
+    /// it: over an hour. What no build reads is carried along only so far.
+    #[test]
+    fn a_save_made_to_be_large_is_recovered_quickly() {
+        let mut stored = serde_json::Map::new();
+        for n in 0..100_000 {
+            stored.insert(format!("filler{n}"), serde_json::json!(n));
+        }
+        stored.insert("groupTimeout".into(), serde_json::json!("nonsense"));
+        stored.insert("numGroups".into(), serde_json::json!(7));
+        let raw = serde_json::to_string(&stored).expect("serialize");
+        let started = std::time::Instant::now();
+        let settings = recover_settings(&raw);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+        assert_eq!(settings.curriculum.num_groups, 7);
+        assert_eq!(
+            settings.playback.group_timeout,
+            TrainingSettings::default().playback.group_timeout
+        );
+        let written = serde_json::to_string(&settings).expect("serialize").len();
+        let fresh = serde_json::to_string(&TrainingSettings::default())
+            .expect("serialize")
+            .len();
+        assert!(written < fresh + 20_000, "{written}");
     }
 
     /// Saves from before the receiver rework all name the old sharp filter,

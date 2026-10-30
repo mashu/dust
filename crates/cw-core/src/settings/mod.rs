@@ -698,6 +698,11 @@ pub struct TrainingSettings {
     /// slow, on Letter accuracy.
     pub recognition: RecognitionBands,
     pub contest: ContestSettings,
+    /// What a save held that this build does not read: settings a later
+    /// build added, kept as they were read and written back with the rest,
+    /// so that a copy of an older build left open never strips them
+    /// ([`save`]).
+    pub unread: serde_json::Map<String, serde_json::Value>,
 }
 
 mod clamp;
