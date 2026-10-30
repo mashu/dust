@@ -652,7 +652,7 @@ fn settings_renders_every_card() {
         "disclosure-recognition",
         "disclosure-character-sampling",
         "disclosure-display",
-        "Practice stays on this device",
+        "No account, no ads, no analytics",
         "disclosure-privacy",
         "Credits",
         "The people who make Dust",
@@ -753,7 +753,7 @@ fn settings_in_contest_mode_show_the_contest_and_your_station() {
             "CQ zone 14",
             "WPX prefix DL1",
         ]),
-        "Stored on this device only.",
+        "Dust never sends it off this device.",
         "Minutes per run",
         "Band activity",
     ] {

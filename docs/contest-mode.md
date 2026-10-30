@@ -238,7 +238,7 @@ reset: your callsign and only the fields the chosen contest sends. Under the
 call it shows what was read ("Germany · Europe · CQ zone 14 · you are DX")
 or a plain error ("needs a digit", "unknown prefix"), and "No licence yet?
 Make up a call from your country's prefix, a digit and two or three
-letters. Stored on this device only." Phase 1 had only the country key and
+letters. Dust never sends it off this device." Phase 1 had only the country key and
 the WPX prefix to read ("Reads as DL · WPX prefix DL1"). As built (3a), the
 line names the country the call is at home in, as cty.dat names it
 (`home_country`, which places the prefixes of Alaska and Canada the call

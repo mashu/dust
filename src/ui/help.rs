@@ -397,7 +397,7 @@ pub fn character_set() -> Element {
 pub fn station() -> Element {
     rsx! {
         p {
-            "What you send in a run: your call, and the exchange your contest asks for, a name, state, zone, power or class and section. Callers check it as a real station would, and a run needs it set. Stored on this device only."
+            "What you send in a run: your call, and the exchange your contest asks for, a name, state, zone, power or class and section. Callers check it as a real station would, and a run needs it set. Dust never sends it off this device."
         }
     }
 }
