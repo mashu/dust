@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cw_core::{AutoLevelCounters, CountersKey, SessionResult, TrainingSettings};
 
 use super::{
-    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, read_history,
-    read_settings_from,
+    BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, newest, over_stored,
+    read_history, read_settings_from,
 };
 
 const THEME: &str = "theme.txt";
@@ -90,7 +90,7 @@ impl DesktopStore {
     /// first rather than written over; a file there that cannot be read at
     /// all, or set aside, is left as it is.
     fn update_counters(&self, change: impl FnOnce(&mut Counters)) {
-        let mut all = match fs::read(self.root.join(COUNTERS)) {
+        let (mut all, mut stored) = match fs::read(self.root.join(COUNTERS)) {
             Ok(raw) => {
                 let (all, whole) = read_counters(&raw);
                 if !whole && let Err(err) = self.write(&aside_name(&self.root, "auto_adjust"), &raw)
@@ -100,16 +100,28 @@ impl DesktopStore {
                     );
                     return;
                 }
-                all
+                let stored: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_slice(&raw).unwrap_or_default();
+                (all, stored)
             }
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Counters::new(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                (Counters::new(), serde_json::Map::new())
+            }
             Err(err) => {
                 eprintln!("could not read the auto-level counters: {err}");
                 return;
             }
         };
         change(&mut all);
-        if let Ok(raw) = serde_json::to_vec_pretty(&all) {
+        // Each over what it held, so what a later build added to it stays.
+        let written: serde_json::Map<String, serde_json::Value> = all
+            .into_iter()
+            .filter_map(|(key, counters)| {
+                let value = over_stored(serde_json::to_value(counters).ok()?, stored.remove(&key));
+                Some((key, value))
+            })
+            .collect();
+        if let Ok(raw) = serde_json::to_vec_pretty(&written) {
             let _ = self.write(COUNTERS, &raw);
         }
     }
@@ -904,6 +916,41 @@ mod tests {
             AutoLevelCounters::default()
         );
         assert_eq!(first.load_auto_counters(&counted[1].0), counted[1].1);
+    }
+
+    /// What a later build added to a counter, or to a stored session,
+    /// stays when this build writes the file again. Each was written back
+    /// as this build reads it, without whatever else it held.
+    #[test]
+    fn what_a_later_build_added_stays_through_a_write() {
+        let (dir, store) = store("later-keys");
+        fs::create_dir_all(&dir.0).unwrap();
+        let counted = counted_at([3, 4]);
+        let held = format!(
+            r#"{{"{}":{{"above":1,"below":0,"laterKey":[1]}}}}"#,
+            counted[0].0.as_str()
+        );
+        fs::write(dir.0.join(COUNTERS), held).unwrap();
+        store.save_auto_counters(&counted[0].0, counted[0].1);
+        store.save_auto_counters(&counted[1].0, counted[1].1);
+        let held: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.0.join(COUNTERS)).unwrap()).unwrap();
+        assert_eq!(
+            held[counted[0].0.as_str()]["laterKey"],
+            serde_json::json!([1])
+        );
+        assert_eq!(store.load_auto_counters(&counted[0].0), counted[0].1);
+
+        let mut later = serde_json::to_value(session("2026-09-01")).unwrap();
+        later["laterKey"] = serde_json::json!("kept");
+        fs::write(dir.0.join(SESSIONS), format!("[{later}]")).unwrap();
+        let mut history = store.load_sessions();
+        history.push(session("2026-09-02"));
+        store.save_sessions(&history);
+        let held: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.0.join(SESSIONS)).unwrap()).unwrap();
+        assert_eq!(held[0]["laterKey"], "kept");
+        assert_eq!(store.load_sessions().len(), 2);
     }
 
     #[test]

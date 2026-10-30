@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::alignment::{CopyTally, LetterAccuracy};
 use crate::contest::{CONTEST_MARK, ContestLog};
@@ -730,6 +731,7 @@ impl GroupSession {
             effective_wpm,
             alphabet_fingerprint: self.settings.alphabet_fingerprint(),
             contest: None,
+            unread: UnreadKeys::default(),
         };
         result.score = result.points();
         result
@@ -835,8 +837,8 @@ fn session_wpm_default() -> f64 {
     18.0
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", from = "StoredSession")]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(from = "StoredSession")]
 pub struct SessionResult {
     pub date: String,
     /// Wall time the session finished, in milliseconds: what history is
@@ -846,7 +848,6 @@ pub struct SessionResult {
     pub group_timings: Vec<SessionTiming>,
     pub accuracy: f64,
     /// What was copied, character by character.
-    #[serde(flatten)]
     pub tally: CopyTally,
     pub avg_response_ms: f64,
     pub total_chars: u32,
@@ -855,7 +856,6 @@ pub struct SessionResult {
     pub digits_level: u32,
     /// Contest is written "callsign", so a build that knows no contests
     /// still reads the session.
-    #[serde(serialize_with = "mode_on_disk")]
     pub char_set_mode: CharSetMode,
     pub char_wpm: f64,
     pub effective_wpm: f64,
@@ -864,22 +864,134 @@ pub struct SessionResult {
     /// [`CONTEST_MARK`] and names the contest: it outlives a lost log.
     pub alphabet_fingerprint: String,
     /// A contest run's log, as it was written.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contest: Option<ContestLog>,
+    /// What the stored session held that this build does not read.
+    pub unread: UnreadKeys,
+}
+
+/// What a stored session holds that this build does not read: keys a later
+/// build wrote, on the session and on each of its groups and their timings.
+/// They are kept as they were read and written back with the session, so a
+/// copy of an older build left open never strips them from the history.
+///
+/// So a key a later build renames is read beside its old name, as an older
+/// build carries the new one along: the new name is to be read as the old
+/// one's successor, not as an alias of it, which serde refuses to read
+/// twice.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UnreadKeys {
+    /// The session's own.
+    pub session: Map<String, Value>,
+    /// Each group's, by its place; none at all where no group has any.
+    pub groups: Vec<Map<String, Value>>,
+    /// Each timing's, by its place; none at all where no timing has any.
+    pub timings: Vec<Map<String, Value>>,
+}
+
+/// Keys of a session earlier builds wrote and no build reads any more: let
+/// go of as a session is read, rather than carried along.
+const RETIRED_SESSION_KEYS: &[&str] = &[
+    "alphabetSize",
+    "effectiveAlphabetSize",
+    "finishedAt",
+    "startedAt",
+];
+
+/// The same, of a group's timing.
+const RETIRED_TIMING_KEYS: &[&str] = &["perCharMs", "recognitionMs", "typedAlong"];
+
+/// A session as it is written: every key this build reads, and after them
+/// whatever it held that this build does not ([`UnreadKeys`]), each part's
+/// where it was read.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionOnDisk<'a> {
+    date: &'a str,
+    timestamp: u64,
+    groups: Vec<WithUnread<'a, GroupResult>>,
+    group_timings: Vec<WithUnread<'a, SessionTiming>>,
+    accuracy: f64,
+    #[serde(flatten)]
+    tally: &'a CopyTally,
+    avg_response_ms: f64,
+    total_chars: u32,
+    score: f64,
+    level: u32,
+    digits_level: u32,
+    #[serde(serialize_with = "mode_on_disk")]
+    char_set_mode: &'a CharSetMode,
+    char_wpm: f64,
+    effective_wpm: f64,
+    alphabet_fingerprint: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contest: Option<&'a ContestLog>,
+    #[serde(flatten)]
+    unread: &'a Map<String, Value>,
+}
+
+/// A part of a session as it is written, and what it held that this build
+/// does not read.
+#[derive(Serialize)]
+struct WithUnread<'a, T> {
+    #[serde(flatten)]
+    known: &'a T,
+    #[serde(flatten)]
+    unread: &'a Map<String, Value>,
+}
+
+/// Each of `parts`, with what it held that this build does not read: by
+/// its place in `unread`, or `none`.
+fn with_unread<'a, T>(
+    parts: &'a [T],
+    unread: &'a [Map<String, Value>],
+    none: &'a Map<String, Value>,
+) -> Vec<WithUnread<'a, T>> {
+    parts
+        .iter()
+        .enumerate()
+        .map(|(at, known)| WithUnread {
+            known,
+            unread: unread.get(at).unwrap_or(none),
+        })
+        .collect()
+}
+
+impl Serialize for SessionResult {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let none = Map::new();
+        SessionOnDisk {
+            date: &self.date,
+            timestamp: self.timestamp,
+            groups: with_unread(&self.groups, &self.unread.groups, &none),
+            group_timings: with_unread(&self.group_timings, &self.unread.timings, &none),
+            accuracy: self.accuracy,
+            tally: &self.tally,
+            avg_response_ms: self.avg_response_ms,
+            total_chars: self.total_chars,
+            score: self.score,
+            level: self.level,
+            digits_level: self.digits_level,
+            char_set_mode: &self.char_set_mode,
+            char_wpm: self.char_wpm,
+            effective_wpm: self.effective_wpm,
+            alphabet_fingerprint: &self.alphabet_fingerprint,
+            contest: self.contest.as_ref(),
+            unread: &self.unread.session,
+        }
+        .serialize(serializer)
+    }
 }
 
 /// A session as it is read: the keys this version knows, with what older
-/// saves lack filled in. Keys it does not read are dropped, not carried
-/// along: a catch-all would keep retired keys alive and could write a key
-/// twice. The contest log is the one part kept that this version does not
-/// read, and it is kept by name.
+/// saves lack filled in, and whatever else it holds, carried along
+/// ([`UnreadKeys`]). The contest log is kept whole, by name.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSession {
     date: String,
     timestamp: u64,
-    groups: Vec<GroupResult>,
-    group_timings: Vec<SessionTiming>,
+    groups: Vec<ReadWithUnread<GroupResult>>,
+    group_timings: Vec<ReadWithUnread<SessionTiming>>,
     accuracy: f64,
     #[serde(flatten)]
     tally: CopyTally,
@@ -901,6 +1013,38 @@ struct StoredSession {
     alphabet_fingerprint: String,
     #[serde(default)]
     contest: Option<ContestLog>,
+    #[serde(flatten)]
+    unread: Map<String, Value>,
+}
+
+/// A part of a session as it is read, and what it holds that this build
+/// does not read.
+#[derive(Deserialize)]
+struct ReadWithUnread<T> {
+    #[serde(flatten)]
+    known: T,
+    #[serde(flatten)]
+    unread: Map<String, Value>,
+}
+
+/// The parts read, and what each held that this build does not read but
+/// `retired`: by place, or nothing at all where none held any.
+fn split_unread<T>(
+    read: Vec<ReadWithUnread<T>>,
+    retired: &[&str],
+) -> (Vec<T>, Vec<Map<String, Value>>) {
+    let (parts, mut unread): (Vec<T>, Vec<Map<String, Value>>) = read
+        .into_iter()
+        .map(|part| {
+            let mut unread = part.unread;
+            unread.retain(|key, _| !retired.contains(&key.as_str()));
+            (part.known, unread)
+        })
+        .unzip();
+    if unread.iter().all(Map::is_empty) {
+        unread = Vec::new();
+    }
+    (parts, unread)
 }
 
 impl From<StoredSession> for SessionResult {
@@ -908,11 +1052,16 @@ impl From<StoredSession> for SessionResult {
     /// knew no contests has saved it without the log.
     fn from(stored: StoredSession) -> Self {
         let run = stored.contest.is_some() || stored.alphabet_fingerprint.starts_with(CONTEST_MARK);
+        let mut unread = stored.unread;
+        unread.retain(|key, _| !RETIRED_SESSION_KEYS.contains(&key.as_str()));
+        let (groups, unread_groups) = split_unread(stored.groups, &[]);
+        let (group_timings, unread_timings) =
+            split_unread(stored.group_timings, RETIRED_TIMING_KEYS);
         Self {
             date: stored.date,
             timestamp: stored.timestamp,
-            groups: stored.groups,
-            group_timings: stored.group_timings,
+            groups,
+            group_timings,
             accuracy: stored.accuracy,
             tally: stored.tally,
             avg_response_ms: stored.avg_response_ms,
@@ -929,6 +1078,11 @@ impl From<StoredSession> for SessionResult {
             effective_wpm: stored.effective_wpm,
             alphabet_fingerprint: stored.alphabet_fingerprint,
             contest: stored.contest,
+            unread: UnreadKeys {
+                session: unread,
+                groups: unread_groups,
+                timings: unread_timings,
+            },
         }
     }
 }
@@ -1000,6 +1154,7 @@ impl SessionResult {
             effective_wpm: 18.0,
             alphabet_fingerprint: String::new(),
             contest: None,
+            unread: UnreadKeys::default(),
         }
     }
 }
@@ -1544,6 +1699,42 @@ mod tests {
         clean.tally.inserted.clear();
         let json = serde_json::to_value(&clean).unwrap();
         assert!(json.get("inserted").is_none());
+    }
+
+    /// A key a later build added, to a session, a group or its timing, is
+    /// read beside the rest and written back where it was, so a copy of an
+    /// older build left open does not strip it from every stored session.
+    /// It used to be dropped as the session was read.
+    #[test]
+    fn keys_a_later_build_added_are_written_back_where_they_were() {
+        let mut written = SessionResult::empty_for_test();
+        written.groups = vec![GroupResult::default(); 2];
+        written.group_timings = vec![SessionTiming::default(); 2];
+        let mut later = serde_json::to_value(&written).unwrap();
+        later["laterKey"] = serde_json::json!({ "v": 2 });
+        later["groups"][1]["laterGroupKey"] = serde_json::json!([1, 2]);
+        later["groupTimings"][0]["laterTimingKey"] = serde_json::json!(0.5);
+        let read: SessionResult = serde_json::from_value(later.clone()).unwrap();
+        assert_eq!(read.groups, written.groups);
+        assert_eq!(read.group_timings, written.group_timings);
+        assert_eq!(read.unread.session.len(), 1);
+        assert_eq!(serde_json::to_value(&read).unwrap(), later);
+        let again: SessionResult =
+            serde_json::from_value(serde_json::to_value(&read).unwrap()).unwrap();
+        assert_eq!(again, read, "the same, read again");
+
+        // A session without any writes none, as before.
+        let plain = serde_json::to_value(&written).unwrap();
+        let read: SessionResult = serde_json::from_value(plain.clone()).unwrap();
+        assert_eq!(read.unread, UnreadKeys::default());
+        assert_eq!(serde_json::to_value(&read).unwrap(), plain);
+
+        // What earlier builds wrote and no build reads is let go of.
+        let mut older = plain;
+        older["startedAt"] = serde_json::json!(0);
+        older["groupTimings"][1]["typedAlong"] = serde_json::json!(true);
+        let read: SessionResult = serde_json::from_value(older).unwrap();
+        assert_eq!(read.unread, UnreadKeys::default());
     }
 
     /// Older saves carry fields this version no longer writes, and lack ones

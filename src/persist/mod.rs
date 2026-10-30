@@ -396,6 +396,21 @@ fn keep_aside(store: &impl Aside, prefix: &str, raw: &str) -> bool {
     true
 }
 
+/// `written`, a record as this build writes it, laid over `stored`, the
+/// same record as it was stored: whatever a later build added to it stays.
+#[cfg(any(feature = "web", feature = "native-runtime"))]
+fn over_stored(written: serde_json::Value, stored: Option<serde_json::Value>) -> serde_json::Value {
+    match (written, stored) {
+        (serde_json::Value::Object(mut written), Some(serde_json::Value::Object(stored))) => {
+            for (key, value) in stored {
+                written.entry(key).or_insert(value);
+            }
+            serde_json::Value::Object(written)
+        }
+        (written, _) => written,
+    }
+}
+
 /// Load settings without throwing away everything for one bad field.
 ///
 /// A strict parse fails on a single unreadable value — a hand-edited file, or a

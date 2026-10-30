@@ -8,7 +8,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use super::{
     Aside, BackupSaving, CutOff, CutOffTaking, HistorySaved, OpenSession, Store, keep_aside,
-    newest, read_history, read_settings_from, saved_now, store_newest_that_fit,
+    newest, over_stored, read_history, read_settings_from, saved_now, store_newest_that_fit,
 };
 
 const THEME_KEY: &str = "dust_theme";
@@ -301,9 +301,17 @@ impl Store for WebStore {
         let Some(store) = storage() else {
             return;
         };
-        if let Ok(raw) = serde_json::to_string(&counters) {
-            let _ = store.set_item(&counters_key(key), &raw);
-        }
+        let key = counters_key(key);
+        let Ok(written) = serde_json::to_value(counters) else {
+            return;
+        };
+        // Over what it held, so what a later build added to it stays.
+        let stored = store
+            .get_item(&key)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        let _ = store.set_item(&key, &over_stored(written, stored).to_string());
     }
 
     fn clear_auto_counters(&self, keys: &[CountersKey]) {

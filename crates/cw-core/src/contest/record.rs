@@ -343,6 +343,7 @@ impl ContestRun {
                 if self.assisted { ASSISTED_MARK } else { "" }
             ),
             contest: Some(ContestLog::from(self)),
+            unread: crate::session::UnreadKeys::default(),
             groups: groups
                 .into_iter()
                 .map(|group| GroupResult {
