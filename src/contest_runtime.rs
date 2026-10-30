@@ -713,7 +713,17 @@ fn keep_run(ctx: AppCtx) {
     view.set(None);
     // A run moves no level.
     auto_message.set(None);
-    keep_and_show(ctx, live.machine.result(now_ms(), live.started_on.clone()));
+    let result = live.machine.result(now_ms(), live.started_on.clone());
+    // Held with its mark as it is to be stored: the app stopping from here
+    // on keeps it once.
+    ctx.mark_so_far(
+        &live.mark,
+        SoFar {
+            result: result.clone(),
+            settings: None,
+        },
+    );
+    keep_and_show(ctx, result);
 }
 
 /// A run with no station worked has nothing for any stat: it is let go, and

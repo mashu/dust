@@ -21,7 +21,7 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use crate::contest_runtime::{LiveContest, send_run_event, start_run};
-use crate::persist::{OpenSession, SoFar};
+use crate::persist::{OpenSession, SessionKey, SoFar};
 use crate::playback::Preview;
 use crate::player::{AudioError, Lease, SendNews};
 use crate::state::{AppCtx, Finished, Notice, Screen};
@@ -729,6 +729,15 @@ fn finish_session(ctx: AppCtx) -> bool {
     let run = store.load_auto_counters(&CountersKey::of(session.settings()));
     // The machine only finishes a session it has scored something in.
     let done = complete_session(session, run, now_ms(), live.started_on.clone());
+    // Held with its mark as it is to be stored, before its level's run is:
+    // the app stopping from here on keeps it once, its level counted once.
+    ctx.mark_so_far(
+        &live.mark,
+        SoFar {
+            result: done.result.clone(),
+            settings: None,
+        },
+    );
     auto_message.set(settle_level(ctx, &done));
     runtime.set(None);
     keep_and_show(ctx, done.result);
@@ -768,7 +777,8 @@ fn settle_level(ctx: AppCtx, done: &Completion) -> Option<String> {
 /// `kept`, as Exit would have kept each ([`AppCtx::tell_of_cut_off`]): in
 /// the history, where each falls by when it was last added to, and a
 /// session of groups counted towards its level's run, the level moved if
-/// the run earned it.
+/// the run earned it. One the app stopped under as it was stored, its mark
+/// holding it as stored, is in the history already, and kept once.
 pub fn keep_cut_off(ctx: AppCtx, kept: Vec<SoFar>) {
     if kept.is_empty() {
         return;
@@ -777,6 +787,16 @@ pub fn keep_cut_off(ctx: AppCtx, kept: Vec<SoFar>) {
     let store = ctx.app().store;
     for so_far in kept {
         let mut result = so_far.result;
+        // A session ended and stored as the app stopped, its mark still
+        // held with it as stored: kept already, and counted.
+        let key = SessionKey::of(&result);
+        if sessions
+            .peek()
+            .iter()
+            .any(|session| SessionKey::of(session) == key)
+        {
+            continue;
+        }
         // On today's scale, as every session of the history is read.
         result.score = result.points();
         if let Some(settings) = so_far.settings.map(TrainingSettings::clamp) {

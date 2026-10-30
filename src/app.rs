@@ -930,6 +930,39 @@ mod ui_tests {
         });
     }
 
+    /// A session the app stopped under just as it was stored, before its
+    /// mark was let go, is not kept again at the next launch: the mark holds
+    /// it as it was stored, and the history has it already.
+    #[test]
+    fn a_session_stored_as_the_app_stopped_is_kept_once() {
+        run(|| async {
+            let (mut ui, recorder) = awaiting_answer(test_settings()).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.has("group done")).await);
+            ui.with_app(|_| crate::page_closed::close_app());
+            let store = ui.store.clone();
+            let kept = store.load_sessions();
+            assert_eq!(kept.len(), 1);
+            drop(ui);
+            // Its mark, as it was held while the history was stored.
+            store.mark_open(Some(OpenSession {
+                started_at: kept[0].timestamp,
+                run: false,
+                so_far: Some(Box::new(crate::persist::SoFar {
+                    result: kept[0].clone(),
+                    settings: None,
+                })),
+            }));
+
+            let (mut ui, _recorder) = Ui::launch(store.clone());
+            ui.advance(20).await;
+            assert_eq!(store.load_sessions().len(), 1, "kept once");
+            assert_eq!(store.open(), None);
+            drop(ui);
+        });
+    }
+
     /// A session going on as the app is closed — the window's close button,
     /// the page left or reloaded — is ended there and then as Exit ends it,
     /// and kept at once: the next launch has nothing cut off to tell of.
