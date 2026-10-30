@@ -383,3 +383,9 @@ version = "0.1"
 
 [target.'cfg(target_os = "windows")'.dev-dependencies.softbuffer]
 version = "0.4"
+
+# Dust: tao is patched in (Cargo.toml at the root), not maintained here. A
+# path dependency's warnings are shown on every build, and these are
+# upstream's to fix.
+[lints.rust]
+warnings = "allow"

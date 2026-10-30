@@ -292,17 +292,28 @@ impl<T: 'static> EventLoop<T> {
             }
           }
         }
-        Some(EventSource::User) => {
-          while let Ok(event) = self.receiver.try_recv() {
-            call_event_handler!(
-              event_handler,
-              self.window_target(),
-              control_flow,
-              event::Event::UserEvent(event)
-            );
-          }
-        }
-        None => {}
+        // Dust: drained below, whatever woke the loop.
+        Some(EventSource::User) | None => {}
+      }
+
+      // Dust: backported from tao 0.37.0. When a lifecycle event on the pipe
+      // is ready at the same moment as a wake from send_event, ALooper_pollAll
+      // drains the wake itself and returns the pipe's ident, so draining the
+      // queue only on Poll::Wake left the event queued until something else
+      // woke the loop. Upstream's comment follows.
+      //
+      // We need to treat every event as if they were from [`EventLoopProxy::send_event`]
+      //
+      // > All return values may also imply ALOOPER_POLL_WAKE. If you call this in a loop,
+      // > you must treat all return values as if they also indicated ALOOPER_POLL_WAKE.
+      // > https://developer.android.com/ndk/reference/group/looper#alooper_pollonce
+      while let Ok(event) = self.receiver.try_recv() {
+        call_event_handler!(
+          event_handler,
+          self.window_target(),
+          control_flow,
+          event::Event::UserEvent(event)
+        );
       }
 
       call_event_handler!(

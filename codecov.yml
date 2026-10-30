@@ -13,3 +13,8 @@ coverage:
     patch:
       default:
         informational: true
+
+# vendor/ holds a patched dependency (tao, docs/platforms.md), not ours to
+# test: its lines are no measure of the app's.
+ignore:
+  - "vendor/**"
