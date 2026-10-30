@@ -193,9 +193,9 @@ time from four repository secrets
 then checks that the APK is not debuggable and carries that key. Without
 the secrets the APK job fails and the release goes out with no APK.
 
-One-time, make the key and add the secrets. The password must be letters
-and digits: `dx` passes it to Gradle through a template that would change
-anything else.
+One-time, make the key and add the secrets. The passwords and the alias
+may hold only letters, digits, `.`, `_` and `-`: `dx` passes them to Gradle
+through a template that would change anything else.
 
 ```bash
 install -m 700 -d ~/.android
@@ -212,7 +212,7 @@ keytool -genkeypair -v \
   -storepass "$pw" \
   -keypass "$pw"
 chmod 600 ~/.android/dust-release.p12
-base64 -w0 ~/.android/dust-release.p12 | gh secret set ANDROID_KEYSTORE_BASE64
+base64 < ~/.android/dust-release.p12 | tr -d '\n' | gh secret set ANDROID_KEYSTORE_BASE64
 printf '%s' "$pw" | gh secret set ANDROID_KEYSTORE_PASSWORD
 printf '%s' "$pw" | gh secret set ANDROID_KEY_PASSWORD
 printf 'dust' | gh secret set ANDROID_KEY_ALIAS

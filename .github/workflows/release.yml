@@ -74,13 +74,12 @@ jobs:
             echo "Run this workflow from a version tag, or pass the tag input."
             exit 1
           fi
-          case "$tag" in
-            v*.*.*) ;;
-            *)
-              echo "Tag '$tag' does not match v*.*.*"
-              exit 1
-              ;;
-          esac
+          # Whole: it goes on into GITHUB_OUTPUT, and a line break there would
+          # write an output of its own.
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag '$tag' is not vX.Y.Z"
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Using tag $tag"
 
@@ -122,6 +121,9 @@ jobs:
         run: |
           set -euo pipefail
           sha="$(git rev-parse HEAD)"
+          # A commit pushed together with its tag may not have its CI run
+          # listed yet when this first looks.
+          unseen=0
           while :; do
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&head_sha=${sha}" \
               --jq '[.workflow_runs[] | .conclusion // "running"] | join(" ")')"
@@ -131,8 +133,13 @@ jobs:
                 break
                 ;;
               "  ")
-                echo "No CI run for a push of ${sha}: tag a commit on main, once its CI has passed."
-                exit 1
+                unseen=$((unseen + 1))
+                if ((unseen > 5)); then
+                  echo "No CI run for a push of ${sha}: tag a commit on main, once its CI has passed."
+                  exit 1
+                fi
+                echo "No CI run for ${sha} yet; looking again"
+                sleep 30
                 ;;
               *" running "*)
                 echo "CI on ${sha} is still running; waiting for it"
@@ -390,6 +397,9 @@ jobs:
           source scripts/android-release-signing.sh
           if ! install_android_release_signing "$PWD" "${RUNNER_TEMP}/dust-release.p12"; then
             echo "::error title=No Android release key::The release has no APK. Add the ANDROID_* secrets (docs/platforms.md, Release signing)."
+            # The job may fail and the release still go out: the run's page
+            # says what it lacks, beside a green tick.
+            echo "**No Android APK in this release**: the ANDROID_* signing secrets are not set (docs/platforms.md, Release signing)." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           echo "ANDROID_RELEASE_CERT_SHA256=${ANDROID_RELEASE_CERT_SHA256}" >> "$GITHUB_ENV"

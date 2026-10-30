@@ -38,7 +38,12 @@ agree dx "${dioxus:-missing}" < <(
 
 pins="$(grep -rnoE 'RUST_TOOLCHAIN: "[^"]*"' .github/workflows | sed -E 's/RUST_TOOLCHAIN: "([^"]*)"$/\1/')"
 rust="${pins%%$'\n'*}"
-agree Rust "${rust##*:}" <<< "$pins"
+if [[ -z "$pins" ]]; then
+  echo "No Rust pin found" >&2
+  failed=1
+else
+  agree Rust "${rust##*:}" <<< "$pins"
+fi
 # A step that names its toolchain any other way is not pinned.
 # shellcheck disable=SC2016 # the workflows' own ${{ }}, not the shell's
 if grep -rnE 'dtolnay/rust-toolchain@(stable|beta|nightly)|^ +toolchain: ' .github/workflows |
