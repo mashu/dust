@@ -3,8 +3,9 @@
 # One-time: Settings → Pages → Build and deployment → Source: GitHub Actions.
 # The site is built by web-site.yml, the same build CI checks on every pull
 # request. Only a push to main whose whole CI run passed is deployed, from
-# the commit that run tested; Run workflow deploys the chosen branch as it
-# stands.
+# the commit that run tested, and only if that commit is still main's tip:
+# re-running an older CI run deploys nothing. Run workflow deploys the
+# chosen branch as it stands.
 
 name: GitHub Pages
 
@@ -15,31 +16,61 @@ on:
     branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
-  build:
-    name: Build web
+  tip:
+    name: Check the commit
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    outputs:
+      deploy: ${{ steps.tip.outputs.deploy }}
+    steps:
+      - name: Compare it with main
+        id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tip="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [[ "$tip" == "$HEAD_SHA" ]]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "${HEAD_SHA} is no longer main's tip (${tip}): not deploying it."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build web
+    needs: tip
+    if: needs.tip.outputs.deploy == 'true'
     uses: ./.github/workflows/web-site.yml
     with:
       ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       upload: true
 
+  # Only this job may deploy; the build, which runs every crate's build
+  # script, may not. Deploys queue rather than cancel one another, and a run
+  # that builds nothing never joins the queue.
   deploy:
     name: Deploy
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
