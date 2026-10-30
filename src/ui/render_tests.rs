@@ -903,7 +903,7 @@ fn a_simple_qso_shows_its_dialogue_and_asks_for_your_name() {
         r#"id="contest-cq-wpx" class="pill""#,
         "You send 599 + name\u{a0}· You\u{a0}copy\u{a0}RST\u{a0}NAME",
         ">CQ CQ DE DL1ABC DL1ABC K<",
-        ">DL1ABC DE K5XYZ K5XYZ K<",
+        ">DL1ABC DE K5XYZ K<",
         ">K5XYZ DE DL1ABC UR 599 599 NAME &#60;your name&#62; &#60;your name&#62; BK<",
         ">R TNX UR 579 579 NAME BOB BOB BK<",
         ">TU BOB 73 EE<",

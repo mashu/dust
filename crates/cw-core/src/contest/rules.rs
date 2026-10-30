@@ -439,10 +439,12 @@ pub(super) const RULES: &[ContestRules] = &[
         ),
     },
     // An everyday QSO, a first real one for a learner: `CQ CQ DE DL1ABC
-    // DL1ABC K` · `DL1ABC DE K5XYZ K5XYZ K` · `K5XYZ DE DL1ABC UR 599 599
-    // NAME MAT MAT BK` · `R TNX UR 579 579 NAME BOB BOB BK` · `TU BOB 73 EE`
-    // · `73 EE`. The report is copied, as the name is. A TU ends the QSO and
+    // DL1ABC K` · `DL1ABC DE K5XYZ K` · `K5XYZ DE DL1ABC UR 599 599 NAME
+    // MAT MAT BK` · `R TNX UR 579 579 NAME BOB BOB BK` · `TU BOB 73 EE` ·
+    // `73 EE`. The report is copied, as the name is. A TU ends the QSO and
     // no more: you call CQ for the next, and nothing scores it but the copy.
+    // A caller signs once, as MorseRunner's single callers do, and a pile-up
+    // caller that calls twice signs twice.
     ContestRules {
         kind: ContestKind::SimpleQso,
         cq: "CQ CQ DE {my} {my} K",
@@ -456,7 +458,7 @@ pub(super) const RULES: &[ContestRules] = &[
         serial_cut: false,
         copied: PerSide::both(&[Field::Rst, Field::Name]),
         callers: PerSide::both(CallSpec::contest(Countries::Any)),
-        answer: "{my} DE {his} {his} K",
+        answer: "{my} DE {his} K",
         their_exchange: PerSide::both("UR {rst} {rst} NAME {name} {name} BK"),
         their_lead: ["R TNX", "R TNX"],
         their_query: ["AGN", "AGN"],
@@ -941,13 +943,15 @@ mod tests {
         assert_eq!(rules.tu_text(&me(0, "BOB")), "TU BOB 73 EE");
         // No name copied: no gap where it would be.
         assert_eq!(rules.tu_text(&me(0, "")), "TU 73 EE");
-        // Its call is twice in it already, whoever calls.
-        for twice in [false, true] {
-            assert_eq!(
-                rules.answer_text("DL1ABC", "K5XYZ", twice),
-                "DL1ABC DE K5XYZ K5XYZ K"
-            );
-        }
+        // Its call once, or twice from a caller that calls twice.
+        assert_eq!(
+            rules.answer_text("DL1ABC", "K5XYZ", false),
+            "DL1ABC DE K5XYZ K"
+        );
+        assert_eq!(
+            rules.answer_text("DL1ABC", "K5XYZ", true),
+            "DL1ABC DE K5XYZ K5XYZ K"
+        );
         let theirs = [
             (Field::Rst, "579".to_string()),
             (Field::Name, "BOB".to_string()),
@@ -1217,7 +1221,7 @@ mod tests {
             simple_qso().example_qso(Side::Dx, &me(0, "")),
             [
                 (you, "CQ CQ DE DL1ABC DL1ABC K".to_string()),
-                (they, "DL1ABC DE K5XYZ K5XYZ K".to_string()),
+                (they, "DL1ABC DE K5XYZ K".to_string()),
                 (
                     you,
                     "K5XYZ DE DL1ABC UR 599 599 NAME MAT MAT BK".to_string()

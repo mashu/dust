@@ -465,7 +465,7 @@ kind replacing an earlier one (11.7).
   Walker's POTA mode (`mw/src/js/modes.js:85-100`).
 - **You send** `CQ CQ DE <my> <my> K`, then
   `<his> DE <my> UR 599 599 NAME <name> <name> BK`, then `TU <his name> 73 EE`.
-- **They send** `<my> DE <his> <his> K`, then
+- **They send** `<my> DE <his> K`, then
   `R TNX UR 579 579 NAME BOB BOB BK`, then `73 EE`, heard but not logged.
   Logged: RST 579, NAME BOB.
 - **Rules.** TU does not bring the next caller; you call CQ again. No contest
@@ -836,7 +836,9 @@ contest; MRCE's sources are the reference for the numbers below.
 - **Calling twice.** 10% of pile-up callers send their call twice; single
   callers never do (`DxOper.pas:500-502`). As built, a caller that calls
   twice sends its call twice where the contest's answer has it once
-  (`K5XYZ K5XYZ`); Simple QSO's answer sends it twice already.
+  (`K5XYZ K5XYZ`), Simple QSO's too (`DL1ABC DE K5XYZ K5XYZ K`). Simple
+  QSO's answer used to send it twice for every caller, which had a learner
+  keying over the second (as built, 2026-10-30).
 - **Careless operators** (phase 4, habits `rough`), as MRCE's LIDs
   (`DxStn.pas:73`, `Station.pas:509-521`, `DxOper.pas:651-671, 879-886`).
   As built (4a): one caller in ten, in a contest whose callers send a
@@ -1064,7 +1066,13 @@ it, and Enter on the call your TU without logging went to, its exchange
 not copied yet, would clear a QSO waiting to be logged. F3 keeps only
 the call it went to, so Enter or `.` on that call sends the TU alone and
 logs the QSO it closed, as MRCE's TU and log does while that call still
-counts as sent, and any other call starts afresh. Its call sent in
+counts as sent, and any other call starts afresh. An F3 the station you
+work never heard, still sending its exchange as it ended, closed nothing:
+it keeps Enter's QSO as it was, C and N with it, as MRCE's F3 always
+does, so Enter on the call sends the TU and logs, and the exchange the
+station sends again on its timeout is no repeat you asked for (as built,
+2026-10-30; Enter used to send the call and exchange again, and charge a
+repeat for the exchange that drew). Its call sent in
 answer to your partial, or to a piece of its call, is no correction: you
 asked for it. A station that corrects you again after you sent its call
 right never heard that call, sent over its correction in a pile-up: Enter's
@@ -2363,7 +2371,7 @@ fist variation.
 |---|---|
 | Character and effective speed ranges | the callers' speeds, drawn within them from your copy speed while the callers adapt (`contestAdaptSpeed`, on as it ships), evenly otherwise; you send at your speed, `myWpm`, or at their middle until you set one; −/+ moves yours and keeps it (as built after operator feedback; it used to shift both for the run) |
 | `callsignLevel` | the callers' call shapes, shared with Callsigns mode |
-| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept, and one the pile-up opened goes back to one station on leaving it, for Single or another character set (as built, 2026-10-29) |
+| `stationsMin/Max` (`settings/mod.rs:414-417`) | Single: labelled "Band activity". Pile-up: "Callers at once", as today; as built its unit reads "callers" ("caller" held at one), and "Your filter fits 6 callers" follows it. Picking Pile-up while the range holds one station opens it to 1–3, as a pile-up of one is none and MRCE's starts busier than its single calls (`Ini.pas:261`); a range you have set is kept, and one the pile-up opened goes back to one station on leaving it, for Single or another character set (as built, 2026-10-29). The Band conditions reset, which puts the range back to one station, opens it again while Pile-up stays chosen |
 | `pileupSpreadHz` | Pile-up only: how far either side of the centre callers land; hidden for Single, where it does nothing |
 | Session shape's first field | "Minutes per run" in place of "Groups per session" (`settings.rs:288-295`) |
 
@@ -2770,7 +2778,10 @@ exactly as it was while the run went on.
   has begun to reach you: logged before that, each field group is a miss
   (received empty, 1 send), as a guess is no copy, so logging early neither
   raises accuracy nor shrinks the groups a run is ranked over; `l` and `s`
-  hold what you logged and what was sent, for the check. As built (third
+  hold what you logged and what was sent, for the check. A field group
+  keeps its token as keyed (`exchange::keyed_token`), so where that is not
+  what you typed (`T15` for a typed 15, `1T5` for 105), `l` holds what you
+  logged beside it, and the results list that (2026-10-30). As built (third
   pile-up audit), of a call put right with the exchange after it
   (`DE K5XYZ 5NN 214`), the exchange has begun once its first character
   has, not once the `DE` has, and so its speed and a repeat of it count
@@ -4435,7 +4446,8 @@ keying with the paddles, a contest level, and more contests.
 | A caller sending across your message, muted (5a) | unheard, the whole send: no copy, repeat, speed, Enter or Show copy, RX counting it from your message's end; its cost to its caller spent | its tail after your message counted | nothing you cannot hear may count as heard, and a call heard in part is no call heard |
 | A CQ, TU or NIL keyed over a pile-up caller (2026-10-29, second Esc review) | heard from a fragment only by a caller that stops sending before your message ends; one still sending as it ends hears none of it and calls again on its timeout, but for a station putting its call right, which takes your TU; so the station you work, sending its exchange through your TU, is not done and sends it again on its timeout | every caller keyed over taking it from a fragment and answering once done | MRCE's station takes note of your message only when it is not sending as your message ends (`DxStn.pas:240-253`), with that one exception for TU (`DxStn.pas:277-289`); a station transmitting through the whole of your message heard no fragment of it |
 | A single caller you key over (2026-10-29, after the round-4 review) | goes on with what it is sending and hears your message only as a pile-up caller does: a CQ, TU or NIL from a fragment if it stops before your message ends, nothing otherwise, so a `?` keyed over it is lost and it calls or sends again on its timeout | stopping to hear the whole of your message, kinder to a learner | MRCE's single caller is a station like any other, transmitting and so deaf while it sends (`DxStn.pas:240-253`); the `?` key asks once it has finished, and waiting for a station to finish is the habit a run should teach; one rule for single and pile-up runs |
-| QRM sending across your message, muted, going on past an Esc (2026-10-29, second Esc review) | unheard, as a caller's: Show copy shows none of it, the rest sounding after the Esc | its whole message shown once the rest ended | the receiver was muted for its start, so what Show copy shows was never heard whole; QRM follows the callers' rule, heard in part is not heard |
+| Telling you a station missed your message (2026-10-30, final review) | the first time in a run that the station a message was for never hears it, still sending, the hint says "Let K5XYZ finish: it did not hear you" till the next key, and a screen reader is told; the station a message is for is the one you work, one its call or the Call field names, or a single caller, named by the call you had for it, else "the station"; what to do comes first, and the whole line keeps to a phone's 47 characters for a call of up to 15, a longer name leaving only "Let … finish" there; Enter does as ever. The tour's TX and RX step says a station still sending cannot hear you. Simple QSO's caller signs once (`DL1ABC DE K5XYZ K`), as MRCE's single callers do, and a pile-up caller that calls twice signs twice | nothing said, the caller sending again the only cue, and Simple QSO's answer sending every call twice; said every time; "K5XYZ was still sending and did not hear you" first, too long for a phone's line unnamed, which cut what to do | a learner keying over a caller went round and round with it, and the run ended with nothing kept: the rule is MRCE's, and once is enough to learn it, where every time would nag in a pile-up keyed over on purpose; the doubled call had the learner keying over the second |
+| QRM sending across your message, muted, going on past an Esc (2026-10-29, second Esc review) | unheard, as a caller's: Show copy shows none of it, the rest sounding after the Esc; so is QRM a browser fallen behind its audio skipped some of, as a caller's send is (2026-10-30) | its whole message shown once the rest ended | the receiver was muted for its start, so what Show copy shows was never heard whole; QRM follows the callers' rule, heard in part is not heard |
 | Flutter (5a) | a switch of its own on the Band card in Contest mode, three callers in ten at 3–33 Hz, half to three quarters deep, over the fading or alone; Contester turns it on | MorseRunner's: a quicker fading in place of a station's, full depth, only with QSB on | the switch does what it says, and no caller is fluttered out of hearing |
 | A continuation (5a) | a timed splice: the turn on the air plays out the character sounding, and any the player has begun, the next starts at the start of the next character, ridden over by then; with none left, half a word space after your message, the next message a word space after it | the next started at once from the character sounding, sent again whole; or started in the past, mid-character | no character twice and no gap; both players start a send at a moment ahead well, and your message is silent where they meet, so nothing clicks |
 | How soon a continuation can take over (5a) | the player's lead, as the last turn started at once found it, and a send's release, after the key | the moment your message is at as it reaches the ear | a player plays ahead of the ear, so a character starting inside its lead has begun already, and taking over there sent its start twice; a lead measured on every turn keeps up with the device |
