@@ -1,6 +1,7 @@
 //! Simulated learners practising under auto level, with adaptive group size
 //! and adaptive speed on and off: what auto level does with a learner who
-//! improves, one who holds steady, and one who struggles.
+//! improves, one who holds steady, and one who struggles, and with one who
+//! holds steady at the bottom of the speed range and one past its top.
 //!
 //! Each learner is the design notes' own: a character is copied right with
 //! the adaptive speed note's curve, nine times in ten at its copy speed, and
@@ -77,6 +78,23 @@ pub(crate) const STABLE: Learner = Learner {
 pub(crate) const STRUGGLING: Learner = Learner {
     capacity: START as usize - 3,
     ..STABLE
+};
+
+/// A learner who holds steady near the bottom of the speed range: nine
+/// characters in ten at 17 WPM, about 95% of those known at 15, so
+/// adaptive speed is pressed against the bottom.
+pub(crate) const SLOW: Learner = Learner {
+    copy: 17.0,
+    ..STABLE
+};
+
+/// A learner who copies past the top of the speed range from the start,
+/// gets no faster, and learns each new character: adaptive speed is pressed
+/// against the top, and the characters are what grow.
+pub(crate) const FAST: Learner = Learner {
+    copy: 40.0,
+    growth: 1.0,
+    ..IMPROVING
 };
 
 /// A learner at work: how often each character has been heard, and how many
@@ -199,6 +217,19 @@ pub(crate) fn levels(
     sessions: i32,
     seed: u64,
 ) -> Vec<u32> {
+    practise(learner, adapting, aim, judged, sessions, seed).0
+}
+
+/// The same practice: the level after each session, and the history the
+/// sessions leave.
+pub(crate) fn practise(
+    learner: Learner,
+    adapting: Adapting,
+    aim: Aim,
+    judged: Judged,
+    sessions: i32,
+    seed: u64,
+) -> (Vec<u32>, Vec<SessionResult>) {
     let mut settings = adapting.settings(aim);
     let mut copier = Copier::new(learner);
     let mut rng = SplitMix64::new(seed);
@@ -267,7 +298,7 @@ pub(crate) fn levels(
         history.push(result);
         levels.push(settings.curriculum.level);
     }
-    levels
+    (levels, history)
 }
 
 /// The mean of `levels`.
@@ -284,8 +315,9 @@ mod tests {
     /// Auto level with the adaptive features on and off, for a learner who
     /// improves, one who holds steady and one who struggles: the first
     /// levels up, the second stays where it started, and the third levels
-    /// down. A session's own accuracy is noisy, and auto level as it ships
-    /// lowers the level after one session under the threshold, so the
+    /// down to the seven characters it knows, give or take one, and no
+    /// further. A session's own accuracy is noisy, and auto level as it
+    /// ships lowers the level after one session under the threshold, so the
     /// steady learner wanders a level or two with nothing adapting too: it
     /// is held to staying within a level on average, and ending within two.
     #[test]
@@ -313,9 +345,98 @@ mod tests {
 
             let struggling = run(STRUGGLING, adapting, Aim::Balanced, Judged::Now);
             let last = *struggling.last().expect("sessions");
+            let knows = STRUGGLING.capacity as u32 - 1;
             assert!(
-                last <= START - 2 && mean(&struggling[24..]) < start - 1.0,
+                (knows - 1..=knows + 1).contains(&last) && mean(&struggling[24..]) < start - 1.0,
                 "{adapting:?}: a struggling learner ended at {last}: {struggling:?}"
+            );
+        }
+    }
+
+    /// The mean level over the last twelve of [`SESSIONS`] sessions of
+    /// `learner` with `adapting` at Balanced, over three seeds.
+    fn settles_at(learner: Learner, adapting: Adapting) -> f64 {
+        let runs: Vec<f64> = [3, 4, 5]
+            .into_iter()
+            .map(|seed| {
+                mean(
+                    &levels(
+                        learner,
+                        adapting,
+                        Aim::Balanced,
+                        Judged::Now,
+                        SESSIONS,
+                        seed,
+                    )[24..],
+                )
+            })
+            .collect();
+        runs.iter().sum::<f64>() / runs.len() as f64
+    }
+
+    /// A learner near the bottom of the speed range has adaptive speed
+    /// pressed against it, and is judged as a learner sent at that speed
+    /// alone is: it settles within a level and a half of where it does with
+    /// the speed fixed there. Judged over every group of a session at the
+    /// bottom, those the draw sent well inside the range too, it was held
+    /// to the threshold at speeds it does not copy: it settled at 2.4,
+    /// against 6.0 with the speed fixed, ending at levels 2, 2 and 1.
+    #[test]
+    fn a_learner_at_the_bottom_of_the_range_is_judged_as_at_that_speed() {
+        for (fixed, adapting) in [
+            (Adapting::Neither, Adapting::Speed),
+            (Adapting::Length, Adapting::Both),
+        ] {
+            let (fixed_at, adapting_at) = (settles_at(SLOW, fixed), settles_at(SLOW, adapting));
+            assert!(
+                adapting_at >= fixed_at - 1.5,
+                "{adapting:?} settled at {adapting_at:.1}, against {fixed_at:.1} with {fixed:?}"
+            );
+        }
+    }
+
+    /// A learner who copies past the top of the range from the start has
+    /// adaptive speed pressed against the top, and climbs as each new
+    /// character comes up to the top speed, without getting any faster.
+    #[test]
+    fn a_learner_past_the_top_of_the_range_climbs_with_the_speed_adapting() {
+        for adapting in [Adapting::Speed, Adapting::Both] {
+            let ended: Vec<u32> = [3, 4, 5]
+                .into_iter()
+                .map(|seed| {
+                    let levels = levels(FAST, adapting, Aim::Balanced, Judged::Now, SESSIONS, seed);
+                    *levels.last().expect("sessions")
+                })
+                .collect();
+            let ended_at = mean(&ended);
+            assert!(
+                ended_at >= f64::from(START + 2),
+                "{adapting:?}: ended at {ended:?}"
+            );
+        }
+    }
+
+    /// With adaptive group size, the ends of groups it sends long on purpose
+    /// are lost about one group in three, and are not misses of the
+    /// characters lost: a steady learner who knows its characters well has
+    /// them all mastered and none to work on, as with groups too short to
+    /// lose. Counted as misses, seven of its eleven went over the line, to
+    /// work on, and only six stayed mastered.
+    #[test]
+    fn a_steady_learner_keeps_its_characters_mastered_whatever_the_length() {
+        for adapting in [Adapting::Neither, Adapting::Length] {
+            let (_, history) = practise(STABLE, adapting, Aim::Balanced, Judged::Now, 30, 3);
+            let known = &LCWO_SEQUENCE[..=START as usize];
+            let rows = crate::stats::sampling_rows(&adapting.settings(Aim::Balanced), &history);
+            let to_work_on: Vec<char> = rows
+                .iter()
+                .filter(|row| known.contains(&row.character) && row.p_error > 0.1)
+                .map(|row| row.character)
+                .collect();
+            let mastered = crate::stats::mastered_count(&history);
+            assert!(
+                to_work_on.len() <= 1 && mastered + 1 >= known.len(),
+                "{adapting:?}: {mastered} mastered, {to_work_on:?} to work on"
             );
         }
     }
@@ -375,6 +496,8 @@ mod tests {
             ("improving", IMPROVING),
             ("stable", STABLE),
             ("struggling", STRUGGLING),
+            ("slow", SLOW),
+            ("fast", FAST),
         ] {
             for adapting in Adapting::ALL {
                 for judged in [Judged::Before, Judged::Now] {
