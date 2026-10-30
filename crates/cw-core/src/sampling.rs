@@ -53,8 +53,8 @@ impl CharSamplingState {
     /// certain again.
     pub fn from_history(history: &[SessionResult]) -> Self {
         let mut state = Self::default();
-        for (session, worth) in sessions_faded(history) {
-            for (character, stats) in session.letter_accuracy().iter() {
+        for (_, letters, worth) in sessions_faded(history) {
+            for (character, stats) in letters.iter() {
                 let belief = state.beliefs.entry(*character).or_default();
                 belief.alpha += worth * f64::from(stats.correct);
                 belief.beta += worth * f64::from(stats.total.saturating_sub(stats.correct));

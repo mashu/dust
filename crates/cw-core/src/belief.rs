@@ -4,6 +4,10 @@
 //! you as you improve. The copy span ([`crate::span`]) and the copy speed
 //! ([`crate::speed`]) are both one, each with a grid and a curve of its own.
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+
+use crate::alignment::LetterAccuracy;
 use crate::rng::Rng;
 use crate::session::SessionResult;
 use crate::settings::CharSetMode;
@@ -213,25 +217,34 @@ pub(crate) fn sessions_in_order(
     sessions
 }
 
-/// Every session that copied any character, oldest first, each with what
-/// its evidence is worth by now: the latest counts one, and each one before
-/// it [`SESSION_FADE`] as much as the one after it, half ten sessions back,
-/// as the span and the speed fade. Whatever character set it practised: a
-/// character is as hard to copy whichever of them sent it. A session that
-/// copied nothing is not one more session for the rest to fade behind.
-pub(crate) fn sessions_faded(history: &[SessionResult]) -> Vec<(&SessionResult, f64)> {
-    let mut sessions: Vec<&SessionResult> = history
+/// How each character a session sent was copied, as the history reads it
+/// ([`SessionResult::letter_accuracy`]).
+pub(crate) type Letters<'a> = Cow<'a, BTreeMap<char, LetterAccuracy>>;
+
+/// Every session that copied any character, oldest first, each with how it
+/// copied each one, worked out once, and what its evidence is worth by now:
+/// the latest counts one, and each one before it [`SESSION_FADE`] as much
+/// as the one after it, half ten sessions back, as the span and the speed
+/// fade. Whatever character set it practised: a character is as hard to
+/// copy whichever of them sent it. A session that copied nothing is not one
+/// more session for the rest to fade behind.
+///
+/// Worked out once, as a session whose lengths adapted has every group
+/// aligned again to read it.
+pub(crate) fn sessions_faded(history: &[SessionResult]) -> Vec<(&SessionResult, Letters<'_>, f64)> {
+    let mut sessions: Vec<(&SessionResult, Letters<'_>)> = history
         .iter()
-        .filter(|session| !session.letter_accuracy().is_empty())
+        .map(|session| (session, session.letter_accuracy()))
+        .filter(|(_, letters)| !letters.is_empty())
         .collect();
-    sessions.sort_by_key(|session| session.timestamp);
+    sessions.sort_by_key(|(session, _)| session.timestamp);
     let count = sessions.len();
     sessions
         .into_iter()
         .enumerate()
-        .map(|(index, session)| {
+        .map(|(index, (session, letters))| {
             let back = i32::try_from(count - 1 - index).unwrap_or(i32::MAX);
-            (session, SESSION_FADE.powi(back))
+            (session, letters, SESSION_FADE.powi(back))
         })
         .collect()
 }
@@ -338,9 +351,15 @@ mod tests {
         let faded = sessions_faded(&history);
         assert_eq!(faded.len(), 11);
         assert_eq!(faded[10].0.timestamp, 10);
-        assert_eq!(faded[10].1, 1.0, "the latest counts in full");
-        assert!((faded[0].1 - 0.5).abs() < 1e-12, "ten back counts half");
-        assert!(faded.windows(2).all(|pair| pair[0].1 < pair[1].1));
+        assert_eq!(faded[10].2, 1.0, "the latest counts in full");
+        assert!((faded[0].2 - 0.5).abs() < 1e-12, "ten back counts half");
+        assert!(faded.windows(2).all(|pair| pair[0].2 < pair[1].2));
+        // Each with what it copied, as the history reads it.
+        assert!(
+            faded
+                .iter()
+                .all(|(session, letters, _)| *letters == session.letter_accuracy())
+        );
     }
 
     #[test]

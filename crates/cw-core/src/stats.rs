@@ -574,8 +574,8 @@ impl LetterTally {
 /// Each character's tallies in `sessions`, in the order of its character.
 fn letter_tallies(sessions: &[SessionResult]) -> Vec<LetterTally> {
     let mut tallies: BTreeMap<char, LetterTally> = BTreeMap::new();
-    for (session, worth) in sessions_faded(sessions) {
-        for (letter, stats) in session.letter_accuracy().iter() {
+    for (session, letters, worth) in sessions_faded(sessions) {
+        for (letter, stats) in letters.iter() {
             let tally = tallies.entry(*letter).or_default();
             tally.letter = *letter;
             tally.correct += stats.correct;
@@ -1226,6 +1226,47 @@ mod tests {
         assert_eq!((m.correct, m.total), (0, 1));
         let k = diag.iter().find(|d| d.letter == 'K').expect("K row");
         assert_eq!((k.correct, k.total), (1, 1));
+    }
+
+    /// A session whose lengths adapted has its groups aligned again to be
+    /// read ([`SessionResult::letter_accuracy`]): once each for the
+    /// mastered count, the Letters card and the sampler's beliefs, not
+    /// once to find whether it copied anything and again to count it.
+    #[test]
+    fn a_history_is_aligned_once_a_group_to_read_its_characters() {
+        use crate::alignment::HELD_ALIGNMENTS;
+        let copies = [("KMRS", "KMR"), ("KM", "KX")].repeat(4);
+        let history: Vec<SessionResult> = (0..6)
+            .map(|at| {
+                let mut adaptive = plain("2026-09-01", at, &copies);
+                adaptive.length_floor = Some(2);
+                adaptive
+            })
+            .collect();
+        let groups = history.len() * copies.len();
+        let aligned = |read: &dyn Fn()| {
+            HELD_ALIGNMENTS.set(0);
+            read();
+            HELD_ALIGNMENTS.get()
+        };
+        assert_eq!(
+            aligned(&|| {
+                mastered_count(&history);
+            }),
+            groups
+        );
+        assert_eq!(
+            aligned(&|| {
+                character_diagnostics(&history);
+            }),
+            groups
+        );
+        assert_eq!(
+            aligned(&|| {
+                CharSamplingState::from_history(&history);
+            }),
+            groups
+        );
     }
 
     #[test]

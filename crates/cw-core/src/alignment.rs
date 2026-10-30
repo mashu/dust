@@ -23,6 +23,13 @@ pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
     table.walk_back(&s, &r, s.len())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many groups [`align_holding`] has aligned on this thread, for a
+    /// test to count what reading a history costs.
+    pub(crate) static HELD_ALIGNMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The alignment of what was held of `sent`, and how many of its characters
 /// were lost off the end, after the last one received.
 ///
@@ -31,6 +38,8 @@ pub fn align_group(sent: &str, received: &str) -> Vec<AlignmentPair> {
 /// three dropped inside and the last one wrong. At least one character is
 /// always held.
 pub(crate) fn align_holding(sent: &str, received: &str) -> (Vec<AlignmentPair>, usize) {
+    #[cfg(test)]
+    HELD_ALIGNMENTS.set(HELD_ALIGNMENTS.get() + 1);
     let (s, r) = upper(sent, received);
     let table = Edits::new(&s, &r);
     let fewest = table.at(s.len(), r.len());
