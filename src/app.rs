@@ -124,6 +124,10 @@ pub fn App() -> Element {
     // A session or run is kept as the app is closed, where the platform
     // says it is closing.
     use_end_on_close(ctx);
+    // Back on a phone, or in a browser, goes back through the app's screens
+    // rather than out of it (src/system_back.rs).
+    #[cfg(any(test, feature = "web", target_os = "android"))]
+    crate::system_back::use_system_back(ctx);
     // Each screen opens at its top, wherever the one before it was scrolled
     // to: a run started from the foot of its results would otherwise begin
     // with its clock and its fields out of sight.

@@ -79,6 +79,19 @@ seconds is taken as a pause from where it began, before anything that waited
 out the gap is heard. No answer closes empty for it, and the time away is
 not answering time. The same holds on iOS.
 
+Back goes back through the app's screens: from Stats, Settings, Listen or
+a session's results to Practice, and out of a session or a contest run the
+way Exit leaves it, keeping what was answered. At Practice it leaves the
+app. The app moves between its screens by itself, so while it is away from
+Practice it keeps one entry of its own on the webview's history, which
+wry's activity goes back through before it hands Back to Android
+([`src/system_back.rs`](../src/system_back.rs)). Without it Back left the
+app from any screen, and Android 7 to 11, which close an app on Back, took
+a session under way with it. A browser's Back does the same in the web
+app. On Android 16 Back never reaches an app built for it, as Dust is: the
+system puts the app behind instead, which pauses a session as any time out
+of sight does.
+
 Whatever else plays stops out of sight, on every build: the band preview,
 the letters, a sample, Hear a QSO. The stream of groups stops too on a
 phone, where the system may freeze an app out of sight whole, and holds the
@@ -264,6 +277,14 @@ work to are tested natively.
 (WebKitGTK on Linux, WebView2 on Windows, WKWebView on macOS). macOS builds
 are unsigned (right-click → Open the first time). Windows needs WebView2,
 already present on typical Windows 10/11.
+
+On macOS Dust has the usual menu bar: the app's menu (About, Hide, Quit),
+Edit and Window ([`src/menus.rs`](../src/menus.rs)). WKWebView turns
+Cmd+V, Cmd+C, Cmd+X, Cmd+A and Cmd+Z into editing only through Edit's
+items, so without them nothing could be pasted into a field. Linux and
+Windows show no menu bar: their webviews take those keys themselves. On
+every desktop a right-click in a field opens the field's own menu, with
+Cut, Copy and Paste; anywhere else in the main window it opens nothing.
 
 On Linux, **Restore a backup** and **Load a text file** open the desktop's
 file chooser portal (`xdg-desktop-portal`, with a backend that chooses
