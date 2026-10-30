@@ -2462,6 +2462,46 @@ mod ui_tests {
         });
     }
 
+    /// Enter in the hero's field keeps what was typed, and the field gives
+    /// way to the next the hero asks for, or to none: the cursor goes on to
+    /// that field, or to Start, rather than to nowhere with the field it was
+    /// in. A call that does not read keeps its field and the cursor, and a
+    /// field left by Tab or a click leaves the cursor where that took it.
+    #[test]
+    fn enter_in_the_heros_field_takes_the_cursor_on() {
+        run(|| async {
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.contest_kind = cw_core::ContestKind::SimpleQso;
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            let call = "field-your-callsign";
+            ui.type_into(call, "abc");
+            ui.press_enter(call);
+            ui.commit(call, "abc");
+            assert!(ui.shows(call));
+            assert!(ui.take_focused().is_empty(), "the cursor is still there");
+            ui.type_into(call, "dl1abc");
+            ui.press_enter(call);
+            ui.commit(call, "dl1abc");
+            assert!(!ui.shows(call));
+            assert_eq!(ui.take_focused(), ["field-your-name"]);
+            ui.type_into("field-your-name", "mat");
+            ui.press_enter("field-your-name");
+            ui.commit("field-your-name", "mat");
+            assert!(ui.has("You send 599 + name, as DL1ABC"));
+            assert_eq!(ui.take_focused(), ["btn-start-training"]);
+
+            let mut settings = crate::testing::contest_settings();
+            settings.contest.my_call.clear();
+            let (mut ui, _recorder) = Ui::app_with_settings(settings);
+            ui.type_into(call, "dl1abc");
+            ui.press_key(call, Key::Tab, Code::Tab);
+            ui.commit(call, "dl1abc");
+            assert!(!ui.shows(call));
+            assert!(ui.take_focused().is_empty(), "Tab took it to Start");
+        });
+    }
+
     /// A Simple QSO sends your name: with the call given and no name, Home
     /// asks for it in the hero, a start says it is missing, and once it is
     /// given the run starts, sending it.
