@@ -545,6 +545,8 @@ struct TestSeeds;
 impl TestSeeds {
     /// Pin the seeds to `given`, or to a fresh seed without one.
     fn pin(given: Option<String>) -> Self {
+        // Set but empty, as `DUST_TEST_SEED= cargo test` leaves it: none.
+        let given = given.filter(|given| !given.trim().is_empty());
         let seed = match given {
             Some(given) => given
                 .trim()
@@ -718,11 +720,10 @@ pub fn on_fake_page(steps: &[PageStep]) -> Option<Vec<PageHeard>> {
         }
     };
     let json = serde_json::to_vec(steps).expect("the steps, as JSON");
-    node.stdin
-        .take()
-        .expect("Node's input")
-        .write_all(&json)
-        .expect("the steps handed to Node");
+    // A page that fails before it reads them closes its input: what it says
+    // on the way out tells why, below, where the write would only say it
+    // could not.
+    let _ = node.stdin.take().expect("Node's input").write_all(&json);
     let out = node.wait_with_output().expect("Node ran");
     assert!(
         out.status.success(),

@@ -3460,7 +3460,7 @@ pub struct Turn { pub id: u64, pub at_run_ms: u64,
                   pub starts_at: Option<MonoMs> /* a continuation's splice (5a, 5.2) */,
                   pub segments: Vec<Segment> }
 #[derive(Clone, Debug, PartialEq)]
-pub struct Segment { pub who: Sender /* You | Caller(u32) */, pub text: String,
+pub struct Segment { pub who: Sender /* You | Caller(u32) | Qrm */, pub text: String,
                      pub voice: StationVoice, pub start_sec: f64, pub end_sec: f64,
                      pub fade: Option<Fade> /* from phase 2, flutter in it from 5a (5.5) */,
                      pub skip_sec: f64 /* how far into its text it goes on (5.2) */ }
@@ -3471,7 +3471,7 @@ pub struct Fields { pub call: String, pub exch: String,
 pub struct ContestView {
     pub phase: ContestPhase, pub clock: Option<RunClock> /* None in the countdown */,
     pub limit_ms: u64, pub my_wpm: f64,
-    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up, a gone station's calls, the calls heard of stations gone, the call sent fitting only one
+    pub qso: QsoState,         // last call sent, exchange taken, corrected, F3's call, nobody calling, pile-up, a gone station's calls, the calls heard of stations gone, the call sent fitting only one, the station your message missed (told once a run)
     pub air: Option<AirView>,  // heard from, your text and where each character ends, segment spans
     pub shown: Vec<ShownText>, // with Show copy on (4b): each station's text and when it shows
     pub log: Vec<LogRow>,      // oldest first: n, time, call, fields, wpm, asked, Pending | Checked

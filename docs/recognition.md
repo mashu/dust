@@ -149,5 +149,7 @@ A caller's call, or an exchange token, is timed the same way, in run time:
   pause out of the time. A turn found held up after its QSO was logged
   takes the time back when the run is kept.
 
-So a pile-up leaves most calls untimed, and Simple QSO's doubled calls and
-exchanges leave all of them untimed: both are honest.
+So a pile-up leaves most calls untimed, and Simple QSO's doubled
+exchanges leave all of them untimed: both are honest. Simple QSO's caller
+signs its call once, as MorseRunner's single callers do, so its call is
+timed as any call sent alone is.

@@ -2962,7 +2962,9 @@ mod interactions {
         assert!(ui.has("class=\"help-note\""));
         assert!(ui.has(">Under your 10%<"), "{}", ui.html());
         assert!(
-            ui.has("what your Auto level threshold of 90% right leaves (Settings → Auto level)")
+            ui.has(
+                "what your Auto level threshold of 90% right leaves (Settings → Auto level, in a mode with a level to move)"
+            )
         );
         assert!(
             ui.input_tag("help-what-comes-up-next")

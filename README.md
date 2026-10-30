@@ -48,6 +48,10 @@ draw the same run again:
 DUST_TEST_SEED=1234567 cargo test -p dust --features desktop name_of_the_test
 ```
 
+A failure in CI's silent build draws its seeds there, so replay it the same
+way, with `--no-default-features --features mobile-silent` in place of
+`--features desktop`.
+
 The tests of the page's key scripts run them in [Node](https://nodejs.org).
 Without Node on the path they say so and pass; CI has it, and fails them
 without it.

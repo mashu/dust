@@ -42,7 +42,7 @@ pub fn next_up(limit: f64) -> Element {
         dl { class: "help-terms",
             dt { "Under your {limit}" }
             dd {
-                "Green: wrong less than {limit} of the time. {limit} is what your Auto level threshold of {pass} right leaves (Settings → Auto level)."
+                "Green: wrong less than {limit} of the time. {limit} is what your Auto level threshold of {pass} right leaves (Settings → Auto level, in a mode with a level to move)."
             }
             dt { "Over it" }
             dd { "Copper: wrong more often than that. These hold your copy back: the ones to work on." }
