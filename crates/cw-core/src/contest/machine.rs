@@ -359,13 +359,10 @@ impl ContestView {
     }
 
     /// QSOs an hour at `now`, over the last five minutes of run time, once
-    /// the run is a minute old.
+    /// the run is a minute old ([`rate_at`]).
     pub fn rate(&self, now: MonoMs) -> Option<f64> {
-        let run_ms = self.run_ms(now);
         let times: Vec<u64> = self.log.iter().map(|row| row.at_ms).collect();
-        (run_ms >= RATE_AFTER_MS)
-            .then(|| rate_at(&times, run_ms))
-            .flatten()
+        rate_at(&times, self.run_ms(now))
     }
 }
 
@@ -392,9 +389,6 @@ const RUN_STREAM: u64 = u64::MAX;
 /// from under rough habits, apart from every other, so the rest of a run
 /// draws the same whatever its habits.
 const QRM_STREAM: u64 = u64::MAX - 1;
-
-/// The rate shows once the run is a minute old.
-const RATE_AFTER_MS: u64 = MS_PER_MINUTE;
 
 /// How many times the runtime tries a send, and how long past a turn's
 /// length it waits for each attempt before it tries again (`player.rs:28`,

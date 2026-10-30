@@ -232,7 +232,8 @@ pub struct RunSummary {
     pub qsos: usize,
     /// Those logged clean, a dupe copied right among them.
     pub clean: usize,
-    /// QSOs an hour over the whole run.
+    /// QSOs an hour over the whole run; none for a run under a minute,
+    /// whose rate says nothing ([`Rates`]).
     pub rate: Option<f64>,
     /// QSOs logged that you asked a repeat for.
     pub repeated: usize,
@@ -242,7 +243,8 @@ pub struct RunSummary {
 
 impl RunSummary {
     /// Minutes a QSO over the whole run, the pace a contest without a score
-    /// is told by; none before a QSO is logged.
+    /// is told by; none before a QSO is logged, or for a run under a
+    /// minute.
     pub fn minutes_per_qso(&self) -> Option<f64> {
         self.rate.filter(|rate| *rate > 0.0).map(|rate| 60.0 / rate)
     }
@@ -1234,6 +1236,21 @@ mod tests {
         assert_eq!(written.0["qsos"][0]["lp"], json!(["F", "EU"]));
         assert!(written.0["qsos"][1].get("lp").is_none());
         assert_eq!(written.run(4), Some(stored));
+    }
+
+    /// A run ended in its first minute keeps no rate, nor the pace told by
+    /// it: one QSO ten seconds in is no rate of 360 an hour.
+    #[test]
+    fn a_run_ended_in_its_first_minute_has_no_rate() {
+        let short = ContestRun {
+            run_ms: 10_000,
+            qsos: vec![qso(5_000, 2, 1)],
+            ..run()
+        };
+        let groups = [group("K5XYZ", "K5XYZ"), group("214", "214")];
+        let summary = short.summary(&groups).expect("its groups");
+        assert_eq!((summary.qsos, summary.rate), (1, None));
+        assert_eq!(summary.minutes_per_qso(), None);
     }
 
     /// A station worked again and logged with its call busted counts once,

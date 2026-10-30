@@ -1953,7 +1953,10 @@ flight, which Dust's "a logged QSO is final" rule covers.
   clean" beside it; a dupe copied right is clean.
 - **Rate:** QSOs per hour over the last 5 minutes of run time, as MRCE's
   `ShowRate` (`Log.pas:1133-1147`), shown after the first minute; Simple QSO
-  shows minutes per QSO.
+  shows minutes per QSO. MRCE shows a rate from the start; Dust's first
+  minute has none, and so a stored run under a minute keeps no rate, nor
+  the pace told by it, in History, on the Runs card and on its results
+  (`Rates::of`), where one QSO ten seconds in would read 360 an hour.
 - **Speed.** Callers' speeds are drawn from the Speed card's ranges:
   evenly, through `resolve_station` (`timing/station.rs:33-47`), or, as
   built with adaptive callers' speed (2026-10-22), from your copy speed

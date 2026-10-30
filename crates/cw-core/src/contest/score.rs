@@ -169,7 +169,7 @@ pub struct Tally {
     pub score: u32,
 }
 
-/// QSOs an hour.
+/// QSOs an hour, none before the run is a minute old.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rates {
     /// Over the last five minutes of the run, as MorseRunner shows it.
@@ -190,6 +190,12 @@ pub struct ContestScore {
 
 /// The window a rate is counted over.
 const RATE_WINDOW_MS: u64 = 5 * MS_PER_MINUTE;
+
+/// The least run time a rate is counted over: before it there is none, as
+/// one QSO in ten seconds is no rate of 360 an hour. MorseRunner shows a
+/// rate from the start (`Log.pas:1133-1147`); Dust waits the minute,
+/// on the run bar, in History and on a run's results alike.
+const RATE_MIN_MS: u64 = MS_PER_MINUTE;
 
 /// The score of `qsos`, in the order they were logged, over a run of
 /// `run_ms`, as `scoring` counts it for `me`.
@@ -248,7 +254,8 @@ fn tally(
 }
 
 impl Rates {
-    /// The rates of QSOs logged at `times`, over a run of `run_ms`.
+    /// The rates of QSOs logged at `times`, over a run of `run_ms`; none
+    /// for a run shorter than a minute.
     pub fn of(times: &[u64], run_ms: u64) -> Self {
         let window = run_ms.min(RATE_WINDOW_MS);
         let best = times
@@ -256,19 +263,21 @@ impl Rates {
             .map(|&end| count_in(times, end, window))
             .max()
             .unwrap_or(0);
+        let counted = run_ms >= RATE_MIN_MS;
         Self {
             last_5_min: rate_at(times, run_ms),
-            whole_run: (run_ms > 0).then(|| per_hour(times.len(), run_ms)),
-            best_5_min: (window > 0).then(|| per_hour(best, window)),
+            whole_run: counted.then(|| per_hour(times.len(), run_ms)),
+            best_5_min: counted.then(|| per_hour(best, window)),
         }
     }
 }
 
 /// QSOs an hour at `now_ms` of run time, counted over the last five
-/// minutes, or over the run so far while it is shorter; none at its start.
+/// minutes, or over the run so far while it is shorter; none in its first
+/// minute.
 pub fn rate_at(times: &[u64], now_ms: u64) -> Option<f64> {
     let window = now_ms.min(RATE_WINDOW_MS);
-    (window > 0).then(|| per_hour(count_in(times, now_ms, window), window))
+    (now_ms >= RATE_MIN_MS).then(|| per_hour(count_in(times, now_ms, window), window))
 }
 
 /// How many of `times` fall in the `window` that ends at `end`.
@@ -884,6 +893,7 @@ mod tests {
     #[test]
     fn a_rate_counts_the_last_five_minutes_or_the_run_so_far() {
         assert_eq!(rate_at(&[], 0), None, "no rate at the start");
+        assert_eq!(rate_at(&[5_000], 10_000), None, "nor in the first minute");
         assert_eq!(rate_at(&[], 60_000), Some(0.0));
         // One QSO in the first minute is 60 an hour.
         assert_eq!(rate_at(&[30_000], 60_000), Some(60.0));
@@ -894,5 +904,19 @@ mod tests {
         assert_eq!(rate_at(&[300_000], 600_000), Some(0.0));
         let empty = Rates::of(&[], 0);
         assert_eq!(empty, Rates::default());
+    }
+
+    /// A run ended in its first minute has no rate, whole or over five
+    /// minutes: one QSO ten seconds in is no rate of 360 an hour. A minute
+    /// in, it has.
+    #[test]
+    fn a_run_shorter_than_a_minute_has_no_rate() {
+        assert_eq!(Rates::of(&[5_000], 10_000), Rates::default());
+        assert_eq!(Rates::of(&[5_000, 50_000], 59_999), Rates::default());
+        let minute = Rates::of(&[30_000], 60_000);
+        assert_eq!(
+            (minute.last_5_min, minute.whole_run, minute.best_5_min),
+            (Some(60.0), Some(60.0), Some(60.0))
+        );
     }
 }
