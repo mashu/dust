@@ -371,6 +371,16 @@ pub fn typed_along(times: &CharTimes) -> bool {
             .is_some_and(|first| first <= by)
 }
 
+/// How long after a group had ended, its last character gone to the
+/// output and on to you, its first key came: what a group typed after it
+/// was sent says of when you started. Negative for a first key while it
+/// still sounded; none without one.
+pub fn first_key_late_ms(times: &CharTimes) -> Option<i64> {
+    let first = times.keys.first().copied().flatten()?;
+    let heard = i64::from(*times.ends.last()?) + i64::from(times.latency_ms);
+    Some(i64::from(first) - heard)
+}
+
 /// How many positions of `typed` line up with `sent`: all of them for an
 /// answer as long as what was sent; otherwise those before the first
 /// difference, less a letter repeated at its end, which could be either of
@@ -780,6 +790,20 @@ mod tests {
             ..et([448, 700], 0)
         };
         assert_eq!(recognise("ET", "ET", &shut), [None, None]);
+    }
+
+    /// How late a group's first key came after the group reached you: what
+    /// a group typed after it was sent says.
+    #[test]
+    fn a_first_key_says_how_long_after_its_group_it_came() {
+        let mut after = times(&[Some(1_400), Some(1_600), Some(1_800)], true);
+        assert_eq!(first_key_late_ms(&after), Some(400));
+        after.latency_ms = 40;
+        assert_eq!(first_key_late_ms(&after), Some(360));
+        let along = times(&[Some(550), Some(900), Some(1_250)], true);
+        assert_eq!(first_key_late_ms(&along), Some(-450));
+        let none = times(&[None, Some(1_600), Some(1_800)], true);
+        assert_eq!(first_key_late_ms(&none), None);
     }
 
     /// An answer shorter or longer than what was sent lines up only before

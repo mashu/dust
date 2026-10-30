@@ -1383,41 +1383,166 @@ fn home_asks_for_your_section_before_field_day() {
     }
 }
 
+/// The results of `result`, offering to turn Lock typing while sending off
+/// when `unlock` says the settings still have it on.
+fn results_of(result: SessionResult, unlock: bool) -> String {
+    #[component]
+    fn Results(result: SessionResult, unlock: bool) -> Element {
+        rsx! {
+            ResultsView {
+                result,
+                auto_message: None,
+                on_unlock: unlock.then(|| EventHandler::new(|()| {})),
+                on_again: move |_| {},
+                on_home: move |_| {},
+            }
+        }
+    }
+    render_props(Results, ResultsProps { result, unlock })
+}
+
+/// Groups `sent`, each typed whole after it was sent, the box open as they
+/// were sent: what the session they make kept, its first keys `late` ms
+/// after each group had ended.
+fn typed_after(sent: &[(&str, &str)], late: u32) -> SessionResult {
+    let mut result = crate::testing::stored_session("2026-10-22", sent);
+    result.typing_locked = false;
+    for (group, timing) in result.groups.iter().zip(&mut result.group_timings) {
+        let chars = group.sent.chars().count() as u32;
+        let ends: Vec<u32> = (1..=chars).map(|at| at * 500 / chars).collect();
+        let first = ends.last().copied().unwrap_or(0) + late;
+        timing.char_times = Some(cw_core::CharTimes {
+            keys: (0..chars).map(|at| Some(first + 150 * at)).collect(),
+            ends,
+            corrected: Vec::new(),
+            latency_ms: 0,
+            box_open: true,
+        });
+    }
+    result
+}
+
 /// A session with nothing timed says why, and what would have it timed:
-/// the lock, when it was on and the groups were longer than a character.
+/// the lock it ran with, when its groups were longer than a character, and
+/// a button to turn it off while the settings still have it on.
 #[test]
 fn results_with_nothing_timed_say_why() {
-    let locked = render(|| {
-        rsx! {
-            ResultsView {
-                result: crate::testing::stored_session("2026-10-22", &[("KM", "KM"), ("RS", "RS")]),
-                auto_message: None,
-                typing_locked: true,
-                on_again: move |_| {},
-                on_home: move |_| {},
-            }
-        }
-    });
-    assert!(locked.contains("none timed"), "{locked}");
+    let locked = crate::testing::stored_session("2026-10-22", &[("KM", "KM"), ("RS", "RS")]);
+    assert!(locked.typing_locked, "run with the test settings' lock");
+    let html = results_of(locked.clone(), true);
+    assert!(html.contains("none timed"), "{html}");
+    for shown in [
+        "Nothing was timed: Lock typing while sending was on",
+        "turn it off and key each one as you hear it",
+        r#"id="btn-turn-off-lock-typing""#,
+        "Turn off Lock typing",
+    ] {
+        assert!(html.contains(shown), "no {shown:?} in {html}");
+    }
+    // Turned off since: said so, and nothing to press.
+    let html = results_of(locked, false);
+    assert!(html.contains("It is off now"), "{html}");
+    assert!(!html.contains("btn-turn-off-lock-typing"), "{html}");
+
+    // Run without it, whatever the settings say now.
+    let mut open = crate::testing::stored_session("2026-10-22", &[("KM", "KM")]);
+    open.typing_locked = false;
+    let html = results_of(open, true);
+    assert!(html.contains("key each character as you hear it"), "{html}");
+    assert!(html.contains("while it is still sounding"), "{html}");
+    assert!(!html.contains("before it ends"), "{html}");
+    assert!(!html.contains("Lock typing"), "{html}");
+
+    // The lock is no reason for groups of one character.
+    let mut ones = crate::testing::stored_session("2026-10-22", &[("K", "K"), ("M", "M")]);
+    ones.group_timings
+        .iter_mut()
+        .for_each(|t| t.char_times = None);
+    let html = results_of(ones, true);
+    assert!(html.contains("Nothing was timed"), "{html}");
+    assert!(!html.contains("Lock typing"), "{html}");
+}
+
+/// Typed after each group was sent, the results say how late the first
+/// key came, as measured, and what would have the group timed; and they
+/// say so too when only a few characters were timed.
+#[test]
+fn results_say_how_late_the_first_key_came() {
+    let html = results_of(typed_after(&[("KM", "KM"), ("RS", "RS")], 400), true);
     assert!(
-        locked.contains("Lock typing while sending is on"),
-        "{locked}"
+        html.contains(
+            "Nothing was timed: in every group, your first key came about 0.4 s after the group had ended."
+        ),
+        "{html}"
     );
-    let unlocked = render(|| {
-        rsx! {
-            ResultsView {
-                result: crate::testing::stored_session("2026-10-22", &[("KM", "KM")]),
-                auto_message: None,
-                on_again: move |_| {},
-                on_home: move |_| {},
-            }
-        }
-    });
     assert!(
-        unlocked.contains("key each character as you hear it"),
-        "{unlocked}"
+        html.contains("only when you key its first character while it is still sounding"),
+        "{html}"
     );
-    assert!(!unlocked.contains("Lock typing"), "{unlocked}");
+    assert!(!html.contains("Lock typing"), "{html}");
+
+    // Two groups typed late and one of a character timed: one character
+    // of five is under a third, and still said.
+    let mut some = typed_after(&[("KM", "KM"), ("RS", "RS"), ("K", "K")], 1_200);
+    if let Some(times) = some.group_timings[2].char_times.as_mut() {
+        times.keys = vec![Some(800)];
+    }
+    let html = results_of(some.clone(), true);
+    assert!(html.contains("1 timed"), "{html}");
+    assert!(
+        html.contains(
+            "Only 1 of 5 characters was timed: in 2 of 3 groups, your first key came about 1.2 s after the group had ended."
+        ),
+        "{html}"
+    );
+    // A third or more timed: nothing to say.
+    some.groups.truncate(1);
+    some.groups[0] = GroupResult {
+        sent: "K".into(),
+        received: "K".into(),
+        correct: true,
+    };
+    some.group_timings = vec![some.group_timings[2].clone()];
+    assert!(!results_of(some, true).contains("untimed-hint"));
+}
+
+/// Groups the audio held up say so: when their characters reached you is
+/// not known, and that is no fault of your typing.
+#[test]
+fn results_say_when_the_sound_was_held_up() {
+    let mut held = typed_after(&[("KM", "KM"), ("RS", "RS"), ("UK", "UK")], 400);
+    for timing in &mut held.group_timings[..2] {
+        timing.char_times = None;
+        timing.untimed = Some(cw_core::Untimed::HeldUp);
+    }
+    let html = results_of(held.clone(), true);
+    assert!(
+        html.contains(
+            "Nothing was timed: the sound was held up on its way in 2 of 3 groups, so when their characters reached you is not known. That is the audio, not your typing."
+        ),
+        "{html}"
+    );
+    // In fewer than half, what was measured of the rest is said instead.
+    held.group_timings[1].untimed = None;
+    let html = results_of(held, true);
+    assert!(!html.contains("held up"), "{html}");
+    assert!(html.contains("your first key came about 0.4 s"), "{html}");
+}
+
+/// Keys only once a group was sent again are not timed, and the results
+/// say so when nothing else was measured.
+#[test]
+fn results_say_keys_during_a_repeat_are_not_timed() {
+    let mut twice = crate::testing::stored_session("2026-10-22", &[("KM", "KM"), ("RS", "RS")]);
+    twice.typing_locked = false;
+    for timing in &mut twice.group_timings {
+        timing.sends = 2;
+    }
+    let html = results_of(twice, true);
+    assert!(
+        html.contains("Nothing was timed: keys during a repeat are not timed"),
+        "{html}"
+    );
 }
 
 /// A Field Day run's results: two points a QSO and nothing to multiply

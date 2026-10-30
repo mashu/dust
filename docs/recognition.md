@@ -125,7 +125,12 @@ says, rather than leaving the slowest tries out.
   time is only that of the tries it got right. A character never timed says
   so: no estimate stands in for it.
 - **Results**: the session's median over its timed characters, and how many
-  were timed, where "Avg time" was.
+  were timed, where "Avg time" was. When under about a third of its
+  characters were timed, it says why, as far as the session kept it
+  (`session_untimed`): Lock typing while sending on as it ran, with a
+  button to turn it off while it still is; the audio holding up most of
+  its groups; how long after each group had ended its first key came,
+  measured; or keys only once a group was sent again.
 
 The paddles key a training group's box as the keyboard types into it: along
 with the send when typing is not locked while it plays.

@@ -378,6 +378,11 @@ fn ResultsRoute() -> Element {
     let ctx = use_context::<AppCtx>();
     let on_again = use_callback(move |()| start_session(ctx));
     let on_home = use_callback(move |()| ctx.go_to(Screen::Home));
+    // Stored at once, as a setting changed off the settings screen is.
+    let on_unlock = use_callback(move |()| {
+        let mut settings = ctx.settings;
+        settings.write().playback.lock_input_during_group_playback = false;
+    });
     let result = match ctx.result.read().clone() {
         Some(Finished::Kept(result)) => *result,
         Some(Finished::NothingKept) => return rsx! { NothingKept { on_again, on_home } },
@@ -389,7 +394,12 @@ fn ResultsRoute() -> Element {
             result,
             place,
             auto_message: ctx.auto_message.read().clone(),
-            typing_locked: ctx.settings.read().playback.lock_input_during_group_playback,
+            on_unlock: ctx
+                .settings
+                .read()
+                .playback
+                .lock_input_during_group_playback
+                .then_some(on_unlock),
             on_again,
             on_home,
         }

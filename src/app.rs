@@ -706,6 +706,31 @@ mod ui_tests {
         });
     }
 
+    /// A session run with Lock typing while sending on, its groups of two
+    /// characters typed once each was sent, timed nothing: its results say
+    /// the lock is why, and turn it off at a press, stored at once.
+    #[test]
+    fn a_locked_session_turns_the_lock_off_from_its_results() {
+        run(|| async {
+            let (mut ui, recorder) = awaiting_answer(short_session()).await;
+            let sent = recorder.texts().first().cloned().expect("a group was sent");
+            ui.type_into("group-input-0", &sent);
+            assert!(ui.run_until(5_000, |ui| ui.screen() == "results").await);
+            assert!(
+                ui.has("Nothing was timed: Lock typing while sending was on"),
+                "{}",
+                ui.html()
+            );
+            ui.click("btn-turn-off-lock-typing");
+            let locked =
+                |settings: &TrainingSettings| settings.playback.lock_input_during_group_playback;
+            assert!(!ui.with_app(|ctx| locked(&ctx.settings.peek())));
+            assert!(!locked(&ui.store.load_settings()), "stored at once");
+            assert!(!ui.shows("btn-turn-off-lock-typing"));
+            assert!(ui.has("It is off now"), "{}", ui.html());
+        });
+    }
+
     /// A session paused while the page was out of sight says so, takes no
     /// typing, and goes on from Resume.
     #[test]
